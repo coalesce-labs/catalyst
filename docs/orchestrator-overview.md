@@ -266,6 +266,19 @@ Revive budget: the top-level `workers/<TICKET>.json` carries `.reviveCount`. Whe
 `reviveCount >= MAX_REVIVES` (default 10), the worker is marked `stalled` with
 `attentionReason="revive-budget-exhausted"`.
 
+Phase-mode workers that emit `phase.<name>.turn-cap-exhausted.<TICKET>` are
+continued via `orchestrate-revive`'s per-phase loop (CTL-613): the loop reads
+`.handoffPath` off the per-phase signal, resolves the prior Claude session id
+from `${JOBS_ROOT}/<bg_job_id>/state.json`'s `linkScanPath` field, resolves the
+worktree from the orchestrator's `state.json`, and spawns a `claude --bg --resume`
+worker with `CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH=<path>` +
+`CATALYST_CONTINUATION_COUNT=<n>`. The per-phase signal flips back to `running`
+with the new `bg_job_id`, `phaseContinuationCount` bumps, and a
+`phase.<name>.dispatched` event re-arms the broker. `phaseContinuationCount` is
+budgeted separately from `phaseReviveCount` (which counts hard-error
+re-dispatches) and shares `MAX_CONTINUATIONS` with the legacy top-level
+continuation branch.
+
 ## The events JSONL is the unified log
 
 Everything Catalyst does — worker dispatch, phase transitions, PR lifecycle,

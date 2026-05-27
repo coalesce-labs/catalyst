@@ -874,3 +874,91 @@ agent: "trust this summary; do not re-walk the plan."
   warrants it. The shared infrastructure (event status, emitter flags,
   broker regex, orchestrate-revive split, schema, resume hook) is
   reusable as-is.
+
+---
+
+## ADR-020: Phase-mode turn-cap continuation lives in `orchestrate-revive`, not the daemon (CTL-613)
+
+**Context**
+
+ADR-019 introduced the turn-cap continuation path against the legacy top-level
+`workers/<TICKET>.json` loop in `orchestrate-revive`. With phase-agents mode
+(ADR-017) now the default `dispatchMode`, phase-mode workers don't write the
+top-level signal — only the per-phase signal `workers/<TICKET>/phase-<name>.json`.
+ADR-019's loop is structurally a no-op for them. The CTL-493 per-phase loop
+that was added to plug the legacy/phase split only consumes `status="stalled"`
+and silently skips `status="turn-cap-exhausted"`, so a handoff doc written by
+`phase-implement` sits unused and the ticket hangs (incident ADV-1134).
+
+The daemon's terminal-status set (`execution-core/signal-reader.mjs`) classifies
+`turn-cap-exhausted` as a terminal phase status — a deliberate ADR-019 choice
+so the daemon doesn't try to resurrect a worker that the agent itself decided
+to stop. That terminal classification is correct: continuation is a different
+operation (resume + handoff) than reclaim (re-dispatch from scratch). What's
+missing is a code path that consumes the terminal signal and dispatches the
+continuation.
+
+**Decision**
+
+Add a fifth branch to `orchestrate-revive`'s CTL-493 per-phase loop that
+consumes `P_STATUS=="turn-cap-exhausted"` directly off the per-phase signal:
+budget-check against a new `.phaseContinuationCount` field, resolve the Claude
+session id, resolve the worktree from the orchestrator's `state.json`, spawn
+the continuation via the existing `spawn_continuation_bg` helper, mutate the
+per-phase signal back to `running`, and emit `phase.<name>.dispatched` so the
+broker re-arms. `phaseContinuationCount` shares the `MAX_CONTINUATIONS` budget
+with ADR-019's top-level counter (default 3); the two counters are tracked
+separately so a phase re-walked across the pipeline doesn't inherit a stale
+top-level count.
+
+Resolve the prior session id for `claude --bg` workers from
+`~/.claude/jobs/<bg_job_id>/state.json`'s `linkScanPath` field rather than
+plumbing the session id into the per-phase signal at dispatch time. The
+basename minus `.jsonl` is the canonical session id. This keeps the dispatcher
+contract (single-write of the per-phase signal) intact.
+
+**Rationale**
+
+- **Daemon terminal-status set stays intact**: `signal-reader.mjs` continues
+  to classify `turn-cap-exhausted` as terminal so the daemon doesn't try to
+  reclaim or re-dispatch on it. The recovery path is `orchestrate-revive`'s
+  job — a script invoked by the daemon's sweep, not the daemon's own decision
+  tree. Conflating those (e.g., un-terminalizing the status and adding a
+  continuation arm to the daemon) would mix two distinct lifecycles into one
+  state machine.
+- **Session-id resolver fallback over signal-side plumbing**: the
+  `linkScanPath` field is populated by Claude CLI within milliseconds of the
+  `--bg` worker starting. Reading it on demand is cheap and self-contained —
+  no `phase-agent-dispatch` change, no atomic-write contention with the
+  existing single-writer guarantee on per-phase signals. The alternative
+  (writing the session id into the signal at dispatch time) would require
+  `phase-agent-dispatch` to parse Claude's init output, race the per-phase
+  signal's initial write, and grow the schema surface for what is effectively
+  a derived field.
+- **Separate budget field, shared cap**: `phaseContinuationCount` ≠
+  `continuationCount` so the operator can disambiguate which lifecycle did
+  the continuing. Sharing `MAX_CONTINUATIONS` avoids a second config knob
+  for the same kind of decision.
+
+**Alternatives considered**
+
+- **Un-terminalize `turn-cap-exhausted` in the daemon**: would let the daemon's
+  reclaim/revive pass walk into the continuation logic, but conflates two
+  distinct recovery operations and grows the daemon's state surface.
+- **Plumb session id into the per-phase signal at dispatch time**: removes
+  the resolver fallback's dependency on Claude CLI's job dir layout, but
+  duplicates a derived field that the job dir already owns and adds a
+  signal-side race with the existing single-write contract. Deferred — the
+  fallback is sufficient and easy to revisit if `linkScanPath` proves flaky.
+
+**Consequences**
+
+- Phase-mode workers can chain `turn-cap-exhausted` continuations
+  automatically up to `MAX_CONTINUATIONS`.
+- `phaseContinuationCount` becomes a visible signal field. The schema
+  validator (`signal-schema.ts`) is documented with a sibling comment so
+  future readers see the parallel with the top-level `continuationCount`.
+- `--bg` session id resolution gains a second entry point
+  (`resolve_phase_session_id`) distinct from the stream-JSONL-driven
+  `resolve_session_id`; both coexist (the legacy resolver still serves
+  ADR-019's top-level branch).

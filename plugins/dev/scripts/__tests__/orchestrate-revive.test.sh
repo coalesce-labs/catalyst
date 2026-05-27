@@ -563,6 +563,238 @@ RC=$(jq -r '.reviveCount // 0' "${ORCH_DIR}/workers/REG-1.json")
 [ -z "$(grep CATALYST_IS_CONTINUATION "$CLAUDE_LOG" 2>/dev/null)" ] && pass "regression: CATALYST_IS_CONTINUATION not set for normal revive" || fail "regression: CATALYST_IS_CONTINUATION leaked"
 scratch_teardown
 
+# ─── CTL-613: phase-mode session_id resolver (resolve_phase_session_id) ─────
+#
+# Unit tests for the new helper that resolves a Claude session_id from a
+# `claude --bg` job's state.json (bg_job_id → ~/.claude/jobs/<bg>/state.json
+# → linkScanPath → basename → strip .jsonl). Tests invoke the helper via the
+# `--probe-helper` flag.
+
+probe_resolver() {
+  # Echo just the resolver's stdout (one-line session id or empty); return its rc.
+  "$REVIVE" --probe-helper resolve_phase_session_id "$1"
+}
+
+echo "test (CTL-613): resolve_phase_session_id — bg_job_id → linkScanPath → session_id"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/cafe1234"
+jq -n '{linkScanPath:"/Users/ryan/.claude/projects/-foo-bar/abcdef12-3456-7890-abcd-ef1234567890.jsonl"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/cafe1234/state.json"
+OUT=$(probe_resolver "cafe1234"); RC=$?
+[ "$RC" = "0" ] && pass "resolver rc=0 on happy path" || fail "resolver rc=0 on happy path" "got rc=$RC"
+[ "$OUT" = "abcdef12-3456-7890-abcd-ef1234567890" ] && pass "resolver returns session_id basename" || fail "resolver session_id" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — missing state.json → rc=1 empty"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/dead0000"
+OUT=$(probe_resolver "dead0000"); RC=$?
+[ "$RC" != "0" ] && pass "missing state.json → rc!=0" || fail "missing state.json → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing state.json → empty stdout" || fail "missing state.json → empty stdout" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — malformed linkScanPath → rc=1 empty"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/bad00001"
+jq -n '{linkScanPath:"/garbage/no-extension"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/bad00001/state.json"
+OUT=$(probe_resolver "bad00001"); RC=$?
+[ "$RC" != "0" ] && pass "malformed linkScanPath → rc!=0" || fail "malformed linkScanPath → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "malformed linkScanPath → empty stdout" || fail "malformed linkScanPath → empty stdout" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — empty bg_job_id arg → rc=1 empty"
+scratch_setup
+OUT=$(probe_resolver ""); RC=$?
+[ "$RC" != "0" ] && pass "empty bg_job_id → rc!=0" || fail "empty bg_job_id → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "empty bg_job_id → empty stdout" || fail "empty bg_job_id → empty stdout" "got: $OUT"
+scratch_teardown
+
+# ─── CTL-613: phase_worktree_path resolver ──────────────────────────────────
+#
+# Unit tests for the helper that resolves a phase-mode worker's worktree
+# path from the orchestrator's state.json (workers[] array). Invoked via
+# the same --probe-helper shim.
+
+probe_worktree() {
+  "$REVIVE" --orch-dir "$ORCH_DIR" --orch-id "test" \
+    --probe-helper phase_worktree_path "$1"
+}
+
+echo "test (CTL-613): phase_worktree_path — workers[ticket].worktreePath → stdout, rc=0"
+scratch_setup
+jq -n '{workers:[{ticket:"WT-1", worktreePath:"/tmp/wt-1"}]}' \
+  > "${ORCH_DIR}/state.json"
+OUT=$(probe_worktree "WT-1"); RC=$?
+[ "$RC" = "0" ] && pass "phase_worktree_path rc=0 on happy path" || fail "phase_worktree_path rc=0 on happy path" "got rc=$RC"
+[ "$OUT" = "/tmp/wt-1" ] && pass "phase_worktree_path returns worktreePath" || fail "phase_worktree_path worktreePath" "got: $OUT"
+scratch_teardown
+
+echo "test (CTL-613): phase_worktree_path — ticket missing → rc=1 empty"
+scratch_setup
+jq -n '{workers:[{ticket:"WT-1", worktreePath:"/tmp/wt-1"}]}' \
+  > "${ORCH_DIR}/state.json"
+OUT=$(probe_worktree "WT-MISSING"); RC=$?
+[ "$RC" != "0" ] && pass "missing ticket → rc!=0" || fail "missing ticket → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing ticket → empty stdout" || fail "missing ticket → empty stdout" "got: $OUT"
+scratch_teardown
+
+echo "test (CTL-613): phase_worktree_path — state.json missing → rc=1 empty"
+scratch_setup
+# Intentionally do not write state.json.
+OUT=$(probe_worktree "WT-1"); RC=$?
+[ "$RC" != "0" ] && pass "missing state.json → rc!=0" || fail "missing state.json → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "missing state.json → empty stdout" || fail "missing state.json → empty stdout" "got: $OUT"
+scratch_teardown
+
+# ─── CTL-613: per-phase turn-cap-exhausted continuation branch ──────────────
+#
+# Phase-mode-only fixture: writes ONLY the per-phase signal (no top-level
+# workers/<T>.json) so the legacy CTL-484 branch cannot fire. The new
+# CTL-613 branch on the CTL-493 per-phase loop must consume the signal
+# end-to-end.
+
+make_phase_turn_cap_worker() {
+  local ticket="$1" phase="${2:-implement}"
+  local handoff="${3:-thoughts/shared/handoffs/T/2026-05-26_00-00-00_turn-cap-continuation.md}"
+  local cc="${4:-0}"
+  local bg_job_id="${5:-cafe1234}"
+  local worktree="${WORKTREE_ROOT}/${ticket}"
+  mkdir -p "$worktree" "${ORCH_DIR}/workers/${ticket}"
+  # Orchestrator state.json — required for phase_worktree_path.
+  jq -n --arg t "$ticket" --arg wt "$worktree" \
+    '{workers:[{ticket:$t, worktreePath:$wt}]}' \
+    > "${ORCH_DIR}/state.json"
+  local updated; updated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # Per-phase signal ONLY — no top-level workers/<T>.json.
+  jq -n --arg phase "$phase" --arg ticket "$ticket" \
+        --arg status "turn-cap-exhausted" --arg hp "$handoff" \
+        --arg reason "turn cap hit (75)" --arg bg "$bg_job_id" \
+        --argjson cc "$cc" --arg ts "$updated" \
+    '{ticket:$ticket, phase:$phase, status:$status, handoffPath:$hp,
+      failureReason:$reason, bg_job_id:$bg, phaseContinuationCount:$cc,
+      updatedAt:$ts}' \
+    > "${ORCH_DIR}/workers/${ticket}/phase-${phase}.json"
+  # Plant fake bg_job dir so resolve_phase_session_id finds it.
+  mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/${bg_job_id}"
+  jq -n --arg sid "sess-${ticket}-${phase}" \
+    '{linkScanPath:("/tmp/projects/-foo/" + $sid + ".jsonl")}' \
+    > "${CATALYST_REVIVE_JOBS_DIR}/${bg_job_id}/state.json"
+}
+
+echo "test (CTL-613): phase-only turn-cap → continuation spawn (happy path)"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+HANDOFF="thoughts/shared/handoffs/PCONT-1/2026-05-26_00-00-00_turn-cap-continuation.md"
+make_phase_turn_cap_worker "PCONT-1" "implement" "$HANDOFF" 0 "cafebabe"
+run_revive > "${SCRATCH}/out" 2>&1
+PS=$(jq -r '.status' "${ORCH_DIR}/workers/PCONT-1/phase-implement.json")
+PCC=$(jq -r '.phaseContinuationCount // 0' "${ORCH_DIR}/workers/PCONT-1/phase-implement.json")
+PBG=$(jq -r '.bg_job_id // ""' "${ORCH_DIR}/workers/PCONT-1/phase-implement.json")
+PHC=$(jq -r '.phaseContinuations | length' "${ORCH_DIR}/workers/PCONT-1/phase-implement.json")
+[ "$PS" = "running" ] && pass "per-phase status → running" || fail "per-phase status → running" "got: $PS"
+[ "$PCC" = "1" ] && pass "phaseContinuationCount bumped to 1" || fail "phaseContinuationCount bumped to 1" "got: $PCC"
+# bg_job_id update is best-effort — depends on claude's JSON init line landing
+# fast enough for spawn_continuation_bg to capture it. The fake claude here
+# writes only to CLAUDE_LOG (not stdout), so the field stays at its prior
+# value. The CTL-484 happy-path test makes the same simplification. The
+# semantically-meaningful evidence — that a NEW worker was launched — is
+# already covered by the env-var and --resume assertions below.
+[ -n "$PBG" ] && pass "bg_job_id remains non-empty after continuation" || fail "bg_job_id non-empty" "got: empty"
+[ "$PHC" = "1" ] && pass "phaseContinuations[] audit entry" || fail "phaseContinuations[] audit entry" "got: $PHC"
+[ ! -f "${ORCH_DIR}/workers/PCONT-1.json" ] && pass "no top-level workers/PCONT-1.json created" || fail "no top-level workers/PCONT-1.json" "file exists"
+grep -q "CATALYST_IS_CONTINUATION=true" "$CLAUDE_LOG" && pass "claude launched with CATALYST_IS_CONTINUATION=true" || fail "CATALYST_IS_CONTINUATION env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q "CATALYST_HANDOFF_PATH=${HANDOFF}" "$CLAUDE_LOG" && pass "claude launched with CATALYST_HANDOFF_PATH" || fail "CATALYST_HANDOFF_PATH env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q "CATALYST_CONTINUATION_COUNT=1" "$CLAUDE_LOG" && pass "claude launched with CATALYST_CONTINUATION_COUNT=1" || fail "CATALYST_CONTINUATION_COUNT env var passed" "log: $(cat "$CLAUDE_LOG")"
+grep -q -- "--resume sess-PCONT-1-implement" "$CLAUDE_LOG" && pass "claude resumed phase-resolved session_id" || fail "claude resumed phase-resolved session_id" "log: $(cat "$CLAUDE_LOG")"
+grep -q "phase.implement.dispatched" "$STATE_LOG" && pass "phase.implement.dispatched event emitted" || fail "phase.implement.dispatched event emitted" "log: $(cat "$STATE_LOG")"
+grep -q '"continuation":true' "$STATE_LOG" && pass "dispatched event marked continuation:true" || fail "dispatched event marked continuation:true" "log: $(cat "$STATE_LOG")"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): phase-mode budget exhausted → escalate, no spawn"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+HANDOFF="thoughts/shared/handoffs/PCONT-2/2026-05-26_00-00-00_turn-cap-continuation.md"
+make_phase_turn_cap_worker "PCONT-2" "implement" "$HANDOFF" 3 "deadbeef"
+run_revive --max-continuations 3 > "${SCRATCH}/out" 2>&1
+PS=$(jq -r '.status' "${ORCH_DIR}/workers/PCONT-2/phase-implement.json")
+PCC=$(jq -r '.phaseContinuationCount // 0' "${ORCH_DIR}/workers/PCONT-2/phase-implement.json")
+[ "$PS" = "turn-cap-exhausted" ] && pass "budget exhausted: status unchanged" || fail "budget exhausted: status unchanged" "got: $PS"
+[ "$PCC" = "3" ] && pass "phaseContinuationCount preserved at budget" || fail "phaseContinuationCount preserved" "got: $PCC"
+grep -q "phase-continuation-budget-exhausted" "$STATE_LOG" && pass "phase-continuation-budget-exhausted attention raised" || fail "phase-continuation-budget-exhausted attention raised" "log: $(cat "$STATE_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when phase budget exhausted" || fail "claude not invoked when phase budget exhausted"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): no resolvable session_id → escalate phase-no-session-id, no spawn"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+HANDOFF="thoughts/shared/handoffs/PCONT-3/2026-05-26_00-00-00_turn-cap-continuation.md"
+make_phase_turn_cap_worker "PCONT-3" "implement" "$HANDOFF" 0 "noresolv"
+# Delete the planted state.json so the resolver fails.
+rm -f "${CATALYST_REVIVE_JOBS_DIR}/noresolv/state.json"
+run_revive > "${SCRATCH}/out" 2>&1
+PS=$(jq -r '.status' "${ORCH_DIR}/workers/PCONT-3/phase-implement.json")
+PCC=$(jq -r '.phaseContinuationCount // 0' "${ORCH_DIR}/workers/PCONT-3/phase-implement.json")
+[ "$PS" = "turn-cap-exhausted" ] && pass "no-session: status unchanged" || fail "no-session: status unchanged" "got: $PS"
+[ "$PCC" = "0" ] && pass "phaseContinuationCount NOT bumped when session_id missing" || fail "phaseContinuationCount NOT bumped when session_id missing" "got: $PCC"
+grep -q "phase-no-session-id" "$STATE_LOG" && pass "phase-no-session-id attention raised" || fail "phase-no-session-id attention raised" "log: $(cat "$STATE_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when session_id missing" || fail "claude not invoked when session_id missing"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): missing handoffPath → no-op, no escalation"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+make_phase_turn_cap_worker "PCONT-4" "implement" "stub" 0 "noholdoff"
+# Null out handoffPath to simulate operator-set state.
+jq '.handoffPath = null' "${ORCH_DIR}/workers/PCONT-4/phase-implement.json" \
+  > "${ORCH_DIR}/workers/PCONT-4/phase-implement.json.tmp" \
+  && mv "${ORCH_DIR}/workers/PCONT-4/phase-implement.json.tmp" \
+        "${ORCH_DIR}/workers/PCONT-4/phase-implement.json"
+run_revive > "${SCRATCH}/out" 2>&1
+PS=$(jq -r '.status' "${ORCH_DIR}/workers/PCONT-4/phase-implement.json")
+PCC=$(jq -r '.phaseContinuationCount // 0' "${ORCH_DIR}/workers/PCONT-4/phase-implement.json")
+[ "$PS" = "turn-cap-exhausted" ] && pass "missing-handoff: status unchanged" || fail "missing-handoff: status unchanged" "got: $PS"
+[ "$PCC" = "0" ] && pass "missing-handoff: phaseContinuationCount not bumped" || fail "missing-handoff: phaseContinuationCount not bumped" "got: $PCC"
+! grep -q "phase-continuation-" "$STATE_LOG" && pass "missing-handoff: no phase-continuation attention raised" || fail "missing-handoff: no phase-continuation attention raised" "log: $(cat "$STATE_LOG")"
+[ ! -s "$CLAUDE_LOG" ] && pass "missing-handoff: claude not invoked" || fail "missing-handoff: claude not invoked"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): dry-run prints intent, mutates nothing"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+HANDOFF="thoughts/shared/handoffs/PCONT-5/2026-05-26_00-00-00_turn-cap-continuation.md"
+make_phase_turn_cap_worker "PCONT-5" "implement" "$HANDOFF" 0 "drycafe1"
+run_revive --dry-run > "${SCRATCH}/out" 2>&1
+PS=$(jq -r '.status' "${ORCH_DIR}/workers/PCONT-5/phase-implement.json")
+PCC=$(jq -r '.phaseContinuationCount // 0' "${ORCH_DIR}/workers/PCONT-5/phase-implement.json")
+[ "$PS" = "turn-cap-exhausted" ] && pass "dry-run: status unchanged" || fail "dry-run: status unchanged" "got: $PS"
+[ "$PCC" = "0" ] && pass "dry-run: phaseContinuationCount unchanged" || fail "dry-run: phaseContinuationCount unchanged" "got: $PCC"
+[ ! -s "$CLAUDE_LOG" ] && pass "dry-run: claude not invoked" || fail "dry-run: claude not invoked"
+grep -q "PCONT-5" "${SCRATCH}/out" && pass "dry-run: stderr mentions PCONT-5" || fail "dry-run: stderr mentions PCONT-5" "out: $(cat "${SCRATCH}/out")"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): regression — CTL-484 legacy fixture still triggers top-level continuation branch"
+scratch_setup
+HANDOFF="thoughts/shared/handoffs/REGR-1/2026-05-17_00-00-00_turn-cap-continuation.md"
+make_turn_cap_worker "REGR-1" "implement" "$HANDOFF" 0
+write_stream_init "REGR-1" "sess-regr-1"
+run_revive > "${SCRATCH}/out" 2>&1
+CC=$(jq -r '.continuationCount // 0' "${ORCH_DIR}/workers/REGR-1.json")
+[ "$CC" = "1" ] && pass "regression: legacy continuationCount still bumped" || fail "regression: legacy continuationCount still bumped" "got: $CC"
+grep -q -- "--resume sess-regr-1" "$CLAUDE_LOG" && pass "regression: legacy continuation spawn still fires" || fail "regression: legacy continuation spawn still fires" "log: $(cat "$CLAUDE_LOG")"
+scratch_teardown
+
 # ─── Results ──────────────────────────────────────────────────────────────────
 
 echo ""

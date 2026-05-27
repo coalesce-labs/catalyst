@@ -49,6 +49,13 @@ STALE_HEARTBEAT_SECONDS=900
 WORKER_COMMAND="/catalyst-dev:oneshot"
 MODEL="opus"
 DRY_RUN=0
+# CTL-613: --probe-helper invokes one helper function from the test harness
+# without running the main revive loop. PROBE_HELPER holds the function name,
+# PROBE_ARG holds its single argument. When set, the script skips
+# --orch-dir/--orch-id validation, defines its helpers, dispatches the call,
+# and exits with the helper's return code.
+PROBE_HELPER=""
+PROBE_ARG=""
 
 usage() {
   sed -n '2,32p' "$0"
@@ -66,14 +73,17 @@ while [[ $# -gt 0 ]]; do
     --worker-command)           WORKER_COMMAND="$2"; shift 2 ;;
     --model)                    MODEL="$2"; shift 2 ;;
     --dry-run)                  DRY_RUN=1; shift ;;
+    --probe-helper)             PROBE_HELPER="$2"; PROBE_ARG="${3:-}"; shift 3 ;;
     -h|--help)                  usage 0 ;;
     *)                          echo "unknown arg: $1" >&2; usage ;;
   esac
 done
 
-[ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
-[ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
-[ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+if [ -z "$PROBE_HELPER" ]; then
+  [ -z "$ORCH_DIR" ] && { echo "ERROR: --orch-dir required" >&2; exit 2; }
+  [ -z "$ORCH_ID" ]  && { echo "ERROR: --orch-id required"  >&2; exit 2; }
+  [ ! -d "$ORCH_DIR/workers" ] && { echo "ERROR: no workers dir at $ORCH_DIR/workers" >&2; exit 2; }
+fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -133,6 +143,37 @@ resolve_session_id() {
   fi
 
   return 1
+}
+
+# CTL-613: resolve the Claude session_id for a phase-mode worker spawned via
+# `claude --bg`. The bg job dir is the source of truth — its state.json
+# carries a `linkScanPath` field whose basename (minus `.jsonl`) is the
+# Claude session id used for `--resume`. This is the fallback used by the
+# per-phase turn-cap-exhausted continuation branch because phase-mode workers
+# don't write the legacy stream JSONL that `resolve_session_id` reads.
+#
+# Returns:
+#   stdout: session_id on success, empty on failure
+#   exit:   0 on success, 1 on failure
+#
+# CATALYST_REVIVE_JOBS_DIR overrides ~/.claude/jobs for tests.
+resolve_phase_session_id() {
+  local bg_job_id="$1"
+  [ -z "$bg_job_id" ] && return 1
+  local jobs_dir="${CATALYST_REVIVE_JOBS_DIR:-${HOME}/.claude/jobs}"
+  local state_file="${jobs_dir}/${bg_job_id}/state.json"
+  [ -f "$state_file" ] || return 1
+  local link_path
+  link_path=$(jq -r '.linkScanPath // empty' "$state_file" 2>/dev/null || echo "")
+  [ -z "$link_path" ] && return 1
+  case "$link_path" in
+    *.jsonl) : ;;
+    *) return 1 ;;
+  esac
+  local sid
+  sid=$(basename "$link_path" .jsonl)
+  [ -z "$sid" ] && return 1
+  echo "$sid"
 }
 
 # Detect an API stream-idle-timeout failure in the tail of the worker's stream
@@ -604,6 +645,24 @@ phase_revive_escalate() {
   fi
 }
 
+# CTL-613: phase_worktree_path TICKET
+# Returns the worktreePath for a phase-mode worker by reading the
+# orchestrator's state.json (workers[] array). Phase-mode per-phase signals
+# do not carry worktreePath directly — it lives on the orchestrator state.
+# Returns empty + rc=1 on miss (no state.json, no matching ticket, or empty
+# worktreePath field).
+phase_worktree_path() {
+  local ticket="$1"
+  local state="${ORCH_DIR}/state.json"
+  [ -f "$state" ] || return 1
+  local wt
+  wt=$(jq -r --arg t "$ticket" \
+    '.workers[]? | select(.ticket == $t) | .worktreePath // empty' \
+    "$state" 2>/dev/null | head -1)
+  [ -z "$wt" ] && return 1
+  echo "$wt"
+}
+
 # phase_revive_emit_complete TICKET PHASE PROGRESS_REASON
 # Calls phase-agent-emit-complete to publish the synthetic complete event +
 # mutate the signal status to "done". Best-effort.
@@ -666,6 +725,21 @@ phase_revive_redispatch() {
     fi
   fi
 }
+
+# ─── CTL-613: probe-helper dispatch ─────────────────────────────────────────
+#
+# Test harness shim: when `--probe-helper FUNC ARG` was passed, invoke the
+# named helper with the single arg, then exit with the helper's return code.
+# Used by orchestrate-revive.test.sh to unit-test helpers (resolve_phase_session_id,
+# phase_worktree_path) without driving the full revive loop.
+if [ -n "$PROBE_HELPER" ]; then
+  case "$PROBE_HELPER" in
+    resolve_phase_session_id|phase_worktree_path) ;;
+    *) echo "ERROR: --probe-helper does not allow ${PROBE_HELPER}" >&2; exit 2 ;;
+  esac
+  "$PROBE_HELPER" "$PROBE_ARG"
+  exit $?
+fi
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
@@ -1048,11 +1122,12 @@ done
 # the top-level signal, so the previous loop is a structural no-op for them —
 # this loop is what gives phase-agents an actual recovery path.
 #
-# Decision tree per stalled signal:
-#   1. truly-failed (.failureReason set)     → escalate, no retry
-#   2. meaningful progress (commits/artifact) → emit synthetic complete
-#   3. budget exhausted                       → escalate
-#   4. fresh stall                            → re-dispatch, bump count
+# Decision tree per phase signal:
+#   1. CTL-613: turn-cap-exhausted → spawn continuation worker
+#   2. truly-failed (.failureReason set)     → escalate, no retry
+#   3. meaningful progress (commits/artifact) → emit synthetic complete
+#   4. budget exhausted                       → escalate
+#   5. fresh stall                            → re-dispatch, bump count
 
 PHASE_MODE_WORKERS=0
 PHASE_ELIGIBLE=0
@@ -1073,9 +1148,13 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
 
   PHASE_MODE_WORKERS=$((PHASE_MODE_WORKERS + 1))
 
-  if [ "$P_STATUS" != "stalled" ]; then
-    continue
-  fi
+  # CTL-613: also walk turn-cap-exhausted signals so the continuation branch
+  # below can fire. Everything else (stalled is the legacy CTL-493 trigger)
+  # continues to land in the four-way decision tree.
+  case "$P_STATUS" in
+    stalled|turn-cap-exhausted) ;;
+    *) continue ;;
+  esac
 
   # CTL-607: only the ticket's CURRENT (latest-index) phase is a live work
   # item. A stalled signal for an EARLIER phase is a reaping artifact
@@ -1094,6 +1173,114 @@ for PHASE_SIGNAL in "${ORCH_DIR}"/workers/*/phase-*.json; do
   echo "phase-mode worker detected: ${P_TICKET}/${P_PHASE} (status=${P_STATUS})" >&2
 
   PHASE_REVIVE_COUNT=$(jq -r '.phaseReviveCount // 0' "$PHASE_SIGNAL" 2>/dev/null || echo 0)
+
+  # ─── CTL-613: turn-cap-exhausted continuation branch ──────────────────────
+  #
+  # Mirrors the legacy CTL-484 top-level branch but reads everything off the
+  # per-phase signal. Runs BEFORE the truly-failed branch so a
+  # turn-cap-exhausted signal that also carries .failureReason (the emitter
+  # sets both — see phase-agent-emit-complete) routes to continuation, not
+  # escalation.
+  if [ "$P_STATUS" = "turn-cap-exhausted" ]; then
+    P_HANDOFF=$(jq -r '.handoffPath // ""' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+    P_BG_JOB=$(jq -r '.bg_job_id // ""' "$PHASE_SIGNAL" 2>/dev/null || echo "")
+    P_CC=$(jq -r '.phaseContinuationCount // 0' "$PHASE_SIGNAL" 2>/dev/null || echo 0)
+
+    if [ -z "$P_HANDOFF" ] || [ "$P_HANDOFF" = "null" ]; then
+      # No handoff → cannot continue. Leave signal alone (operator visibility);
+      # don't escalate — a real failure carries .failureReason and the
+      # truly-failed branch below handles it.
+      echo "phase-revive: ${P_TICKET}/${P_PHASE} turn-cap-exhausted with no handoffPath; skipping" >&2
+      continue
+    fi
+
+    # Budget check.
+    if [ "$P_CC" -ge "$MAX_CONTINUATIONS" ]; then
+      phase_revive_escalate "$P_TICKET" "$P_PHASE" \
+        "phase-continuation-budget-exhausted count=${P_CC}"
+      PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+      continue
+    fi
+
+    # Resolve session_id via the bg-job dir.
+    P_SID=$(resolve_phase_session_id "$P_BG_JOB" 2>/dev/null || echo "")
+    if [ -z "$P_SID" ]; then
+      phase_revive_escalate "$P_TICKET" "$P_PHASE" "phase-no-session-id"
+      PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+      continue
+    fi
+
+    # Resolve worktree path from orchestrator state.json.
+    P_WT=$(phase_worktree_path "$P_TICKET" 2>/dev/null || echo "")
+    if [ -z "$P_WT" ]; then
+      phase_revive_escalate "$P_TICKET" "$P_PHASE" "phase-no-worktree-path"
+      PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+      continue
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+      echo "[dry-run] ${P_TICKET}/${P_PHASE}: would continue via session ${P_SID} from ${P_HANDOFF}" >&2
+      PHASE_REVIVED=$((PHASE_REVIVED + 1))
+      continue
+    fi
+
+    NEW_P_CC=$((P_CC + 1))
+    SPAWN_OUT=$(spawn_continuation_bg "$P_TICKET" "$P_WT" "$P_SID" \
+                                       "$P_HANDOFF" "$NEW_P_CC" \
+                                       "$P_PHASE" || echo "")
+    # spawn_continuation_bg shape: "pid:<pid>:<bg_job_id>". The bg_job_id is
+    # best-effort (depends on claude's JSON init line landing fast enough); the
+    # pid is the authoritative liveness signal. Mirrors the CTL-484 legacy
+    # branch — gate on pid, fall back to old bg_job_id when the new one isn't
+    # parseable in time.
+    NEW_P_PID="${SPAWN_OUT#pid:}"
+    NEW_P_PID="${NEW_P_PID%%:*}"
+    NEW_P_BG="${SPAWN_OUT##*:}"
+    [ "$NEW_P_BG" = "$SPAWN_OUT" ] && NEW_P_BG=""
+
+    if [ -z "$NEW_P_PID" ]; then
+      phase_revive_escalate "$P_TICKET" "$P_PHASE" "phase-continuation-spawn-failed"
+      PHASE_ESCALATED=$((PHASE_ESCALATED + 1))
+      continue
+    fi
+
+    # Mutate the per-phase signal: flip to running, bump count, swap bg_job_id
+    # (only when parseable — empty means the JSON init line didn't land yet, in
+    # which case keep the previous bg_job_id so the revive sweep still has a
+    # handle), append audit entry. Keep handoffPath so a subsequent turn-cap
+    # emit can overwrite with a fresh path instead of losing the reference.
+    TS=$(now_iso)
+    TMP="${PHASE_SIGNAL}.tmp.$$"
+    jq --arg ts "$TS" --arg bg "$NEW_P_BG" --arg sid "$P_SID" \
+       --arg hp "$P_HANDOFF" --argjson cc "$NEW_P_CC" \
+       '.status = "running"
+        | .updatedAt = $ts
+        | (if $bg == "" then . else .bg_job_id = $bg end)
+        | .phaseContinuationCount = $cc
+        | .phaseContinuations = ((.phaseContinuations // []) + [{ts:$ts, sessionId:$sid, handoffPath:$hp, bg_job_id:$bg}])' \
+       "$PHASE_SIGNAL" > "$TMP" && mv "$TMP" "$PHASE_SIGNAL"
+
+    # Re-emit phase.<name>.dispatched so the broker re-arms.
+    emit_state event "$(jq -nc \
+      --arg ts "$TS" --arg orch "$ORCH_ID" --arg w "$P_TICKET" \
+      --arg phase "$P_PHASE" --arg sid "$P_SID" --arg bg "$NEW_P_BG" \
+      "{ts:\$ts, orchestrator:\$orch, worker:\$w,
+        event:(\"phase.\" + \$phase + \".dispatched\"),
+        detail:{phase:\$phase, sessionId:\$sid, bg_job_id:\$bg, continuation:true}}")"
+
+    emit_state event "$(jq -nc --arg ts "$TS" --arg orch "$ORCH_ID" \
+      --arg w "$P_TICKET" --arg phase "$P_PHASE" --arg sid "$P_SID" \
+      --arg hp "$P_HANDOFF" --argjson cc "$NEW_P_CC" \
+      '{ts:$ts, orchestrator:$orch, worker:$w,
+        event:"phase-continuation-spawned",
+        detail:{phase:$phase, sessionId:$sid, handoffPath:$hp,
+                phaseContinuationCount:$cc}}')"
+
+    echo "PHASE-CONTINUED: ${P_TICKET}/${P_PHASE} (sid=${P_SID}, count=${NEW_P_CC}, handoff=${P_HANDOFF})" >&2
+    PHASE_REVIVED=$((PHASE_REVIVED + 1))
+    continue
+  fi
+  # ─── End CTL-613 branch ───────────────────────────────────────────────────
 
   # Branch 1: truly failed → escalate, no retry.
   if phase_is_truly_failed "$PHASE_SIGNAL"; then

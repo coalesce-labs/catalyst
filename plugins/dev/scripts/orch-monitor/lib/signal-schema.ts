@@ -75,6 +75,12 @@ export function validateSignalFile(obj: unknown): boolean {
   // CTL-484 — continuation-budget bookkeeping. Distinct from reviveCount so the
   // operator can tell "this worker is making steady progress and just needs
   // more turns" apart from "this worker is failing and needs help".
+  //
+  // CTL-613 — The per-phase signal (workers/<T>/phase-<name>.json, not validated
+  // by this function) carries a sibling field `phaseContinuationCount` that
+  // tracks the same budget for phase-mode workers. Both fields share
+  // `MAX_CONTINUATIONS` in orchestrate-revive; they are tracked separately so a
+  // ticket re-walked across phases doesn't inherit a stale top-level count.
   if ("continuationCount" in o && o.continuationCount !== null && o.continuationCount !== undefined) {
     if (typeof o.continuationCount !== "number" || !Number.isInteger(o.continuationCount)) return false;
     if (o.continuationCount < 0) return false;
