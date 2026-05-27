@@ -25,8 +25,11 @@ import { fileURLToPath } from "node:url";
 import { shortIdFromSessionId, isSelfSession } from "../claude-ids.mjs";
 import { readWorkerSignals, TERMINAL } from "../signal-reader.mjs";
 import { emitReapIntent } from "../reap-intent.mjs";
-import { getRunsRoot, getExecutionCoreDir } from "../config.mjs";
-import { lastSeenMsForSession } from "../session-recency.mjs";
+import { getRunsRoot, getExecutionCoreDir, getEventLogPath } from "../config.mjs";
+import { lastSeenMsForSession, findTranscript, defaultProjectsDir } from "../session-recency.mjs";
+import { scanEventsChunked } from "../event-tail.mjs";
+import { classifyWaitState, isWaitingState } from "../wait-state-classifier.mjs";
+import { createTranscriptTracker } from "../transcript-tail.mjs";
 import { parseArgs, ArgError } from "./args.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -313,6 +316,122 @@ export function buildLiveSessionsByWorktree(rows) {
   return map;
 }
 
+// ─── CTL-650: `waiting` — the wait-watcher reference consumer ─────────────────
+
+/**
+ * netWaitingSessions — reduce a stream of agent.waiting_on_user / agent.resumed
+ * envelopes (append-ordered) to the sessions whose NET latest event is a
+ * waiting event. Last-event-per-session wins, so a session that later resumed is
+ * excluded. Returns Map<sessionId, payload>. Pure.
+ */
+export function netWaitingSessions(events) {
+  const net = new Map(); // sessionId → { name, payload }
+  for (const ev of events ?? []) {
+    const name = ev?.attributes?.["event.name"];
+    if (name !== "agent.waiting_on_user" && name !== "agent.resumed") continue;
+    const payload = ev?.body?.payload ?? {};
+    if (!payload.sessionId) continue;
+    net.set(payload.sessionId, { name, payload });
+  }
+  const waiting = new Map();
+  for (const [sessionId, { name, payload }] of net) {
+    if (name === "agent.waiting_on_user") waiting.set(sessionId, payload);
+  }
+  return waiting;
+}
+
+/**
+ * buildWaitingRows — the `waiting` read-path. Source of truth for "currently
+ * waiting" is the net state of agent.waiting_on_user / agent.resumed events on
+ * the bus; ticket/phase are joined from the signal index (the event payload
+ * already carries them when the watcher saw the signal). When the bus has no
+ * such events (daemon off / fresh log) it falls back to inline classification
+ * over the live sessions. All side-effecting inputs are injectable.
+ */
+export async function buildWaitingRows({
+  events,
+  eventLogPath = getEventLogPath(),
+  signalsByBgJobId = indexSignalsByBgJobId(),
+  agents = liveAgents,
+  findTranscriptFn = findTranscript,
+  makeTracker = (p) => createTranscriptTracker({ path: p }),
+  projectsDir = defaultProjectsDir(),
+} = {}) {
+  // Read the bus unless events were injected (tests pass [] to force fallback).
+  let evs = events;
+  if (evs === undefined) {
+    evs = [];
+    scanEventsChunked({ path: eventLogPath, onEvent: (e) => evs.push(e) });
+  }
+
+  // Trust the bus whenever it carries ANY wait/resume event — an empty net set
+  // then legitimately means "nobody is waiting" (return []). Only fall back to
+  // inline classification when the bus has no such events at all (daemon off /
+  // fresh log), NOT when every waiter has since resumed.
+  const sawWaitEvents = evs.some((e) => {
+    const n = e?.attributes?.["event.name"];
+    return n === "agent.waiting_on_user" || n === "agent.resumed";
+  });
+  const waitingMap = netWaitingSessions(evs);
+  if (sawWaitEvents) {
+    const rows = [];
+    for (const [sessionId, payload] of waitingMap) {
+      let shortId = payload.shortId ?? null;
+      if (!shortId) {
+        try {
+          shortId = shortIdFromSessionId(sessionId);
+        } catch {
+          shortId = null;
+        }
+      }
+      const meta = (shortId && signalsByBgJobId.get(shortId)) || {};
+      rows.push({
+        sessionId,
+        shortId,
+        ticket: payload.ticket ?? meta.ticket ?? null,
+        phase: payload.phase ?? meta.phase ?? null,
+        waitState: payload.waitState ?? null,
+        waitingText: payload.waitingText ?? null,
+        cwd: payload.cwd ?? meta.worktreePath ?? null,
+      });
+    }
+    return rows;
+  }
+
+  // Fallback: no events on the bus — classify the live sessions inline.
+  const sessions = typeof agents === "function" ? agents() : agents;
+  const rows = [];
+  for (const s of sessions ?? []) {
+    if (!s || !s.sessionId) continue;
+    const path = findTranscriptFn(s.sessionId, projectsDir);
+    let snap = { hasTranscript: false };
+    if (path) {
+      const tracker = makeTracker(path);
+      tracker.poll();
+      snap = tracker.snapshot();
+    }
+    const { state, waitingText } = classifyWaitState({ ...snap, status: s.status });
+    if (!isWaitingState(state)) continue;
+    let shortId = null;
+    try {
+      shortId = shortIdFromSessionId(s.sessionId);
+    } catch {
+      shortId = null;
+    }
+    const meta = (shortId && signalsByBgJobId.get(shortId)) || {};
+    rows.push({
+      sessionId: s.sessionId,
+      shortId,
+      ticket: meta.ticket ?? null,
+      phase: meta.phase ?? null,
+      waitState: state,
+      waitingText: waitingText ?? null,
+      cwd: s.cwd ?? meta.worktreePath ?? null,
+    });
+  }
+  return rows;
+}
+
 // ─── prune: the write path ───────────────────────────────────────────────────
 
 /**
@@ -517,6 +636,35 @@ async function cmdPrune(opts) {
   return 0;
 }
 
+async function cmdWaiting({ json }) {
+  const rows = await buildWaitingRows();
+  if (json) {
+    process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+    return 0;
+  }
+  printWaitingTable(rows);
+  return 0;
+}
+
+// printWaitingTable — focused listing: shortId TICKET PHASE WAIT_STATE cwd, with
+// the blocking text on a wrapped continuation line so a long question stays
+// readable. Mirrors printTable's column-padding style.
+function printWaitingTable(rows) {
+  if (rows.length === 0) {
+    process.stdout.write("No sessions are currently waiting on the user.\n");
+    return;
+  }
+  for (const r of rows) {
+    process.stdout.write(
+      `${String(r.shortId ?? "-").padEnd(9)} ${String(r.ticket ?? "-").padEnd(10)} ` +
+        `${String(r.phase ?? "-").padEnd(16)} ${String(r.waitState ?? "-").padEnd(15)} ` +
+        `${r.cwd ?? ""}\n`,
+    );
+    if (r.waitingText) process.stdout.write(`            ↳ ${r.waitingText}\n`);
+  }
+  process.stdout.write(`──\ntotal: ${rows.length} waiting\n`);
+}
+
 function printTable(rows) {
   const byCat = new Map();
   let totalRss = 0;
@@ -547,11 +695,12 @@ function printTable(rows) {
 
 function usage() {
   process.stderr.write(
-    "Usage: catalyst-execution-core sessions {list|show|prune} [flags]\n" +
-      "  list  [--json] [--ticket X] [--phase Y]\n" +
-      "  show  <ticket>\n" +
-      "  prune [--yes] [--dry-run] [--max N] [--include-idle] [--include-interactive]\n" +
-      "        [--min-idle-seconds N] [--categories LIST]\n"
+    "Usage: catalyst-execution-core sessions {list|show|waiting|prune} [flags]\n" +
+      "  list    [--json] [--ticket X] [--phase Y]\n" +
+      "  show    <ticket>\n" +
+      "  waiting [--json]   list sessions currently blocked on the user (CTL-650)\n" +
+      "  prune   [--yes] [--dry-run] [--max N] [--include-idle] [--include-interactive]\n" +
+      "          [--min-idle-seconds N] [--categories LIST]\n"
   );
 }
 
@@ -563,6 +712,8 @@ async function main(argv) {
       return cmdList(opts);
     case "show":
       return cmdShow({ ticket: argv[1] });
+    case "waiting":
+      return cmdWaiting(opts);
     case "prune":
       return cmdPrune(opts);
     default:
