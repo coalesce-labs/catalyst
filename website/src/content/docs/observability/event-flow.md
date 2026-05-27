@@ -62,11 +62,26 @@ gets from GitHub (or Linear) to that log so the waiting process wakes up.
             └──> Cloudflare Analytics Engine
 ```
 
+```
+┌──────────────────────────┐
+│ execution-core daemon     │ ──boot-replay + fs.watch byte-cursor tail──>
+│ reaper (CTL-649)          │   ~/catalyst/events/YYYY-MM.jsonl
+└──────────────────────────┘     (reads *.reap-requested / *.cleanup-requested)
+            │
+            ├──> claude stop / git worktree remove / git branch -D
+            └──> appends *.reap-complete / *.reap-failed echoes
+                 ~/catalyst/events/YYYY-MM.jsonl   (same file)
+```
+
 All inbound paths converge on the same monthly JSONL file. The broker daemon is both a
 **reader** (tails the log via `fs.watch`) and a **writer** (appends `filter.wake.<id>` events
-when a registered interest matches). The forwarder is a pure outbound consumer — it never
-writes back. Workers using `catalyst-events wait-for` monitor that file regardless of which
-path produced the event.
+when a registered interest matches). The execution-core daemon reaper (CTL-649) is the second
+**reader-and-writer**: it tails the log (boot-replay of unmatched intents, then an `fs.watch` +
+byte-cursor live tail) to consume `*.reap-requested` / `pr.merged.cleanup-requested` lines, runs
+the matching executor (`claude stop`, `git worktree remove`, `git branch -D`), and appends
+`*.reap-complete` / `*.reap-failed` echoes back into the same file. The forwarder is a pure
+outbound consumer — it never writes back. Workers using `catalyst-events wait-for` monitor that
+file regardless of which path produced the event.
 
 ## Step-by-step: a GitHub PR merge
 
