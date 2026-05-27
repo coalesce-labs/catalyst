@@ -91,6 +91,8 @@ By default every active-work phase maps to "In Progress" — the broad span is e
 
 Phase 4 (validate) in the legacy single-session workflow doesn't transition state — it's an internal quality check, not a milestone visible to others. In phase-agents mode, Phase 5 (verify) and Phase 6 (review) each transition state because they're independent sub-agent passes and the orchestrator surfaces them as distinct stages on the Linear ticket.
 
+In phase-agents mode each phase also leaves a **comment trail** on the ticket, not just a state transition: phases 1–6 (triage through review) each mirror their artifact summary back as a Linear comment when they finish (CTL-632), so the ticket reads as a running log of what each phase found and produced. See [Phase agents → Linear comment trail](/reference/orchestration/phase-agents/#linear-comment-trail-ctl-632) for the idempotency and truncation details.
+
 ## Phase 6 and oneshot
 
 In `/catalyst-dev:oneshot` and `/catalyst-dev:orchestrate` worker runs, **Phase 6 is folded into Phase 5**. The worker enters an event-driven listen loop immediately after opening the PR, resolves any blockers inline, and executes the merge itself before exiting. There is no separate merge phase.

@@ -529,6 +529,8 @@ env var is set.
 | `CATALYST_ARCHIVE_ROOT`                      | `catalyst-archive`                         | Archive root. Default `$CATALYST_DIR/archives`.                                                                                                                                                                                                                                                                                             |
 | `CATALYST_RUNS_DIR`                          | `catalyst-archive`                         | Orchestrator runtime root. Default `$CATALYST_DIR/runs`.                                                                                                                                                                                                                                                                                    |
 | `CATALYST_COMMS_DIR`                         | `catalyst-comms`                           | Comms channel root. Default `$CATALYST_DIR/comms/channels`.                                                                                                                                                                                                                                                                                 |
+| `SCHEDULER_DISPATCH_COOLDOWN_MS`             | `catalyst-execution-core` (scheduler)      | Per-(ticket,phase) dispatch cool-down (CTL-624). Throttles re-dispatch of the same phase after a refused dispatch (e.g. `prior_artifact_missing`) so the scheduler doesn't storm. Default `60000` (60s).                                                                                                                                     |
+| `RECOVERY_ESCALATION_COOLDOWN_MS`            | `catalyst-execution-core` (recovery sweep) | Per-(ticket,phase) escalation cool-down (CTL-638) on the recovery sweep's `needs-human` label escalation, so a stuck phase isn't re-escalated on every sweep. Default `600000` (10 min).                                                                                                                                                     |
 
 ### Monitor Webhook Config
 
@@ -1084,6 +1086,23 @@ attributes:
 `source_up` inherits environment from parent `.envrc` files (e.g., profile-based secrets at the
 workspace root). When using worktrees, `create-worktree.sh` generates a `.envrc` and runs
 `direnv allow` automatically.
+
+**Execution-core daemon identity (CTL-635).** The per-ticket attributes above are correct for an
+interactive shell, but the `catalyst-execution-core` daemon's `claude --bg` worker pool freezes
+`OTEL_RESOURCE_ATTRIBUTES` at warm time and it's immutable thereafter — so without intervention,
+every bg phase worker would inherit (and mis-attribute its cost to) whatever per-ticket context
+happened to be set in the launch shell. To prevent this, the daemon **scrubs** the inherited
+per-ticket keys (`project`, `branch`, `linear.key`, `catalyst.orchestration`, `task.type`) at
+launch and stamps a neutral, honest identity instead:
+
+```text
+project=catalyst,catalyst.role=execution-core-daemon
+```
+
+So daemon-spawned bg workers carry `catalyst.role=execution-core-daemon` rather than a per-ticket
+`linear.key`, and their `claude_code_cost_usage_USD_total` lands in one truthful daemon bucket
+instead of being borrowed by an unrelated ticket. (True per-ticket attribution for the bg pool would
+require an Anthropic per-job env API; the scrub is the honest fallback until then.)
 
 ## direnv Setup (Recommended)
 
