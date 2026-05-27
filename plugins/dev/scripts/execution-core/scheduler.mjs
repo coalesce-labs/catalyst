@@ -207,14 +207,43 @@ function readPhaseSignalRaw(orchDir, ticket, phase) {
 
 // predecessorPhaseOf — the completed phase whose happy-path successor is `next`
 // (i.e. the worker that just finished and triggered this advance), or null.
-// Uses the NEXT_PHASE inversion so it is unambiguous on every linear edge; the
-// router-only remediate detour (no NEXT_PHASE entry) yields null and is left to
-// the periodic orphan reaper as a backstop.
+// Uses the NEXT_PHASE inversion so it is unambiguous on every LINEAR edge. The
+// router-only verify⇄remediate detour (no NEXT_PHASE entry) is resolved
+// separately by resolveReapPredecessor (CTL-661) — it is no longer left to the
+// periodic orphan reaper as a backstop.
 export function predecessorPhaseOf(signals, next) {
   for (const [phase, status] of Object.entries(signals ?? {})) {
     if (status === "done" && NEXT_PHASE[phase] === next) return phase;
   }
   return null;
+}
+
+// resolveReapPredecessor — CTL-661 hole #2. Pure resolution of "which just-
+// finished worker should be reaped now that `next` is dispatched", covering the
+// two verify⇄remediate detour edges that NEXT_PHASE cannot express, then the
+// linear edges. Returns `{ phase, reason } | null`.
+//   • verify → remediate (next === REMEDIATE_PHASE): the verify worker just
+//     produced the fail verdict — reap verify.
+//   • remediate → verify (next === "verify" && remediate done): the remediate
+//     worker just committed its fix — reap remediate, NOT the long-finished
+//     implement the NEXT_PHASE inversion would return.
+//   • every linear edge: fall through to the NEXT_PHASE inversion.
+// NOTE: on the real remediate→verify re-entry, maybeResetForRemediateCycle has
+// already deleted the remediate signal by the time the scheduler advances, so
+// the call site passes resolveReapPredecessor the PRE-reset signals (and the
+// pre-reset remediate raw) — see the advancement sweep below.
+export function resolveReapPredecessor(signals, next) {
+  const sig = signals ?? {};
+  if (next === REMEDIATE_PHASE) {
+    return sig.verify === "done"
+      ? { phase: "verify", reason: "ctl-661-remediate-detour" }
+      : null;
+  }
+  if (next === "verify" && sig[REMEDIATE_PHASE] === "done") {
+    return { phase: REMEDIATE_PHASE, reason: "ctl-661-remediate-detour" };
+  }
+  const pred = predecessorPhaseOf(sig, next);
+  return pred ? { phase: pred, reason: "ctl-657-scheduler-advance" } : null;
 }
 
 // emitPredecessorReap — CTL-657 Bug 2: stop the predecessor worker now that its
@@ -226,18 +255,24 @@ export function predecessorPhaseOf(signals, next) {
 // `claude stop`. No-op when the predecessor has no recorded bg_job_id (e.g. the
 // new-work entry phase, or a unit-test signal with no bg_job_id) so it never
 // shells out or appends to the event log spuriously.
-function emitPredecessorReap(orchDir, ticket, signals, next) {
-  const pred = predecessorPhaseOf(signals, next);
+// CTL-661: `remediateRaw` is the remediate phase signal captured BEFORE
+// maybeResetForRemediateCycle deletes it — passed in so the remediate→verify
+// re-entry can still read the dead remediate worker's bg_job_id.
+function emitPredecessorReap(orchDir, ticket, signals, next, { remediateRaw = null } = {}) {
+  const pred = resolveReapPredecessor(signals, next);
   if (!pred) return;
-  const raw = readPhaseSignalRaw(orchDir, ticket, pred);
+  const raw =
+    pred.phase === REMEDIATE_PHASE
+      ? (remediateRaw ?? readPhaseSignalRaw(orchDir, ticket, pred.phase))
+      : readPhaseSignalRaw(orchDir, ticket, pred.phase);
   const bgJobId = raw?.bg_job_id;
   if (!bgJobId) return;
   emitReapIntent("phase.predecessor.reap-requested", {
     ticket,
-    phase: pred,
+    phase: pred.phase,
     bgJobId,
     worktreePath: raw?.worktreePath,
-    reason: "ctl-657-scheduler-advance",
+    reason: pred.reason,
   }).catch(() => {});
 }
 
@@ -790,6 +825,14 @@ export function schedulerTick(
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
+    // CTL-661 hole #2: snapshot the signals + the remediate worker's raw signal
+    // BEFORE maybeResetForRemediateCycle deletes the verify+remediate signals,
+    // so a remediate→verify re-entry can still name + reap the remediate worker
+    // (the NEXT_PHASE inversion alone would wrongly pick the long-finished
+    // implement worker, and the deleted signal would carry no bg_job_id).
+    const preResetSignals = readPhaseSignals(orchDir, ticket);
+    const remediateRaw = readPhaseSignalRaw(orchDir, ticket, REMEDIATE_PHASE);
+
     // CTL-653: re-enter verify after a completed remediation (deletes the cycle
     // signals so deriveAdvancement re-dispatches a fresh verify this tick).
     maybeResetForRemediateCycle(orchDir, ticket);
@@ -840,8 +883,11 @@ export function schedulerTick(
           { ticket, phase: next }
         );
         advanced.push({ ticket, phase: next });
-        // CTL-657: stop the predecessor worker now that its successor is live.
-        emitPredecessorReap(orchDir, ticket, signals, next);
+        // CTL-657 / CTL-661: stop the predecessor worker now that its successor
+        // is live. resolveReapPredecessor reads the PRE-reset signals so the
+        // verify⇄remediate detour edges name the correct just-finished worker;
+        // remediateRaw supplies the bg_job_id the reset already deleted.
+        emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
         // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
         // (linear-transition.sh read-compares first); never aborts the tick.
         safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
