@@ -22,6 +22,15 @@
 import { readWorkerSignals, TERMINAL, byActivePhase } from "./signal-reader.mjs";
 import { listInFlightTickets, readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
 import { log } from "./config.mjs";
+import { defaultReviveDispatch, defaultAppendBootResumeEvent } from "./recovery.mjs";
+import { defaultDispatch } from "./dispatch.mjs";
+// liveAgents() is synchronous (execFileSync `claude agents --json`). A static
+// import is safe here: cli/sessions.mjs imports only signal-reader/reap-intent/
+// config/claude-ids/session-recency/cli-args — none of which import this module,
+// so there is no import cycle. (The plan floated a lazy import to keep the pure
+// Phase-1 exports import-light, but a lazy `import()` is async and the boot pass
+// must stay synchronous to complete before the monitor/scheduler start.)
+import { liveAgents } from "./cli/sessions.mjs";
 
 // hasLiveBgWorker — does `agents` contain a live BACKGROUND session whose cwd is
 // exactly `worktreePath`? This is the synchronous reduction of research §6's
@@ -104,4 +113,67 @@ export function selectBootResumeCandidates({
   const free = computeFreeSlots(maxParallel, liveCount);
   needResume.sort((a, b) => a.ticket.localeCompare(b.ticket));
   return needResume.slice(0, free);
+}
+
+// resolveAgents — normalize the injectable `agents` seam to a concrete array.
+// An array is used as-is; a function is invoked; undefined falls back to the
+// synchronous production liveAgents() shell-out. Keeps reconcileBootResume's
+// agent resolution test-injectable while the production default needs no wiring.
+function resolveAgents(agents) {
+  if (Array.isArray(agents)) return agents;
+  if (typeof agents === "function") return agents();
+  return liveAgents();
+}
+
+// reconcileBootResume — the side-effecting boot driver (Phase 2). Gated on a
+// cold start, it dispatches each selected candidate via defaultReviveDispatch
+// (which resets the signal to `stalled` and applies the CTL-615 worktree-path
+// cross-check, and bypasses the revive budget because the budget lives in
+// reclaimDeadWorkIfPossible, not in the dispatch primitive), and emits one
+// audit event per successful dispatch. A non-cold-start restart is a no-op so
+// the existing budget-gated per-tick reclaim sweep keeps chronic-failure
+// protection. No single failure throws out of the loop — a boot pass must never
+// crash daemon boot.
+export function reconcileBootResume({
+  orchDir,
+  report,
+  agents = undefined, // array | fn | undefined→liveAgents()
+  dispatch = defaultDispatch, // inner seam handed to reviveDispatch
+  reviveDispatch = defaultReviveDispatch,
+  appendEvent = defaultAppendBootResumeEvent,
+  orchId = undefined, // threaded into the audit envelope
+} = {}) {
+  if (!report || report.coldStart !== true) {
+    return { dispatched: 0, failed: 0, skipped: "not-cold-start" };
+  }
+
+  const liveAgentList = resolveAgents(agents);
+  const candidates = selectBootResumeCandidates({ orchDir, agents: liveAgentList });
+
+  let dispatched = 0;
+  let failed = 0;
+  for (const { ticket, phase } of candidates) {
+    let res;
+    try {
+      res = reviveDispatch({ orchDir, ticket, phase }, { dispatch });
+    } catch (err) {
+      res = { code: 1, stderr: err?.message ?? String(err) };
+    }
+    if (res?.code === 0) {
+      dispatched++;
+      appendEvent({ phase, ticket, orchId });
+    } else {
+      failed++;
+      log.warn(
+        { ticket, phase, code: res?.code, stderr: res?.stderr },
+        "boot-resume: dispatch failed (continuing)",
+      );
+    }
+  }
+
+  log.info(
+    { dispatched, failed, candidates: candidates.length },
+    "boot-resume: cold-start reconciliation complete",
+  );
+  return { dispatched, failed, candidates: candidates.length };
 }

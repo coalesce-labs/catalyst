@@ -8,13 +8,14 @@
 // dispatch/agents/appendEvent/report.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   hasLiveBgWorker,
   activePhaseForTicket,
   selectBootResumeCandidates,
+  reconcileBootResume,
 } from "./boot-resume.mjs";
 
 let orchDir;
@@ -163,5 +164,200 @@ describe("selectBootResumeCandidates", () => {
     writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2" });
     const out = selectBootResumeCandidates({ orchDir, agents: [] });
     expect(out).toHaveLength(1);
+  });
+});
+
+// ── Phase 2: reconcileBootResume orchestration ────────────────────────────
+describe("reconcileBootResume", () => {
+  test("cold-start gate: report.coldStart === false ⇒ 0 dispatches, no-op", () => {
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    const calls = [];
+    const dispatch = (a) => {
+      calls.push(a);
+      return { code: 0 };
+    };
+    const appendEvent = () => calls.push("event");
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: false },
+      agents: [],
+      dispatch,
+      appendEvent,
+    });
+    expect(res.dispatched).toBe(0);
+    expect(calls).toHaveLength(0);
+    expect(res.skipped).toBe("not-cold-start");
+  });
+
+  test("missing/undefined report ⇒ no-op (defensive)", () => {
+    const calls = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: undefined,
+      agents: [],
+      dispatch: () => calls.push("d"),
+      appendEvent: () => calls.push("e"),
+    });
+    expect(res.dispatched).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("happy path: dispatches once with expectedWorktreePath and resets the signal to stalled", () => {
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1", status: "running" });
+    const dispatched = [];
+    const events = [];
+    const dispatch = (a) => {
+      dispatched.push(a);
+      return { code: 0 };
+    };
+    const appendEvent = (a) => events.push(a);
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch,
+      appendEvent,
+    });
+    expect(res.dispatched).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({
+      orchDir,
+      ticket: "CTL-1",
+      phase: "implement",
+      expectedWorktreePath: "/wt/CTL-1",
+    });
+    // Went through defaultReviveDispatch: the signal on disk is reset to stalled.
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"), "utf8"),
+    );
+    expect(sig.status).toBe("stalled");
+    // One audit event routed through the injected appendEvent.
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ ticket: "CTL-1", phase: "implement" });
+  });
+
+  test("slot bound end-to-end: maxParallel=1, 2 no-live tickets ⇒ exactly 1 dispatch + 1 event", () => {
+    writeMaxParallel(orchDir, 1);
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2" });
+    const dispatched = [];
+    const events = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      appendEvent: (a) => events.push(a),
+    });
+    expect(res.dispatched).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    expect(events).toHaveLength(1);
+  });
+
+  test("skip-when-live: a ticket WITH a live bg worker is never dispatched", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-LIVE", "implement", { worktreePath: "/wt/CTL-LIVE" });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [{ kind: "background", cwd: "/wt/CTL-LIVE" }],
+      dispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(0);
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("dispatch failure is isolated: ticket B still attempted, failure counted, no throw", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-A", "implement", { worktreePath: "/wt/CTL-A" });
+    writeSignal(orchDir, "CTL-B", "implement", { worktreePath: "/wt/CTL-B" });
+    const attempted = [];
+    const events = [];
+    const dispatch = (a) => {
+      attempted.push(a.ticket);
+      return a.ticket === "CTL-A" ? { code: 1, stderr: "boom" } : { code: 0 };
+    };
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch,
+      appendEvent: (a) => events.push(a),
+    });
+    expect(attempted.sort()).toEqual(["CTL-A", "CTL-B"]);
+    expect(res.dispatched).toBe(1);
+    expect(res.failed).toBe(1);
+    // No audit event for the failed dispatch.
+    expect(events).toHaveLength(1);
+    expect(events[0].ticket).toBe("CTL-B");
+  });
+
+  test("missing-signal safety: a reviveDispatch signal-missing return is a failure, not a throw", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: () => ({ code: 1, stderr: "signal-missing" }),
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(0);
+    expect(res.failed).toBe(1);
+  });
+
+  test("a throwing reviveDispatch is contained and counted as a failure", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: () => {
+        throw new Error("kaboom");
+      },
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(0);
+    expect(res.failed).toBe(1);
+  });
+});
+
+// ── Phase 2: audit event round-trip — boot-resume must NOT count as a revive ──
+describe("defaultAppendBootResumeEvent envelope", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl654-rt-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  test("writes phase.<phase>.boot-resume.<ticket> and is NOT counted by countReviveEvents", async () => {
+    const { defaultAppendBootResumeEvent } = await import("./recovery.mjs");
+    const { countReviveEvents } = await import("./event-scan.mjs");
+    const ok = defaultAppendBootResumeEvent({
+      phase: "implement",
+      ticket: "CTL-RT-654",
+      orchId: "orch-654",
+    });
+    expect(ok).toBe(true);
+    // boot-resume is a distinct action: the implement-only revive counter must
+    // stay at 0 so a reboot does not consume the chronic-failure budget.
+    expect(countReviveEvents({ ticket: "CTL-RT-654" })).toBe(0);
   });
 });

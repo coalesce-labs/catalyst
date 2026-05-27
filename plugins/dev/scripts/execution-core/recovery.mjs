@@ -215,6 +215,28 @@ function defaultAppendReclaimEvent({ phase, ticket, orchId }) {
   );
 }
 
+// defaultAppendBootResumeEvent — phase.<phase>.boot-resume.<ticket>. The
+// CTL-654 path: a cold-start reboot re-dispatches an in-flight ticket whose
+// worktree has no live bg worker. The `boot-resume` action is deliberately
+// distinct from `revive`/`reclaim` so countReviveEvents (event-scan.mjs,
+// implement-only `phase.implement.revive.<ticket>`) is unaffected and the
+// broker's PHASE_EVENT_PATTERN (complete|failed|turn-cap-exhausted|skipped)
+// ignores it — audit-only, like the other CTL-587 helpers. Exported so the
+// round-trip test can confirm the envelope shape, and so boot-resume.mjs imports
+// it as the default appendEvent seam.
+export function defaultAppendBootResumeEvent({ phase, ticket, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume",
+      reason: "cold-start-no-live-worker",
+    }),
+    "boot-resume",
+  );
+}
+
 // CTL-587: three new audit-only event helpers. The broker's PHASE_EVENT_PATTERN
 // in router.mjs only matches complete|failed|turn-cap-exhausted|skipped, so
 // revive/escalated/revive-suppressed events are deliberately ignored by the
