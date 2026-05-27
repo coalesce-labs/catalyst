@@ -22,11 +22,17 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: extract-cost-from-jsonl.sh --jsonl <path> --pricing <path>
+usage: extract-cost-from-jsonl.sh --jsonl <path> --pricing <path> [--include-subagents]
 
 required:
   --jsonl <path>     Claude conversation JSONL (~/.claude/projects/.../<sid>.jsonl)
   --pricing <path>   pricing table JSON (see plugins/dev/scripts/claude-pricing.json)
+
+optional:
+  --include-subagents  Also sum the deterministic sub-agent JSONLs derived from
+                       the parent path (<parent-without-.jsonl>/subagents/*.jsonl).
+                       Default OFF — every existing caller keeps parent-only,
+                       byte-identical output (the signal.cost contract).
 
 Emits a USAGE record on stdout matching the orchestrate-roll-usage.sh schema:
   { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens,
@@ -38,11 +44,12 @@ EOF
   exit 2
 }
 
-JSONL="" PRICING=""
+JSONL="" PRICING="" INCLUDE_SUBAGENTS=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --jsonl)   JSONL="$2";   shift 2 ;;
-    --pricing) PRICING="$2"; shift 2 ;;
+    --jsonl)              JSONL="$2";   shift 2 ;;
+    --pricing)            PRICING="$2"; shift 2 ;;
+    --include-subagents)  INCLUDE_SUBAGENTS=1; shift ;;
     -h|--help) usage ;;
     *) echo "unknown arg: $1" >&2; usage ;;
   esac
@@ -53,11 +60,36 @@ done
 [ -f "$JSONL" ]   || { echo "jsonl not found: $JSONL"     >&2; exit 1; }
 [ -f "$PRICING" ] || { echo "pricing not found: $PRICING" >&2; exit 1; }
 
-# Single jq pass: slurps the JSONL into an array, slurps pricing as a side
-# input, computes per-model token bucket → per-model cost → aggregate USAGE.
-# The reduce-over-assistant-events is the hot path; everything else is a
+# Resolve the input set. By default it is the parent JSONL alone. With
+# --include-subagents we also fold the deterministic sub-agent JSONLs that the
+# CLI writes for in-process Task/Agent sub-agents: strip `.jsonl` from the
+# parent's path to recover its session dir, then glob `<dir>/subagents/*.jsonl`
+# (the same linkScanPath → /subagents linkage documented in CTL-666 research).
+# Sub-agents complete before a phase's End block, so these files are fully
+# written by the time the footer (the only --include-subagents caller) runs.
+# This is invoked as `bash extract-cost-from-jsonl.sh` (a real bash shell), so
+# `shopt`/`nullglob` are safe here — NOT the zsh Bash-tool path.
+INPUTS=( "$JSONL" )
+if [ "$INCLUDE_SUBAGENTS" = "1" ]; then
+  shopt -s nullglob
+  SUBDIR="${JSONL%.jsonl}/subagents"
+  for f in "$SUBDIR"/*.jsonl; do INPUTS+=( "$f" ); done
+  shopt -u nullglob
+fi
+
+# Single jq aggregation: slurps the input events into an array, slurps pricing
+# as a side input, computes per-model token bucket → per-model cost → aggregate
+# USAGE. The reduce-over-assistant-events is the hot path; everything else is a
 # constant-time post-pass.
-jq -s --slurpfile pricing "$PRICING" '
+#
+# The inputs are concatenated through a tolerant raw-line pre-parse
+# (`jq -R 'fromjson? // empty'`) so a partially-written sub-agent file (last
+# line truncated mid-write) drops only the bad line instead of aborting the
+# whole run. The aggregation program below is byte-for-byte the original; only
+# its input source changed from one file arg to the sanitized stdin stream.
+cat "${INPUTS[@]}" 2>/dev/null \
+  | jq -R 'fromjson? // empty' 2>/dev/null \
+  | jq -s --slurpfile pricing "$PRICING" '
   ($pricing[0].models) as $p
   # Per-model token bucket
   | ([.[] | select(.type == "assistant" and .message.usage != null)]
@@ -102,4 +134,4 @@ jq -s --slurpfile pricing "$PRICING" '
       durationApiMs:       0,
       model:               ($primary.model // null)
     }
-' "$JSONL"
+'
