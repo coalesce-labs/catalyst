@@ -48,6 +48,8 @@ import {
   clearDispatchCooldown,
   dispatchCooldownPath,
   escalateDispatchExhausted,
+  maybeTripCircuitBreaker,
+  CIRCUIT_BREAKER_THRESHOLD,
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
@@ -1009,6 +1011,112 @@ describe("dispatch cool-down escalation", () => {
       });
     }
     expect(applied).toContainEqual({ ticket: "CTL-7", label: "needs-human" });
+  });
+});
+
+// ── CTL-671 Phase 1: per-ticket dispatch-failure circuit breaker ──
+describe("dispatch circuit breaker (CTL-671)", () => {
+  test("recordDispatchFailure increments consecutiveFailures and preserves CTL-624 fields", () => {
+    const t = "CTL-9",
+      phase = "research";
+    recordDispatchFailure(orchDir, t, phase, 1, 1000);
+    recordDispatchFailure(orchDir, t, phase, 1, 2000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, t, phase), "utf8"));
+    expect(m.failedAt).toBe(2000); // CTL-624 field preserved (latest)
+    expect(m.phase).toBe(phase); // CTL-624 field preserved
+    expect(m.code).toBe(1); // CTL-624 field preserved
+    expect(m.consecutiveFailures).toBe(2); // new counter
+  });
+
+  test("clearDispatchCooldown resets the counter (success heals)", () => {
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 1000);
+    clearDispatchCooldown(orchDir, "CTL-9", "research");
+    // marker gone → fresh failure starts at 1
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 3000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("a pre-CTL-671 marker without consecutiveFailures self-upgrades from 0", () => {
+    // A legacy CTL-624 marker (no counter field) reads as 0, so the first new
+    // failure writes consecutiveFailures: 1 (the `?? 0` default — Migration Notes).
+    mkdirSync(join(orchDir, ".dispatch-cooldowns"), { recursive: true });
+    writeFileSync(
+      dispatchCooldownPath(orchDir, "CTL-9", "research"),
+      JSON.stringify({ phase: "research", code: 2, failedAt: 500 })
+    );
+    recordDispatchFailure(orchDir, "CTL-9", "research", 2, 1000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("maybeTripCircuitBreaker writes terminal stalled at threshold, idempotently", () => {
+    const t = "CTL-9",
+      phase = "research";
+    writeSignal(t, phase, "running");
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("dispatch-circuit-breaker");
+    expect(sig.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true); // idempotent (already stalled)
+  });
+
+  test("below threshold does NOT trip", () => {
+    writeSignal("CTL-9", "research", "running");
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 1000);
+    expect(maybeTripCircuitBreaker(orchDir, "CTL-9", "research")).toBe(false);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-research.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+  });
+
+  test("no marker → does NOT trip (absent counter)", () => {
+    expect(maybeTripCircuitBreaker(orchDir, "CTL-9", "research")).toBe(false);
+  });
+
+  test("at threshold with no signal still reports tripped so the caller skips dispatch", () => {
+    // Refused-dispatch case: the target phase signal was never written. The
+    // breaker has nothing to stall but must still return true so the caller
+    // stops re-dispatching.
+    const t = "CTL-9",
+      phase = "plan";
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 2, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    expect(existsSync(join(orchDir, "workers", t, `phase-${phase}.json`))).toBe(false);
+  });
+
+  test("schedulerTick stops dispatching after THRESHOLD consecutive failures", () => {
+    writeSignal("CTL-9", "research", "done"); // in-flight; advancement → plan
+    const dispatch = fakeDispatch({ code: 2 }); // every dispatch refused
+    // Each tick is past the 60 s cool-down window so a fresh failure records.
+    for (let i = 0; i < CIRCUIT_BREAKER_THRESHOLD; i++) {
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        now: () => (i + 1) * 70_000,
+        liveBackgroundCount: () => 0,
+      });
+    }
+    expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD);
+    const m = JSON.parse(
+      readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "plan"), "utf8")
+    );
+    expect(m.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
+    // One more tick past the window: the top-of-loop breaker guard suppresses it.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => (CIRCUIT_BREAKER_THRESHOLD + 2) * 70_000,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD); // no growth — breaker held
   });
 });
 

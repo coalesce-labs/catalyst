@@ -1195,31 +1195,38 @@ export function dispatchCooldownPath(orchDir, ticket, phase) {
   return join(orchDir, ".dispatch-cooldowns", `${ticket}-${phase}.json`);
 }
 
-export function inDispatchCooldown(orchDir, ticket, phase, now) {
-  const p = dispatchCooldownPath(orchDir, ticket, phase);
-  let marker;
+// CTL-671: single reader for the cool-down marker, shared by inDispatchCooldown,
+// recordDispatchFailure, and maybeTripCircuitBreaker (avoids three copies of the
+// try/parse). Returns the parsed marker object, or null when absent/malformed.
+function readCooldownMarker(orchDir, ticket, phase) {
   try {
-    marker = JSON.parse(readFileSync(p, "utf8"));
+    return JSON.parse(readFileSync(dispatchCooldownPath(orchDir, ticket, phase), "utf8"));
   } catch {
-    return false; // absent / malformed → no cool-down
+    return null; // absent / malformed → treat as no marker
   }
-  if (typeof marker?.expiresAt === "number") return now < marker.expiresAt;
+}
+
+export function inDispatchCooldown(orchDir, ticket, phase, now) {
+  const marker = readCooldownMarker(orchDir, ticket, phase);
+  if (!marker) return false; // absent / malformed → no cool-down
+  if (typeof marker.expiresAt === "number") return now < marker.expiresAt;
   // Legacy CTL-624 marker (failedAt only): preserve old behavior.
-  if (typeof marker?.failedAt === "number") return now - marker.failedAt < DISPATCH_COOLDOWN_MS;
+  if (typeof marker.failedAt === "number") return now - marker.failedAt < DISPATCH_COOLDOWN_MS;
   return false;
 }
 
+// CTL-671: extends the CTL-624 marker with a `consecutiveFailures` counter
+// (read-modify-write, preserving every existing field — phase/code/failedAt). A
+// pre-CTL-671 marker without the counter reads as 0 (the `?? 0` default) and
+// self-upgrades on this write. clearDispatchCooldown rmSync's the whole marker,
+// so a successful dispatch resets the counter for free.
 export function recordDispatchFailure(orchDir, ticket, phase, code, now) {
   const dir = join(orchDir, ".dispatch-cooldowns");
   const path = dispatchCooldownPath(orchDir, ticket, phase);
+  const prev = readCooldownMarker(orchDir, ticket, phase);
   let consecutiveFailures = 1;
-  try {
-    const prev = JSON.parse(readFileSync(path, "utf8"));
-    if (prev?.code === code && typeof prev.consecutiveFailures === "number") {
-      consecutiveFailures = prev.consecutiveFailures + 1;
-    }
-  } catch {
-    // absent / malformed / legacy-without-counter → start at 1
+  if (prev?.code === code && typeof prev.consecutiveFailures === "number") {
+    consecutiveFailures = prev.consecutiveFailures + 1;
   }
   const ttl = PERMANENT_FAILURE_CODES.has(code)
     ? DISPATCH_PERMANENT_COOLDOWN_MS
@@ -1333,6 +1340,69 @@ export function escalateDispatchExhausted(
     return false;
   }
   clearDispatchCooldown(orchDir, ticket, phase); // marker no longer needed; stalled signal is the stop
+  return true;
+}
+
+// CTL-671: shared terminal-`stalled` writer for the dispatch circuit breaker
+// (Phase 1) and the phantom worker-dir sweep (Phase 3). Writes status:"stalled"
+// + stalledReason onto an EXISTING phase signal in place (every other field
+// preserved), so isTicketInFlight() drops the ticket and the terminal sweep
+// applies `needs-human`. Idempotent (a signal already stalled is a no-op).
+// Best-effort: a missing/unreadable signal returns false (nothing to stall) —
+// the caller decides whether that still counts as "handled". Mirrors the shape
+// of maybeEscalateRemediateExhausted's in-place write.
+function writeTerminalStalled(
+  orchDir,
+  ticket,
+  phase,
+  reason,
+  extra = {},
+  { readFile = readFileSync, writeFile = writeFileSync } = {}
+) {
+  const p = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  let cur;
+  try {
+    cur = JSON.parse(readFile(p, "utf8"));
+  } catch {
+    return false; // no signal to stall
+  }
+  if (cur.status === "stalled") return true; // idempotent
+  try {
+    writeFile(
+      p,
+      JSON.stringify({
+        ...cur,
+        ...extra,
+        status: "stalled",
+        stalledReason: reason,
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    return false; // best-effort — could not persist the stall
+  }
+  return true;
+}
+
+// CTL-671: trip the per-ticket dispatch circuit breaker. When the cool-down
+// marker's consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD, write terminal
+// `stalled` onto the ticket's phase signal (via writeTerminalStalled) so
+// isTicketInFlight() drops it and the terminal sweep applies `needs-human`.
+// Returns true at/above threshold REGARDLESS of whether a signal existed to
+// stall — a refused dispatch never wrote a target-phase signal, but the caller
+// must still stop re-dispatching. Below threshold (or no marker) → false.
+// Idempotent. Best-effort.
+export function maybeTripCircuitBreaker(orchDir, ticket, phase, opts = {}) {
+  const n = readCooldownMarker(orchDir, ticket, phase)?.consecutiveFailures ?? 0;
+  if (n < CIRCUIT_BREAKER_THRESHOLD) return false;
+  writeTerminalStalled(
+    orchDir,
+    ticket,
+    phase,
+    "dispatch-circuit-breaker",
+    { consecutiveFailures: n },
+    opts
+  );
   return true;
 }
 
@@ -2255,6 +2325,9 @@ export function schedulerTick(
     // for the triage→research edge; non-research edges skip the guard.
     if (next === NEW_WORK_ENTRY_PHASE && signals.triage === "done" && !admittedThisTick.has(ticket)) continue;
     if (inDispatchCooldown(orchDir, ticket, next, now())) continue; // CTL-624: throttle refused re-dispatch
+    // CTL-671: circuit breaker — once consecutiveFailures has crossed the
+    // threshold, quarantine to terminal `stalled` and stop re-dispatching.
+    if (maybeTripCircuitBreaker(orchDir, ticket, next)) continue;
     // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -2324,6 +2397,7 @@ export function schedulerTick(
         // see the drop.
         const cd1 = recordDispatchFailure(orchDir, ticket, next, 0, now());
         if (cd1.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
+        maybeTripCircuitBreaker(orchDir, ticket, next); // CTL-671: trip same tick if at threshold
         appendDispatchFailedEvent({
           orchId: ticket,
           ticket,
@@ -2345,6 +2419,7 @@ export function schedulerTick(
     } else {
       const cd2 = recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
       if (cd2.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
+      maybeTripCircuitBreaker(orchDir, ticket, next); // CTL-671: trip same tick if at threshold
       // CTL-611 Gap 2: surface the silent drop as an event so the broker /
       // HUD / operator can react. Best-effort; failure is logged inside.
       appendDispatchFailedEvent({
@@ -2570,6 +2645,9 @@ export function schedulerTick(
       if (verdict?.verdict === "hold") continue; // soft conflict — no cooldown marker
       // "go" → fall through to existing dispatch
     }
+    // CTL-671: circuit breaker — stop re-dispatching a new-work ticket that has
+    // failed its entry-phase dispatch THRESHOLD times in a row.
+    if (maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE)) continue;
     // CTL-660: record the new-work dispatch DECISION before the spawn.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -2625,6 +2703,7 @@ export function schedulerTick(
       } else {
         const cd3 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
         if (cd3.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
+        maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-671
         appendDispatchFailedEvent({
           orchId: t.identifier,
           ticket: t.identifier,
@@ -2643,6 +2722,7 @@ export function schedulerTick(
     } else {
       const cd4 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
       if (cd4.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
+      maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-671
       // CTL-611: Gap 2 entry-phase silent-drop event.
       appendDispatchFailedEvent({
         orchId: t.identifier,
@@ -2769,6 +2849,14 @@ const DISPATCH_FAILURE_ESCALATION_THRESHOLD =
 // writes the stalled signal that terminally stops the loop; the CTL-713 label
 // escalation at DISPATCH_FAILURE_ESCALATION_THRESHOLD (3) fires earlier as a flag.
 const getMaxDispatchRetries = () => Number(process.env.SCHEDULER_MAX_DISPATCH_RETRIES) || 5;
+
+// CTL-671: consecutive failed dispatches (no forward progress) before the ticket
+// is quarantined to terminal `stalled` by the dispatch circuit breaker.
+// Conservative default — well above any legitimate transient (rebase race,
+// momentary launch failure). A successful dispatch (clearDispatchCooldown)
+// resets the counter, so a healthy ticket can never trip it.
+export const CIRCUIT_BREAKER_THRESHOLD =
+  Number(process.env.SCHEDULER_CIRCUIT_BREAKER_THRESHOLD) || 8;
 
 // --- daemon module state ---
 let tickTimer = null;
