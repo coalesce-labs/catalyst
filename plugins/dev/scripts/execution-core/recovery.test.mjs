@@ -1011,6 +1011,44 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
     expect(s.opts.killBgJob.calls.length).toBe(0);
   });
+
+  // ── CTL-658: resume-on-revive. When a resume UUID resolves from the dead
+  //    worker's bg_job_id, the revive dispatches with `resumeSession` AND skips
+  //    the defensive kill (we are continuing the session, not retiring it).
+  test("CTL-658: resolved resume UUID is forwarded to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    s.opts.resolveSession = recorder("uuid-1");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBe("uuid-1");
+    // The resolver was asked about the dead worker's bg_job_id.
+    expect(s.opts.resolveSession.calls[0][0]).toBe("bg-9");
+  });
+
+  test("CTL-658: resume viable → defensive kill is SKIPPED", () => {
+    // Same quiet-state fixture that fires the kill in the test above, but with a
+    // resolvable session: the kill must not fire (its jsonl must stay intact).
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 6 * 60 * 1000, // 6min past — stale + past kill threshold
+    });
+    s.opts.resolveSession = () => "uuid-1";
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBe("uuid-1");
+  });
+
+  test("CTL-658: unresumable (resolver null) → kill fires, no resumeSession (unchanged)", () => {
+    const s = setupReviveScenario({
+      stateJsonMtime: 1_000,
+      nowMs: 1_000 + 6 * 60 * 1000,
+    });
+    s.opts.resolveSession = () => null;
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.killBgJob.calls.length).toBe(1);
+    // resumeSession is null on the dispatch (the fresh-start path).
+    expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBeNull();
+  });
 });
 
 // --- CTL-610: alive-quiet keep-alive guard (branch (C0)) -------------------
@@ -1423,6 +1461,28 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     });
     // No expectedWorktreePath key at all — undefined means "no check".
     expect("expectedWorktreePath" in dispatch.calls[0][0]).toBe(false);
+  });
+
+  // CTL-658: a resolved resume UUID is forwarded to dispatch so the spawned
+  // phase-agent-dispatch runs `claude --bg --resume <uuid>`.
+  test("resumeSession is forwarded to dispatch when set (CTL-658)", () => {
+    seed("CTL-658-A", "implement", { status: "running", bg_job_id: "bg-a" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-658-A", phase: "implement", resumeSession: "9f8e-uuid" },
+      { dispatch },
+    );
+    expect(dispatch.calls[0][0].resumeSession).toBe("9f8e-uuid");
+  });
+
+  test("resumeSession absent → dispatch called without the key (CTL-658)", () => {
+    seed("CTL-658-B", "implement", { status: "running", bg_job_id: "bg-b" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-658-B", phase: "implement" },
+      { dispatch },
+    );
+    expect("resumeSession" in dispatch.calls[0][0]).toBe(false);
   });
 
   test("signal flip happens BEFORE dispatch (so dispatcher sees 'stalled')", () => {

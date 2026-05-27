@@ -357,4 +357,123 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(result.escalated).toEqual([]);
     expect(reviveDispatchCalls).toHaveLength(1);
   });
+
+  // CTL-658: end-to-end resume-on-revive. A dead-by-stale-mtime implement worker
+  // whose bg_job_id has a resolvable state.json → the revive carries
+  // resumeSession AND skips the defensive kill. Exercises the REAL
+  // resolvePhaseSessionId against a fixture jobsDir (CATALYST_REVIVE_JOBS_DIR)
+  // rather than a stub, so the daemon→dispatch resume wiring is proven end-to-end.
+  test("resumable dead worker → dispatch carries resumeSession, kill skipped", () => {
+    const jobsDir = join(catalystDir, "jobs");
+    mkdirSync(join(jobsDir, "cafe1234"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "cafe1234", "state.json"),
+      JSON.stringify({ linkScanPath: "/p/abcd-uuid.jsonl" }),
+    );
+    const prevJobsDir = process.env.CATALYST_REVIVE_JOBS_DIR;
+    process.env.CATALYST_REVIVE_JOBS_DIR = jobsDir;
+    try {
+      seedSignal("CTL-658-E", "implement", {
+        status: "running",
+        bg_job_id: "cafe1234",
+        worktreePath: "/wt/CTL/CTL-658-E",
+        orchestrator: "CTL-658-E",
+      });
+
+      const reviveDispatchCalls = [];
+      const killCalls = [];
+      const result = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => ({ applied: true }),
+        },
+        teardownWorktree: () => true,
+        reclaimDeadWork: (od, sig, opts) =>
+          reclaimDeadWorkIfPossible(od, sig, {
+            ...opts,
+            // 'running' classification + ancient mtime → effectively dead via the
+            // staleness path (also past hungCutoffMs so pidAlive is never read).
+            statJob: () => ({ exists: true, mtimeMs: 1000 }),
+            probes: { implement: () => false }, // work NOT done → revive territory
+            reviveDispatch: (args) => {
+              reviveDispatchCalls.push(args);
+              return { code: 0 };
+            },
+            killBgJob: (args) => killCalls.push(args),
+            applyStalledLabel: () => ({ applied: true }),
+            countReviveEvents: () => 0,
+            countDistinctRevivingTickets: () => 1,
+            // resolveSession left at the real default → reads CATALYST_REVIVE_JOBS_DIR.
+          }),
+      });
+
+      expect(result.revived).toEqual([{ ticket: "CTL-658-E", phase: "implement" }]);
+      expect(reviveDispatchCalls).toHaveLength(1);
+      expect(reviveDispatchCalls[0].resumeSession).toBe("abcd-uuid");
+      // Resume viable → the defensive kill must NOT fire (the session's jsonl
+      // must stay intact for `--resume`).
+      expect(killCalls).toHaveLength(0);
+    } finally {
+      if (prevJobsDir === undefined) delete process.env.CATALYST_REVIVE_JOBS_DIR;
+      else process.env.CATALYST_REVIVE_JOBS_DIR = prevJobsDir;
+    }
+  });
+
+  // CTL-658 companion: same fixture but NO state.json for the bg_job_id →
+  // resolvePhaseSessionId returns null → unchanged behaviour: the defensive kill
+  // fires and the dispatch carries no resumeSession (fresh re-dispatch).
+  test("unresumable dead worker → kill fires, no resumeSession (fresh dispatch)", () => {
+    const jobsDir = join(catalystDir, "jobs-empty");
+    mkdirSync(jobsDir, { recursive: true }); // no <bgJobId>/state.json inside
+    const prevJobsDir = process.env.CATALYST_REVIVE_JOBS_DIR;
+    process.env.CATALYST_REVIVE_JOBS_DIR = jobsDir;
+    try {
+      seedSignal("CTL-658-F", "implement", {
+        status: "running",
+        bg_job_id: "feedface",
+        worktreePath: "/wt/CTL/CTL-658-F",
+        orchestrator: "CTL-658-F",
+      });
+
+      const reviveDispatchCalls = [];
+      const killCalls = [];
+      const result = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => ({ applied: true }),
+        },
+        teardownWorktree: () => true,
+        reclaimDeadWork: (od, sig, opts) =>
+          reclaimDeadWorkIfPossible(od, sig, {
+            ...opts,
+            statJob: () => ({ exists: true, mtimeMs: 1000 }),
+            probes: { implement: () => false },
+            reviveDispatch: (args) => {
+              reviveDispatchCalls.push(args);
+              return { code: 0 };
+            },
+            killBgJob: (args) => killCalls.push(args),
+            applyStalledLabel: () => ({ applied: true }),
+            countReviveEvents: () => 0,
+            countDistinctRevivingTickets: () => 1,
+          }),
+      });
+
+      expect(result.revived).toEqual([{ ticket: "CTL-658-F", phase: "implement" }]);
+      expect(reviveDispatchCalls).toHaveLength(1);
+      expect(reviveDispatchCalls[0].resumeSession).toBeNull();
+      // Unresumable → the defensive kill fires (free the abandoned bg worker).
+      expect(killCalls).toHaveLength(1);
+      expect(killCalls[0].bgJobId).toBe("feedface");
+    } finally {
+      if (prevJobsDir === undefined) delete process.env.CATALYST_REVIVE_JOBS_DIR;
+      else process.env.CATALYST_REVIVE_JOBS_DIR = prevJobsDir;
+    }
+  });
 });
