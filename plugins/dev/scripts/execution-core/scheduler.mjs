@@ -58,7 +58,7 @@ export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
-import { countRemediateCycles } from "./event-scan.mjs";
+import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState, fetchTicketRelations, classifyTicketResolution } from "./linear-query.mjs";
@@ -101,6 +101,7 @@ import {
   defaultAppendCooldownGcEvent,
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
+  defaultAppendRunawayEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -1420,6 +1421,35 @@ function maybeQuarantinePhantom(orchDir, ticket, phase, opts = {}) {
   return writeTerminalStalled(orchDir, ticket, phase, "phantom-ticket", {}, opts);
 }
 
+// CTL-671: once-per-window guard for the runaway alert, mirroring the dispatch
+// cool-down marker (timestamp + time-based window). Lives under
+// orchDir/.runaway-alerts/<ticket>.json so it never manufactures a worker dir
+// (same reasoning as the .dispatch-cooldowns placement, CTL-624). Best-effort.
+function runawayAlertPath(orchDir, ticket) {
+  return join(orchDir, ".runaway-alerts", `${ticket}.json`);
+}
+
+function inRunawayCooldown(orchDir, ticket, now) {
+  let alertedAt;
+  try {
+    alertedAt = JSON.parse(readFileSync(runawayAlertPath(orchDir, ticket), "utf8"))?.alertedAt;
+  } catch {
+    return false; // absent / malformed → not in cool-down
+  }
+  if (typeof alertedAt !== "number") return false;
+  return now - alertedAt < RUNAWAY_WINDOW_MS;
+}
+
+function recordRunawayAlert(orchDir, ticket, now) {
+  const dir = join(orchDir, ".runaway-alerts");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(runawayAlertPath(orchDir, ticket), JSON.stringify({ ticket, alertedAt: now }));
+  } catch (err) {
+    log.warn({ ticket, err: err.message }, "scheduler: runaway-alert marker write failed — continuing");
+  }
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -1752,6 +1782,12 @@ export function schedulerTick(
     // production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
+    // CTL-671: runaway-alert seams. countTicketEvents reads the unified event
+    // log (safe in tests — CATALYST_DIR is redirected), so it defaults to the
+    // real scan; appendRunawayEvent writes the canonical alert. Both injectable
+    // for hermetic unit assertions.
+    countTicketEvents = countTicketEventsInWindow,
+    appendRunawayEvent = defaultAppendRunawayEvent,
   } = {}
 ) {
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
@@ -1800,6 +1836,25 @@ export function schedulerTick(
   for (const sig of readWorkerSignals(orchDir)) {
     if (!sig.ticket) continue;
     if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue; // skip terminal — no probe
+
+    // CTL-671 runaway-rate alert — OBSERVABILITY ONLY (does not quarantine, so
+    // it covers noisy-but-real tickets too and runs before the phantom gates).
+    // Fires once per RUNAWAY_WINDOW_MS via the .runaway-alerts/<ticket> marker.
+    const evCount = countTicketEvents({ ticket: sig.ticket, windowMs: RUNAWAY_WINDOW_MS, now });
+    if (evCount >= RUNAWAY_THRESHOLD && !inRunawayCooldown(orchDir, sig.ticket, now())) {
+      appendRunawayEvent({
+        ticket: sig.ticket,
+        orchId: sig.raw?.orchestrator ?? sig.ticket,
+        count: evCount,
+        window_ms: RUNAWAY_WINDOW_MS,
+      });
+      recordRunawayAlert(orchDir, sig.ticket, now());
+      log.warn(
+        { ticket: sig.ticket, count: evCount, window_ms: RUNAWAY_WINDOW_MS },
+        "scheduler: ticket event-rate domination — emitted phase.dispatch.runaway (CTL-671)"
+      );
+    }
+
     if (eligibleIds.has(sig.ticket)) continue; // (a) eligible → real ticket
     const bgId = sig.liveness?.kind === "bg" ? sig.liveness.value : null;
     if (isBgJobAlive(bgId)) continue; // (c) live worker → cheap check before the Linear call
@@ -2916,6 +2971,16 @@ const getMaxDispatchRetries = () => Number(process.env.SCHEDULER_MAX_DISPATCH_RE
 // resets the counter, so a healthy ticket can never trip it.
 export const CIRCUIT_BREAKER_THRESHOLD =
   Number(process.env.SCHEDULER_CIRCUIT_BREAKER_THRESHOLD) || 8;
+
+// CTL-671: per-ticket event-rate domination alert. When a single ticket emits
+// >= RUNAWAY_THRESHOLD phase.*.<ticket> events within RUNAWAY_WINDOW_MS, the
+// scheduler fires ONE phase.dispatch.runaway.<ticket> event per window
+// (observability only — enforcement is the phantom sweep + circuit breaker).
+// CTL-9's storm was ~24,560 events over 3 days; 50-in-10min is a conservative
+// floor far above any healthy ticket's per-window rate.
+export const RUNAWAY_THRESHOLD = Number(process.env.SCHEDULER_RUNAWAY_THRESHOLD) || 50;
+export const RUNAWAY_WINDOW_MS =
+  Number(process.env.SCHEDULER_RUNAWAY_WINDOW_MS) || 10 * 60 * 1000;
 
 // --- daemon module state ---
 let tickTimer = null;

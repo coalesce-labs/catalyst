@@ -50,6 +50,8 @@ import {
   escalateDispatchExhausted,
   maybeTripCircuitBreaker,
   CIRCUIT_BREAKER_THRESHOLD,
+  RUNAWAY_THRESHOLD,
+  RUNAWAY_WINDOW_MS,
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
@@ -1250,6 +1252,88 @@ describe("phantom worker-dir validity sweep (CTL-671)", () => {
       isBgJobAlive: () => false,
     });
     expect(result.quarantinedPhantoms).toEqual([{ ticket: "CTL-9", phase: "implement" }]);
+  });
+});
+
+// ── CTL-671 Phase 4: runaway event-rate domination alert ──
+describe("runaway event-rate alert (CTL-671)", () => {
+  test("emits exactly one runaway event per window when a ticket dominates", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const runawayCalls = [];
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true, // isolate the alert from phantom quarantine
+      countTicketEvents: () => RUNAWAY_THRESHOLD, // at threshold → fires
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 1_000_000,
+    };
+    schedulerTick(orchDir, opts);
+    expect(runawayCalls).toHaveLength(1);
+    expect(runawayCalls[0]).toMatchObject({
+      ticket: "CTL-9",
+      count: RUNAWAY_THRESHOLD,
+      window_ms: RUNAWAY_WINDOW_MS,
+    });
+
+    // Second tick within the same window → suppressed by the once-per-window marker.
+    schedulerTick(orchDir, opts);
+    expect(runawayCalls).toHaveLength(1);
+
+    // A tick past the window → fires again.
+    schedulerTick(orchDir, { ...opts, now: () => 1_000_000 + RUNAWAY_WINDOW_MS + 1 });
+    expect(runawayCalls).toHaveLength(2);
+  });
+
+  test("does NOT emit below threshold", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const runawayCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true,
+      countTicketEvents: () => RUNAWAY_THRESHOLD - 1, // below threshold
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 1_000_000,
+    });
+    expect(runawayCalls).toHaveLength(0);
+  });
+
+  test("alerts a noisy ticket even when it is eligible (real but runaway)", () => {
+    // The alert is observability, not enforcement — it must fire before the
+    // eligible short-circuit so a real, eligible, noisy ticket is still surfaced.
+    writeSignal("CTL-100", "implement", "running");
+    const runawayCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        {
+          identifier: "CTL-100",
+          priority: 1,
+          state: "Todo",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      ],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true,
+      countTicketEvents: () => RUNAWAY_THRESHOLD + 5,
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 2_000_000,
+    });
+    expect(runawayCalls).toHaveLength(1);
+    expect(runawayCalls[0].ticket).toBe("CTL-100");
   });
 });
 

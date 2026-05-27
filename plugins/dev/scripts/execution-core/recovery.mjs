@@ -525,6 +525,28 @@ export function defaultAppendDispatchFailedEvent({
   );
 }
 
+// CTL-671: runaway-loop alert event. Fires once-per-window from schedulerTick
+// when a single ticket's per-ticket event rate dominates the unified log
+// (>= SCHEDULER_RUNAWAY_THRESHOLD events in SCHEDULER_RUNAWAY_WINDOW_MS). This
+// is OBSERVABILITY ONLY — it does not itself quarantine (the phantom sweep +
+// circuit breaker handle enforcement); a real but noisy ticket gets surfaced,
+// not killed. Routes via the broker's PHASE_EVENT_PATTERN as
+// phase.dispatch.runaway.<TICKET> (phase slot "dispatch", action "runaway").
+// Best-effort, mirroring every other audit emitter.
+export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "runaway",
+      reason: "event-rate-domination",
+      payloadExtras: { count, window_ms },
+    }),
+    "runaway",
+  );
+}
+
 // CTL-660: success-path dispatch lifecycle events — the complement to
 // defaultAppendDispatchFailedEvent. The daemon already emits on the dispatch
 // FAILURE path (above) and on phase COMPLETION, but nothing when it DECIDES to
