@@ -37,6 +37,11 @@ import {
 import { Reaper, defaultReadActivePhaseSignal } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import { reconcileBootResume } from "./boot-resume.mjs";
+// CTL-665: the committed executionCore concurrency reader — imported directly
+// (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
+// main() can resolve the slot-ceiling config once and thread it into the
+// scheduler + boot-resume.
+import { readExecutionCoreConcurrency } from "./scheduler.mjs";
 import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -91,6 +96,10 @@ export function startDaemon({
   // that only exercise monitor + scheduler.
   enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
   orphanReaperConfig = null,
+  // CTL-665: committed executionCore concurrency knobs resolved in main() from
+  // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
+  // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
+  concurrency = {},
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -130,7 +139,7 @@ export function startDaemon({
     // a chronic-failure storm) and is bounded by maxParallel so a reboot never
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
-    reconcileBoot({ orchDir, report });
+    reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -143,7 +152,7 @@ export function startDaemon({
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache }); // CTL-536 + CTL-634 — pull-loop scheduler
+    schedulerFn({ orchDir, cache, concurrency }); // CTL-536 + CTL-634 + CTL-665 — pull-loop scheduler
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -423,6 +432,11 @@ function main() {
   const configPath =
     process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
+  // CTL-665: resolve the committed executionCore concurrency knobs once here and
+  // thread them into startDaemon → scheduler + boot-resume. Same config file as
+  // the orphan-reaper read above; absent/partial config yields {} → the scheduler
+  // falls back to state.json + the hardcoded default exactly as before.
+  const concurrency = readExecutionCoreConcurrency(configPath);
 
   // A post-startup throw (a monitor/scheduler timer callback, the watcher)
   // must not leave a half-dead daemon holding a valid PID file — that makes
@@ -435,7 +449,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig });
+    startDaemon({ pidFile, orphanReaperConfig, concurrency });
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

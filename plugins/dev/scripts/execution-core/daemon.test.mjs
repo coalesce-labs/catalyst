@@ -120,6 +120,45 @@ describe("startDaemon", () => {
     ).not.toThrow();
   });
 
+  // CTL-665: the committed executionCore concurrency knobs resolved in main()
+  // thread through startDaemon into BOTH the boot-resume pass and the scheduler,
+  // so a config-set maxParallel drives the slot ceiling end-to-end. An absent
+  // config yields {} (the default), preserving the legacy state.json path.
+  test("threads the concurrency knobs into both reconcileBoot and startScheduler (CTL-665)", () => {
+    const concurrency = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    let bootConcurrency;
+    let schedulerConcurrency;
+    startDaemon({
+      recover: () => ({ coldStart: true, workers: {} }),
+      reconcileBoot: (o) => {
+        bootConcurrency = o.concurrency;
+      },
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        schedulerConcurrency = o.concurrency;
+      },
+      watchRegistry: false,
+      concurrency,
+    });
+    expect(bootConcurrency).toEqual(concurrency);
+    expect(schedulerConcurrency).toEqual(concurrency);
+  });
+
+  // CTL-665: default concurrency is {} when not passed (main() supplies it from
+  // config; the no-arg test path must keep the legacy state.json ceiling).
+  test("defaults concurrency to {} when not passed (CTL-665)", () => {
+    let schedulerConcurrency = "unset";
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        schedulerConcurrency = o.concurrency;
+      },
+      watchRegistry: false,
+    });
+    expect(schedulerConcurrency).toEqual({});
+  });
+
   // CTL-634: one cache instance is created in startDaemon and threaded into
   // BOTH composed boots, so the monitor's write-through and the scheduler's
   // read path share state. Capture each boot's `cache` arg and assert identity.

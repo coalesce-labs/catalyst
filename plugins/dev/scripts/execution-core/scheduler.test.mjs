@@ -20,6 +20,8 @@ import {
   isTicketInFlight,
   listInFlightTickets,
   readMaxParallel,
+  readExecutionCoreConcurrency,
+  DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
   resolveReapPredecessor,
@@ -183,6 +185,85 @@ describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
   test("computeFreeSlots never goes negative", () => {
     expect(computeFreeSlots(3, 1)).toBe(2);
     expect(computeFreeSlots(3, 5)).toBe(0);
+  });
+});
+
+// CTL-665 Phase 1 — the committed-config reader + readMaxParallel config-first
+// precedence + clamp. Mirrors the readOrphanReaperConfig reader contract.
+describe("readExecutionCoreConcurrency (CTL-665)", () => {
+  function writeConfig(obj) {
+    const p = join(orchDir, "config.json");
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  }
+  test("returns {} for a null/empty configPath", () => {
+    expect(readExecutionCoreConcurrency(null)).toEqual({});
+    expect(readExecutionCoreConcurrency("")).toEqual({});
+  });
+  test("returns {} for an absent file (ENOENT silent — no throw)", () => {
+    expect(readExecutionCoreConcurrency(join(orchDir, "nope.json"))).toEqual({});
+  });
+  test("returns {} for unparseable JSON (no throw)", () => {
+    const p = join(orchDir, "bad.json");
+    writeFileSync(p, "{ not json");
+    expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+  test("returns the catalyst.orchestration.executionCore object", () => {
+    const p = writeConfig({
+      catalyst: {
+        orchestration: {
+          executionCore: {
+            maxParallel: 4,
+            minParallel: 1,
+            maxParallelCeiling: 10,
+            eligibleQuery: { status: "Ready" },
+          },
+        },
+      },
+    });
+    expect(readExecutionCoreConcurrency(p)).toEqual({
+      maxParallel: 4,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    });
+  });
+  test("returns {} when the key is absent", () => {
+    const p = writeConfig({ catalyst: { orchestration: {} } });
+    expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+});
+
+describe("readMaxParallel precedence + clamp (CTL-665)", () => {
+  test("config wins over state.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(readMaxParallel(orchDir, { maxParallel: 4 })).toBe(4);
+  });
+  test("state.json fallback when config silent", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    expect(readMaxParallel(orchDir, {})).toBe(2);
+  });
+  test("hardcoded fallback constant when both silent", () => {
+    expect(readMaxParallel(orchDir, {})).toBe(DEFAULT_MAX_PARALLEL);
+  });
+  test("clamp to ceiling", () => {
+    expect(
+      readMaxParallel(orchDir, { maxParallel: 50, minParallel: 1, maxParallelCeiling: 10 }),
+    ).toBe(10);
+  });
+  test("clamp to floor — a resolved value below minParallel is raised", () => {
+    // state.json resolves to 1; config carries only the bounds (no maxParallel),
+    // so the resolved 1 is clamped up to minParallel: 2.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    expect(readMaxParallel(orchDir, { minParallel: 2, maxParallelCeiling: 10 })).toBe(2);
+  });
+  test("no clamp when bounds absent", () => {
+    expect(readMaxParallel(orchDir, { maxParallel: 50 })).toBe(50);
+  });
+  test("backward compatibility — one-arg call unchanged (default 1, state.json 3)", () => {
+    expect(readMaxParallel(orchDir)).toBe(1);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    expect(readMaxParallel(orchDir)).toBe(3);
   });
 });
 
@@ -577,6 +658,50 @@ describe("schedulerTick — new-work pull", () => {
     // CTL-565: new-work enters the pipeline at research, not triage.
     expect(dispatch.calls.every((c) => c.phase === "research")).toBe(true);
     expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
+  });
+
+  // CTL-665: a committed executionCore.maxParallel threaded via `concurrency`
+  // drives the new-work ceiling end-to-end, overriding a smaller state.json value.
+  test("concurrency.maxParallel overrides state.json for the new-work ceiling (CTL-665)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-1",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-2",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+      {
+        identifier: "CTL-3",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk, // CTL-611: bypass the dispatch verifier
+      liveBackgroundCount: () => 0,
+      // committed config raises the ceiling from state.json's 1 to 3.
+      concurrency: { maxParallel: 3, minParallel: 1, maxParallelCeiling: 10 },
+    });
+    // state.json caps at 1, but the threaded config ceiling is 3 → all 3 dispatch.
+    expect(dispatch.calls).toHaveLength(3);
+    expect(r.dispatched).toHaveLength(3);
   });
 
   test("new-work pull dispatches Ready tickets at the research phase, not triage (CTL-565)", () => {
@@ -1133,6 +1258,18 @@ describe("startScheduler / stopScheduler", () => {
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-1", phase: "research" }]);
   });
+
+  // CTL-665: startScheduler's forward of the threaded `concurrency` into the
+  // immediate runTick → schedulerTick is a trivial one-property pass-through
+  // (runningOpts.concurrency), identical to the existing untested cache /
+  // writeStatus forwards. It is covered transitively: the "new-work ceiling"
+  // schedulerTick test (above) proves schedulerTick honors `concurrency`, and the
+  // daemon "threads the concurrency knobs into startScheduler" test proves
+  // startDaemon supplies it. A dedicated startScheduler dispatch-count assertion
+  // is intentionally omitted — it can only observe `concurrency` through the
+  // freeSlots-gated new-work pull, whose count depends on the live
+  // countBackgroundAgents() shell-out (not injectable through startScheduler),
+  // making such a test environment-fragile without adding coverage.
 
   test("the periodic timer fires another tick", async () => {
     const dispatch = fakeDispatch();

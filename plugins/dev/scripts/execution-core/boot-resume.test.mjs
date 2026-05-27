@@ -165,6 +165,22 @@ describe("selectBootResumeCandidates", () => {
     const out = selectBootResumeCandidates({ orchDir, agents: [] });
     expect(out).toHaveLength(1);
   });
+
+  // CTL-665: a committed executionCore.maxParallel (threaded via `concurrency`)
+  // overrides state.json for the boot-resume ceiling, mirroring the new-work pull.
+  test("concurrency.maxParallel overrides state.json for the boot ceiling (CTL-665)", () => {
+    writeMaxParallel(orchDir, 1); // state.json caps at 1
+    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2" });
+    writeSignal(orchDir, "CTL-3", "implement", { worktreePath: "/wt/CTL-3" });
+    const out = selectBootResumeCandidates({
+      orchDir,
+      agents: [],
+      concurrency: { maxParallel: 3, minParallel: 1, maxParallelCeiling: 10 },
+    });
+    // committed config (3) wins over state.json (1) → 3 candidates, not 1.
+    expect(out).toHaveLength(3);
+  });
 });
 
 // ── Phase 2: reconcileBootResume orchestration ────────────────────────────

@@ -47,7 +47,13 @@
     },
     "orchestration": {
       "_comment": "Worker dispatch mode. 'phase-agents' (default) dispatches the 9-phase pipeline on claude --bg; 'oneshot-legacy' keeps the pre-CTL-452 single-shot oneshot worker on claude -p.",
-      "dispatchMode": "phase-agents"
+      "dispatchMode": "phase-agents",
+      "executionCore": {
+        "_comment": "Execution-core scheduler worker-slot ceiling (CTL-665). maxParallel is the committed source of truth (~/catalyst/execution-core/state.json is an optional runtime fallback consulted only when this is absent). minParallel/maxParallelCeiling clamp the resolved value — bounds for the future adaptive-concurrency feature. Default stays 4; the operator bump to 10 is gated on CTL-661/662/663. NOTE: eligibleQuery is intentionally NOT here — it lives centrally in registry.json (CTL-582 D4); only these concurrency knobs are templated.",
+        "maxParallel": 4,
+        "minParallel": 1,
+        "maxParallelCeiling": 10
+      }
     }
   }
 }
