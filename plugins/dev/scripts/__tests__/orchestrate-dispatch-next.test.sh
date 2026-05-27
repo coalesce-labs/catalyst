@@ -865,6 +865,45 @@ DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ "$DISPATCHED" = "" ] && pass "done signal NOT re-dispatched" || fail "done signal NOT re-dispatched" "got: $DISPATCHED"
 scratch_teardown
 
+echo "test 44 (CTL-611): phase-agent-dispatch failure emits phase.dispatch.failed event"
+scratch_setup
+# Install a stub phase-agent-dispatch that ALWAYS exits non-zero.
+cat >"${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$PHASE_DISPATCH_LOG"
+exit 1
+EOF
+chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
+export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
+: >"$PHASE_DISPATCH_LOG"
+export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+RC=$?
+# Exit code stays 0 — idempotency contract unchanged.
+[ "$RC" = "0" ] && pass "exit 0 on phase-agent-dispatch failure (unchanged contract)" || fail "exit 0 on phase-agent-dispatch failure" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+# Stdout shape unchanged — dispatched stays empty.
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "" ] && pass "dispatched=[] on failure (unchanged shape)" || fail "dispatched=[] on failure" "got: $DISPATCHED"
+# State log gained exactly one phase.dispatch.failed.T-1 event.
+COUNT=$(grep -c "phase.dispatch.failed.T-1" "$STATE_LOG" || true)
+[ "$COUNT" = "1" ] && pass "exactly one phase.dispatch.failed.T-1 event" || fail "exactly one phase.dispatch.failed.T-1 event" "count=$COUNT log: $(cat "$STATE_LOG")"
+grep -q "research" "$STATE_LOG" && pass "event carries toPhase=research" || fail "event carries toPhase=research" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test 45 (CTL-611): successful phase-agent-dispatch does NOT emit phase.dispatch.failed"
+scratch_setup
+phase_agent_dispatch_setup
+write_state "demo" 4 '{"wave1Pending": []}'
+make_worktree "demo" "T-1"
+OUT=$("$DISPATCH" --orch-dir "$ORCH_DIR" --ticket "T-1" --phase "research" 2>"${SCRATCH}/err")
+DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
+[ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1] on success" || fail "dispatched=[T-1] on success" "got: $DISPATCHED"
+COUNT=$(grep -c "phase.dispatch.failed" "$STATE_LOG" || true)
+[ "$COUNT" = "0" ] && pass "no phase.dispatch.failed event on success" || fail "no phase.dispatch.failed event on success" "count=$COUNT log: $(cat "$STATE_LOG")"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

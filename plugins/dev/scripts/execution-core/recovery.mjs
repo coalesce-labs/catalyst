@@ -309,6 +309,34 @@ function defaultAppendReviveSuppressedEvent({
   );
 }
 
+// CTL-611: dispatch-failed audit event. Fires whenever the scheduler observes
+// a dispatch attempt that did not produce a live successor worker (Gap 1
+// silent demotion: rc=0 but no bg_job_id signal; Gap 2: rc!=0). Routes via
+// the broker's PHASE_EVENT_PATTERN as phase.dispatch.failed.<TICKET> (phase
+// slot is the literal "dispatch", action slot is "failed"); the actual phase
+// being dispatched is carried in payload.target_phase so operators can filter.
+// Best-effort like every other audit emitter — return value lets the caller
+// log (no current caller gates on it; matches recordDispatchFailure shape).
+export function defaultAppendDispatchFailedEvent({
+  orchId,
+  ticket,
+  target_phase,
+  code,
+  reason,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "failed",
+      reason,
+      payloadExtras: { target_phase, code },
+    }),
+    "dispatch-failed",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass

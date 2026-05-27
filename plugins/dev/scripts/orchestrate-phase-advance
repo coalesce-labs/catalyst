@@ -162,6 +162,19 @@ fi
   echo "ERROR: dispatch-next failed for ${TICKET} phase=${NEXT_PHASE}" >&2
   jq -nc --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" --arg ticket "$TICKET" \
     '{advanced: false, fromPhase: $from, toPhase: $to, ticket: $ticket, reason: "dispatch-failed"}'
+  # CTL-611: surface the silent drop as a phase.dispatch.failed.<TICKET> event
+  # so the broker / HUD / operator can react. Without this, exit 0 + stderr-only
+  # ERROR left no machine-readable signal that the next-phase worker never
+  # launched. Best-effort — never changes the exit code.
+  if [ -x "$STATE_SCRIPT" ]; then
+    "$STATE_SCRIPT" event "$(jq -nc \
+      --arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$TICKET" \
+      --arg from "$COMPLETED_PHASE" --arg to "$NEXT_PHASE" \
+      '{ts:$ts, orchestrator:$orch, worker:$w,
+        event:("phase.dispatch.failed." + $w),
+        detail:{fromPhase:$from, toPhase:$to, reason:"dispatch-failed"}}')" \
+      >/dev/null 2>&1 || true
+  fi
   exit 0
 }
 

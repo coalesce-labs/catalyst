@@ -286,6 +286,40 @@ grep -q -- "--config /tmp/x/.catalyst/config.json" "$LINEAR_TRANSITION_LOG" \
   && pass "--config forwarded to linear-transition" || fail "--config forwarded to linear-transition" "log: $(cat "$LINEAR_TRANSITION_LOG")"
 scratch_teardown
 
+echo "test 18 (CTL-611): dispatch-failed emits phase.dispatch.failed event"
+scratch_setup
+# Install a stub dispatch-next that ALWAYS exits non-zero.
+cat > "${SCRATCH}/bin/orchestrate-dispatch-next" <<'EOF'
+#!/usr/bin/env bash
+echo "$@" >> "$DISPATCH_LOG"
+exit 1
+EOF
+chmod +x "${SCRATCH}/bin/orchestrate-dispatch-next"
+make_phase_signal "T-1" "triage" "done"
+OUT=$(run_advance --ticket "T-1" --completed-phase "triage" 2>"${SCRATCH}/err")
+RC=$?
+# Exit code stays 0 — idempotency contract unchanged.
+[ "$RC" = "0" ] && pass "exit 0 on dispatch-failed (unchanged contract)" || fail "exit 0 on dispatch-failed (unchanged contract)" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+# Stdout shape unchanged.
+echo "$OUT" | jq -e '.advanced == false and .reason == "dispatch-failed" and .ticket == "T-1" and .toPhase == "research"' >/dev/null   && pass "stdout shape unchanged on dispatch-failed" || fail "stdout shape unchanged on dispatch-failed" "got: $OUT"
+# State log gained exactly one phase.dispatch.failed.T-1 event.
+COUNT=$(grep -c "phase.dispatch.failed.T-1" "$STATE_LOG" || true)
+[ "$COUNT" = "1" ] && pass "exactly one phase.dispatch.failed.T-1 event" || fail "exactly one phase.dispatch.failed.T-1 event" "count=$COUNT log: $(cat "$STATE_LOG")"
+# Event detail mentions fromPhase + toPhase.
+grep -q "fromPhase" "$STATE_LOG" && grep -q "research" "$STATE_LOG"   && pass "event carries fromPhase + toPhase" || fail "event carries fromPhase + toPhase" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
+echo "test 19 (CTL-611): successful dispatch does NOT emit phase.dispatch.failed"
+scratch_setup
+# Regression: the existing exit-0 stub stays in place; no phase.dispatch.failed event.
+make_phase_signal "T-1" "research" "done"
+run_advance --ticket "T-1" --completed-phase "research" >/dev/null 2>"${SCRATCH}/err"
+COUNT=$(grep -c "phase.dispatch.failed" "$STATE_LOG" || true)
+[ "$COUNT" = "0" ] && pass "no phase.dispatch.failed event on success" || fail "no phase.dispatch.failed event on success" "count=$COUNT log: $(cat "$STATE_LOG")"
+# The existing worker-phase-advanced event still fires.
+grep -q "worker-phase-advanced" "$STATE_LOG" && pass "worker-phase-advanced still emitted" || fail "worker-phase-advanced still emitted" "log: $(cat "$STATE_LOG")"
+scratch_teardown
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "Results: ${PASSES} pass, ${FAILURES} fail"

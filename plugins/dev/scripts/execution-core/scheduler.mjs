@@ -52,7 +52,12 @@ import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
 // reclaimDeadWorkIfPossible in recovery.mjs for the decision tree.
-import { reclaimDeadWorkIfPossible as defaultReclaimDeadWork } from "./recovery.mjs";
+// CTL-611: defaultAppendDispatchFailedEvent — emits phase.dispatch.failed.<T>
+// to the unified event log on every dispatch failure (Gap 1 + Gap 2).
+import {
+  reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
+  defaultAppendDispatchFailedEvent,
+} from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -505,6 +510,39 @@ export function clearDispatchCooldown(orchDir, ticket, phase) {
   }
 }
 
+// CTL-611: post-dispatch verifier. A dispatch is only really successful if
+// workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
+// runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
+// half-write (status="dispatched"/"running" but bg_job_id=null) used to be
+// silently treated as a real advance, leaving the orchestrator wedged. The
+// returned {ok, reason} feeds the demotion path: on !ok the rc=0 result is
+// reclassified as a failure with reason="verify_failed:<reason>" and a
+// phase.dispatch.failed.<T> event fires.
+export function verifyDispatchedSignal(orchDir, ticket, phase) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  let raw;
+  try {
+    raw = readFileSync(signalPath, "utf8");
+  } catch {
+    return { ok: false, reason: "signal_missing" };
+  }
+  let signal;
+  try {
+    signal = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: "signal_unparseable" };
+  }
+  const status = signal?.status;
+  if (status !== "dispatched" && status !== "running") {
+    return { ok: false, reason: "status_not_runnable" };
+  }
+  const bgJob = signal?.bg_job_id;
+  if (typeof bgJob !== "string" || bgJob.length === 0) {
+    return { ok: false, reason: "bg_job_id_missing" };
+  }
+  return { ok: true };
+}
+
 // REQUIRED_WORKSPACE_LABELS — the flat labels the CTL-558 coordinator sweep
 // writes. Both must pre-exist in the Linear workspace; linearis has no
 // `labels create`. CTL-585's preflight warns once at daemon start if either
@@ -658,6 +696,10 @@ export function schedulerTick(
     // its slot. Interactive sessions are excluded (unlimited). Injectable for
     // tests so a unit tick need not shell out to `claude`.
     liveBackgroundCount = () => countBackgroundAgents(),
+    // CTL-611: injectable verifier + audit-event emitter so tests can pin the
+    // demotion path independently of fixture choice (fakeDispatch / recorder).
+    verifyDispatched = verifyDispatchedSignal,
+    appendDispatchFailedEvent = defaultAppendDispatchFailedEvent,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -746,18 +788,50 @@ export function schedulerTick(
     if (inDispatchCooldown(orchDir, ticket, next, now())) continue; // CTL-624: throttle refused re-dispatch
     const r = dispatchTicket(orchDir, ticket, next, { dispatch });
     if (r.code === 0) {
-      clearDispatchCooldown(orchDir, ticket, next); // CTL-624: success clears any prior cool-down
-      advanced.push({ ticket, phase: next });
-      // CTL-657: stop the predecessor worker now that its successor is live.
-      emitPredecessorReap(orchDir, ticket, signals, next);
-      // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
-      // (linear-transition.sh read-compares first); never aborts the tick.
-      safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
-        ticket,
-        phase: next,
-      });
+      // CTL-611: verify the dispatch actually produced a live worker before
+      // declaring success. A --dry-run leak / mark_launch_failed half-write
+      // returns rc=0 with no usable signal, which used to silently leave the
+      // pipeline wedged. !ok demotes to failure (cool-down + event).
+      const v = verifyDispatched(orchDir, ticket, next);
+      if (v.ok) {
+        clearDispatchCooldown(orchDir, ticket, next); // CTL-624: success clears any prior cool-down
+        advanced.push({ ticket, phase: next });
+        // CTL-657: stop the predecessor worker now that its successor is live.
+        emitPredecessorReap(orchDir, ticket, signals, next);
+        // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
+        // (linear-transition.sh read-compares first); never aborts the tick.
+        safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
+          ticket,
+          phase: next,
+        });
+      } else {
+        // CTL-611 Gap 1 demotion: rc=0 but no live bg job. Same on-disk
+        // effects as a real rc!=0 failure so the broker / HUD / operator can
+        // see the drop.
+        recordDispatchFailure(orchDir, ticket, next, 0, now());
+        appendDispatchFailedEvent({
+          orchId: ticket,
+          ticket,
+          target_phase: next,
+          code: 0,
+          reason: `verify_failed:${v.reason}`,
+        });
+        log.warn(
+          { ticket, phase: next, verifyReason: v.reason },
+          "scheduler: dispatched signal verification failed"
+        );
+      }
     } else {
       recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
+      // CTL-611 Gap 2: surface the silent drop as an event so the broker /
+      // HUD / operator can react. Best-effort; failure is logged inside.
+      appendDispatchFailedEvent({
+        orchId: ticket,
+        ticket,
+        target_phase: next,
+        code: r.code,
+        reason: "dispatch_nonzero_exit",
+      });
       log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
     }
   }
@@ -784,19 +858,45 @@ export function schedulerTick(
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
     const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
     if (r.code === 0) {
-      clearDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-624: success clears any prior cool-down
-      dispatched.push(t.identifier);
-      // CTL-558: write the entry-phase (`research`) status for the new ticket.
-      safeWrite(
-        () =>
-          writeStatus.applyPhaseStatus({
-            ticket: t.identifier,
-            phase: NEW_WORK_ENTRY_PHASE,
-          }),
-        { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
-      );
+      // CTL-611: same Gap 1 verifier as the advancement sweep — a rc=0
+      // without a live successor signal must be demoted.
+      const v = verifyDispatched(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE);
+      if (v.ok) {
+        clearDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-624: success clears any prior cool-down
+        dispatched.push(t.identifier);
+        // CTL-558: write the entry-phase (`research`) status for the new ticket.
+        safeWrite(
+          () =>
+            writeStatus.applyPhaseStatus({
+              ticket: t.identifier,
+              phase: NEW_WORK_ENTRY_PHASE,
+            }),
+          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
+        );
+      } else {
+        recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
+        appendDispatchFailedEvent({
+          orchId: t.identifier,
+          ticket: t.identifier,
+          target_phase: NEW_WORK_ENTRY_PHASE,
+          code: 0,
+          reason: `verify_failed:${v.reason}`,
+        });
+        log.warn(
+          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, verifyReason: v.reason },
+          "scheduler: dispatched signal verification failed"
+        );
+      }
     } else {
       recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
+      // CTL-611: Gap 2 entry-phase silent-drop event.
+      appendDispatchFailedEvent({
+        orchId: t.identifier,
+        ticket: t.identifier,
+        target_phase: NEW_WORK_ENTRY_PHASE,
+        code: r.code,
+        reason: "dispatch_nonzero_exit",
+      });
       log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
     }
   }

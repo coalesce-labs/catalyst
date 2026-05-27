@@ -443,6 +443,16 @@ while IFS=$'\t' read -r W T; do
 				--orch-id "$ORCH_ID" </dev/null
 		) || {
 			echo "phase-agent-dispatch failed for $T phase=$PHASE — see stderr" >&2
+			# CTL-611: surface the silent drop as a phase.dispatch.failed.<TICKET>
+			# event so the broker / HUD / operator can react. Without this, the
+			# `continue` advanced to the next ticket with no machine-readable
+			# signal — the legacy silent-drop the plan §Phase 2 closes. Best-effort.
+			"$STATE_SCRIPT" event "$(jq -nc \
+				--arg ts "$(now_iso)" --arg orch "$ORCH_ID" --arg w "$T" --arg phase "$PHASE" \
+				'{ts:$ts, orchestrator:$orch, worker:$w,
+				  event:("phase.dispatch.failed." + $w),
+				  detail:{toPhase:$phase, reason:"dispatch-failed"}}')" \
+				>/dev/null 2>&1 || true
 			continue
 		}
 
