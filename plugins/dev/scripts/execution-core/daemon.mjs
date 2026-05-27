@@ -36,6 +36,7 @@ import {
 } from "./index.mjs";
 import { Reaper } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
+import { reconcileBootResume } from "./boot-resume.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -74,6 +75,9 @@ function ensureState(orchDir) {
 // wiring needs no arguments and tests inject deterministic fakes.
 export function startDaemon({
   recover = recoverStartup,
+  // CTL-654: synchronous boot-resume pass. Runs once between recover() and the
+  // monitor, consuming recover()'s previously-discarded RecoveryReport.
+  reconcileBoot = reconcileBootResume,
   startMonitor: monitorFn = startMonitor,
   startScheduler: schedulerFn = startScheduler,
   stopMonitor: stopMonitorFn = stopMonitor,
@@ -110,7 +114,17 @@ export function startDaemon({
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
   // try/catch logs and process.exit(1)s as before.
   try {
-    recover({ orchDir }); // CTL-539 — rebuild routing + worker state on boot
+    // CTL-539 — rebuild routing + worker state on boot. CTL-654: capture the
+    // RecoveryReport (previously discarded) so the boot-resume pass can consume
+    // its `coldStart` verdict + worker buckets.
+    const report = recover({ orchDir });
+    // CTL-654: boot-resume — on a cold start, re-dispatch in-flight tickets whose
+    // worktree has no live --bg worker, BEFORE the monitor/scheduler start. This
+    // bypasses the per-tick reclaim sweep's revive budget (a clean reboot is not
+    // a chronic-failure storm) and is bounded by maxParallel so a reboot never
+    // spawns a worker storm. Synchronous and inside the same try/catch so a throw
+    // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
+    reconcileBoot({ orchDir, report });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into

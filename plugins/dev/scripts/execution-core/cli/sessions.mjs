@@ -188,7 +188,11 @@ export function indexSignalsByBgJobId(runsRoot = getRunsRoot()) {
 
 // ─── I/O: live agents + ps ───────────────────────────────────────────────────
 
-function liveAgents() {
+// Exported (CTL-654) so the synchronous daemon boot-resume pass can resolve the
+// live-agent inventory without the async buildRows join. Shells
+// `claude agents --json` via execFileSync, so it is synchronous and safe inside
+// startDaemon's synchronous boot ordering.
+export function liveAgents() {
   try {
     const out = execFileSync(CLAUDE_BIN, ["agents", "--json"], { encoding: "utf8" });
     const parsed = JSON.parse(out);

@@ -111,7 +111,9 @@ function readNestedDir(dir) {
 
 // byActivePhase — rank nested phase signals so the active one sorts first:
 // non-terminal status beats terminal, then most-recent updatedAt wins.
-function byActivePhase(a, b) {
+// CTL-654: exported so boot-resume.mjs's activePhaseForTicket reuses the same
+// comparator instead of duplicating the tiebreak (single source of truth).
+export function byActivePhase(a, b) {
   const aTerminal = TERMINAL.has(a.status);
   const bTerminal = TERMINAL.has(b.status);
   if (aTerminal !== bTerminal) return aTerminal ? 1 : -1;
