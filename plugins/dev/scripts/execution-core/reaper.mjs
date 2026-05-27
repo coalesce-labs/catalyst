@@ -144,13 +144,17 @@ export class Reaper {
       this.log.info({ bgJobId }, "reaper: skipping interactive session");
       return;
     }
-    // TODO(CTL-619): replace status==="idle" check with pidAlive+state.json
-    // freshness once CTL-619's primitive lands. Conservative until then —
-    // we never reap a session reporting `active`.
-    if (target.status !== "idle") {
-      this.log.info({ bgJobId, status: target.status }, "reaper: skipping non-idle session");
-      return;
-    }
+    // CTL-657: NO idle gate here. A single-target intent (yield/predecessor/
+    // supersede/revive/abort) is authoritative — the producer already decided
+    // this specific bg worker must die. A phase worker is almost always still
+    // `busy` finishing its last turn at the moment its successor's dispatch
+    // emits the predecessor reap, so the pre-CTL-657 `status !== "idle"` skip
+    // dropped the stop and never retried (the de-dupe at :93 consumes the event
+    // once) — the worker went idle seconds later and lingered forever (0
+    // reap-complete events ever; 35-session/28GB pileup). `claude stop` works
+    // on a busy session, so stop it regardless of busy/idle. The idle gate
+    // survives ONLY on the periodic orphan sweep + worktree presweep, which
+    // enumerate ALL sessions and so must stay conservative.
 
     let shortId;
     try {

@@ -21,6 +21,7 @@ import {
   listInFlightTickets,
   readMaxParallel,
   computeFreeSlots,
+  predecessorPhaseOf,
   computeReadyTickets,
   selectDispatchable,
   deriveAdvancement,
@@ -598,7 +599,13 @@ describe("schedulerTick — new-work pull", () => {
         inverseRelations: { nodes: [] },
       },
     ];
-    const r = schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    // CTL-657: concurrency is the live background-agent count, not a workers/
+    // scan — one live worker fills the single slot.
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 1,
+    });
     expect(dispatch.calls).toHaveLength(0);
     expect(r.dispatched).toEqual([]);
   });
@@ -679,6 +686,117 @@ describe("schedulerTick — new-work pull", () => {
       // CTL-565: new-work pull enters at research, not triage.
       { orchDir, ticket: "CTL-X", phase: "research" },
     ]);
+  });
+});
+
+// ── CTL-657: live-count concurrency + predecessor reap on scheduler advance ──
+describe("schedulerTick — CTL-657 live-count concurrency & predecessor reap", () => {
+  // Write a phase signal that carries a bg_job_id (the default writeSignal
+  // helper omits it; the predecessor reap reads it from the raw signal).
+  function writeSignalWithBg(ticket, phase, status, bgJobId) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status, bg_job_id: bgJobId }),
+    );
+  }
+
+  function readEventLog() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const p = join(catalystDir, "events", `${ym}.jsonl`);
+    if (!existsSync(p)) return [];
+    return readFileSync(p, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  }
+
+  const oneEligible = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("holds at max — no new-work dispatch when live background count == maxParallel", () => {
+    // No worker dirs at all, but the live fleet already has 2 background agents
+    // (e.g. leaked workers whose signals went terminal). The paper-count model
+    // would see 0 in-flight and over-dispatch; the live-count model holds.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => oneEligible("CTL-2"),
+      dispatch,
+      liveBackgroundCount: () => 2,
+    });
+    expect(r.freeSlots).toBe(0);
+    expect(r.dispatched).toEqual([]);
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("fills exactly the freed slot — live count below max admits new work", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => oneEligible("CTL-2"),
+      dispatch,
+      liveBackgroundCount: () => 1, // 1 live bg worker, 1 slot free
+    });
+    expect(r.freeSlots).toBe(1);
+    expect(r.dispatched).toEqual(["CTL-2"]);
+  });
+
+  test("emits phase.predecessor.reap-requested for the completed phase on advance", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // research done (bg worker bg-aaaa1111) → FSM advances to plan; the research
+    // worker is the predecessor and must be nominated for stopping.
+    writeSignalWithBg("CTL-7", "research", "done", "aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee");
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 0,
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "plan" }]);
+    const reap = readEventLog().find(
+      (e) => e.event === "phase.predecessor.reap-requested" && e.ticket === "CTL-7",
+    );
+    expect(reap).toBeTruthy();
+    expect(reap.phase).toBe("research");
+    expect(reap.bg_job_id).toBe("aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee");
+  });
+
+  test("no predecessor reap when the completed-phase signal has no bg_job_id", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-8", "research", "done"); // no bg_job_id
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, liveBackgroundCount: () => 0 });
+    expect(
+      readEventLog().filter((e) => e.event === "phase.predecessor.reap-requested"),
+    ).toHaveLength(0);
+  });
+});
+
+describe("predecessorPhaseOf", () => {
+  test("returns the done phase whose successor is `next`", () => {
+    expect(predecessorPhaseOf({ research: "done" }, "plan")).toBe("research");
+    expect(predecessorPhaseOf({ implement: "done" }, "verify")).toBe("implement");
+  });
+
+  test("ignores a non-done predecessor and unrelated done phases", () => {
+    expect(predecessorPhaseOf({ research: "running" }, "plan")).toBeNull();
+    expect(predecessorPhaseOf({ triage: "done" }, "plan")).toBeNull();
+  });
+
+  test("null for the router-only remediate detour (no NEXT_PHASE edge) and empty input", () => {
+    expect(predecessorPhaseOf({ verify: "done" }, "remediate")).toBeNull();
+    expect(predecessorPhaseOf(null, "plan")).toBeNull();
   });
 });
 

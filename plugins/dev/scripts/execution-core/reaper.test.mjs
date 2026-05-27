@@ -47,8 +47,14 @@ describe("Reaper._handleBgReap", () => {
     expect(executor).not.toHaveBeenCalled();
   });
 
-  it("skips active sessions (await CTL-619 liveness gate)", async () => {
-    const executor = mock();
+  it("stops a busy/active session for an authoritative single-target intent (CTL-657)", async () => {
+    // CTL-657: an authoritative intent (yield/predecessor/supersede/revive/abort)
+    // is NOT idle-gated — a phase worker is almost always still busy finishing
+    // its last turn when its reap is requested, and the producer already decided
+    // it must die. Pre-CTL-657 the idle gate dropped the stop and never retried,
+    // so the worker lingered forever (the 28GB pileup). `claude stop` works on a
+    // busy session, so the executor MUST be invoked.
+    const executor = mock(() => Promise.resolve({ ok: true }));
     const r = new Reaper({
       executorReap: executor,
       agents: agentsFixture([
@@ -58,7 +64,7 @@ describe("Reaper._handleBgReap", () => {
       log: silentLog(),
     });
     await r.handle({ event: "phase.yield.reap-requested", bg_job_id: "abc12345" });
-    expect(executor).not.toHaveBeenCalled();
+    expect(executor).toHaveBeenCalledTimes(1);
   });
 
   it("never reaps the controlling session", async () => {

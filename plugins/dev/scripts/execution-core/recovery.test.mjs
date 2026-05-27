@@ -1463,190 +1463,78 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
   });
 });
 
-describe("defaultKillBgJob — pid-recycling guard", () => {
-  let jobsRootDir;
-  beforeEach(() => {
-    jobsRootDir = mkdtempSync(join(tmpdir(), "ctl587-jobs-"));
-  });
-  afterEach(() => {
-    rmSync(jobsRootDir, { recursive: true, force: true });
-  });
+describe("defaultKillBgJob — claude stop termination (CTL-657)", () => {
+  // CTL-657: the pre-CTL-657 pid-file SIGKILL was a guaranteed no-op on CC
+  // 2.1.152 (no ~/.claude/jobs/<id>/pid). killBgJob now issues
+  // `claude stop <shortId>` — the primitive that actually deregisters a session.
+  const FULL_UUID = "12345678-aaaa-bbbb-cccc-0123456789ab";
 
-  function seedPid(bgJobId, pid) {
-    const dir = join(jobsRootDir, bgJobId);
-    mkdirSync(dir, { recursive: true });
-    if (pid !== undefined) writeFileSync(join(dir, "pid"), String(pid));
-  }
-
-  test("missing bgJobId → no spawn invocation", () => {
-    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
-    defaultKillBgJob({ bgJobId: null }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(spawn.calls.length).toBe(0);
+  test("missing bgJobId → no stop invocation", () => {
+    const stop = recorder({ ok: true });
+    defaultKillBgJob({ bgJobId: null }, { stop });
+    expect(stop.calls.length).toBe(0);
   });
 
-  test("missing pid file → no spawn invocation", () => {
-    // bgJobId set but no pid file written.
-    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(spawn.calls.length).toBe(0);
+  test("malformed bgJobId (not a short/UUID id) → no stop invocation", () => {
+    // "bg-9" is the legacy revive fixture: not a valid short id, so it must
+    // short-circuit WITHOUT shelling out (keeps those revive tests deterministic).
+    const stop = recorder({ ok: true });
+    defaultKillBgJob({ bgJobId: "bg-9" }, { stop });
+    expect(stop.calls.length).toBe(0);
   });
 
-  test("pid <= 1 (init / invalid) → no spawn invocation", () => {
-    seedPid("bg-9", "1");
-    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(spawn.calls.length).toBe(0);
+  test("valid 8-char short id → claude stop issued with that id", () => {
+    const stop = recorder({ ok: true });
+    defaultKillBgJob({ bgJobId: "12345678" }, { stop });
+    expect(stop.calls).toHaveLength(1);
+    expect(stop.calls[0][0]).toBe("12345678");
   });
 
-  test("non-numeric pid → no spawn invocation", () => {
-    seedPid("bg-9", "abc");
-    const spawn = recorder({ status: 0, stdout: "claude\n", stderr: "" });
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(spawn.calls.length).toBe(0);
+  test("full UUID → claude stop issued with the 8-char short id (UUIDs are rejected rc=1)", () => {
+    const stop = recorder({ ok: true });
+    defaultKillBgJob({ bgJobId: FULL_UUID }, { stop });
+    expect(stop.calls).toHaveLength(1);
+    expect(stop.calls[0][0]).toBe("12345678");
   });
 
-  test("ps exit non-zero (pid gone) → ps invoked, kill is NOT invoked", () => {
-    seedPid("bg-9", "12345");
-    const calls = [];
-    const spawn = (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "ps") return { status: 1, stdout: "", stderr: "" };
-      return { status: 0 };
-    };
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(calls.filter((c) => c.cmd === "ps").length).toBe(1);
-    expect(calls.filter((c) => c.cmd === "kill").length).toBe(0);
-  });
-
-  test("ps says pid is 'node' (recycled to non-claude process) → kill skipped", () => {
-    seedPid("bg-9", "12345");
-    const calls = [];
-    const spawn = (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "ps") return { status: 0, stdout: "node\n", stderr: "" };
-      return { status: 0 };
-    };
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    expect(calls.filter((c) => c.cmd === "kill").length).toBe(0);
-  });
-
-  test("happy path: ps confirms 'claude' → kill -9 issued with the pid", () => {
-    seedPid("bg-9", "12345");
-    const calls = [];
-    const spawn = (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "ps") return { status: 0, stdout: "claude\n", stderr: "" };
-      if (cmd === "kill") return { status: 0, stdout: "", stderr: "" };
-      return { status: 127 };
-    };
-    defaultKillBgJob({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir });
-    const killCalls = calls.filter((c) => c.cmd === "kill");
-    expect(killCalls).toHaveLength(1);
-    expect(killCalls[0].args).toEqual(["-9", "12345"]);
+  test("stop failure ({ok:false}) does not throw", () => {
+    const stop = recorder({ ok: false, error: "no such session" });
+    expect(() => defaultKillBgJob({ bgJobId: "12345678" }, { stop })).not.toThrow();
+    expect(stop.calls).toHaveLength(1);
   });
 });
 
-// CTL-610: defaultPidAlive is the positive inverse of the ps-verify inside
-// defaultKillBgJob. It answers "is this bg job's pid still a live `claude`
-// process?" as a keep-alive signal. Best-effort: every doubt (missing pid
-// file, recycled pid, unreadable pid, falsy id) returns false so the caller's
-// existing revive path is preserved — critically, existing setupReviveScenario
-// tests use bgJobId "bg-9" with no real pid file under the real ~/.claude/jobs,
-// so the production default-seamed defaultPidAlive must return false there.
-describe("defaultPidAlive — positive bg-pid keep-alive (CTL-610)", () => {
-  let jobsRootDir;
-  beforeEach(() => {
-    jobsRootDir = mkdtempSync(join(tmpdir(), "ctl610-jobs-"));
-  });
-  afterEach(() => {
-    rmSync(jobsRootDir, { recursive: true, force: true });
+// CTL-657: defaultPidAlive is the keep-alive signal "is this bg worker still a
+// live `claude agents` session?". It delegates to isBgJobAlive (claude-agents.mjs);
+// the seam is `isAlive`. Best-effort — any throw returns false so the caller's
+// existing revive path is preserved. Critically, the legacy setupReviveScenario
+// tests use bgJobId "bg-9" (not a valid short id), and isBgJobAlive returns
+// false for it WITHOUT shelling out, so those revive tests stay green unchanged.
+describe("defaultPidAlive — claude-agents keep-alive (CTL-657)", () => {
+  test("delegates to the isAlive seam (true)", () => {
+    const isAlive = recorder(true);
+    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(true);
+    expect(isAlive.calls).toHaveLength(1);
+    expect(isAlive.calls[0][0]).toBe("12345678");
   });
 
-  function seedPid(bgJobId, pid) {
-    const dir = join(jobsRootDir, bgJobId);
-    mkdirSync(dir, { recursive: true });
-    if (pid !== undefined) writeFileSync(join(dir, "pid"), String(pid));
-  }
-
-  test("falsy bgJobId → false, no spawn", () => {
-    const spawn = recorder({ status: 0, stdout: "claude\n" });
-    expect(defaultPidAlive({ bgJobId: null }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-    expect(spawn.calls.length).toBe(0);
+  test("delegates to the isAlive seam (false → caller's revive path runs)", () => {
+    const isAlive = recorder(false);
+    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(false);
   });
 
-  test("missing pid file → false (the default-safe case existing revive tests rely on)", () => {
-    // bgJobId set but no pid file → fall through to false; production seam
-    // therefore leaves every existing setupReviveScenario (bg-9, no pid) green.
-    const spawn = recorder({ status: 0, stdout: "claude\n" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-    expect(spawn.calls.length).toBe(0);
-  });
-
-  test("non-numeric pid file → false, no spawn", () => {
-    seedPid("bg-9", "abc");
-    const spawn = recorder({ status: 0, stdout: "claude\n" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-    expect(spawn.calls.length).toBe(0);
-  });
-
-  test("pid <= 1 → false, no spawn (init / invalid)", () => {
-    seedPid("bg-9", "1");
-    const spawn = recorder({ status: 0, stdout: "claude\n" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-    expect(spawn.calls.length).toBe(0);
-  });
-
-  test("ps exit non-zero (pid gone) → false, ps was invoked exactly once", () => {
-    seedPid("bg-9", "12345");
-    const calls = [];
-    const spawn = (cmd, args) => {
-      calls.push({ cmd, args });
-      return { status: 1, stdout: "", stderr: "" };
+  test("a throwing isAlive seam is swallowed → false", () => {
+    const isAlive = () => {
+      throw new Error("claude agents exploded");
     };
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-    expect(calls.filter((c) => c.cmd === "ps").length).toBe(1);
+    expect(defaultPidAlive({ bgJobId: "12345678" }, { isAlive })).toBe(false);
   });
 
-  test("ps says 'node' (pid recycled to non-claude process) → false", () => {
-    seedPid("bg-9", "12345");
-    const spawn = () => ({ status: 0, stdout: "node\n", stderr: "" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(false);
-  });
-
-  test("happy path: pid file present + ps says 'claude' → true, ps invoked with -p <pid> -o comm=", () => {
-    seedPid("bg-9", "12345");
-    const calls = [];
-    const spawn = (cmd, args) => {
-      calls.push({ cmd, args });
-      if (cmd === "ps") return { status: 0, stdout: "claude\n", stderr: "" };
-      return { status: 127 };
-    };
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
-    expect(calls.filter((c) => c.cmd === "ps")).toHaveLength(1);
-    expect(calls.find((c) => c.cmd === "ps").args).toEqual(["-p", "12345", "-o", "comm="]);
-  });
-
-  test("case-insensitive match: ps stdout 'Claude' (capitalised) is still a claude process", () => {
-    seedPid("bg-9", "12345");
-    const spawn = () => ({ status: 0, stdout: "Claude\n", stderr: "" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
-  });
-
-  test("substring match: ps stdout 'claude-bg' still counts (process name truncations)", () => {
-    seedPid("bg-9", "12345");
-    const spawn = () => ({ status: 0, stdout: "claude-bg\n", stderr: "" });
-    expect(defaultPidAlive({ bgJobId: "bg-9" }, { spawn, jobsRoot: () => jobsRootDir })).toBe(true);
-  });
-
-  test("never throws on a hostile jobsRoot (returns false)", () => {
-    // jobsRoot resolver throws — defaultPidAlive must swallow.
-    const spawn = recorder({ status: 0, stdout: "claude\n" });
-    expect(
-      defaultPidAlive({ bgJobId: "bg-9" }, {
-        spawn,
-        jobsRoot: () => { throw new Error("boom"); },
-      }),
-    ).toBe(false);
+  test("production default: malformed bgJobId ('bg-9') → false, no shell-out", () => {
+    // No isAlive seam → the real isBgJobAlive runs. "bg-9" is not a valid short
+    // id, so it returns false before touching `claude agents`. This is the
+    // contract every legacy setupReviveScenario (bg-9, no seam) relies on.
+    expect(defaultPidAlive({ bgJobId: "bg-9" })).toBe(false);
   });
 });
 
