@@ -78,6 +78,14 @@ export function getRegistryPath() {
   return resolve(getExecutionCoreDir(), "registry.json");
 }
 
+// Root for orchestrator run dirs — ~/catalyst/runs/<orchId>/. Each holds a
+// workers/<TICKET>/phase-<P>.json signal tree. The audit CLI (CTL-649 Phase 5)
+// walks this to join live `claude agents` sessions onto their worker signals.
+// Re-resolved per call so tests redirect via CATALYST_DIR.
+export function getRunsRoot() {
+  return resolve(catalystDir(), "runs");
+}
+
 // Root for `claude --bg` job state dirs — ~/.claude/jobs/<bg_job_id>/state.json.
 // Env name matches orchestrate-healthcheck's CATALYST_HEALTHCHECK_JOBS_ROOT so
 // tests override one variable for both.

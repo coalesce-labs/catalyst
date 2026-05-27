@@ -180,11 +180,26 @@ it at `.event`.
 | `filter.wake.<id>` | catalyst-broker | Wake event delivered to a registered interest |
 | `worker-dispatched` / `worker-pr-created` / `worker-done` | Orchestrator (v1 envelope) | Worker lifecycle |
 | `phase.<name>.dispatched.<TICKET>` / `phase.<name>.complete.<TICKET>` / `phase.<name>.failed.<TICKET>` | `phase-agent-dispatch` + phase agents (CTL-452) | 9-phase pipeline lifecycle — emitted only when `dispatchMode = "phase-agents"` (see [Phase agents](/reference/orchestration/phase-agents/)) |
+| `phase.yield.reap-requested` / `phase.predecessor.reap-requested` / `phase.supersede.reap-requested` / `phase.revive.reap-requested` / `phase.abort.reap-requested` | execution-core reap-intent producers + reaper, CTL-649 | Reap-intent requests — a worker bowed out (yield), a successor wants its predecessor reaped, a stale signal was superseded, revive's defensive-kill, or the abort-worker path |
+| `worktree.presweep.reap-requested` | execution-core reap-intent producers + reaper, CTL-649 | One entry per session under a worktree before teardown. Internal step — no echo; the reaper returns a still-live count instead |
+| `pr.merged.cleanup-requested` | execution-core reap-intent producers + reaper, CTL-649 | Worktree + local-branch teardown on PR merge |
+| `orphans.reap-requested` | execution-core reap-intent producers + reaper, CTL-649 | Periodic-timer hint to scan for orphaned sessions; the reaper fans this out to one `phase.abort.reap-requested` per orphan found |
+| `phase.<kind>.reap-complete` / `phase.<kind>.reap-failed`, `pr.merged.cleanup-complete` / `pr.merged.cleanup-failed` | execution-core reaper, CTL-649 | Echoes the reaper re-emits after running each intent's executor (`claude stop`, `git worktree remove`, `git branch -D`) so consumers can observe completion |
 | `catalyst.*` | catalyst-session | Skill/session lifecycle events |
 
 GitHub and Linear topics arrive via webhooks when the monitor is configured (see
 [Webhook Pipeline Setup](./webhooks/)). Fallback polling writes the same topic shapes but with
 a `source: "poll"` field instead of `"github.webhook"` or `"linear.webhook"`.
+
+The reap-intent vocabulary is **closed** (CTL-649): the producers
+(`plugins/dev/scripts/lib/emit-reap-intent.sh` and
+`plugins/dev/scripts/execution-core/reap-intent.mjs`) reject any event type outside the fixed
+list above — unknown types throw — so the on-disk schema stays disciplined and the reaper's
+switch can rely on a fixed set. The execution-core daemon **tails this same log** to drive the
+reaper: on boot it replays any `*.reap-requested` / `*.cleanup-requested` line with no matching
+`*-complete` echo (boot-replay), then follows new appends via an `fs.watch` + byte-cursor tail,
+handing each parsed line to `Reaper.handle()`. The reaper re-emits the `*-complete` / `*-failed`
+echoes back into the log, so it is both a consumer and a writer of this file.
 
 ## Backpressure and reconnection
 

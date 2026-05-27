@@ -164,12 +164,95 @@ cmd_probe() {
 }
 
 cmd_status() {
+	# CTL-649 devex finding #5: `daemon status --json` (and the top-level `status`
+	# alias) emit a machine-readable object so a headless agent can branch on
+	# daemon liveness without scraping "running (pid N)" / "stopped". The first
+	# arg is the already-shifted verb tail; we only look for --json in it.
+	local want_json=0 arg
+	for arg in "$@"; do
+		[ "$arg" = "--json" ] && want_json=1
+	done
 	local pid
 	if pid=$(read_pid); then
-		echo "running (pid $pid)"
+		if [ "$want_json" -eq 1 ]; then
+			printf '{"running":true,"pid":%s}\n' "$pid"
+		else
+			echo "running (pid $pid)"
+		fi
 		return 0
 	fi
-	echo "stopped"
+	if [ "$want_json" -eq 1 ]; then
+		printf '{"running":false,"pid":null}\n'
+	else
+		echo "stopped"
+	fi
+}
+
+# CTL-649 Phase 5: route a noun (sessions|worktrees|branches|tidy) to its mjs
+# module under execution-core/cli/. The audit CLI lives inside this same binary
+# — no new wrapper symlink, no new plist. resolve_runtime picks bun/node.
+exec_runtime_module() {
+	local module="$1"
+	shift
+	local module_path="$SCRIPT_DIR/execution-core/cli/${module}.mjs"
+	if [[ ! -f $module_path ]]; then
+		echo "error: execution-core module not found: $module_path" >&2
+		return 1
+	fi
+	local runtime
+	runtime="$(resolve_runtime)" || return 1
+	exec "$runtime" "$module_path" "$@"
+}
+
+# CTL-649 Phase 5: the daemon-lifecycle verbs, dispatched from both the
+# `daemon` noun and the backcompat top-level aliases. The verb is consumed via
+# $1; any trailing flags (e.g. `status --json`) are passed through to the
+# handler.
+dispatch_daemon() {
+	local verb="${1-}"
+	shift 2>/dev/null || true
+	case "$verb" in
+	start) cmd_start ;;
+	stop) cmd_stop ;;
+	restart) cmd_restart ;;
+	probe) cmd_probe ;;
+	status) cmd_status "$@" ;;
+	*)
+		echo "Usage: catalyst-execution-core daemon {start|stop|restart|probe|status}" >&2
+		exit 1
+		;;
+	esac
+}
+
+# CTL-649 devex finding #3: a real top-level help block. The audit CLI is read
+# by an AGENT as well as a human, so spell out what each noun does, point at the
+# safe starting point (`tidy --dry-run`), note the universal --json scripting
+# affordance, and link the docs page. Printed to stdout by --help/-h/help (exit
+# 0); to stderr by no-arg / unknown noun (exit 1).
+print_help() {
+	cat <<'EOF'
+catalyst-execution-core — manage the execution-core daemon and audit/clean its leaked resources.
+
+Usage: catalyst-execution-core <command> [args]
+
+Commands:
+  daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status)
+  sessions    inventory / reap leaked `claude --bg` sessions (list|show|prune)
+  worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
+  branches    inventory / delete merged or orphaned branch refs (list|prune)
+  tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
+
+Backcompat: start|stop|restart|probe|status work as top-level aliases for the daemon verbs.
+
+Safe starting point:
+  catalyst-execution-core tidy --dry-run     # show the full cleanup plan, change nothing
+
+Scripting:
+  Every list / prune / tidy command and `daemon status` accepts --json for
+  machine-readable output (pipe to jq).
+
+Docs: reference/orchestration/tidy-cli
+EOF
 }
 
 # Source-safety (CTL-635): when sourced (e.g. by the test suite to unit-test
@@ -178,13 +261,34 @@ cmd_status() {
 # direct-invocation case.
 if ! (return 0 2>/dev/null); then
 	case "${1-}" in
-	start) cmd_start ;;
-	stop) cmd_stop ;;
-	restart) cmd_restart ;;
-	probe) cmd_probe ;;
-	status) cmd_status ;;
+	# CTL-649 finding #3: rich help to stdout, exit 0.
+	--help | -h | help)
+		print_help
+		exit 0
+		;;
+	# Backcompat aliases — operator muscle memory for the daemon verbs. Trailing
+	# flags (e.g. top-level `status --json`) pass through to the daemon handler.
+	start | stop | restart | probe | status) dispatch_daemon "$@" ;;
+	daemon)
+		shift
+		dispatch_daemon "$@"
+		;;
+	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
+	sessions | worktrees | branches | tidy)
+		module="$1"
+		shift
+		exec_runtime_module "$module" "$@"
+		;;
+	"")
+		# CTL-649 finding #4: no-arg prints help to stderr, exit 1.
+		print_help >&2
+		exit 1
+		;;
 	*)
-		echo "Usage: catalyst-execution-core {start|stop|restart|probe|status}" >&2
+		# CTL-649 finding #4: name the bad input so the operator/agent sees the
+		# typo, then show the full help.
+		echo "error: unknown command: $1" >&2
+		print_help >&2
 		exit 1
 		;;
 	esac

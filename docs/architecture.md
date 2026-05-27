@@ -241,6 +241,7 @@ flowchart LR
     PAD[phase-agent-dispatch] --> PSF[workers/&lt;TICKET&gt;/<br/>phase-&lt;name&gt;.json]
     BROKER[broker daemon] --> BI[~/catalyst/broker-interests.json]
     BROKER --> EL[~/catalyst/events/<br/>YYYY-MM.jsonl]
+    REAPER[execution-core<br/>daemon reaper] -- "emits *.reap-complete<br/>/ *.reap-failed echoes" --> EL
   end
 
   subgraph Surfaces
@@ -254,13 +255,19 @@ flowchart LR
   BI --> HUD
   DM --> OM
   EL --> CE
+  EL -- "tails *.reap-requested<br/>(boot-replay + byte-cursor)" --> REAPER
 ```
 
 Writers — phase-agent workers, `phase-agent-dispatch`, the broker daemon, the TypeScript webhook
-receiver, and `catalyst-comms send` — all append to `~/catalyst/events/YYYY-MM.jsonl`. Readers —
-`catalyst-events tail`, `catalyst-events wait-for`, the broker daemon, `catalyst-hud`, and the
-orch-monitor web dashboard — consume that log (plus per-run state files and broker registry)
-without coordinating with one another.
+receiver, `catalyst-comms send`, the reap-intent producers
+(`lib/emit-reap-intent.sh` / `execution-core/reap-intent.mjs`), and the execution-core daemon
+reaper (which re-emits `*.reap-complete` / `*.reap-failed` echoes) — all append to
+`~/catalyst/events/YYYY-MM.jsonl`. Readers — `catalyst-events tail`, `catalyst-events wait-for`,
+the broker daemon, the execution-core daemon reaper (CTL-649: it tails the log via boot-replay
+plus an `fs.watch` byte-cursor to drive `claude stop` / `git worktree remove` / `git branch -D`),
+`catalyst-hud`, and the orch-monitor web dashboard — consume that log (plus per-run state files
+and broker registry) without coordinating with one another. The broker and the reaper are each
+both a reader and a writer of the same file.
 
 ### `shouldSkipEvent` self-filter
 

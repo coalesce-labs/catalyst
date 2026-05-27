@@ -189,7 +189,20 @@ PRED_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${COMPLETED_PHASE}.json"
 if [ -f "$PRED_SIGNAL" ]; then
   PRED_STATUS="$(jq -r '.status // empty' "$PRED_SIGNAL" 2>/dev/null || echo "")"
   PRED_BG="$(jq -r '.bg_job_id // empty' "$PRED_SIGNAL" 2>/dev/null || echo "")"
+  PRED_WT="$(jq -r '.worktreePath // empty' "$PRED_SIGNAL" 2>/dev/null || echo "")"
   if [ "$PRED_STATUS" = "done" ] && [ -n "$PRED_BG" ]; then
+    # CTL-649: emit reap-intent for daemon-reaper visibility, then still call
+    # executor_reap directly so behaviour cannot regress when the event log
+    # is unwritable. The reconciler's dedupe window absorbs the duplicate.
+    _phase_advance_lib_dir="$(cd "$(dirname "$0")/lib" 2>/dev/null && pwd || echo "")"
+    if [ -n "$_phase_advance_lib_dir" ] && [ -f "${_phase_advance_lib_dir}/emit-reap-intent.sh" ]; then
+      # shellcheck source=./lib/emit-reap-intent.sh
+      . "${_phase_advance_lib_dir}/emit-reap-intent.sh"
+      emit_reap_intent phase.predecessor.reap-requested \
+        --ticket "$TICKET" --phase "$COMPLETED_PHASE" \
+        --bg-job-id "$PRED_BG" \
+        ${PRED_WT:+--worktree-path "$PRED_WT"} 2>/dev/null || true
+    fi
     REAP_RESULT="$(executor_reap "$PRED_BG" 2>/dev/null || true)"
     [ "$REAP_RESULT" = "stopped" ] && REAPED_PRED=true
     echo "phase-advance: reap predecessor ${COMPLETED_PHASE} bg=${PRED_BG} → ${REAP_RESULT:-unknown}" >&2

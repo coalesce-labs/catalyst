@@ -529,6 +529,8 @@ env var is set.
 | `CATALYST_ARCHIVE_ROOT`                      | `catalyst-archive`                         | Archive root. Default `$CATALYST_DIR/archives`.                                                                                                                                                                                                                                                                                             |
 | `CATALYST_RUNS_DIR`                          | `catalyst-archive`                         | Orchestrator runtime root. Default `$CATALYST_DIR/runs`.                                                                                                                                                                                                                                                                                    |
 | `CATALYST_COMMS_DIR`                         | `catalyst-comms`                           | Comms channel root. Default `$CATALYST_DIR/comms/channels`.                                                                                                                                                                                                                                                                                 |
+| `SCHEDULER_DISPATCH_COOLDOWN_MS`             | `catalyst-execution-core` (scheduler)      | Per-(ticket,phase) dispatch cool-down (CTL-624). Throttles re-dispatch of the same phase after a refused dispatch (e.g. `prior_artifact_missing`) so the scheduler doesn't storm. Default `60000` (60s).                                                                                                                                     |
+| `RECOVERY_ESCALATION_COOLDOWN_MS`            | `catalyst-execution-core` (recovery sweep) | Per-(ticket,phase) escalation cool-down (CTL-638) on the recovery sweep's `needs-human` label escalation, so a stuck phase isn't re-escalated on every sweep. Default `600000` (10 min).                                                                                                                                                     |
 
 ### Monitor Webhook Config
 
@@ -845,7 +847,13 @@ for full documentation.
         "fullstack": ["unit"]
       },
       "verifyBeforeMerge": true,
-      "allowSelfReportedCompletion": false
+      "allowSelfReportedCompletion": false,
+      "keepWorktreeAfterMerge": false,
+      "orphanReaper": {
+        "enabled": true,
+        "intervalSeconds": 600,
+        "minIdleSeconds": 900
+      }
     }
   }
 }
@@ -866,6 +874,10 @@ for full documentation.
 | `testRequirements`                          | object       | See above                    | Required test types by scope (backend/frontend/fullstack)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `verifyBeforeMerge`                         | boolean      | `true`                       | Run adversarial verification on merged commits (post-merge)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `allowSelfReportedCompletion`               | boolean      | `false`                      | When `true`, verification failures are advisory (wave advances). When `false` (default), verification failures block wave advancement until remediation is filed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `keepWorktreeAfterMerge`                    | boolean      | `false`                      | When `false` (default), `phase-monitor-merge` auto-tears-down the local worktree + branch after a PR merges (CTL-649): it pre-sweeps any `claude --bg` sessions still cwd'd in the worktree, then `git worktree remove` + `git branch -D`. Set `true` to leave merged worktrees in place for manual inspection.                                                                                                                                                                                                                                                                                                                                          |
+| `orphanReaper.enabled`                      | boolean      | `true`                       | When `true` (default), the execution-core daemon runs a periodic sweep (CTL-649) that emits `orphans.reap-requested`; the in-daemon reaper stops any `claude --bg` session whose cwd worktree no longer exists. Set `false` to disable the periodic backstop (the per-call-site reap-intent producers still fire).                                                                                                                                                                                                                                                                                                                                       |
+| `orphanReaper.intervalSeconds`              | number       | `600`                        | Cadence of the periodic orphan sweep in seconds (default 10 minutes). Read at daemon launch from `.catalyst/config.json` (path overridable via `CATALYST_CONFIG_FILE`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `orphanReaper.minIdleSeconds`               | number       | `900`                        | Minimum LAST_SEEN (transcript mtime age) in seconds before the periodic orphan reaper will stop a session — protects recently-active sessions. A session whose transcript was touched within this window is left alone even if classified DONE/ORPHAN/DUPLICATE. Read at daemon launch alongside `enabled`/`intervalSeconds` (default 15 minutes).                                                                                                                                                                                                                                                                                                     |
 
 For `dispatchMode: "execution-core"` the eligible-set query is **not** per-repo
 config — it lives in the central registry's `eligibleQuery` (see [Central
@@ -1076,6 +1088,23 @@ attributes:
 `source_up` inherits environment from parent `.envrc` files (e.g., profile-based secrets at the
 workspace root). When using worktrees, `create-worktree.sh` generates a `.envrc` and runs
 `direnv allow` automatically.
+
+**Execution-core daemon identity (CTL-635).** The per-ticket attributes above are correct for an
+interactive shell, but the `catalyst-execution-core` daemon's `claude --bg` worker pool freezes
+`OTEL_RESOURCE_ATTRIBUTES` at warm time and it's immutable thereafter — so without intervention,
+every bg phase worker would inherit (and mis-attribute its cost to) whatever per-ticket context
+happened to be set in the launch shell. To prevent this, the daemon **scrubs** the inherited
+per-ticket keys (`project`, `branch`, `linear.key`, `catalyst.orchestration`, `task.type`) at
+launch and stamps a neutral, honest identity instead:
+
+```text
+project=catalyst,catalyst.role=execution-core-daemon
+```
+
+So daemon-spawned bg workers carry `catalyst.role=execution-core-daemon` rather than a per-ticket
+`linear.key`, and their `claude_code_cost_usage_USD_total` lands in one truthful daemon bucket
+instead of being borrowed by an unrelated ticket. (True per-ticket attribution for the bg pool would
+require an Anthropic per-job env API; the scrub is the honest fallback until then.)
 
 ## direnv Setup (Recommended)
 

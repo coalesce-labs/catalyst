@@ -277,6 +277,7 @@ flowchart LR
     HUD["catalyst-hud<br/>(Ink TUI)"]
     FWD["catalyst-otel-forward<br/>→ OTLP/PostHog/CFAE"]
     ANL["analyze-events.ts<br/>(offline query)"]
+    REAPER["execution-core daemon reaper<br/>service.name=catalyst.execution-core"]
   end
 
   EL --> TAIL
@@ -285,6 +286,8 @@ flowchart LR
   EL --> HUD
   EL --> FWD
   EL --> ANL
+  EL -- "tail *.reap-requested<br/>(boot-replay + byte-cursor)" --> REAPER
+  REAPER -- "re-emits *.reap-complete<br/>/ *.reap-failed echoes (CTL-649)" --> EL
 ```
 
 **The broker is both a producer and a consumer** — it tails the same log it writes
@@ -295,15 +298,27 @@ on read (belt-and-suspenders fallback also drops names prefixed `filter.` or
 `(source_event_id, interest_id)`) deduplicates wakes when `fs.watch` fires twice
 on the same append.
 
+**The execution-core daemon reaper (CTL-649) is the second producer-and-consumer.**
+It consumes the reap-intent requests appended by the reap-intent producers
+(`lib/emit-reap-intent.sh`, `execution-core/reap-intent.mjs`) — `phase.<kind>.reap-requested`,
+`worktree.presweep.reap-requested`, `pr.merged.cleanup-requested`, `orphans.reap-requested` — by
+boot-replaying any request with no matching `*-complete` echo on daemon start, then following new
+appends via an `fs.watch` + byte-cursor tail. For each it runs the matching local executor
+(`claude stop`, `git worktree remove`, `git branch -D`) and re-emits a `*.reap-complete` /
+`*.reap-failed` echo back into the same log; `orphans.reap-requested` fans out to one
+`phase.abort.reap-requested` per orphaned session. An in-memory dedupe window (keyed on
+`event:bg_job_id|worktree_path`) suppresses duplicate intents.
+
 ## Where you observe a running orchestration
 
-Four operator surfaces — three read structured state, one reads diagnostic logs:
+Five operator surfaces — four read structured state, one reads diagnostic logs:
 
 | Surface | Reads | Where it lives | When to use |
 |---|---|---|---|
 | **`catalyst-hud`** (Ink TUI) | `~/catalyst/runs/<id>/{state.json,workers/*.json}` + `~/catalyst/broker-interests.json` + `broker.state.json` | `plugins/dev/scripts/orch-monitor/cli/` | Live operator dashboard — workers, interests, broker key-health |
 | **orch-monitor web dashboard** | file-watches `DASHBOARD.md` → SSE; also `/api/archive/*` from `catalyst.db` | `plugins/dev/scripts/orch-monitor/` | Shareable browser view; archive replay |
 | **`catalyst-events tail --filter`** | append-only JSONL at `~/catalyst/events/YYYY-MM.jsonl` | `plugins/dev/scripts/catalyst-events` | Raw semantic event stream, jq-filterable |
+| **`catalyst-execution-core sessions/worktrees/branches list`** | live `claude agents` inventory + git worktree/branch state (read path of the CTL-649 audit CLI) | `plugins/dev/scripts/catalyst-execution-core` → `execution-core/cli/{sessions,worktrees,branches}.mjs` | Inventory and classify live sessions, worktrees, and branches — what the reaper sees before it acts |
 | **`catalyst broker logs`** | tails `~/catalyst/broker.log` (pino-structured daemon stdout) | `plugins/dev/scripts/catalyst-broker` | Broker daemon diagnostics — Groq errors, routing traces, key-missing warnings |
 
 **Broker logs vs events JSONL — these are different things.** The events log is the
@@ -369,10 +384,11 @@ native UI surfaces.** Specifically:
   question**, not a Catalyst question, and is not described in any catalyst source.
 
 If you want to monitor a running orchestration, use `catalyst-hud`, the
-orch-monitor web dashboard, `catalyst-events tail`, or `catalyst broker logs` —
-those are the four surfaces Catalyst owns. If you want to see backgrounded Claude
-jobs directly, consult the Claude CLI's own documentation for whatever inventory
-it exposes.
+orch-monitor web dashboard, `catalyst-events tail`, the
+`catalyst-execution-core sessions/worktrees/branches list` audit CLI, or
+`catalyst broker logs` — those are the surfaces Catalyst owns. If you want to see
+backgrounded Claude jobs directly, consult the Claude CLI's own documentation for
+whatever inventory it exposes.
 
 ## Canonical artifact / state locations
 

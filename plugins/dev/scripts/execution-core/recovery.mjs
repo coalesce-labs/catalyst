@@ -28,6 +28,7 @@ import { phaseIndex } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
+import { emitReapIntent } from "./reap-intent.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { WORK_DONE_PROBES, hasProbe } from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
@@ -718,6 +719,20 @@ export function reclaimDeadWorkIfPossible(
     return i > max ? i : max;
   }, -1);
   if (phaseIndex(phase) < latestIdx) {
+    // CTL-649: emit a reap-intent so the daemon reaper can stop the lingering
+    // bg worker (pre-CTL-649 the supersede-noop branch did nothing and the
+    // stale worker kept running). Fire-and-forget — the periodic orphan
+    // reaper picks up anything the reconciler missed.
+    if (signal.raw?.bg_job_id) {
+      emitReapIntent("phase.supersede.reap-requested", {
+        ticket,
+        phase,
+        bgJobId: signal.raw.bg_job_id,
+        worktreePath: signal.raw.worktreePath,
+        dominantPhase: dispatched[dispatched.length - 1],
+        reason: "ctl-606-superseded",
+      }).catch(() => {});
+    }
     log.info({ ticket, phase, latestPhaseIndex: latestIdx }, "ctl-606: superseded phase, no-op");
     return "superseded-noop";
   }
@@ -844,11 +859,23 @@ export function reclaimDeadWorkIfPossible(
   // the bg process is gone, so a SIGKILL on its pid is harmless and prevents
   // a zombie holding a worktree lock. The kill is best-effort and pid-file-gated
   // — if no pid file exists (the normal post-exit state) it's a no-op.
+  //
+  // CTL-649: also emit a reap-intent so the daemon reaper has authoritative
+  // visibility and can issue `claude stop` on the supervisor entry (kill -9
+  // hits the OS pid but the claude supervisor lingers as idle/dead-pid). The
+  // inline kill stays so behaviour cannot regress.
   if (
     prevStateJsonMtime !== null &&
     now() - prevStateJsonMtime > KILL_RECENT_ACTIVITY_MS &&
     prevBgJobId
   ) {
+    emitReapIntent("phase.revive.reap-requested", {
+      ticket,
+      phase,
+      bgJobId: prevBgJobId,
+      worktreePath: signal.raw?.worktreePath,
+      quietMs: now() - prevStateJsonMtime,
+    }).catch(() => {});
     killBgJob({ bgJobId: prevBgJobId });
   }
 

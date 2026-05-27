@@ -1957,8 +1957,19 @@ When ALL tickets in the current wave are merged and verified:
      eval "$HOOK" || true
    done
 
-   # If teardown hooks didn't already remove the worktree, do it now
+   # If teardown hooks didn't already remove the worktree, do it now.
+   # CTL-649: stop any bg sessions still cwd'd into this worker dir before
+   # yanking the filesystem. Without the presweep, the supervisor session
+   # lingers as an ORPHAN (status=idle, cwd=<deleted>) — that's 70% of the
+   # 157-session leak observed on the affected host. --force fallback keeps
+   # us moving when an individual `claude stop` fails; the periodic reaper
+   # picks up any survivors on its next tick.
    if [ -d "$WORKER_DIR" ]; then
+     PRESWEEP_BIN="$CATALYST_PLUGIN_DIR/scripts/lib/worktree-presweep.sh"
+     if [ -x "$PRESWEEP_BIN" ]; then
+       "$PRESWEEP_BIN" "$WORKER_DIR" 2>/dev/null \
+         || "$PRESWEEP_BIN" --force "$WORKER_DIR" 2>/dev/null || true
+     fi
      git worktree remove "$WORKER_DIR" 2>/dev/null || true
      git branch -D "$BRANCH_NAME" 2>/dev/null || true
    fi

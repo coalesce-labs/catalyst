@@ -339,6 +339,13 @@ else
 		if ! make setup; then
 			echo -e "${RED}❌ Setup failed. Cleaning up worktree...${NC}"
 			cd - >/dev/null
+			# CTL-649: defensive presweep — in a failure-before-dispatch rollback
+			# no bg session should exist yet, but the helper is a cheap no-op
+			# in that case and prevents any future race that lands a session
+			# between create-worktree and rollback from leaking.
+			SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+			[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
+				"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
 			git worktree remove --force "$WORKTREE_PATH"
 			git branch -D "$WORKTREE_NAME" 2>/dev/null || true
 			exit 1
@@ -409,6 +416,10 @@ if [ "$THOUGHTS_INIT_EXPECTED" = true ] && [ ! -d "thoughts/shared" ]; then
 	echo "  write race) dropped init into an interactive prompt that failed."
 	echo -e "${RED}  Cleaning up worktree...${NC}"
 	cd - >/dev/null
+	# CTL-649: defensive presweep before removal.
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	[ -x "$SCRIPT_DIR/lib/worktree-presweep.sh" ] &&
+		"$SCRIPT_DIR/lib/worktree-presweep.sh" --force "$WORKTREE_PATH" 2>/dev/null || true
 	git worktree remove --force "$WORKTREE_PATH"
 	git branch -D "$WORKTREE_NAME" 2>/dev/null || true
 	exit 1

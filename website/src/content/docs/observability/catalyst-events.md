@@ -193,6 +193,42 @@ Written by `catalyst-state.sh event` and the older bash skills that call it:
 
 Top-level fields: `ts`, `event`, `orchestrator` (nullable), `worker` (nullable), `detail` (nullable object).
 
+### reap-intent envelope (CTL-649)
+
+The execution-core reaper protocol uses a third, **flat snake_case** shape, written by both the
+bash producer (`plugins/dev/scripts/lib/emit-reap-intent.sh`) and the mjs producer
+(`plugins/dev/scripts/execution-core/reap-intent.mjs`). It is distinct from both the canonical
+OTel envelope and the v1 `{event, orchestrator, worker, detail}` envelope — there is no
+`attributes`, no `detail`, and no nesting:
+
+```json
+{
+  "ts": "2026-05-26T12:00:00Z",
+  "event": "phase.yield.reap-requested",
+  "ticket": "CTL-48",
+  "phase": "implement",
+  "bg_job_id": "sess_abc123",
+  "worktree_path": "/Users/you/catalyst/wt/catalyst-workspace/CTL-48",
+  "session_id": "sess_abc123",
+  "branch": "CTL-48",
+  "reason": "inverse-yield",
+  "canonical_bg_job_id": "sess_def456",
+  "dominant_phase": "verify",
+  "quiet_ms": 90000,
+  "force": true
+}
+```
+
+Top-level fields: `ts`, `event`, then any subset of the snake_case payload fields `ticket`,
+`phase`, `bg_job_id`, `worktree_path`, `session_id`, `branch`, `reason`, `canonical_bg_job_id`,
+`dominant_phase`, `quiet_ms`, `orch_id`, `force` (empty/null fields are dropped on write). The
+`.event` topic is one of the closed reap-intent vocabulary — the `phase.<kind>.reap-requested`
+requests, their `phase.<kind>.reap-complete` / `phase.<kind>.reap-failed` echoes, the
+`worktree.presweep.reap-requested` / `pr.merged.cleanup-requested` / `orphans.reap-requested`
+requests, and the `pr.merged.cleanup-complete` / `pr.merged.cleanup-failed` echoes. The
+execution-core daemon tails the log to consume the requests and re-emits the echoes (see
+[Event architecture](./events/#event-topics-in-the-log)).
+
 ### Identifying the envelope version
 
 ```bash
@@ -231,7 +267,13 @@ Both shapes coexist indefinitely. New tools write the canonical envelope;
 --filter '.attributes."event.name" | startswith("filter.")'  # broker register/deregister/wake
 --filter '.attributes."event.name" | startswith("broker.")'  # broker daemon lifecycle
 --filter '.attributes."event.name" | startswith("phase.")'   # phase-agent pipeline (CTL-452)
+--filter '.event | test("\\.reap-(requested|complete|failed)$")'  # reap-intent requests + echoes (CTL-649)
+--filter '.event | startswith("pr.merged.cleanup")'          # PR-merged worktree/branch teardown (CTL-649)
 ```
+
+Reap-intent events (CTL-649) use the flat snake_case envelope with a top-level `.event`
+field (see [reap-intent envelope](#reap-intent-envelope-ctl-649) below), so they are matched
+on `.event` like the v1 writers, not on `.attributes."event.name"`.
 
 ### Match by orchestrator scope
 
@@ -248,12 +290,18 @@ Both shapes coexist indefinitely. New tools write the canonical envelope;
 
 ### Match by phase event (CTL-452 — phase-agent pipeline)
 
-Phase-agent events follow the deterministic shape
+Phase-agent **pipeline** events follow the deterministic shape
 `phase.<name>.<action>.<TICKET>` where `<name>` is one of the nine canonical phases
 (triage, research, plan, implement, verify, review, pr, monitor-merge, monitor-deploy),
 `<action>` is `dispatched`, `complete`, or `failed`, and `<TICKET>` is the Linear key
 (e.g. `CTL-48`). The broker's `phase_lifecycle` interest matches the same regex
 deterministically — see [Phase agents](/reference/orchestration/phase-agents/).
+
+Note that the `phase.*` namespace is **not** limited to those three actions. The CTL-649
+reap-intent protocol adds a parallel `phase.<kind>.reap-requested` / `phase.<kind>.reap-complete`
+/ `phase.<kind>.reap-failed` family (`<kind>` ∈ yield, predecessor, supersede, revive, abort) on
+the flat reap-intent envelope — distinct from the pipeline events above. Match those on
+`.event` with the reap suffixes, not the `<TICKET>`-anchored pipeline regex.
 
 ```bash
 # All phase-agent events

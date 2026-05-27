@@ -110,6 +110,12 @@ MODEL_FLAG=""
 TURN_CAP_FLAG=""
 CONFIG=""
 DRY_RUN=0
+# CTL-649: --attempt threads the dispatch attempt number through to the
+# structured session name (`--name o-<orchId>:<ticket>:<phase>:<attempt>`).
+# Default 1 covers the cold-dispatch path; the recovery/revive callers should
+# pass higher values once they're plumbed through, but a missing flag must
+# never break dispatch.
+ATTEMPT=1
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -137,6 +143,10 @@ while [[ $# -gt 0 ]]; do
 		TURN_CAP_FLAG="$2"
 		shift 2
 		;;
+	--attempt)
+		ATTEMPT="$2"
+		shift 2
+		;;
 	--config)
 		CONFIG="$2"
 		shift 2
@@ -152,6 +162,11 @@ while [[ $# -gt 0 ]]; do
 	*) die "unknown flag: $1" ;;
 	esac
 done
+
+# CTL-649: numeric guard — keeps a bad caller from poisoning the session name.
+if [[ ! $ATTEMPT =~ ^[0-9]+$ ]]; then
+	die "invalid --attempt: $ATTEMPT (expected non-negative integer)"
+fi
 
 [[ -n $PHASE ]] || die "--phase is required"
 [[ -n $TICKET ]] || die "--ticket is required"
@@ -497,6 +512,13 @@ DISPATCH_ENV=(
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
 
+# CTL-649: structured session name. `claude --name` is in dispatch.respawnFlags
+# (verified empirically) so it survives daemon restart. The structured form
+# (`o-<orchId>:<ticket>:<phase>:<attempt>`) is what the new
+# `catalyst-execution-core sessions list` joins on; before this, the daemon
+# roster surfaces prompt-derived auto-names that operators can't grep.
+SESSION_NAME="o-${ORCH_ID}:${TICKET}:${PHASE}:${ATTEMPT}"
+
 if [[ $DRY_RUN -eq 1 ]]; then
 	# Dry-run prints the command it would have run without spawning anything.
 	jq -nc \
@@ -506,9 +528,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--argjson turnCap "$TURN_CAP" \
 		--arg prompt "$PROMPT" \
 		--arg signal "$SIGNAL_FILE" \
+		--arg sessionName "$SESSION_NAME" \
+		--argjson attempt "$ATTEMPT" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
+      sessionName: $sessionName, attempt: $attempt,
       env: $env, status: "dispatched", dryRun: true}'
 	exit 0
 fi
@@ -525,11 +550,13 @@ trap 'rm -f "$BG_OUT" "$BG_ERR"' EXIT
 # function the reap path uses for `claude stop`. CATALYST_DISPATCH_CLAUDE_BIN
 # still overrides it, so existing tests and tooling are unaffected.
 CLAUDE_BIN="$(executor_claude_bin)"
+
 # </dev/null (CTL-605): `claude --bg` reads stdin; redirect it so a caller that
 # invokes us from inside a herestring/`while read` loop can't have its loop
 # stdin drained. Harmless for normal callers (fd 0 already a tty/pipe).
 env "${DISPATCH_ENV[@]}" \
-	"$CLAUDE_BIN" --bg --dangerously-skip-permissions --model "$MODEL" "$PROMPT" \
+	"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
+	--model "$MODEL" "$PROMPT" \
 	>"$BG_OUT" 2>"$BG_ERR" </dev/null
 RC=$?
 

@@ -47,6 +47,18 @@ Default models come from `phase-agent-dispatch:51` (Opus) plus the per-phase ove
 Turn caps follow the same precedence: `--turn-cap` CLI flag >
 `catalyst.orchestration.phaseAgents.turnCaps[phase]` > the per-phase default above.
 
+### Linear comment trail (CTL-632)
+
+Every phase from `phase-triage` through `phase-review` (phases 1–6) mirrors its output back to the
+Linear ticket as a single comment in its End block — not just `phase-triage`. So the ticket
+accumulates a running commentary as the pipeline walks: the triaged classification, then the
+research summary, the plan summary, the implement summary, the verify gates + findings, and the
+review verdict. The mirror is **idempotent** — guarded by a per-phase marker file
+(`${ORCH_DIR}/workers/${TICKET}/.linear-mirror-<phase>`) so a re-dispatched or revived phase agent
+doesn't double-post — and **fail-open** (a `linearis` failure logs and continues, never blocking the
+phase). Each comment body is hard-truncated to 30,000 bytes (under Linear's effective comment cap)
+with a truncation marker.
+
 ### 1. `phase-triage`
 
 Entry phase. Reads the Linear ticket, expands acronyms, classifies it
@@ -62,19 +74,22 @@ Reads `triage.json` from the prior phase, delegates to
 [`/catalyst-dev:research-codebase`](/plugins/catalyst-dev/), and emits
 `phase.research.complete.<TICKET>` once `thoughts/shared/research/<date>-<ticket>.md` exists with
 the standard frontmatter, Summary, Findings (≥10 `file:line` references), and References sections.
+Mirrors its research summary to the ticket as a Linear comment (CTL-632).
 
 ### 3. `phase-plan`
 
 Reads the research document by glob (`thoughts/shared/research/*-<ticket>.md`), delegates to
 [`/catalyst-dev:create-plan`](/plugins/catalyst-dev/), and emits `phase.plan.complete.<TICKET>` once
 `thoughts/shared/plans/<date>-<ticket>.md` exists with Overview plus phased Tests First (Red) →
-Implementation (Green) → Refactor → Success Criteria sections.
+Implementation (Green) → Refactor → Success Criteria sections. Mirrors its plan summary to the
+ticket as a Linear comment (CTL-632).
 
 ### 4. `phase-implement`
 
 Reads the plan, delegates to [`/catalyst-dev:implement-plan`](/plugins/catalyst-dev/) via the Task
 tool, commits each plan phase as it lands. `/goal` succeeds when `git diff <base>..HEAD` is
-non-empty AND the targeted tests pass. Emits `phase.implement.complete.<TICKET>`.
+non-empty AND the targeted tests pass. Emits `phase.implement.complete.<TICKET>`. Mirrors its
+implement summary to the ticket as a Linear comment (CTL-632).
 
 The cost projection assumes Sonnet on this phase — that's a config flip
 (`catalyst.orchestration.phaseAgents.models.implement = "sonnet"`), not a code change. The shipped
@@ -88,7 +103,8 @@ Read-only adversarial verification. Runs tsc, tests, lint, security scan, reward
 the `code-reviewer`, `pr-test-analyzer`, and `silent-failure-hunter` sub-agents. Writes
 `${ORCH_DIR}/workers/${TICKET}/verify.json` with a `regression_risk` score and findings list. Never
 writes application code; test files are the only writable target. Emits
-`phase.verify.complete.<TICKET>`.
+`phase.verify.complete.<TICKET>`. Mirrors the regression-risk score, per-gate pass/fail/skip, and
+findings to the ticket as a Linear comment (CTL-632).
 
 This is the **independent verification layer** that replaces the orchestrator's adversarial recheck
 — see [Verification and reward-hacking defense](/reference/orchestration/verification/).
@@ -97,7 +113,8 @@ This is the **independent verification layer** that replaces the orchestrator's 
 
 Reads `verify.json`, runs the `/review` skill (gstack) against the diff, writes
 `${ORCH_DIR}/workers/${TICKET}/review.json`, and creates a remediation commit for any HIGH-severity
-finding with a deterministic fix. Emits `phase.review.complete.<TICKET>`.
+finding with a deterministic fix. Emits `phase.review.complete.<TICKET>`. Mirrors its review verdict
+and findings to the ticket as a Linear comment (CTL-632).
 
 Explicitly skips `/ultrareview` (per the source plan); operator can still run it manually after the
 PR opens.

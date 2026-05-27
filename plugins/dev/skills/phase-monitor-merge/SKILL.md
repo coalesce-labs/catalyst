@@ -179,6 +179,62 @@ if [[ -x "$LINEAR_TRANSITION" ]]; then
 fi
 
 echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}; Linear=done"
+
+# ── CTL-649: auto-teardown local worktree + branch on merge ──────────────────
+# Remote branch is already gone via `gh pr merge --delete-branch` above. The
+# local worktree + local branch are NOT — that's the secondary leak source
+# (20 worktrees pile up under ~/catalyst/wt/<key>/ on the affected host).
+#
+# Skipped when:
+#   - catalyst.orchestration.keepWorktreeAfterMerge=true
+#   - we can't `cd` out of the worktree we're about to delete
+#   - the worktree is dirty (we never roll back the merge itself; warn + skip)
+#
+# This skill runs INSIDE the worktree it's about to remove. `cd` to the
+# primary worktree first so `git worktree remove` doesn't try to yank our
+# own cwd.
+
+KEEP_WT="$(jq -r '.catalyst.orchestration.keepWorktreeAfterMerge // false' \
+  .catalyst/config.json 2>/dev/null || echo "false")"
+
+if [[ "$KEEP_WT" != "true" ]]; then
+  WORKTREE_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  PRIMARY_WT="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+  BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+  if [[ -z "$PRIMARY_WT" || "$PRIMARY_WT" == "$WORKTREE_PATH" ]]; then
+    echo "phase-monitor-merge: cannot resolve primary worktree distinct from self; auto-teardown skipped" >&2
+  else
+    cd "$PRIMARY_WT" || {
+      echo "phase-monitor-merge: cannot cd to primary worktree; auto-teardown skipped" >&2
+      cd "$WORKTREE_PATH"  # restore, even on failure
+    }
+
+    if [[ "$PWD" == "$PRIMARY_WT" ]]; then
+      PRESWEEP_BIN="${PLUGIN_ROOT}/scripts/lib/worktree-presweep.sh"
+      # CTL-649: do NOT swallow presweep stderr — its "N session(s) still alive
+      # in <path>" diagnostic is the precise leak signal this teardown exists to
+      # surface. Let it flow straight through to the operator.
+      if [[ -x "$PRESWEEP_BIN" ]] && ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
+        echo "phase-monitor-merge: presweep failed for $WORKTREE_PATH; auto-teardown skipped" >&2
+      else
+        # Capture the real `git worktree remove` stderr so a failed teardown
+        # reports the actual cause (dirty tree, locked, submodule, etc.) rather
+        # than guessing. The merge is NEVER rolled back — we only warn + skip.
+        WT_RM_ERR="$(git worktree remove "$WORKTREE_PATH" 2>&1)"
+        if [[ $? -eq 0 ]]; then
+          if [[ -n "$BRANCH_NAME" ]]; then
+            git branch -D "$BRANCH_NAME" 2>/dev/null \
+              || echo "phase-monitor-merge: local branch $BRANCH_NAME already gone" >&2
+          fi
+          echo "phase-monitor-merge: auto-teardown complete (worktree + branch removed)"
+        else
+          echo "phase-monitor-merge: git worktree remove failed; auto-teardown skipped (merge left intact): ${WT_RM_ERR}" >&2
+        fi
+      fi
+    fi
+  fi
+fi
 ```
 
 Deployment verification (`skipDeployVerification=false`) is **not** in this
