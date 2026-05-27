@@ -460,6 +460,49 @@ export function defaultPidAlive(
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// CTL-655: daemon-boot marker. The daemon writes this once at startup
+// (writeBootMarker, below) and reclaimDeadWorkIfPossible reads it
+// (readBootSince) to window the per-ticket revive budget to the CURRENT daemon
+// run, so a clean restart resets a budget burned by a prior crash storm. This
+// is deliberately NOT the CTL-640 cold-start epoch (OS boot / claude-daemon
+// start) — that boundary would not reset on a daemon-only restart.
+// ──────────────────────────────────────────────────────────────────────────
+
+// bootMarkerPath — the single source of the marker location, shared by the
+// reader and writer. Lives alongside daemon.pid / state.json / cursor.json.
+export function bootMarkerPath(orchDir) {
+  return join(orchDir, "daemon-boot.json");
+}
+
+// readBootSince — the ISO-8601 boot timestamp to pass as countReviveEvents'
+// `since`, or undefined. Fail-open: a missing / unparseable / wrong-typed
+// marker returns undefined → the counter counts all events (the pre-CTL-655
+// behavior, the conservative direction — the budget can still exhaust).
+export function readBootSince(orchDir) {
+  try {
+    const raw = readFileSync(bootMarkerPath(orchDir), "utf8");
+    const bootedAt = JSON.parse(raw)?.bootedAt;
+    return typeof bootedAt === "string" && bootedAt ? bootedAt : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// writeBootMarker — record this daemon process's start time. Atomic tmp+rename,
+// fail-open: a write failure logs and the daemon continues (the budget simply
+// won't reset this run — the safe degradation). Injectable `now` for tests.
+export function writeBootMarker(orchDir, { now = () => new Date().toISOString() } = {}) {
+  try {
+    const p = bootMarkerPath(orchDir);
+    const tmp = `${p}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ bootedAt: now() }));
+    renameSync(tmp, p);
+  } catch (err) {
+    log.warn({ err }, "ctl-655: failed to write daemon-boot.json (revive budget will not reset this run)");
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // CTL-640: cold-start detection. The reference epoch = max(OS boot, claude-daemon
 // start). If that epoch is newer than EVERY ~/.claude/jobs/<id>/state.json mtime,
 // every recorded --bg worker pre-dates the epoch and is provably dead → COLD
@@ -688,6 +731,11 @@ export function reclaimDeadWorkIfPossible(
     applyStalledLabel = defaultApplyStalledLabel,
     killBgJob = defaultKillBgJob,
     countReviveEvents = defaultCountReviveEvents,
+    // CTL-655 — boot-time window reader. Reads <orchDir>/daemon-boot.json and
+    // returns its `bootedAt` (or undefined) so the revive budget counts only
+    // revives from the current daemon run. Named ...Fn to avoid shadowing the
+    // module-level readBootSince used as the default.
+    readBootSince: readBootSinceFn = readBootSince,
     countDistinctRevivingTickets = defaultCountDistinctRevivingTickets,
     writeReviveMarker = defaultWriteReviveMarker,
     // CTL-638 — per-(ticket, phase) escalation cool-down. Defaults read/write
@@ -850,9 +898,13 @@ export function reclaimDeadWorkIfPossible(
   }
 
   // Per-ticket revive budget from events.jsonl. The events file is the
-  // authoritative counter — surviving daemon restarts, more truthful than the
-  // signal file (which the dispatcher rewrites each spawn).
-  const priorRevives = countReviveEvents({ ticket, orchId });
+  // authoritative counter — more truthful than the signal file (which the
+  // dispatcher rewrites each spawn). CTL-655: window the count to the current
+  // daemon run via the boot marker, so a clean restart resets a budget burned
+  // by a prior crash storm. `since` is undefined when the marker is absent →
+  // the count is unwindowed (the pre-CTL-655 behavior).
+  const since = readBootSinceFn(orchDir);
+  const priorRevives = countReviveEvents({ ticket, orchId, since });
   if (priorRevives >= MAX_REVIVES) {
     return escalateOnce("revive-budget-exhausted", priorRevives);
   }
