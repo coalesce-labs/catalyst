@@ -6,6 +6,9 @@
 // `claude` / `ps` / the event log.
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   classifyRow,
   applyDuplicates,
@@ -16,6 +19,7 @@ import {
   buildLiveSessionsByWorktree,
   runPrune,
   parseSessionArgs,
+  indexSignalsByBgJobId,
 } from "./sessions.mjs";
 import { ArgError } from "./args.mjs";
 
@@ -224,9 +228,7 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
       now: 5000,
     });
     expect(rows[0].lastSeenMs).toBe(12345);
-    expect(seen).toEqual([
-      { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", now: 5000 },
-    ]);
+    expect(seen).toEqual([{ sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", now: 5000 }]);
   });
 
   it("classifies ORPHAN when cwd is missing", async () => {
@@ -692,5 +694,92 @@ describe("parseSessionArgs (strict shared parser + option mapping)", () => {
   it("THROWS ArgError on --min-idle-seconds abc (devex finding #2 — no silent NaN)", () => {
     expect(() => parseSessionArgs(["--min-idle-seconds", "abc"])).toThrow(ArgError);
     expect(() => parseSessionArgs(["--min-idle-seconds", "abc"])).toThrow(/expects a number/);
+  });
+});
+
+describe("indexSignalsByBgJobId (real directory walk — CTL-674 regression)", () => {
+  let catalystDir;
+  let prevDir;
+
+  beforeEach(() => {
+    catalystDir = mkdtempSync(join(tmpdir(), "exec-core-sessions-idx-"));
+    prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = catalystDir;
+  });
+
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(catalystDir, { recursive: true, force: true });
+  });
+
+  function writeExecCoreSignal(ticket, phase, body) {
+    const dir = join(catalystDir, "execution-core", "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, orchestrator: ticket, ...body })
+    );
+  }
+
+  function writeLegacyRunSignal(orchId, ticket, phase, body) {
+    const dir = join(catalystDir, "runs", orchId, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  it("indexes a live execution-core worker by its bg_job_id short id (FAILS pre-fix)", () => {
+    writeExecCoreSignal("CTL-900", "research", {
+      bg_job_id: "24e1e48c",
+      status: "running",
+      worktreePath: "/tmp/wt/CTL-900",
+    });
+    const idx = indexSignalsByBgJobId();
+    const worker = idx.get("24e1e48c");
+    expect(worker).toBeTruthy();
+    expect(worker.ticket).toBe("CTL-900");
+    expect(worker.phase).toBe("research");
+    expect(worker.status).toBe("running");
+    expect(worker.orchestratorId).toBe("CTL-900"); // from raw.orchestrator
+    expect(worker.worktreePath).toBe("/tmp/wt/CTL-900");
+  });
+
+  it("still indexes legacy runs/<orchId> workers with orchId from the dir name", () => {
+    writeLegacyRunSignal("o-adv-xyz", "CTL-901", "plan", {
+      bg_job_id: "deadbeef",
+      status: "running",
+    });
+    const worker = indexSignalsByBgJobId().get("deadbeef");
+    expect(worker).toBeTruthy();
+    expect(worker.orchestratorId).toBe("o-adv-xyz");
+  });
+
+  it("execution-core wins a short-id collision over a historical runs/ entry", () => {
+    writeLegacyRunSignal("o-old", "CTL-902", "plan", {
+      bg_job_id: "cafebabe",
+      status: "done",
+    });
+    writeExecCoreSignal("CTL-903", "implement", {
+      bg_job_id: "cafebabe",
+      status: "running",
+    });
+    const worker = indexSignalsByBgJobId().get("cafebabe");
+    expect(worker.ticket).toBe("CTL-903");
+    expect(worker.status).toBe("running");
+  });
+
+  it("skips flat/pid signals (no bg liveness) under execution-core", () => {
+    // flat layout = workers/<T>.json → {kind:"pid"} → filtered out
+    const wdir = join(catalystDir, "execution-core", "workers");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      join(wdir, "CTL-904.json"),
+      JSON.stringify({ ticket: "CTL-904", phase: 3, pid: 123, status: "running" })
+    );
+    expect(indexSignalsByBgJobId().size).toBe(0);
+  });
+
+  it("returns an empty map when neither root exists", () => {
+    expect(indexSignalsByBgJobId().size).toBe(0); // temp dir has no runs/ or execution-core/
   });
 });

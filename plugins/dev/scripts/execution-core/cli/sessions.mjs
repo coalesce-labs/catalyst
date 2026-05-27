@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 import { shortIdFromSessionId, isSelfSession } from "../claude-ids.mjs";
 import { readWorkerSignals, TERMINAL } from "../signal-reader.mjs";
 import { emitReapIntent } from "../reap-intent.mjs";
-import { getRunsRoot } from "../config.mjs";
+import { getRunsRoot, getExecutionCoreDir } from "../config.mjs";
 import { lastSeenMsForSession } from "../session-recency.mjs";
 import { parseArgs, ArgError } from "./args.mjs";
 
@@ -149,23 +149,22 @@ export function parseSessionName(name) {
 // ─── I/O: signal index ───────────────────────────────────────────────────────
 
 /**
- * indexSignalsByBgJobId — walk every ~/catalyst/runs/<orchId>/workers tree and
- * index the nested phase signals by their 8-char bg_job_id, joining each onto
- * its orchestratorId. The CLI then looks up a live session's short id here to
- * recover worker status / ticket / phase. Missing runs root → empty map.
+ * indexSignalsByBgJobId — index nested bg phase signals by their 8-char
+ * bg_job_id short id so the CLI can join a live `claude agents` session onto
+ * its worker signal. Reads TWO roots:
+ *   • legacy runs/<orchId>/workers/...  — orchestratorId is the subdir name
+ *   • the execution-core orchDir (no orchId layer) — orchestratorId comes from
+ *     the signal's raw.orchestrator field
+ * The execution-core dir is indexed last so a live signal wins any short-id
+ * collision against a historical runs/ entry (CTL-674). Missing roots → skipped.
  */
-export function indexSignalsByBgJobId(runsRoot = getRunsRoot()) {
+export function indexSignalsByBgJobId(
+  runsRoot = getRunsRoot(),
+  execCoreDir = getExecutionCoreDir()
+) {
   const index = new Map();
-  let orchDirs;
-  try {
-    orchDirs = readdirSync(runsRoot, { withFileTypes: true });
-  } catch {
-    return index;
-  }
-  for (const entry of orchDirs) {
-    if (!entry.isDirectory()) continue;
-    const orchestratorId = entry.name;
-    const orchDir = join(runsRoot, orchestratorId);
+
+  const indexOrchDir = (orchDir, orchestratorIdFromDir) => {
     for (const sig of readWorkerSignals(orchDir)) {
       if (sig.liveness?.kind !== "bg" || !sig.liveness.value) continue;
       let shortId;
@@ -178,11 +177,28 @@ export function indexSignalsByBgJobId(runsRoot = getRunsRoot()) {
         status: sig.status,
         ticket: sig.ticket,
         phase: sig.phase,
-        orchestratorId,
+        orchestratorId: orchestratorIdFromDir ?? sig.raw?.orchestrator ?? null,
         worktreePath: sig.worktreePath,
       });
     }
+  };
+
+  // Legacy runs/<orchId> — orchestratorId is the subdir name.
+  let orchDirs = [];
+  try {
+    orchDirs = readdirSync(runsRoot, { withFileTypes: true });
+  } catch {
+    orchDirs = []; // no runs root → skip the legacy walk
   }
+  for (const entry of orchDirs) {
+    if (!entry.isDirectory()) continue;
+    indexOrchDir(join(runsRoot, entry.name), entry.name);
+  }
+
+  // Execution-core single orchDir (no orchId layer) — indexed LAST so live
+  // signals win short-id collisions; orchestratorId falls back to raw.orchestrator.
+  indexOrchDir(execCoreDir, null);
+
   return index;
 }
 
