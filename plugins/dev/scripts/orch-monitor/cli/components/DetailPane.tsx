@@ -2,11 +2,15 @@ import { memo, useMemo } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 import { formatDateTime, formatDetailBody } from "../lib/format.ts";
+import type { DispatchLatency } from "../lib/dispatch-latency.ts";
 
 export interface DetailPaneProps {
   event: CanonicalEvent;
   scrollTop: number;
   maxHeight: number;
+  // CTL-660: the matched dispatch latency for this event's (ticket, phase),
+  // when the paired requested/launched/complete events are in the window.
+  dispatchLatency?: DispatchLatency;
 }
 
 type Line =
@@ -22,7 +26,11 @@ const SEV_COLOR: Record<string, string> = {
 
 const LABEL_W = 14;
 
-export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
+export function buildDetailLines(
+  event: CanonicalEvent,
+  cols: number,
+  dispatchLatency?: DispatchLatency,
+): Line[] {
   const attrs = event.attributes ?? {};
   const name = attrs["event.name"] ?? "(unknown)";
   const ts = formatDateTime(event);
@@ -31,6 +39,19 @@ export function buildDetailLines(event: CanonicalEvent, cols: number): Line[] {
 
   lines.push({ k: "title", name, ts, sev });
   lines.push({ k: "sep" });
+
+  // CTL-660: surface the derived dispatch latencies for a dispatch/complete
+  // row when both ends of a leg are present in the window. pickup = daemon
+  // decided → worker live; wall-clock = worker live → phase done.
+  if (dispatchLatency?.pickupMs !== undefined || dispatchLatency?.wallClockMs !== undefined) {
+    if (dispatchLatency.pickupMs !== undefined) {
+      lines.push({ k: "field", label: "pickup", value: `${dispatchLatency.pickupMs}ms`, color: "cyan" });
+    }
+    if (dispatchLatency.wallClockMs !== undefined) {
+      lines.push({ k: "field", label: "wall-clock", value: `${dispatchLatency.wallClockMs}ms`, color: "cyan" });
+    }
+    lines.push({ k: "sep" });
+  }
 
   const repo = attrs["vcs.repository.name"];
   const pr = attrs["vcs.pr.number"];
@@ -182,12 +203,15 @@ function renderLine(line: Line, i: number, cols: number): React.ReactNode {
 
 // CTL-473: memo wrap. All three props (event, scrollTop, maxHeight) are
 // referentially stable from hud.tsx after Phase 1's prop stabilization.
-function DetailPaneImpl({ event, scrollTop, maxHeight }: DetailPaneProps) {
+function DetailPaneImpl({ event, scrollTop, maxHeight, dispatchLatency }: DetailPaneProps) {
   const { stdout } = useStdout();
   const cols = stdout?.columns ?? 120;
   // CTL-473: avoid recomputing the detail-line array on every render. Only
-  // changes when the focused event or terminal width changes.
-  const lines = useMemo(() => buildDetailLines(event, cols), [event, cols]);
+  // changes when the focused event, terminal width, or matched latency changes.
+  const lines = useMemo(
+    () => buildDetailLines(event, cols, dispatchLatency),
+    [event, cols, dispatchLatency],
+  );
 
   // First line is always the title — pin it so it stays visible while scrolling.
   const titleLine = lines[0];

@@ -1374,10 +1374,21 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
 
 describe("defaultReviveDispatch — signal-reset behaviour", () => {
   let orchDir;
+  let prevCatalystDir;
   beforeEach(() => {
     orchDir = mkdtempSync(join(tmpdir(), "ctl587-revdisp-"));
+    // CTL-660: defaultReviveDispatch now emits real dispatch-lifecycle events
+    // by default (appendRequested/appendLaunched default to the real helpers).
+    // Tests here inject only `dispatch`, so redirect CATALYST_DIR into the temp
+    // orchDir to keep those default emits out of the operator's real
+    // ~/catalyst/events log.
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = orchDir;
+    mkdirSync(join(orchDir, "events"), { recursive: true });
   });
   afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
     rmSync(orchDir, { recursive: true, force: true });
   });
 
@@ -1523,6 +1534,86 @@ describe("defaultReviveDispatch — signal-reset behaviour", () => {
     const dir = join(orchDir, "workers", "CTL-9");
     const leftovers = readdirSync(dir).filter((f) => f.includes(".tmp."));
     expect(leftovers).toEqual([]);
+  });
+
+  // ── CTL-660: revive-path dispatch-lifecycle emission ────────────────────
+  test("CTL-660: revive success emits requested(revive) + launched with the relaunched signal's bg_job_id + worktreePath", () => {
+    const signalPath = seed("CTL-660-R", "implement", {
+      status: "running",
+      bg_job_id: "bg-orig",
+      worktreePath: "/wt/CTL/CTL-660-R",
+      orchestrator: "orch-rev",
+    });
+    // The real dispatcher rewrites the signal with the relaunched worker's
+    // bg_job_id; mimic that so the launched emit re-reads the NEW id.
+    const dispatch = () => {
+      const sig = JSON.parse(readFileSync(signalPath, "utf8"));
+      sig.status = "running";
+      sig.bg_job_id = "bg-new";
+      writeFileSync(signalPath, JSON.stringify(sig));
+      return { code: 0 };
+    };
+    const appendRequested = recorder(true);
+    const appendLaunched = recorder(true);
+
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-660-R", phase: "implement" },
+      { dispatch, appendRequested, appendLaunched },
+    );
+
+    expect(r.code).toBe(0);
+    expect(appendRequested.calls.length).toBe(1);
+    expect(appendRequested.calls[0][0]).toMatchObject({
+      orchId: "orch-rev",
+      ticket: "CTL-660-R",
+      target_phase: "implement",
+      reason: "revive",
+    });
+    expect(appendLaunched.calls.length).toBe(1);
+    expect(appendLaunched.calls[0][0]).toMatchObject({
+      orchId: "orch-rev",
+      ticket: "CTL-660-R",
+      target_phase: "implement",
+      bg_job_id: "bg-new",
+      worktree_path: "/wt/CTL/CTL-660-R",
+    });
+  });
+
+  test("CTL-660: revive dispatch failure (code!=0) emits requested but NOT launched", () => {
+    seed("CTL-660-F", "implement", {
+      status: "running",
+      bg_job_id: "bg-f",
+      orchestrator: "orch-rev",
+    });
+    const dispatch = recorder({ code: 2, stderr: "boom" });
+    const appendRequested = recorder(true);
+    const appendLaunched = recorder(true);
+
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-660-F", phase: "implement" },
+      { dispatch, appendRequested, appendLaunched },
+    );
+
+    expect(r.code).toBe(2);
+    expect(appendRequested.calls.length).toBe(1);
+    expect(appendRequested.calls[0][0]).toMatchObject({ reason: "revive", target_phase: "implement" });
+    expect(appendLaunched.calls.length).toBe(0);
+  });
+
+  test("CTL-660: signal-missing early return emits neither requested nor launched", () => {
+    const dispatch = recorder({ code: 0 });
+    const appendRequested = recorder(true);
+    const appendLaunched = recorder(true);
+
+    const r = defaultReviveDispatch(
+      { orchDir, ticket: "CTL-660-MISSING", phase: "implement" },
+      { dispatch, appendRequested, appendLaunched },
+    );
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toBe("signal-missing");
+    expect(appendRequested.calls.length).toBe(0);
+    expect(appendLaunched.calls.length).toBe(0);
   });
 });
 

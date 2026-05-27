@@ -2354,3 +2354,179 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
     expect(existsSync(dispatchCooldownPath(orchDir, "CTL-205", "plan"))).toBe(false);
   });
 });
+
+// ── CTL-660: phase.dispatch.requested / .launched emission (scheduler) ────
+//
+// The success-path complement to CTL-611's phase.dispatch.failed. `requested`
+// fires when the scheduler DECIDES to dispatch (before the spawn); `launched`
+// fires ONLY after verifyDispatched confirms a live worker, carrying the
+// signal's bg_job_id + worktreePath so pickup→launch latency is derivable.
+// Asserted via the injection seam (spy emitters) per the plan; the envelope
+// shape itself is round-tripped in recovery.test.mjs.
+describe("CTL-660: phase.dispatch.requested/launched emission (scheduler)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      labels: ["Ready"],
+      blockedBy: [],
+      raw: { team: { key: "CTL" } },
+    },
+  ];
+
+  // Spy emitter: records each call's single argument object, returns true
+  // (the best-effort contract; no caller gates on it).
+  function spy() {
+    const calls = [];
+    const fn = (arg) => {
+      calls.push(arg);
+      return true;
+    };
+    fn.calls = calls;
+    return fn;
+  }
+
+  // A dispatch fake that writes a runnable signal carrying bg_job_id +
+  // worktreePath so the default verifyDispatchedSignal returns ok AND the
+  // launched emit (which re-reads the signal via readPhaseSignalRaw) sees them.
+  function dispatchWritesSignal({ bgJobId = "abcd1234", worktreePath = "/wt/x" } = {}) {
+    const calls = [];
+    const fn = ({ orchDir: od, ticket, phase }) => {
+      calls.push({ ticket, phase });
+      const dir = join(od, "workers", ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "running", bg_job_id: bgJobId, worktreePath })
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    fn.calls = calls;
+    return fn;
+  }
+
+  test("advance success: requested(advance) then launched with signal bg_job_id + worktree_path", () => {
+    writeSignal("CTL-300", "research", "done"); // FSM owes plan
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchWritesSignal({ bgJobId: "deadbeef", worktreePath: "/wt/CTL-300" });
+    const requested = spy();
+    const launched = spy();
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      appendDispatchRequestedEvent: requested,
+      appendDispatchLaunchedEvent: launched,
+    });
+
+    expect(r.advanced).toContainEqual({ ticket: "CTL-300", phase: "plan" });
+    expect(requested.calls).toHaveLength(1);
+    expect(requested.calls[0]).toMatchObject({
+      ticket: "CTL-300",
+      target_phase: "plan",
+      reason: "advance",
+    });
+    expect(launched.calls).toHaveLength(1);
+    expect(launched.calls[0]).toMatchObject({
+      ticket: "CTL-300",
+      target_phase: "plan",
+      bg_job_id: "deadbeef",
+      worktree_path: "/wt/CTL-300",
+    });
+  });
+
+  test("new-work success: requested(new-work) then launched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchWritesSignal({ bgJobId: "f00dface", worktreePath: "/wt/CTL-301" });
+    const requested = spy();
+    const launched = spy();
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-301"),
+      dispatch,
+      now: () => 1_000,
+      liveBackgroundCount: () => 0,
+      appendDispatchRequestedEvent: requested,
+      appendDispatchLaunchedEvent: launched,
+    });
+
+    expect(r.dispatched).toContain("CTL-301");
+    expect(requested.calls).toHaveLength(1);
+    expect(requested.calls[0]).toMatchObject({
+      ticket: "CTL-301",
+      target_phase: "research",
+      reason: "new-work",
+    });
+    expect(launched.calls).toHaveLength(1);
+    expect(launched.calls[0]).toMatchObject({
+      ticket: "CTL-301",
+      target_phase: "research",
+      bg_job_id: "f00dface",
+      worktree_path: "/wt/CTL-301",
+    });
+  });
+
+  test("dispatch rc!=0: requested emitted (decision happened), launched NOT", () => {
+    writeSignal("CTL-302", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1 });
+    const requested = spy();
+    const launched = spy();
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      appendDispatchRequestedEvent: requested,
+      appendDispatchLaunchedEvent: launched,
+    });
+
+    expect(requested.calls).toHaveLength(1);
+    expect(requested.calls[0]).toMatchObject({ ticket: "CTL-302", target_phase: "plan", reason: "advance" });
+    expect(launched.calls).toHaveLength(0);
+  });
+
+  test("verify !ok (rc=0, no live signal): requested emitted, launched NOT (no CTL-611 regression)", () => {
+    writeSignal("CTL-303", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 }); // writes no signal → verifier !ok
+    const requested = spy();
+    const launched = spy();
+
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      appendDispatchRequestedEvent: requested,
+      appendDispatchLaunchedEvent: launched,
+    });
+
+    expect(requested.calls).toHaveLength(1);
+    expect(launched.calls).toHaveLength(0);
+    // CTL-611 failure event still fires on the demotion.
+    expect(dispatchFailedEvents("CTL-303")).toHaveLength(1);
+  });
+
+  test("fail-open: a throwing requested/launched emitter does not break the tick", () => {
+    writeSignal("CTL-304", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchWritesSignal({ bgJobId: "abc12345", worktreePath: "/wt/CTL-304" });
+    const thrower = () => {
+      throw new Error("emit boom");
+    };
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      appendDispatchRequestedEvent: thrower,
+      appendDispatchLaunchedEvent: thrower,
+    });
+
+    // The dispatch still advanced despite both lifecycle emitters throwing.
+    expect(r.advanced).toContainEqual({ ticket: "CTL-304", phase: "plan" });
+  });
+});

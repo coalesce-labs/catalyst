@@ -7,6 +7,7 @@ import { readBrokerState, type BrokerState } from "./lib/broker-key-health.ts";
 import { EventList } from "./components/EventList.tsx";
 import { PromptInput, type InputMode } from "./components/PromptInput.tsx";
 import { DetailPane, buildDetailLines } from "./components/DetailPane.tsx";
+import { computeDispatchLatencies, latencyKeyForEvent } from "./lib/dispatch-latency.ts";
 import { Dashboard } from "./components/Dashboard.tsx";
 import {
   computeBottomOverlaySize,
@@ -268,11 +269,20 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // extracted into pure helpers for testability.
   const inDetailMode = showDetail && !!selectedEvent && !showHelp;
   const innerCols = cols - 1;
+  // CTL-660: pair the dispatch-lifecycle events once per event-array change and
+  // look up the single latency matching the selected row's (ticket, phase).
+  // Memoized on `events` identity so it does not recompute every render.
+  const dispatchLatencies = useMemo(() => computeDispatchLatencies(events), [events]);
+  const selectedLatency = useMemo(() => {
+    if (!selectedEvent) return undefined;
+    const key = latencyKeyForEvent(selectedEvent);
+    return key ? dispatchLatencies.get(key) : undefined;
+  }, [selectedEvent, dispatchLatencies]);
   // CTL-473: memoize buildDetailLines so it only recomputes when the selected
-  // event or column width changes — was re-running on every render.
+  // event, column width, or matched latency changes — was re-running on every render.
   const detailLines = useMemo(
-    () => (selectedEvent ? buildDetailLines(selectedEvent, innerCols) : []),
-    [selectedEvent, innerCols],
+    () => (selectedEvent ? buildDetailLines(selectedEvent, innerCols, selectedLatency) : []),
+    [selectedEvent, innerCols, selectedLatency],
   );
 
   let listRows: number;
@@ -527,6 +537,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
             event={selectedEvent}
             scrollTop={detailScrollTop}
             maxHeight={detailContentRows}
+            dispatchLatency={selectedLatency}
           />
         </Box>
       )}
