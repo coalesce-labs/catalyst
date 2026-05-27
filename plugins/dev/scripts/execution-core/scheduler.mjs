@@ -28,7 +28,18 @@ import { analyzeDependencyGraph, referencedBlockerIds } from "../lib/dependency-
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
 // ("triage") is intentionally NO LONGER the new-work entry phase — new work
 // enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
-import { PHASES, transition, isTerminal } from "../lib/phase-fsm.mjs";
+import {
+  PHASES,
+  transition,
+  isTerminal,
+  REMEDIATE_PHASE,
+  REMEDIATE_CYCLE_CAP,
+} from "../lib/phase-fsm.mjs";
+// CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
+// budget) live here. deriveAdvancement stays pure — the impure reads happen in
+// the sweep and are injected, so the router itself is unit-testable.
+import { readVerifyVerdict } from "./work-done-probes.mjs";
+import { countRemediateCycles } from "./event-scan.mjs";
 import { rankTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
@@ -275,11 +286,27 @@ export function readAllEligibleTickets() {
 // known phase is `done` and its transition() successor is a non-terminal phase
 // with no signal yet. Advancement goes through phase-fsm.mjs — never a local
 // copy of NEXT_PHASE.
-export function deriveAdvancement(signals) {
+// CTL-653: the optional second param injects the verify verdict + the
+// event-counted remediate cycle count so the router can branch verify →
+// remediate vs verify → review while staying pure (no I/O). Backward compatible:
+// existing single-arg callers default to { verifyVerdict: undefined,
+// remediateCycleCount: 0 }, which preserves the legacy verify → review edge.
+export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount = 0 } = {}) {
   const sig = signals ?? {};
   let latest = null;
-  for (const p of PHASES) if (p in sig) latest = p;
+  for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
   if (latest === null || sig[latest] !== "done") return null;
+
+  // CTL-653: verdict routing at verify. A verdict-fail detours to remediate
+  // (until the cycle cap); pass/null/undefined falls through to the normal
+  // verify → review edge. The cap-and-escalate path returns null here — the
+  // sweep's maybeEscalateRemediateExhausted owns the stall, not a dispatch.
+  if (latest === "verify" && verifyVerdict === "fail") {
+    if (remediateCycleCount >= REMEDIATE_CYCLE_CAP) return null; // exhausted → sweep stalls it
+    if (REMEDIATE_PHASE in sig) return null; // remediate already dispatched this cycle
+    return REMEDIATE_PHASE;
+  }
+
   const next = transition(
     { phase: latest, reviveCount: 0, parkedFrom: null },
     { type: "complete" }
@@ -287,6 +314,73 @@ export function deriveAdvancement(signals) {
   if (isTerminal(next)) return null; // pipeline reached monitor-deploy → done
   if (next.phase in sig) return null; // successor already dispatched
   return next.phase;
+}
+
+// REMEDIATE_CYCLE_FILES — the per-cycle signal/artifact files the sweep deletes
+// to re-enter verify after a completed remediation (CTL-653). Limited to the
+// three files that constitute one verify⇄remediate cycle; upstream signals
+// (triage/research/plan/implement) and their artifacts are never touched.
+const REMEDIATE_CYCLE_FILES = ["phase-verify.json", "phase-remediate.json", "verify.json"];
+
+// maybeResetForRemediateCycle — CTL-653 re-entry. A completed remediate cycles
+// back to a fresh verify, but deriveAdvancement's `next.phase in sig` guard
+// blocks re-dispatching verify while its signal exists. Rather than special-
+// casing the guard, reset the cycle by deleting the verify+remediate signals
+// (and verify.json). The next deriveAdvancement then sees implement as the
+// latest `done` phase and cleanly re-dispatches verify. The cycle count
+// survives because it is event-counted (countRemediateCycles), not signal-stored.
+// Returns true when a reset happened (so the caller re-reads the signals).
+export function maybeResetForRemediateCycle(
+  orchDir,
+  ticket,
+  { rm = rmSync, readSignals = readPhaseSignals } = {}
+) {
+  const sig = readSignals(orchDir, ticket);
+  if (sig[REMEDIATE_PHASE] !== "done") return false;
+  for (const f of REMEDIATE_CYCLE_FILES) {
+    try {
+      rm(join(orchDir, "workers", ticket, f), { force: true });
+    } catch {
+      // best-effort — a missing file is the desired end state anyway
+    }
+  }
+  return true;
+}
+
+// maybeEscalateRemediateExhausted — CTL-653 cap. A verify verdict-fail with no
+// remediation budget left escalates to terminal `stalled`, so the existing
+// terminal sweep (this file, ~line 653) applies the `needs-human` label and
+// frees the slot. Writes status:"stalled" onto the verify signal in place;
+// idempotent (a signal already stalled is a no-op success). Returns true when
+// the ticket is (or was already) escalated, so the caller skips its dispatch.
+export function maybeEscalateRemediateExhausted(
+  orchDir,
+  ticket,
+  signals,
+  verdict,
+  cycleCount,
+  { writeFile = writeFileSync, readFile = readFileSync } = {}
+) {
+  if (signals.verify !== "done" || verdict !== "fail" || cycleCount < REMEDIATE_CYCLE_CAP) {
+    return false;
+  }
+  const p = join(orchDir, "workers", ticket, "phase-verify.json");
+  try {
+    const cur = JSON.parse(readFile(p, "utf8"));
+    if (cur.status === "stalled") return true; // idempotent
+    writeFile(
+      p,
+      JSON.stringify({
+        ...cur,
+        status: "stalled",
+        stalledReason: "remediate-cycle-cap-exhausted",
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch {
+    // best-effort — a missing/unreadable signal means nothing to stall
+  }
+  return true;
 }
 
 // safeWrite — run a best-effort Linear-write call (CTL-558). A write failure
@@ -570,7 +664,24 @@ export function schedulerTick(
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
-    const next = deriveAdvancement(readPhaseSignals(orchDir, ticket));
+    // CTL-653: re-enter verify after a completed remediation (deletes the cycle
+    // signals so deriveAdvancement re-dispatches a fresh verify this tick).
+    maybeResetForRemediateCycle(orchDir, ticket);
+
+    const signals = readPhaseSignals(orchDir, ticket);
+    // CTL-653: the verdict-router reads — verify.json verdict + event-counted
+    // cycle budget. Injected into deriveAdvancement so the router stays pure.
+    const verdict = readVerifyVerdict({ ticket, orchDir });
+    const cycleCount = countRemediateCycles({ ticket });
+
+    // CTL-653: cap reached → stall (needs-human via the terminal sweep below),
+    // skip any dispatch for this ticket this tick.
+    if (maybeEscalateRemediateExhausted(orchDir, ticket, signals, verdict, cycleCount)) continue;
+
+    const next = deriveAdvancement(signals, {
+      verifyVerdict: verdict,
+      remediateCycleCount: cycleCount,
+    });
     if (!next) continue;
     if (inDispatchCooldown(orchDir, ticket, next, now())) continue; // CTL-624: throttle refused re-dispatch
     const r = dispatchTicket(orchDir, ticket, next, { dispatch });
