@@ -1,7 +1,12 @@
 // reaper.test.mjs — Reaper reconciler unit tests (CTL-649 Phase 4).
 // All executors are injected; no real claude / git invocations.
 import { describe, it, expect, beforeEach, mock } from "bun:test";
-import { Reaper } from "./reaper.mjs";
+import {
+  Reaper,
+  ticketFromCwd,
+  groupBackgroundSessionsByTicket,
+  CLEANUP_GRACE_MS,
+} from "./reaper.mjs";
 
 function silentLog() {
   return { info: () => {}, warn: () => {}, error: () => {} };
@@ -568,5 +573,202 @@ describe("Reaper.bootReplay", () => {
     await r.bootReplay("/nonexistent/log/path.jsonl");
     // No throw == pass
     expect(true).toBe(true);
+  });
+});
+
+// ─── CTL-661 hole #4: pure grouping helpers ──────────────────────────────────
+describe("ticketFromCwd", () => {
+  it("derives the ticket from the worktree basename", () => {
+    expect(ticketFromCwd("/Users/x/catalyst/wt/CTL-661")).toBe("CTL-661");
+    expect(ticketFromCwd("/wt/CTL-661")).toBe("CTL-661");
+    expect(ticketFromCwd("/wt/CTL-661/")).toBe("CTL-661"); // trailing slash
+  });
+
+  it("keeps the /wt/CTL-64 vs /wt/CTL-649 boundary distinct", () => {
+    expect(ticketFromCwd("/wt/CTL-64")).toBe("CTL-64");
+    expect(ticketFromCwd("/wt/CTL-649")).toBe("CTL-649");
+    expect(ticketFromCwd("/wt/CTL-64")).not.toBe(ticketFromCwd("/wt/CTL-649"));
+  });
+
+  it("returns null for empty / non-string input", () => {
+    expect(ticketFromCwd("")).toBeNull();
+    expect(ticketFromCwd(null)).toBeNull();
+    expect(ticketFromCwd(undefined)).toBeNull();
+  });
+});
+
+describe("groupBackgroundSessionsByTicket", () => {
+  const bg = (sessionId, cwd) => ({ sessionId, cwd, kind: "background", status: "busy" });
+
+  it("buckets background sessions by ticket and groups distinct worktrees apart", () => {
+    const groups = groupBackgroundSessionsByTicket([
+      bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      bg("cccc3333-0000-0000-0000-000000000000", "/wt/CTL-660"),
+    ]);
+    expect(groups.get("CTL-661")).toHaveLength(2);
+    expect(groups.get("CTL-660")).toHaveLength(1);
+  });
+
+  it("drops interactive/unknown-kind sessions and sessions with no cwd", () => {
+    const groups = groupBackgroundSessionsByTicket([
+      bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      { sessionId: "dddd4444-0000-0000-0000-000000000000", cwd: "/wt/CTL-661", kind: "interactive" },
+      { sessionId: "eeee5555-0000-0000-0000-000000000000", kind: "background" }, // no cwd
+    ]);
+    expect(groups.get("CTL-661")).toHaveLength(1);
+  });
+});
+
+// ─── CTL-661 hole #4: reconcileTicketWorkers ─────────────────────────────────
+describe("Reaper.reconcileTicketWorkers", () => {
+  const bg = (sessionId, cwd, status = "busy") => ({ sessionId, cwd, kind: "background", status });
+
+  it("keeps the canonical bg_job_id owner and reaps the rest", async () => {
+    const emit = mock(() => Promise.resolve());
+    const r = new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      ]),
+      emit,
+      readActivePhaseSignal: () => ({ bg_job_id: "aaaa1111", phase: "verify" }),
+      lastSeenMs: () => null, // null does NOT trip the cleanup-grace skip
+      log: silentLog(),
+    });
+    await r.reconcileTicketWorkers();
+    expect(emit).toHaveBeenCalledTimes(1);
+    const [evt, fields] = emit.mock.calls[0];
+    expect(evt).toBe("phase.reconcile.reap-requested");
+    expect(fields.bgJobId).toBe("bbbb2222");
+    expect(fields.canonicalBgJobId).toBe("aaaa1111");
+    expect(fields.dominantPhase).toBe("verify");
+    expect(fields.reason).toBe("ctl-661-one-worker-per-ticket");
+  });
+
+  it("leaves a ticket with a single live session alone", async () => {
+    const emit = mock(() => Promise.resolve());
+    const r = new Reaper({
+      agents: agentsFixture([bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661")]),
+      emit,
+      readActivePhaseSignal: () => ({ bg_job_id: "aaaa1111", phase: "verify" }),
+      lastSeenMs: () => null,
+      log: silentLog(),
+    });
+    await r.reconcileTicketWorkers();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("falls back to newest-by-last_seen when the signal is unresolvable", async () => {
+    const emit = mock(() => Promise.resolve());
+    // lastSeenMs is an AGE: aaaa1111 is 10s old (newest), bbbb2222 is 5min old.
+    const ages = {
+      "aaaa1111-0000-0000-0000-000000000000": 10_000,
+      "bbbb2222-0000-0000-0000-000000000000": 300_000,
+    };
+    const r = new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      ]),
+      emit,
+      readActivePhaseSignal: () => null, // unresolvable → newest fallback
+      lastSeenMs: (sid) => ages[sid] ?? null,
+      log: silentLog(),
+    });
+    await r.reconcileTicketWorkers();
+    expect(emit).toHaveBeenCalledTimes(1);
+    // newest (aaaa1111) kept → older bbbb2222 reaped.
+    expect(emit.mock.calls[0][1].bgJobId).toBe("bbbb2222");
+  });
+
+  it("never reconciles interactive sessions sharing the cwd", async () => {
+    const emit = mock(() => Promise.resolve());
+    const r = new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        { sessionId: "dddd4444-0000-0000-0000-000000000000", cwd: "/wt/CTL-661", kind: "interactive", status: "busy" },
+      ]),
+      emit,
+      readActivePhaseSignal: () => ({ bg_job_id: "aaaa1111", phase: "verify" }),
+      lastSeenMs: () => null,
+      log: silentLog(),
+    });
+    await r.reconcileTicketWorkers();
+    // only 1 background session in the group → nothing to reap.
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("reconciles distinct worktrees independently", async () => {
+    const emit = mock(() => Promise.resolve());
+    const r = new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("cccc3333-0000-0000-0000-000000000000", "/wt/CTL-660"), // lone session, untouched
+      ]),
+      emit,
+      readActivePhaseSignal: (ticket) =>
+        ticket === "CTL-661" ? { bg_job_id: "aaaa1111", phase: "verify" } : null,
+      lastSeenMs: () => null,
+      log: silentLog(),
+    });
+    await r.reconcileTicketWorkers();
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit.mock.calls[0][1].bgJobId).toBe("bbbb2222");
+  });
+
+  it("routes a no-target reconcile event (timer trigger) to the sweep", async () => {
+    const emit = mock(() => Promise.resolve());
+    const r = new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      ]),
+      emit,
+      readActivePhaseSignal: () => ({ bg_job_id: "aaaa1111", phase: "verify" }),
+      lastSeenMs: () => null,
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.reconcile.reap-requested" }); // no bg_job_id → trigger
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit.mock.calls[0][1].bgJobId).toBe("bbbb2222");
+  });
+});
+
+// ─── CTL-661 Phase 5: cleanup-grace ──────────────────────────────────────────
+describe("Reaper.reconcileTicketWorkers — CLEANUP_GRACE_MS spawn grace", () => {
+  const bg = (sessionId, cwd) => ({ sessionId, cwd, kind: "background", status: "busy" });
+
+  function reconciler(emit, ageMs) {
+    return new Reaper({
+      agents: agentsFixture([
+        bg("aaaa1111-0000-0000-0000-000000000000", "/wt/CTL-661"),
+        bg("bbbb2222-0000-0000-0000-000000000000", "/wt/CTL-661"),
+      ]),
+      emit,
+      readActivePhaseSignal: () => ({ bg_job_id: "aaaa1111", phase: "verify" }),
+      lastSeenMs: (sid) => (sid.startsWith("bbbb2222") ? ageMs : null),
+      log: silentLog(),
+    });
+  }
+
+  it("spares a non-canonical session younger than the cleanup grace", async () => {
+    const emit = mock(() => Promise.resolve());
+    await reconciler(emit, 30_000).reconcileTicketWorkers(); // 30s < 60s grace
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("reaps the same session once it is past the grace", async () => {
+    const emit = mock(() => Promise.resolve());
+    await reconciler(emit, 90_000).reconcileTicketWorkers(); // 90s > 60s grace
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(emit.mock.calls[0][1].bgJobId).toBe("bbbb2222");
+  });
+
+  it("CLEANUP_GRACE_MS is distinct from STALE_MS (5m) and minIdleMs (15m)", () => {
+    expect(CLEANUP_GRACE_MS).toBe(60_000);
+    expect(CLEANUP_GRACE_MS).not.toBe(5 * 60 * 1000); // STALE_MS
+    expect(CLEANUP_GRACE_MS).not.toBe(15 * 60 * 1000); // DEFAULT_MIN_IDLE_MS
   });
 });

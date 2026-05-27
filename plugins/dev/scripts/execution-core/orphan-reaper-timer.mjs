@@ -56,7 +56,16 @@ export function startOrphanReaperTimer({
   const ms = Math.max(1, intervalSeconds) * 1000;
   const handle = clock.setInterval(async () => {
     try {
-      await emit("orphans.reap-requested", {});
+      // CTL-661 hole #4: drive the per-ticket reconciliation sweep off the same
+      // timer (no new daemon timer). A bare reconcile event — no bg_job_id — is
+      // the TRIGGER the Reaper routes to its reconcile sweep; the sweep then
+      // emits per-session phase.reconcile.reap-requested intents WITH a target.
+      // Both emits are issued synchronously (before any await) so a single tick
+      // fires both even when the producer is async.
+      await Promise.all([
+        emit("orphans.reap-requested", {}),
+        emit("phase.reconcile.reap-requested", {}),
+      ]);
     } catch (err) {
       // CTL-649: a persistently-unwritable event log would make every tick
       // fail silently, turning the periodic orphan safety-net into a permanent
