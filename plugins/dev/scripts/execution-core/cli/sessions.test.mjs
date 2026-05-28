@@ -20,6 +20,8 @@ import {
   runPrune,
   parseSessionArgs,
   indexSignalsByBgJobId,
+  netWaitingSessions,
+  buildWaitingRows,
 } from "./sessions.mjs";
 import { ArgError } from "./args.mjs";
 
@@ -781,5 +783,129 @@ describe("indexSignalsByBgJobId (real directory walk — CTL-674 regression)", (
 
   it("returns an empty map when neither root exists", () => {
     expect(indexSignalsByBgJobId().size).toBe(0); // temp dir has no runs/ or execution-core/
+  });
+});
+
+// ─── CTL-650: `sessions waiting` reference consumer ───────────────────────────
+
+const waitEvent = (name, sessionId, payload = {}) => ({
+  attributes: { "event.name": name },
+  body: { payload: { sessionId, ...payload } },
+});
+
+describe("netWaitingSessions (net-last-event-per-session reducer)", () => {
+  it("keeps only sessions whose net last event is waiting_on_user", () => {
+    const net = netWaitingSessions([
+      waitEvent("agent.waiting_on_user", "aaaaaaaa-1", { waitState: "WAITING_USER" }),
+      waitEvent("agent.waiting_on_user", "bbbbbbbb-2", { waitState: "WAITING_PERM" }),
+    ]);
+    expect([...net.keys()].sort()).toEqual(["aaaaaaaa-1", "bbbbbbbb-2"]);
+  });
+
+  it("excludes a session whose later event is agent.resumed", () => {
+    const net = netWaitingSessions([
+      waitEvent("agent.waiting_on_user", "aaaaaaaa-1", { waitState: "WAITING_USER" }),
+      waitEvent("agent.resumed", "aaaaaaaa-1", { waitState: "ACTIVE" }),
+    ]);
+    expect(net.has("aaaaaaaa-1")).toBe(false);
+  });
+
+  it("a re-waiting after a resume is included again (last wins)", () => {
+    const net = netWaitingSessions([
+      waitEvent("agent.waiting_on_user", "aaaaaaaa-1"),
+      waitEvent("agent.resumed", "aaaaaaaa-1"),
+      waitEvent("agent.waiting_on_user", "aaaaaaaa-1", { waitState: "WAITING_TOOL_OK" }),
+    ]);
+    expect(net.get("aaaaaaaa-1")?.waitState).toBe("WAITING_TOOL_OK");
+  });
+
+  it("ignores unrelated event names", () => {
+    const net = netWaitingSessions([
+      { attributes: { "event.name": "phase.implement.complete.CTL-1" }, body: { payload: { sessionId: "x" } } },
+    ]);
+    expect(net.size).toBe(0);
+  });
+});
+
+describe("buildWaitingRows", () => {
+  it("lists waiting sessions and joins ticket/phase via the signal index", async () => {
+    const sessionId = "abcd1234-eeee-ffff-0000-111122223333";
+    const rows = await buildWaitingRows({
+      events: [
+        waitEvent("agent.waiting_on_user", sessionId, {
+          shortId: "abcd1234",
+          waitState: "WAITING_USER",
+          waitingText: "Should I proceed?",
+          cwd: "/wt/CTL-650",
+        }),
+      ],
+      signalsByBgJobId: new Map([
+        ["abcd1234", { ticket: "CTL-650", phase: "implement", worktreePath: "/wt/CTL-650" }],
+      ]),
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({
+      sessionId,
+      shortId: "abcd1234",
+      ticket: "CTL-650",
+      phase: "implement",
+      waitState: "WAITING_USER",
+      waitingText: "Should I proceed?",
+      cwd: "/wt/CTL-650",
+    });
+  });
+
+  it("excludes a session that has since resumed", async () => {
+    const sessionId = "abcd1234-eeee-ffff-0000-111122223333";
+    const rows = await buildWaitingRows({
+      events: [
+        waitEvent("agent.waiting_on_user", sessionId, { shortId: "abcd1234" }),
+        waitEvent("agent.resumed", sessionId, { shortId: "abcd1234" }),
+      ],
+      signalsByBgJobId: new Map(),
+    });
+    expect(rows).toEqual([]);
+  });
+
+  it("falls back to inline classification when no events exist (daemon off)", async () => {
+    const sessionId = "abcd1234-eeee-ffff-0000-111122223333";
+    const rows = await buildWaitingRows({
+      events: [], // empty bus → fallback path
+      agents: () => [{ sessionId, status: "idle", cwd: "/wt/CTL-650" }],
+      findTranscriptFn: () => "/fake/transcript.jsonl",
+      makeTracker: () => ({
+        poll() {},
+        snapshot: () => ({
+          hasTranscript: true,
+          lastBlockType: "text",
+          stopReason: "end_turn",
+          lastText: "Need your call here?",
+          postUserOrResultCount: 0,
+        }),
+      }),
+      signalsByBgJobId: new Map([["abcd1234", { ticket: "CTL-650", phase: "implement" }]]),
+    });
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toMatchObject({
+      shortId: "abcd1234",
+      ticket: "CTL-650",
+      phase: "implement",
+      waitState: "WAITING_USER",
+    });
+    expect(rows[0].waitingText).toContain("Need your call here?");
+  });
+
+  it("fallback excludes non-waiting (busy/mid-turn) sessions", async () => {
+    const rows = await buildWaitingRows({
+      events: [],
+      agents: () => [{ sessionId: "abcd1234-x", status: "busy", cwd: "/wt" }],
+      findTranscriptFn: () => "/fake/transcript.jsonl",
+      makeTracker: () => ({
+        poll() {},
+        snapshot: () => ({ hasTranscript: true, lastBlockType: "text", stopReason: "end_turn" }),
+      }),
+      signalsByBgJobId: new Map(),
+    });
+    expect(rows).toEqual([]); // busy → ACTIVE, not waiting
   });
 });
