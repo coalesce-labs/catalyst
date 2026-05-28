@@ -34,6 +34,8 @@ import {
   getBrokerStartedAt,
   getLastWakeAt,
   getLastRegisterAt,
+  getGcLastRunAt,
+  getGcLastPrunedCount,
 } from "./state.mjs";
 import {
   getRecentAgents,
@@ -197,6 +199,11 @@ export function buildBrokerState({ probe } = {}) {
     interestCount: interests.size,
     lastWakeAt: getLastWakeAt(),
     lastRegisterAt: getLastRegisterAt(),
+    // CTL-643: boot-time GC pass observability. gcLastRunAt is the ISO timestamp
+    // of the most recent gc pass (set at broker startup); gcLastPrunedCount is
+    // the number of stale interests removed in that pass.
+    gcLastRunAt: getGcLastRunAt(),
+    gcLastPrunedCount: getGcLastPrunedCount(),
     // CTL-403: active wait-loop sessions (empty array when no active waits).
     waitingSessions: activeWaiting,
     // CTL-421: expose prose enabled state so the HUD can badge inactive prose interests.

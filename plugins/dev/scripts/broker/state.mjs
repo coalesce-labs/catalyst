@@ -70,6 +70,10 @@ let lastRegisterAt = null;
 // One-shot guard for broker.daemon.degraded — set on emission, cleared whenever
 // interests.size > 0 so a future empty window re-arms.
 let degradedEmittedAt = null;
+// CTL-643: boot-time GC pass result, surfaced in broker.state.json so operators
+// can see "the broker pruned N stale interests on its last start."
+let gcLastRunAt = null;
+let gcLastPrunedCount = null;
 
 export function getBrokerStartedAt() {
   return brokerStartedAt;
@@ -95,6 +99,18 @@ export function getDegradedEmittedAt() {
 export function setDegradedEmittedAt(value) {
   degradedEmittedAt = value;
 }
+export function getGcLastRunAt() {
+  return gcLastRunAt;
+}
+export function setGcLastRunAt(value) {
+  gcLastRunAt = value;
+}
+export function getGcLastPrunedCount() {
+  return gcLastPrunedCount;
+}
+export function setGcLastPrunedCount(value) {
+  gcLastPrunedCount = value;
+}
 
 // Test-only setters. Production paths only ever set these via main() and the
 // router hook points; tests use these to time-travel without touching Date.now().
@@ -117,4 +133,6 @@ export function __resetBrokerLivenessForTest() {
   lastWakeAt = null;
   lastRegisterAt = null;
   degradedEmittedAt = null;
+  gcLastRunAt = null;
+  gcLastPrunedCount = null;
 }
