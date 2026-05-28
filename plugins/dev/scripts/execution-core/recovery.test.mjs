@@ -1048,6 +1048,27 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.appendEscalatedEvent.calls[0][0].final_attempt_count).toBe(2);
   });
 
+  test("CTL-679: breaker open → 'rate-limited-deferred', no escalation event, no label write", () => {
+    const s = setupReviveScenario({ reviveCount: 2 }); // would otherwise escalate
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
+      ...s.opts,
+      breaker: { isOpen: () => true },
+    });
+    expect(r).toBe("rate-limited-deferred");
+    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+  });
+
+  test("CTL-679: breaker closed → escalation proceeds as normal", () => {
+    const s = setupReviveScenario({ reviveCount: 2 });
+    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
+      ...s.opts,
+      breaker: { isOpen: () => false },
+    });
+    expect(r).toBe("escalated");
+    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
+  });
+
   test("storm-breaker: distinct=4 > 3 → 'revive-suppressed', no dispatch", () => {
     const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 4 });
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");

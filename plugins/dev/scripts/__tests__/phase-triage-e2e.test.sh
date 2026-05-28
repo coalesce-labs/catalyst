@@ -6,8 +6,9 @@
 #   2. Stand up a fake `linearis` shim on PATH:
 #        - `linearis issues read <id>` → prints fixture JSON
 #        - `linearis issues discuss <id> --body <text>` → records call to a log
-#      (CTL-558: phase-triage no longer calls `linearis issues update` for the
-#       `triaged` label — the coordinator's label sweep owns it.)
+#      (phase-triage never calls `linearis issues update` for a `triaged`
+#       label — there is no such label; triage completion is signaled by the
+#       analysis comment plus the local triage.json.)
 #   3. Point CATALYST_EVENTS_FILE at a tempfile.
 #   4. Extract the executable bash body from the skill (fenced by
 #      `bash phase-triage-body`).
@@ -167,13 +168,13 @@ else
 	fail "happy: discuss call" "no 'discuss' entry in linearis log:$(printf '\n%s' "$(cat "$LINEARIS_LOG" 2>/dev/null)")"
 fi
 
-# CTL-558: the `triaged` label is applied by the coordinator (the execution-core
-# scheduler's label sweep), NOT by phase-triage. The skill must NOT call
-# `linearis issues update` for the label any more.
+# There is no `triaged` label (removed). phase-triage must never call
+# `linearis issues update` — triage completion is signaled by the analysis
+# comment plus the local triage.json, never a Linear label write.
 if grep -q '^update$' "$LINEARIS_LOG" 2>/dev/null; then
-	fail "happy: no label update call" "phase-triage still calls 'linearis issues update' — the coordinator owns the triaged label (CTL-558)"
+	fail "happy: no label update call" "phase-triage calls 'linearis issues update' — there is no triaged label to write"
 else
-	ok "happy: phase-triage does not self-apply the triaged label (coordinator owns it, CTL-558)"
+	ok "happy: phase-triage does not write any Linear label (no triaged label exists)"
 fi
 
 # Assert: emitted event has the right shape

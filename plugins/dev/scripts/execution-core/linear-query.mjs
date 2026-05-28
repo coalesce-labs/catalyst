@@ -5,6 +5,7 @@
 // post-filter that linearis cannot express server-side.
 
 import { spawnSync } from "node:child_process";
+import { withBreaker } from "./linear-breaker.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -33,9 +34,9 @@ export function buildLinearisArgs(query) {
   return args;
 }
 
-// defaultExec — thin spawnSync wrapper. Injected in tests so no test ever
+// rawExec — thin spawnSync wrapper. Injected in tests so no test ever
 // shells out to the real linearis CLI or touches the network.
-function defaultExec(cmd, args) {
+function rawExec(cmd, args) {
   const res = spawnSync(cmd, args, { encoding: "utf8" });
   if (res.error) {
     return { code: 127, stdout: "", stderr: res.error.message };
@@ -46,6 +47,12 @@ function defaultExec(cmd, args) {
     stderr: res.stderr ?? "",
   };
 }
+
+// defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker. The
+// eligible poll and per-ticket reads short-circuit without spawning linearis
+// while the breaker is open. Shared singleton with linear-write.mjs so a 429 on
+// the write path also pauses reads (and vice-versa).
+const defaultExec = withBreaker(rawExec);
 
 // normalizeTicket — flatten linearis's nested shape into a stable record.
 // `state` and `project` arrive as `{ name }` objects from the Linear API;

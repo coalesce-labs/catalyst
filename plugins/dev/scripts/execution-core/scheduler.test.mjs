@@ -1522,21 +1522,12 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
   });
 });
 
-// ── CTL-558: deterministic label write-back (triaged / needs-human) ──
+// ── CTL-558: deterministic label write-back (needs-human) ──
 
 describe("schedulerTick — label write-back (CTL-558)", () => {
   const noWrites = () => ({
     applyPhaseStatus() {},
     applyTerminalDone() {},
-  });
-
-  test("applies the `triaged` label when a ticket's triage signal is done", () => {
-    writeSignal("CTL-6", "triage", "done");
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const labels = [];
-    const writeStatus = { ...noWrites(), applyLabel: (a) => labels.push(a) };
-    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
-    expect(labels).toContainEqual(expect.objectContaining({ ticket: "CTL-6", label: "triaged" }));
   });
 
   test("applies `needs-human` when any phase signal is stalled", () => {
@@ -1561,9 +1552,9 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("writes the .applied marker only after applyLabel reports applied:true", () => {
-    writeSignal("CTL-8", "triage", "done");
+    writeSignal("CTL-8", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const markerPath = join(orchDir, "workers", "CTL-8", ".linear-label-triaged.applied");
+    const markerPath = join(orchDir, "workers", "CTL-8", ".linear-label-needs-human.applied");
     // applyLabel reports failure → no marker written → retried next tick.
     const failWrite = { ...noWrites(), applyLabel: () => ({ applied: false }) };
     schedulerTick(orchDir, {
@@ -1583,7 +1574,7 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("a label-write throw never aborts the tick", () => {
-    writeSignal("CTL-9", "triage", "done");
+    writeSignal("CTL-9", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const writeStatus = {
       ...noWrites(),
@@ -1598,10 +1589,10 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
 
   // CTL-585: short-circuit the per-tick retry on an unrecoverable miss.
   test("writes the .skipped marker on reason:'missing-label' and stops retrying", () => {
-    writeSignal("CTL-10", "triage", "done");
+    writeSignal("CTL-10", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const skipped = join(orchDir, "workers", "CTL-10", ".linear-label-triaged.skipped");
-    const applied = join(orchDir, "workers", "CTL-10", ".linear-label-triaged.applied");
+    const skipped = join(orchDir, "workers", "CTL-10", ".linear-label-needs-human.skipped");
+    const applied = join(orchDir, "workers", "CTL-10", ".linear-label-needs-human.applied");
 
     let calls = 0;
     const writeStatus = {
@@ -1624,9 +1615,9 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("a transient failure still retries on the next tick", () => {
-    writeSignal("CTL-11", "triage", "done");
+    writeSignal("CTL-11", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const skipped = join(orchDir, "workers", "CTL-11", ".linear-label-triaged.skipped");
+    const skipped = join(orchDir, "workers", "CTL-11", ".linear-label-needs-human.skipped");
 
     let calls = 0;
     const writeStatus = {
@@ -1644,7 +1635,7 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("a rate-limited failure still retries on the next tick", () => {
-    writeSignal("CTL-12", "triage", "done");
+    writeSignal("CTL-12", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     let calls = 0;
     const writeStatus = {
@@ -1660,11 +1651,11 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("a pre-existing .skipped marker prevents re-attempt", () => {
-    writeSignal("CTL-13", "triage", "done");
+    writeSignal("CTL-13", "implement", "stalled");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     // Pre-seed the .skipped marker (simulates a previous daemon run that hit
     // the missing-label path).
-    writeFileSync(join(orchDir, "workers", "CTL-13", ".linear-label-triaged.skipped"), "");
+    writeFileSync(join(orchDir, "workers", "CTL-13", ".linear-label-needs-human.skipped"), "");
     let calls = 0;
     const writeStatus = {
       ...noWrites(),
@@ -2078,11 +2069,11 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
       expect(args.slice(0, 3)).toEqual(["labels", "list", "--team"]);
       const team = args[3];
       // linearis labels list emits JSON ({nodes:[{name,...},...]}).
-      // CTL is missing both expected labels; ENG has both.
+      // CTL is missing the expected label; ENG has it.
       const nodes =
         team === "CTL"
           ? [{ name: "orchestrate" }, { name: "enhancement" }]
-          : [{ name: "triaged" }, { name: "needs-human" }, { name: "bug" }];
+          : [{ name: "needs-human" }, { name: "bug" }];
       return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
     };
     preflightWorkspaceLabels({
@@ -2093,7 +2084,7 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
     const ctlWarns = warnings.filter(
       (w) => w.obj?.team === "CTL" && w.msg.includes("missing required label")
     );
-    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual(["needs-human", "triaged"]);
+    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual(["needs-human"]);
     const engWarns = warnings.filter((w) => w.obj?.team === "ENG");
     expect(engWarns).toHaveLength(0);
   });

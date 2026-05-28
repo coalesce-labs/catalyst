@@ -667,12 +667,12 @@ export function verifyDispatchedSignal(orchDir, ticket, phase) {
 }
 
 // REQUIRED_WORKSPACE_LABELS — the flat labels the CTL-558 coordinator sweep
-// writes. Both must pre-exist in the Linear workspace; linearis has no
-// `labels create`. CTL-585's preflight warns once at daemon start if either
+// writes. Must pre-exist in the Linear workspace; linearis has no
+// `labels create`. CTL-585's preflight warns once at daemon start if it
 // is missing, so an operator sees the contract gap before the per-tick label
 // sweep starts (and so the missing-label short-circuit in labelOnce does not
 // surprise a fresh operator).
-const REQUIRED_WORKSPACE_LABELS = ["triaged", "needs-human"];
+const REQUIRED_WORKSPACE_LABELS = ["needs-human"];
 
 // preflightWorkspaceLabels — best-effort daemon-start check. For each team,
 // list the team's labels and warn once per missing expected label. `exec`
@@ -1094,11 +1094,10 @@ export function schedulerTick(
   // (3) Terminal-Done + label sweep (CTL-558) — one pass over every started
   // ticket. deriveAdvancement returns null once monitor-deploy completes, so
   // terminal `Done` is not a dispatch — it needs this dedicated sweep. In the
-  // same pass: apply the `triaged` label on triage completion, and the flat
-  // `needs-human` label when any phase signal is `stalled` (D7 — the worker
-  // keeps its phase state, it does not bounce to Triage). Status writes are
-  // idempotent via linear-transition.sh; label writes are guarded once-per-run
-  // by labelOnce's marker file.
+  // same pass: apply the flat `needs-human` label when any phase signal is
+  // `stalled` (D7 — the worker keeps its phase state, it does not bounce to
+  // Triage). Status writes are idempotent via linear-transition.sh; label
+  // writes are guarded once-per-run by labelOnce's marker file.
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
     // CTL-589 (CTL-512 followup): `skipped` is the second terminal status for
@@ -1112,9 +1111,6 @@ export function schedulerTick(
       terminalDoneOnce(orchDir, ticket, writeStatus);
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
-    }
-    if (signals.triage === "done") {
-      labelOnce(orchDir, ticket, "triaged", writeStatus);
     }
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
