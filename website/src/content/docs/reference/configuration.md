@@ -930,6 +930,16 @@ The `executionCore` block carries **only** these three concurrency keys in the
 template; `eligibleQuery` is intentionally central (registry.json, CTL-582 D4).
 :::
 
+**Hot-reload (CTL-676).** `maxParallel`, `minParallel`, and `maxParallelCeiling`
+are re-read by the execution-core scheduler on every tick (~2s under event-log
+activity via the existing `fs.watch` + 2s debounce, ~30s otherwise via the
+periodic backstop). Edits take effect on the next tick without a daemon
+restart. Lowering `maxParallel` mid-run gates new dispatch only — in-flight
+workers continue (the dispatch gate is the only consumer of the resolved
+ceiling). Other `executionCore` fields (`eligibleQuery` lives in the central
+registry; `dispatchMode` and structural daemon fields elsewhere in the config)
+remain boot-time only.
+
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag >
 `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The
 dispatcher reads `dispatchMode` at
