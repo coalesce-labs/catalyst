@@ -1322,6 +1322,267 @@ describe("startScheduler / stopScheduler", () => {
   });
 });
 
+// ── CTL-676: hot-reload concurrency knobs via per-tick re-read ──
+//
+// The scheduler stores `configPath` on `runningOpts` and, when set, re-reads
+// `readExecutionCoreConcurrency(configPath)` at the top of every `runTick`
+// instead of re-passing the boot-captured object. An edit to the config takes
+// effect on the next debounced tick (≤2s under event-log activity) or the
+// next periodic tick (≤30s in production; smaller in tests). When `configPath`
+// is unset (back-compat scheduler harnesses), `runTick` re-passes
+// `runningOpts.concurrency` exactly as before CTL-676.
+describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
+  afterEach(() => __resetForTests());
+
+  // Test 5 (back-compat hinge) — calling startScheduler without `configPath`
+  // keeps the boot-captured concurrency object on every tick. Observable via
+  // the dispatch ceiling: with `concurrency: { maxParallel: 2 }` and 3 eligible
+  // ready tickets, exactly 2 dispatch on the first tick.
+  test("configPath unset → boot-captured concurrency reaches schedulerTick (back-compat)", () => {
+    const dispatch = fakeDispatch();
+    const tk = (id, priority) => ({
+      identifier: id,
+      priority,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      concurrency: { maxParallel: 2 },
+      liveBackgroundCount: () => 0, // CTL-676: deterministic in-flight count
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    // 2 dispatches (the ceiling), not 3 — proves runningOpts.concurrency
+    // reached the schedulerTick call.
+    expect(dispatch.calls.length).toBe(2);
+  });
+
+  // Test 1 (happy path) — editing the config file between two ticks raises
+  // the slot ceiling on the next tick. The observation route is the dispatch
+  // count under a controlled-size ready set, gated by readMaxParallel which
+  // schedulerTick computes from the threaded `concurrency` object.
+  test("editing the config raises the ceiling on the next tick", async () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    // Pre-create the event log so a later append is an in-place `change`
+    // (not a `rename` that some macOS hosts can drop). Mirrors the existing
+    // "an event-log change triggers a debounced tick" test.
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    const tk = (id, priority) => ({
+      identifier: id,
+      priority,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      liveBackgroundCount: () => 0, // CTL-676
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    // First tick honored the file's maxParallel: 1 → exactly one dispatch.
+    expect(dispatch.calls.length).toBe(1);
+    const firstTicket = dispatch.calls[0].ticket;
+
+    // Raise the ceiling. The already-dispatched ticket has a worker dir, so
+    // the new-work pull will skip it; on the next tick we expect the next
+    // two ranked tickets to dispatch.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 3 } } },
+      }),
+    );
+    await waitFor(() => dispatch.calls.length >= 3, {
+      intervalMs: 100,
+      onTick: () => appendToEventLog('{"event":"wake.CTL-676"}\n'),
+    });
+    expect(dispatch.calls.length).toBe(3);
+    // The originally-dispatched ticket is not re-dispatched (its worker dir
+    // gates it out of the new-work pull).
+    expect(dispatch.calls.filter((c) => c.ticket === firstTicket).length).toBe(1);
+  });
+
+  // Test 2 (in-flight safety) — lowering the ceiling does NOT kill the
+  // already-dispatched worker; it gates only the next selectDispatchable
+  // result. teardownWorktree is the seam that would tear down a worker.
+  test("lowering the ceiling does not kill in-flight workers", async () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 2 } } },
+      }),
+    );
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    const teardownCalls = [];
+    const teardownWorktree = (args) => {
+      teardownCalls.push(args);
+    };
+    const tk = (id, priority) => ({
+      identifier: id,
+      priority,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    });
+    startScheduler({
+      orchDir,
+      dispatch,
+      teardownWorktree,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2)],
+      configPath,
+      liveBackgroundCount: () => 0, // CTL-676
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    expect(dispatch.calls.length).toBe(2);
+
+    // Drop the ceiling below the in-flight count. The next tick must not
+    // tear down or re-dispatch anything.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    // Burn a few wake cycles so a hypothetical teardown would have fired.
+    for (let i = 0; i < 5; i++) {
+      appendToEventLog('{"event":"wake.CTL-676.b"}\n');
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    expect(teardownCalls.length).toBe(0);
+    // No additional dispatches were issued either (no new eligible tickets,
+    // and the in-flight ones gate themselves out of the pull).
+    expect(dispatch.calls.length).toBe(2);
+  });
+
+  // Test 3 (invalid/partial new config falls back) — rewriting the file to
+  // malformed JSON makes readExecutionCoreConcurrency return {}, so the next
+  // tick falls back to state.json.maxParallel (here, 2) exactly as a fresh
+  // boot against the same malformed config would.
+  test("invalid new config falls back to state.json on the next tick", async () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    const tk = (id, priority) => ({
+      identifier: id,
+      priority,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      liveBackgroundCount: () => 0, // CTL-676
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    // First tick: config wins → maxParallel = 1.
+    expect(dispatch.calls.length).toBe(1);
+
+    // Corrupt the config. Next tick must fall back to state.json (2).
+    writeFileSync(configPath, "{ not json");
+    await waitFor(() => dispatch.calls.length >= 2, {
+      intervalMs: 100,
+      onTick: () => appendToEventLog('{"event":"wake.CTL-676.c"}\n'),
+    });
+    // Exactly 2 (one before, one after) — config-absent ceiling of 2.
+    expect(dispatch.calls.length).toBe(2);
+  });
+
+  // Test 4 (surface pinning) — the per-tick re-read only consults
+  // `readExecutionCoreConcurrency`; out-of-scope fields in the new config
+  // (here `dispatchMode`) cannot change scheduler behavior. We assert this
+  // indirectly: an edit that flips `maxParallel` to 1 AND adds
+  // `dispatchMode: "oneshot-legacy"` is honored for maxParallel (the next
+  // tick gates dispatch to 1) and has no other visible effect on the
+  // scheduler's choices.
+  test("only readExecutionCoreConcurrency drives the per-tick re-read (no other fields)", async () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: {
+          orchestration: {
+            executionCore: { maxParallel: 3, dispatchMode: "phase-agent" },
+          },
+        },
+      }),
+    );
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    const tk = (id, priority) => ({
+      identifier: id,
+      priority,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3), tk("CTL-D", 4)],
+      configPath,
+      liveBackgroundCount: () => 0, // CTL-676
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    expect(dispatch.calls.length).toBe(3);
+
+    // Edit lowers maxParallel and flips dispatchMode. The maxParallel change
+    // bites the next tick; dispatchMode is structural (not re-read) and is a
+    // no-op here. The 3 in-flight tickets are still gated out of the pull,
+    // and the 4th ticket cannot dispatch because freeSlots = max(0, 1-3) = 0.
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: {
+          orchestration: {
+            executionCore: { maxParallel: 1, dispatchMode: "oneshot-legacy" },
+          },
+        },
+      }),
+    );
+    for (let i = 0; i < 5; i++) {
+      appendToEventLog('{"event":"wake.CTL-676.d"}\n');
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    // Still 3 — the 4th ticket did not dispatch under the lower ceiling.
+    expect(dispatch.calls.length).toBe(3);
+  });
+});
+
 // ── CTL-539: idempotent-dispatch proof — re-deriving the tick after a
 // "crash" can never double-dispatch the same {ticket, phase} ──
 

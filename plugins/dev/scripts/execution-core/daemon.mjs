@@ -114,6 +114,12 @@ export function startDaemon({
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
   concurrency = {},
+  // CTL-676: the resolved config path. Threaded only into startScheduler so the
+  // scheduler can re-read concurrency knobs per tick (hot-reload). reconcileBoot
+  // intentionally stays on the boot-captured `concurrency` object — it fires
+  // once before the scheduler starts and never re-reads. Null in tests that
+  // never resolve a config path.
+  configPath = null,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -166,7 +172,7 @@ export function startDaemon({
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache, concurrency }); // CTL-536 + CTL-634 + CTL-665 — pull-loop scheduler
+    schedulerFn({ orchDir, cache, concurrency, configPath }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 — pull-loop scheduler (configPath enables per-tick re-read)
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -456,7 +462,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, concurrency });
+    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath }); // CTL-676
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);
