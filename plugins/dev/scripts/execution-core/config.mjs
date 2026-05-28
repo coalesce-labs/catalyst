@@ -139,3 +139,16 @@ export const IDLE_CONFIRM_TICKS =
 // genuinely wedged worker does. Env-overridable for tuning.
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
+
+// CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
+// continuously classifies live sessions and emits agent.waiting_on_user /
+// agent.resumed transition events. CATALYST_WAIT_WATCHER=0 disables it (the
+// test/opt-out knob, mirroring EXECUTION_CORE_DISABLE_REAPER). The tick cadence
+// reuses EVENT_DEBOUNCE_MS (env-tunable via EXECUTION_CORE_DEBOUNCE_MS) so the
+// watcher's enumeration sweep runs at the same order as the reaper sweep.
+export function readWaitWatcherConfig() {
+  return {
+    enabled: process.env.CATALYST_WAIT_WATCHER !== "0",
+    intervalMs: EVENT_DEBOUNCE_MS,
+  };
+}

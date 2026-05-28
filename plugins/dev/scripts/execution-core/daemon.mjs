@@ -25,7 +25,14 @@ import {
 } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
 import { parseEventTailChunk } from "./event-tail.mjs";
-import { getExecutionCoreDir, getEventLogPath, log, EVENT_DEBOUNCE_MS } from "./config.mjs";
+import {
+  getExecutionCoreDir,
+  getEventLogPath,
+  log,
+  EVENT_DEBOUNCE_MS,
+  readWaitWatcherConfig,
+} from "./config.mjs";
+import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import {
   recoverStartup,
   startMonitor,
@@ -55,6 +62,8 @@ let _pidFile = null;
 // CTL-649: reap-intent reconciler + periodic orphan-sweep timer.
 let _reaper = null;
 let _orphanTimer = null;
+// CTL-650: the push-based session wait-state watcher handle.
+let _waitWatcher = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
 let _eventLogCursor = 0;
@@ -97,6 +106,10 @@ export function startDaemon({
   // that only exercise monitor + scheduler.
   enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
   orphanReaperConfig = null,
+  // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
+  // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
+  startWaitWatcher = realStartWaitWatcher,
+  enableWaitWatcher = readWaitWatcherConfig().enabled,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -185,6 +198,12 @@ export function startDaemon({
 
     if (enableReaper) {
       startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir });
+    }
+
+    // CTL-650: start the push-based session wait-state watcher. Inside the same
+    // try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    if (enableWaitWatcher) {
+      _waitWatcher = startWaitWatcher({ intervalMs: readWaitWatcherConfig().intervalMs });
     }
   } catch (err) {
     stopDaemon();
@@ -387,6 +406,15 @@ export function stopDaemon() {
     _orphanTimer = null;
   }
   _reaper = null;
+  // CTL-650: stop the wait-state watcher.
+  if (_waitWatcher) {
+    try {
+      _waitWatcher.stop();
+    } catch {
+      /* watcher already stopped */
+    }
+    _waitWatcher = null;
+  }
   _eventLogCursor = 0;
   _eventLogLeftover = "";
   if (_pidFile) {

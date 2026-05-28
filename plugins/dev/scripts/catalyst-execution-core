@@ -237,7 +237,7 @@ Usage: catalyst-execution-core <command> [args]
 
 Commands:
   daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status)
-  sessions    inventory / reap leaked `claude --bg` sessions (list|show|prune)
+  sessions    inventory / reap leaked `claude --bg` sessions (list|show|waiting|prune)
   worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
