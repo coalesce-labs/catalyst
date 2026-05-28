@@ -2302,6 +2302,99 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
   });
 });
 
+// CTL-643: the step-0 reclaim sweep filters out terminal tickets, so
+// reclaimDeadWork is never invoked for them. reclaimDeadWorkIfPossible already
+// short-circuits on terminal signals at recovery.mjs (~1009); pre-filtering here
+// eliminates iteration cost + the log/audit churn that fed the HUD escalation
+// storm (2/min) and lets the per-tick cost match the in-flight set size, not
+// the started-ticket set size.
+describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
+  function writeNestedSignal(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  const writeStatus = {
+    applyPhaseStatus: () => {},
+    applyTerminalDone: () => {},
+    applyLabel: () => ({ applied: true }),
+  };
+
+  test("reclaimDeadWork is called for in-flight tickets only, never for terminal ones", () => {
+    writeNestedSignal("CTL-A", "implement", { status: "running", bg_job_id: "bg-a" });
+    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+    writeNestedSignal("CTL-C", "verify", { status: "failed" });
+
+    const reclaimDeadWork = recorder("noop");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+
+    const seenTickets = reclaimDeadWork.calls.map((args) => args[1].ticket);
+    expect(seenTickets).toContain("CTL-A");
+    expect(seenTickets).not.toContain("CTL-B");
+    expect(seenTickets).not.toContain("CTL-C");
+    expect(reclaimDeadWork.calls.length).toBe(1);
+  });
+
+  test("preserves the existing result shape (reclaimed/revived/reviveSuppressed/escalated)", () => {
+    writeNestedSignal("CTL-A", "implement", { status: "running", bg_job_id: "bg-a" });
+    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "noop",
+    });
+
+    expect(Array.isArray(r.reclaimed)).toBe(true);
+    expect(Array.isArray(r.revived)).toBe(true);
+    expect(Array.isArray(r.reviveSuppressed)).toBe(true);
+    expect(Array.isArray(r.escalated)).toBe(true);
+  });
+
+  test("skips the loop entirely when no tickets are in-flight (all terminal)", () => {
+    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+    writeNestedSignal("CTL-C", "verify", { status: "failed" });
+
+    const reclaimDeadWork = recorder("noop");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+
+    expect(reclaimDeadWork.calls.length).toBe(0);
+  });
+
+  test("filters out aborted/stalled tickets (slot-freeing per isTicketInFlight)", () => {
+    writeNestedSignal("CTL-A", "implement", { status: "running", bg_job_id: "bg-a" });
+    writeNestedSignal("CTL-D", "implement", { status: "aborted" });
+    writeNestedSignal("CTL-E", "implement", { status: "stalled" });
+
+    const reclaimDeadWork = recorder("noop");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      writeStatus,
+      teardownWorktree: () => true,
+      reclaimDeadWork,
+    });
+
+    const seen = reclaimDeadWork.calls.map((args) => args[1].ticket);
+    expect(seen).toEqual(["CTL-A"]);
+  });
+});
+
 // recorder — small spy that records args and returns either a constant value or
 // a function-derived value. Local to this describe to avoid leaking into the
 // existing block-scope helpers.

@@ -52,10 +52,18 @@ import {
   HEARTBEAT_STALE_MS,
   getEventLogPath,
 } from "./config.mjs";
-import { getInterests, getWaitingSessionsMap, setBrokerStartedAt } from "./state.mjs";
+import {
+  getInterests,
+  getWaitingSessionsMap,
+  setBrokerStartedAt,
+  setGcLastRunAt,
+  setGcLastPrunedCount,
+} from "./state.mjs";
 import {
   migrateLegacyInterestsFile,
   loadPersistedInterests,
+  saveInterests,
+  persistBrokerState,
   buildBrokerState,
   writeBrokerStateFile,
   replayWorkerStateProjection,
@@ -67,6 +75,10 @@ import {
   clearDebounceTimers,
 } from "./router.mjs";
 import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
+import { deleteFilterState } from "./broker-state.mjs";
+import { gcStaleInterests } from "./gc-startup.mjs";
+import { getExecutionCoreDir, getRunsRoot } from "../execution-core/config.mjs";
+import { defaultStatJob } from "../execution-core/recovery.mjs";
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
@@ -254,6 +266,26 @@ function main() {
   loadPersistedInterests();
   loadExistingRegistrations();
 
+  // CTL-643: GC stale interests left over from dead orchestrators / sessions
+  // before the live tailer starts ingesting filter.register events. Bulk
+  // pattern (mirrors handleOrchestratorTerminated) — one log line per pruned
+  // entry, one saveInterests + persistBrokerState after the loop. Safe here
+  // because the broker is single-threaded and fs.watch is not registered
+  // until startTailing() below.
+  const gcResult = gcStaleInterests({
+    interests,
+    log,
+    saveInterests,
+    persistBrokerState,
+    deleteFilterState,
+    appendEvent,
+    execCoreOrchDir: getExecutionCoreDir(),
+    runsRoot: getRunsRoot(),
+    statJob: defaultStatJob,
+  });
+  setGcLastRunAt(new Date().toISOString());
+  setGcLastPrunedCount(gcResult.pruned);
+
   // CTL-357: surface stale prose interests left on disk now that the Groq path
   // is off by default. Single-shot info event so the HUD/operator can see them
   // without grepping broker-interests.json.
@@ -302,6 +334,10 @@ function main() {
     detail: {
       pid: process.pid,
       recovered_interests: interests.size,
+      // CTL-643: surface boot-time GC results so the startup event captures
+      // how many stale interests were pruned and why.
+      gc_pruned: gcResult.pruned,
+      gc_by_reason: gcResult.byReason,
       watchdog_interval_ms: WATCHDOG_INTERVAL_MS,
       heartbeat_stale_ms: HEARTBEAT_STALE_MS,
       broker: true,

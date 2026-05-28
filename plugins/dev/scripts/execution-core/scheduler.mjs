@@ -853,7 +853,17 @@ export function schedulerTick(
   const revived = [];
   const reviveSuppressed = [];
   const escalated = [];
+  // CTL-643: drop terminal tickets from the reclaim attention set.
+  // reclaimDeadWorkIfPossible already short-circuits on terminal signals
+  // (recovery.mjs:~1009); filtering here eliminates iteration cost + the
+  // log/audit churn that fed the HUD escalation storm (2/min) and lets the
+  // per-tick cost match the in-flight set size, not the started-ticket set
+  // size. listInFlightTickets defines in-flight as "has ≥1 signal AND is
+  // neither pipeline-complete (monitor-deploy done/skipped) nor
+  // failed/stalled/aborted" — exactly the set this sweep cares about.
+  const inFlightTickets = listInFlightTickets(orchDir);
   for (const sig of readWorkerSignals(orchDir)) {
+    if (!inFlightTickets.has(sig.ticket)) continue;
     const team = teamOf(sig.ticket);
     const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
     const r = reclaimDeadWork(orchDir, sig, { repoRoot });
