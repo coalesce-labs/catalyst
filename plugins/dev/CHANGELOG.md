@@ -1,5 +1,12 @@
 # Changelog
 
+## [10.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.0...catalyst-dev-v10.2.1) (2026-05-28)
+
+
+### Bug Fixes
+
+* **dev:** inject liveBackgroundCount in scheduler tests broken by CTL-705 preemption (CTL-715) ([#1188](https://github.com/coalesce-labs/catalyst/issues/1188)) ([9e1dedf](https://github.com/coalesce-labs/catalyst/commit/9e1dedfa6dc3edf1efe3c47123c5807710f1fd8d))
+
 ## [10.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.1.0...catalyst-dev-v10.2.0) (2026-05-28)
 
 
