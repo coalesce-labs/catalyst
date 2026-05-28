@@ -648,6 +648,36 @@ describe("consumeEventTail (byte-offset + partial-line tail)", () => {
   });
 });
 
+// CTL-701 Phase 3: boot marker exists when recover() (detectColdStart) reads it
+describe("startDaemon — writeBootMarker ordering (CTL-701)", () => {
+  test("daemon-boot.json written BEFORE recover() runs", () => {
+    const orchDir = join(process.env.CATALYST_DIR, "execution-core");
+    let bootFileExistedAtRecover = false;
+    let bootedAtAtRecover = null;
+    startDaemon({
+      recover: (o) => {
+        const bootPath = join(o.orchDir, "daemon-boot.json");
+        try {
+          const raw = readFileSync(bootPath, "utf8");
+          const parsed = JSON.parse(raw);
+          bootFileExistedAtRecover = true;
+          bootedAtAtRecover = parsed.bootedAt;
+        } catch {
+          /* file not yet written — test will fail */
+        }
+        return {};
+      },
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    expect(bootFileExistedAtRecover).toBe(true);
+    expect(typeof bootedAtAtRecover).toBe("string");
+    expect(Number.isNaN(Date.parse(bootedAtAtRecover))).toBe(false);
+  });
+});
+
 describe("stopDaemon", () => {
   test("stops monitor + scheduler and removes the pidFile", () => {
     const pidFile = join(process.env.CATALYST_DIR, "daemon.pid");

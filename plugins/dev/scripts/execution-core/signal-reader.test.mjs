@@ -5,7 +5,7 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWorkerSignals, listDispatchedPhases } from "./signal-reader.mjs";
+import { readWorkerSignals, listDispatchedPhases, byActivePhase } from "./signal-reader.mjs";
 
 let orchDir;
 
@@ -100,20 +100,37 @@ describe("readWorkerSignals", () => {
     expect(sigs[0].signalPath.endsWith(".projected")).toBe(false);
   });
 
-  test("ignores phase-output artifacts (triage/verify/review/phase-monitor-deploy.json)", () => {
+  test("ignores phase-output artifacts (triage/verify/review) (CTL-701)", () => {
     writeNested("CTL-3", "implement", { status: "running" });
     const dir = join(workersDir(), "CTL-3");
-    for (const name of [
-      "triage.json",
-      "verify.json",
-      "review.json",
-      "phase-monitor-deploy.json",
-    ]) {
+    for (const name of ["triage.json", "verify.json", "review.json"]) {
       writeFileSync(join(dir, name), JSON.stringify({ artifact: true }));
     }
     const sigs = readWorkerSignals(orchDir);
     expect(sigs).toHaveLength(1);
     expect(sigs[0].phase).toBe("implement");
+  });
+
+  test("phase-monitor-deploy.json IS a phase signal (CTL-701)", () => {
+    const dir = join(workersDir(), "CTL-MD");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-monitor-deploy.json"),
+      JSON.stringify({
+        ticket: "CTL-MD",
+        phase: "monitor-deploy",
+        status: "running",
+        bg_job_id: "abc123",
+        updatedAt: "2026-05-28T16:00:00Z",
+        worktreePath: "/tmp/wt/CTL-MD",
+      }),
+    );
+    const sigs = readWorkerSignals(orchDir);
+    expect(sigs).toHaveLength(1);
+    expect(sigs[0].ticket).toBe("CTL-MD");
+    expect(sigs[0].phase).toBe("monitor-deploy");
+    expect(sigs[0].status).toBe("running");
+    expect(sigs[0].liveness).toEqual({ kind: "bg", value: "abc123" });
   });
 
   test("ignores the workers/output/ directory", () => {
@@ -178,10 +195,9 @@ describe("readWorkerSignals", () => {
         updatedAt: "2026-05-21T02:00:00Z",
       }),
     );
-    // NOTE: phase-monitor-deploy.json is in ARTIFACT_NAMES so it is filtered
-    // out as an artifact, not as a signal. To exercise byActivePhase with a
-    // skipped terminal we use a fresh worker dir whose terminal signal is on
-    // a different phase name.
+    // CTL-701: phase-monitor-deploy.json is now a real signal (not an artifact).
+    // CTL-512 dir exercises byActivePhase with monitor-deploy/skipped; CTL-512B
+    // uses a different phase name to provide a parallel smoke scenario.
     const dir2 = join(workersDir(), "CTL-512B");
     mkdirSync(dir2, { recursive: true });
     writeFileSync(
@@ -268,21 +284,43 @@ describe("listDispatchedPhases", () => {
     ]);
   });
 
-  test("ignores phase-output artifacts (triage/verify/review/phase-monitor-deploy.json)", () => {
+  test("ignores phase-output artifacts (triage/verify/review) (CTL-701)", () => {
     writeNested("CTL-9", "implement", { status: "running" });
     const dir = join(workersDir(), "CTL-9");
-    for (const name of [
-      "triage.json",
-      "verify.json",
-      "review.json",
-      "phase-monitor-deploy.json",
-    ]) {
+    for (const name of ["triage.json", "verify.json", "review.json"]) {
       writeFileSync(join(dir, name), JSON.stringify({ artifact: true }));
     }
     expect(listDispatchedPhases(orchDir, "CTL-9")).toEqual(["implement"]);
   });
 
+  test("monitor-deploy appears in dispatched phases (CTL-701)", () => {
+    writeNested("CTL-9", "implement", { status: "done" });
+    writeNested("CTL-9", "monitor-deploy", { status: "running" });
+    const phases = listDispatchedPhases(orchDir, "CTL-9").sort();
+    expect(phases).toContain("monitor-deploy");
+    expect(phases).toContain("implement");
+  });
+
   test("returns [] when the worker dir does not exist", () => {
     expect(listDispatchedPhases(orchDir, "NOPE")).toEqual([]);
+  });
+});
+
+// CTL-701 Phase 2: byActivePhase — turn-cap-exhausted is NOT terminal
+describe("byActivePhase — turn-cap-exhausted (CTL-701)", () => {
+  test("turn-cap-exhausted sorts before done regardless of updatedAt", () => {
+    const tce = {
+      phase: "implement",
+      status: "turn-cap-exhausted",
+      updatedAt: "2026-05-28T10:00:00Z",
+    };
+    const done = {
+      phase: "monitor-deploy",
+      status: "done",
+      updatedAt: "2026-05-28T12:00:00Z",
+    };
+    const sorted = [tce, done].sort(byActivePhase);
+    expect(sorted[0].status).toBe("turn-cap-exhausted");
+    expect(sorted[1].status).toBe("done");
   });
 });

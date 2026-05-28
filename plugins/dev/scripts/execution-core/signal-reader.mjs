@@ -13,12 +13,13 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
 
-// Files inside workers/<T>/ that are phase OUTPUTS, not signals.
+// Files inside workers/<T>/ that are phase OUTPUTS ONLY (no phase signal
+// collision). Note: `phase-monitor-deploy.json` is intentionally NOT here —
+// it's dual-use (signal + artifact), tracked via CTL-701.
 const ARTIFACT_NAMES = new Set([
   "triage.json",
   "verify.json",
   "review.json",
-  "phase-monitor-deploy.json",
 ]);
 
 // Terminal worker statuses — exported so decision modules share one set.
@@ -26,7 +27,11 @@ const ARTIFACT_NAMES = new Set([
 // event arrived before the timeout (phase-monitor-deploy SKILL.md). Ranked
 // the same as 'done' by byActivePhase: a skipped terminal must never shadow
 // an in-flight phase.
-const TERMINAL = new Set(["done", "failed", "stalled", "turn-cap-exhausted", "skipped"]);
+// CTL-484 / CTL-701: 'turn-cap-exhausted' is NOT terminal — the worker's bg
+// session ended at the turn cap but the phase awaits continuation; reclaim /
+// revive probes work-done state to decide reclaim-as-done vs
+// `claude --bg --resume`.
+const TERMINAL = new Set(["done", "failed", "stalled", "skipped"]);
 
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:
