@@ -680,6 +680,25 @@ export function readBootSince(orchDir) {
   }
 }
 
+// readExecCoreBootEpoch — daemon-boot.json's bootedAt as epoch-ms, or 0 if
+// missing/malformed. CTL-701: the third cold-start epoch source. Unlike
+// readDaemonEpoch (claude-daemon socket dir mtime, fragile across socket
+// refreshes), this is THIS exec-core instance's own start time — written
+// atomically by writeBootMarker at startDaemon line 1, before detectColdStart
+// runs. Any --bg worker whose state.json mtime predates it is provably dead.
+export function readExecCoreBootEpoch(orchDir, { read = (p) => readFileSync(p, "utf8") } = {}) {
+  if (!orchDir) return 0;
+  try {
+    const raw = read(bootMarkerPath(orchDir));
+    const bootedAt = JSON.parse(raw)?.bootedAt;
+    if (typeof bootedAt !== "string" || !bootedAt) return 0;
+    const ms = Date.parse(bootedAt);
+    return Number.isFinite(ms) ? ms : 0;
+  } catch {
+    return 0;
+  }
+}
+
 // writeBootMarker — record this daemon process's start time. Atomic tmp+rename,
 // fail-open: a write failure logs and the daemon continues (the budget simply
 // won't reset this run — the safe degradation). Injectable `now` for tests.
@@ -777,13 +796,28 @@ export function defaultReadRuntimeEpoch({
 // remains the fallback. Enumerates ALL dirs under getJobsRoot() (not just
 // signalled bg_job_ids) so a live sibling-orchestrator worker can veto the
 // verdict. Pure aside from injected seams; never throws.
+//
+// Three epochs feed the cold-start verdict: (1) OS boot, (2) claude-daemon
+// socket dir, (3) exec-core daemon-boot.json. The latest wins. Adding the
+// exec-core epoch (CTL-701) catches manual daemon restarts where the socket
+// dir mtime was refreshed between the OS boot and the new daemon launch.
 export function detectColdStart({
   jobsRoot = getJobsRoot(),
   readDir = readdirSync,
   statJob = defaultStatJob,
   readEpoch = defaultReadRuntimeEpoch,
+  orchDir = undefined,                       // CTL-701: enables exec-core epoch
+  readExecCoreEpoch = readExecCoreBootEpoch, // CTL-701: injectable seam
 } = {}) {
-  const { epoch, epochSource } = readEpoch();
+  const { epoch: runtimeEpoch, epochSource: runtimeSource } = readEpoch();
+  const execCoreEpoch = readExecCoreEpoch(orchDir);
+
+  let epoch = runtimeEpoch;
+  let epochSource = runtimeSource;
+  if (execCoreEpoch > epoch) {
+    epoch = execCoreEpoch;
+    epochSource = "exec-core";
+  }
 
   let ids = [];
   try {
@@ -1388,7 +1422,9 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
   //     runtime epoch? Surfaced for a downstream consumer (CTL-639) to gate the
   //     boot-time stale-wait. Pass statJob so a test-redirected jobs root flows
   //     through both the worker reconstruction and the cold-start scan.
-  const coldStart = detectCold({ statJob });
+  // CTL-701: forward orchDir so detectColdStart can read daemon-boot.json as
+  // the third cold-start epoch (exec-core restart without OS/daemon socket reboot).
+  const coldStart = detectCold({ statJob, orchDir });
 
   return {
     recoveredAt: new Date().toISOString(),

@@ -27,6 +27,7 @@ import {
   defaultReadRuntimeEpoch,
   detectColdStart,
   readBootSince,
+  readExecCoreBootEpoch,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -73,12 +74,28 @@ const bgSignal = (status, bgJobId) => ({
 // --- classifyWorker — pure given statJob ----------------------------------
 
 describe("classifyWorker", () => {
-  test("terminal status (done/failed/stalled/turn-cap-exhausted) → 'terminal'", () => {
-    for (const status of ["done", "failed", "stalled", "turn-cap-exhausted"]) {
+  test("terminal status (done/failed/stalled/skipped) → 'terminal' (CTL-701)", () => {
+    for (const status of ["done", "failed", "stalled", "skipped"]) {
       expect(
         classifyWorker(bgSignal(status, "job-x"), { statJob: () => null }),
       ).toBe("terminal");
     }
+  });
+
+  test("turn-cap-exhausted is NOT terminal — classified by liveness (CTL-701)", () => {
+    // Live bg job → "running"
+    const live = classifyWorker(
+      bgSignal("turn-cap-exhausted", "alive"),
+      { statJob: () => ({ mtimeMs: Date.now() }) },
+    );
+    expect(live).toBe("running");
+
+    // Dead bg job → "dead" (reclaim-eligible)
+    const dead = classifyWorker(
+      bgSignal("turn-cap-exhausted", "gone"),
+      { statJob: () => null },
+    );
+    expect(dead).toBe("dead");
   });
 
   test("non-terminal status + bg job dir present → 'running' (re-attached)", () => {
@@ -468,6 +485,88 @@ function recorder(returnValue) {
   fn.calls = calls;
   return fn;
 }
+
+// CTL-701 Phase 1: reclaim sweep visits a monitor-deploy/running signal
+describe("reclaimDeadWorkIfPossible — monitor-deploy (CTL-701)", () => {
+  const orch = "/orch";
+
+  test("classifies monitor-deploy/running/dead-bg as 'dead', visits probe (CTL-701)", () => {
+    const sig = {
+      ticket: "CTL-MD",
+      phase: "monitor-deploy",
+      status: "running",
+      liveness: { kind: "bg", value: "job-md" },
+      signalPath: `${orch}/workers/CTL-MD/phase-monitor-deploy.json`,
+      raw: {
+        ticket: "CTL-MD",
+        phase: "monitor-deploy",
+        orchestrator: "CTL-MD",
+        status: "running",
+        bg_job_id: "job-md",
+      },
+    };
+    const klass = classifyWorker(sig, { statJob: () => null });
+    expect(klass).toBe("dead");
+
+    // reclaimDeadWorkIfPossible proceeds to probe (not short-circuited)
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => null,
+      probes: { "monitor-deploy": probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      liveness: () => "absent",
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+  });
+});
+
+// CTL-701 Phase 2: reclaim/revive for turn-cap-exhausted
+describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
+  const orch = "/orch";
+
+  test("reclaims turn-cap-exhausted/dead with commits ahead (CTL-701)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      liveness: () => "absent",
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("revives turn-cap-exhausted/dead with --resume when no work done (CTL-701)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
+      statJob: () => null,
+      probes: { implement: recorder(false) },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(undefined),
+      reviveDispatch,
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(1),
+      writeReviveMarker: recorder(undefined),
+      killBgJob: recorder(undefined),
+      applyStalledLabel: recorder({ applied: true }),
+      resolveSession: () => "uuid-resume",
+      liveness: () => "absent",
+    });
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+    expect(reviveDispatch.calls[0][0].resumeSession).toBe("uuid-resume");
+  });
+});
 
 describe("reclaimDeadWorkIfPossible", () => {
   const orch = "/orch";
@@ -2330,6 +2429,96 @@ describe("runtime epoch readers", () => {
       });
       expect(res).toMatchObject({ coldStart: true, jobsChecked: 0 });
     });
+  });
+});
+
+// CTL-701 Phase 3: readExecCoreBootEpoch + detectColdStart exec-core epoch
+describe("readExecCoreBootEpoch (CTL-701)", () => {
+  let dir;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl701-epoch-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("reads daemon-boot.json bootedAt as epoch-ms", () => {
+    writeFileSync(
+      join(dir, "daemon-boot.json"),
+      JSON.stringify({ bootedAt: "2026-05-28T15:00:00Z" }),
+    );
+    expect(readExecCoreBootEpoch(dir)).toBe(Date.parse("2026-05-28T15:00:00Z"));
+  });
+
+  test("returns 0 when file is missing (fail-open)", () => {
+    expect(readExecCoreBootEpoch(dir)).toBe(0);
+  });
+
+  test("returns 0 when file is malformed JSON (fail-open)", () => {
+    writeFileSync(join(dir, "daemon-boot.json"), "not json");
+    expect(readExecCoreBootEpoch(dir)).toBe(0);
+  });
+
+  test("returns 0 when bootedAt is wrong type (fail-open)", () => {
+    writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: 12345 }));
+    expect(readExecCoreBootEpoch(dir)).toBe(0);
+    writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
+    expect(readExecCoreBootEpoch(dir)).toBe(0);
+  });
+
+  test("returns 0 for null orchDir (fail-open)", () => {
+    expect(readExecCoreBootEpoch(null)).toBe(0);
+    expect(readExecCoreBootEpoch(undefined)).toBe(0);
+  });
+});
+
+describe("detectColdStart — exec-core epoch (CTL-701)", () => {
+  const statJobFrom = (map) => (id) =>
+    id in map ? { exists: true, mtimeMs: map[id], state: {} } : null;
+
+  test("uses exec-core epoch when newer than OS/daemon (CTL-701 Option A)", () => {
+    const T1 = 1000; // runtime epoch (daemon)
+    const T2 = 2000; // job mtime — between T1 and T3
+    const T3 = 3000; // exec-core boot epoch — newest
+    const res = detectColdStart({
+      readEpoch: () => ({ epoch: T1, epochSource: "daemon", bootEpoch: 0, daemonEpoch: T1 }),
+      readDir: () => ["j1"],
+      statJob: statJobFrom({ j1: T2 }),
+      readExecCoreEpoch: () => T3,
+    });
+    // T2 < T3 → cold; exec-core epoch wins
+    expect(res.coldStart).toBe(true);
+    expect(res.epochSource).toBe("exec-core");
+    expect(res.epoch).toBe(T3);
+  });
+
+  test("keeps OS/daemon path when newer than exec-core (CTL-701)", () => {
+    const T1 = 5000; // runtime epoch (boot) — newest
+    const T2 = 3000; // job mtime < T1 → cold regardless
+    const T3 = 2000; // exec-core epoch — lower
+    const res = detectColdStart({
+      readEpoch: () => ({ epoch: T1, epochSource: "boot", bootEpoch: T1, daemonEpoch: 0 }),
+      readDir: () => ["j1"],
+      statJob: statJobFrom({ j1: T2 }),
+      readExecCoreEpoch: () => T3,
+    });
+    expect(res.coldStart).toBe(true);
+    expect(res.epochSource).toBe("boot"); // runtime wins
+    expect(res.epoch).toBe(T1);
+  });
+
+  test("unreadable exec-core epoch (0) falls through to runtime epoch (CTL-701)", () => {
+    const T1 = 5000;
+    const T2 = 3000;
+    const res = detectColdStart({
+      readEpoch: () => ({ epoch: T1, epochSource: "daemon", bootEpoch: 0, daemonEpoch: T1 }),
+      readDir: () => ["j1"],
+      statJob: statJobFrom({ j1: T2 }),
+      readExecCoreEpoch: () => 0, // missing / malformed
+    });
+    expect(res.coldStart).toBe(true);
+    expect(res.epochSource).toBe("daemon");
+    expect(res.epoch).toBe(T1);
   });
 });
 

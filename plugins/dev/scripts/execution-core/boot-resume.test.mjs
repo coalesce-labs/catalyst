@@ -190,6 +190,38 @@ describe("selectBootResumeCandidates", () => {
     expect(out).toHaveLength(1);
   });
 
+  test("selectBootResumeCandidates picks up monitor-deploy/running (CTL-701)", () => {
+    writeSignal(orchDir, "CTL-MD", "monitor-deploy", {
+      worktreePath: "/wt/CTL-MD",
+      bg_job_id: "md-job-1",
+      status: "running",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      ticket: "CTL-MD",
+      phase: "monitor-deploy",
+      worktreePath: "/wt/CTL-MD",
+      bgJobId: "md-job-1",
+    });
+  });
+
+  test("selectBootResumeCandidates picks up implement/turn-cap-exhausted (CTL-701)", () => {
+    writeSignal(orchDir, "CTL-TCE", "implement", {
+      worktreePath: "/wt/CTL-TCE",
+      bg_job_id: "tce-job-1",
+      status: "turn-cap-exhausted",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      ticket: "CTL-TCE",
+      phase: "implement",
+      worktreePath: "/wt/CTL-TCE",
+      bgJobId: "tce-job-1",
+    });
+  });
+
   // CTL-665: a committed executionCore.maxParallel (threaded via `concurrency`)
   // overrides state.json for the boot-resume ceiling, mirroring the new-work pull.
   test("concurrency.maxParallel overrides state.json for the boot ceiling (CTL-665)", () => {
@@ -528,6 +560,37 @@ describe("reconcileBootResume", () => {
       "CTL-A": "uuid-A",
       "CTL-B": null,
       "CTL-C": null,
+    });
+  });
+});
+
+// ── CTL-701: turn-cap-exhausted boot-resume ───────────────────────────────────
+describe("reconcileBootResume — turn-cap-exhausted (CTL-701)", () => {
+  test("relaunches turn-cap-exhausted with --resume when session resolvable", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-TCE", "implement", {
+      worktreePath: "/wt/CTL-TCE",
+      bg_job_id: "tce-abc",
+      status: "turn-cap-exhausted",
+    });
+    const calls = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        calls.push(a);
+        return { code: 0 };
+      },
+      resolveSession: (id) => (id === "tce-abc" ? "uuid-resume" : null),
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(1);
+    expect(calls[0]).toMatchObject({
+      ticket: "CTL-TCE",
+      phase: "implement",
+      resumeSession: "uuid-resume",
     });
   });
 });
