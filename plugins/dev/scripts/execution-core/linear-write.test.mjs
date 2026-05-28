@@ -194,6 +194,21 @@ describe("applyLabel", () => {
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "rate-limited" });
   });
+  test("classifies a cross-team label-UUID stderr as reason:'missing-label' (no per-tick retry storm)", () => {
+    // Linear's labels are team-scoped: same name, different UUID per team. When
+    // linearis resolves the label in the wrong team's workspace context and
+    // sends the cross-team UUID, Linear returns this exact error. It is
+    // permanently unrecoverable inside one daemon lifetime (the resolver is
+    // global), so it must classify as missing-label to short-circuit retries.
+    const exec = () => ({
+      code: 1,
+      stdout: "",
+      stderr:
+        'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
+    });
+    const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
+    expect(r).toEqual({ applied: false, reason: "missing-label" });
+  });
   test("CTL-585: any other non-zero exit is reason:'transient'", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
