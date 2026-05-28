@@ -163,6 +163,80 @@ describe("CTL-705 acceptance scenario — preemption + resume", () => {
   });
 });
 
+describe("CTL-705 reclaim-guard scenario — real reclaimDeadWork, no stub", () => {
+  // The acceptance scenario above injects reclaimDeadWork: noopReclaim, which
+  // masks the reclaim-guard regression entirely. This test deliberately does
+  // NOT stub reclaimDeadWork (schedulerTick falls back to the real
+  // reclaimDeadWorkIfPossible from recovery.mjs), so the guard is the only thing
+  // standing between a parked-with-dead-bg signal and a false revive.
+  function seedPreempted(ticket, phase, bgJobId, priority) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({
+        ticket,
+        phase,
+        status: "preempted",
+        parkedFrom: phase,
+        bg_job_id: bgJobId, // a now-dead bg job — what classifyWorker would treat as dead
+        attentionReason: "preempted-by-priority",
+      })
+    );
+    writeWorkerPriority(orchDir, ticket, { priority, createdAt: "2026-05-01T00:00:00Z" });
+  }
+
+  test("parked-with-dead-bg signal is NOT revived by the real reclaim sweep; only the resume sweep re-dispatches it", () => {
+    const T0 = 200_000;
+    // CTL-Park is the ONLY in-flight worker, parked at research with a dead
+    // bg_job_id. It is the only signal the real reclaim sweep would iterate.
+    seedPreempted("CTL-Park", "research", "bg-park-dead", 4);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+
+    const writeStatus = { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => {} };
+
+    // Tick A — saturated (liveBackgroundCount=1). The resume sweep (1.5) sees 0
+    // free slots and skips. With NO reclaim stub, the real reclaim sweep runs
+    // first; without the CTL-705 guard it would route the parked-dead-bg signal
+    // through the death trigger and revive it (a duplicate spawn). The guard
+    // makes the parked signal untouched.
+    const dispatchA = makeRealDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      // reclaimDeadWork intentionally omitted → real reclaimDeadWorkIfPossible
+      dispatch: dispatchA,
+      liveBackgroundCount: () => 1,
+      now: () => T0,
+      killBgJob: makeKillStub(),
+      writeStatus,
+    });
+    // The parked signal must be untouched — no revive, no advancement, status
+    // still "preempted", bg_job_id unchanged.
+    const afterA = readSignal("CTL-Park", "research");
+    expect(afterA?.status).toBe("preempted");
+    expect(afterA?.bg_job_id).toBe("bg-park-dead");
+    expect(dispatchA.calls.find((c) => c.ticket === "CTL-Park")).toBeUndefined();
+
+    // Tick B — a slot frees (liveBackgroundCount=0). NOW the resume sweep owns
+    // the re-dispatch (not the reclaim sweep), at parkedFrom=research.
+    const dispatchB = makeRealDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      // reclaimDeadWork still omitted → real reclaim
+      dispatch: dispatchB,
+      liveBackgroundCount: () => 0,
+      now: () => T0 + 1_000,
+      killBgJob: makeKillStub(),
+      resolveSession: () => null, // cold re-dispatch (no --resume-session)
+      writeStatus,
+    });
+    const resumeCall = dispatchB.calls.find((c) => c.ticket === "CTL-Park");
+    expect(resumeCall).toBeDefined();
+    expect(resumeCall.phase).toBe("research"); // re-dispatched at parkedFrom
+    expect(readSignal("CTL-Park", "research")?.status).toBe("dispatched");
+  });
+});
+
 describe("CTL-705 guard scenario — monitor-deploy not preemptable", () => {
   test("Only in-flight worker at monitor-deploy → no preemption even with Urgent queued", () => {
     const T0 = 200_000;

@@ -1271,6 +1271,15 @@ export function schedulerTick(
 
   for (const sig of readWorkerSignals(orchDir)) {
     if (!inFlightTickets.has(sig.ticket)) continue;
+    // CTL-705: a parked ("preempted") worker is paused, not dead. Its signal
+    // preserves the now-killed bg_job_id, so classifyWorker would route it
+    // through the death trigger and reclaimDeadWork would falsely revive it —
+    // spawning a duplicate AND defeating the resume sweep (1.5), the only path
+    // that re-dispatches a parked ticket with --resume-session continuity
+    // (CTL-690). The reclaim sweep runs BEFORE sweep 1.5, so without this guard
+    // it wins the race every tick. (The advancement guard at the (1) sweep only
+    // stops false advancement, not false reclaim — both are needed.)
+    if (sig.status === PREEMPTED_STATUS) continue;
     try {
       const team = teamOf(sig.ticket);
       const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
@@ -1326,6 +1335,18 @@ export function schedulerTick(
   // the new-work pull (2) share a single read per tick.
   const eligible = readEligible ? readEligible() : readAllEligibleTickets();
 
+  // CTL-705: hoist the worker-slot ceiling + live background count to a SINGLE
+  // read per tick, shared by the preemption sweep (0.5), the resume sweep (1.5),
+  // and the new-work pull (2). `claude stop` does not deregister within the same
+  // tick (a just-preempted worker's process lingers until the next agents scan),
+  // so liveBackgroundCount is stable across all three sweeps — one read is
+  // semantically correct AND avoids tripling the per-tick `claude agents --json`
+  // subprocess cost on the hot daemon loop (was the root cause of the CTL-653
+  // verify-remediate test timeout). freeSlots is recomputed arithmetically per
+  // sweep (subtracting resumedCount in sweep 2) rather than re-shelling-out.
+  const maxParallel = readMaxParallel(orchDir, concurrency);
+  const liveCount = liveBackgroundCount();
+
   // (0.5) Preemption sweep — if slots are saturated AND the top-ranked queued
   // ticket out-ranks the lowest-ranked preemptable in-flight worker, stop that
   // worker and park it for resume when a slot frees. Safety guards prevent
@@ -1333,9 +1354,7 @@ export function schedulerTick(
   // 30s hysteresis. Runs after reclaim (so a just-reclaimed slot is counted)
   // and before advancement (so a preempted signal isn't falsely advanced).
   {
-    const maxP = readMaxParallel(orchDir, concurrency);
-    const liveCount = liveBackgroundCount();
-    if (computeFreeSlots(maxP, liveCount) <= 0) {
+    if (computeFreeSlots(maxParallel, liveCount) <= 0) {
       // Build the global ranking to find topQueued and potential victim.
       const ranking = buildGlobalRanking(orchDir, eligible);
       const topQueued = ranking.find((d) => !d.inFlight);
@@ -1560,9 +1579,7 @@ export function schedulerTick(
   // pull (so a preempted ticket reclaims its slot ahead of brand-new work).
   let resumedCount = 0;
   {
-    const maxP2 = readMaxParallel(orchDir, concurrency);
-    const liveCount2 = liveBackgroundCount();
-    let resumeSlots = computeFreeSlots(maxP2, liveCount2);
+    let resumeSlots = computeFreeSlots(maxParallel, liveCount);
     if (resumeSlots > 0) {
       // Collect parked tickets: in-flight tickets with status === PREEMPTED_STATUS.
       const parkedDescriptors = [];
@@ -1666,12 +1683,16 @@ export function schedulerTick(
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
   // but process alive) still consumes a slot; a duplicate spawn is counted.
-  const inFlightCount = liveBackgroundCount();
+  // CTL-705: reuse the tick-hoisted liveCount (a single `claude agents --json`
+  // read) instead of re-shelling-out — `claude stop` does not deregister within
+  // the same tick, so the count is stable since sweep 0.5.
+  const inFlightCount = liveCount;
   // CTL-665: config-first ceiling — a committed executionCore.maxParallel
   // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
   // CTL-705: subtract resumed slots (sweep 1.5) so resume and new-work don't
-  // both fill the same slot when claude stop hasn't deregistered yet.
-  const freeSlots = Math.max(0, computeFreeSlots(readMaxParallel(orchDir, concurrency), inFlightCount) - resumedCount);
+  // both fill the same slot when claude stop hasn't deregistered yet. maxParallel
+  // is the tick-hoisted readMaxParallel value (single read per tick).
+  const freeSlots = Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount);
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.

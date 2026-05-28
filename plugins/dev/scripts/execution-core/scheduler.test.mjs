@@ -3241,6 +3241,14 @@ describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
         writeStatus: noopWriteStatus,
         reclaimDeadWork: () => "noop",
         verifyDispatched: verifyOk, // CTL-611: cyclingDispatch writes status:"done", not a runnable dispatched signal; bypass the verifier
+        // CTL-705: inject the liveBackgroundCount seam so this end-to-end cycle
+        // test does NOT shell out to the real `claude agents --json` once per
+        // tick. With no eligible/queued tickets the slot-counting sweeps (0.5
+        // preemption, 2 new-work) are no-ops anyway, so a free-slot stub is
+        // behavior-preserving — and it makes the 12-tick run deterministic
+        // instead of dependent on real subprocess latency (which timed the test
+        // out under load even after the scheduler hoisted the call 3x→1x).
+        liveBackgroundCount: () => 0,
       });
     }
   };
@@ -4099,12 +4107,25 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
   });
 
   test("reclaim sweep ignores 'preempted' signals — no false revive", () => {
-    // Seed a preempted signal (no bg_job_id so classifyWorker returns 'unknown')
+    // Seed a preempted signal WITH a (now-dead) bg_job_id — the exact shape a
+    // worker parks in: status "preempted", but its killed bg_job_id is still on
+    // the signal. Without the CTL-705 reclaim guard, classifyWorker routes this
+    // through the death trigger (liveness.kind='bg', process gone) and
+    // reclaimDeadWorkIfPossible returns "revived", spawning a duplicate and
+    // defeating the resume sweep. Seeding bg_job_id is what makes this test
+    // actually exercise that path — the prior fixture omitted it, so
+    // classifyWorker returned 'unknown' and the gap was invisible.
     const dir = join(orchDir, "workers", "CTL-Park");
     mkdirSync(dir, { recursive: true });
     writeFileSync(
       join(dir, "phase-research.json"),
-      JSON.stringify({ ticket: "CTL-Park", phase: "research", status: "preempted", parkedFrom: "research" })
+      JSON.stringify({
+        ticket: "CTL-Park",
+        phase: "research",
+        status: "preempted",
+        parkedFrom: "research",
+        bg_job_id: "dead-bg-from-preemption",
+      })
     );
     // Saturate the slot so the resume sweep (1.5) also sees 0 free slots and doesn't fire.
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -4114,16 +4135,20 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       readEligible: () => [],
       dispatch,
       liveBackgroundCount: () => 1, // saturated → resume sweep skips
+      // If the guard were missing, the reclaim loop would call this for the
+      // preempted signal; returning "revived" models reclaimDeadWorkIfPossible's
+      // real verdict for a preempted-signal-with-dead-bg. The guard means it is
+      // never invoked for a preempted ticket at all.
       reclaimDeadWork: (_od, sig) => {
         reclaimCalls.push({ ticket: sig.ticket, status: sig.status });
-        return "noop"; // we're capturing the call but still returning noop
+        return "revived";
       },
     });
-    // preempted signal must never reach reclaimDeadWork (listInFlightTickets excludes it,
-    // or the sweep skips it — either way, no reclaim attempt should fire for a preempted signal)
-    // The ticket IS in-flight (preempted is non-terminal), so it shows up in listInFlightTickets.
-    // But reclaimDeadWork should not actually reclaim it (the real reclaimDeadWork returns noop
-    // for a non-running status). Our guard means no advancement either.
+    // The reclaim guard skips the preempted signal BEFORE reclaimDeadWork is
+    // called — so it must never fire for CTL-Park even though the signal carries
+    // a dead bg_job_id that would otherwise trip the death trigger.
+    expect(reclaimCalls.find((c) => c.ticket === "CTL-Park")).toBeUndefined();
+    // And no advancement / re-dispatch fired for it (advancement guard).
     const parkedAdvance = dispatch.calls.filter((c) => c.ticket === "CTL-Park");
     expect(parkedAdvance).toHaveLength(0); // not advanced
   });
