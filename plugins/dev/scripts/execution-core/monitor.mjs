@@ -2,14 +2,25 @@
 //
 // The orchestration layer of the Linear Todo-state monitor: event parsing
 // (canonical OTel + legacy flat shapes), per-project and all-project
-// reconcile, the event-driven fast path (confident removal + debounced
-// reconcile), the byte-offset event-log tailer, the periodic reconcile timer,
+// reconcile, the event-driven fast path (confident removal + Triage auto-
+// dispatch), the byte-offset event-log tailer, the periodic reconcile timer,
 // and the startMonitor/stopMonitor lifecycle.
 //
-// Event-vs-poll division of labour: a linear.issue.state_changed event can
-// only CONFIRM A REMOVAL (the new state left the eligible state) or TRIGGER A
-// RECONCILE (it may have entered) — the payload carries no project/label/
-// priority, so additions and scoping are resolved exclusively by the poll.
+// Event-vs-poll division of labour (CTL-681 — was rewritten):
+// A linear.issue.state_changed event handles two cases inline (no poll):
+//   - DRAG_OUT_STATES (Backlog/Canceled/Duplicate) → confident immediate
+//     removal + abortWorker.
+//   - →Triage / →Ready-without-triage-artifact → one-shot triage dispatch.
+// Every other →Ready / unknown-new-state case is now a NO-OP — the
+// per-event scoping reconcile that used to fire here (because the parsed
+// event was missing project/labels/priority) is gone. CTL-681 captures those
+// fields in the event payload so a future incremental projection update can
+// fold the change without a poll; until that lands, the eligible set picks up
+// the new ticket on the next periodic reconcile (RECONCILE_INTERVAL_MS, 10
+// min) or on operator-restart startup reconcile. This trade-off — up to
+// ~10 min staleness for new Ready tickets in exchange for zero per-event
+// Linear polls — was explicitly chosen to remove the per-tick poll baseline
+// that exhausted the 2500/hr quota.
 
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -114,29 +125,33 @@ export function reconcileAll({ exec } = {}) {
 
 // --- Event-driven fast path ---------------------------------------------
 
-// team -> pending debounce timer handle.
-const dirtyTimers = new Map();
-
 // handleStateChangedEvent — fold one state_changed event into the eligible
 // sets of every project whose query team matches the event's team.
 //
-// CTL-565 + CTL-584 — the toState branch is a four-way split:
+// CTL-565 + CTL-584 + CTL-681 — the toState branch is a four-way split:
 //   →triageStatus              one-shot-dispatches the triage phase agent
 //                              (NOT the eligible set — a Triage ticket is
 //                              never scheduler-pulled).
-//   →status (Ready)            reconciles into the scheduler-eligible set
-//                              (debounced).
+//   →status (Ready)            no-op (CTL-681 removed the per-event scoping
+//                              poll). If the ticket has no triage.json the
+//                              one-shot triage auto-dispatch still fires
+//                              (CTL-625); otherwise the periodic reconcile
+//                              picks it up on the next 10-min tick.
 //   →DRAG_OUT_STATES           the leave-path — confident immediate removal
 //                              + abortWorker on the in-flight worker.
 //   anything else (pipeline)   no-op. Research/Plan/Implement/Validate/PR/
 //                              Done are the daemon's own CTL-558 write-backs
 //                              echoed back; an unknown state is conservatively
 //                              treated as a hand-edit we don't recognize.
+//
+// `exec` and `debounceMs` are kept in the signature for backwards-compat with
+// the previous reconcile-on-event contract; they are now unused inside the
+// function. Removing them would break call sites that still pass them.
 export function handleStateChangedEvent(
   event,
   {
-    exec,
-    debounceMs = EVENT_DEBOUNCE_MS,
+    exec: _exec, // CTL-681: retained for signature compat; no longer triggers a poll
+    debounceMs: _debounceMs = EVENT_DEBOUNCE_MS, // CTL-681: retained for signature compat; unused
     dispatch,
     orchDir,
     abortWorker = defaultAbortWorker,
@@ -166,14 +181,19 @@ export function handleStateChangedEvent(
       // the user moved Backlog→Ready directly, skipping →Triage. Auto-dispatch
       // triage (same seam as →Triage) so "Ready" transparently triages-then-
       // proceeds instead of dead-locking the research prior-artifact gate. The
-      // triage agent's phase.triage.complete advances the ticket to research via
-      // the scheduler's advancement sweep, so we do NOT also reconcile here —
-      // reconciling would let the new-work pull dispatch research before
-      // triage.json exists (the no-backoff storm CTL-625 fixes). An unknown new
-      // state (!parsed.toState), an already-triaged Ready, or a standalone
-      // monitor with no orchDir falls through to the debounced reconcile
-      // (the event cannot confirm project/label/priority scoping, so a full
-      // poll is required; debounced so a burst coalesces into one reconcile).
+      // triage agent's phase.triage.complete advances the ticket to research
+      // via the scheduler's advancement sweep, so we do NOT also reconcile
+      // here.
+      //
+      // CTL-681: anything that does NOT trigger the triage auto-dispatch
+      // (an already-triaged Ready, an unknown new state, or a standalone
+      // monitor with no orchDir) is now a NO-OP — the pre-CTL-681 debounced
+      // reconcile that fired here is gone. The eligible set picks up the new
+      // ticket on the next periodic reconcile (RECONCILE_INTERVAL_MS, ~10 min).
+      // The event payload now carries project/labels/priority (CTL-681 parser
+      // change) so a follow-up PR can fold the change incrementally into the
+      // projection without a poll; until then the 10-min reconcile + startup
+      // reconcile are the only Linear list-polls.
       if (
         parsed.toState === query.status &&
         orchDir &&
@@ -181,7 +201,14 @@ export function handleStateChangedEvent(
       ) {
         dispatchTriage(parsed.identifier, { dispatch, orchDir });
       } else {
-        scheduleDirtyReconcile(p.team, { exec, debounceMs });
+        log.debug(
+          {
+            ticket: parsed.identifier,
+            team: p.team,
+            toState: parsed.toState,
+          },
+          "monitor: →Ready event observed; per-event scoping poll removed (CTL-681), relying on 10-min reconcile"
+        );
       }
     } else if (DRAG_OUT_STATES.has(parsed.toState)) {
       // Drag-out to Backlog/Canceled/Duplicate — kill signal. Confident
@@ -230,16 +257,13 @@ function hasTriageArtifact(orchDir, ticket) {
   return existsSync(join(orchDir, "workers", ticket, "triage.json"));
 }
 
-function scheduleDirtyReconcile(team, { exec, debounceMs }) {
-  clearTimeout(dirtyTimers.get(team));
-  dirtyTimers.set(
-    team,
-    setTimeout(() => {
-      dirtyTimers.delete(team);
-      reconcileProject(team, { exec });
-    }, debounceMs)
-  );
-}
+// CTL-681 removed scheduleDirtyReconcile + its dirtyTimers Map. The
+// per-event scoping reconcile it implemented is the load that exhausted the
+// Linear 2500/hr quota: the parser dropped project/labels/priority, so every
+// relevant event triggered a full poll to recover them. CTL-681 captures those
+// fields in the event payload; the per-event reconcile is gone. The eligible
+// set is now refreshed by exactly two paths: the startup reconcile + the
+// 10-min periodic reconcile (RECONCILE_INTERVAL_MS).
 
 // --- Byte-offset event-log tailer ---------------------------------------
 // Mirrors broker/tailer.mjs: follow ~/catalyst/events/YYYY-MM.jsonl via
@@ -391,15 +415,14 @@ export function startMonitor({
   reconcileTimer = setInterval(() => reconcileAll({ exec }), reconcileIntervalMs);
 }
 
-// stopMonitor — clear the reconcile interval, all pending debounce timers,
-// and the file watcher. Idempotent and safe to call when nothing is running.
+// stopMonitor — clear the reconcile interval and the file watcher. Idempotent
+// and safe to call when nothing is running. CTL-681 removed the dirtyTimers
+// cleanup (the per-event debounce timers it tracked are gone).
 export function stopMonitor() {
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     reconcileTimer = null;
   }
-  for (const t of dirtyTimers.values()) clearTimeout(t);
-  dirtyTimers.clear();
   watcher?.close();
   watcher = null;
 }

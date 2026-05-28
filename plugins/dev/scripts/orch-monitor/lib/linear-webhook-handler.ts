@@ -1,11 +1,7 @@
 import { verifyLinearSignature } from "./linear-webhook-verify";
 import { parseLinearWebhookEvent, type LinearWebhookEvent } from "./linear-webhook-events";
 import { type EventLogWriter } from "./event-log";
-import {
-  buildCanonicalEvent,
-  type CanonicalEvent,
-  type Attributes,
-} from "./canonical-event";
+import { buildCanonicalEvent, type CanonicalEvent, type Attributes } from "./canonical-event";
 
 const LINEAR_SERVICE_NAME = "catalyst.linear" as const;
 
@@ -117,7 +113,7 @@ function deriveTeamKey(ticket: string | null): string | null {
 export function buildLinearEventLogEnvelope(
   event: LinearWebhookEvent,
   ts: string = new Date().toISOString(),
-  teamsMap: ReadonlyMap<string, string> = new Map(),
+  teamsMap: ReadonlyMap<string, string> = new Map()
 ): CanonicalEvent | null {
   const lookupRepo = (teamKey: string | null): string | undefined =>
     teamKey !== null ? teamsMap.get(teamKey) : undefined;
@@ -150,6 +146,12 @@ export function buildLinearEventLogEnvelope(
           toPriority: event.toPriority,
           toAssigneeId: event.toAssigneeId,
           toAssigneeName: event.toAssigneeName,
+          // CTL-681 — scoping fields the daemon's eligibleQuery needs. The
+          // pre-CTL-681 envelope dropped these and forced a full poll per event.
+          toLabels: event.toLabels,
+          toProject: event.toProject,
+          toProjectId: event.toProjectId,
+          previousFromValues: event.previousFromValues,
         },
       });
     }
@@ -248,7 +250,7 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
   // CTL-362: build the team→repo lookup once at construction so every webhook
   // call shares the same map without re-parsing.
   const teamsMap: ReadonlyMap<string, string> = new Map(
-    (deps.linearTeams ?? []).map((t) => [t.key, t.vcsRepo]),
+    (deps.linearTeams ?? []).map((t) => [t.key, t.vcsRepo])
   );
 
   function rememberDelivery(deliveryId: string): void {

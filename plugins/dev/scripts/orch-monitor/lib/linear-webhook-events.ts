@@ -36,6 +36,31 @@ export type LinearWebhookEvent =
       toAssigneeName: string | null;
       /** Actor display name from actor.name; null when absent. CTL-424. */
       actorName: string | null;
+      /**
+       * Current label name list from data.labels.nodes[].name; null when the
+       * payload omits `labels` entirely (distinguishes "no label info" from
+       * "explicitly empty"). Eligible-set scoping needs this. CTL-681.
+       */
+      toLabels: string[] | null;
+      /**
+       * Current project name from data.project.name; null when absent. CTL-681.
+       */
+      toProject: string | null;
+      /**
+       * Current project UUID from data.project.id, falling back to
+       * data.projectId when the project object is omitted (partial payloads).
+       * Null when neither is present. Stable join key for incremental
+       * projection updates. CTL-681.
+       */
+      toProjectId: string | null;
+      /**
+       * Full updatedFrom map (previous values of changed fields). The pre-CTL-681
+       * parser kept only the KEY NAMES (`updatedFromKeys`). Retaining the full
+       * map lets a downstream consumer ask "did labels actually leave the set?"
+       * by diffing previous labelIds against current data.labels.nodes[].id
+       * without re-parsing the raw webhook payload.
+       */
+      previousFromValues: Record<string, unknown>;
     }
   | {
       kind: "comment";
@@ -127,6 +152,16 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const assigneeObj = isObject(data.assignee) ? data.assignee : null;
   const toAssigneeId = assigneeObj !== null ? getOptStr(assigneeObj, "id") : null;
   const toAssigneeName = assigneeObj !== null ? getOptStr(assigneeObj, "name") : null;
+  // CTL-681 — eligible-set scoping fields. Linear's API returns label info as
+  // `labels: { nodes: [{id, name, …}] }` (confirmed by orch-monitor/lib/
+  // linear.ts and linear-write.mjs:145). `null` when `labels` is absent
+  // entirely, `[]` when the array is present but empty — preserves the
+  // distinction the daemon's incremental projection needs.
+  const toLabels = parseLabelNames(data.labels);
+  const projectObj = isObject(data.project) ? data.project : null;
+  const toProject = projectObj !== null ? getOptStr(projectObj, "name") : null;
+  const toProjectId =
+    projectObj !== null ? getOptStr(projectObj, "id") : getOptStr(data, "projectId");
   return {
     kind: "issue",
     action,
@@ -141,7 +176,27 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     toPriority,
     toAssigneeId,
     toAssigneeName,
+    toLabels,
+    toProject,
+    toProjectId,
+    previousFromValues: updatedFrom,
   };
+}
+
+// parseLabelNames — extract the label-name list from a webhook `data.labels`
+// value. Returns null when labels is absent (not an object), [] when present
+// with an empty nodes array, or the names otherwise. CTL-681.
+function parseLabelNames(value: unknown): string[] | null {
+  if (!isObject(value)) return null;
+  const nodes = value.nodes;
+  if (!Array.isArray(nodes)) return null;
+  const names: string[] = [];
+  for (const node of nodes) {
+    if (!isObject(node)) continue;
+    const name = getOptStr(node, "name");
+    if (name !== null) names.push(name);
+  }
+  return names;
 }
 
 function parseComment(payload: Record<string, unknown>): LinearWebhookEvent {

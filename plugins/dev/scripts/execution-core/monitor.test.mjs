@@ -188,7 +188,7 @@ describe("handleStateChangedEvent", () => {
   // ("In Progress") was a pipeline state under the new model, not a leave-path
   // trigger.
 
-  test("an event whose toState == eligible status schedules a debounced reconcile (no immediate poll)", async () => {
+  test("CTL-681: an event whose toState == eligible status does NOT trigger a poll (per-event scoping reconcile removed)", async () => {
     enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     handleStateChangedEvent(
@@ -200,11 +200,14 @@ describe("handleStateChangedEvent", () => {
     );
     expect(exec.calls).toBe(0); // not polled synchronously
     await sleep(70);
-    expect(exec.calls).toBe(1);
-    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
+    // Pre-CTL-681 this was 1 (the debounced reconcile fired). Post-CTL-681
+    // the eligible set is refreshed only by startup + 10-min reconcile; the
+    // event itself does not trigger a poll. The 10-min timer is mocked out
+    // of this test (no setInterval) so exec stays at 0.
+    expect(exec.calls).toBe(0);
   });
 
-  test("multiple events for one project within the debounce window coalesce into one reconcile", async () => {
+  test("CTL-681: multiple →Ready events do not trigger any poll (no debounced reconcile to coalesce)", async () => {
     enroll("ENG", { status: "Todo" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     for (const ticket of ["ENG-7", "ENG-8", "ENG-9"]) {
@@ -217,7 +220,9 @@ describe("handleStateChangedEvent", () => {
       );
     }
     await sleep(80);
-    expect(exec.calls).toBe(1);
+    // Pre-CTL-681 a 3-event burst coalesced into 1 reconcile (calls === 1).
+    // Post-CTL-681 there is no per-event reconcile to coalesce; calls stays 0.
+    expect(exec.calls).toBe(0);
   });
 
   test("an event whose teamKey matches no registered team is ignored", async () => {
@@ -258,7 +263,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
   });
 
-  test("→Ready with an existing triage.json reconciles, never a triage dispatch", async () => {
+  test("CTL-681: →Ready with an existing triage.json is a no-op (was: debounced reconcile, now: 10-min reconcile picks it up)", async () => {
     enroll("ENG", { status: "Ready" });
     const realOrchDir = join(catalystDir, "execution-core"); // real dir (beforeEach made it)
     writeTriageArtifact(realOrchDir, "ENG-9");
@@ -273,7 +278,10 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     );
     expect(dispatch).not.toHaveBeenCalled();
     await sleep(70);
-    expect(exec.calls).toBe(1); // the debounced reconcile ran
+    // Pre-CTL-681 the debounced reconcile fired (calls === 1). Post-CTL-681
+    // an already-triaged →Ready is a no-op; the 10-min periodic reconcile is
+    // what picks it up.
+    expect(exec.calls).toBe(0);
   });
 
   test("CTL-625: →Ready with no triage.json auto-dispatches triage (Backlog→Ready-direct)", () => {
@@ -296,7 +304,7 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     expect(exec.calls).toBe(0); // did NOT reconcile (no new-work pull → no storm)
   });
 
-  test("CTL-625: →Ready with no orchDir wired falls back to reconcile, never throws", async () => {
+  test("CTL-625 + CTL-681: →Ready with no orchDir wired is a no-op (was: fallback reconcile), never throws", async () => {
     enroll("ENG", { status: "Ready" });
     const exec = execReturning({ ENG: [node("ENG-9")] });
     const dispatch = mock(() => ({ code: 0 }));
@@ -311,7 +319,11 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
     ).not.toThrow();
     expect(dispatch).not.toHaveBeenCalled();
     await sleep(70);
-    expect(exec.calls).toBe(1);
+    // Pre-CTL-681 the no-orchDir branch fell back to the debounced reconcile
+    // (calls === 1). Post-CTL-681 there is no reconcile to fall back to; the
+    // 10-min periodic reconcile handles it. The throw-safety property is
+    // preserved (still no throw).
+    expect(exec.calls).toBe(0);
   });
 
   // CTL-584: drag-out kill fires only for the enumerated DRAG_OUT_STATES.

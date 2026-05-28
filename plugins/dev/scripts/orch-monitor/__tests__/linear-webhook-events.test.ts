@@ -22,7 +22,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
   it("Issue create → linear.issue.created", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
-      issuePayload({ action: "create", updatedFrom: undefined }),
+      issuePayload({ action: "create", updatedFrom: undefined })
     );
     expect(ev.kind).toBe("issue");
     if (ev.kind !== "issue") return;
@@ -37,7 +37,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
       "Issue",
       issuePayload({
         updatedFrom: { stateId: "old-state-id" },
-      }),
+      })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.state_changed");
@@ -57,7 +57,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
           state: { id: "new-state-id", name: "In Progress" },
           priority: 2,
         },
-      }),
+      })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.toState).toBe("In Progress");
@@ -66,17 +66,14 @@ describe("parseLinearWebhookEvent — Issue", () => {
   it("toState is null when data.state is absent", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
-      issuePayload({ updatedFrom: { stateId: "old-state-id" } }),
+      issuePayload({ updatedFrom: { stateId: "old-state-id" } })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.toState).toBeNull();
   });
 
   it("extracts toPriority from data.priority", () => {
-    const ev = parseLinearWebhookEvent(
-      "Issue",
-      issuePayload({ updatedFrom: { priority: 3 } }),
-    );
+    const ev = parseLinearWebhookEvent("Issue", issuePayload({ updatedFrom: { priority: 3 } }));
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.toPriority).toBe(2);
   });
@@ -93,7 +90,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
           team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
           assignee: { id: "new-user-id", name: "Ryan" },
         },
-      }),
+      })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.toAssigneeId).toBe("new-user-id");
@@ -106,26 +103,20 @@ describe("parseLinearWebhookEvent — Issue", () => {
       issuePayload({
         updatedFrom: { stateId: "old" },
         actor: { id: "actor-uuid", name: "Alice" },
-      }),
+      })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.actorName).toBe("Alice");
   });
 
   it("actorName is null when actor is absent", () => {
-    const ev = parseLinearWebhookEvent(
-      "Issue",
-      issuePayload({ updatedFrom: { stateId: "old" } }),
-    );
+    const ev = parseLinearWebhookEvent("Issue", issuePayload({ updatedFrom: { stateId: "old" } }));
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.actorName).toBeNull();
   });
 
   it("Issue update with only priority → priority_changed", () => {
-    const ev = parseLinearWebhookEvent(
-      "Issue",
-      issuePayload({ updatedFrom: { priority: 3 } }),
-    );
+    const ev = parseLinearWebhookEvent("Issue", issuePayload({ updatedFrom: { priority: 3 } }));
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.priority_changed");
   });
@@ -133,7 +124,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
   it("Issue update with only assigneeId → assignee_changed", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
-      issuePayload({ updatedFrom: { assigneeId: "old-user" } }),
+      issuePayload({ updatedFrom: { assigneeId: "old-user" } })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.assignee_changed");
@@ -144,7 +135,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
       "Issue",
       issuePayload({
         updatedFrom: { stateId: "old", priority: 1 },
-      }),
+      })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.state_changed");
@@ -153,7 +144,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
   it("Issue update with no recognized changes → linear.issue.updated", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
-      issuePayload({ updatedFrom: { title: "old title" } }),
+      issuePayload({ updatedFrom: { title: "old title" } })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.updated");
@@ -162,7 +153,7 @@ describe("parseLinearWebhookEvent — Issue", () => {
   it("Issue remove → linear.issue.removed", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
-      issuePayload({ action: "remove", updatedFrom: undefined }),
+      issuePayload({ action: "remove", updatedFrom: undefined })
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.topic).toBe("linear.issue.removed");
@@ -183,6 +174,128 @@ describe("parseLinearWebhookEvent — Issue", () => {
       type: "Issue",
     });
     expect(ev.kind).toBe("ignored");
+  });
+
+  // Scoping-field capture: the Linear webhook's raw payload.data carries the
+  // fields the daemon's eligibleQuery needs (project, labels, priority). The
+  // pre-existing parser dropped them, forcing the daemon to fall back to a full
+  // poll for every relevant event ("scoping resolved exclusively by the poll"
+  // comment in monitor.mjs). Capturing them now lets the daemon evaluate
+  // eligibility from the event payload directly and drop the per-event poll.
+
+  it("extracts toLabels from data.labels.nodes (Linear API shape)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: {
+            nodes: [
+              { id: "l1", name: "bug" },
+              { id: "l2", name: "p0" },
+            ],
+          },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toEqual(["bug", "p0"]);
+  });
+
+  it("toLabels is null when data.labels is absent", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload());
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toBeNull();
+  });
+
+  it("toLabels is an empty array when data.labels.nodes is empty", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: { nodes: [] },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toEqual([]);
+  });
+
+  it("extracts toProject (name) and toProjectId from data.project", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          project: { id: "proj-uuid", name: "Initiative 1" },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toProject).toBe("Initiative 1");
+    expect(ev.toProjectId).toBe("proj-uuid");
+  });
+
+  it("toProject is null when data.project is absent", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload());
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toProject).toBeNull();
+    expect(ev.toProjectId).toBeNull();
+  });
+
+  it("toProjectId falls back to data.projectId when data.project object is absent", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          projectId: "proj-uuid-only",
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toProject).toBeNull();
+    expect(ev.toProjectId).toBe("proj-uuid-only");
+  });
+
+  it("previousFromValues mirrors the full updatedFrom object (not just keys)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: {
+          stateId: "old-state",
+          labelIds: ["old-label-1", "old-label-2"],
+          projectId: "old-proj",
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.previousFromValues).toEqual({
+      stateId: "old-state",
+      labelIds: ["old-label-1", "old-label-2"],
+      projectId: "old-proj",
+    });
+    // updatedFromKeys still derived from Object.keys, unchanged
+    expect(ev.updatedFromKeys).toEqual(["stateId", "labelIds", "projectId"]);
+  });
+
+  it("previousFromValues is an empty object when updatedFrom is absent", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload({ updatedFrom: undefined }));
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.previousFromValues).toEqual({});
   });
 });
 

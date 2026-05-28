@@ -21,15 +21,14 @@ function makeReq(
     "linear-delivery": string;
     "linear-signature": string;
   }> = {},
-  method = "POST",
+  method = "POST"
 ): Request {
   const bodyStr = JSON.stringify(body);
   return new Request("http://localhost:7400/api/webhook/linear", {
     method,
     headers: {
       "linear-event": headers["linear-event"] ?? "Issue",
-      "linear-delivery":
-        headers["linear-delivery"] ?? `linear-delivery-${Math.random()}`,
+      "linear-delivery": headers["linear-delivery"] ?? `linear-delivery-${Math.random()}`,
       "linear-signature": headers["linear-signature"] ?? sign(bodyStr),
       "content-type": "application/json",
     },
@@ -90,7 +89,7 @@ describe("createLinearWebhookHandler", () => {
       linearSecrets: [{ key: "test", secret: SECRET }],
     });
     const res = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-signature": "deadbeef" }),
+      makeReq(issueUpdatePayload(), { "linear-signature": "deadbeef" })
     );
     expect(res.status).toBe(401);
   });
@@ -99,9 +98,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
     });
-    const res = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-event": "" }),
-    );
+    const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-event": "" }));
     expect(res.status).toBe(400);
   });
 
@@ -109,9 +106,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
     });
-    const res = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-delivery": "" }),
-    );
+    const res = await handler.handle(makeReq(issueUpdatePayload(), { "linear-delivery": "" }));
     expect(res.status).toBe(400);
   });
 
@@ -125,9 +120,7 @@ describe("createLinearWebhookHandler", () => {
       headers: {
         "linear-event": "Issue",
         "linear-delivery": "delivery-1",
-        "linear-signature": createHmac("sha256", SECRET)
-          .update(bodyStr)
-          .digest("hex"),
+        "linear-signature": createHmac("sha256", SECRET).update(bodyStr).digest("hex"),
         "content-type": "application/json",
       },
       body: bodyStr,
@@ -172,13 +165,11 @@ describe("createLinearWebhookHandler", () => {
       eventLog,
     });
     const deliveryId = "stable-delivery-1";
-    await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }),
-    );
+    await handler.handle(makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }));
     expect(eventLog.appends.length).toBe(1);
 
     const res2 = await handler.handle(
-      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId }),
+      makeReq(issueUpdatePayload(), { "linear-delivery": deliveryId })
     );
     expect(res2.status).toBe(200);
     const body = (await res2.json()) as { ok: boolean; replay?: boolean };
@@ -210,8 +201,8 @@ describe("createLinearWebhookHandler", () => {
           type: "Project",
           data: { id: "p1" },
         },
-        { "linear-event": "Project" },
-      ),
+        { "linear-event": "Project" }
+      )
     );
     expect(res.status).toBe(200);
     expect(eventLog.appends.length).toBe(0);
@@ -245,8 +236,8 @@ describe("createLinearWebhookHandler", () => {
     await handler.handle(
       makeReq(
         { action: "create", type: "Project", data: { id: "p1" } },
-        { "linear-event": "Project" },
-      ),
+        { "linear-event": "Project" }
+      )
     );
     expect(seen).toHaveLength(0);
   });
@@ -278,9 +269,7 @@ describe("createLinearWebhookHandler", () => {
       updatedFrom: { description: "old desc" },
     };
     await handler.handle(makeReq(payload));
-    expect(
-      eventLog.appends[0]?.attributes["linear.actor.id"],
-    ).toBe("actor-uuid-999");
+    expect(eventLog.appends[0]?.attributes["linear.actor.id"]).toBe("actor-uuid-999");
     const bodyPayload = eventLog.appends[0]?.body.payload as { actorId: string };
     expect(bodyPayload.actorId).toBe("actor-uuid-999");
   });
@@ -377,9 +366,7 @@ describe("createLinearWebhookHandler", () => {
       actor: { id: "bot-uuid-123" },
       data: { id: "c1", issueId: "i1" },
     };
-    await handler.handle(
-      makeReq(commentPayload, { "linear-event": "Comment" }),
-    );
+    await handler.handle(makeReq(commentPayload, { "linear-event": "Comment" }));
     expect(eventLog.appends.length).toBe(1);
   });
 });
@@ -401,8 +388,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     expect(env).not.toBeNull();
     expect(env!.attributes["event.name"]).toBe("linear.issue.state_changed");
@@ -428,8 +419,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     const payload = env!.body.payload as Record<string, unknown>;
     expect(payload["toState"]).toBe("In Review");
@@ -451,8 +446,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     const payload = env!.body.payload as Record<string, unknown>;
     expect(payload["toState"]).toBeNull();
@@ -474,8 +473,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     expect(env!.attributes["linear.actor.id"]).toBe("actor-uuid-123");
     const payload = env!.body.payload as { actorId: string };
@@ -498,11 +501,51 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     const payload = env!.body.payload as { actorId: string | null };
     expect(payload.actorId).toBeNull();
+  });
+
+  it("CTL-681: Issue event forwards toLabels/toProject/toProjectId/previousFromValues into body.payload", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.state_changed",
+        ticket: "CTL-681",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["stateId", "labelIds"],
+        actorId: null,
+        actorName: null,
+        toState: "Ready",
+        toPriority: 2,
+        toAssigneeId: null,
+        toAssigneeName: null,
+        toLabels: ["bug", "p0"],
+        toProject: "Initiative 1",
+        toProjectId: "proj-uuid",
+        previousFromValues: {
+          stateId: "old-state",
+          labelIds: ["old-label"],
+        },
+      },
+      TS
+    );
+    const p = env!.body.payload as Record<string, unknown>;
+    expect(p.toLabels).toEqual(["bug", "p0"]);
+    expect(p.toProject).toBe("Initiative 1");
+    expect(p.toProjectId).toBe("proj-uuid");
+    expect(p.previousFromValues).toEqual({
+      stateId: "old-state",
+      labelIds: ["old-label"],
+    });
   });
 
   it("Issue event serializes toState, toPriority, toAssigneeName, actorName into body.payload (CTL-424)", () => {
@@ -521,8 +564,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: 2,
         toAssigneeId: "user-uuid-424",
         toAssigneeName: "Alice",
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     const p = env!.body.payload as Record<string, unknown>;
     expect(p.toState).toBe("In Progress");
@@ -548,8 +595,12 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     const p = env!.body.payload as Record<string, unknown>;
     expect(p.toState).toBeNull();
@@ -569,7 +620,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         issueId: "i1",
         data: {},
       },
-      TS,
+      TS
     );
     expect(env!.attributes["event.name"]).toBe("linear.comment.created");
     expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-1");
@@ -584,7 +635,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
       },
-      TS,
+      TS
     );
     expect(env!.attributes["event.name"]).toBe("linear.cycle.updated");
     expect(env!.attributes["linear.team.key"]).toBe("CTL");
@@ -598,16 +649,13 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         reactionId: "r1",
         data: {},
       },
-      TS,
+      TS
     );
     expect(env!.attributes["event.name"]).toBe("linear.reaction.created");
   });
 
   it("ignored → null", () => {
-    const env = buildLinearEventLogEnvelope(
-      { kind: "ignored", reason: "test" },
-      TS,
-    );
+    const env = buildLinearEventLogEnvelope({ kind: "ignored", reason: "test" }, TS);
     expect(env).toBeNull();
   });
 });
@@ -637,9 +685,13 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
     expect(env!.attributes["linear.team.key"]).toBe("CTL");
@@ -661,9 +713,13 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
     expect(env!.attributes["linear.team.key"]).toBe("FOO");
@@ -685,9 +741,13 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
@@ -703,7 +763,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/adva");
     expect(env!.attributes["linear.team.key"]).toBe("ADV");
@@ -721,7 +781,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
     expect(env!.attributes["linear.team.key"]).toBeUndefined();
@@ -738,7 +798,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
@@ -753,7 +813,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBe("coalesce-labs/catalyst");
   });
@@ -767,7 +827,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
@@ -781,7 +841,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         data: {},
       },
       TS,
-      TEAMS,
+      TEAMS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
@@ -802,8 +862,12 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toPriority: null,
         toAssigneeId: null,
         toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
       },
-      TS,
+      TS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
