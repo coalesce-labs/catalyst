@@ -3,9 +3,12 @@
 // exercise the pure logic against injected payloads (the `exec`/`agents`/`spawn`
 // seams) so nothing shells out to the real `claude`.
 
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, beforeEach } from "bun:test";
 import {
   listClaudeAgents,
+  listClaudeAgentsResult,
+  cachedListClaudeAgents,
+  resetLivenessCache,
   agentForShortId,
   isBgJobAlive,
   livenessForBgJob,
@@ -37,6 +40,120 @@ describe("listClaudeAgents", () => {
 
   test("returns [] when the parsed value is not an array", () => {
     expect(listClaudeAgents({ exec: () => JSON.stringify({ not: "an array" }) })).toEqual([]);
+  });
+});
+
+describe("listClaudeAgentsResult", () => {
+  test("ok:true with the parsed array on success", () => {
+    expect(listClaudeAgentsResult({ exec: () => JSON.stringify(agents) })).toEqual({
+      ok: true,
+      agents,
+    });
+  });
+  test("ok:false on a throwing exec (binary missing)", () => {
+    const exec = () => {
+      throw new Error("claude: command not found");
+    };
+    expect(listClaudeAgentsResult({ exec })).toEqual({ ok: false, agents: [] });
+  });
+  test("ok:false on non-JSON output", () => {
+    expect(listClaudeAgentsResult({ exec: () => "not json" })).toEqual({ ok: false, agents: [] });
+  });
+  test("ok:false when the parsed value is not an array", () => {
+    expect(listClaudeAgentsResult({ exec: () => JSON.stringify({ not: "array" }) })).toEqual({
+      ok: false,
+      agents: [],
+    });
+  });
+});
+
+describe("cachedListClaudeAgents (CTL-672 TTL liveness cache)", () => {
+  // Module-level cache → reset before each case so order doesn't leak state.
+  beforeEach(() => resetLivenessCache());
+
+  // A counting exec returning a fixed payload, plus a mutable clock.
+  function harness(payload = agents) {
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return JSON.stringify(payload);
+    };
+    return { exec, calls: () => calls };
+  }
+
+  test("first call reads through and returns the parsed agents", () => {
+    const h = harness();
+    const got = cachedListClaudeAgents({ exec: h.exec, now: () => 1000 });
+    expect(got).toHaveLength(3);
+    expect(h.calls()).toBe(1);
+  });
+
+  test("second call within the TTL serves the cached snapshot WITHOUT re-exec", () => {
+    const h = harness();
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1000, ttlMs: 5000 });
+    const second = cachedListClaudeAgents({ exec: h.exec, now: () => 4000, ttlMs: 5000 });
+    expect(second).toHaveLength(3);
+    expect(h.calls()).toBe(1); // no second shell-out
+  });
+
+  test("refreshes once the TTL has elapsed", () => {
+    const h = harness();
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1000, ttlMs: 5000 });
+    cachedListClaudeAgents({ exec: h.exec, now: () => 6001, ttlMs: 5000 }); // > ttl later
+    expect(h.calls()).toBe(2);
+  });
+
+  test("force:true bypasses a still-fresh cache", () => {
+    const h = harness();
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1000 });
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1001, force: true });
+    expect(h.calls()).toBe(2);
+  });
+
+  test("serves last-good on a failed refresh instead of flapping to [] (no false-absent storm)", () => {
+    // Populate the cache, then let the TTL lapse and the refresh fail.
+    let mode = "ok";
+    const exec = () => {
+      if (mode === "throw") throw new Error("transient claude agents failure");
+      return JSON.stringify(agents);
+    };
+    cachedListClaudeAgents({ exec, now: () => 1000, ttlMs: 5000 });
+    mode = "throw";
+    const got = cachedListClaudeAgents({ exec, now: () => 7000, ttlMs: 5000 });
+    expect(got).toHaveLength(3); // last-good, NOT []
+  });
+
+  test("a failed refresh does not advance the TTL — the next call retries the read", () => {
+    let mode = "throw";
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      if (mode === "throw") throw new Error("down");
+      return JSON.stringify(agents);
+    };
+    // Cold start, refresh fails → []
+    expect(cachedListClaudeAgents({ exec, now: () => 1000, ttlMs: 5000 })).toEqual([]);
+    expect(calls).toBe(1);
+    // Next call (still within what would be the TTL window) retries rather than
+    // locking the failure in, and now succeeds.
+    mode = "ok";
+    expect(cachedListClaudeAgents({ exec, now: () => 1001, ttlMs: 5000 })).toHaveLength(3);
+    expect(calls).toBe(2);
+  });
+
+  test("cold-start failure with no prior snapshot → []", () => {
+    const exec = () => {
+      throw new Error("boom");
+    };
+    expect(cachedListClaudeAgents({ exec, now: () => 1000 })).toEqual([]);
+  });
+
+  test("resetLivenessCache forces the next call to read through", () => {
+    const h = harness();
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1000 });
+    resetLivenessCache();
+    cachedListClaudeAgents({ exec: h.exec, now: () => 1001 });
+    expect(h.calls()).toBe(2);
   });
 });
 

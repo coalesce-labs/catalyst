@@ -761,6 +761,100 @@ describe("watchdog skips legitimately waiting sessions (CTL-403)", () => {
   });
 });
 
+describe("watchdog uses claude-agents liveness over heartbeat-ts (CTL-672)", () => {
+  function wakeCount(notifyEvent) {
+    const ym = new Date().toISOString().slice(0, 7);
+    const logPath = join(tmpDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return 0;
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .filter((l) => {
+        try {
+          const evt = JSON.parse(l);
+          return (evt.event ?? evt.attributes?.["event.name"] ?? "") === notifyEvent;
+        } catch {
+          return false;
+        }
+      }).length;
+  }
+
+  test("liveness 'dead' wakes the session even when the heartbeat ts is FRESH", async () => {
+    const { runWatchdogTick } = await import("./index.mjs");
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-d",
+      detail: {
+        interest_id: "orch-d",
+        notify_event: "filter.wake.orch-d",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [1],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [1], tickets: [], workers: ["sess-dead"] },
+        session_id: null,
+      },
+    });
+    // FRESH heartbeat — the legacy ts check would NOT fire.
+    getLastHeartbeat().set("sess-dead", { ts: Date.now(), notified: false });
+
+    runWatchdogTick({ liveness: (id) => (id === "sess-dead" ? "dead" : "unknown") });
+
+    expect(wakeCount("filter.wake.orch-d")).toBeGreaterThan(0);
+  });
+
+  test("liveness 'alive' suppresses the wake even when the heartbeat ts is STALE", async () => {
+    const { runWatchdogTick } = await import("./index.mjs");
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-a",
+      detail: {
+        interest_id: "orch-a",
+        notify_event: "filter.wake.orch-a",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [2],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [2], tickets: [], workers: ["sess-alive"] },
+        session_id: null,
+      },
+    });
+    // STALE heartbeat — the legacy ts check WOULD fire, but claude-agents says alive.
+    getLastHeartbeat().set("sess-alive", { ts: Date.now() - 300_000, notified: false });
+
+    runWatchdogTick({ liveness: (id) => (id === "sess-alive" ? "alive" : "unknown") });
+
+    expect(wakeCount("filter.wake.orch-a")).toBe(0);
+  });
+
+  test("liveness 'unknown' falls back to heartbeat-ts staleness (legacy behavior)", async () => {
+    const { runWatchdogTick } = await import("./index.mjs");
+    handleRegister({
+      event: "filter.register",
+      orchestrator: "orch-u",
+      detail: {
+        interest_id: "orch-u",
+        notify_event: "filter.wake.orch-u",
+        interest_type: "pr_lifecycle",
+        pr_numbers: [3],
+        repo: "org/repo",
+        base_branches: [],
+        persistent: true,
+        context: { pr_numbers: [3], tickets: [], workers: ["sess-unknown"] },
+        session_id: null,
+      },
+    });
+    getLastHeartbeat().set("sess-unknown", { ts: Date.now() - 300_000, notified: false });
+
+    runWatchdogTick({ liveness: () => "unknown" });
+
+    expect(wakeCount("filter.wake.orch-u")).toBeGreaterThan(0);
+  });
+});
+
 describe("buildBrokerState includes waitingSessions (CTL-403)", () => {
   test("empty when no active waits", () => {
     const state = buildBrokerState();

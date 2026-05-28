@@ -60,6 +60,7 @@ import {
   upsertWaitingSession,
   clearWaitingSession,
 } from "./broker-state.mjs";
+import { sessionLiveness } from "./session-liveness.mjs";
 import {
   severityNumber,
   deriveTraceId,
@@ -1377,7 +1378,13 @@ function queueEvent(event) {
 
 // --- Heartbeat watchdog ---
 
-export function runWatchdogTick() {
+// CTL-672: `liveness(sourceId)` returns "alive" | "dead" | "unknown" from the
+// `claude agents` source of truth (via the catalyst.db sess_→UUID bridge),
+// shared through the TTL cache so all tracked sessions in one tick collapse to a
+// single `claude agents` invocation. Injectable for tests. "unknown" (a session
+// not yet resolvable to a claude UUID — e.g. interactive sessions) falls back to
+// the legacy heartbeat-ts staleness below, so behavior is unchanged for those.
+export function runWatchdogTick({ liveness = sessionLiveness } = {}) {
   const now = Date.now();
 
   // CTL-352: empty-interests observability. Warn on every tick when the table
@@ -1416,7 +1423,12 @@ export function runWatchdogTick() {
   // the HUD when N sessions go stale simultaneously.
   const staleNow = new Map(); // sourceId → { ts, minsAgo }
   for (const [sourceId, state] of lastHeartbeat) {
-    const stale = now - state.ts > HEARTBEAT_STALE_MS;
+    // CTL-672: prefer the `claude agents` truth (resolved via the catalyst.db
+    // sess_→UUID bridge); fall back to heartbeat-ts staleness only when the
+    // session isn't yet resolvable to a claude UUID ("unknown").
+    const liv = liveness(sourceId);
+    const stale =
+      liv === "dead" ? true : liv === "alive" ? false : now - state.ts > HEARTBEAT_STALE_MS;
     // CTL-403: skip stale-wake if this session has an active wait whose timeout
     // has not yet elapsed. The session is legitimately blocking — not dead.
     if (stale && waitingSessions.has(sourceId)) {

@@ -16,16 +16,72 @@ import { shortIdFromSessionId } from "./claude-ids.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
-// listClaudeAgents — the parsed `claude agents --json` array, or [] on any
-// failure (binary missing, non-JSON output, non-array). Never throws.
-export function listClaudeAgents({ exec = execFileSync } = {}) {
+// listClaudeAgentsResult — like listClaudeAgents but distinguishes a FAILED read
+// ({ ok:false }) from a genuinely empty fleet ({ ok:true, agents:[] }). The TTL
+// cache (cachedListClaudeAgents) needs that distinction: on a transient
+// `claude agents` failure it must serve the last-good snapshot rather than flap
+// every tracked session to "absent" — which would fire a false-wake / false-
+// reclaim storm across the whole fleet.
+export function listClaudeAgentsResult({ exec = execFileSync } = {}) {
   try {
     const out = exec(CLAUDE_BIN, ["agents", "--json"], { encoding: "utf8" });
     const parsed = JSON.parse(out);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return { ok: false, agents: [] };
+    return { ok: true, agents: parsed };
   } catch {
-    return [];
+    return { ok: false, agents: [] };
   }
+}
+
+// listClaudeAgents — the parsed `claude agents --json` array, or [] on any
+// failure (binary missing, non-JSON output, non-array). Never throws.
+export function listClaudeAgents({ exec } = {}) {
+  return listClaudeAgentsResult({ exec }).agents;
+}
+
+// --- TTL liveness cache (CTL-672) ---
+//
+// A short-TTL memoization of listClaudeAgents so the broker watchdog and the
+// CTL-662 reclaim sweep share ONE `claude agents --json` invocation per window
+// instead of each shelling out per tick. The 5s default is far below both the
+// reclaim cadence and any phase duration, so a cached snapshot is never
+// meaningfully stale for a liveness decision, while N consumers collapse to at
+// most ~12 invocations/min regardless of how many ask.
+//
+// SINGLE-HOST ASSUMPTION: `claude agents` enumerates only LOCAL sessions, so
+// this cache — and every liveness decision built on it — is correct only while
+// the broker/daemon are co-located with their workers. A distributed deployment
+// (workers on remote hosts) must reinstate an over-the-wire liveness signal
+// (heartbeats or a liveness RPC); see CTL-672's single-host caveat.
+const LIVENESS_TTL_MS = Number(process.env.CATALYST_LIVENESS_TTL_MS) || 5_000;
+let _livenessCache = { ts: 0, agents: null }; // agents:null ⇒ never populated
+
+export function cachedListClaudeAgents({
+  exec,
+  now = Date.now,
+  ttlMs = LIVENESS_TTL_MS,
+  force = false,
+} = {}) {
+  const t = now();
+  if (!force && _livenessCache.agents !== null && t - _livenessCache.ts < ttlMs) {
+    return _livenessCache.agents;
+  }
+  const res = listClaudeAgentsResult({ exec });
+  if (res.ok) {
+    _livenessCache = { ts: t, agents: res.agents };
+    return res.agents;
+  }
+  // Failed refresh: serve last-good if we have one — and do NOT advance ts, so
+  // the next call retries the read rather than locking a stale snapshot in for a
+  // full TTL. Cold-start with no prior snapshot ⇒ [] (nothing better to serve).
+  return _livenessCache.agents ?? [];
+}
+
+// resetLivenessCache — drop the memoized snapshot. Test seam, and an explicit
+// invalidation hook for callers that just changed the fleet (e.g. right after a
+// dispatch or a `claude stop`) and want the next read to reflect it immediately.
+export function resetLivenessCache() {
+  _livenessCache = { ts: 0, agents: null };
 }
 
 // agentForShortId — the agent record whose sessionId truncates to `shortId`, or
