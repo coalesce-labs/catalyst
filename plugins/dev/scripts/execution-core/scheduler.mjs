@@ -182,6 +182,47 @@ export function readExecutionCoreConcurrency(configPath) {
   return parsed?.catalyst?.orchestration?.executionCore ?? {};
 }
 
+// readExecutionCoreConcurrencyLayer2 — pull the machine-canonical worker-slot
+// concurrency knobs from a Layer-2 file (~/.config/catalyst/config.json) at
+// catalyst.orchestration.executionCore (CTL-678). Same failure semantics as
+// readExecutionCoreConcurrency: returns {} for a null/missing/unparseable file
+// or absent key; never throws. The Layer-2 path is host-wide; per-project
+// overrides are out of scope today (see CTL-678 plan, Decision 1).
+export function readExecutionCoreConcurrencyLayer2(layer2Path) {
+  if (!layer2Path) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(layer2Path, "utf8"));
+  } catch (err) {
+    if (err?.code !== "ENOENT") {
+      log.warn(
+        { layer2Path, err: err.message },
+        "execution-core: Layer-2 concurrency config unreadable; using Layer-1"
+      );
+    }
+    return {};
+  }
+  return parsed?.catalyst?.orchestration?.executionCore ?? {};
+}
+
+// mergeExecutionCoreConcurrency — per-field merge of Layer-1 (committed
+// .catalyst/config.json seed) and Layer-2 (~/.config/catalyst/config.json
+// machine-canonical override). Layer-2 wins per field WHEN the field is a
+// positive integer; otherwise the Layer-1 value is preserved (a malformed
+// Layer-2 never silently caps a healthy Layer-1). eligibleQuery and any other
+// co-located fields on Layer-1 pass through unchanged (Layer-2's executionCore
+// block is concurrency-only by convention). The returned object is fed to
+// readMaxParallel verbatim — same shape, same precedence-and-clamp semantics
+// as CTL-665.
+export function mergeExecutionCoreConcurrency(layer1 = {}, layer2 = {}) {
+  const merged = { ...layer1 };
+  for (const key of ["maxParallel", "minParallel", "maxParallelCeiling"]) {
+    const v = layer2?.[key];
+    if (Number.isInteger(v) && v > 0) merged[key] = v;
+  }
+  return merged;
+}
+
 // clampToBounds — raise `value` to `minParallel` and lower it to
 // `maxParallelCeiling`, but only when each bound is a valid integer (CTL-665).
 // Bounds bite only when present, so the empty-`concurrency` legacy path stays

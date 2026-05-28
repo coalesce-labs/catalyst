@@ -21,6 +21,8 @@ import {
   listInFlightTickets,
   readMaxParallel,
   readExecutionCoreConcurrency,
+  readExecutionCoreConcurrencyLayer2,
+  mergeExecutionCoreConcurrency,
   DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
@@ -231,6 +233,108 @@ describe("readExecutionCoreConcurrency (CTL-665)", () => {
   test("returns {} when the key is absent", () => {
     const p = writeConfig({ catalyst: { orchestration: {} } });
     expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+});
+
+// CTL-678 — Layer-2 reader (machine-canonical override) mirrors the Layer-1
+// reader's failure semantics: ENOENT silent, unparseable JSON silent, absent
+// key → {}.
+describe("readExecutionCoreConcurrencyLayer2 (CTL-678)", () => {
+  function writeLayer2(obj) {
+    const p = join(orchDir, "layer2.json");
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  }
+  test("returns {} for a null/empty layer2Path", () => {
+    expect(readExecutionCoreConcurrencyLayer2(null)).toEqual({});
+    expect(readExecutionCoreConcurrencyLayer2("")).toEqual({});
+  });
+  test("returns {} for an absent file (ENOENT silent — no throw)", () => {
+    expect(readExecutionCoreConcurrencyLayer2(join(orchDir, "nope.json"))).toEqual({});
+  });
+  test("returns {} for unparseable JSON (no throw)", () => {
+    const p = join(orchDir, "bad-layer2.json");
+    writeFileSync(p, "{ not json");
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({});
+  });
+  test("returns the catalyst.orchestration.executionCore object", () => {
+    const p = writeLayer2({
+      catalyst: {
+        orchestration: {
+          executionCore: { maxParallel: 6 },
+        },
+      },
+    });
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({ maxParallel: 6 });
+  });
+  test("returns {} when the file exists but lacks catalyst.orchestration.executionCore", () => {
+    const p = writeLayer2({ catalyst: { orchestration: {} } });
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({});
+  });
+});
+
+// CTL-678 — per-field pre-merge of Layer-1 (committed seed) + Layer-2
+// (machine-canonical override). Layer-2 wins per VALID INTEGER field; absent
+// or invalid Layer-2 fields fall back to Layer-1. eligibleQuery and any other
+// non-concurrency key on Layer-1 passes through unchanged.
+describe("mergeExecutionCoreConcurrency (CTL-678)", () => {
+  test("both empty → {}", () => {
+    expect(mergeExecutionCoreConcurrency({}, {})).toEqual({});
+    expect(mergeExecutionCoreConcurrency()).toEqual({});
+  });
+  test("Layer-1 only → Layer-1 verbatim", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    expect(mergeExecutionCoreConcurrency(l1, {})).toEqual(l1);
+  });
+  test("Layer-2 only → Layer-2 verbatim", () => {
+    const l2 = { maxParallel: 6, minParallel: 2, maxParallelCeiling: 20 };
+    expect(mergeExecutionCoreConcurrency({}, l2)).toEqual(l2);
+  });
+  test("Layer-2 partial override: only maxParallel set in Layer-2", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    const l2 = { maxParallel: 6 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+    });
+  });
+  test("per-field override: Layer-2 wins independently per field", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    const l2 = { maxParallel: 6, maxParallelCeiling: 20 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 20,
+    });
+  });
+  test("invalid type in Layer-2 does NOT block Layer-1 fallback", () => {
+    const l1 = { maxParallel: 4 };
+    const l2 = { maxParallel: "six" };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({ maxParallel: 4 });
+  });
+  test("non-positive integer in Layer-2 falls back to Layer-1", () => {
+    expect(
+      mergeExecutionCoreConcurrency({ maxParallel: 4 }, { maxParallel: 0 }),
+    ).toEqual({ maxParallel: 4 });
+    expect(
+      mergeExecutionCoreConcurrency({ maxParallel: 4 }, { maxParallel: -1 }),
+    ).toEqual({ maxParallel: 4 });
+  });
+  test("eligibleQuery on Layer-1 passes through unchanged", () => {
+    const l1 = {
+      maxParallel: 4,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    };
+    const l2 = { maxParallel: 6 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    });
   });
 });
 
