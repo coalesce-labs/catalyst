@@ -81,7 +81,7 @@ function enroll(team, eligibleQuery) {
   registryEntries.push({ team, repoRoot, eligibleQuery: eligibleQuery ?? null });
   writeFileSync(
     join(catalystDir, "execution-core", "registry.json"),
-    JSON.stringify({ projects: registryEntries }, null, 2),
+    JSON.stringify({ projects: registryEntries }, null, 2)
   );
   enrolledTeams.add(team);
   return repoRoot;
@@ -113,7 +113,17 @@ function mockExec(nodesByTeam) {
 }
 
 describe("execution-core integration — acceptance criteria", () => {
-  test("AC1 — a state_changed event INTO the eligible state triggers a reconcile that adds the ticket", async () => {
+  test("CTL-681: AC1 — a state_changed event INTO the eligible state is a NO-OP; the periodic reconcile (or operator-triggered reconcileAll) adds the ticket", async () => {
+    // Pre-CTL-681 AC1: the event triggered a debounced per-event poll which
+    // rediscovered ENG-9 and folded it into the eligible set. That per-event
+    // poll was the load that exhausted the Linear 2500/hr quota.
+    //
+    // Post-CTL-681 AC1: the event is a no-op (per-event scoping reconcile
+    // removed). The webhook parser now captures project/labels/priority so a
+    // follow-up PR can fold the change incrementally without a poll; until then
+    // the eligible set is refreshed by the periodic reconcile timer
+    // (RECONCILE_INTERVAL_MS, 10 min in prod) or the startup reconcile. This
+    // test demonstrates BOTH halves of the new contract.
     enroll("ENG", { status: "Todo" });
     const reported = { ENG: [] };
     const exec = mockExec(reported);
@@ -123,6 +133,11 @@ describe("execution-core integration — acceptance criteria", () => {
     reported.ENG = [node("ENG-9")]; // linearis now reports ENG-9 as Todo
     handleStateChangedEvent(evt("ENG-9", "ENG", "Todo"), { exec, debounceMs: 25 });
     await sleep(70);
+    // The event itself did NOT add ENG-9 — that's the deliberate change.
+    expect(getEligibleSet("ENG")).toEqual([]);
+
+    // The next periodic reconcile (here driven directly) picks it up.
+    reconcileAll({ exec });
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 
@@ -175,9 +190,7 @@ describe("execution-core integration — rebuild + isolation", () => {
     const exec = mockExec({ ENG: [node("ENG-1")] });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
-    expect(
-      existsSync(join(catalystDir, "execution-core", "eligible", "ENG.json")),
-    ).toBe(true);
+    expect(existsSync(join(catalystDir, "execution-core", "eligible", "ENG.json"))).toBe(true);
   });
 
   test("a second enrolled project is served independently (per-project isolation)", () => {
@@ -189,10 +202,7 @@ describe("execution-core integration — rebuild + isolation", () => {
     });
     startMonitor({ exec, reconcileIntervalMs: 60_000 });
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
-    expect(getEligibleSet("PLAT").map((t) => t.identifier)).toEqual([
-      "PLAT-1",
-      "PLAT-2",
-    ]);
+    expect(getEligibleSet("PLAT").map((t) => t.identifier)).toEqual(["PLAT-1", "PLAT-2"]);
   });
 });
 
@@ -220,10 +230,7 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
   function writeWorkerSignal(orchDir, ticket, phase, body) {
     const dir = join(orchDir, "workers", ticket);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, `phase-${phase}.json`),
-      JSON.stringify({ ticket, phase, ...body }),
-    );
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
   }
   // makeJobDir — a fake claude --bg job state dir under the fake jobs root.
   function makeJobDir(bgJobId) {
