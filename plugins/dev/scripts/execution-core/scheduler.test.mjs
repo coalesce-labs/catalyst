@@ -1687,6 +1687,127 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
   });
 });
 
+// ── CTL-678: per-tick Layer-2 hot-reload — extends CTL-676 ──
+//
+// CTL-676 hot-reloads the Layer-1 config every tick. CTL-678 layers a
+// machine-canonical Layer-2 override on top: when `layer2Path` is wired in
+// alongside `configPath`, runTick reads BOTH files per tick and merges
+// Layer-2 over Layer-1 per field. An edit to either file takes effect on the
+// next debounced tick — no daemon restart.
+describe("startScheduler — per-tick Layer-2 merge (CTL-678)", () => {
+  afterEach(() => __resetForTests());
+
+  const tk = (id, priority) => ({
+    identifier: id,
+    priority,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  // Boot-time precedence: with both files present, Layer-2 wins per field on
+  // the very first tick. Observable via the dispatch ceiling.
+  test("Layer-2 maxParallel wins on the first tick when both files present", () => {
+    const configPath = join(orchDir, "config.json");
+    const layer2Path = join(orchDir, "layer2.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 3 } } },
+      }),
+    );
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      layer2Path,
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    // Layer-2 ceiling 3, not Layer-1 ceiling 1.
+    expect(dispatch.calls.length).toBe(3);
+  });
+
+  // Hot-reload: editing the Layer-2 file between ticks raises the ceiling
+  // on the next tick — proves the per-tick re-read pulls Layer-2 too.
+  test("editing Layer-2 raises the ceiling on the next tick", async () => {
+    const configPath = join(orchDir, "config.json");
+    const layer2Path = join(orchDir, "layer2.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      layer2Path,
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    expect(dispatch.calls.length).toBe(1);
+
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 3 } } },
+      }),
+    );
+    await waitFor(() => dispatch.calls.length >= 3, {
+      intervalMs: 100,
+      onTick: () => appendToEventLog('{"event":"wake.CTL-678"}\n'),
+    });
+    expect(dispatch.calls.length).toBe(3);
+  });
+
+  // Back-compat: layer2Path unset → byte-for-byte CTL-676 behavior (Layer-1
+  // only). The merger's both-empty path returns Layer-1 verbatim.
+  test("layer2Path unset → Layer-1 reaches schedulerTick (CTL-676 back-compat)", () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 2 } } },
+      }),
+    );
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      // layer2Path intentionally omitted
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    // Layer-1 ceiling 2 reached schedulerTick — no Layer-2 path, no merge work.
+    expect(dispatch.calls.length).toBe(2);
+  });
+});
+
 // ── CTL-539: idempotent-dispatch proof — re-deriving the tick after a
 // "crash" can never double-dispatch the same {ticket, phase} ──
 

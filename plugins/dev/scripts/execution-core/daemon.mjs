@@ -128,6 +128,12 @@ export function startDaemon({
   // once before the scheduler starts and never re-reads. Null in tests that
   // never resolve a config path.
   configPath = null,
+  // CTL-678: machine-canonical Layer-2 path (~/.config/catalyst/config.json).
+  // Threaded into startScheduler alongside configPath so the per-tick re-read
+  // can apply Layer-2's per-field override on every tick (hot-reload of the
+  // override). Null in tests; production main() resolves it from
+  // CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json.
+  layer2Path = null,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -180,7 +186,7 @@ export function startDaemon({
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache, concurrency, configPath }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 — pull-loop scheduler (configPath enables per-tick re-read)
+    schedulerFn({ orchDir, cache, concurrency, configPath, layer2Path }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -491,7 +497,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath }); // CTL-676
+    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

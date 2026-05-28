@@ -1205,19 +1205,28 @@ let runningOpts = null;
 
 function runTick() {
   try {
-    // CTL-676: hot-reload the concurrency knobs by re-reading the project
-    // config at the top of every tick. When `configPath` is unset (back-compat
-    // scheduler harnesses that never threaded it), fall back to the
-    // boot-captured `concurrency` object — byte-for-byte the pre-CTL-676
-    // behavior. `readExecutionCoreConcurrency` is null/ENOENT/parse-error
-    // safe (returns `{}`), so a malformed mid-run edit fails open exactly as
-    // a fresh daemon boot against the same malformed file would: the next
-    // `readMaxParallel` call falls through to state.json + the hardcoded
-    // default. Boot-resume keeps the boot-captured object — it fires once
-    // before the scheduler starts, and never re-reads.
-    const concurrency = runningOpts.configPath
-      ? readExecutionCoreConcurrency(runningOpts.configPath)
-      : runningOpts.concurrency;
+    // CTL-676 + CTL-678: hot-reload the concurrency knobs by re-reading the
+    // project config at the top of every tick. When `configPath` is unset
+    // (back-compat scheduler harnesses that never threaded it), fall back to
+    // the boot-captured `concurrency` object — byte-for-byte the pre-CTL-676
+    // behavior. When both `configPath` (Layer-1 seed) AND `layer2Path`
+    // (machine-canonical Layer-2 override, ~/.config/catalyst/config.json)
+    // are wired in (production), the merger picks per-field winners on each
+    // tick — an operator can edit Layer-2 with no daemon restart. Both
+    // readers are null/ENOENT/parse-error safe (return `{}`), so a malformed
+    // mid-run edit fails open: the next `readMaxParallel` falls through to
+    // state.json + the hardcoded default. Boot-resume keeps the boot-captured
+    // object — it fires once before the scheduler starts and never re-reads.
+    let concurrency;
+    if (runningOpts.configPath) {
+      const layer1 = readExecutionCoreConcurrency(runningOpts.configPath);
+      const layer2 = runningOpts.layer2Path
+        ? readExecutionCoreConcurrencyLayer2(runningOpts.layer2Path)
+        : {};
+      concurrency = mergeExecutionCoreConcurrency(layer1, layer2);
+    } else {
+      concurrency = runningOpts.concurrency;
+    }
     schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
@@ -1264,6 +1273,10 @@ export function startScheduler({
   // this path per tick (hot-reload). Threaded from startDaemon, which resolves
   // it from CATALYST_CONFIG_FILE || <cwd>/.catalyst/config.json. Null in tests
   // that exercise the back-compat boot-captured-only shape.
+  layer2Path = null, // CTL-678: when set (production wiring), runTick also
+  // re-reads the machine-canonical Layer-2 file per tick and merges it
+  // per-field over Layer-1. Null in tests that exercise the Layer-1-only
+  // shape; the merger's both-empty path then returns Layer-1 verbatim.
   liveBackgroundCount, // CTL-676: optional test-only seam, forwarded to
   // schedulerTick where it defaults to countBackgroundAgents (the live
   // `claude agents --json` count). Symmetric with the existing dispatch /
@@ -1282,7 +1295,8 @@ export function startScheduler({
     teardownWorktree,
     cache,
     concurrency,
-    configPath, // CTL-676: per-tick re-read source
+    configPath, // CTL-676: per-tick Layer-1 re-read source
+    layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)
     liveBackgroundCount, // CTL-676: test seam
   };
 
