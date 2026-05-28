@@ -130,6 +130,14 @@ export function defaultDispatch(
 }
 
 // dispatchTicket — thin seam over the injectable dispatch function.
-export function dispatchTicket(orchDir, ticket, phase, { dispatch = defaultDispatch } = {}) {
-  return dispatch({ orchDir, ticket, phase });
+// CTL-705: forwards optional resumeSession so the resume re-dispatch path can
+// pass a resume UUID. Omitted when absent — the legacy toEqual assertions stay
+// green because the key is not added when the value is falsy.
+export function dispatchTicket(
+  orchDir, ticket, phase,
+  { dispatch = defaultDispatch, resumeSession } = {},
+) {
+  const args = { orchDir, ticket, phase };
+  if (resumeSession) args.resumeSession = resumeSession;
+  return dispatch(args);
 }

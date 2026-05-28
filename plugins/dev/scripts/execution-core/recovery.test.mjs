@@ -23,6 +23,8 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultAppendPreemptedEvent,
+  defaultAppendResumedAfterPreemptionEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -32,7 +34,7 @@ import {
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync, chmodSync } from "node:fs";
 
 let orchDir;
 
@@ -2745,5 +2747,76 @@ describe("resolvePhaseSessionId", () => {
     mkdirSync(join(jobsDir, "nolink"), { recursive: true });
     writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({ state: "stopped" }));
     expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
+  });
+});
+
+// CTL-705 Phase 4/5: preemption and resume-after-preemption event envelopes.
+describe("preemption event envelopes (CTL-705)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl705-preempt-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("defaultAppendPreemptedEvent writes phase.<phase>.preempted.<TICKET> envelope", () => {
+    const ok = defaultAppendPreemptedEvent({
+      orchId: "CTL-2",
+      ticket: "CTL-2",
+      phase: "research",
+      preemptedBy: "CTL-9",
+      bgJobId: "abc12345",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.research.preempted.CTL-2");
+    expect(env.attributes["event.action"]).toBe("preempted");
+    expect(env.body.payload.preempted_by).toBe("CTL-9");
+    expect(env.body.payload.bg_job_id).toBe("abc12345");
+  });
+
+  test("defaultAppendPreemptedEvent returns false on write failure, never throws", () => {
+    // Remove the events dir and make envCatalystDir read-only to force a write failure.
+    rmSync(join(envCatalystDir, "events"), { recursive: true, force: true });
+    chmodSync(envCatalystDir, 0o555);
+    let result;
+    try {
+      result = defaultAppendPreemptedEvent({
+        orchId: "CTL-2", ticket: "CTL-2", phase: "research", preemptedBy: "CTL-9", bgJobId: "x",
+      });
+    } finally {
+      chmodSync(envCatalystDir, 0o755);
+    }
+    expect(result).toBe(false);
+  });
+
+  test("defaultAppendResumedAfterPreemptionEvent writes phase.<phase>.resumed-after-preemption.<T>", () => {
+    const ok = defaultAppendResumedAfterPreemptionEvent({
+      orchId: "CTL-2",
+      ticket: "CTL-2",
+      phase: "research",
+      resumeSession: "sess-uuid",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.research.resumed-after-preemption.CTL-2");
+    expect(env.attributes["event.action"]).toBe("resumed-after-preemption");
+    expect(env.body.payload.resume_session).toBe("sess-uuid");
   });
 });

@@ -47,3 +47,49 @@ describe("rankTickets", () => {
     expect(rankTickets([])).toEqual([]);
   });
 });
+
+// CTL-705: stage-aware global comparator
+describe("compareTickets stage key", () => {
+  const ts = (id, priority, stage, createdAt) => ({ identifier: id, priority, stage, createdAt });
+
+  test("backward compat — no stage field: sorts by createdAt (queued-vs-queued unchanged)", () => {
+    const a = t("A", 2, "2026-05-01T00:00:00Z");
+    const b = t("B", 2, "2026-05-10T00:00:00Z");
+    expect(compareTickets(a, b)).toBeLessThan(0);
+  });
+
+  test("stage breaks a priority tie, descending (higher stage = closer to done)", () => {
+    // Use identifiers where B < A to make identifier tie-break go the WRONG way,
+    // proving the stage key is what drives the result.
+    const a = ts("Z", 2, 5, "2026-05-01T00:00:00Z"); // higher stage, higher identifier
+    const b = ts("A", 2, 2, "2026-05-01T00:00:00Z"); // lower stage, lower identifier
+    expect(compareTickets(a, b)).toBeLessThan(0); // a (stage 5) sorts before b (stage 2)
+  });
+
+  test("priority dominates stage: Urgent@triage beats Low@monitor-deploy", () => {
+    const urgent = ts("Z", 1, 0, "2026-05-01T00:00:00Z"); // higher identifier
+    const low = ts("A", 4, 9, "2026-05-01T00:00:00Z");    // lower identifier
+    expect(compareTickets(urgent, low)).toBeLessThan(0);
+  });
+
+  test("in-flight (stage ≥ 0) sorts before queued (stage -1) within same priority band", () => {
+    // in-flight has higher identifier so identifier tie-break goes wrong way without stage
+    const inFlight = ts("Z", 2, 3, "2026-05-01T00:00:00Z");
+    const queued = ts("A", 2, -1, "2026-05-01T00:00:00Z");
+    expect(compareTickets(inFlight, queued)).toBeLessThan(0);
+  });
+
+  test("stage undefined is treated as -1 (queued default)", () => {
+    // withStage has higher identifier so identifier tie-break goes wrong way without stage
+    const withStage = ts("Z", 2, 2, "2026-05-01T00:00:00Z");
+    const withoutStage = t("A", 2, "2026-05-01T00:00:00Z"); // no stage field → treated as -1
+    expect(compareTickets(withStage, withoutStage)).toBeLessThan(0);
+  });
+
+  test("rankTickets is still pure — input array not mutated", () => {
+    const input = [ts("C", 2, 1, "x"), ts("A", 2, 5, "x"), ts("B", 2, -1, "x")];
+    const copy = input.map((x) => ({ ...x }));
+    rankTickets(input);
+    expect(input).toEqual(copy);
+  });
+});

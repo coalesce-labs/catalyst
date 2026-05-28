@@ -272,4 +272,20 @@ describe("dispatchTicket", () => {
     const dispatch = () => ({ code: 7, stdout: "", stderr: "boom" });
     expect(dispatchTicket("/orch", "CTL-1", "research", { dispatch }).code).toBe(7);
   });
+
+  // CTL-705 Phase 3: resumeSession thread-through
+  test("backward compat: no resumeSession → dispatch receives exactly {orchDir, ticket, phase}", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
+    expect(calls[0]).toEqual({ orchDir: "/orch", ticket: "CTL-1", phase: "triage" });
+    expect("resumeSession" in calls[0]).toBe(false);
+  });
+
+  test("forwards resumeSession to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "implement", { dispatch, resumeSession: "uuid-123" });
+    expect(calls[0].resumeSession).toBe("uuid-123");
+  });
 });

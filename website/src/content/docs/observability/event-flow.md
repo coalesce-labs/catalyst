@@ -304,6 +304,45 @@ Operators investigating a yield-storm can grep for
 `phase.scheduler.yield-file-skip.<TICKET>` events in the unified event log —
 one such event is emitted per tombstone per daemon lifetime (CTL-702).
 
+## Priority preemption (CTL-705)
+
+When `maxParallel` slots are saturated and a higher-priority queued ticket
+out-ranks the lowest-ranked in-flight worker, the scheduler stops that worker
+and parks it so the Urgent ticket can claim a slot. Two events mark this lifecycle:
+
+### `phase.<phase>.preempted.<TICKET>`
+
+Emitted when the scheduler stops a lower-priority in-flight worker to free a slot.
+
+| Payload field | Description |
+|---|---|
+| `phase` | Pipeline phase being preempted (e.g. `research`) |
+| `preempted_by` | Identifier of the higher-priority queued ticket |
+| `bg_job_id` | bg job ID of the stopped worker |
+
+The worker's phase signal is rewritten to `status: "preempted"` with
+`parkedFrom: <phase>` and `attentionReason: "preempted-by-priority"`.
+
+**Safety guards** prevent preemption from firing prematurely:
+- Non-preemptable phases: `triage`, `monitor-deploy` are never stopped.
+- Min-runtime floor: the worker must have been running ≥60s.
+- Implement quiet-window: `phase-implement.json` mtime must be >10s old (worker not actively committing).
+- Hysteresis: the queued ticket must out-rank the candidate for ≥30s across two ticks.
+
+### `phase.<phase>.resumed-after-preemption.<TICKET>`
+
+Emitted when a preempted worker is re-dispatched at its `parkedFrom` phase.
+
+| Payload field | Description |
+|---|---|
+| `phase` | Phase the worker resumes at (= `parkedFrom`) |
+| `resume_session` | Claude `--resume` UUID used for the re-dispatch, or `null` if cold |
+
+Preemption→resume is inherently multi-tick: `claude stop` may not deregister
+within the same tick's `liveBackgroundCount()`, so the freed slot fills on the
+next tick. The resume sweep runs **before** new-work pull, so a preempted ticket
+always reclaims its slot ahead of brand-new work.
+
 ## Related
 
 - [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook
