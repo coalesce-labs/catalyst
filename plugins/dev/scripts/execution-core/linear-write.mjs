@@ -10,6 +10,7 @@ import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
 import { fetchTicketLabels } from "./linear-query.mjs";
+import { withBreaker } from "./linear-breaker.mjs";
 
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the
 // sibling-bin spawnSync pattern dispatch.mjs uses for orchestrate-dispatch-next.
@@ -17,13 +18,19 @@ const LINEAR_TRANSITION_BIN = fileURLToPath(
   new URL("../linear-transition.sh", import.meta.url)
 );
 
-// defaultExec — spawnSync wrapper normalising the result shape. A spawn error
+// rawExec — spawnSync wrapper normalising the result shape. A spawn error
 // (binary missing, permission) is reported as code 127, never thrown.
-function defaultExec(cmd, args) {
+function rawExec(cmd, args) {
   const res = spawnSync(cmd, args, { encoding: "utf8" });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
+
+// defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker, so
+// the status-write path (which shells linear-transition.sh, itself a Linear
+// read+write) short-circuits without spawning while the breaker is open. Shared
+// singleton with linear-query.mjs: one 429 on any path pauses every path.
+const defaultExec = withBreaker(rawExec);
 
 // teamOf — the Linear team key is the identifier prefix: "CTL-558" → "CTL".
 export function teamOf(ticket) {
@@ -95,7 +102,7 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec }) {
   return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec });
 }
 
-// applyLabel — additively apply a Linear label (triaged, needs-human), classify
+// applyLabel — additively apply a Linear label (needs-human), classify
 // any failure, AND verify a successful write actually landed. Returns a tagged
 // { applied, reason } shape callers use to decide retry vs short-circuit.
 //

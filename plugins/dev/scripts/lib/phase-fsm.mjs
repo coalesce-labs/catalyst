@@ -68,7 +68,7 @@ export const NEXT_PHASE = {
 // The keys are the legacy stateMap vocabulary — an execution-core repo's stateMap
 // re-targets the SAME keys onto the 5 collapsed states (Research/Plan/Implement/
 // Validate/PR), see setup-execution-core-states.sh:build_execution_core_state_map.
-//   • `triage` → null: the human owns the Triage state; the daemon only tags `triaged`.
+//   • `triage` → null: the human owns the Triage state; the daemon does not write it back.
 //   • verify + review collapse onto `verifying`/`reviewing` (both → Validate).
 //   • pr + monitor-merge + monitor-deploy collapse onto `inReview` (→ PR) while in flight;
 //     terminal Done is written separately on monitor-deploy completion (TERMINAL_LINEAR_KEY).

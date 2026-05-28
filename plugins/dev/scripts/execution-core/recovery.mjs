@@ -43,6 +43,7 @@ import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { WORK_DONE_PROBES, hasProbe, describeProbe } from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
+import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-638: pull the once-marker + per-(ticket, phase) cool-down primitives
 // from the shared leaf module. labelOnce is the same guard CTL-585 introduced
 // for scheduler.mjs's `needs-human` path — pre-CTL-638 the recovery sweep's
@@ -992,6 +993,11 @@ export function reclaimDeadWorkIfPossible(
     // "Phase Reclaim" comment the dead worker's skill End block never ran.
     // Marker-guarded + fail-open; tests inject a spy to assert call order.
     postReclaimMirror = defaultPostReclaimMirror,
+    // CTL-679 — the process-wide Linear rate-limit breaker. escalateOnce defers
+    // the needs-human apply while the breaker is open so a transient 429 is
+    // never treated as a human-intervention condition (and never adds to the
+    // write storm). Injected for tests; defaults to the shared singleton.
+    breaker = linearBreaker,
     now = Date.now,
   } = {},
 ) {
@@ -1019,6 +1025,18 @@ export function reclaimDeadWorkIfPossible(
   // applyStalledLabel in a per-(ticket, phase) cool-down so the same escalation
   // cannot re-fire within the window (the pre-CTL-638 self-feeding storm).
   function escalateOnce(reason, finalAttemptCount) {
+    // CTL-679 — while the Linear breaker is open we are rate-limited; the
+    // needs-human apply would 429 and write no marker, re-firing every tick.
+    // Defer: skip the audit event + label write entirely (no cool-down record,
+    // so a genuine escalation re-fires cleanly once the breaker closes). A
+    // transient 429 is not a human-intervention condition.
+    if (breaker.isOpen(now())) {
+      log.warn(
+        { ticket, phase, reason },
+        "ctl-679: escalation deferred — Linear breaker open"
+      );
+      return "rate-limited-deferred";
+    }
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }

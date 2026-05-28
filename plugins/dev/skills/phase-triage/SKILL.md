@@ -1,6 +1,6 @@
 ---
 name: phase-triage
-description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies dependencies, estimates scope, writes triage.json, and posts a triaged comment to Linear. The `triaged` label is applied by the coordinator (CTL-558). Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
+description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies dependencies, estimates scope, writes triage.json, and posts a triage analysis comment to Linear. Triage completion is signaled by that comment plus the local triage.json — there is no `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write, Grep
@@ -30,7 +30,7 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
        classification (feature|bug|docs|refactor|chore), estimated_scope,
        acronyms_expanded, dependencies, and a non-empty summary — refined with
        real analysis (not just the deterministic placeholders), AND posted the
-       triaged analysis comment to the Linear ticket, AND printed the triage.json
+       triage analysis comment to the Linear ticket, AND printed the triage.json
        path on stdout. OR I have stopped after 15 turns and recorded a partial
        triage.json with whatever I could classify."
 ```
@@ -42,14 +42,11 @@ blocker (unreadable ticket, a Linear 4xx on the comment) surfaces as needs-input
 rather than a silently-thin `triage.json`. (Production/Opus mode only; the CI
 bash body is self-sufficient and does not invoke the evaluator.)
 
-## Setup prerequisite
+## Triage completion signal
 
-The `triaged` workspace label must already exist in Linear. The label is applied by the
-deterministic coordinator (CTL-558) — the execution-core scheduler's label sweep tags `triaged`
-once the triage phase signal is `done` — not by this skill. `linearis` has no label-create, so the
-label must be created in the workspace beforehand. Verify with
-`linearis labels list --team <TEAM>`; create missing labels in the Linear workspace UI. The
-execution-core scheduler logs a startup warning per missing label (CTL-585).
+Triage completion is recorded by two artifacts, not a Linear label: the analysis comment this skill
+posts to the ticket, and the local `triage.json` the coordinator reads (`hasTriageArtifact`). There
+is no `triaged` workspace label — the daemon never writes one.
 
 ## Inputs
 
@@ -264,11 +261,11 @@ fi
 DISCUSS_STDERR="$(linearis issues discuss "$TICKET" --body "$COMMENT_BODY" 2>&1 >/dev/null)" \
   || echo "phase-triage: linearis issues discuss failed (continuing): ${DISCUSS_STDERR}" >&2
 
-# 5. The `triaged` label is applied by the coordinator (CTL-558): the
-#    execution-core scheduler's label sweep tags `triaged` once the triage
-#    phase signal is `done`. The phase agent no longer applies the label.
-#    The label must already exist in the workspace — verify with
-#    `linearis labels list --team <TEAM>` (CTL-585).
+# 5. There is no `triaged` label. Triage completion is signaled by the
+#    analysis comment posted above plus the local triage.json the coordinator
+#    reads — the phase agent and the daemon both leave Linear labels alone.
+#    (Historical note for anyone grepping CTL-558: the old coordinator label
+#    sweep that tagged `triaged` was removed.)
 
 # 6. Emit the canonical phase event.
 emit_phase_complete --phase triage --ticket "$TICKET" --status complete \
