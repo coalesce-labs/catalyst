@@ -1154,6 +1154,19 @@ let runningOpts = null;
 
 function runTick() {
   try {
+    // CTL-676: hot-reload the concurrency knobs by re-reading the project
+    // config at the top of every tick. When `configPath` is unset (back-compat
+    // scheduler harnesses that never threaded it), fall back to the
+    // boot-captured `concurrency` object — byte-for-byte the pre-CTL-676
+    // behavior. `readExecutionCoreConcurrency` is null/ENOENT/parse-error
+    // safe (returns `{}`), so a malformed mid-run edit fails open exactly as
+    // a fresh daemon boot against the same malformed file would: the next
+    // `readMaxParallel` call falls through to state.json + the hardcoded
+    // default. Boot-resume keeps the boot-captured object — it fires once
+    // before the scheduler starts, and never re-reads.
+    const concurrency = runningOpts.configPath
+      ? readExecutionCoreConcurrency(runningOpts.configPath)
+      : runningOpts.concurrency;
     schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
@@ -1161,7 +1174,11 @@ function runTick() {
       writeStatus: runningOpts.writeStatus,
       teardownWorktree: runningOpts.teardownWorktree,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
-      concurrency: runningOpts.concurrency, // CTL-665: committed slot-ceiling knobs
+      concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
+      // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
+      // a unit test can drive freeSlots deterministically without shelling
+      // out to `claude agents`. Undefined here keeps the production default.
+      liveBackgroundCount: runningOpts.liveBackgroundCount,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -1188,13 +1205,35 @@ export function startScheduler({
   writeStatus,
   teardownWorktree,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
-  concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
+  concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
+  // `configPath` is also set (production wiring), runTick re-reads the live
+  // file every tick and ignores this object; the boot-captured value is the
+  // back-compat path for tests that never thread `configPath`.
+  configPath = null, // CTL-676: when set, runTick re-reads concurrency from
+  // this path per tick (hot-reload). Threaded from startDaemon, which resolves
+  // it from CATALYST_CONFIG_FILE || <cwd>/.catalyst/config.json. Null in tests
+  // that exercise the back-compat boot-captured-only shape.
+  liveBackgroundCount, // CTL-676: optional test-only seam, forwarded to
+  // schedulerTick where it defaults to countBackgroundAgents (the live
+  // `claude agents --json` count). Symmetric with the existing dispatch /
+  // exec / writeStatus / teardownWorktree seams on schedulerTick.
   preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
   if (!orchDir) throw new Error("startScheduler: orchDir is required");
-  runningOpts = { orchDir, dispatch, readEligible, exec, writeStatus, teardownWorktree, cache, concurrency };
+  runningOpts = {
+    orchDir,
+    dispatch,
+    readEligible,
+    exec,
+    writeStatus,
+    teardownWorktree,
+    cache,
+    concurrency,
+    configPath, // CTL-676: per-tick re-read source
+    liveBackgroundCount, // CTL-676: test seam
+  };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
   // the CTL-558 sweep writes. Best-effort — never blocks startup.

@@ -159,6 +159,39 @@ describe("startDaemon", () => {
     expect(schedulerConcurrency).toEqual({});
   });
 
+  // CTL-676: `configPath` resolved in main() threads into startScheduler so
+  // the scheduler can re-read the concurrency knobs per tick (boot-resume
+  // continues to use the boot-captured `concurrency` object). Default is
+  // null when not passed — every existing test path keeps the back-compat
+  // shape (scheduler re-passes the boot-captured concurrency).
+  test("threads configPath into startScheduler (CTL-676)", () => {
+    const configPath = "/tmp/CTL-676/config.json";
+    let schedulerConfigPath = "unset";
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        schedulerConfigPath = o.configPath;
+      },
+      watchRegistry: false,
+      configPath,
+    });
+    expect(schedulerConfigPath).toBe(configPath);
+  });
+
+  test("defaults configPath to null when not passed (CTL-676)", () => {
+    let schedulerConfigPath = "unset";
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        schedulerConfigPath = o.configPath;
+      },
+      watchRegistry: false,
+    });
+    expect(schedulerConfigPath).toBeNull();
+  });
+
   // CTL-634: one cache instance is created in startDaemon and threaded into
   // BOTH composed boots, so the monitor's write-through and the scheduler's
   // read path share state. Capture each boot's `cache` arg and assert identity.
