@@ -64,11 +64,16 @@ export function readWorkerSignals(orchDir) {
 }
 
 // isPhaseSignalFile — a nested phase signal is phase-<name>.json and is NOT a
-// phase-output artifact (those are listed in ARTIFACT_NAMES).
+// phase-output artifact (those are listed in ARTIFACT_NAMES). CTL-702: also
+// rejects yield tombstones (phase-*-yield-*.json) — read-only audit files
+// written by phase-agent-yield-check. See
+// website/src/content/docs/observability/event-flow.md#yield-tombstones.
 function isPhaseSignalFile(name) {
   if (!name.endsWith(".json")) return false;
   if (ARTIFACT_NAMES.has(name)) return false;
-  return name.startsWith("phase-");
+  if (!name.startsWith("phase-")) return false;
+  if (name.includes("-yield-")) return false; // CTL-702
+  return true;
 }
 
 // listDispatchedPhases — the phase NAMES dispatched for one ticket: every

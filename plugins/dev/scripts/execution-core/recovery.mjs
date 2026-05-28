@@ -32,7 +32,7 @@ import {
   IDLE_CONFIRM_TICKS,
   BUSY_CEILING_MS,
 } from "./config.mjs";
-import { phaseIndex } from "../lib/phase-fsm.mjs";
+import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
@@ -375,6 +375,25 @@ export function defaultAppendReviveEvent({
       payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
     }),
     "revive",
+  );
+}
+
+// defaultAppendYieldFileSkipEvent — phase.scheduler.yield-file-skip.<ticket>.
+// CTL-702: emitted once per observed yield tombstone per daemon lifetime so
+// yield rate is queryable from the event log. `phase` is "scheduler" — the
+// yielded phase lives inside body.payload.filename. See
+// website/src/content/docs/observability/event-flow.md#yield-tombstones.
+export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket,
+      orchId,
+      action: "yield-file-skip",
+      reason: "yield_tombstone_filtered",
+      payloadExtras: { filename },
+    }),
+    "yield-file-skip",
   );
 }
 
@@ -1127,8 +1146,13 @@ export function reclaimDeadWorkIfPossible(
   // the ticket's latest-dispatched phase, the ticket has moved on — escalating or
   // reviving it would spuriously flag needs-human or spawn a duplicate worker at
   // a past phase. Runs only once a worker is reclaim-eligible (not busy).
+  // CTL-702: defensive — listTicketPhases is read off the filesystem; if a
+  // future on-disk variant slips past signal-reader's filter (e.g. yield
+  // tombstone, manual operator file), isKnownPhase skips it instead of
+  // throwing. See website/src/content/docs/observability/event-flow.md#yield-tombstones.
   const dispatched = listTicketPhases(ticket);
   const latestIdx = dispatched.reduce((max, p) => {
+    if (!isKnownPhase(p)) return max; // CTL-702: defensive — skip unknown names
     const i = phaseIndex(p);
     return i > max ? i : max;
   }, -1);
