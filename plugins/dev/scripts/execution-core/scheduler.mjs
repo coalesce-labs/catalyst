@@ -70,6 +70,8 @@ import {
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   resolvePhaseSessionId as defaultResolveSession,
+  defaultAppendCooldownGcEvent,
+  defaultAppendCooldownEscalatedEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -974,32 +976,44 @@ export function dispatchCooldownPath(orchDir, ticket, phase) {
 
 export function inDispatchCooldown(orchDir, ticket, phase, now) {
   const p = dispatchCooldownPath(orchDir, ticket, phase);
-  let failedAt;
+  let marker;
   try {
-    failedAt = JSON.parse(readFileSync(p, "utf8"))?.failedAt;
+    marker = JSON.parse(readFileSync(p, "utf8"));
   } catch {
-    return false; // absent / malformed → treat as no cool-down
+    return false; // absent / malformed → no cool-down
   }
-  if (typeof failedAt !== "number") return false;
-  return now - failedAt < DISPATCH_COOLDOWN_MS;
+  if (typeof marker?.expiresAt === "number") return now < marker.expiresAt;
+  // Legacy CTL-624 marker (failedAt only): preserve old behavior.
+  if (typeof marker?.failedAt === "number") return now - marker.failedAt < DISPATCH_COOLDOWN_MS;
+  return false;
 }
 
 export function recordDispatchFailure(orchDir, ticket, phase, code, now) {
   const dir = join(orchDir, ".dispatch-cooldowns");
+  const path = dispatchCooldownPath(orchDir, ticket, phase);
+  let consecutiveFailures = 1;
+  try {
+    const prev = JSON.parse(readFileSync(path, "utf8"));
+    if (prev?.code === code && typeof prev.consecutiveFailures === "number") {
+      consecutiveFailures = prev.consecutiveFailures + 1;
+    }
+  } catch {
+    // absent / malformed / legacy-without-counter → start at 1
+  }
+  const ttl = PERMANENT_FAILURE_CODES.has(code)
+    ? DISPATCH_PERMANENT_COOLDOWN_MS
+    : DISPATCH_COOLDOWN_MS;
+  const marker = { ticket, phase, code, failedAt: now, expiresAt: now + ttl, consecutiveFailures };
   try {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      dispatchCooldownPath(orchDir, ticket, phase),
-      JSON.stringify({ phase, code, failedAt: now })
-    );
+    writeFileSync(path, JSON.stringify(marker));
   } catch (err) {
-    // Never let a marker write crash the tick — worst case is the next tick
-    // retries (the pre-CTL-624 behavior).
     log.warn(
       { ticket, phase, err: err.message },
       "scheduler: dispatch cool-down marker write failed — continuing"
     );
   }
+  return marker;
 }
 
 export function clearDispatchCooldown(orchDir, ticket, phase) {
@@ -1008,6 +1022,50 @@ export function clearDispatchCooldown(orchDir, ticket, phase) {
   } catch {
     // best-effort — a stale marker just means one suppressed re-dispatch
   }
+}
+
+// CTL-713: garbage-collect expired cooldown markers whose ticket has left the
+// eligible set (Done/Canceled). Both conditions required: an eligible ticket
+// still failing must keep its marker so consecutiveFailures accrues toward
+// escalation. Best-effort + never throws — a tick must never crash on a stray
+// file. Returns [{ ticket, phase }] for the caller to emit events.
+export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
+  const dir = join(orchDir, ".dispatch-cooldowns");
+  let files;
+  try { files = readdirSync(dir); } catch { return []; }
+  const reaped = [];
+  for (const f of files) {
+    if (!f.endsWith(".json")) continue;
+    const p = join(dir, f);
+    let marker;
+    try { marker = JSON.parse(readFileSync(p, "utf8")); } catch { continue; }
+    const phase = typeof marker?.phase === "string" ? marker.phase : null;
+    let ticket = typeof marker?.ticket === "string" ? marker.ticket : null;
+    if (!ticket && phase && f.endsWith(`-${phase}.json`)) {
+      ticket = f.slice(0, f.length - `-${phase}.json`.length);
+    }
+    if (!ticket) continue;
+    const expiresAt = typeof marker?.expiresAt === "number"
+      ? marker.expiresAt
+      : (typeof marker?.failedAt === "number" ? marker.failedAt + DISPATCH_COOLDOWN_MS : null);
+    if (expiresAt === null || now < expiresAt) continue;
+    if (eligibleIdentifiers.has(ticket)) continue;
+    try { rmSync(p, { force: true }); reaped.push({ ticket, phase }); } catch { /* best-effort */ }
+  }
+  return reaped;
+}
+
+// CTL-713: consecutive-failure escalation. When a (ticket,phase) has failed N
+// times in a row with the same code, apply needs-human via labelOnce and emit
+// cooldown-escalated. labelOnce's .applied marker makes this idempotent.
+export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, appendEvent }) {
+  if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return;
+  labelOnce(orchDir, marker.ticket, "needs-human", writeStatus);
+  appendEvent({
+    ticket: marker.ticket, orchId: marker.ticket,
+    target_phase: marker.phase, code: marker.code,
+    consecutiveFailures: marker.consecutiveFailures,
+  });
 }
 
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
@@ -1220,6 +1278,9 @@ export function schedulerTick(
     // CTL-705 Phase 5: resume resolver — maps a dead bg_job_id to a claude
     // --resume UUID. Null return → cold re-dispatch (no --resume-session).
     resolveSession = defaultResolveSession,
+    // CTL-713: GC + escalation emitters. Injectable for tests.
+    appendCooldownGcEvent = defaultAppendCooldownGcEvent,
+    appendCooldownEscalatedEvent = defaultAppendCooldownEscalatedEvent,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -1544,21 +1605,24 @@ export function schedulerTick(
         // CTL-611 Gap 1 demotion: rc=0 but no live bg job. Same on-disk
         // effects as a real rc!=0 failure so the broker / HUD / operator can
         // see the drop.
-        recordDispatchFailure(orchDir, ticket, next, 0, now());
+        const cd1 = recordDispatchFailure(orchDir, ticket, next, 0, now());
         appendDispatchFailedEvent({
           orchId: ticket,
           ticket,
           target_phase: next,
           code: 0,
           reason: `verify_failed:${v.reason}`,
+          expiresAt: cd1.expiresAt,
+          consecutiveFailures: cd1.consecutiveFailures,
         });
+        maybeEscalateDispatchFailures(orchDir, cd1, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
         log.warn(
           { ticket, phase: next, verifyReason: v.reason },
           "scheduler: dispatched signal verification failed"
         );
       }
     } else {
-      recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
+      const cd2 = recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
       // CTL-611 Gap 2: surface the silent drop as an event so the broker /
       // HUD / operator can react. Best-effort; failure is logged inside.
       appendDispatchFailedEvent({
@@ -1567,7 +1631,10 @@ export function schedulerTick(
         target_phase: next,
         code: r.code,
         reason: "dispatch_nonzero_exit",
+        expiresAt: cd2.expiresAt,
+        consecutiveFailures: cd2.consecutiveFailures,
       });
+      maybeEscalateDispatchFailures(orchDir, cd2, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
       log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
     }
   }
@@ -1760,21 +1827,24 @@ export function schedulerTick(
           { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
         );
       } else {
-        recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
+        const cd3 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
         appendDispatchFailedEvent({
           orchId: t.identifier,
           ticket: t.identifier,
           target_phase: NEW_WORK_ENTRY_PHASE,
           code: 0,
           reason: `verify_failed:${v.reason}`,
+          expiresAt: cd3.expiresAt,
+          consecutiveFailures: cd3.consecutiveFailures,
         });
+        maybeEscalateDispatchFailures(orchDir, cd3, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
         log.warn(
           { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, verifyReason: v.reason },
           "scheduler: dispatched signal verification failed"
         );
       }
     } else {
-      recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
+      const cd4 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
       // CTL-611: Gap 2 entry-phase silent-drop event.
       appendDispatchFailedEvent({
         orchId: t.identifier,
@@ -1782,7 +1852,10 @@ export function schedulerTick(
         target_phase: NEW_WORK_ENTRY_PHASE,
         code: r.code,
         reason: "dispatch_nonzero_exit",
+        expiresAt: cd4.expiresAt,
+        consecutiveFailures: cd4.consecutiveFailures,
       });
+      maybeEscalateDispatchFailures(orchDir, cd4, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
       log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
     }
   }
@@ -1813,6 +1886,15 @@ export function schedulerTick(
     }
   }
 
+  // (4) Cooldown GC sweep (CTL-713) — reap expired markers for tickets that
+  // have left the eligible set so .dispatch-cooldowns/ self-cleans instead of
+  // accumulating orphans. Runs last: GC must not influence this tick's dispatch
+  // decisions.
+  const eligibleIds = new Set(eligible.map((t) => t.identifier));
+  for (const { ticket, phase } of gcDispatchCooldowns(orchDir, eligibleIds, now())) {
+    appendCooldownGcEvent({ ticket, orchId: ticket, target_phase: phase });
+  }
+
   return {
     reclaimed,
     revived,
@@ -1841,6 +1923,16 @@ const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
 // (ticket,phase) to one attempt per window. Time-based (not a permanent
 // .skipped marker like labelOnce) so it self-heals once the artifact appears.
 const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
+// CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
+// phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
+// the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.
+const DISPATCH_PERMANENT_COOLDOWN_MS =
+  Number(process.env.SCHEDULER_DISPATCH_PERMANENT_COOLDOWN_MS) || 30 * 60 * 1000;
+const PERMANENT_FAILURE_CODES = new Set([2]);
+// After this many consecutive same-code failures on one (ticket,phase), escalate
+// to needs-human. Mirrors REMEDIATE_CYCLE_CAP.
+const DISPATCH_FAILURE_ESCALATION_THRESHOLD =
+  Number(process.env.SCHEDULER_DISPATCH_FAILURE_ESCALATION_THRESHOLD) || 3;
 
 // --- daemon module state ---
 let tickTimer = null;
