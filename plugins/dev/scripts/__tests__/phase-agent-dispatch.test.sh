@@ -134,7 +134,10 @@ fresh_env() {
 # ─── Test 1: dispatcher writes the per-phase signal file with the right schema
 echo "Test 1: dispatcher writes signal file with correct schema"
 fresh_env t1
-OUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>&1)
+# (CTL-689) cd into a scratch proj/ that has no parent .catalyst/config.json so
+# the "defaulted to opus" assertion isn't contaminated by the repo's shipped
+# per-phase overrides when the suite runs from the repo root.
+OUT=$(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>&1)
 SIGNAL="${WORKER_DIR}/phase-triage.json"
 if [[ ! -f $SIGNAL ]]; then
 	fail "signal file created: $SIGNAL"
@@ -1075,6 +1078,55 @@ assert_eq '{"committed":false,"dirty":true}' "$(cat "${GWORK}/.catalyst/config.j
 	"noise: dirty .catalyst/config.json content intact after the rebase"
 BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "noise: rebase still advanced onto the new base"
+
+# ─── Test 34 (CTL-689): shipped repo config routes research/implement/pr to
+# sonnet; plan and review default to opus.
+#
+# Integration check: points --config at the repo's real `.catalyst/config.json`
+# (not a test-local synthetic) so any future drift in that file — e.g. a
+# rebased PR dropping the override or renaming `phaseAgents.models` — fails
+# this test instead of silently reverting the budget split.
+echo ""
+echo "Test 34 (CTL-689): shipped config routes triage/research/implement/pr → sonnet"
+SHIPPED_CONFIG="${REPO_ROOT}/.catalyst/config.json"
+if [[ ! -f $SHIPPED_CONFIG ]]; then
+	fail "CTL-689: shipped config not found at ${SHIPPED_CONFIG}"
+else
+	declare -A EXPECT_MODEL=(
+		[triage]=sonnet
+		[research]=sonnet
+		[implement]=sonnet
+		[pr]=sonnet
+		[plan]=opus
+		[review]=opus
+	)
+	for phase in triage research implement pr plan review; do
+		fresh_env "t34_${phase}"
+		# Seed each phase's prior-phase artifact so the gate passes.
+		case "$phase" in
+		triage) : ;; # no prior-phase artifact required
+		research) : >"${WORKER_DIR}/triage.json" ;;
+		plan)
+			mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+			: >"${TEST_DIR}/proj/thoughts/shared/research/2026-05-28-ctl-100.md"
+			;;
+		implement)
+			mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+			: >"${TEST_DIR}/proj/thoughts/shared/plans/2026-05-28-ctl-100.md"
+			;;
+		review) : >"${WORKER_DIR}/verify.json" ;;
+		pr) : >"${WORKER_DIR}/review.json" ;;
+		esac
+		(cd "${TEST_DIR}/proj" &&
+			"$DISPATCH" --phase "$phase" --ticket CTL-100 \
+				--orch-dir "$ORCH_DIR" --orch-id orch-test \
+				--config "$SHIPPED_CONFIG" \
+				>"${TEST_DIR}/m34_${phase}.out" 2>/dev/null)
+		MODEL=$(jq -r '.model' "${TEST_DIR}/m34_${phase}.out")
+		assert_eq "${EXPECT_MODEL[$phase]}" "$MODEL" \
+			"shipped config: phase=${phase} → ${EXPECT_MODEL[$phase]}"
+	done
+fi
 
 echo ""
 echo "─────────────────────────────────────────────"
