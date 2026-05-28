@@ -702,6 +702,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 1_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(1);
     expect(existsSync(marker)).toBe(true);
@@ -711,6 +712,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 30_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(1);
 
@@ -719,6 +721,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 70_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(2);
   });
@@ -732,6 +735,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-4"),
       dispatch: fakeDispatch({ code: 2 }),
       now: () => 1_000,
+      liveBackgroundCount: () => 0,
     });
     expect(existsSync(marker)).toBe(true);
 
@@ -741,6 +745,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       dispatch: fakeDispatch({ code: 0 }),
       now: () => 70_000,
       verifyDispatched: verifyOk, // CTL-611: not testing the verifier here
+      liveBackgroundCount: () => 0,
     });
     expect(existsSync(marker)).toBe(false);
   });
@@ -929,6 +934,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass the dispatch verifier
+      liveBackgroundCount: () => 0,
     });
     // 2 free slots, both ready → both dispatched, urgent (CTL-8) first.
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-8", "CTL-9"]);
@@ -994,7 +1000,7 @@ describe("schedulerTick — new-work pull", () => {
         inverseRelations: { nodes: [] },
       },
     ];
-    schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    schedulerTick(orchDir, { readEligible: () => eligible, dispatch, liveBackgroundCount: () => 0 });
     expect(dispatch.calls).toHaveLength(1);
     expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-1", phase: "research" });
   });
@@ -1100,6 +1106,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+      liveBackgroundCount: () => 0,
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
@@ -1535,6 +1542,7 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
       readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
       dispatch,
       exec,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-1"]);
   });
@@ -2129,6 +2137,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
     });
     expect(r1.dispatched).toEqual(["CTL-9"]);
 
@@ -2225,6 +2234,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       dispatch: okDispatch,
       writeStatus,
       verifyDispatched: verifyOk, // CTL-611
+      liveBackgroundCount: () => 0,
     });
     expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-2", phase: "research" }));
   });
