@@ -193,6 +193,26 @@ The dashboard includes:
 - **Tool use frequency** — which tools agents reach for most often
 - **Cost tracking** — $ per session, per worker, per orchestrator
 
+#### Per-project slot-usage gauge (CTL-706)
+
+When `executionCore.perProject` is configured, the scheduler emits a structured log line on every tick:
+
+```
+scheduler: per-project slots  { freeSlots: 2, perProject: { ADV: { inFlight: 3, maxParallel: 6, reserve: 2 }, CTL: { inFlight: 1, maxParallel: 4, reserve: 1 } } }
+```
+
+Fields in `perProject.<KEY>`:
+
+| Field        | Description |
+| ------------ | ----------- |
+| `inFlight`   | Workers currently occupying a slot for this project. |
+| `maxParallel`| Configured hard cap for this project (omitted when not set). |
+| `reserve`    | Configured guaranteed floor for this project (omitted when not set). |
+
+The top-level `freeSlots` is the global free-slot count for that tick. The line is emitted only when at least one project key is configured — runs without `perProject` produce no extra noise.
+
+Recommended Grafana panel: a multi-series gauge showing `inFlight` vs `maxParallel` per project key, filtered to log lines where `msg == "scheduler: per-project slots"` via Loki or a pino JSON log scrape.
+
 ## Troubleshooting
 
 ### No telemetry arriving

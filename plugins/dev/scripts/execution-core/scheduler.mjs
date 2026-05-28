@@ -216,13 +216,103 @@ export function readExecutionCoreConcurrencyLayer2(layer2Path) {
 // block is concurrency-only by convention). The returned object is fed to
 // readMaxParallel verbatim — same shape, same precedence-and-clamp semantics
 // as CTL-665.
+// positiveIntFields — returns a new object containing only the fields from
+// `obj` whose values are positive integers. Used by perProject merge + validate.
+function positiveIntFields(obj) {
+  if (!obj || typeof obj !== "object") return {};
+  const out = {};
+  for (const k of ["maxParallel", "reserve"]) {
+    const v = obj[k];
+    if (Number.isInteger(v) && v > 0) out[k] = v;
+  }
+  return out;
+}
+
+// warnedPerProjectConfigs — dedup set keyed on stable JSON signature of the
+// perProject map, so per-tick re-reads don't spam (mirrors observedYieldFiles).
+const warnedPerProjectConfigs = new Set();
+
+function warnPerProjectOnce(sig, msg, ctx) {
+  if (warnedPerProjectConfigs.has(sig)) return;
+  warnedPerProjectConfigs.add(sig);
+  log.warn(ctx, msg);
+}
+
 export function mergeExecutionCoreConcurrency(layer1 = {}, layer2 = {}) {
   const merged = { ...layer1 };
   for (const key of ["maxParallel", "minParallel", "maxParallelCeiling"]) {
     const v = layer2?.[key];
     if (Number.isInteger(v) && v > 0) merged[key] = v;
   }
-  return merged;
+  // CTL-706: deep-merge perProject — sub-field level, positive-int guard per field.
+  const l1pp = layer1?.perProject;
+  const l2pp = layer2?.perProject;
+  if (l1pp || l2pp) {
+    const allKeys = new Set([...Object.keys(l1pp ?? {}), ...Object.keys(l2pp ?? {})]);
+    const mergedPP = {};
+    for (const k of allKeys) {
+      mergedPP[k] = { ...(l1pp?.[k] ?? {}), ...positiveIntFields(l2pp?.[k]) };
+    }
+    merged.perProject = mergedPP;
+  }
+  return validatePerProjectBudgets(merged);
+}
+
+// validatePerProjectBudgets — clamps over-subscribed reserves so
+// sum(reserve) ≤ maxParallel, warns once per distinct config (CTL-706).
+// Never throws; returns input unchanged when perProject is absent/empty.
+export function validatePerProjectBudgets(concurrency) {
+  const pp = concurrency?.perProject;
+  if (!pp || typeof pp !== "object" || Object.keys(pp).length === 0) return concurrency;
+
+  const globalMax =
+    Number.isInteger(concurrency.maxParallel) && concurrency.maxParallel > 0
+      ? concurrency.maxParallel
+      : DEFAULT_MAX_PARALLEL;
+
+  // Coerce each entry to valid non-negative integers.
+  const coerced = {};
+  for (const [k, v] of Object.entries(pp)) {
+    const entry = {};
+    if (Number.isInteger(v?.maxParallel) && v.maxParallel > 0) entry.maxParallel = v.maxParallel;
+    if (Number.isInteger(v?.reserve) && v.reserve >= 0) entry.reserve = v.reserve;
+    coerced[k] = entry;
+  }
+
+  // Clamp reserves so sum ≤ globalMax (descending reserve, then key-asc).
+  const keysWithReserve = Object.keys(coerced)
+    .filter((k) => coerced[k].reserve > 0)
+    .sort((a, b) => (coerced[b].reserve ?? 0) - (coerced[a].reserve ?? 0) || a.localeCompare(b));
+
+  const totalReserve = keysWithReserve.reduce((s, k) => s + coerced[k].reserve, 0);
+  const sig = JSON.stringify(coerced);
+
+  if (totalReserve > globalMax) {
+    warnPerProjectOnce(
+      `clamp:${sig}`,
+      "execution-core: perProject reserves over-subscribed; clamping to fit maxParallel",
+      { totalReserve, globalMax, perProject: coerced },
+    );
+    let remaining = globalMax;
+    for (const k of keysWithReserve) {
+      const want = coerced[k].reserve;
+      coerced[k] = { ...coerced[k], reserve: Math.min(want, remaining) };
+      remaining = Math.max(0, remaining - coerced[k].reserve);
+    }
+  }
+
+  const configuredCaps = Object.values(coerced)
+    .filter((e) => e.maxParallel > 0)
+    .reduce((s, e) => s + e.maxParallel, 0);
+  if (configuredCaps > 0 && configuredCaps < globalMax) {
+    warnPerProjectOnce(
+      `under:${sig}`,
+      "execution-core: sum(perProject.maxParallel) < globalMax — some slots may be unused",
+      { configuredCaps, globalMax },
+    );
+  }
+
+  return { ...concurrency, perProject: coerced };
 }
 
 // clampToBounds — raise `value` to `minParallel` and lower it to
@@ -435,6 +525,109 @@ export function selectDispatchable(rankedReady, excludeTickets, freeSlots) {
   if (freeSlots <= 0) return [];
   const exclude = excludeTickets ?? new Set();
   return (rankedReady ?? []).filter((t) => !exclude.has(t.identifier)).slice(0, freeSlots);
+}
+
+// tallyByProject — counts occurrences of each team prefix in an iterable of
+// ticket identifiers. Returns a plain object { "CTL": 2, "ADV": 1, … }.
+function tallyByProject(ids) {
+  const tally = {};
+  for (const id of ids) {
+    const p = teamOf(id);
+    if (p) tally[p] = (tally[p] ?? 0) + 1;
+  }
+  return tally;
+}
+
+// selectDispatchablePerProject — CTL-706 ranked-walk selector that applies
+// per-project cap + reserve guards AFTER the global free-slot ceiling.
+//
+// Reserve model: work-aware greedy. A project's reserve only protects its
+// unmet demand when it has undispatched ready work. A candidate filling its
+// OWN reserve (running[P] < reserveP) bypasses the reserve guard — it can
+// never starve another project by claiming its own floor.
+//
+// With no perProject config (or an empty map) this is byte-for-byte
+// equivalent to selectDispatchable.
+export function selectDispatchablePerProject(
+  rankedReady,
+  excludeTickets,
+  freeSlots,
+  { perProject = {}, inFlight = new Set() } = {},
+) {
+  if (freeSlots <= 0) return [];
+  const pp = perProject ?? {};
+  if (Object.keys(pp).length === 0) {
+    return selectDispatchable(rankedReady, excludeTickets, freeSlots);
+  }
+
+  const exclude = excludeTickets ?? new Set();
+  const candidates = (rankedReady ?? []).filter((t) => !exclude.has(t.identifier));
+
+  // Seed running counts from in-flight workers.
+  const running = tallyByProject(inFlight);
+
+  // Pre-compute per-project ready-remaining counts (work-bounded reserve demand).
+  const readyRemaining = tallyByProject(candidates.map((t) => t.identifier));
+
+  const selected = [];
+
+  for (const t of candidates) {
+    if (selected.length >= freeSlots) break;
+    const P = teamOf(t.identifier) ?? "";
+
+    // Cap guard: skip if this project is at its hard cap.
+    const cap = pp[P]?.maxParallel;
+    if (Number.isInteger(cap) && cap > 0 && (running[P] ?? 0) >= cap) {
+      readyRemaining[P] = Math.max(0, (readyRemaining[P] ?? 0) - 1);
+      continue;
+    }
+
+    const reserveP = Number.isInteger(pp[P]?.reserve) ? pp[P].reserve : 0;
+    const runningP = running[P] ?? 0;
+
+    // Reserve guard: only applies when P is already at or above its own reserve
+    // (i.e. this dispatch consumes a *shared* slot, not P's own floor).
+    if (runningP >= reserveP) {
+      const remainingAfter = freeSlots - selected.length - 1;
+      // Sum of unmet, work-bounded reserve demand from every OTHER project.
+      let demandOthers = 0;
+      for (const [Q, cfg] of Object.entries(pp)) {
+        if (Q === P) continue;
+        const reserveQ = Number.isInteger(cfg?.reserve) ? cfg.reserve : 0;
+        const runningQ = running[Q] ?? 0;
+        const unmetQ = Math.max(0, reserveQ - runningQ);
+        const waitingQ = readyRemaining[Q] ?? 0;
+        demandOthers += Math.min(unmetQ, waitingQ);
+      }
+      if (remainingAfter < demandOthers) {
+        readyRemaining[P] = Math.max(0, (readyRemaining[P] ?? 0) - 1);
+        continue;
+      }
+    }
+
+    selected.push(t);
+    running[P] = (running[P] ?? 0) + 1;
+    readyRemaining[P] = Math.max(0, (readyRemaining[P] ?? 0) - 1);
+  }
+
+  return selected;
+}
+
+// buildPerProjectGauge — pure helper that assembles the per-tick slot-usage
+// gauge object (CTL-706). Returns { freeSlots, perProject: { <KEY>: { inFlight,
+// maxParallel?, reserve? } } } over the union of in-flight + configured projects.
+export function buildPerProjectGauge(inFlight, perProject = {}, freeSlots) {
+  const pp = perProject ?? {};
+  const inFlightTally = tallyByProject(inFlight);
+  const allKeys = new Set([...Object.keys(inFlightTally), ...Object.keys(pp)]);
+  const gauge = {};
+  for (const k of allKeys) {
+    const entry = { inFlight: inFlightTally[k] ?? 0 };
+    if (Number.isInteger(pp[k]?.maxParallel)) entry.maxParallel = pp[k].maxParallel;
+    if (Number.isInteger(pp[k]?.reserve)) entry.reserve = pp[k].reserve;
+    gauge[k] = entry;
+  }
+  return { freeSlots, perProject: gauge };
 }
 
 // ─── Phase 4: dispatch and FSM-driven phase advancement ───
@@ -1102,7 +1295,21 @@ export function schedulerTick(
   // CTL-665: config-first ceiling — a committed executionCore.maxParallel
   // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
   const freeSlots = computeFreeSlots(readMaxParallel(orchDir, concurrency), inFlightCount);
-  const selected = selectDispatchable(ready, listStartedTickets(orchDir), freeSlots);
+  // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
+  // no perProject config this is byte-for-byte selectDispatchable.
+  // inFlightTickets was already computed above for the reclaim sweep.
+  const selected = selectDispatchablePerProject(ready, listStartedTickets(orchDir), freeSlots, {
+    perProject: concurrency?.perProject,
+    inFlight: inFlightTickets,
+  });
+  // CTL-706: per-project slot-usage gauge (dashboarding). log-line-only,
+  // matching the cache.stats() per-tick metric convention.
+  if (concurrency?.perProject && Object.keys(concurrency.perProject).length > 0) {
+    log.info(
+      buildPerProjectGauge(inFlightTickets, concurrency.perProject, freeSlots),
+      "scheduler: per-project slots",
+    );
+  }
 
   const dispatched = [];
   for (const t of selected) {
