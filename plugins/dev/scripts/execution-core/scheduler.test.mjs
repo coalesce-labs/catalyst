@@ -21,6 +21,8 @@ import {
   listInFlightTickets,
   readMaxParallel,
   readExecutionCoreConcurrency,
+  readExecutionCoreConcurrencyLayer2,
+  mergeExecutionCoreConcurrency,
   DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
@@ -231,6 +233,108 @@ describe("readExecutionCoreConcurrency (CTL-665)", () => {
   test("returns {} when the key is absent", () => {
     const p = writeConfig({ catalyst: { orchestration: {} } });
     expect(readExecutionCoreConcurrency(p)).toEqual({});
+  });
+});
+
+// CTL-678 — Layer-2 reader (machine-canonical override) mirrors the Layer-1
+// reader's failure semantics: ENOENT silent, unparseable JSON silent, absent
+// key → {}.
+describe("readExecutionCoreConcurrencyLayer2 (CTL-678)", () => {
+  function writeLayer2(obj) {
+    const p = join(orchDir, "layer2.json");
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  }
+  test("returns {} for a null/empty layer2Path", () => {
+    expect(readExecutionCoreConcurrencyLayer2(null)).toEqual({});
+    expect(readExecutionCoreConcurrencyLayer2("")).toEqual({});
+  });
+  test("returns {} for an absent file (ENOENT silent — no throw)", () => {
+    expect(readExecutionCoreConcurrencyLayer2(join(orchDir, "nope.json"))).toEqual({});
+  });
+  test("returns {} for unparseable JSON (no throw)", () => {
+    const p = join(orchDir, "bad-layer2.json");
+    writeFileSync(p, "{ not json");
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({});
+  });
+  test("returns the catalyst.orchestration.executionCore object", () => {
+    const p = writeLayer2({
+      catalyst: {
+        orchestration: {
+          executionCore: { maxParallel: 6 },
+        },
+      },
+    });
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({ maxParallel: 6 });
+  });
+  test("returns {} when the file exists but lacks catalyst.orchestration.executionCore", () => {
+    const p = writeLayer2({ catalyst: { orchestration: {} } });
+    expect(readExecutionCoreConcurrencyLayer2(p)).toEqual({});
+  });
+});
+
+// CTL-678 — per-field pre-merge of Layer-1 (committed seed) + Layer-2
+// (machine-canonical override). Layer-2 wins per VALID INTEGER field; absent
+// or invalid Layer-2 fields fall back to Layer-1. eligibleQuery and any other
+// non-concurrency key on Layer-1 passes through unchanged.
+describe("mergeExecutionCoreConcurrency (CTL-678)", () => {
+  test("both empty → {}", () => {
+    expect(mergeExecutionCoreConcurrency({}, {})).toEqual({});
+    expect(mergeExecutionCoreConcurrency()).toEqual({});
+  });
+  test("Layer-1 only → Layer-1 verbatim", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    expect(mergeExecutionCoreConcurrency(l1, {})).toEqual(l1);
+  });
+  test("Layer-2 only → Layer-2 verbatim", () => {
+    const l2 = { maxParallel: 6, minParallel: 2, maxParallelCeiling: 20 };
+    expect(mergeExecutionCoreConcurrency({}, l2)).toEqual(l2);
+  });
+  test("Layer-2 partial override: only maxParallel set in Layer-2", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    const l2 = { maxParallel: 6 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+    });
+  });
+  test("per-field override: Layer-2 wins independently per field", () => {
+    const l1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    const l2 = { maxParallel: 6, maxParallelCeiling: 20 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 20,
+    });
+  });
+  test("invalid type in Layer-2 does NOT block Layer-1 fallback", () => {
+    const l1 = { maxParallel: 4 };
+    const l2 = { maxParallel: "six" };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({ maxParallel: 4 });
+  });
+  test("non-positive integer in Layer-2 falls back to Layer-1", () => {
+    expect(
+      mergeExecutionCoreConcurrency({ maxParallel: 4 }, { maxParallel: 0 }),
+    ).toEqual({ maxParallel: 4 });
+    expect(
+      mergeExecutionCoreConcurrency({ maxParallel: 4 }, { maxParallel: -1 }),
+    ).toEqual({ maxParallel: 4 });
+  });
+  test("eligibleQuery on Layer-1 passes through unchanged", () => {
+    const l1 = {
+      maxParallel: 4,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    };
+    const l2 = { maxParallel: 6 };
+    expect(mergeExecutionCoreConcurrency(l1, l2)).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+      eligibleQuery: { status: "Ready" },
+    });
   });
 });
 
@@ -1580,6 +1684,127 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
     }
     // Still 3 — the 4th ticket did not dispatch under the lower ceiling.
     expect(dispatch.calls.length).toBe(3);
+  });
+});
+
+// ── CTL-678: per-tick Layer-2 hot-reload — extends CTL-676 ──
+//
+// CTL-676 hot-reloads the Layer-1 config every tick. CTL-678 layers a
+// machine-canonical Layer-2 override on top: when `layer2Path` is wired in
+// alongside `configPath`, runTick reads BOTH files per tick and merges
+// Layer-2 over Layer-1 per field. An edit to either file takes effect on the
+// next debounced tick — no daemon restart.
+describe("startScheduler — per-tick Layer-2 merge (CTL-678)", () => {
+  afterEach(() => __resetForTests());
+
+  const tk = (id, priority) => ({
+    identifier: id,
+    priority,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  // Boot-time precedence: with both files present, Layer-2 wins per field on
+  // the very first tick. Observable via the dispatch ceiling.
+  test("Layer-2 maxParallel wins on the first tick when both files present", () => {
+    const configPath = join(orchDir, "config.json");
+    const layer2Path = join(orchDir, "layer2.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 3 } } },
+      }),
+    );
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      layer2Path,
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    // Layer-2 ceiling 3, not Layer-1 ceiling 1.
+    expect(dispatch.calls.length).toBe(3);
+  });
+
+  // Hot-reload: editing the Layer-2 file between ticks raises the ceiling
+  // on the next tick — proves the per-tick re-read pulls Layer-2 too.
+  test("editing Layer-2 raises the ceiling on the next tick", async () => {
+    const configPath = join(orchDir, "config.json");
+    const layer2Path = join(orchDir, "layer2.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
+      }),
+    );
+    appendToEventLog("");
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      layer2Path,
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 10,
+    });
+    expect(dispatch.calls.length).toBe(1);
+
+    writeFileSync(
+      layer2Path,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 3 } } },
+      }),
+    );
+    await waitFor(() => dispatch.calls.length >= 3, {
+      intervalMs: 100,
+      onTick: () => appendToEventLog('{"event":"wake.CTL-678"}\n'),
+    });
+    expect(dispatch.calls.length).toBe(3);
+  });
+
+  // Back-compat: layer2Path unset → byte-for-byte CTL-676 behavior (Layer-1
+  // only). The merger's both-empty path returns Layer-1 verbatim.
+  test("layer2Path unset → Layer-1 reaches schedulerTick (CTL-676 back-compat)", () => {
+    const configPath = join(orchDir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { orchestration: { executionCore: { maxParallel: 2 } } },
+      }),
+    );
+    const dispatch = fakeDispatch();
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2), tk("CTL-C", 3)],
+      configPath,
+      // layer2Path intentionally omitted
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+    // Layer-1 ceiling 2 reached schedulerTick — no Layer-2 path, no merge work.
+    expect(dispatch.calls.length).toBe(2);
   });
 });
 

@@ -24,6 +24,7 @@ import {
   closeSync,
 } from "node:fs";
 import { resolve, dirname, basename } from "node:path";
+import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
@@ -49,7 +50,14 @@ import { reconcileBootResume } from "./boot-resume.mjs";
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
 // main() can resolve the slot-ceiling config once and thread it into the
 // scheduler + boot-resume.
-import { readExecutionCoreConcurrency } from "./scheduler.mjs";
+// CTL-678: pair the Layer-1 reader with the Layer-2 reader + merger so the
+// machine-canonical override (~/.config/catalyst/config.json) can win
+// per-field over the committed seed.
+import {
+  readExecutionCoreConcurrency,
+  readExecutionCoreConcurrencyLayer2,
+  mergeExecutionCoreConcurrency,
+} from "./scheduler.mjs";
 import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -120,6 +128,12 @@ export function startDaemon({
   // once before the scheduler starts and never re-reads. Null in tests that
   // never resolve a config path.
   configPath = null,
+  // CTL-678: machine-canonical Layer-2 path (~/.config/catalyst/config.json).
+  // Threaded into startScheduler alongside configPath so the per-tick re-read
+  // can apply Layer-2's per-field override on every tick (hot-reload of the
+  // override). Null in tests; production main() resolves it from
+  // CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json.
+  layer2Path = null,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -172,7 +186,7 @@ export function startDaemon({
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache, concurrency, configPath }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 — pull-loop scheduler (configPath enables per-tick re-read)
+    schedulerFn({ orchDir, cache, concurrency, configPath, layer2Path }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -434,6 +448,18 @@ export function stopDaemon() {
   log.info("execution-core daemon stopped");
 }
 
+// resolveBootConcurrency — CTL-678. Build the concurrency object the daemon
+// threads at boot by merging the committed Layer-1 seed under the
+// machine-canonical Layer-2 override. Layer-2 wins per valid integer field;
+// absent Layer-2 fields fall back to Layer-1; absent in both yields {} (the
+// legacy empty-concurrency path preserved end-to-end). Pure helper — CTL-676's
+// hot-reload work can re-invoke it from a watch handler without refactor.
+export function resolveBootConcurrency({ layer1Path, layer2Path }) {
+  const layer1 = readExecutionCoreConcurrency(layer1Path);
+  const layer2 = readExecutionCoreConcurrencyLayer2(layer2Path);
+  return mergeExecutionCoreConcurrency(layer1, layer2);
+}
+
 function main() {
   const idx = process.argv.indexOf("--pid-file");
   const pidFile = idx >= 0 ? process.argv[idx + 1] : null;
@@ -445,11 +471,20 @@ function main() {
   const configPath =
     process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
-  // CTL-665: resolve the committed executionCore concurrency knobs once here and
-  // thread them into startDaemon → scheduler + boot-resume. Same config file as
-  // the orphan-reaper read above; absent/partial config yields {} → the scheduler
-  // falls back to state.json + the hardcoded default exactly as before.
-  const concurrency = readExecutionCoreConcurrency(configPath);
+  // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
+  // and thread them into startDaemon → scheduler + boot-resume. The
+  // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
+  // per-field over the committed Layer-1 seed; absent/partial in both yields
+  // {} → the scheduler falls back to state.json + the hardcoded default. The
+  // env var CATALYST_LAYER2_CONFIG_FILE overrides the Layer-2 path for tests.
+  const layer2Path =
+    process.env.CATALYST_LAYER2_CONFIG_FILE ||
+    resolve(homedir(), ".config", "catalyst", "config.json");
+  const concurrency = resolveBootConcurrency({ layer1Path: configPath, layer2Path });
+  log.info(
+    { concurrency, layer2Present: existsSync(layer2Path) },
+    "execution-core: resolved boot concurrency"
+  );
 
   // A post-startup throw (a monitor/scheduler timer callback, the watcher)
   // must not leave a half-dead daemon holding a valid PID file — that makes
@@ -462,7 +497,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath }); // CTL-676
+    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

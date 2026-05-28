@@ -365,6 +365,18 @@ Never committed. One file per project, linked by `projectKey`.
 
 Only configure the integrations you use. The setup script prompts for each one.
 
+#### Execution-core concurrency (host-wide, CTL-678)
+
+The cross-project Layer-2 file `~/.config/catalyst/config.json` (no `projectKey`
+suffix) is **also** the live source for the execution-core scheduler's worker-slot
+ceiling. Under `catalyst.orchestration.executionCore` it accepts the same three
+concurrency keys as the committed Layer-1 seed — `maxParallel`, `minParallel`,
+`maxParallelCeiling` — each overriding the committed value per-field. See
+[Execution-core concurrency (`executionCore.maxParallel`)](#execution-core-concurrency-executioncoremaxparallel)
+for precedence, per-field merge semantics, and worked examples. The execution-core
+daemon is one-per-machine and serves all enrolled projects, so this knob is
+intentionally host-wide rather than per-project.
+
 ### Broker (`catalyst.broker` / `groq`)
 
 The `catalyst-broker` daemon (CTL-303) is the local event broker that registered agents and skills
@@ -924,21 +936,64 @@ fallback**, consulted only when the committed config omits a valid value; a
 shared hardcoded default is the last resort. The resolved value is then clamped
 into `[minParallel, maxParallelCeiling]` when those bounds are present.
 
+#### Layer-2 override (CTL-678)
+
+The **live source of truth** is the machine-canonical Layer-2 file
+`~/.config/catalyst/config.json` under the same key —
+`catalyst.orchestration.executionCore`. The committed Layer-1 block above is
+the **seed/fallback**, consulted per field only when the Layer-2 value is
+absent or not a positive integer. Operators override per-field; set just
+`maxParallel` in Layer-2 to inherit the Layer-1 bounds:
+
+```json
+// ~/.config/catalyst/config.json
+{
+  "catalyst": {
+    "orchestration": {
+      "executionCore": {
+        "maxParallel": 6
+      }
+    }
+  }
+}
+```
+
+With the committed Layer-1 default of `{maxParallel:4, minParallel:1,
+maxParallelCeiling:10}` and the Layer-2 above, the daemon's resolved boot
+concurrency is `{maxParallel:6, minParallel:1, maxParallelCeiling:10}`.
+
+The Layer-2 path is **host-wide** — `config.json`, no `projectKey` suffix.
+The execution-core daemon is one-per-machine and serves all enrolled
+projects, so this knob is a host knob, not a project knob. Per-project
+overrides are not modeled today.
+
+Both files are also **hot-reloaded per scheduler tick** — the same per-tick
+re-read CTL-676 introduced for Layer-1 also applies to Layer-2, so editing
+either file takes effect on the next tick without a daemon restart. Operators
+see the resolved boot object plus a `layer2Present` flag once in the daemon's
+startup log (`execution-core: resolved boot concurrency`); the per-tick
+behavior is identical to a fresh boot against the current on-disk state.
+
+The env var `CATALYST_LAYER2_CONFIG_FILE` overrides the Layer-2 path for
+tests; absent in production.
+
 :::note The default stays **4**. The operator bump to **10** is a separate, later
 config edit gated on CTL-661/662/663 being live — this knob is plumbing only.
 The `executionCore` block carries **only** these three concurrency keys in the
 template; `eligibleQuery` is intentionally central (registry.json, CTL-582 D4).
 :::
 
-**Hot-reload (CTL-676).** `maxParallel`, `minParallel`, and `maxParallelCeiling`
-are re-read by the execution-core scheduler on every tick (~2s under event-log
-activity via the existing `fs.watch` + 2s debounce, ~30s otherwise via the
-periodic backstop). Edits take effect on the next tick without a daemon
-restart. Lowering `maxParallel` mid-run gates new dispatch only — in-flight
-workers continue (the dispatch gate is the only consumer of the resolved
-ceiling). Other `executionCore` fields (`eligibleQuery` lives in the central
-registry; `dispatchMode` and structural daemon fields elsewhere in the config)
-remain boot-time only.
+**Hot-reload (CTL-676 + CTL-678).** `maxParallel`, `minParallel`, and
+`maxParallelCeiling` are re-read by the execution-core scheduler on every tick
+(~2s under event-log activity via the existing `fs.watch` + 2s debounce, ~30s
+otherwise via the periodic backstop) from **both** the committed Layer-1
+config and the machine-canonical Layer-2 file. The Layer-2 per-field merge
+runs on every tick, so editing either file takes effect on the next tick
+without a daemon restart. Lowering `maxParallel` mid-run gates new dispatch
+only — in-flight workers continue (the dispatch gate is the only consumer of
+the resolved ceiling). Other `executionCore` fields (`eligibleQuery` lives in
+the central registry; `dispatchMode` and structural daemon fields elsewhere
+in the config) remain boot-time only.
 
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag >
 `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The

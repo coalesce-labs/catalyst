@@ -23,6 +23,7 @@ import {
   stopDaemon,
   consumeEventTail,
   parseEventTailChunk,
+  resolveBootConcurrency,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
 } from "./daemon.mjs";
@@ -429,6 +430,86 @@ describe("startDaemon", () => {
     });
     stopDaemon();
     expect(stopped).toBe(1);
+  });
+});
+
+// CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under
+// Layer-2 (machine-canonical override) into the same concurrency object
+// CTL-665 threads into startDaemon. Pure helper, exercised in isolation;
+// the existing CTL-665 startDaemon tests above remain unchanged.
+describe("resolveBootConcurrency (CTL-678)", () => {
+  let tmpDir;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "boot-concurrency-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function writeJson(name, obj) {
+    const p = join(tmpDir, name);
+    writeFileSync(p, JSON.stringify(obj));
+    return p;
+  }
+
+  test("merges Layer-2 over Layer-1 per field", () => {
+    const layer1Path = writeJson("layer1.json", {
+      catalyst: {
+        orchestration: {
+          executionCore: { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 },
+        },
+      },
+    });
+    const layer2Path = writeJson("layer2.json", {
+      catalyst: { orchestration: { executionCore: { maxParallel: 6 } } },
+    });
+    expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
+      maxParallel: 6,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+    });
+  });
+
+  test("Layer-2 absent → result equals Layer-1", () => {
+    const layer1Path = writeJson("layer1.json", {
+      catalyst: {
+        orchestration: {
+          executionCore: { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 },
+        },
+      },
+    });
+    const layer2Path = join(tmpDir, "missing.json");
+    expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
+      maxParallel: 4,
+      minParallel: 1,
+      maxParallelCeiling: 10,
+    });
+  });
+
+  test("both absent → {} (legacy empty-concurrency path)", () => {
+    const layer1Path = join(tmpDir, "missing1.json");
+    const layer2Path = join(tmpDir, "missing2.json");
+    expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({});
+  });
+
+  test("eligibleQuery on Layer-1 survives the merge unchanged", () => {
+    const layer1Path = writeJson("layer1.json", {
+      catalyst: {
+        orchestration: {
+          executionCore: {
+            maxParallel: 4,
+            eligibleQuery: { status: "Ready" },
+          },
+        },
+      },
+    });
+    const layer2Path = writeJson("layer2.json", {
+      catalyst: { orchestration: { executionCore: { maxParallel: 6 } } },
+    });
+    expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
+      maxParallel: 6,
+      eligibleQuery: { status: "Ready" },
+    });
   });
 });
 
