@@ -1,5 +1,12 @@
 # Changelog
 
+## [10.2.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.1...catalyst-dev-v10.2.2) (2026-05-28)
+
+
+### Bug Fixes
+
+* **dev:** auto-dispatch triage for pre-existing eligible tickets at startup (CTL-711) ([#1191](https://github.com/coalesce-labs/catalyst/issues/1191)) ([954b31e](https://github.com/coalesce-labs/catalyst/commit/954b31eafef59ee71f8d5ca45ce6ee140bebfd6d))
+
 ## [10.2.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.0...catalyst-dev-v10.2.1) (2026-05-28)
 
 
