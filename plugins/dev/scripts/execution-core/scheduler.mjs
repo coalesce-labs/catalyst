@@ -22,6 +22,7 @@ import {
   mkdirSync,
   rmSync,
   renameSync,
+  statSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
@@ -42,7 +43,7 @@ import {
 // the sweep and are injected, so the router itself is unit-testable.
 import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles } from "./event-scan.mjs";
-import { rankTickets } from "./scheduler-rank.mjs";
+import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
@@ -65,6 +66,9 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultKillBgJob,
+  defaultAppendPreemptedEvent,
+  defaultAppendResumedAfterPreemptionEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -197,6 +201,33 @@ export function buildGlobalRanking(orchDir, eligible) {
 
   return rankTickets(descriptors);
 }
+
+// CTL-705 Phase 4: preemption constants and module state.
+
+// Phases that must never be preempted: monitor-deploy is a passive observer of
+// deployment outcomes; triage runs once at pipeline entry and is brief.
+export const NON_PREEMPTABLE_PHASES = new Set(["triage", "monitor-deploy"]);
+
+// Minimum wall-clock seconds a worker must have been running before it becomes
+// a preemption candidate — prevents stopping a worker that just started.
+const PREEMPT_MIN_RUNTIME_MS = 60_000;
+
+// Quiet-window for implement workers: if phase-implement.json mtime is more
+// recent than this, the worker is actively committing — don't interrupt.
+const PREEMPT_IMPLEMENT_QUIET_MS = 10_000;
+
+// Hysteresis window: a queued ticket must out-rank its candidate for at least
+// this long before preemption fires, preventing thrash on priority fluctuations.
+const PREEMPT_HYSTERESIS_MS = 30_000;
+
+// Status value written to the victim's phase signal when preempted.
+export const PREEMPTED_STATUS = "preempted";
+
+// rankedAboveSince — module state tracking when each (topQueued,victim) pair
+// first became rank-eligible. Keyed by `${topQueuedId}:${victimId}` so the
+// hysteresis tracks the specific preemptor→victim relationship.
+// Cleared on stopScheduler/__resetForTests (see daemon module state section).
+const rankedAboveSince = new Map();
 
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
 export function readPhaseSignals(orchDir, ticket) {
@@ -1181,6 +1212,10 @@ export function schedulerTick(
     // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
     // (module-level set) so only the first observation per daemon lifetime fires.
     appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
+    // CTL-705: preemption seams — injectable for tests, default to real helpers.
+    killBgJob = defaultKillBgJob,
+    appendPreemptedEvent = defaultAppendPreemptedEvent,
+    appendResumedAfterPreemptionEvent = defaultAppendResumedAfterPreemptionEvent,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -1283,9 +1318,136 @@ export function schedulerTick(
     }
   }
 
+  // CTL-705: hoist eligible read here so both the preemption sweep (0.5) and
+  // the new-work pull (2) share a single read per tick.
+  const eligible = readEligible ? readEligible() : readAllEligibleTickets();
+
+  // (0.5) Preemption sweep — if slots are saturated AND the top-ranked queued
+  // ticket out-ranks the lowest-ranked preemptable in-flight worker, stop that
+  // worker and park it for resume when a slot frees. Safety guards prevent
+  // thrash: non-preemptable phases, 60s min-runtime, implement quiet-window,
+  // 30s hysteresis. Runs after reclaim (so a just-reclaimed slot is counted)
+  // and before advancement (so a preempted signal isn't falsely advanced).
+  {
+    const maxP = readMaxParallel(orchDir, concurrency);
+    const liveCount = liveBackgroundCount();
+    if (computeFreeSlots(maxP, liveCount) <= 0) {
+      // Build the global ranking to find topQueued and potential victim.
+      const ranking = buildGlobalRanking(orchDir, eligible);
+      const topQueued = ranking.find((d) => !d.inFlight);
+      // Victim candidates: in-flight, sorted worst-to-best (reverse ranking).
+      const inFlightRanked = ranking.filter((d) => d.inFlight);
+      // Scan from lowest-ranked in-flight (last in sorted array) toward highest.
+      const nowMs = now();
+      for (let i = inFlightRanked.length - 1; i >= 0; i--) {
+        if (!topQueued) break; // no queued ticket wants a slot
+        const candidate = inFlightRanked[i];
+        // Only preempt if topQueued strictly out-ranks this candidate.
+        if (compareTickets(topQueued, candidate) >= 0) break; // sorted, so remaining are worse
+
+        // Read the candidate's active signal to get phase and startedAt.
+        const signals = readPhaseSignals(orchDir, candidate.identifier);
+        const activePhase = Object.entries(signals).reduce((best, [phase, status]) => {
+          if (TERMINAL_SIGNAL_STATUSES.has(status)) return best;
+          if (phase === TERMINAL_PHASE && (status === "done" || status === "skipped")) return best;
+          const rank = STAGE_RANK[phase] ?? -1;
+          return rank > (STAGE_RANK[best] ?? -1) ? phase : best;
+        }, null);
+        if (!activePhase) continue;
+
+        // Guard: non-preemptable phase
+        if (NON_PREEMPTABLE_PHASES.has(activePhase)) continue;
+
+        const signalRaw = readPhaseSignalRaw(orchDir, candidate.identifier, activePhase);
+        if (!signalRaw) continue;
+
+        // Guard: min-runtime floor
+        const startedMs = signalRaw.startedAt ? Date.parse(signalRaw.startedAt) : 0;
+        if (startedMs > 0 && nowMs - startedMs < PREEMPT_MIN_RUNTIME_MS) continue;
+
+        // Guard: implement quiet-window (mtime of the phase signal file)
+        if (activePhase === "implement") {
+          const signalPath = join(orchDir, "workers", candidate.identifier, `phase-${activePhase}.json`);
+          try {
+            const st = statSync(signalPath);
+            if (nowMs - st.mtimeMs < PREEMPT_IMPLEMENT_QUIET_MS) continue;
+          } catch {
+            // can't stat → fail-open (skip the quiet-window guard)
+          }
+        }
+
+        // Guard: hysteresis — must have out-ranked this candidate for ≥30s
+        const hysteresisKey = `${topQueued.identifier}:${candidate.identifier}`;
+        if (!rankedAboveSince.has(hysteresisKey)) {
+          rankedAboveSince.set(hysteresisKey, nowMs);
+          continue; // first observation this tick — start the clock
+        }
+        if (nowMs - rankedAboveSince.get(hysteresisKey) < PREEMPT_HYSTERESIS_MS) continue;
+
+        // All guards passed — preempt this candidate.
+        const bgJobId = signalRaw.bg_job_id;
+        killBgJob({ bgJobId });
+
+        // Atomically park the signal: status → "preempted", add parkedFrom + attentionReason.
+        const signalPath = join(orchDir, "workers", candidate.identifier, `phase-${activePhase}.json`);
+        try {
+          const updated = {
+            ...signalRaw,
+            status: PREEMPTED_STATUS,
+            parkedFrom: activePhase,
+            attentionReason: "preempted-by-priority",
+            updatedAt: new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z"),
+          };
+          const tmp = `${signalPath}.tmp.${process.pid}`;
+          writeFileSync(tmp, JSON.stringify(updated));
+          renameSync(tmp, signalPath);
+        } catch (err) {
+          log.warn(
+            { ticket: candidate.identifier, phase: activePhase, err: err.message },
+            "scheduler: preemption signal write failed — skipping"
+          );
+          continue;
+        }
+
+        safeEmit(
+          appendPreemptedEvent,
+          {
+            orchId: candidate.identifier,
+            ticket: candidate.identifier,
+            phase: activePhase,
+            preemptedBy: topQueued.identifier,
+            bgJobId,
+          },
+          { ticket: candidate.identifier, phase: activePhase }
+        );
+
+        rankedAboveSince.delete(hysteresisKey); // clear after successful preemption
+        break; // one preemption per tick
+      }
+
+      // Prune hysteresis entries whose candidates are no longer lowest-ranked.
+      // (Avoids stale entries from tickets that advanced or completed.)
+      if (topQueued) {
+        for (const [key] of rankedAboveSince) {
+          const victimId = key.split(":")[1];
+          if (!inFlightRanked.find((d) => d.identifier === victimId)) {
+            rankedAboveSince.delete(key);
+          }
+        }
+      }
+    }
+  }
+
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
+  // CTL-705: preempted workers are skipped — their active status is not "done" so
+  // deriveAdvancement returns null, but an early continue makes the intent explicit
+  // and provides a regression anchor (test 9 in the plan).
   const advanced = [];
   for (const ticket of listInFlightTickets(orchDir)) {
+    // Skip parked (preempted) tickets — they re-enter via the resume sweep (1.5).
+    const ticketSignals = readPhaseSignals(orchDir, ticket);
+    if (Object.values(ticketSignals).some((s) => s === PREEMPTED_STATUS)) continue;
+
     // CTL-661 hole #2: snapshot the signals + the remediate worker's raw signal
     // BEFORE maybeResetForRemediateCycle deletes the verify+remediate signals,
     // so a remediate→verify re-entry can still name + reap the remediate worker
@@ -1390,7 +1552,7 @@ export function schedulerTick(
   // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
   // hydrate the live state of every out-of-set blocker first so a Ready ticket
   // blocked by a non-terminal out-of-set ticket is held back.
-  const eligible = readEligible ? readEligible() : readAllEligibleTickets();
+  // CTL-705: `eligible` is hoisted above sweep 0.5 — used by buildGlobalRanking there.
   const blockerStates = hydrateOutOfSetBlockers(eligible, { exec, cache });
   // CTL-634: surface the cache hit-rate once per tick. Log-line-only matches
   // the daemon's pino-only observability convention (schedulerTick's return
@@ -1705,6 +1867,7 @@ export function stopScheduler() {
   watcher?.close();
   watcher = null;
   runningOpts = null;
+  rankedAboveSince.clear(); // CTL-705: reset hysteresis state on daemon stop
 }
 
 // __resetForTests — clear daemon state between unit tests. Not part of the
@@ -1712,6 +1875,7 @@ export function stopScheduler() {
 export function __resetForTests() {
   stopScheduler();
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
+  // rankedAboveSince is cleared by stopScheduler above (CTL-705)
 }
 
 // --- standalone entrypoint (operator dry-run / CTL-554 wires the real daemon) ---

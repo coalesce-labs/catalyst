@@ -524,6 +524,42 @@ export function defaultAppendDispatchLaunchedEvent({
   );
 }
 
+// CTL-705: preemption and resume-after-preemption event emitters.
+
+// defaultAppendPreemptedEvent — phase.<phase>.preempted.<TICKET>.
+// Emitted when the scheduler stops a lower-priority in-flight worker to free a
+// slot for a higher-priority queued ticket. The `phase` slot is the real phase
+// being preempted (not the literal "dispatch"). Best-effort, never throws.
+export function defaultAppendPreemptedEvent({ orchId, ticket, phase, preemptedBy, bgJobId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "preempted",
+      payloadExtras: { preempted_by: preemptedBy, bg_job_id: bgJobId },
+    }),
+    "preempted",
+  );
+}
+
+// defaultAppendResumedAfterPreemptionEvent — phase.<phase>.resumed-after-preemption.<TICKET>.
+// Emitted when a previously-preempted worker is re-dispatched at its parkedFrom
+// phase. resumeSession is null when the UUID could not be resolved (cold re-dispatch).
+// Best-effort, never throws.
+export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase, resumeSession }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "resumed-after-preemption",
+      payloadExtras: { resume_session: resumeSession ?? null },
+    }),
+    "resumed-after-preemption",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass

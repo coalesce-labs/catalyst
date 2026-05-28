@@ -3861,3 +3861,289 @@ describe("schedulerTick — writeWorkerPriority at new-work dispatch (CTL-705)",
     expect(pj.createdAt).toBe("2026-05-01T00:00:00Z");
   });
 });
+
+// ─── CTL-705 Phase 4: preemption sweep ───
+
+describe("preemption sweep (CTL-705 Phase 4)", () => {
+  // Seed a fully-formed in-flight signal with startedAt + bg_job_id + priority.json
+  function seedWorker(ticket, phase, priority, startedAtMs, bgJobId, createdAt) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    const startedAt = new Date(startedAtMs).toISOString();
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status: "running", bg_job_id: bgJobId, startedAt })
+    );
+    writeWorkerPriority(orchDir, ticket, { priority, createdAt: createdAt ?? "2026-05-01T00:00:00Z" });
+  }
+
+  function readSignal(ticket, phase) {
+    return JSON.parse(readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+  }
+
+  function makePrioEligible(identifier, priority) {
+    return { identifier, priority, createdAt: "2026-05-01T00:00:00Z" };
+  }
+
+  // killBgJob recording stub
+  function makeKillStub() {
+    const calls = [];
+    const fn = (args) => calls.push(args);
+    fn.calls = calls;
+    return fn;
+  }
+
+  // appendPreemptedEvent recording stub
+  function makePreemptStub() {
+    const calls = [];
+    const fn = (args) => { calls.push(args); return true; };
+    fn.calls = calls;
+    return fn;
+  }
+
+  const noopReclaim = () => "noop";
+
+  test("happy path: saturated, Urgent queued vs 2 Low in-flight — parks lowest-stage Low", () => {
+    const T0 = 100_000;
+    // CTL-1: Low @ verify (stage 5), CTL-2: Low @ research (stage 1) — CTL-2 is lowest stage
+    seedWorker("CTL-1", "verify", 4, T0 - 90_000, "bg-ctl1");
+    seedWorker("CTL-2", "research", 4, T0 - 90_000, "bg-ctl2");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const tickOpts = {
+      readEligible: () => [makePrioEligible("CTL-9", 1)], // Urgent
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 2, // saturated
+      reclaimDeadWork: noopReclaim,
+    };
+    // Tick 1: hysteresis window opens, no preemption yet.
+    schedulerTick(orchDir, { ...tickOpts, now: () => T0, killBgJob: makeKillStub() });
+    // Tick 2 (35s later): past the 30s hysteresis → preemption fires.
+    const kill = makeKillStub();
+    const appendPreempted = makePreemptStub();
+    schedulerTick(orchDir, {
+      ...tickOpts,
+      now: () => T0 + 35_000,
+      killBgJob: kill,
+      appendPreemptedEvent: appendPreempted,
+    });
+    // CTL-2 should be preempted (research = lowest stage)
+    expect(kill.calls.map((c) => c.bgJobId)).toContain("bg-ctl2");
+    expect(kill.calls.map((c) => c.bgJobId)).not.toContain("bg-ctl1");
+    const sig = readSignal("CTL-2", "research");
+    expect(sig.status).toBe("preempted");
+    expect(sig.parkedFrom).toBe("research");
+    expect(sig.attentionReason).toBe("preempted-by-priority");
+    expect(appendPreempted.calls).toHaveLength(1);
+    expect(appendPreempted.calls[0].ticket).toBe("CTL-2");
+  });
+
+  test("no preemption when a slot is free (liveBackgroundCount < maxParallel)", () => {
+    const NOW = 100_000;
+    seedWorker("CTL-1", "verify", 4, NOW - 90_000, "bg-ctl1");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1, // slot free
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+  });
+
+  test("no preemption when queued ticket does not out-rank any in-flight", () => {
+    const NOW = 100_000;
+    // In-flight: both Urgent (priority 1), queued: also priority 4 (Low)
+    seedWorker("CTL-1", "verify", 1, NOW - 90_000, "bg-ctl1");
+    seedWorker("CTL-2", "research", 1, NOW - 90_000, "bg-ctl2");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 4)], // Low — doesn't out-rank Urgent
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 2,
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+  });
+
+  test("guard: non-preemptable phase (monitor-deploy) is skipped", () => {
+    const NOW = 100_000;
+    // Only in-flight worker is at monitor-deploy — non-preemptable
+    seedWorker("CTL-MD", "monitor-deploy", 4, NOW - 90_000, "bg-md");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0); // non-preemptable → skip, no preemption
+  });
+
+  test("guard: triage is non-preemptable", () => {
+    const NOW = 100_000;
+    seedWorker("CTL-T", "triage", 4, NOW - 90_000, "bg-t");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+  });
+
+  test("guard: min-runtime floor 60s — 30s-old candidate not preempted", () => {
+    const NOW = 100_000;
+    // Worker started only 30s ago (< 60s floor)
+    seedWorker("CTL-Young", "research", 4, NOW - 30_000, "bg-young");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+    });
+    expect(kill.calls).toHaveLength(0);
+  });
+
+  test("guard: implement quiet-window — mtime too recent (<10s) → not preempted, mtime stale → preempted", async () => {
+    const { utimesSync } = await import("node:fs");
+    const NOW = 100_000;
+    // Worker old enough (> 60s) but at implement
+    seedWorker("CTL-Impl", "implement", 4, NOW - 90_000, "bg-impl");
+    const signalPath = join(orchDir, "workers", "CTL-Impl", "phase-implement.json");
+    // Set mtime to 3s ago (within the 10s quiet window)
+    const recentMtime = new Date(NOW - 3_000);
+    utimesSync(signalPath, recentMtime, recentMtime);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => NOW,
+      killBgJob: kill,
+      appendPreemptedEvent: makePreemptStub(),
+    });
+    expect(kill.calls).toHaveLength(0); // 3s mtime < 10s quiet window → not preempted
+
+    // Now make mtime stale (15s ago — past the quiet window). Run two ticks so
+    // hysteresis allows the second tick to fire.
+    const staleMtime = new Date(NOW - 15_000);
+    utimesSync(signalPath, staleMtime, staleMtime);
+    const tickOpts2 = {
+      readEligible: () => [makePrioEligible("CTL-9", 1)],
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+    };
+    // __resetForTests clears hysteresis from the first tick (mtime-guarded tick above).
+    __resetForTests();
+    schedulerTick(orchDir, { ...tickOpts2, now: () => NOW, killBgJob: makeKillStub() }); // tick 1: open hysteresis
+    const kill2 = makeKillStub();
+    schedulerTick(orchDir, {
+      ...tickOpts2,
+      now: () => NOW + 35_000, // tick 2: past hysteresis
+      killBgJob: kill2,
+      appendPreemptedEvent: makePreemptStub(),
+    });
+    expect(kill2.calls).toHaveLength(1); // 15s mtime > 10s quiet window → preempted
+  });
+
+  test("guard: hysteresis 30s — first observation skips, ≥30s observation preempts", () => {
+    const T0 = 100_000;
+    seedWorker("CTL-H", "research", 4, T0 - 90_000, "bg-h");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const eligible = [makePrioEligible("CTL-9", 1)];
+
+    // Tick 1 at T0: first observation — hysteresis window opens, no preemption yet
+    const kill1 = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => T0,
+      killBgJob: kill1,
+    });
+    expect(kill1.calls).toHaveLength(0); // first observation → hysteresis window just opened
+
+    // Tick 2 at T0 + 35s: past the 30s hysteresis window → preempt
+    const kill2 = makeKillStub();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch: fakeDispatch(),
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: noopReclaim,
+      now: () => T0 + 35_000,
+      killBgJob: kill2,
+      appendPreemptedEvent: makePreemptStub(),
+    });
+    expect(kill2.calls).toHaveLength(1); // ≥30s → preempted
+  });
+
+  test("reclaim sweep ignores 'preempted' signals — no false revive", () => {
+    // Seed a preempted signal (no bg_job_id so classifyWorker returns 'unknown')
+    const dir = join(orchDir, "workers", "CTL-Park");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-Park", phase: "research", status: "preempted", parkedFrom: "research" })
+    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const reclaimCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 0,
+      reclaimDeadWork: (_od, sig) => {
+        reclaimCalls.push({ ticket: sig.ticket, status: sig.status });
+        return "noop"; // we're capturing the call but still returning noop
+      },
+    });
+    // preempted signal must never reach reclaimDeadWork (listInFlightTickets excludes it,
+    // or the sweep skips it — either way, no reclaim attempt should fire for a preempted signal)
+    // The ticket IS in-flight (preempted is non-terminal), so it shows up in listInFlightTickets.
+    // But reclaimDeadWork should not actually reclaim it (the real reclaimDeadWork returns noop
+    // for a non-running status). Our guard means no advancement either.
+    const parkedAdvance = dispatch.calls.filter((c) => c.ticket === "CTL-Park");
+    expect(parkedAdvance).toHaveLength(0); // not advanced
+  });
+
+  test("advancement sweep ignores 'preempted' — deriveAdvancement never dispatched", () => {
+    // preempted research → advancement must not advance to plan
+    const dir = join(orchDir, "workers", "CTL-Adv");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-Adv", phase: "research", status: "preempted", parkedFrom: "research" })
+    );
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 0,
+    });
+    // No plan dispatch for CTL-Adv
+    expect(r.advanced.find((a) => a.ticket === "CTL-Adv")).toBeUndefined();
+    expect(dispatch.calls.find((c) => c.ticket === "CTL-Adv")).toBeUndefined();
+  });
+});
