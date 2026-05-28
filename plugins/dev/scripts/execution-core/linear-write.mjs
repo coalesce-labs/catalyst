@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
-import { fetchTicketLabels } from "./linear-query.mjs";
+import { fetchTicketLabels, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
 
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the
@@ -164,6 +164,56 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
       "linear-write: label write threw — swallowed"
     );
     return { applied: false, reason: "transient" };
+  }
+}
+
+// applyTriageStatus — verified Todo→Triage write-back (CTL-704). Reads the
+// pre-transition state, shells linear-transition.sh for the triage key, then
+// re-reads to confirm the state actually landed. Returns
+// {applied, verified, from_state, to_state, reason}. Never throws (best-effort).
+//
+// Modelled on applyLabel's read-back pattern (CTL-587). The `fetchState` seam
+// is injectable so tests never shell out to linearis; `resolveRepoRoot` + `exec`
+// are forwarded to runTransition unchanged.
+export function applyTriageStatus({
+  ticket,
+  resolveRepoRoot = defaultResolveRepoRoot,
+  exec = defaultExec,
+  fetchState = fetchTicketState,
+}) {
+  let from_state = null;
+  try {
+    // 1. Capture pre-transition state (best-effort — null is acceptable).
+    from_state = fetchState(ticket, { exec });
+
+    // 2. Shell the transition.
+    const t = runTransition({ ticket, key: "triage", resolveRepoRoot, exec });
+    if (!t.applied) {
+      return { applied: false, verified: false, from_state, to_state: null, reason: t.reason };
+    }
+
+    // 3. Resolve expected target state from the project config (stateMap.triage).
+    const team = teamOf(ticket);
+    const cfg = team ? getProjectConfig(team) : null;
+    const expectedState = cfg?.eligibleQuery?.triageStatus ?? "Triage";
+
+    // 4. Re-read to verify the state actually landed.
+    const to_state = fetchState(ticket, { exec });
+    if (to_state == null) {
+      log.warn({ ticket }, "linear-write: triage verify-unreadable — cannot confirm state landed");
+      return { applied: true, verified: false, from_state, to_state: null, reason: "verify-unreadable" };
+    }
+    if (to_state === expectedState) {
+      return { applied: true, verified: true, from_state, to_state, reason: null };
+    }
+    log.warn(
+      { ticket, expected: expectedState, actual: to_state },
+      "linear-write: triage exit-0 but read-back missing (silent-success gap)"
+    );
+    return { applied: true, verified: false, from_state, to_state, reason: "verify-failed" };
+  } catch (err) {
+    log.warn({ ticket, err: err.message }, "linear-write: applyTriageStatus threw — swallowed");
+    return { applied: false, verified: false, from_state, to_state: null, reason: "threw" };
   }
 }
 

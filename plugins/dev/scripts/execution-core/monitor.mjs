@@ -31,6 +31,8 @@ import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mj
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
+import { applyTriageStatus as defaultApplyTriageStatus } from "./linear-write.mjs";
+import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
@@ -156,6 +158,8 @@ export function handleStateChangedEvent(
     orchDir,
     abortWorker = defaultAbortWorker,
     cache, // CTL-634: write-through target shared with the scheduler read path
+    applyTriageStatus = defaultApplyTriageStatus, // CTL-704: injectable for tests
+    appendEvent = defaultAppendEvent, // CTL-704: injectable for tests
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -174,7 +178,13 @@ export function handleStateChangedEvent(
       // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
       // set: a Triage ticket is never scheduler-pulled. Idempotent downstream
       // (phase-agent-dispatch no-ops an existing signal file).
-      dispatchTriage(parsed.identifier, { dispatch, orchDir });
+      dispatchTriage(parsed.identifier, {
+        dispatch,
+        orchDir,
+        applyTriageStatus,
+        appendEvent,
+        orchId: parsed.identifier,
+      });
     } else if (!parsed.toState || parsed.toState === query.status) {
       // →Ready (or an unknown new state). CTL-625: a confirmed →Ready
       // (toState === query.status) for a ticket with no prior triage.json means
@@ -199,7 +209,13 @@ export function handleStateChangedEvent(
         orchDir &&
         !hasTriageArtifact(orchDir, parsed.identifier)
       ) {
-        dispatchTriage(parsed.identifier, { dispatch, orchDir });
+        dispatchTriage(parsed.identifier, {
+          dispatch,
+          orchDir,
+          applyTriageStatus,
+          appendEvent,
+          orchId: parsed.identifier,
+        });
       } else {
         log.debug(
           {
@@ -238,8 +254,15 @@ export function handleStateChangedEvent(
 
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
 // a missing orchDir (a standalone monitor with no daemon wiring) and logs —
-// never throws — a non-zero dispatch.
-function dispatchTriage(identifier, { dispatch, orchDir }) {
+// never throws — a non-zero dispatch. CTL-704: after a successful dispatch,
+// writes Linear Todo→Triage (verified) and emits a canonical observability event.
+function dispatchTriage(identifier, {
+  dispatch,
+  orchDir,
+  applyTriageStatus = defaultApplyTriageStatus,
+  appendEvent = defaultAppendEvent,
+  orchId,
+}) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
     return;
@@ -247,7 +270,24 @@ function dispatchTriage(identifier, { dispatch, orchDir }) {
   const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
+    return;
   }
+  // CTL-704: write Linear Todo→Triage (verified) + emit observability event.
+  let res = { applied: false, verified: false, from_state: null, to_state: null, reason: null };
+  try {
+    res = applyTriageStatus({ ticket: identifier });
+  } catch (err) {
+    log.warn({ identifier, err: err.message }, "monitor: triage status write threw");
+  }
+  appendEvent({
+    ticket: identifier,
+    orchId: orchId ?? identifier,
+    from_state: res.from_state,
+    to_state: res.to_state,
+    verified: res.verified,
+    applied: res.applied,
+    reason: res.reason,
+  });
 }
 
 // hasTriageArtifact — does a triage.json exist for this ticket's worker dir?

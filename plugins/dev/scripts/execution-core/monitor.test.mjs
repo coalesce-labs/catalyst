@@ -462,6 +462,101 @@ describe("handleStateChangedEvent — CTL-565 two-state trigger", () => {
   });
 });
 
+// --- CTL-704: verified Todo→Triage write-back wiring in dispatchTriage ---------
+
+describe("handleStateChangedEvent — CTL-704 triage write-back wiring", () => {
+  const orchDir = "/orch";
+
+  test("CTL-704: writes Triage after successful dispatch — applyTriageStatus + appendEvent called", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({
+      applied: true,
+      verified: true,
+      from_state: "Todo",
+      to_state: "Triage",
+      reason: null,
+    }));
+    const appendEvent = mock(() => true);
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+      },
+      { dispatch, orchDir, applyTriageStatus, appendEvent }
+    );
+    expect(dispatch).toHaveBeenCalledWith({ orchDir, ticket: "ENG-1", phase: "triage" });
+    expect(applyTriageStatus).toHaveBeenCalledTimes(1);
+    const applyArg = applyTriageStatus.mock.calls[0][0];
+    expect(applyArg.ticket).toBe("ENG-1");
+    expect(appendEvent).toHaveBeenCalledTimes(1);
+    const appendArg = appendEvent.mock.calls[0][0];
+    expect(appendArg.ticket).toBe("ENG-1");
+    expect(appendArg.from_state).toBe("Todo");
+    expect(appendArg.to_state).toBe("Triage");
+    expect(appendArg.verified).toBe(true);
+  });
+
+  test("CTL-704: dispatch fails → applyTriageStatus and appendEvent are NOT called", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 1 }));
+    const applyTriageStatus = mock(() => ({ applied: false, verified: false }));
+    const appendEvent = mock(() => true);
+    handleStateChangedEvent(
+      {
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+      },
+      { dispatch, orchDir, applyTriageStatus, appendEvent }
+    );
+    expect(applyTriageStatus).not.toHaveBeenCalled();
+    expect(appendEvent).not.toHaveBeenCalled();
+  });
+
+  test("CTL-704: write unverified → appendEvent still called with verified:false, never throws", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({
+      applied: true,
+      verified: false,
+      from_state: "Todo",
+      to_state: "Todo",
+      reason: "verify-failed",
+    }));
+    const appendEvent = mock(() => true);
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+        },
+        { dispatch, orchDir, applyTriageStatus, appendEvent }
+      )
+    ).not.toThrow();
+    expect(appendEvent).toHaveBeenCalledTimes(1);
+    expect(appendEvent.mock.calls[0][0].verified).toBe(false);
+  });
+
+  test("CTL-704: no orchDir → unchanged no-op, applyTriageStatus not called", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({ applied: true, verified: true }));
+    const appendEvent = mock(() => true);
+    expect(() =>
+      handleStateChangedEvent(
+        {
+          event: "linear.issue.state_changed",
+          detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+        },
+        { dispatch, applyTriageStatus, appendEvent } // no orchDir
+      )
+    ).not.toThrow();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(applyTriageStatus).not.toHaveBeenCalled();
+    expect(appendEvent).not.toHaveBeenCalled();
+  });
+});
+
 describe("lifecycle", () => {
   test("startMonitor runs an immediate reconcileAll", () => {
     enroll("ENG", { status: "Todo" });
