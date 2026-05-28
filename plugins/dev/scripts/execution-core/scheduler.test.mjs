@@ -29,6 +29,9 @@ import {
   resolveReapPredecessor,
   computeReadyTickets,
   selectDispatchable,
+  selectDispatchablePerProject,
+  validatePerProjectBudgets,
+  buildPerProjectGauge,
   deriveAdvancement,
   maybeResetForRemediateCycle,
   maybeEscalateRemediateExhausted,
@@ -345,6 +348,160 @@ describe("mergeExecutionCoreConcurrency (CTL-678)", () => {
       maxParallelCeiling: 10,
       eligibleQuery: { status: "Ready" },
     });
+  });
+});
+
+describe("mergeExecutionCoreConcurrency — perProject (CTL-706)", () => {
+  test("layer-1-only perProject passes through", () => {
+    const l1 = { maxParallel: 6, perProject: { CTL: { maxParallel: 3, reserve: 1 } } };
+    expect(mergeExecutionCoreConcurrency(l1, {})).toMatchObject({
+      perProject: { CTL: { maxParallel: 3, reserve: 1 } },
+    });
+  });
+  test("layer-2 adds a new project key", () => {
+    const l1 = { maxParallel: 6, perProject: { CTL: { maxParallel: 3, reserve: 1 } } };
+    const l2 = { perProject: { ADV: { maxParallel: 4, reserve: 2 } } };
+    const result = mergeExecutionCoreConcurrency(l1, l2);
+    expect(result.perProject.CTL).toMatchObject({ maxParallel: 3, reserve: 1 });
+    expect(result.perProject.ADV).toMatchObject({ maxParallel: 4, reserve: 2 });
+  });
+  test("layer-2 sub-field override wins per field, other fields preserved", () => {
+    const l1 = { maxParallel: 6, perProject: { CTL: { maxParallel: 3, reserve: 1 } } };
+    const l2 = { perProject: { CTL: { reserve: 2 } } };
+    expect(mergeExecutionCoreConcurrency(l1, l2).perProject.CTL).toMatchObject({
+      maxParallel: 3,
+      reserve: 2,
+    });
+  });
+  test("invalid layer-2 sub-field (non-positive / non-int) is ignored", () => {
+    const l1 = { maxParallel: 6, perProject: { CTL: { maxParallel: 3, reserve: 1 } } };
+    const l2 = { perProject: { CTL: { maxParallel: 0, reserve: -1 } } };
+    expect(mergeExecutionCoreConcurrency(l1, l2).perProject.CTL).toMatchObject({
+      maxParallel: 3,
+      reserve: 1,
+    });
+  });
+  test("scalar-only merge with no perProject is unchanged (regression)", () => {
+    expect(mergeExecutionCoreConcurrency({ maxParallel: 4 }, { maxParallel: 6 })).toEqual({
+      maxParallel: 6,
+    });
+  });
+});
+
+describe("validatePerProjectBudgets (CTL-706)", () => {
+  test("absent perProject → unchanged", () => {
+    expect(validatePerProjectBudgets({ maxParallel: 6 })).toEqual({ maxParallel: 6 });
+  });
+  test("sum(reserve) ≤ maxParallel → reserves untouched", () => {
+    const c = { maxParallel: 6, perProject: { ADV: { reserve: 2 }, CTL: { reserve: 1 } } };
+    const out = validatePerProjectBudgets(c);
+    expect(out.perProject.ADV.reserve).toBe(2);
+    expect(out.perProject.CTL.reserve).toBe(1);
+  });
+  test("sum(reserve) > maxParallel → reserves clamped so sum ≤ maxParallel", () => {
+    const c = { maxParallel: 3, perProject: { ADV: { reserve: 3 }, CTL: { reserve: 2 } } };
+    const out = validatePerProjectBudgets(c).perProject;
+    const sum = (out.ADV.reserve ?? 0) + (out.CTL.reserve ?? 0);
+    expect(sum).toBeLessThanOrEqual(3);
+    expect(out.ADV.reserve ?? 0).toBeGreaterThanOrEqual(0);
+  });
+  test("never throws on garbage entries", () => {
+    expect(() =>
+      validatePerProjectBudgets({ maxParallel: 6, perProject: { X: { reserve: "nope" } } }),
+    ).not.toThrow();
+  });
+});
+
+describe("selectDispatchablePerProject — equivalence (CTL-706)", () => {
+  const tk = (id) => ({
+    identifier: id,
+    priority: 1,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+  const ids = (sel) => sel.map((t) => t.identifier);
+
+  test("empty perProject behaves exactly like selectDispatchable", () => {
+    const ranked = [tk("CTL-1"), tk("CTL-2"), tk("CTL-3")];
+    expect(ids(selectDispatchablePerProject(ranked, new Set(["CTL-2"]), 2, {}))).toEqual([
+      "CTL-1",
+      "CTL-3",
+    ]);
+  });
+  test("freeSlots 0 → []", () => {
+    expect(
+      selectDispatchablePerProject([tk("CTL-1")], new Set(), 0, {
+        perProject: { CTL: { maxParallel: 2 } },
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe("selectDispatchablePerProject — cap saturation (CTL-706)", () => {
+  const tk = (id) => ({
+    identifier: id,
+    priority: 1,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+  const ids = (sel) => sel.map((t) => t.identifier);
+
+  test("project at cap is skipped; next non-saturated project picked", () => {
+    const ranked = [tk("ADV-1"), tk("ADV-2"), tk("CTL-1")];
+    const sel = selectDispatchablePerProject(ranked, new Set(), 2, {
+      perProject: { ADV: { maxParallel: 1, reserve: 0 }, CTL: { maxParallel: 3, reserve: 0 } },
+      inFlight: new Set(),
+    });
+    expect(ids(sel)).toEqual(["ADV-1", "CTL-1"]);
+  });
+  test("in-flight count counts toward the cap", () => {
+    const ranked = [tk("ADV-2"), tk("CTL-1")];
+    const sel = selectDispatchablePerProject(ranked, new Set(), 2, {
+      perProject: { ADV: { maxParallel: 1 }, CTL: { maxParallel: 3 } },
+      inFlight: new Set(["ADV-9"]),
+    });
+    expect(ids(sel)).toEqual(["CTL-1"]);
+  });
+});
+
+describe("selectDispatchablePerProject — reserve enforcement (CTL-706)", () => {
+  const tk = (id) => ({
+    identifier: id,
+    priority: 1,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+  const ids = (sel) => sel.map((t) => t.identifier);
+
+  test("last shared slot withheld so another project can reach its reserve", () => {
+    const ranked = [tk("ADV-1"), tk("CTL-1")];
+    const sel = selectDispatchablePerProject(ranked, new Set(), 1, {
+      perProject: { ADV: { reserve: 0 }, CTL: { reserve: 1 } },
+      inFlight: new Set(),
+    });
+    expect(ids(sel)).toEqual(["CTL-1"]);
+  });
+  test("reserve does NOT bite when the reserved project has no waiting work", () => {
+    const ranked = [tk("ADV-1"), tk("ADV-2")];
+    const sel = selectDispatchablePerProject(ranked, new Set(), 1, {
+      perProject: { ADV: { reserve: 0 }, CTL: { reserve: 1 } },
+      inFlight: new Set(),
+    });
+    expect(ids(sel)).toEqual(["ADV-1"]);
+  });
+  test("a project filling its OWN reserve is never blocked by the reserve guard", () => {
+    const ranked = [tk("CTL-1"), tk("CTL-2")];
+    const sel = selectDispatchablePerProject(ranked, new Set(), 2, {
+      perProject: { CTL: { reserve: 2 } },
+      inFlight: new Set(),
+    });
+    expect(ids(sel)).toEqual(["CTL-1", "CTL-2"]);
   });
 });
 
@@ -945,6 +1102,118 @@ describe("schedulerTick — new-work pull", () => {
       // CTL-565: new-work pull enters at research, not triage.
       { orchDir, ticket: "CTL-X", phase: "research" },
     ]);
+  });
+});
+
+// ── CTL-706: per-project cap + reserve wired into schedulerTick ──
+describe("schedulerTick — CTL-706 per-project budgets", () => {
+  const mk = (id, p = 1) => ({
+    identifier: id,
+    priority: p,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("perProject cap saturation skips the next pick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = [mk("ADV-1", 1), mk("ADV-2", 1), mk("CTL-1", 2)];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      concurrency: { maxParallel: 3, perProject: { ADV: { maxParallel: 1 } } },
+    });
+    expect(r.dispatched).toEqual(["ADV-1", "CTL-1"]);
+  });
+
+  test("perProject reserve withholds a slot for a starved project", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    const eligible = [mk("ADV-1", 1), mk("CTL-1", 2)];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      concurrency: { maxParallel: 1, perProject: { CTL: { reserve: 1 } } },
+    });
+    expect(r.dispatched).toEqual(["CTL-1"]);
+  });
+
+  test("no perProject config → identical to pre-CTL-706 behavior (regression)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch();
+    const eligible = [mk("CTL-9", 4), mk("CTL-8", 1)];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+    });
+    expect(r.dispatched).toEqual(["CTL-8", "CTL-9"]);
+  });
+});
+
+describe("CTL-706 — per-project budgets integration", () => {
+  const mk = (id, p = 1) => ({
+    identifier: id,
+    priority: p,
+    createdAt: "x",
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("ADV burst respects cap=3; CTL reserve=1 is never starved", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 4 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      mk("ADV-1", 1),
+      mk("ADV-2", 1),
+      mk("ADV-3", 1),
+      mk("ADV-4", 1),
+      mk("ADV-5", 1),
+      mk("ADV-6", 1),
+      mk("CTL-1", 2),
+      mk("CTL-2", 2),
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      concurrency: {
+        maxParallel: 4,
+        perProject: { ADV: { maxParallel: 3, reserve: 2 }, CTL: { maxParallel: 3, reserve: 1 } },
+      },
+    });
+    const advCount = r.dispatched.filter((t) => t.startsWith("ADV")).length;
+    const ctlCount = r.dispatched.filter((t) => t.startsWith("CTL")).length;
+    expect(advCount).toBeLessThanOrEqual(3);
+    expect(ctlCount).toBeGreaterThanOrEqual(1);
+    expect(r.dispatched.length).toBeLessThanOrEqual(4);
+  });
+});
+
+describe("buildPerProjectGauge (CTL-706)", () => {
+  test("counts in-flight per project and surfaces cap/reserve", () => {
+    const g = buildPerProjectGauge(
+      new Set(["ADV-1", "ADV-2", "CTL-1"]),
+      { ADV: { maxParallel: 4, reserve: 2 }, CTL: { maxParallel: 3, reserve: 1 } },
+      1,
+    );
+    expect(g.freeSlots).toBe(1);
+    expect(g.perProject.ADV).toEqual({ inFlight: 2, maxParallel: 4, reserve: 2 });
+    expect(g.perProject.CTL).toEqual({ inFlight: 1, maxParallel: 3, reserve: 1 });
+  });
+  test("includes an in-flight project with no config entry", () => {
+    const g = buildPerProjectGauge(new Set(["ZZZ-1"]), { CTL: { reserve: 1 } }, 0);
+    expect(g.perProject.ZZZ).toEqual({ inFlight: 1 });
+    expect(g.perProject.CTL).toEqual({ inFlight: 0, reserve: 1 });
   });
 });
 

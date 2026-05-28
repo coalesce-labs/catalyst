@@ -965,7 +965,7 @@ concurrency is `{maxParallel:6, minParallel:1, maxParallelCeiling:10}`.
 The Layer-2 path is **host-wide** — `config.json`, no `projectKey` suffix.
 The execution-core daemon is one-per-machine and serves all enrolled
 projects, so this knob is a host knob, not a project knob. Per-project
-overrides are not modeled today.
+concurrency and reserve budgets are modeled via `perProject` (see below).
 
 Both files are also **hot-reloaded per scheduler tick** — the same per-tick
 re-read CTL-676 introduced for Layer-1 also applies to Layer-2, so editing
@@ -1001,6 +1001,45 @@ dispatcher reads `dispatchMode` at
 [`plugins/dev/scripts/orchestrate-dispatch-next:117`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/orchestrate-dispatch-next);
 per-phase resolution lives in
 [`phase-agent-dispatch:158-176`](https://github.com/coalesce-labs/catalyst/blob/main/plugins/dev/scripts/phase-agent-dispatch).
+
+#### Per-project budgets (CTL-706)
+
+The `perProject` map under `executionCore` assigns each enrolled project a
+**hard cap** and/or a **guaranteed reserve** so one high-volume project cannot
+starve another.
+
+```json
+{
+  "catalyst": {
+    "orchestration": {
+      "executionCore": {
+        "maxParallel": 8,
+        "perProject": {
+          "ADV": { "maxParallel": 6, "reserve": 2 },
+          "CTL": { "maxParallel": 4, "reserve": 1 }
+        }
+      }
+    }
+  }
+}
+```
+
+| Field                              | Type   | Description |
+| ---------------------------------- | ------ | ----------- |
+| `perProject.<KEY>.maxParallel`     | number | Hard per-project cap. The project may never dispatch more than this many concurrent workers, even when the global pool has free slots. |
+| `perProject.<KEY>.reserve`         | number | Minimum guaranteed slot count. When this project has undispatched ready work, other projects yield so it can always reach this floor. |
+
+**Three rules govern the interaction with the global ceiling:**
+
+1. **`perProject.maxParallel` is a hard cap.** A project never exceeds it regardless of global free slots.
+2. **`reserve` is a guaranteed floor.** When a project has waiting work and is below its reserve, the dispatcher withholds shared slots from other projects so the reserved project can claim them. A project filling its own reserve is never blocked by another project's reserve.
+3. **`sum(reserve)` must be ≤ `maxParallel` (global).** The scheduler clamps over-subscribed reserves at config load and logs a one-time warning; `sum(perProject.maxParallel)` may exceed the global ceiling (projects share overflow slots) but reserves must fit.
+
+**Layer-1 / Layer-2 merge:** the `perProject` map is deep-merged at the project-key level. Layer-2 can add a new project key or override individual sub-fields (`maxParallel` or `reserve`) for an existing key; other fields from Layer-1 are preserved. This lets a machine override just the ADV cap without touching the CTL reserve.
+
+**Hot-reload:** `perProject` is re-read and re-merged on every tick alongside the scalar concurrency fields — no daemon restart required.
+
+**Opt-in, additive.** With no `perProject` key in either config layer the scheduler behaves byte-for-byte as before CTL-706. No state migration required.
 
 ## Feedback Config
 
