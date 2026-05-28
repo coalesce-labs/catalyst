@@ -7,8 +7,19 @@
 
 set -uo pipefail
 
-# Single source of truth for the machine-local noise paths (mirrors the
-# operator pattern in memory/project_worktree_noise_before_pr.md).
+# WORKTREE_NOISE_PATHS — single source of truth for files that diverge
+# per-worktree (machine-local noise) and must be stashed before a rebase,
+# then popped after. Mirrors the operator pattern in
+# memory/project_worktree_noise_before_pr.md.
+#
+# CTL-678: the execution-core concurrency knobs themselves
+# (catalyst.orchestration.executionCore.{maxParallel,minParallel,maxParallelCeiling})
+# no longer drive drift here — their live source is now machine-canonical
+# Layer-2 (~/.config/catalyst/config.json, outside any worktree). The
+# committed Layer-1 block stays in .catalyst/config.json as the seed/fallback.
+# We keep .catalyst/config.json in this list because it still carries other
+# per-worktree state (e.g. .workflow-context.json regeneration); the .trunk/*
+# paths still emit machine-local files.
 # shellcheck disable=SC2034
 WORKTREE_NOISE_PATHS=(
   .catalyst/config.json
