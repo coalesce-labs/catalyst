@@ -69,6 +69,7 @@ import {
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
+  resolvePhaseSessionId as defaultResolveSession,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -1216,6 +1217,9 @@ export function schedulerTick(
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
     appendResumedAfterPreemptionEvent = defaultAppendResumedAfterPreemptionEvent,
+    // CTL-705 Phase 5: resume resolver — maps a dead bg_job_id to a claude
+    // --resume UUID. Null return → cold re-dispatch (no --resume-session).
+    resolveSession = defaultResolveSession,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -1549,6 +1553,106 @@ export function schedulerTick(
     }
   }
 
+  // (1.5) Resume-after-preemption sweep — re-dispatch parked ("preempted") tickets
+  // at their parkedFrom phase when a slot frees. Parked tickets are ranked by
+  // buildGlobalRanking and processed top-ranked first. Runs after advancement
+  // (so a slot freed by an advanced ticket is credited here) and before new-work
+  // pull (so a preempted ticket reclaims its slot ahead of brand-new work).
+  let resumedCount = 0;
+  {
+    const maxP2 = readMaxParallel(orchDir, concurrency);
+    const liveCount2 = liveBackgroundCount();
+    let resumeSlots = computeFreeSlots(maxP2, liveCount2);
+    if (resumeSlots > 0) {
+      // Collect parked tickets: in-flight tickets with status === PREEMPTED_STATUS.
+      const parkedDescriptors = [];
+      for (const ticket of listInFlightTickets(orchDir)) {
+        const sigs = readPhaseSignals(orchDir, ticket);
+        const parkedPhase = Object.entries(sigs).find(([, s]) => s === PREEMPTED_STATUS)?.[0];
+        if (!parkedPhase) continue;
+        const { priority, createdAt } = readWorkerPriority(orchDir, ticket);
+        parkedDescriptors.push({
+          identifier: ticket,
+          priority,
+          createdAt,
+          stage: STAGE_RANK[parkedPhase] ?? -1,
+          inFlight: true,
+          parkedFrom: parkedPhase,
+        });
+      }
+      const rankedParked = rankTickets(parkedDescriptors);
+
+      for (const pd of rankedParked) {
+        if (resumeSlots <= 0) break;
+        const parkedPhase = pd.parkedFrom;
+        const signalRaw = readPhaseSignalRaw(orchDir, pd.identifier, parkedPhase);
+        const bgJobId = signalRaw?.bg_job_id;
+
+        const resumeSession = resolveSession(bgJobId) ?? undefined;
+        safeEmit(
+          appendDispatchRequestedEvent,
+          { orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase, reason: "resume-after-preemption" },
+          { ticket: pd.identifier, phase: parkedPhase }
+        );
+
+        // Reset the signal to "stalled" so phase-agent-dispatch's idempotency
+        // guard does not block re-dispatch (mirrors defaultReviveDispatch).
+        const signalPath = join(orchDir, "workers", pd.identifier, `phase-${parkedPhase}.json`);
+        try {
+          const tmp = `${signalPath}.tmp.${process.pid}`;
+          writeFileSync(tmp, JSON.stringify({
+            ...(signalRaw ?? {}),
+            status: "stalled",
+            attentionReason: "resume-after-preemption",
+            updatedAt: new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+          }));
+          renameSync(tmp, signalPath);
+        } catch (err) {
+          log.warn({ ticket: pd.identifier, phase: parkedPhase, err: err.message }, "scheduler: resume signal reset failed");
+          continue;
+        }
+
+        const r = dispatchTicket(orchDir, pd.identifier, parkedPhase, { dispatch, resumeSession });
+        if (r.code === 0) {
+          const v = verifyDispatched(orchDir, pd.identifier, parkedPhase);
+          if (v.ok) {
+            clearDispatchCooldown(orchDir, pd.identifier, parkedPhase);
+            rankedAboveSince.delete(`${pd.identifier}:${pd.identifier}`); // clear any stale hysteresis
+            const sig2 = readPhaseSignalRaw(orchDir, pd.identifier, parkedPhase);
+            safeEmit(
+              appendDispatchLaunchedEvent,
+              { orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase, bg_job_id: sig2?.bg_job_id, worktree_path: sig2?.worktreePath },
+              { ticket: pd.identifier, phase: parkedPhase }
+            );
+            safeEmit(
+              appendResumedAfterPreemptionEvent,
+              { orchId: pd.identifier, ticket: pd.identifier, phase: parkedPhase, resumeSession: resumeSession ?? null },
+              { ticket: pd.identifier, phase: parkedPhase }
+            );
+            safeWrite(
+              () => writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase }),
+              { ticket: pd.identifier, phase: parkedPhase }
+            );
+            resumeSlots--;
+            resumedCount++;
+          } else {
+            recordDispatchFailure(orchDir, pd.identifier, parkedPhase, 0, now());
+            appendDispatchFailedEvent({
+              orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase,
+              code: 0, reason: `verify_failed:${v.reason}`,
+            });
+          }
+        } else {
+          recordDispatchFailure(orchDir, pd.identifier, parkedPhase, r.code, now());
+          appendDispatchFailedEvent({
+            orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase,
+            code: r.code, reason: "dispatch_nonzero_exit",
+          });
+        }
+      }
+    }
+  }
+
   // (2) New-work pull — fill free slots with top-ranked ready tickets. D5:
   // hydrate the live state of every out-of-set blocker first so a Ready ticket
   // blocked by a non-terminal out-of-set ticket is held back.
@@ -1565,7 +1669,9 @@ export function schedulerTick(
   const inFlightCount = liveBackgroundCount();
   // CTL-665: config-first ceiling — a committed executionCore.maxParallel
   // (threaded via `concurrency`) wins over state.json; clamped to the bounds.
-  const freeSlots = computeFreeSlots(readMaxParallel(orchDir, concurrency), inFlightCount);
+  // CTL-705: subtract resumed slots (sweep 1.5) so resume and new-work don't
+  // both fill the same slot when claude stop hasn't deregistered yet.
+  const freeSlots = Math.max(0, computeFreeSlots(readMaxParallel(orchDir, concurrency), inFlightCount) - resumedCount);
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
   // inFlightTickets was already computed above for the reclaim sweep.

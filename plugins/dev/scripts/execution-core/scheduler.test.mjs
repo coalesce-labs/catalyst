@@ -4106,13 +4106,14 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       join(dir, "phase-research.json"),
       JSON.stringify({ ticket: "CTL-Park", phase: "research", status: "preempted", parkedFrom: "research" })
     );
+    // Saturate the slot so the resume sweep (1.5) also sees 0 free slots and doesn't fire.
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch();
     const reclaimCalls = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch,
-      liveBackgroundCount: () => 0,
+      liveBackgroundCount: () => 1, // saturated → resume sweep skips
       reclaimDeadWork: (_od, sig) => {
         reclaimCalls.push({ ticket: sig.ticket, status: sig.status });
         return "noop"; // we're capturing the call but still returning noop
@@ -4135,15 +4136,136 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
       join(dir, "phase-research.json"),
       JSON.stringify({ ticket: "CTL-Adv", phase: "research", status: "preempted", parkedFrom: "research" })
     );
+    // Saturate so resume sweep (1.5) also sees 0 free slots.
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch();
     const r = schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch,
-      liveBackgroundCount: () => 0,
+      liveBackgroundCount: () => 1, // saturated → neither advancement nor resume fires
     });
-    // No plan dispatch for CTL-Adv
+    // No advancement dispatch for CTL-Adv (the early continue in the advancement loop)
     expect(r.advanced.find((a) => a.ticket === "CTL-Adv")).toBeUndefined();
+    // No dispatch call at all for CTL-Adv when saturated
     expect(dispatch.calls.find((c) => c.ticket === "CTL-Adv")).toBeUndefined();
+  });
+});
+
+// ─── CTL-705 Phase 5: resume-after-preemption re-dispatch ───
+describe("resume-after-preemption sweep (CTL-705 Phase 5)", () => {
+  function seedPreempted(ticket, phase, bgJobId, priority) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({
+        ticket, phase, status: "preempted", parkedFrom: phase, bg_job_id: bgJobId,
+        attentionReason: "preempted-by-priority",
+      })
+    );
+    writeWorkerPriority(orchDir, ticket, { priority, createdAt: "2026-05-01T00:00:00Z" });
+  }
+
+  function makeResumeStub() {
+    const calls = [];
+    const fn = (args) => { calls.push(args); return true; };
+    fn.calls = calls;
+    return fn;
+  }
+
+  function makeDispatchCapture() {
+    const calls = [];
+    const fn = (args) => {
+      calls.push(args);
+      const dir = join(orchDir, "workers", args.ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${args.phase}.json`),
+        JSON.stringify({ ticket: args.ticket, phase: args.phase, status: "dispatched", bg_job_id: "new-bg" })
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    fn.calls = calls;
+    return fn;
+  }
+
+  test("re-dispatches a preempted ticket at parkedFrom phase with resumeSession when slot frees", () => {
+    seedPreempted("CTL-2", "research", "bg-ctl2", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = makeDispatchCapture();
+    const appendResumed = makeResumeStub();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 1, // 1 free slot
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => "uuid-x", // injectable resolver
+      appendResumedAfterPreemptionEvent: appendResumed,
+      verifyDispatched: verifyOk,
+    });
+    // dispatch called at phase "research" with resumeSession
+    const call = dispatch.calls.find((c) => c.ticket === "CTL-2");
+    expect(call).toBeDefined();
+    expect(call.phase).toBe("research");
+    expect(call.resumeSession).toBe("uuid-x");
+    // signal reset to running
+    const sig = JSON.parse(readFileSync(
+      join(orchDir, "workers", "CTL-2", "phase-research.json"), "utf8"
+    ));
+    expect(sig.status).toBe("dispatched"); // written by makeDispatchCapture
+    // resumed event emitted
+    expect(appendResumed.calls).toHaveLength(1);
+    expect(appendResumed.calls[0].ticket).toBe("CTL-2");
+  });
+
+  test("no resume when no slot is free (liveBackgroundCount >= maxParallel)", () => {
+    seedPreempted("CTL-2", "research", "bg-ctl2", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 1, // saturated
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => "uuid-x",
+    });
+    expect(dispatch.calls.find((c) => c.ticket === "CTL-2")).toBeUndefined();
+  });
+
+  test("resolveSession returns null → re-dispatches without resumeSession (cold re-dispatch)", () => {
+    seedPreempted("CTL-2", "research", "bg-ctl2", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = makeDispatchCapture();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => null, // no resumable session
+      appendResumedAfterPreemptionEvent: makeResumeStub(),
+      verifyDispatched: verifyOk,
+    });
+    const call = dispatch.calls.find((c) => c.ticket === "CTL-2");
+    expect(call).toBeDefined();
+    expect(call.resumeSession).toBeUndefined(); // no resumeSession when null
+  });
+
+  test("new-work pull still excludes parked ticket (listStartedTickets covers it)", () => {
+    // preempted worker has a worker dir → listStartedTickets includes it → selectDispatchable excludes it
+    seedPreempted("CTL-2", "research", "bg-ctl2", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = makeDispatchCapture();
+    const r = schedulerTick(orchDir, {
+      // CTL-2 is also eligible — but it's in listStartedTickets, so it should not be pulled as new work
+      readEligible: () => [{ identifier: "CTL-2", priority: 2, createdAt: "2026-05-01T00:00:00Z" }],
+      dispatch,
+      liveBackgroundCount: () => 0, // slots free
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => null, // no resume
+      verifyDispatched: verifyOk,
+    });
+    // The resume sweep may dispatch CTL-2 at its parkedFrom phase (correct behavior).
+    // But the new-work pull (sweep 2) must NOT include CTL-2 in r.dispatched (that's for fresh starts).
+    expect(r.dispatched).not.toContain("CTL-2");
   });
 });
