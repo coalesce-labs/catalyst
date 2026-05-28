@@ -967,10 +967,12 @@ The execution-core daemon is one-per-machine and serves all enrolled
 projects, so this knob is a host knob, not a project knob. Per-project
 overrides are not modeled today.
 
-Daemon reads happen **once at boot**; hot-reload of this file is tracked
-separately in [CTL-676](https://linear.app/coalesce-labs/issue/CTL-676).
-Operators see the resolved object plus a `layer2Present` flag in the
-daemon's startup log (`execution-core: resolved boot concurrency`).
+Both files are also **hot-reloaded per scheduler tick** — the same per-tick
+re-read CTL-676 introduced for Layer-1 also applies to Layer-2, so editing
+either file takes effect on the next tick without a daemon restart. Operators
+see the resolved boot object plus a `layer2Present` flag once in the daemon's
+startup log (`execution-core: resolved boot concurrency`); the per-tick
+behavior is identical to a fresh boot against the current on-disk state.
 
 The env var `CATALYST_LAYER2_CONFIG_FILE` overrides the Layer-2 path for
 tests; absent in production.
@@ -981,15 +983,17 @@ The `executionCore` block carries **only** these three concurrency keys in the
 template; `eligibleQuery` is intentionally central (registry.json, CTL-582 D4).
 :::
 
-**Hot-reload (CTL-676).** `maxParallel`, `minParallel`, and `maxParallelCeiling`
-are re-read by the execution-core scheduler on every tick (~2s under event-log
-activity via the existing `fs.watch` + 2s debounce, ~30s otherwise via the
-periodic backstop). Edits take effect on the next tick without a daemon
-restart. Lowering `maxParallel` mid-run gates new dispatch only — in-flight
-workers continue (the dispatch gate is the only consumer of the resolved
-ceiling). Other `executionCore` fields (`eligibleQuery` lives in the central
-registry; `dispatchMode` and structural daemon fields elsewhere in the config)
-remain boot-time only.
+**Hot-reload (CTL-676 + CTL-678).** `maxParallel`, `minParallel`, and
+`maxParallelCeiling` are re-read by the execution-core scheduler on every tick
+(~2s under event-log activity via the existing `fs.watch` + 2s debounce, ~30s
+otherwise via the periodic backstop) from **both** the committed Layer-1
+config and the machine-canonical Layer-2 file. The Layer-2 per-field merge
+runs on every tick, so editing either file takes effect on the next tick
+without a daemon restart. Lowering `maxParallel` mid-run gates new dispatch
+only — in-flight workers continue (the dispatch gate is the only consumer of
+the resolved ceiling). Other `executionCore` fields (`eligibleQuery` lives in
+the central registry; `dispatchMode` and structural daemon fields elsewhere
+in the config) remain boot-time only.
 
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag >
 `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The
