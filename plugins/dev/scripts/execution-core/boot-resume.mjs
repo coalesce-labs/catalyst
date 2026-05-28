@@ -1,4 +1,4 @@
-// boot-resume.mjs — execution-core daemon boot-resume (CTL-654).
+// boot-resume.mjs — execution-core daemon boot-resume (CTL-654, CTL-690).
 //
 // On a real reboot every prior `claude --bg` phase worker is provably dead at
 // once. The per-tick reclaim sweep (recovery.mjs::reclaimDeadWorkIfPossible) is
@@ -9,11 +9,22 @@
 // This module is a dedicated, synchronous boot-reconciliation pass that runs
 // once at daemon boot (between recover() and the monitor). For each in-flight
 // ticket whose persisted worktreePath has no live background session it
-// re-dispatches a fresh worker at the ticket's current phase via
+// re-dispatches a worker at the ticket's current phase via
 // defaultReviveDispatch — which bypasses the revive budget by construction (the
 // budget lives in reclaimDeadWorkIfPossible, not in the dispatch primitive) and
 // keeps the CTL-615 worktree-path cross-check. The fan-out is bounded by
 // maxParallel so a reboot never spawns a worker storm.
+//
+// CTL-690 — session continuation. Each candidate's bg_job_id is mapped (via
+// the same resolvePhaseSessionId helper recovery.mjs:1265 uses on the per-tick
+// reclaim path) to a `claude --resume`-compatible UUID. When that resolves, the
+// dispatcher relaunches `claude --bg --resume <uuid>` so the worker continues
+// where it left off. When it does NOT resolve (legacy signal, transcript
+// missing, etc.) the candidate falls through to today's fresh-dispatch path —
+// preserving the unchanged-from-CTL-654 fallback. Resume-launch failures are
+// reclassified by phase-agent-dispatch (CTL-658 launched/alive/failed) which
+// itself falls back to a fresh start inside the same dispatcher invocation, so
+// boot-resume never has to retry.
 //
 // Phase 1 (this section) is pure selection logic, dependency-free beyond the
 // scheduler/signal-reader read helpers, and exhaustively unit-tested. The
@@ -22,7 +33,11 @@
 import { readWorkerSignals, TERMINAL, byActivePhase } from "./signal-reader.mjs";
 import { listInFlightTickets, readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
 import { log } from "./config.mjs";
-import { defaultReviveDispatch, defaultAppendBootResumeEvent } from "./recovery.mjs";
+import {
+  defaultReviveDispatch,
+  defaultAppendBootResumeEvent,
+  resolvePhaseSessionId,
+} from "./recovery.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 // liveAgents() is synchronous (execFileSync `claude agents --json`). A static
 // import is safe here: cli/sessions.mjs imports only signal-reader/reap-intent/
@@ -60,8 +75,9 @@ export function activePhaseForTicket(signals) {
 
 // selectBootResumeCandidates — the set of in-flight tickets that need a fresh
 // worker, bounded by free slots. Pure over the filesystem + the supplied agents
-// list. Returns `{ ticket, phase, worktreePath }[]`, deterministically sorted by
-// ticket id and sliced to the free-slot cap so a reboot never over-dispatches.
+// list. Returns `{ ticket, phase, worktreePath, bgJobId }[]`, deterministically
+// sorted by ticket id and sliced to the free-slot cap so a reboot never
+// over-dispatches.
 //
 //   1. inFlight  = the tickets currently occupying a worker slot.
 //   2. signals   = one active signal per ticket (readWorkerSignals already
@@ -73,6 +89,12 @@ export function activePhaseForTicket(signals) {
 //                  so the boot pass and the surviving workers together stay under
 //                  the cap.
 //   5. return the no-live-worker candidates sorted by ticket id, sliced to free.
+//
+// CTL-690: bgJobId is captured from the active signal so reconcileBootResume
+// can resolve a `claude --resume`-compatible UUID and continue the dead
+// worker's session instead of starting fresh. May be null on legacy signals or
+// when the worker died before any bg job was recorded — the reconcile pass
+// treats null as "fresh dispatch", preserving today's behavior for those rows.
 export function selectBootResumeCandidates({
   orchDir,
   agents,
@@ -109,7 +131,17 @@ export function selectBootResumeCandidates({
     if (hasLiveBgWorker(agents, active.worktreePath)) {
       liveCount++;
     } else {
-      needResume.push({ ticket, phase: active.phase, worktreePath: active.worktreePath });
+      // CTL-690: capture bg_job_id (signal-reader exposes it as liveness.value
+      // when liveness.kind === 'bg'). The reconcile pass resolves it to a
+      // resume-compatible UUID; legacy/missing values stay null and the
+      // candidate falls back to fresh dispatch downstream.
+      const bgJobId = active.liveness?.kind === "bg" ? active.liveness.value : null;
+      needResume.push({
+        ticket,
+        phase: active.phase,
+        worktreePath: active.worktreePath,
+        bgJobId,
+      });
     }
   }
 
@@ -144,6 +176,12 @@ export function reconcileBootResume({
   dispatch = defaultDispatch, // inner seam handed to reviveDispatch
   reviveDispatch = defaultReviveDispatch,
   appendEvent = defaultAppendBootResumeEvent,
+  // CTL-690: session resolver — same helper recovery.mjs:1265 uses on the
+  // per-tick reclaim path so boot-resume and reclaim share resume semantics.
+  // Injectable so tests can drive both the resumable + unresumable branches
+  // without touching real ~/.claude/jobs state. Returns a UUID string when the
+  // dead worker's transcript is on disk, or null when not resumable.
+  resolveSession = resolvePhaseSessionId,
   orchId = undefined, // threaded into the audit envelope
   concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
 } = {}) {
@@ -155,29 +193,49 @@ export function reconcileBootResume({
   const candidates = selectBootResumeCandidates({ orchDir, agents: liveAgentList, concurrency });
 
   let dispatched = 0;
+  let resumed = 0;
   let failed = 0;
-  for (const { ticket, phase } of candidates) {
+  for (const { ticket, phase, bgJobId } of candidates) {
+    // CTL-690: try to map the dead worker's bg_job_id → resume UUID. Null
+    // result (no bg id, no state.json, no/!.jsonl transcript) falls through
+    // to the today-default fresh-dispatch path. The downstream stderr
+    // classifier in phase-agent-dispatch (CTL-658 launched/alive/failed)
+    // handles a resume that's recorded on disk but fails to launch.
+    let resumeSession = null;
+    if (bgJobId) {
+      try {
+        resumeSession = resolveSession(bgJobId);
+      } catch (err) {
+        log.warn(
+          { ticket, phase, bgJobId, err: err?.message ?? String(err) },
+          "boot-resume: resolveSession threw — falling back to fresh dispatch"
+        );
+        resumeSession = null;
+      }
+    }
+
     let res;
     try {
-      res = reviveDispatch({ orchDir, ticket, phase }, { dispatch });
+      res = reviveDispatch({ orchDir, ticket, phase, resumeSession }, { dispatch });
     } catch (err) {
       res = { code: 1, stderr: err?.message ?? String(err) };
     }
     if (res?.code === 0) {
       dispatched++;
+      if (resumeSession) resumed++;
       appendEvent({ phase, ticket, orchId });
     } else {
       failed++;
       log.warn(
-        { ticket, phase, code: res?.code, stderr: res?.stderr },
+        { ticket, phase, code: res?.code, stderr: res?.stderr, resumeSession },
         "boot-resume: dispatch failed (continuing)"
       );
     }
   }
 
   log.info(
-    { dispatched, failed, candidates: candidates.length },
+    { dispatched, resumed, failed, candidates: candidates.length },
     "boot-resume: cold-start reconciliation complete"
   );
-  return { dispatched, failed, candidates: candidates.length };
+  return { dispatched, resumed, failed, candidates: candidates.length };
 }

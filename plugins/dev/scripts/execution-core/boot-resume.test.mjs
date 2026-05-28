@@ -117,7 +117,31 @@ describe("selectBootResumeCandidates", () => {
     writeSignal(orchDir, "CTL-B", "verify", { worktreePath: "/wt/CTL-B" });
     const agents = [{ kind: "background", cwd: "/wt/CTL-A" }];
     const out = selectBootResumeCandidates({ orchDir, agents, maxParallel: 3 });
-    expect(out).toEqual([{ ticket: "CTL-B", phase: "verify", worktreePath: "/wt/CTL-B" }]);
+    // CTL-690: bgJobId is now also captured on each candidate so reconcile
+    // can resolve a resume UUID. writeSignal's default bg_job_id is 'deadbeef'.
+    expect(out).toEqual([
+      { ticket: "CTL-B", phase: "verify", worktreePath: "/wt/CTL-B", bgJobId: "deadbeef" },
+    ]);
+  });
+
+  // CTL-690: every candidate exposes bgJobId from the active signal's liveness
+  // field so reconcileBootResume can map it to a `--resume`-compatible UUID.
+  // Legacy signals without a bg_job_id surface bgJobId === null and fall back
+  // to fresh dispatch downstream.
+  test("captures bgJobId per candidate; null when the signal lacks bg_job_id (CTL-690)", () => {
+    writeSignal(orchDir, "CTL-1", "implement", {
+      worktreePath: "/wt/CTL-1",
+      bg_job_id: "abc12345",
+    });
+    writeSignal(orchDir, "CTL-2", "implement", {
+      worktreePath: "/wt/CTL-2",
+      bg_job_id: null,
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => ({ ticket: c.ticket, bgJobId: c.bgJobId }))).toEqual([
+      { ticket: "CTL-1", bgJobId: "abc12345" },
+      { ticket: "CTL-2", bgJobId: null },
+    ]);
   });
 
   test("excludes an in-flight ticket whose active signal lacks a worktreePath, recording a warn", () => {
@@ -344,6 +368,167 @@ describe("reconcileBootResume", () => {
     });
     expect(res.dispatched).toBe(0);
     expect(res.failed).toBe(1);
+  });
+
+  // ── CTL-690: --resume-session continuation ─────────────────────────────
+  //
+  // The reconcile pass must thread the dead worker's bg_job_id through
+  // resolveSession() and forward the resulting UUID to reviveDispatch as
+  // `resumeSession`. The downstream phase-agent-dispatch (CTL-658) translates
+  // that into `claude --bg --resume <uuid>`. When resolveSession returns null
+  // (no transcript on disk, legacy signal, etc.) the candidate falls back to
+  // today's fresh-dispatch behavior — preserving the unchanged-from-CTL-654
+  // fallback path.
+  test("forwards resumeSession to reviveDispatch when resolveSession returns a UUID (CTL-690)", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-1", "implement", {
+      worktreePath: "/wt/CTL-1",
+      bg_job_id: "abc12345",
+    });
+    const calls = [];
+    const reviveDispatch = (args, _opts) => {
+      calls.push(args);
+      return { code: 0 };
+    };
+    const resolveSession = (bgJobId) => (bgJobId === "abc12345" ? "uuid-1111" : null);
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch,
+      resolveSession,
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      orchDir,
+      ticket: "CTL-1",
+      phase: "implement",
+      resumeSession: "uuid-1111",
+    });
+  });
+
+  test("falls back to fresh dispatch (resumeSession=null) when resolveSession returns null (CTL-690)", () => {
+    writeMaxParallel(orchDir, 3);
+    // bg_job_id is recorded but the transcript is gone → resolveSession → null.
+    writeSignal(orchDir, "CTL-1", "implement", {
+      worktreePath: "/wt/CTL-1",
+      bg_job_id: "nope9999",
+    });
+    const calls = [];
+    const reviveDispatch = (args, _opts) => {
+      calls.push(args);
+      return { code: 0 };
+    };
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch,
+      resolveSession: () => null,
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(0);
+    expect(calls[0]).toMatchObject({
+      orchDir,
+      ticket: "CTL-1",
+      phase: "implement",
+      resumeSession: null,
+    });
+  });
+
+  test("legacy signal with no bg_job_id skips resolveSession and falls back to fresh dispatch (CTL-690)", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-1", "implement", {
+      worktreePath: "/wt/CTL-1",
+      bg_job_id: null,
+    });
+    const resolveCalls = [];
+    const reviveCalls = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        reviveCalls.push(a);
+        return { code: 0 };
+      },
+      resolveSession: (id) => {
+        resolveCalls.push(id);
+        return "should-not-resolve";
+      },
+      appendEvent: () => {},
+    });
+    expect(resolveCalls).toEqual([]); // never called for null bgJobId
+    expect(reviveCalls[0]).toMatchObject({ resumeSession: null });
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(0);
+  });
+
+  test("a throwing resolveSession is contained and treated as unresumable (CTL-690)", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-1", "implement", {
+      worktreePath: "/wt/CTL-1",
+      bg_job_id: "boom",
+    });
+    const reviveCalls = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        reviveCalls.push(a);
+        return { code: 0 };
+      },
+      resolveSession: () => {
+        throw new Error("transcript read failed");
+      },
+      appendEvent: () => {},
+    });
+    // Dispatch still happens — the resume optimization is best-effort.
+    expect(res.dispatched).toBe(1);
+    expect(res.resumed).toBe(0);
+    expect(reviveCalls[0]).toMatchObject({ resumeSession: null });
+  });
+
+  test("mixed batch: some resume, some fresh, all dispatch (CTL-690)", () => {
+    writeMaxParallel(orchDir, 3);
+    writeSignal(orchDir, "CTL-A", "implement", {
+      worktreePath: "/wt/CTL-A",
+      bg_job_id: "aaa",
+    });
+    writeSignal(orchDir, "CTL-B", "implement", {
+      worktreePath: "/wt/CTL-B",
+      bg_job_id: "bbb",
+    });
+    writeSignal(orchDir, "CTL-C", "implement", {
+      worktreePath: "/wt/CTL-C",
+      bg_job_id: null,
+    });
+    const calls = [];
+    const resolveSession = (id) => (id === "aaa" ? "uuid-A" : null);
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        calls.push(a);
+        return { code: 0 };
+      },
+      resolveSession,
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(3);
+    expect(res.resumed).toBe(1);
+    const byTicket = Object.fromEntries(calls.map((c) => [c.ticket, c.resumeSession]));
+    expect(byTicket).toEqual({
+      "CTL-A": "uuid-A",
+      "CTL-B": null,
+      "CTL-C": null,
+    });
   });
 });
 
