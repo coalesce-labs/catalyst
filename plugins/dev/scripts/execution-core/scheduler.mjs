@@ -83,6 +83,7 @@ import * as linearWrite from "./linear-write.mjs";
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
 import { labelOnce } from "./label-guard.mjs";
+import { countReapOutcomes } from "./reaper-metrics.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
@@ -589,6 +590,29 @@ export function resolveReapPredecessor(signals, next) {
   }
   const pred = predecessorPhaseOf(sig, next);
   return pred ? { phase: pred, reason: "ctl-657-scheduler-advance" } : null;
+}
+
+// emitTerminalWorkerReapOnce — CTL-695: nominate a terminal worker for reaping
+// once per worker/phase. Covers the gaps the happy-path emitPredecessorReap
+// (advance-success only) never reaches: self-exited failed/stalled workers and
+// the final monitor-deploy worker. Once-marker prevents per-tick re-emission.
+// The marker is written BEFORE the emit (optimistic) so a synchronous second
+// tick sees it and skips — emitReapIntent uses appendFileSync (no await), so
+// the file is already written before this function returns.
+function emitTerminalWorkerReapOnce(orchDir, ticket, phase) {
+  const marker = join(orchDir, "workers", ticket, `.terminal-reap-${phase}.applied`);
+  if (existsSync(marker)) return;
+  const raw = readPhaseSignalRaw(orchDir, ticket, phase);
+  const bgJobId = raw?.bg_job_id;
+  if (!bgJobId) return; // no bg session to stop (unit-test signal / new-work entry)
+  writeFileSync(marker, ""); // optimistic pre-write: prevents re-spam even if emit fails
+  emitReapIntent("phase.terminal.reap-requested", {
+    ticket,
+    phase,
+    bgJobId,
+    worktreePath: raw?.worktreePath,
+    reason: "ctl-695-terminal-worker",
+  }).catch(() => {}); // best-effort; marker already guards against re-emission
 }
 
 // emitPredecessorReap — CTL-657 Bug 2: stop the predecessor worker now that its
@@ -1620,6 +1644,9 @@ export function schedulerTick(
           { ticket, phase: next, verifyReason: v.reason },
           "scheduler: dispatched signal verification failed"
         );
+        // CTL-695: reap the just-finished predecessor even though its successor
+        // did not come up — the failed dispatch leaves the predecessor alive.
+        emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
       }
     } else {
       const cd2 = recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
@@ -1636,6 +1663,9 @@ export function schedulerTick(
       });
       maybeEscalateDispatchFailures(orchDir, cd2, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
       log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
+      // CTL-695: reap the just-finished predecessor even though its successor
+      // did not come up — the failed dispatch leaves the predecessor alive.
+      emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
     }
   }
 
@@ -1746,6 +1776,9 @@ export function schedulerTick(
   // the daemon's pino-only observability convention (schedulerTick's return
   // object is discarded by runTick, so a metric must be logged, not returned).
   if (cache) log.info(cache.stats(), "scheduler: cache stats");
+  // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
+  // gauge (same log-line-only convention as cache.stats / per-project slots).
+  log.info(countReapOutcomes(), "scheduler: reap stats");
   const ready = computeReadyTickets(eligible, { blockerStates });
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
@@ -1883,6 +1916,19 @@ export function schedulerTick(
     }
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
+    }
+    // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
+    // happy-path emitPredecessorReap (advance-success only) never reaches:
+    // self-exited failed/stalled workers and the final monitor-deploy worker.
+    // Intermediate `done` phases are excluded — those advance, and the existing
+    // emitPredecessorReap (section 1, advance-success) owns their reap. The
+    // reaper's _inflight 60s dedup + the per-phase marker make any overlap benign.
+    for (const [phase, status] of Object.entries(signals)) {
+      const isFinalTerminal =
+        phase === TERMINAL_PHASE && (status === "done" || status === "skipped");
+      if (status === "failed" || status === "stalled" || isFinalTerminal) {
+        emitTerminalWorkerReapOnce(orchDir, ticket, phase);
+      }
     }
   }
 

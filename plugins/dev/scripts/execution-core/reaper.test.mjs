@@ -143,6 +143,24 @@ describe("Reaper._handleBgReap", () => {
     expect(executor).toHaveBeenCalledWith("abc12345");
   });
 
+  it("routes phase.terminal.reap-requested to _handleBgReap (busy-OK, CTL-695)", async () => {
+    // CTL-695: terminal-worker reap — must route to the single-target (busy-OK)
+    // path, not the periodic orphan sweep or an unknown-handler warn.
+    const executor = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: executor,
+      agents: agentsFixture([
+        { sessionId: "abcd1234-aaaa-bbbb-cccc-dddddddddddd", status: "busy", kind: "background" },
+      ]),
+      emit: (evt, f) => { emitted.push({ evt, f }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.terminal.reap-requested", bg_job_id: "abcd1234", ticket: "CTL-695", phase: "monitor-deploy" });
+    expect(executor).toHaveBeenCalled(); // reaped even though status==="busy"
+    expect(emitted.find((e) => e.evt === "phase.terminal.reap-complete")).toBeTruthy();
+  });
+
   it("reaps an unknown-kind target (avoids regressing the leak fix if claude omits .kind)", async () => {
     const executor = mock(() => Promise.resolve({ ok: true }));
     const r = new Reaper({
