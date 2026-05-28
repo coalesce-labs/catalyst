@@ -14,6 +14,7 @@ import {
   reconcileProject,
   reconcileAll,
   handleStateChangedEvent,
+  sweepMissingTriage,
   startMonitor,
   stopMonitor,
   seedTailerFromCursor,
@@ -740,5 +741,133 @@ describe("handleStateChangedEvent — cache write-through (CTL-634)", () => {
       { cache }
     );
     expect(cache.get("CTL-99")).toBeUndefined();
+  });
+});
+
+// --- CTL-711: sweepMissingTriage — reconcile-path triage dispatch ---------------
+
+describe("sweepMissingTriage (CTL-711)", () => {
+  test("dispatches triage for an eligible ticket with no triage.json", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // real dir, NO triage.json
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec }); // populate the eligible set first
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-9",
+      phase: "triage",
+    });
+  });
+
+  test("does NOT dispatch for an already-triaged eligible ticket", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    writeTriageArtifact(realOrchDir, "ENG-9"); // already triaged
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({ orchDir: realOrchDir, dispatch });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("dispatches only the un-triaged subset across a mixed eligible set", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    writeTriageArtifact(realOrchDir, "ENG-1"); // triaged
+    // ENG-2 left un-triaged
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    const dispatched = dispatch.mock.calls.map((c) => c[0].ticket);
+    expect(dispatched).toEqual(["ENG-2"]);
+  });
+
+  test("no orchDir wired → no dispatch, never throws", () => {
+    enroll("ENG", { status: "Ready" });
+    const exec = execReturning({ ENG: [node("ENG-9")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    expect(() => sweepMissingTriage({ dispatch })).not.toThrow(); // no orchDir
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("a dispatch failure is logged and never throws (one bad ticket does not abort the sweep)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 9, stderr: "boom" })); // non-zero
+    expect(() =>
+      sweepMissingTriage({
+        orchDir: realOrchDir,
+        dispatch,
+        applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+        appendEvent: () => {},
+      })
+    ).not.toThrow();
+    // both tickets attempted despite the first failing
+    expect(dispatch.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-1", "ENG-2"]);
+  });
+
+  test("startMonitor dispatches triage for a pre-existing eligible ticket lacking triage.json (CTL-711)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // real, NO triage.json
+    const exec = execReturning({ ENG: [node("ENG-1")] });
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec,
+      orchDir: realOrchDir,
+      dispatch,
+      reconcileIntervalMs: 60_000,
+      resumeFromCursor: false, // avoid cursor/tailer side effects in the unit test
+    });
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-1",
+      phase: "triage",
+    });
+  });
+
+  test("the periodic reconcile timer also runs the triage sweep (CTL-711)", async () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // NO triage.json
+    // First poll returns empty (nothing eligible yet at boot), later polls return ENG-1.
+    let polls = 0;
+    const exec = (_cmd, args) => {
+      polls += 1;
+      const team = args[args.indexOf("--team") + 1];
+      const nodes = polls === 1 ? [] : team === "ENG" ? [node("ENG-1")] : [];
+      return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
+    };
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec,
+      orchDir: realOrchDir,
+      dispatch,
+      reconcileIntervalMs: 30, // fast periodic tick for the test
+      resumeFromCursor: false,
+    });
+    // Startup sweep saw an empty eligible set → no dispatch yet.
+    expect(dispatch).not.toHaveBeenCalled();
+    await sleep(80); // let the periodic reconcile + sweep fire
+    expect(dispatch).toHaveBeenCalledWith({
+      orchDir: realOrchDir,
+      ticket: "ENG-1",
+      phase: "triage",
+    });
+    stopMonitor();
   });
 });

@@ -27,7 +27,7 @@ import { dirname, basename, join } from "node:path";
 import { getEventLogPath, RECONCILE_INTERVAL_MS, EVENT_DEBOUNCE_MS, log } from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
-import { setProjectEligible, removeTicket, dropProject } from "./eligible-set.mjs";
+import { setProjectEligible, removeTicket, dropProject, getEligibleSet } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
@@ -297,6 +297,45 @@ function hasTriageArtifact(orchDir, ticket) {
   return existsSync(join(orchDir, "workers", ticket, "triage.json"));
 }
 
+// sweepMissingTriage — the reconcile-path analogue of the CTL-625 webhook guard
+// (handleStateChangedEvent →Ready branch). After reconcileAll has (re)populated
+// the eligible sets, dispatch triage for every eligible ticket that lacks a
+// triage.json. Tickets already in the Ready state when the daemon boots — or
+// that appear in Linear between webhooks — never generate a →Ready event
+// (CTL-681 removed the per-event scoping poll), so without this sweep their
+// research dispatch dead-locks on phase-agent-dispatch's prior_artifact_missing
+// gate, looping prior_artifact_missing → 60s cooldown → retry forever (CTL-711:
+// CTL-704/705/706/710 each needed a manual triage dispatch after a restart).
+//
+// Idempotent by construction: hasTriageArtifact skips already-triaged tickets
+// (no duplicate dispatch on normal webhook-driven tickets), and an in-flight
+// triage's signal file is no-op'd downstream by phase-agent-dispatch. A missing
+// orchDir (standalone monitor) is a no-op. A non-zero dispatch for one ticket is
+// logged by dispatchTriage and never aborts the sweep for the rest.
+export function sweepMissingTriage({
+  orchDir,
+  dispatch,
+  applyTriageStatus = defaultApplyTriageStatus,
+  appendEvent = defaultAppendEvent,
+} = {}) {
+  if (!orchDir) {
+    log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
+    return;
+  }
+  for (const p of listProjects()) {
+    for (const t of getEligibleSet(p.team)) {
+      if (hasTriageArtifact(orchDir, t.identifier)) continue;
+      dispatchTriage(t.identifier, {
+        dispatch,
+        orchDir,
+        applyTriageStatus,
+        appendEvent,
+        orchId: t.identifier,
+      });
+    }
+  }
+}
+
 // CTL-681 removed scheduleDirtyReconcile + its dirtyTimers Map. The
 // per-event scoping reconcile it implemented is the load that exhausted the
 // Linear 2500/hr quota: the parser dropped project/labels/priority, so every
@@ -445,6 +484,7 @@ export function startMonitor({
   // populates the same instance the scheduler reads.
   tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache };
   reconcileAll({ exec });
+  sweepMissingTriage({ orchDir, dispatch }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
     readNewEvents(); // drain the cursor→EOF downtime gap immediately
@@ -452,7 +492,10 @@ export function startMonitor({
     seedTailerAtEof();
   }
   startTailing();
-  reconcileTimer = setInterval(() => reconcileAll({ exec }), reconcileIntervalMs);
+  reconcileTimer = setInterval(() => {
+    reconcileAll({ exec });
+    sweepMissingTriage({ orchDir, dispatch }); // CTL-711: catch tickets that appeared between webhooks
+  }, reconcileIntervalMs);
 }
 
 // stopMonitor — clear the reconcile interval and the file watcher. Idempotent
