@@ -2674,7 +2674,10 @@ describe("readBootSince — CTL-655 boot-time window reader", () => {
 
 // CTL-658 — JS port of orchestrate-revive's resolve_phase_session_id. Resolves a
 // `claude --resume`-compatible session UUID from a dead worker's bg_job_id by
-// reading <jobsDir>/<bg_job_id>/state.json → .linkScanPath → basename minus .jsonl.
+// reading <jobsDir>/<bg_job_id>/state.json to extract a claude --resume UUID.
+// Two schemas supported:
+//   New (Claude Code ≥2.x): state.json contains .resumeSessionId directly.
+//   Legacy (Claude Code <2.x): state.json contains .linkScanPath; basename minus .jsonl = UUID.
 // Mirrors the bash unit tests at __tests__/orchestrate-revive.test.sh:578-617.
 describe("resolvePhaseSessionId", () => {
   let jobsDir;
@@ -2685,13 +2688,38 @@ describe("resolvePhaseSessionId", () => {
     rmSync(jobsDir, { recursive: true, force: true });
   });
 
-  test("happy path — linkScanPath .jsonl returns the UUID basename", () => {
+  test("new schema — resumeSessionId returns UUID directly", () => {
     mkdirSync(join(jobsDir, "cafe1234"), { recursive: true });
     writeFileSync(
       join(jobsDir, "cafe1234", "state.json"),
+      JSON.stringify({ resumeSessionId: "cc820da8-5e10-420b-bb54-dab3b61a3f8b" }),
+    );
+    expect(resolvePhaseSessionId("cafe1234", { jobsDir })).toBe(
+      "cc820da8-5e10-420b-bb54-dab3b61a3f8b",
+    );
+  });
+
+  test("new schema — resumeSessionId takes priority over linkScanPath", () => {
+    mkdirSync(join(jobsDir, "dualschema"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "dualschema", "state.json"),
+      JSON.stringify({
+        resumeSessionId: "cc820da8-5e10-420b-bb54-dab3b61a3f8b",
+        linkScanPath: "/p/9f8e-uuid.jsonl",
+      }),
+    );
+    expect(resolvePhaseSessionId("dualschema", { jobsDir })).toBe(
+      "cc820da8-5e10-420b-bb54-dab3b61a3f8b",
+    );
+  });
+
+  test("legacy schema — linkScanPath .jsonl returns the UUID basename", () => {
+    mkdirSync(join(jobsDir, "legacy1234"), { recursive: true });
+    writeFileSync(
+      join(jobsDir, "legacy1234", "state.json"),
       JSON.stringify({ linkScanPath: "/p/9f8e-uuid.jsonl" }),
     );
-    expect(resolvePhaseSessionId("cafe1234", { jobsDir })).toBe("9f8e-uuid");
+    expect(resolvePhaseSessionId("legacy1234", { jobsDir })).toBe("9f8e-uuid");
   });
 
   test("missing state.json returns null", () => {
@@ -2713,9 +2741,9 @@ describe("resolvePhaseSessionId", () => {
     expect(resolvePhaseSessionId("", { jobsDir })).toBeNull();
   });
 
-  test("state.json without linkScanPath returns null", () => {
+  test("state.json with neither resumeSessionId nor linkScanPath returns null", () => {
     mkdirSync(join(jobsDir, "nolink"), { recursive: true });
-    writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({}));
+    writeFileSync(join(jobsDir, "nolink", "state.json"), JSON.stringify({ state: "stopped" }));
     expect(resolvePhaseSessionId("nolink", { jobsDir })).toBeNull();
   });
 });

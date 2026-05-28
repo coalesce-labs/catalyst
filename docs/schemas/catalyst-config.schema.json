@@ -1,0 +1,339 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://catalyst.coalesce-labs.com/schemas/catalyst-config.schema.json",
+  "title": "Catalyst Project Config",
+  "description": "Schema for .catalyst/config.json — the Layer-1 project config committed to the repository. Contains team-wide settings safe to share. Secrets and host-specific overrides belong in the Layer-2 machine config (~/.config/catalyst/config.json).",
+  "type": "object",
+  "required": [],
+  "additionalProperties": false,
+  "properties": {
+    "catalyst": {
+      "type": "object",
+      "description": "Root namespace for all Catalyst configuration.",
+      "additionalProperties": false,
+      "required": [],
+      "properties": {
+        "projectKey": {
+          "type": "string",
+          "description": "Short identifier for this project, used as a namespace for machine-config lookup (~/.config/catalyst/config-{projectKey}.json) and as a display label.",
+          "examples": ["CTL", "MY-PROJECT"]
+        },
+        "project": {
+          "type": "object",
+          "description": "Project-level metadata.",
+          "additionalProperties": false,
+          "properties": {
+            "ticketPrefix": {
+              "type": "string",
+              "description": "Linear ticket prefix used when constructing ticket IDs (e.g. 'CTL' produces 'CTL-123').",
+              "examples": ["CTL", "ADV"]
+            }
+          }
+        },
+        "linear": {
+          "type": "object",
+          "description": "Linear integration settings.",
+          "additionalProperties": false,
+          "properties": {
+            "teamKey": {
+              "type": "string",
+              "description": "Linear team key string (e.g. 'CTL'). Required for Linear integration to function.",
+              "examples": ["CTL", "ADV"]
+            },
+            "stateMap": {
+              "type": "object",
+              "description": "Maps canonical Catalyst phase names to Linear workflow state name strings. All values must exactly match the state names configured in your Linear team.",
+              "additionalProperties": false,
+              "properties": {
+                "backlog":     { "type": "string", "description": "Linear state name for backlog items." },
+                "todo":        { "type": "string", "description": "Linear state name for to-do / ready items." },
+                "triage":      { "type": "string", "description": "Linear state name while in the triage phase." },
+                "research":    { "type": "string", "description": "Linear state name while in the research phase." },
+                "planning":    { "type": "string", "description": "Linear state name while in the plan phase." },
+                "inProgress":  { "type": "string", "description": "Linear state name while in the implement phase." },
+                "verifying":   { "type": "string", "description": "Linear state name while in the verify phase." },
+                "reviewing":   { "type": "string", "description": "Linear state name while in the review phase." },
+                "remediating": { "type": "string", "description": "Linear state name while in the remediate phase." },
+                "inReview":    { "type": "string", "description": "Linear state name after a PR is open (monitor-merge phase)." },
+                "done":        { "type": "string", "description": "Linear state name for completed tickets." },
+                "canceled":    { "type": "string", "description": "Linear state name for canceled tickets." }
+              },
+              "additionalProperties": false
+            },
+            "stateIds": {
+              "type": "object",
+              "description": "Optional cache of Linear state name → UUID mappings. Populated automatically by setup scripts. Allows the daemon to avoid repeated API lookups.",
+              "additionalProperties": {
+                "type": "string",
+                "format": "uuid"
+              }
+            },
+            "teamId": {
+              "type": "string",
+              "format": "uuid",
+              "description": "UUID of the Linear team. Populated by setup scripts. Used to scope API calls."
+            }
+          }
+        },
+        "thoughts": {
+          "type": "object",
+          "description": "HumanLayer thoughts persistence settings.",
+          "additionalProperties": false,
+          "properties": {
+            "profile": {
+              "type": ["string", "null"],
+              "description": "HumanLayer profile name for the thoughts CLI. null disables thoughts persistence.",
+              "default": null
+            },
+            "directory": {
+              "type": ["string", "null"],
+              "description": "Absolute or repo-relative path to the thoughts directory where agent notes are written.",
+              "default": null
+            },
+            "user": {
+              "type": ["string", "null"],
+              "description": "Username passed to the thoughts CLI. null uses the CLI default.",
+              "default": null
+            }
+          }
+        },
+        "monitor": {
+          "type": "object",
+          "description": "Catalyst monitor dashboard settings.",
+          "additionalProperties": false,
+          "properties": {
+            "suppressVersionWarning": {
+              "type": "boolean",
+              "description": "When true, suppresses the monitor startup banner warning about version mismatches between the installed CLI and the running daemon.",
+              "default": false
+            },
+            "github": {
+              "type": "object",
+              "description": "GitHub-specific monitor display settings.",
+              "additionalProperties": false,
+              "properties": {
+                "repoColors": {
+                  "type": "object",
+                  "description": "Maps repository full names (owner/repo) to CSS color strings for color-coding in the monitor dashboard.",
+                  "additionalProperties": {
+                    "type": "string",
+                    "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
+                  },
+                  "examples": [
+                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/conductor": "#E24A4A" }
+                  ]
+                }
+              }
+            },
+            "linear": {
+              "type": "object",
+              "description": "Linear-specific monitor display settings.",
+              "additionalProperties": false,
+              "properties": {
+                "teams": {
+                  "type": "array",
+                  "description": "List of Linear teams to display in the monitor, each linked to a VCS repository.",
+                  "items": {
+                    "type": "object",
+                    "required": ["key", "vcsRepo"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "description": "Linear team key (e.g. 'CTL')."
+                      },
+                      "vcsRepo": {
+                        "type": "string",
+                        "description": "GitHub repository full name (owner/repo) associated with this team."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "orchestration": {
+          "type": "object",
+          "description": "Orchestration engine settings controlling how Catalyst dispatches and manages agent work.",
+          "additionalProperties": false,
+          "properties": {
+            "dispatchMode": {
+              "type": "string",
+              "enum": ["phase-agents", "oneshot-legacy"],
+              "default": "phase-agents",
+              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-dev:oneshot job per ticket. Default is 'phase-agents'."
+            },
+            "executionCore": {
+              "type": "object",
+              "description": "Concurrency settings for the execution-core daemon. These are seed values; the Layer-2 machine config wins per-field when present.",
+              "additionalProperties": false,
+              "properties": {
+                "maxParallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 4,
+                  "description": "Desired maximum number of concurrently running phase-agent bg jobs. The scheduler will not dispatch new work when the running count reaches this value. Overrideable per-machine in Layer-2 config."
+                },
+                "minParallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1,
+                  "description": "Minimum concurrency floor; the scheduler always tries to keep at least this many jobs active when eligible work exists."
+                },
+                "maxParallelCeiling": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 10,
+                  "description": "Hard upper cap on maxParallel. Dynamic concurrency scaling will never exceed this value regardless of Layer-2 overrides."
+                },
+                "eligibleQuery": {
+                  "type": "object",
+                  "description": "DEPRECATED. The daemon now reads eligibleQuery from ~/catalyst/execution-core/registry.json per-project. This field is ignored by the execution-core scheduler.",
+                  "$comment": "DEPRECATED: moved to ~/catalyst/execution-core/registry.json. The daemon's scheduler reads eligibleQuery from the registry, not from this config field. This object is retained for backward compatibility with older CLI versions that may still write it.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "description": "Linear workflow state name to filter eligible tickets (e.g. 'Todo')."
+                    },
+                    "team": {
+                      "type": ["string", "null"],
+                      "description": "Linear team key to filter eligible tickets. null means all enrolled teams."
+                    },
+                    "project": {
+                      "type": ["string", "null"],
+                      "description": "Linear project name to filter eligible tickets. null means no project filter."
+                    },
+                    "label": {
+                      "type": ["string", "null"],
+                      "description": "Linear label to filter eligible tickets. null means no label filter."
+                    },
+                    "priority": {
+                      "type": ["integer", "null"],
+                      "minimum": 1,
+                      "maximum": 4,
+                      "description": "Linear priority (1=urgent, 2=high, 3=medium, 4=low) to filter eligible tickets. null means no priority filter."
+                    }
+                  }
+                }
+              }
+            },
+            "phaseAgents": {
+              "type": "object",
+              "description": "Per-phase agent configuration for the phase-agents dispatch mode.",
+              "additionalProperties": false,
+              "properties": {
+                "models": {
+                  "type": "object",
+                  "description": "Maps phase names to Claude model strings. Allows routing expensive phases (e.g. implement) to a more capable model while using faster models for lighter phases. Layer-2 machine config wins over this field when present.",
+                  "additionalProperties": {
+                    "type": "string",
+                    "description": "Model identifier string (e.g. 'sonnet', 'opus', 'claude-opus-4-5')."
+                  },
+                  "examples": [
+                    {
+                      "triage": "sonnet",
+                      "research": "sonnet",
+                      "plan": "sonnet",
+                      "implement": "opus",
+                      "verify": "sonnet",
+                      "review": "sonnet",
+                      "pr": "sonnet",
+                      "monitor-merge": "sonnet",
+                      "monitor-deploy": "sonnet"
+                    }
+                  ]
+                },
+                "turnCaps": {
+                  "type": "object",
+                  "description": "Maps phase names to maximum turn counts. A phase that reaches its turn cap emits status 'turn-cap-exhausted' and stops. The daemon may revive it or escalate to needs-human.",
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "examples": [
+                    {
+                      "triage": 10,
+                      "research": 30,
+                      "plan": 20,
+                      "implement": 80,
+                      "verify": 30,
+                      "review": 40,
+                      "pr": 10,
+                      "monitor-merge": 20,
+                      "monitor-deploy": 20
+                    }
+                  ]
+                }
+              }
+            },
+            "orphanReaper": {
+              "type": "object",
+              "description": "Settings for the orphan reaper, which detects and cleans up bg jobs that have exited without emitting a terminal signal status.",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "When false, the orphan reaper is disabled. Useful for debugging to prevent the daemon from terminating stalled workers."
+                },
+                "intervalSeconds": {
+                  "type": "number",
+                  "default": 300,
+                  "description": "How often (in seconds) the orphan reaper sweep runs."
+                },
+                "minIdleSeconds": {
+                  "type": "number",
+                  "default": 120,
+                  "description": "Minimum number of seconds a worker's signal file must be unmodified before the reaper considers it a candidate for reclaim."
+                }
+              }
+            }
+          }
+        },
+        "feedback": {
+          "type": "object",
+          "description": "Automatic feedback filing settings. When enabled, agents can file issues to a GitHub repository when they encounter unexpected behavior.",
+          "additionalProperties": false,
+          "properties": {
+            "autoFile": {
+              "type": "boolean",
+              "description": "When true, agents automatically file GitHub issues for feedback events without prompting."
+            },
+            "githubRepo": {
+              "type": "string",
+              "description": "GitHub repository full name (owner/repo) where feedback issues are filed.",
+              "examples": ["coalesce-labs/catalyst"]
+            },
+            "labels": {
+              "type": "array",
+              "description": "List of label strings applied to auto-filed feedback issues.",
+              "items": {
+                "type": "string"
+              },
+              "examples": [["auto-filed", "agent-feedback"]]
+            }
+          }
+        },
+        "filter": {
+          "type": "object",
+          "description": "Catalyst filter / broker settings. The filter is not a separate daemon; it is part of the broker process.",
+          "additionalProperties": false,
+          "properties": {
+            "groqModel": {
+              "type": "string",
+              "default": "llama-3.1-8b-instant",
+              "description": "Groq model identifier used by the broker's LLM-based event filtering. Requires a GROQ_API_KEY in the environment."
+            }
+          }
+        },
+        "deploy": {
+          "type": "object",
+          "description": "Repository-specific deploy configuration consumed by phase-monitor-deploy. The shape is repo-specific; additionalProperties are allowed.",
+          "additionalProperties": true
+        }
+      }
+    }
+  }
+}

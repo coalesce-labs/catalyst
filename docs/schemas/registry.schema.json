@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://catalyst.coalesce-labs.com/schemas/registry.schema.json",
+  "title": "Execution-Core Registry",
+  "description": "Schema for ~/catalyst/execution-core/registry.json — the per-project enrollment records read by the execution-core daemon scheduler. Each entry tells the daemon which Linear team and git repository constitute a 'project', and what Linear state to use when querying for eligible tickets. This file supersedes the deprecated catalyst.orchestration.executionCore.eligibleQuery field in .catalyst/config.json.",
+  "type": "object",
+  "required": ["projects"],
+  "additionalProperties": false,
+  "properties": {
+    "projects": {
+      "type": "array",
+      "description": "Ordered list of project enrollment records. The daemon iterates this array each scheduler tick to find eligible tickets across all enrolled projects.",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["team", "repoRoot"],
+        "additionalProperties": false,
+        "properties": {
+          "team": {
+            "type": "string",
+            "description": "Linear team key (e.g. 'CTL', 'ADV'). Must match the teamKey in the project's .catalyst/config.json. Used to scope Linear API queries.",
+            "examples": ["CTL", "ADV"]
+          },
+          "repoRoot": {
+            "type": "string",
+            "description": "Absolute path to the canonical git repository root for this project. The daemon creates worktrees from this path when dispatching phase-agent jobs.",
+            "examples": ["/Users/ryan/code-repos/github/coalesce-labs/catalyst"]
+          },
+          "eligibleQuery": {
+            "type": "object",
+            "description": "Criteria used by the scheduler to pull eligible tickets from Linear for this project. The daemon performs a Linear issue query using these filters on each scheduler tick.",
+            "additionalProperties": false,
+            "properties": {
+              "status": {
+                "type": "string",
+                "default": "Todo",
+                "description": "Linear workflow state name that marks a ticket as eligible for dispatch. The scheduler queries issues in this state. Default is 'Todo'.",
+                "examples": ["Todo", "Ready", "Triage"]
+              },
+              "triageStatus": {
+                "type": "string",
+                "default": "Triage",
+                "description": "Linear workflow state name for one-shot triage dispatch. When the daemon finds tickets in this state, it dispatches a triage phase-agent job. Default is 'Triage'.",
+                "examples": ["Triage"]
+              },
+              "project": {
+                "type": ["string", "null"],
+                "default": null,
+                "description": "Linear project name to restrict the query to a specific project within the team. null means no project filter — all projects in the team are eligible."
+              },
+              "label": {
+                "type": ["string", "null"],
+                "default": null,
+                "description": "Linear label string to filter eligible tickets. Only tickets carrying this label are dispatched. null means no label filter."
+              },
+              "priority": {
+                "type": ["integer", "null"],
+                "minimum": 1,
+                "maximum": 4,
+                "default": null,
+                "description": "Linear priority level to filter eligible tickets (1=urgent, 2=high, 3=medium, 4=low). null means all priorities are eligible."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
