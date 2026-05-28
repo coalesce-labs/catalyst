@@ -1092,6 +1092,53 @@ export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, ap
   });
 }
 
+// CTL-712: the refused-dispatch path writes NO signal file (the artifact gate
+// in phase-agent-dispatch precedes the signal write, and emit-complete's
+// file-exists guard skips the update). So when the retry ceiling is hit we must
+// CREATE workers/<T>/phase-<phase>.json as `stalled` — that single write makes
+// isTicketInFlight false (loop stops) and trips the needs-human terminal sweep.
+// Idempotent and best-effort: a write failure just means the next tick retries.
+// See also: maybeEscalateRemediateExhausted (create-vs-mutate difference — kept
+// separate per CTL-565 intentional-divergence convention).
+export function escalateDispatchExhausted(
+  orchDir,
+  ticket,
+  phase,
+  { writeFile = writeFileSync, readFile = readFileSync } = {}
+) {
+  const dir = join(orchDir, "workers", ticket);
+  const p = join(dir, `phase-${phase}.json`);
+  let existing = {};
+  try {
+    existing = JSON.parse(readFile(p, "utf8")) ?? {};
+  } catch {
+    // absent / malformed → create fresh
+  }
+  if (existing.status === "stalled") return true; // idempotent
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFile(
+      p,
+      JSON.stringify({
+        ...existing,
+        ticket,
+        phase,
+        status: "stalled",
+        stalledReason: "prior-artifact-retry-exhausted",
+        updatedAt: new Date().toISOString(),
+      })
+    );
+  } catch (err) {
+    log.warn(
+      { ticket, phase, err: err.message },
+      "scheduler: escalateDispatchExhausted write failed — continuing"
+    );
+    return false;
+  }
+  clearDispatchCooldown(orchDir, ticket, phase); // marker no longer needed; stalled signal is the stop
+  return true;
+}
+
 // CTL-611: post-dispatch verifier. A dispatch is only really successful if
 // workers/<T>/phase-<P>.json was written with a non-empty bg_job_id and a
 // runnable status. A --dry-run leak (no signal at all) or a mark_launch_failed
@@ -1630,6 +1677,7 @@ export function schedulerTick(
         // effects as a real rc!=0 failure so the broker / HUD / operator can
         // see the drop.
         const cd1 = recordDispatchFailure(orchDir, ticket, next, 0, now());
+        if (cd1.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
         appendDispatchFailedEvent({
           orchId: ticket,
           ticket,
@@ -1650,6 +1698,7 @@ export function schedulerTick(
       }
     } else {
       const cd2 = recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
+      if (cd2.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
       // CTL-611 Gap 2: surface the silent drop as an event so the broker /
       // HUD / operator can react. Best-effort; failure is logged inside.
       appendDispatchFailedEvent({
@@ -1861,6 +1910,7 @@ export function schedulerTick(
         );
       } else {
         const cd3 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
+        if (cd3.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
         appendDispatchFailedEvent({
           orchId: t.identifier,
           ticket: t.identifier,
@@ -1878,6 +1928,7 @@ export function schedulerTick(
       }
     } else {
       const cd4 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
+      if (cd4.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
       // CTL-611: Gap 2 entry-phase silent-drop event.
       appendDispatchFailedEvent({
         orchId: t.identifier,
@@ -1979,6 +2030,13 @@ const PERMANENT_FAILURE_CODES = new Set([2]);
 // to needs-human. Mirrors REMEDIATE_CYCLE_CAP.
 const DISPATCH_FAILURE_ESCALATION_THRESHOLD =
   Number(process.env.SCHEDULER_DISPATCH_FAILURE_ESCALATION_THRESHOLD) || 3;
+// CTL-712: terminal ceiling for refused-dispatch retries. Read lazily (not a
+// module-level const) so the SCHEDULER_MAX_DISPATCH_RETRIES env var can be
+// overridden at runtime (e.g. in tests via beforeEach). Default 5 mirrors the
+// SCHEDULER_DISPATCH_COOLDOWN_MS precedent. At this ceiling escalateDispatchExhausted
+// writes the stalled signal that terminally stops the loop; the CTL-713 label
+// escalation at DISPATCH_FAILURE_ESCALATION_THRESHOLD (3) fires earlier as a flag.
+const getMaxDispatchRetries = () => Number(process.env.SCHEDULER_MAX_DISPATCH_RETRIES) || 5;
 
 // --- daemon module state ---
 let tickTimer = null;
