@@ -1,5 +1,37 @@
 # Changelog
 
+## [10.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.1.0...catalyst-dev-v10.2.0) (2026-05-28)
+
+
+### Features
+
+* **dev:** aggregate sub-agent-inclusive cost/token totals for the phase mirror footer (CTL-666) ([#1123](https://github.com/coalesce-labs/catalyst/issues/1123)) ([5bf0e2f](https://github.com/coalesce-labs/catalyst/commit/5bf0e2f77d8b194d2302a7d89ee8b3236bd014ca))
+* **dev:** boot-resume passes --resume-session for true session continuation (CTL-690) ([#1155](https://github.com/coalesce-labs/catalyst/issues/1155)) ([b52c4c7](https://github.com/coalesce-labs/catalyst/commit/b52c4c7fcf9cacabeb82b51a1b74751ce7f67416))
+* **dev:** capture Linear webhook scoping fields + drop per-event scoping poll (CTL-681) ([#1138](https://github.com/coalesce-labs/catalyst/issues/1138)) ([545e2f6](https://github.com/coalesce-labs/catalyst/commit/545e2f69349fd61c69e32ac03c3ce642271bc33f))
+* **dev:** cold-start detection signal for execution-core recovery (CTL-640) ([#1071](https://github.com/coalesce-labs/catalyst/issues/1071)) ([9221ef8](https://github.com/coalesce-labs/catalyst/commit/9221ef8dbefbc30d64b880a7a9e74d987766ac20))
+* **dev:** Linear state TTL cache for execution-core daemon (CTL-634) ([#1069](https://github.com/coalesce-labs/catalyst/issues/1069)) ([43917b3](https://github.com/coalesce-labs/catalyst/commit/43917b3fa3d9b68c4a5aa8b51540ea3b5ab6b477))
+* **dev:** machine-level config fallback for phase-agent-dispatch (CTL-689) ([#1152](https://github.com/coalesce-labs/catalyst/issues/1152)) ([23eae98](https://github.com/coalesce-labs/catalyst/commit/23eae9892a35f868e2c4cee464d990a93bd34e58))
+* **dev:** repoint broker watchdog to claude-agents liveness (CTL-672) ([#1163](https://github.com/coalesce-labs/catalyst/issues/1163)) ([6f1c7bf](https://github.com/coalesce-labs/catalyst/commit/6f1c7bf4b9141b46beb7af780d25e1c3e623ecc3))
+* **dev:** route triage/research/implement/pr phase workers to Sonnet (CTL-689) ([#1150](https://github.com/coalesce-labs/catalyst/issues/1150)) ([c5061e6](https://github.com/coalesce-labs/catalyst/commit/c5061e6927dc6d56fbf41fac7c5573f3334bcd7c))
+
+
+### Bug Fixes
+
+* **dev:** add Linear rate-limit circuit breaker + drop redundant triaged label (CTL-679) ([#1136](https://github.com/coalesce-labs/catalyst/issues/1136)) ([c5e550d](https://github.com/coalesce-labs/catalyst/commit/c5e550d0fefd316dd60f3cbb5eb594a7872d7185))
+* **dev:** carry project/linear.key/orchestration in canonical-event resource block (CTL-636) ([#1070](https://github.com/coalesce-labs/catalyst/issues/1070)) ([f011f12](https://github.com/coalesce-labs/catalyst/commit/f011f1299bd0005c9364567f8ff5b195e22ee051))
+* **dev:** classify Linear cross-team label-UUID errors as missing-label ([#1137](https://github.com/coalesce-labs/catalyst/issues/1137)) ([e336f36](https://github.com/coalesce-labs/catalyst/commit/e336f36bb2327e3c36e2cb2c774b1383a1147f03))
+* **dev:** enforce one-worker-per-ticket — liveness-gate reclaim + reap on remediate cycle (CTL-661) ([#1107](https://github.com/coalesce-labs/catalyst/issues/1107)) ([a4bbfea](https://github.com/coalesce-labs/catalyst/commit/a4bbfea08f068cdbc7524970a764ca199d7a36d9))
+* **dev:** make phase-emit-complete.sh sourceable under zsh (CTL-618) ([#1067](https://github.com/coalesce-labs/catalyst/issues/1067)) ([ebde111](https://github.com/coalesce-labs/catalyst/commit/ebde11128f58cf28a64de7214a228096038508ea))
+* **dev:** make phase-triage body resilient to slash-arg substitution (CTL-602) ([#1031](https://github.com/coalesce-labs/catalyst/issues/1031)) ([fab4c66](https://github.com/coalesce-labs/catalyst/commit/fab4c66c1795586706b78270ebfbf3a0a5e73e43))
+* **dev:** orchestrate-dispatch-next phase-fork bugs — phase-aware RUNNING count + stdin drain guard (CTL-605) ([#1068](https://github.com/coalesce-labs/catalyst/issues/1068)) ([c19dea5](https://github.com/coalesce-labs/catalyst/commit/c19dea511b93e7b8f19eea0df0b823c61087481b))
+* **dev:** phase-mode turn-cap continuation — orchestrate-revive fires --resume in phase-agents mode (CTL-613) ([#1099](https://github.com/coalesce-labs/catalyst/issues/1099)) ([b3d5b49](https://github.com/coalesce-labs/catalyst/commit/b3d5b49e66c3d5206497940e50be8f51970866cf))
+* **dev:** resolve session UUID from resumeSessionId + formal config schemas (CTL-710) ([#1181](https://github.com/coalesce-labs/catalyst/issues/1181)) ([2fedd98](https://github.com/coalesce-labs/catalyst/commit/2fedd98b7b97b56470d3639643c6a61dfa69939c))
+* **dev:** stop execution-core label-retry storm on missing workspace labels (CTL-585) ([#1007](https://github.com/coalesce-labs/catalyst/issues/1007)) ([b9e06e1](https://github.com/coalesce-labs/catalyst/commit/b9e06e1db9bc007bf87e6f87ce1e33a6bcc72903))
+* **dev:** stop scheduler tick from crashing on yield-tombstone files (CTL-702) ([#1170](https://github.com/coalesce-labs/catalyst/issues/1170)) ([b732664](https://github.com/coalesce-labs/catalyst/commit/b732664f08e20f344278563b8e199bc20049b7dd))
+* **dev:** supersede guard for predecessor reaping (CTL-606) ([#1072](https://github.com/coalesce-labs/catalyst/issues/1072)) ([a6c7f1c](https://github.com/coalesce-labs/catalyst/commit/a6c7f1c6d0a782b8c20ab0c5f6199fe16ac13e37))
+* **execution-core:** broaden reclaim trigger to cover stale bg jobs (CTL-588) ([#988](https://github.com/coalesce-labs/catalyst/issues/988)) ([30f1655](https://github.com/coalesce-labs/catalyst/commit/30f165549cebf8a13d0972385fc4dec22623be76))
+* **execution-core:** reclaim dead phase-implement workers via commit-state probe (CTL-574) ([#985](https://github.com/coalesce-labs/catalyst/issues/985)) ([747a3f6](https://github.com/coalesce-labs/catalyst/commit/747a3f6e3de5bd5fe47790f2228413ab436b8eb1))
+
 ## [10.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.0.0...catalyst-dev-v10.1.0) (2026-05-18)
 
 
