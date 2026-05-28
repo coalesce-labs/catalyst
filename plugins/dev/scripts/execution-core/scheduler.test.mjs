@@ -125,6 +125,16 @@ describe("readPhaseSignals", () => {
   test("returns {} when the worker dir does not exist", () => {
     expect(readPhaseSignals(orchDir, "CTL-404")).toEqual({});
   });
+
+  test("ignores phase-*-yield-*.json files (CTL-702)", () => {
+    const dir = join(orchDir, "workers", "CTL-702");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-plan.json"), JSON.stringify({ status: "done" }));
+    writeFileSync(join(dir, "phase-plan-yield-20260528T050740Z.json"), JSON.stringify({}));
+    const signals = readPhaseSignals(orchDir, "CTL-702");
+    expect(Object.keys(signals)).toEqual(["plan"]);
+    expect(signals.plan).toBe("done");
+  });
 });
 
 describe("isTicketInFlight", () => {
@@ -2408,6 +2418,67 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
         teardownWorktree: () => true,
       })
     ).not.toThrow();
+  });
+});
+
+// CTL-702: per-worker error isolation in schedulerTick reclaim sweep.
+describe("schedulerTick — per-worker error isolation (CTL-702)", () => {
+  function writeNestedSignal(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  test("schedulerTick continues past one worker's per-worker exception", () => {
+    // Two in-flight worker dirs. reclaimDeadWork throws for CTL-BAD-702 — the
+    // tick must survive and still process CTL-GOOD-702.
+    writeNestedSignal("CTL-GOOD-702", "plan", { status: "running", bg_job_id: "j1" });
+    writeNestedSignal("CTL-BAD-702", "plan", { status: "running", bg_job_id: "j2" });
+
+    const processedTickets = [];
+    const reclaimDeadWork = (_orchDir, sig) => {
+      if (sig.ticket === "CTL-BAD-702") throw new Error("injected crash for CTL-BAD-702");
+      processedTickets.push(sig.ticket);
+      return "noop";
+    };
+
+    expect(() => {
+      schedulerTick(orchDir, {
+        reclaimDeadWork,
+        readEligible: () => [],
+        dispatch: () => ({ code: 1 }),
+      });
+    }).not.toThrow();
+
+    expect(processedTickets).toContain("CTL-GOOD-702");
+  });
+
+  test("schedulerTick emits yield-file-skip once per observed yield file (CTL-702)", () => {
+    // Worker dir with one yield tombstone. schedulerTick emits once on the first
+    // tick and nothing on the second (same absolute path already in the observed set).
+    const dir = join(orchDir, "workers", "CTL-YIELD-702");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-plan.json"), JSON.stringify({ ticket: "CTL-YIELD-702", phase: "plan", status: "done" }));
+    writeFileSync(join(dir, "phase-plan-yield-20260528T050740Z.json"), JSON.stringify({}));
+
+    const emits = [];
+    schedulerTick(orchDir, {
+      appendYieldFileSkipEvent: (args) => { emits.push(args); return true; },
+      readEligible: () => [],
+      dispatch: () => ({ code: 1 }),
+    });
+    expect(emits).toHaveLength(1);
+    expect(emits[0]).toMatchObject({
+      ticket: "CTL-YIELD-702",
+      filename: "phase-plan-yield-20260528T050740Z.json",
+    });
+    // Second tick with same seam — same absolute path, no second emit.
+    schedulerTick(orchDir, {
+      appendYieldFileSkipEvent: (args) => { emits.push(args); return true; },
+      readEligible: () => [],
+      dispatch: () => ({ code: 1 }),
+    });
+    expect(emits).toHaveLength(1);
   });
 });
 

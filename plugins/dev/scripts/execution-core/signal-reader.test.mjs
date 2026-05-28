@@ -324,3 +324,52 @@ describe("byActivePhase — turn-cap-exhausted (CTL-701)", () => {
     expect(sorted[1].status).toBe("done");
   });
 });
+
+// --- CTL-702: yield-tombstone exclusion -----------------------------------
+
+describe("yield-tombstone exclusion (CTL-702)", () => {
+  test("readWorkerSignals ignores phase-*-yield-*.json files", () => {
+    const dir = join(workersDir(), "CTL-702A");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-plan.json"),
+      JSON.stringify({
+        ticket: "CTL-702A",
+        phase: "plan",
+        status: "done",
+        updatedAt: "2026-05-28T00:00:00Z",
+      }),
+    );
+    writeFileSync(
+      join(dir, "phase-plan-yield-20260528T050740Z.json"),
+      JSON.stringify({
+        yieldedAt: "2026-05-28T05:07:40Z",
+        ourJob: "abc123",
+        canonicalJob: "def456",
+      }),
+    );
+    const sigs = readWorkerSignals(orchDir);
+    const forTicket = sigs.filter((s) => s.ticket === "CTL-702A");
+    expect(forTicket).toHaveLength(1);
+    expect(forTicket[0].phase).toBe("plan");
+    expect(forTicket[0].status).toBe("done");
+  });
+
+  test("listDispatchedPhases excludes -yield- names", () => {
+    const dir = join(workersDir(), "CTL-702B");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-plan.json"), JSON.stringify({ ticket: "CTL-702B", phase: "plan", status: "done" }));
+    writeFileSync(join(dir, "phase-plan-yield-20260528T050740Z.json"), JSON.stringify({}));
+    writeFileSync(join(dir, "phase-research-yield-20260527T120000Z.json"), JSON.stringify({}));
+    const phases = listDispatchedPhases(orchDir, "CTL-702B");
+    expect(phases).toEqual(["plan"]);
+  });
+
+  test("yield-file-only worker dir returns no signals", () => {
+    const dir = join(workersDir(), "CTL-702C");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-plan-yield-20260528T050740Z.json"), JSON.stringify({}));
+    const sigs = readWorkerSignals(orchDir);
+    expect(sigs.find((s) => s.ticket === "CTL-702C")).toBeUndefined();
+  });
+});

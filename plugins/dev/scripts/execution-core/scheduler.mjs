@@ -63,6 +63,7 @@ import {
   defaultAppendDispatchFailedEvent,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
+  defaultAppendYieldFileSkipEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -101,6 +102,7 @@ export function readPhaseSignals(orchDir, ticket) {
   for (const f of files) {
     const m = /^phase-(.+)\.json$/.exec(f);
     if (!m) continue;
+    if (m[1].includes("-yield-")) continue; // CTL-702: skip yield tombstones
     try {
       signals[m[1]] = JSON.parse(readFileSync(join(dir, f), "utf8"))?.status ?? null;
     } catch {
@@ -874,6 +876,9 @@ export function schedulerTick(
     // confirms a live worker. Both best-effort — no branch gates on the return.
     appendDispatchRequestedEvent = defaultAppendDispatchRequestedEvent,
     appendDispatchLaunchedEvent = defaultAppendDispatchLaunchedEvent,
+    // CTL-702: injectable yield-file-skip emitter. Deduped by observedYieldFiles
+    // (module-level set) so only the first observation per daemon lifetime fires.
+    appendYieldFileSkipEvent = defaultAppendYieldFileSkipEvent,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -903,47 +908,76 @@ export function schedulerTick(
   // neither pipeline-complete (monitor-deploy done/skipped) nor
   // failed/stalled/aborted" — exactly the set this sweep cares about.
   const inFlightTickets = listInFlightTickets(orchDir);
+
+  // CTL-702: scan worker dirs for yield tombstones. Emit once per unique
+  // absolute path per daemon lifetime (deduped via observedYieldFiles).
+  try {
+    const workersDirEntries = readdirSync(join(orchDir, "workers"), { withFileTypes: true });
+    for (const d of workersDirEntries) {
+      if (!d.isDirectory()) continue;
+      const ticket = d.name;
+      for (const f of readdirSync(join(orchDir, "workers", ticket))) {
+        if (!f.startsWith("phase-") || !f.endsWith(".json") || !f.includes("-yield-")) continue;
+        const absPath = join(orchDir, "workers", ticket, f);
+        if (observedYieldFiles.has(absPath)) continue;
+        observedYieldFiles.add(absPath);
+        appendYieldFileSkipEvent({ ticket, orchId: ticket, filename: f });
+      }
+    }
+  } catch {
+    // fail-open — a missing/unreadable workers dir does not abort the tick
+  }
+
   for (const sig of readWorkerSignals(orchDir)) {
     if (!inFlightTickets.has(sig.ticket)) continue;
-    const team = teamOf(sig.ticket);
-    const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
-    const r = reclaimDeadWork(orchDir, sig, { repoRoot });
-    const entry = { ticket: sig.ticket, phase: sig.phase };
-    switch (r) {
-      case "reclaimed":
-        reclaimed.push(entry);
-        break;
-      case "revived":
-        revived.push(entry);
-        break;
-      case "revive-suppressed":
-        reviveSuppressed.push(entry);
-        break;
-      case "escalated":
-        escalated.push(entry);
-        break;
-      case "escalation-suppressed":
-        // CTL-638: the per-(ticket, phase) cool-down throttled the audit event
-        // and label write. Invisible by design — operators saw the original
-        // escalation in events.jsonl already; surfacing this would re-recreate
-        // the noise the cool-down exists to prevent.
-        break;
-      case "alive-quiet-suppressed":
-        // CTL-610: the bg worker is alive (kill -0) but quiet on a long tool
-        // call (the pre-first-output window for research/plan, or a long
-        // synchronous Edit/Bash inside implement). Invisible by design — no
-        // duplicate spawn, no state change; the next tick re-evaluates the
-        // mtime + pidAlive pair. Surfacing it in result.revived / .escalated
-        // / .reviveSuppressed would re-create the very revive-storm noise the
-        // (C0) guard exists to suppress (and would re-feed the scheduler's own
-        // fs.watch fast path via any audit-event write — CTL-638 lineage).
-        break;
-      default:
-        // noop | not-done | not-applicable | reclaim-failed → invisible.
-        // CTL-606: superseded-noop also buckets here — a dead predecessor signal
-        // the ticket has already advanced past. Invisible by design (the active
-        // phase is progressing normally); surfacing it would be noise.
-        break;
+    try {
+      const team = teamOf(sig.ticket);
+      const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+      const r = reclaimDeadWork(orchDir, sig, { repoRoot });
+      const entry = { ticket: sig.ticket, phase: sig.phase };
+      switch (r) {
+        case "reclaimed":
+          reclaimed.push(entry);
+          break;
+        case "revived":
+          revived.push(entry);
+          break;
+        case "revive-suppressed":
+          reviveSuppressed.push(entry);
+          break;
+        case "escalated":
+          escalated.push(entry);
+          break;
+        case "escalation-suppressed":
+          // CTL-638: the per-(ticket, phase) cool-down throttled the audit event
+          // and label write. Invisible by design — operators saw the original
+          // escalation in events.jsonl already; surfacing this would re-recreate
+          // the noise the cool-down exists to prevent.
+          break;
+        case "alive-quiet-suppressed":
+          // CTL-610: the bg worker is alive (kill -0) but quiet on a long tool
+          // call (the pre-first-output window for research/plan, or a long
+          // synchronous Edit/Bash inside implement). Invisible by design — no
+          // duplicate spawn, no state change; the next tick re-evaluates the
+          // mtime + pidAlive pair. Surfacing it in result.revived / .escalated
+          // / .reviveSuppressed would re-create the very revive-storm noise the
+          // (C0) guard exists to suppress (and would re-feed the scheduler's own
+          // fs.watch fast path via any audit-event write — CTL-638 lineage).
+          break;
+        default:
+          // noop | not-done | not-applicable | reclaim-failed → invisible.
+          // CTL-606: superseded-noop also buckets here — a dead predecessor signal
+          // the ticket has already advanced past. Invisible by design (the active
+          // phase is progressing normally); surfacing it would be noise.
+          break;
+      }
+    } catch (err) {
+      // CTL-702: per-worker isolation — one bad signal cannot abort the whole
+      // tick. Log and continue to the next worker.
+      log.warn(
+        { ticket: sig.ticket, phase: sig.phase, step: "reclaim", err: err.message },
+        "scheduler: per-worker step failed — skipping signal, continuing tick (CTL-702)",
+      );
     }
   }
 
@@ -1203,6 +1237,11 @@ let debounceTimer = null;
 let watcher = null;
 let runningOpts = null;
 
+// CTL-702: observed yield tombstones for the lifetime of this daemon process.
+// Keyed by absolute path so the same file across multiple ticks emits exactly
+// one event. Cleared only on daemon restart (via __resetForTests in tests).
+const observedYieldFiles = new Set();
+
 function runTick() {
   try {
     // CTL-676 + CTL-678: hot-reload the concurrency knobs by re-reading the
@@ -1350,6 +1389,7 @@ export function stopScheduler() {
 // public contract; the index.mjs barrel does not re-export it.
 export function __resetForTests() {
   stopScheduler();
+  observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
 }
 
 // --- standalone entrypoint (operator dry-run / CTL-554 wires the real daemon) ---

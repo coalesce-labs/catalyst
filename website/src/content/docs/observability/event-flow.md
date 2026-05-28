@@ -282,6 +282,28 @@ The replay uses the same handler as live deliveries (including HMAC verification
 synthetic signature — the orch-monitor owns the secret it uses to re-sign). Replayed events
 are appended to the log only if they're not already present (deduplication by delivery ID).
 
+## Yield tombstones
+
+When a phase agent detects that its `bg_job_id` is no longer the canonical
+worker for a ticket (the orphan-bg pattern, CTL-649), it gracefully yields
+instead of editing the worker tree. The yield is recorded two ways:
+
+1. **Hidden sidecar**: `workers/<TICKET>/.phase-<phase>-yield` — written by
+   `phase-agent-yield-check.sh`. No `.json` extension, leading dot, no
+   timestamp. Used by phase-agent prelude code for the inverse-yield detection
+   pattern.
+2. **Visible tombstone**: `workers/<TICKET>/phase-<phase>-yield-<timestamp>.json` —
+   audit trail of the yield event. Status is `null`, phase is `null`, no
+   `bg_job_id`. **These are read-only audit files.** The scheduler explicitly
+   skips any filename matching `phase-*-yield-*.json` in both
+   `signal-reader.mjs:isPhaseSignalFile` and `scheduler.mjs:readPhaseSignals`
+   (CTL-702). Treating one as a live signal extracts an invalid phase name and
+   crashes the supersede guard.
+
+Operators investigating a yield-storm can grep for
+`phase.scheduler.yield-file-skip.<TICKET>` events in the unified event log —
+one such event is emitted per tombstone per daemon lifetime (CTL-702).
+
 ## Related
 
 - [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook

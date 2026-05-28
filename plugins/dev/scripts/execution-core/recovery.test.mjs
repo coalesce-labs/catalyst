@@ -22,6 +22,7 @@ import {
   defaultPostReclaimMirror,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
+  defaultAppendYieldFileSkipEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -2289,6 +2290,47 @@ describe("reclaim event envelope round-trip (CTL-664)", () => {
   });
 });
 
+// CTL-702: yield-file-skip OTEL emitter round-trip.
+describe("yield-file-skip event envelope (CTL-702)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl702-yield-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("defaultAppendYieldFileSkipEvent emits the expected envelope shape (CTL-702)", () => {
+    const ok = defaultAppendYieldFileSkipEvent({
+      ticket: "CTL-FOO",
+      orchId: "ORCH-1",
+      filename: "phase-plan-yield-20260528T050740Z.json",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.yield-file-skip.CTL-FOO");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.filename).toBe("phase-plan-yield-20260528T050740Z.json");
+    expect(env.body.payload.reason).toBe("yield_tombstone_filtered");
+    expect(env.attributes["catalyst.orchestration"]).toBe("ORCH-1");
+  });
+});
+
 // CTL-640: cold-start detection — runtime epoch readers + detectColdStart.
 describe("runtime epoch readers", () => {
   describe("readBootEpoch", () => {
@@ -2576,6 +2618,28 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     });
     expect(r).toBe("alive-busy-suppressed");
     expect(listSpy.calls.length).toBe(0); // guard runs only on the reclaim-eligible path
+  });
+
+  test("supersede guard tolerates unknown phase names in listTicketPhases (CTL-702)", () => {
+    // listTicketPhases returns a yield-tombstone name. The reduce must skip it
+    // via isKnownPhase, not throw PhaseFsmError. The triage signal is the dead
+    // predecessor; implement is the latest KNOWN dispatched phase, so the
+    // guard fires and returns 'superseded-noop'.
+    const triasSig = {
+      ticket: "CTL-702D",
+      phase: "triage",
+      status: "running",
+      liveness: { kind: "bg", value: "job-old" },
+      raw: { ticket: "CTL-702D", phase: "triage", status: "running", bg_job_id: "job-old" },
+    };
+    expect(() => {
+      reclaimDeadWorkIfPossible(orch, triasSig, {
+        statJob: () => null,
+        listTicketPhases: () => ["triage", "plan-yield-20260528T050740Z", "plan", "implement"],
+        appendEscalatedEvent: recorder(undefined),
+        applyStalledLabel: recorder(undefined),
+      });
+    }).not.toThrow();
   });
 });
 
