@@ -1,0 +1,153 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://catalyst.coalesce-labs.com/schemas/machine-config.schema.json",
+  "title": "Catalyst Machine Config",
+  "description": "Schema for ~/.config/catalyst/config.json — the Layer-2 machine-local config. Contains host-specific secrets, concurrency overrides, and webhook registration data. NEVER commit this file to version control.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "otel": {
+      "type": "object",
+      "description": "OpenTelemetry / observability export settings.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "When true, the execution-core daemon and phase agents emit OTEL traces and metrics to the configured endpoints."
+        },
+        "prometheus": {
+          "type": "string",
+          "format": "uri",
+          "description": "Prometheus remote-write or Pushgateway endpoint URI for metrics.",
+          "examples": ["http://localhost:9091/metrics/job/catalyst"]
+        },
+        "loki": {
+          "type": "string",
+          "format": "uri",
+          "description": "Loki push API endpoint URI for log shipping.",
+          "examples": ["http://localhost:3100/loki/api/v1/push"]
+        }
+      }
+    },
+    "catalyst": {
+      "type": "object",
+      "description": "Machine-level Catalyst overrides. Fields here win over Layer-1 (.catalyst/config.json) on a per-field basis.",
+      "additionalProperties": false,
+      "properties": {
+        "monitor": {
+          "type": "object",
+          "description": "Monitor dashboard machine-level settings, primarily webhook registration data written by setup scripts.",
+          "additionalProperties": false,
+          "properties": {
+            "github": {
+              "type": "object",
+              "description": "GitHub webhook settings for the monitor.",
+              "additionalProperties": false,
+              "properties": {
+                "smeeChannel": {
+                  "type": "string",
+                  "format": "uri",
+                  "description": "Smee.io proxy channel URI for receiving GitHub webhook events on a local machine.",
+                  "examples": ["https://smee.io/AbCdEfGhIjKlMnOp"]
+                }
+              }
+            },
+            "linear": {
+              "type": "object",
+              "description": "Linear webhook registration map. Keys are Linear team keys; values are registration records written by setup-linear-webhook.sh.",
+              "additionalProperties": {
+                "type": "object",
+                "description": "Webhook registration record for a single Linear team.",
+                "additionalProperties": false,
+                "properties": {
+                  "webhookId": {
+                    "type": "string",
+                    "description": "Linear webhook UUID returned by the Linear API on registration."
+                  },
+                  "smeeChannel": {
+                    "type": "string",
+                    "format": "uri",
+                    "description": "Smee.io proxy channel URI for this team's Linear webhook events."
+                  },
+                  "registeredAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "ISO 8601 timestamp when this webhook was registered."
+                  },
+                  "resourceTypes": {
+                    "type": "array",
+                    "description": "Linear resource types this webhook is subscribed to (e.g. 'Issue', 'Comment').",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "orchestration": {
+          "type": "object",
+          "description": "Orchestration overrides. Concurrency fields here win per-field over Layer-1 values. Use this to tune concurrency per machine without modifying committed config.",
+          "additionalProperties": false,
+          "properties": {
+            "executionCore": {
+              "type": "object",
+              "description": "Concurrency override values for the execution-core daemon scheduler. Each field independently wins over the corresponding Layer-1 value when present.",
+              "additionalProperties": false,
+              "properties": {
+                "maxParallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Maximum number of concurrently running phase-agent bg jobs on this machine. Wins over catalyst.orchestration.executionCore.maxParallel in Layer-1."
+                },
+                "minParallel": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Minimum concurrency floor on this machine. Wins over catalyst.orchestration.executionCore.minParallel in Layer-1."
+                },
+                "maxParallelCeiling": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Hard upper cap on maxParallel on this machine. Wins over catalyst.orchestration.executionCore.maxParallelCeiling in Layer-1."
+                }
+              }
+            },
+            "phaseAgents": {
+              "type": "object",
+              "description": "Per-phase model routing overrides. Wins over catalyst.orchestration.phaseAgents.models in Layer-1. Use this to assign different models per machine (e.g. use opus on a powerful host, sonnet on a laptop).",
+              "additionalProperties": false,
+              "properties": {
+                "models": {
+                  "type": "object",
+                  "description": "Maps phase names to Claude model strings. Each entry independently overrides the corresponding Layer-1 value.",
+                  "additionalProperties": {
+                    "type": "string",
+                    "description": "Model identifier string (e.g. 'sonnet', 'opus', 'claude-opus-4-5')."
+                  },
+                  "examples": [
+                    {
+                      "implement": "opus",
+                      "verify": "sonnet"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "groq": {
+      "type": "object",
+      "description": "Groq API credentials. Required if catalyst.filter.groqModel is configured and the broker's LLM filtering is enabled.",
+      "additionalProperties": false,
+      "properties": {
+        "apiKey": {
+          "type": "string",
+          "description": "Groq API key. Kept in machine config (not Layer-1) because it is a secret."
+        }
+      }
+    }
+  }
+}

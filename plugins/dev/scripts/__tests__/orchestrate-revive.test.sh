@@ -565,25 +565,50 @@ scratch_teardown
 
 # ─── CTL-613: phase-mode session_id resolver (resolve_phase_session_id) ─────
 #
-# Unit tests for the new helper that resolves a Claude session_id from a
-# `claude --bg` job's state.json (bg_job_id → ~/.claude/jobs/<bg>/state.json
-# → linkScanPath → basename → strip .jsonl). Tests invoke the helper via the
-# `--probe-helper` flag.
+# Unit tests for the helper that resolves a Claude session_id from a
+# `claude --bg` job's state.json. Two schemas:
+#   New (Claude Code ≥2.x): state.json contains .resumeSessionId directly.
+#   Legacy (Claude Code <2.x): state.json contains .linkScanPath; basename
+#     minus .jsonl = session UUID.
+# Tests invoke the helper via the `--probe-helper` flag.
 
 probe_resolver() {
   # Echo just the resolver's stdout (one-line session id or empty); return its rc.
   "$REVIVE" --probe-helper resolve_phase_session_id "$1"
 }
 
-echo "test (CTL-613): resolve_phase_session_id — bg_job_id → linkScanPath → session_id"
+echo "test (CTL-613): resolve_phase_session_id — new schema: resumeSessionId → session_id"
 scratch_setup
 export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
 mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/cafe1234"
-jq -n '{linkScanPath:"/Users/ryan/.claude/projects/-foo-bar/abcdef12-3456-7890-abcd-ef1234567890.jsonl"}' \
+jq -n '{resumeSessionId:"cc820da8-5e10-420b-bb54-dab3b61a3f8b"}' \
   > "${CATALYST_REVIVE_JOBS_DIR}/cafe1234/state.json"
 OUT=$(probe_resolver "cafe1234"); RC=$?
-[ "$RC" = "0" ] && pass "resolver rc=0 on happy path" || fail "resolver rc=0 on happy path" "got rc=$RC"
-[ "$OUT" = "abcdef12-3456-7890-abcd-ef1234567890" ] && pass "resolver returns session_id basename" || fail "resolver session_id" "got: $OUT"
+[ "$RC" = "0" ] && pass "resolver rc=0 on new schema" || fail "resolver rc=0 on new schema" "got rc=$RC"
+[ "$OUT" = "cc820da8-5e10-420b-bb54-dab3b61a3f8b" ] && pass "resolver returns resumeSessionId" || fail "resolver resumeSessionId" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — new schema takes priority over linkScanPath"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/dual1234"
+jq -n '{resumeSessionId:"cc820da8-5e10-420b-bb54-dab3b61a3f8b",linkScanPath:"/p/abcdef12-3456-7890-abcd-ef1234567890.jsonl"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/dual1234/state.json"
+OUT=$(probe_resolver "dual1234"); RC=$?
+[ "$OUT" = "cc820da8-5e10-420b-bb54-dab3b61a3f8b" ] && pass "resumeSessionId wins over linkScanPath" || fail "resumeSessionId wins" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — legacy schema: linkScanPath → session_id"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/legacy234"
+jq -n '{linkScanPath:"/Users/ryan/.claude/projects/-foo-bar/abcdef12-3456-7890-abcd-ef1234567890.jsonl"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/legacy234/state.json"
+OUT=$(probe_resolver "legacy234"); RC=$?
+[ "$RC" = "0" ] && pass "resolver rc=0 on legacy schema" || fail "resolver rc=0 on legacy schema" "got rc=$RC"
+[ "$OUT" = "abcdef12-3456-7890-abcd-ef1234567890" ] && pass "resolver returns linkScanPath basename" || fail "resolver linkScanPath basename" "got: $OUT"
 unset CATALYST_REVIVE_JOBS_DIR
 scratch_teardown
 
@@ -606,6 +631,18 @@ jq -n '{linkScanPath:"/garbage/no-extension"}' \
 OUT=$(probe_resolver "bad00001"); RC=$?
 [ "$RC" != "0" ] && pass "malformed linkScanPath → rc!=0" || fail "malformed linkScanPath → rc!=0" "got rc=$RC"
 [ -z "$OUT" ] && pass "malformed linkScanPath → empty stdout" || fail "malformed linkScanPath → empty stdout" "got: $OUT"
+unset CATALYST_REVIVE_JOBS_DIR
+scratch_teardown
+
+echo "test (CTL-613): resolve_phase_session_id — no resumeSessionId or linkScanPath → rc=1 empty"
+scratch_setup
+export CATALYST_REVIVE_JOBS_DIR="${SCRATCH}/jobs"
+mkdir -p "${CATALYST_REVIVE_JOBS_DIR}/nolink01"
+jq -n '{state:"stopped"}' \
+  > "${CATALYST_REVIVE_JOBS_DIR}/nolink01/state.json"
+OUT=$(probe_resolver "nolink01"); RC=$?
+[ "$RC" != "0" ] && pass "no session fields → rc!=0" || fail "no session fields → rc!=0" "got rc=$RC"
+[ -z "$OUT" ] && pass "no session fields → empty stdout" || fail "no session fields → empty stdout" "got: $OUT"
 unset CATALYST_REVIVE_JOBS_DIR
 scratch_teardown
 

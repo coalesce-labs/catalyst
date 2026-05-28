@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://catalyst.coalesce-labs.com/schemas/phase-signal.schema.json",
+  "title": "Phase Signal File",
+  "description": "Schema for ~/catalyst/execution-core/workers/{TICKET}/phase-{name}.json — the per-phase coordination file written by the execution-core daemon and updated by phase-agent workers. The daemon dispatches work by writing this file; the phase-agent worker updates it (status, bg_job_id) as it runs; the daemon reads it to determine when to advance to the next phase.",
+  "type": "object",
+  "required": ["ticket", "phase", "model", "turnCap", "status"],
+  "additionalProperties": true,
+  "properties": {
+    "ticket": {
+      "type": "string",
+      "description": "Linear ticket identifier (e.g. 'CTL-123'). Matches the worker directory name.",
+      "examples": ["CTL-123", "ADV-456"]
+    },
+    "phase": {
+      "type": "string",
+      "description": "Name of the pipeline phase this signal file represents.",
+      "enum": [
+        "triage",
+        "research",
+        "plan",
+        "implement",
+        "verify",
+        "review",
+        "pr",
+        "monitor-merge",
+        "monitor-deploy",
+        "remediate"
+      ]
+    },
+    "model": {
+      "type": "string",
+      "description": "Claude model string passed to the phase-agent worker at dispatch time (e.g. 'opus', 'sonnet'). Determined by resolving Layer-1 and Layer-2 phaseAgents.models config.",
+      "examples": ["opus", "sonnet", "claude-opus-4-5"]
+    },
+    "turnCap": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum number of agent turns allowed for this phase invocation. When reached, the phase-agent emits status 'turn-cap-exhausted' and halts."
+    },
+    "status": {
+      "type": "string",
+      "description": "Current lifecycle status of this phase, written by the daemon on dispatch and updated by the phase-agent as work progresses.",
+      "enum": [
+        "dispatched",
+        "running",
+        "done",
+        "failed",
+        "stalled",
+        "skipped",
+        "turn-cap-exhausted"
+      ]
+    },
+    "bg_job_id": {
+      "type": ["string", "null"],
+      "description": "8-character hex identifier of the Claude Code bg job running this phase. Written by the phase-agent at startup. Used for orphan detection and revive deduplication. null before the worker writes it or after a terminal status.",
+      "pattern": "^[0-9a-f]{8}$",
+      "examples": ["a1b2c3d4"]
+    },
+    "worktreePath": {
+      "type": ["string", "null"],
+      "description": "Absolute filesystem path to the git worktree created for this ticket/phase. null for phases that do not create a worktree (e.g. monitor-merge, monitor-deploy on some configurations).",
+      "examples": ["/Users/ryan/catalyst/workspaces/CTL-123"]
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the daemon dispatched this phase (i.e. when the signal file was first written)."
+    },
+    "updatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the last write to this signal file. The orphan reaper compares this against the current time to detect stalled workers."
+    },
+    "completedAt": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the phase reached a terminal status (done, failed, skipped, turn-cap-exhausted). null while still in progress."
+    },
+    "failureReason": {
+      "type": ["string", "null"],
+      "description": "Short description of why the phase failed, written by phase-agent-emit-complete when --status failed is passed. Omit (null) on success — do not pass --reason to emit-complete on successful phases.",
+      "examples": ["no_actionable_plan", "blocked_by_unbuilt_dep", "tests_failed"]
+    },
+    "attentionReason": {
+      "type": ["string", "null"],
+      "description": "Human-readable explanation written when the daemon escalates the ticket to needs-human status. null during normal operation.",
+      "examples": ["revive-budget-exhausted", "turn-cap-exhausted after 3 revivals"]
+    },
+    "handoffPath": {
+      "type": ["string", "null"],
+      "description": "Absolute path to a phase artifact (e.g. research doc, plan doc, verify.json) passed to downstream phases as context. Written by the phase-agent at completion.",
+      "examples": ["/Users/ryan/catalyst/workspaces/CTL-123/thoughts/research.md"]
+    },
+    "catalystSessionId": {
+      "type": ["string", "null"],
+      "description": "Catalyst session identifier (not the Claude Code session UUID). Used by the session tracker to correlate cost and duration metrics in catalyst.db.",
+      "examples": ["sess-CTL-123-implement-1"]
+    },
+    "pr": {
+      "type": "object",
+      "description": "Pull request metadata written by the pr phase-agent after opening a PR. Only present on phase-pr signal files.",
+      "additionalProperties": false,
+      "properties": {
+        "number": {
+          "type": "integer",
+          "description": "GitHub pull request number.",
+          "examples": [42]
+        },
+        "url": {
+          "type": "string",
+          "description": "GitHub pull request URL.",
+          "examples": ["https://github.com/coalesce-labs/catalyst/pull/42"]
+        }
+      }
+    },
+    "phaseTimestamps": {
+      "type": "object",
+      "description": "Map of status values to ISO 8601 timestamps, recording when each status transition occurred. Useful for measuring phase duration.",
+      "additionalProperties": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "examples": [
+        {
+          "dispatched": "2026-05-28T10:00:00Z",
+          "running": "2026-05-28T10:00:05Z",
+          "done": "2026-05-28T10:42:17Z"
+        }
+      ]
+    }
+  }
+}

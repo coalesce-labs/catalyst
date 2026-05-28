@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://catalyst.coalesce-labs.com/schemas/state-json-contract.schema.json",
+  "title": "Claude Code Job State File (External Contract)",
+  "$comment": "EXTERNAL: this file is written by Claude Code, not Catalyst. Catalyst reads it read-only. This schema documents the fields Catalyst depends on. The authoritative source of truth for this file's shape is the Claude Code application itself. Field names and semantics may change across Claude Code versions. Catalyst currently handles both the >=2.x form (resumeSessionId) and the <2.x form (linkScanPath) as a fallback.",
+  "description": "Schema documenting the fields Catalyst reads from ~/.claude/jobs/{bg_job_id}/state.json. This file is owned and written exclusively by Claude Code. Catalyst reads it read-only for session continuation and job liveness probes. Do NOT write to or delete this file from Catalyst code.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "state": {
+      "type": "string",
+      "description": "Lifecycle state of the Claude Code bg job. Catalyst's defaultStatJob helper reads this field to determine whether a job is still running. Known values include 'running' (job is active) and 'stopped' (job has exited).",
+      "examples": ["running", "stopped"]
+    },
+    "resumeSessionId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "PRIMARY field for session continuation in Claude Code >=2.x. This UUID is passed as --resume-session when re-launching a phase-agent in boot-resume or turn-cap revival scenarios. Catalyst's boot-resume skill reads this field first; falls back to sessionId if absent.",
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Session UUID. For stopped sessions in Claude Code >=2.x this is the same value as resumeSessionId. Catalyst uses this as a fallback when resumeSessionId is absent.",
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "linkScanPath": {
+      "type": "string",
+      "description": "DEPRECATED. Present in Claude Code <2.x for terminal job states. Absolute path to a JSONL transcript file. Catalyst's legacy session-continuation path read this to extract the session ID from the transcript. Superseded by resumeSessionId in Claude Code >=2.x. Still present in older bg job directories and read as a fallback.",
+      "examples": ["/Users/ryan/.claude/projects/.../session-abc123.jsonl"]
+    },
+    "cwd": {
+      "type": "string",
+      "description": "Absolute path to the working directory the Claude Code bg job was launched in. Catalyst reads this during liveness probes and worktree validation.",
+      "examples": ["/Users/ryan/catalyst/workspaces/CTL-123"]
+    },
+    "name": {
+      "type": "string",
+      "description": "Structured display name for the bg job, typically in the form 'o-{TICKET}:{TICKET}:{phase}:{index}' (e.g. 'o-CTL-123:CTL-123:implement:1'). Catalyst uses this for display in the monitor dashboard and for log correlation.",
+      "examples": [
+        "o-CTL-123:CTL-123:implement:1",
+        "o-ADV-793:ADV-793:monitor-deploy:1"
+      ]
+    }
+  }
+}

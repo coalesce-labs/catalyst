@@ -151,10 +151,12 @@ resolve_session_id() {
 
 # CTL-613: resolve the Claude session_id for a phase-mode worker spawned via
 # `claude --bg`. The bg job dir is the source of truth — its state.json
-# carries a `linkScanPath` field whose basename (minus `.jsonl`) is the
-# Claude session id used for `--resume`. This is the fallback used by the
-# per-phase turn-cap-exhausted continuation branch because phase-mode workers
-# don't write the legacy stream JSONL that `resolve_session_id` reads.
+# carries the session UUID needed for `claude --bg --resume`.
+#
+# Two schemas supported:
+#   New (Claude Code ≥2.x): state.json contains .resumeSessionId directly.
+#   Legacy (Claude Code <2.x): state.json contains .linkScanPath (path to
+#     .jsonl file); the basename minus `.jsonl` is the session UUID.
 #
 # Returns:
 #   stdout: session_id on success, empty on failure
@@ -167,6 +169,14 @@ resolve_phase_session_id() {
   local jobs_dir="${CATALYST_REVIVE_JOBS_DIR:-${HOME}/.claude/jobs}"
   local state_file="${jobs_dir}/${bg_job_id}/state.json"
   [ -f "$state_file" ] || return 1
+  # New schema (Claude Code ≥2.x): resumeSessionId stored directly.
+  local resume_id
+  resume_id=$(jq -r '.resumeSessionId // empty' "$state_file" 2>/dev/null || echo "")
+  if [ -n "$resume_id" ]; then
+    echo "$resume_id"
+    return 0
+  fi
+  # Legacy schema (Claude Code <2.x): derive UUID from linkScanPath basename.
   local link_path
   link_path=$(jq -r '.linkScanPath // empty' "$state_file" 2>/dev/null || echo "")
   [ -z "$link_path" ] && return 1
