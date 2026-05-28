@@ -21,6 +21,7 @@ import {
   watch,
   mkdirSync,
   rmSync,
+  renameSync,
 } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname, basename } from "node:path";
@@ -88,6 +89,114 @@ const TERMINAL_PHASE = "monitor-deploy";
 // scheduler never dispatches `triage`. CTL-565 Part B. Deliberately NOT
 // PHASES[0] ("triage"); the FSM still owns chaining research → plan → … .
 const NEW_WORK_ENTRY_PHASE = "research";
+
+// CTL-705: STAGE_RANK — integer stage index for every pipeline phase + remediate.
+// Higher = later in the pipeline = closer to done (shortest-remaining-time-first
+// for preemption targeting). Deliberately duplicates PHASES order here rather than
+// computing it dynamically, so scheduler-rank.mjs stays a pure leaf (no imports).
+// Key ORDER mirrors [...PHASES, "remediate"] (drift guard in scheduler.test.mjs).
+// Any reorder to PHASES must update both keys AND values here.
+// Values: 0..9 with remediate=4 sitting between implement(3) and verify(5).
+export const STAGE_RANK = Object.freeze({
+  triage: 0,
+  research: 1,
+  plan: 2,
+  implement: 3,
+  verify: 5,
+  review: 6,
+  pr: 7,
+  "monitor-merge": 8,
+  "monitor-deploy": 9,
+  remediate: 4, // ancillary phase — appended last so Object.keys() == [...PHASES, "remediate"]
+});
+
+// TERMINAL_SIGNAL_STATUSES — statuses that indicate a phase is definitively done
+// (success or failure). Used by stageRankForTicket to skip phases that no longer
+// represent active work. Mirrors the isTicketInFlight notion of terminal, but
+// kept separate (isTicketInFlight includes the terminal-pipeline check and must
+// not collapse with this set — see the CTL-565 cross-reference comment on
+// isTicketInFlight).
+const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
+
+// stageRankForTicket — given a {phase: status} map, return the highest STAGE_RANK
+// value over all non-terminal phases. Returns -1 when no active phase is found
+// (e.g. empty signals or all phases terminal) — this is the same sentinel used for
+// queued tickets, placing parked-but-active in-flight workers ahead of the queue.
+// A "preempted" signal is non-terminal (the worker is paused, not finished) and
+// yields its phase's rank so the preempted ticket keeps its position in the global
+// order.
+export function stageRankForTicket(signals) {
+  const sig = signals ?? {};
+  let maxRank = -1;
+  for (const [phase, status] of Object.entries(sig)) {
+    if (TERMINAL_SIGNAL_STATUSES.has(status)) continue;
+    if (phase === TERMINAL_PHASE && (status === "done" || status === "skipped")) continue;
+    const rank = STAGE_RANK[phase];
+    if (rank !== undefined && rank > maxRank) maxRank = rank;
+  }
+  return maxRank;
+}
+
+// readWorkerPriority — read workers/<T>/priority.json → {priority, createdAt}.
+// Missing or unreadable → {priority: 5, createdAt: null} (safe lowest-band
+// default). Never throws.
+export function readWorkerPriority(orchDir, ticket) {
+  try {
+    const raw = readFileSync(join(orchDir, "workers", ticket, "priority.json"), "utf8");
+    const p = JSON.parse(raw);
+    return {
+      priority: Number.isInteger(p?.priority) ? p.priority : 5,
+      createdAt: typeof p?.createdAt === "string" ? p.createdAt : null,
+    };
+  } catch {
+    return { priority: 5, createdAt: null };
+  }
+}
+
+// writeWorkerPriority — write workers/<T>/priority.json. Idempotent overwrite via
+// tmp+rename. Silently no-ops if the worker dir does not exist (we never create it
+// here — the worker's prelude owns the dir). Best-effort: a write failure is
+// swallowed so a transient I/O error never blocks the dispatch.
+export function writeWorkerPriority(orchDir, ticket, { priority, createdAt }) {
+  const p = join(orchDir, "workers", ticket, "priority.json");
+  try {
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ priority, createdAt }));
+    renameSync(tmp, p);
+  } catch {
+    // best-effort — missing worker dir or I/O failure; next dispatch retries
+  }
+}
+
+// buildGlobalRanking — assemble a descriptor array for every in-flight ticket
+// AND every eligible-but-not-started queued ticket, sorted by rankTickets.
+// Descriptor shape: {identifier, priority, createdAt, stage, inFlight}.
+// A ticket present in both eligible and in-flight is listed once, as in-flight.
+export function buildGlobalRanking(orchDir, eligible) {
+  const inFlight = listInFlightTickets(orchDir);
+  const started = listStartedTickets(orchDir);
+  const descriptors = [];
+
+  for (const ticket of inFlight) {
+    const { priority, createdAt } = readWorkerPriority(orchDir, ticket);
+    const signals = readPhaseSignals(orchDir, ticket);
+    const stage = stageRankForTicket(signals);
+    descriptors.push({ identifier: ticket, priority, createdAt, stage, inFlight: true });
+  }
+
+  for (const t of eligible ?? []) {
+    if (started.has(t.identifier)) continue; // already in-flight (listed above)
+    descriptors.push({
+      identifier: t.identifier,
+      priority: t.priority,
+      createdAt: t.createdAt ?? null,
+      stage: -1,
+      inFlight: false,
+    });
+  }
+
+  return rankTickets(descriptors);
+}
 
 // readPhaseSignals — { phase: status } for one ticket's workers/<T>/phase-*.json.
 export function readPhaseSignals(orchDir, ticket) {
@@ -1346,6 +1455,12 @@ export function schedulerTick(
           { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
         );
         dispatched.push(t.identifier);
+        // CTL-705: persist priority + createdAt for the global rank, so
+        // preemption decisions need no per-tick Linear API calls.
+        writeWorkerPriority(orchDir, t.identifier, {
+          priority: t.priority,
+          createdAt: t.createdAt ?? null,
+        });
         // CTL-558: write the entry-phase (`research`) status for the new ticket.
         safeWrite(
           () =>

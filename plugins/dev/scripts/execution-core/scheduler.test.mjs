@@ -48,6 +48,12 @@ import {
   dispatchCooldownPath,
   verifyDispatchedSignal,
   __resetForTests,
+  // CTL-705: Phase 2 helpers
+  STAGE_RANK,
+  stageRankForTicket,
+  readWorkerPriority,
+  writeWorkerPriority,
+  buildGlobalRanking,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
@@ -3671,5 +3677,187 @@ describe("CTL-660: phase.dispatch.requested/launched emission (scheduler)", () =
 
     // The dispatch still advanced despite both lifecycle emitters throwing.
     expect(r.advanced).toContainEqual({ ticket: "CTL-304", phase: "plan" });
+  });
+});
+
+// ─── CTL-705 Phase 2: stageRankForTicket, readWorkerPriority, writeWorkerPriority, buildGlobalRanking ───
+import { PHASES } from "../lib/phase-fsm.mjs";
+
+describe("STAGE_RANK (CTL-705)", () => {
+  test("keys are exactly PHASES + 'remediate'", () => {
+    const expected = [...PHASES, "remediate"];
+    expect(Object.keys(STAGE_RANK)).toEqual(expected);
+  });
+
+  test("order: triage=0, research=1, plan=2, implement=3, remediate=4, verify=5, review=6, pr=7, monitor-merge=8, monitor-deploy=9", () => {
+    expect(STAGE_RANK.triage).toBe(0);
+    expect(STAGE_RANK.research).toBe(1);
+    expect(STAGE_RANK.plan).toBe(2);
+    expect(STAGE_RANK.implement).toBe(3);
+    expect(STAGE_RANK.remediate).toBe(4);
+    expect(STAGE_RANK.verify).toBe(5);
+    expect(STAGE_RANK.review).toBe(6);
+    expect(STAGE_RANK.pr).toBe(7);
+    expect(STAGE_RANK["monitor-merge"]).toBe(8);
+    expect(STAGE_RANK["monitor-deploy"]).toBe(9);
+  });
+});
+
+describe("stageRankForTicket (CTL-705)", () => {
+  test("returns -1 for empty signals", () => {
+    expect(stageRankForTicket({})).toBe(-1);
+    expect(stageRankForTicket(null)).toBe(-1);
+    expect(stageRankForTicket(undefined)).toBe(-1);
+  });
+
+  test("triage running → 0", () => {
+    expect(stageRankForTicket({ triage: "running" })).toBe(0);
+  });
+
+  test("research running → 1", () => {
+    expect(stageRankForTicket({ research: "running" })).toBe(1);
+  });
+
+  test("picks highest-indexed non-terminal phase when multiple signals", () => {
+    // plan done + implement running → implement wins (3)
+    expect(stageRankForTicket({ plan: "done", implement: "running" })).toBe(3);
+    // all of triage/research done, verify running → verify wins (5)
+    expect(stageRankForTicket({ triage: "done", research: "done", plan: "done", verify: "running" })).toBe(5);
+  });
+
+  test("preempted signal still yields its phase rank", () => {
+    expect(stageRankForTicket({ research: "preempted" })).toBe(1);
+    expect(stageRankForTicket({ implement: "preempted" })).toBe(3);
+  });
+
+  test("failed/stalled/aborted phases are excluded", () => {
+    expect(stageRankForTicket({ implement: "failed" })).toBe(-1);
+    expect(stageRankForTicket({ research: "stalled" })).toBe(-1);
+    expect(stageRankForTicket({ plan: "aborted" })).toBe(-1);
+  });
+
+  test("monitor-deploy done is terminal — excluded", () => {
+    expect(stageRankForTicket({ "monitor-deploy": "done" })).toBe(-1);
+    expect(stageRankForTicket({ "monitor-deploy": "skipped" })).toBe(-1);
+  });
+
+  test("monitor-deploy running is NOT terminal — included", () => {
+    expect(stageRankForTicket({ "monitor-deploy": "running" })).toBe(9);
+  });
+
+  test("remediate running → 4", () => {
+    expect(stageRankForTicket({ remediate: "running" })).toBe(4);
+  });
+});
+
+describe("readWorkerPriority / writeWorkerPriority (CTL-705)", () => {
+  test("missing priority.json → safe default {priority:5, createdAt:null}", () => {
+    expect(readWorkerPriority(orchDir, "CTL-NOT-EXIST")).toEqual({ priority: 5, createdAt: null });
+  });
+
+  test("round-trips priority + createdAt through write → read", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-42"), { recursive: true });
+    writeWorkerPriority(orchDir, "CTL-42", { priority: 1, createdAt: "2026-05-01T00:00:00Z" });
+    expect(readWorkerPriority(orchDir, "CTL-42")).toEqual({ priority: 1, createdAt: "2026-05-01T00:00:00Z" });
+  });
+
+  test("write is idempotent — second write overwrites first", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-43"), { recursive: true });
+    writeWorkerPriority(orchDir, "CTL-43", { priority: 3, createdAt: "2026-01-01T00:00:00Z" });
+    writeWorkerPriority(orchDir, "CTL-43", { priority: 2, createdAt: "2026-02-01T00:00:00Z" });
+    expect(readWorkerPriority(orchDir, "CTL-43")).toEqual({ priority: 2, createdAt: "2026-02-01T00:00:00Z" });
+  });
+
+  test("unreadable/malformed priority.json → safe default, never throws", () => {
+    const dir = join(orchDir, "workers", "CTL-44");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "priority.json"), "not-json");
+    expect(() => readWorkerPriority(orchDir, "CTL-44")).not.toThrow();
+    expect(readWorkerPriority(orchDir, "CTL-44")).toEqual({ priority: 5, createdAt: null });
+  });
+});
+
+describe("buildGlobalRanking (CTL-705)", () => {
+  function seedInFlight(ticket, phase, status, bgJobId, priority, createdAt) {
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", ticket, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status, bg_job_id: bgJobId })
+    );
+    if (priority !== undefined) {
+      writeWorkerPriority(orchDir, ticket, { priority, createdAt: createdAt ?? null });
+    }
+  }
+
+  function makeEligible(identifier, priority, createdAt) {
+    return { identifier, priority, createdAt: createdAt ?? "2026-05-01T00:00:00Z" };
+  }
+
+  test("in-flight ticket → inFlight:true with its stageRankForTicket stage", () => {
+    seedInFlight("CTL-1", "implement", "running", "abc1", 2, "2026-05-01T00:00:00Z");
+    const result = buildGlobalRanking(orchDir, []);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ identifier: "CTL-1", inFlight: true, stage: 3 });
+  });
+
+  test("queued (eligible, not started) ticket → inFlight:false with stage:-1", () => {
+    const eligible = [makeEligible("CTL-99", 2, "2026-05-01T00:00:00Z")];
+    const result = buildGlobalRanking(orchDir, eligible);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ identifier: "CTL-99", inFlight: false, stage: -1 });
+  });
+
+  test("ticket in both eligible and in-flight → listed once, as in-flight", () => {
+    seedInFlight("CTL-5", "research", "running", "abc5", 2, "2026-05-01T00:00:00Z");
+    const eligible = [makeEligible("CTL-5", 2, "2026-05-01T00:00:00Z")];
+    const result = buildGlobalRanking(orchDir, eligible);
+    expect(result.filter((d) => d.identifier === "CTL-5")).toHaveLength(1);
+    expect(result.find((d) => d.identifier === "CTL-5").inFlight).toBe(true);
+  });
+
+  test("result is sorted by rankTickets (higher stage in same band first)", () => {
+    seedInFlight("CTL-A", "verify", "running", "abc-a", 2, "2026-05-01T00:00:00Z");
+    seedInFlight("CTL-B", "research", "running", "abc-b", 2, "2026-05-01T00:00:00Z");
+    const result = buildGlobalRanking(orchDir, []);
+    // verify (stage 5) before research (stage 1) within same priority band
+    expect(result[0].identifier).toBe("CTL-A");
+    expect(result[1].identifier).toBe("CTL-B");
+  });
+
+  test("terminal in-flight tickets are excluded", () => {
+    seedInFlight("CTL-X", "monitor-deploy", "done", "dead", undefined, undefined);
+    const result = buildGlobalRanking(orchDir, []);
+    expect(result.find((d) => d.identifier === "CTL-X")).toBeUndefined();
+  });
+});
+
+describe("schedulerTick — writeWorkerPriority at new-work dispatch (CTL-705)", () => {
+  function dispatchWritesSignalWithBg(bgJobId, worktreePath) {
+    return ({ orchDir: od, ticket, phase }) => {
+      const dir = join(od, "workers", ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "dispatched", bg_job_id: bgJobId, worktreePath })
+      );
+      return { code: 0, stdout: "", stderr: "", worktreePath };
+    };
+  }
+
+  test("writes priority.json for a newly dispatched new-work ticket", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeEligibleProjection("CTL", {
+      tickets: [{ identifier: "CTL-9", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    });
+    const dispatch = dispatchWritesSignalWithBg("bg-job-9", "/wt/CTL-9");
+    schedulerTick(orchDir, {
+      readEligible: undefined,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    const pj = readWorkerPriority(orchDir, "CTL-9");
+    expect(pj.priority).toBe(1);
+    expect(pj.createdAt).toBe("2026-05-01T00:00:00Z");
   });
 });
