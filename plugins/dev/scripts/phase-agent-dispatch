@@ -233,16 +233,35 @@ resolve_config() {
 }
 CONFIG_PATH="$(resolve_config)"
 
+# (CTL-689) Machine-level fallback: keys absent from the repo `.catalyst/config.json`
+# resolve from `${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json` so a single
+# host-wide source (e.g. phase model overrides) applies across every repo a worker
+# might dispatch from. `CATALYST_MACHINE_CONFIG` overrides the path for tests.
+# Precedence: repo > machine > built-in default.
+MACHINE_CONFIG_PATH="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"
+
 config_value() {
 	local key="$1" default="$2"
-	if [[ -z $CONFIG_PATH ]] || ! command -v jq >/dev/null 2>&1; then
+	if ! command -v jq >/dev/null 2>&1; then
 		echo "$default"
 		return
 	fi
 	local v
-	v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
-	[[ -z $v ]] && v="$default"
-	echo "$v"
+	if [[ -n $CONFIG_PATH && -f $CONFIG_PATH ]]; then
+		v=$(jq -r "$key // empty" "$CONFIG_PATH" 2>/dev/null)
+		if [[ -n $v ]]; then
+			echo "$v"
+			return
+		fi
+	fi
+	if [[ -f $MACHINE_CONFIG_PATH ]]; then
+		v=$(jq -r "$key // empty" "$MACHINE_CONFIG_PATH" 2>/dev/null)
+		if [[ -n $v ]]; then
+			echo "$v"
+			return
+		fi
+	fi
+	echo "$default"
 }
 
 # ─── OTEL resource attributes (CTL-492, CTL-495) ───────────────────────────

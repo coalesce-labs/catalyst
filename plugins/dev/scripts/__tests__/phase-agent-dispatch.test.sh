@@ -123,6 +123,9 @@ fresh_env() {
 	ORCH_DIR="${TEST_DIR}/orch"
 	WORKER_DIR="${ORCH_DIR}/workers/CTL-100"
 	CONFIG_DIR="${TEST_DIR}/proj/.catalyst"
+	# (CTL-689) Point machine-config fallback at a per-test non-existent path so
+	# the user's real ~/.config/catalyst/config.json never contaminates assertions.
+	export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config-absent.json"
 	mkdir -p "$STUB_DIR" "$WORKER_DIR" "$CONFIG_DIR"
 	setup_claude_stub "$STUB_DIR"
 	export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
@@ -135,8 +138,9 @@ fresh_env() {
 echo "Test 1: dispatcher writes signal file with correct schema"
 fresh_env t1
 # (CTL-689) cd into a scratch proj/ that has no parent .catalyst/config.json so
-# the "defaulted to opus" assertion isn't contaminated by the repo's shipped
-# per-phase overrides when the suite runs from the repo root.
+# the "defaulted to opus" assertion isn't contaminated by the shipped repo config
+# when the suite runs from the repo root. (CATALYST_MACHINE_CONFIG already
+# neutralized for the machine-level fallback in fresh_env.)
 OUT=$(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>&1)
 SIGNAL="${WORKER_DIR}/phase-triage.json"
 if [[ ! -f $SIGNAL ]]; then
@@ -1079,54 +1083,85 @@ assert_eq '{"committed":false,"dirty":true}' "$(cat "${GWORK}/.catalyst/config.j
 BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "noise: rebase still advanced onto the new base"
 
-# ─── Test 34 (CTL-689): shipped repo config routes research/implement/pr to
-# sonnet; plan and review default to opus.
+# ─── Test 34 (CTL-689): machine-level config fallback resolves keys absent from
+# the repo config, and the repo config wins when both define the same key.
 #
-# Integration check: points --config at the repo's real `.catalyst/config.json`
-# (not a test-local synthetic) so any future drift in that file — e.g. a
-# rebased PR dropping the override or renaming `phaseAgents.models` — fails
-# this test instead of silently reverting the budget split.
+# Why: the host-wide ~/.config/catalyst/config.json is the canonical source for
+# settings (e.g. phase model overrides) that should apply across every repo a
+# worker dispatches from. The repo `.catalyst/config.json` may still pin its own
+# overrides — those must beat the machine value.
 echo ""
-echo "Test 34 (CTL-689): shipped config routes triage/research/implement/pr → sonnet"
-SHIPPED_CONFIG="${REPO_ROOT}/.catalyst/config.json"
-if [[ ! -f $SHIPPED_CONFIG ]]; then
-	fail "CTL-689: shipped config not found at ${SHIPPED_CONFIG}"
-else
-	declare -A EXPECT_MODEL=(
-		[triage]=sonnet
-		[research]=sonnet
-		[implement]=sonnet
-		[pr]=sonnet
-		[plan]=opus
-		[review]=opus
-	)
-	for phase in triage research implement pr plan review; do
-		fresh_env "t34_${phase}"
-		# Seed each phase's prior-phase artifact so the gate passes.
-		case "$phase" in
-		triage) : ;; # no prior-phase artifact required
-		research) : >"${WORKER_DIR}/triage.json" ;;
-		plan)
-			mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
-			: >"${TEST_DIR}/proj/thoughts/shared/research/2026-05-28-ctl-100.md"
-			;;
-		implement)
-			mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
-			: >"${TEST_DIR}/proj/thoughts/shared/plans/2026-05-28-ctl-100.md"
-			;;
-		review) : >"${WORKER_DIR}/verify.json" ;;
-		pr) : >"${WORKER_DIR}/review.json" ;;
-		esac
-		(cd "${TEST_DIR}/proj" &&
-			"$DISPATCH" --phase "$phase" --ticket CTL-100 \
-				--orch-dir "$ORCH_DIR" --orch-id orch-test \
-				--config "$SHIPPED_CONFIG" \
-				>"${TEST_DIR}/m34_${phase}.out" 2>/dev/null)
-		MODEL=$(jq -r '.model' "${TEST_DIR}/m34_${phase}.out")
-		assert_eq "${EXPECT_MODEL[$phase]}" "$MODEL" \
-			"shipped config: phase=${phase} → ${EXPECT_MODEL[$phase]}"
-	done
-fi
+echo "Test 34 (CTL-689): machine-config fallback resolves missing repo keys"
+fresh_env t34_machine_only
+# Write a machine config that pins implement → sonnet. No repo config.
+cat >"${TEST_DIR}/machine-config.json" <<'EOF'
+{
+  "catalyst": {
+    "orchestration": {
+      "phaseAgents": {
+        "models": { "implement": "sonnet" }
+      }
+    }
+  }
+}
+EOF
+export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config.json"
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+: >"${TEST_DIR}/proj/thoughts/shared/plans/2026-05-28-ctl-100.md"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/m34_machine.out" 2>/dev/null)
+MODEL_M=$(jq -r '.model' "${TEST_DIR}/m34_machine.out")
+assert_eq "sonnet" "$MODEL_M" "machine-only: implement → sonnet (from ~/.config fallback)"
+
+echo ""
+echo "Test 34b (CTL-689): repo config beats machine config for the same key"
+fresh_env t34_repo_beats_machine
+cat >"${TEST_DIR}/machine-config.json" <<'EOF'
+{
+  "catalyst": {
+    "orchestration": {
+      "phaseAgents": {
+        "models": { "implement": "sonnet" }
+      }
+    }
+  }
+}
+EOF
+export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config.json"
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "orchestration": {
+      "phaseAgents": {
+        "models": { "implement": "haiku" }
+      }
+    }
+  }
+}
+EOF
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+: >"${TEST_DIR}/proj/thoughts/shared/plans/2026-05-28-ctl-100.md"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/m34b.out" 2>/dev/null)
+MODEL_R=$(jq -r '.model' "${TEST_DIR}/m34b.out")
+assert_eq "haiku" "$MODEL_R" "repo wins: implement → haiku (repo) over sonnet (machine)"
+
+echo ""
+echo "Test 34c (CTL-689): missing key in BOTH falls through to built-in default"
+fresh_env t34_default_fallthrough
+# Empty machine config + empty repo config — should default to opus.
+echo '{}' >"${TEST_DIR}/machine-config.json"
+export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config.json"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>"${TEST_DIR}/m34c.out" 2>/dev/null)
+MODEL_D=$(jq -r '.model' "${TEST_DIR}/m34c.out")
+assert_eq "opus" "$MODEL_D" "default fallthrough: triage → opus when neither config sets it"
 
 echo ""
 echo "─────────────────────────────────────────────"
