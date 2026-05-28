@@ -59,6 +59,14 @@
           "label": null,
           "priority": null
         }
+      },
+      "phaseAgents": {
+        "models": {
+          "triage": "sonnet",
+          "research": "sonnet",
+          "implement": "sonnet",
+          "pr": "sonnet"
+        }
       }
     },
     "feedback": {
