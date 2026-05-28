@@ -5,6 +5,7 @@ import {
   applyPhaseStatus,
   applyTerminalDone,
   applyLabel,
+  applyTriageStatus,
   teamOf,
 } from "./linear-write.mjs";
 
@@ -225,5 +226,80 @@ describe("applyLabel", () => {
     };
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+});
+
+// CTL-704: applyTriageStatus — verified Todo→Triage write-back with pre/post state reads.
+// Uses injectable `fetchState` seam for the reads and `exec` seam for the transition.
+describe("applyTriageStatus", () => {
+  const resolveRepoRoot = () => "/repo";
+
+  // Builds a fake exec that returns a successful transition response (code 0, action: transitioned).
+  function makeTransitionExec(calls = []) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned" }), stderr: "" };
+    };
+  }
+
+  test("happy path — state lands → verified:true, from_state captured", () => {
+    const calls = [];
+    const exec = makeTransitionExec(calls);
+    let readCount = 0;
+    const fetchState = (_ticket, _opts) => (++readCount === 1 ? "Todo" : "Triage");
+    const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
+    expect(r).toEqual({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null });
+    // transition was called with --transition triage
+    const args = calls[0].args;
+    expect(args).toContain("--transition");
+    expect(args[args.indexOf("--transition") + 1]).toBe("triage");
+  });
+
+  test("false-success — exit 0 but stale state → verified:false", () => {
+    const exec = makeTransitionExec();
+    // Both reads return "Todo" — the write exited 0 but state never changed
+    const fetchState = () => "Todo";
+    const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
+    expect(r.applied).toBe(true);
+    expect(r.verified).toBe(false);
+    expect(r.to_state).toBe("Todo");
+    expect(r.reason).toBe("verify-failed");
+  });
+
+  test("transition fails (exit non-zero) — applied:false, no re-read attempted", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 1, stdout: JSON.stringify({ action: "update-failed" }), stderr: "" };
+    };
+    let readCount = 0;
+    const fetchState = (_ticket, _opts) => { readCount++; return "Todo"; };
+    const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
+    expect(r.applied).toBe(false);
+    expect(r.verified).toBe(false);
+    // fetchState called once for from_state, NOT a second time for post-transition verify
+    expect(readCount).toBe(1);
+  });
+
+  test("re-read fails (fetchTicketState returns null) → applied:true, verified:false, verify-unreadable", () => {
+    const exec = makeTransitionExec();
+    let readCount = 0;
+    const fetchState = () => (++readCount === 1 ? "Todo" : null);
+    const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
+    expect(r.applied).toBe(true);
+    expect(r.verified).toBe(false);
+    expect(r.to_state).toBeNull();
+    expect(r.reason).toBe("verify-unreadable");
+  });
+
+  test("never throws — a thrown exec still yields a result object", () => {
+    const exec = () => { throw new Error("spawn boom"); };
+    const fetchState = () => { throw new Error("read boom"); };
+    expect(() =>
+      applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState })
+    ).not.toThrow();
+    const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
+    expect(r.applied).toBe(false);
+    expect(r.verified).toBe(false);
   });
 });

@@ -7,6 +7,8 @@ sidebar:
 
 The guided workflow has six phases. Each one does something discrete, writes an artifact, and hands off to the next phase via the **workflow context file** at `.catalyst/.workflow-context.json`. This page explains each phase and how they connect.
 
+Before the pipeline starts, the daemon auto-transitions a ticket from **Todo → Triage** when it dispatches the triage agent. See [Todo column convention](./todo-column-convention.md) for how that write-back and verification work.
+
 ## The phases
 
 | # | Phase | Skill | Writes | Typical duration |

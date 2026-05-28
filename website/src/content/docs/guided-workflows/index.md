@@ -30,6 +30,7 @@ Each phase writes an artifact that the next phase reads. If you stop halfway (co
 - [Understanding phases](./phases/) — what each phase does, what it writes, and how workflow context tracks the handoff between them
 - [Oneshot vs manual](./oneshot-vs-manual/) — concrete guidance on which mode fits which ticket shape
 - [Handoffs and resume](./handoffs/) — how to stop midway and pick up later without losing context
+- [Todo column convention](./todo-column-convention/) — how moving a ticket to Todo hands it to the daemon and what the auto Todo→Triage transition does
 
 ## Level 1 vs Level 2 vs Level 3
 
