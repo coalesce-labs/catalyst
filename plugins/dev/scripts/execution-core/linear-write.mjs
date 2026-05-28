@@ -168,12 +168,22 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 }
 
 // classifyLabelFailure — map a `linearis issues update --labels` stderr to
-// one of the tagged reason codes. Both substrings are the literal forms
-// observed in ~/catalyst/execution-core/daemon.log during the CTL-380 QA
-// run (CTL-585 research §3, §7).
+// one of the tagged reason codes. The substrings are the literal forms observed
+// in ~/catalyst/execution-core/daemon.log:
+//   - "not found": workspace lacks the label (CTL-585 §3,§7 — CTL-380 QA run).
+//   - "Rate limit": linearis CLI surfaced an HTTP 429 (CTL-679 trigger).
+//   - "incorrect team": Linear's labels are team-scoped (different UUIDs per
+//     team for the same name). linearis resolved the label name in the wrong
+//     team's workspace context and sent the cross-team UUID, which Linear
+//     rejects. Permanent within one daemon lifetime (the resolver is global) —
+//     classified as missing-label so labelOnce writes the .skipped marker and
+//     stops the per-tick retry storm. (Observed on ADV tickets when the daemon
+//     orchestrates a team whose labels share names with the resolver's default
+//     team but have different UUIDs.)
 function classifyLabelFailure(stderr) {
   const s = String(stderr ?? "");
   if (s.includes("not found")) return "missing-label";
+  if (s.includes("incorrect team")) return "missing-label";
   if (s.includes("Rate limit")) return "rate-limited";
   return "transient";
 }
