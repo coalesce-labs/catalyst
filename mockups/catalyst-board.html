@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Catalyst · Board</title>
+<style>
+  /* ── Tokens (from orch-monitor DESIGN.md) ───────────────────────────── */
+  :root {
+    --surface-0:#0b0d10; --surface-1:#111318; --surface-2:#16191f;
+    --surface-3:#1c2028; --surface-4:#232a33;
+    --border:#262d36; --border-subtle:#1e242c;
+    --green:#39d07a; --blue:#4ea1ff; --accent:#4ea1ff; --red:#ef5d5d; --yellow:#eabc3b;
+    --fg:#e6e9ef; --fg-muted:#8b93a1; --fg-dim:#5b626f;
+    --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+    /* phase / column accents */
+    --c-triage:#64748b; --c-research:#3b82f6; --c-plan:#a855f7;
+    --c-implement:#10b981; --c-verify:#f59e0b; --c-review:#eab308;
+    --c-pr:#14b8a6; --c-merge:#4ea1ff; --c-deploy:#39d07a; --c-done:#6b7280;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; }
+  body {
+    background:var(--surface-0); color:var(--fg);
+    font-family:var(--sans); font-size:13px; line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+
+  /* ── Top chrome ─────────────────────────────────────────────────────── */
+  header.chrome {
+    height:48px; display:flex; align-items:center; gap:18px;
+    padding:0 16px; background:var(--surface-1);
+    border-bottom:1px solid var(--border); position:sticky; top:0; z-index:20;
+  }
+  .brand { display:flex; align-items:center; gap:9px; font-weight:600; letter-spacing:.2px; }
+  .brand .spark {
+    width:16px; height:16px; border-radius:4px;
+    background:linear-gradient(135deg,var(--blue),var(--green));
+    box-shadow:0 0 12px rgba(78,161,255,.45);
+  }
+  nav.views { display:flex; gap:2px; }
+  nav.views button {
+    appearance:none; border:1px solid transparent; background:transparent;
+    color:var(--fg-muted); font:inherit; font-size:12.5px; font-weight:500;
+    padding:5px 12px; border-radius:7px; cursor:pointer;
+  }
+  nav.views button:hover { color:var(--fg); background:var(--surface-2); }
+  nav.views button.active { color:var(--fg); background:var(--surface-3); border-color:var(--border); }
+
+  .chrome .spacer { flex:1; }
+
+  /* daemon strip — the stateless paradigm, made visible */
+  .daemons { display:flex; align-items:center; gap:14px; font-size:11.5px; color:var(--fg-muted); }
+  .daemons .grp { display:flex; align-items:center; gap:6px; }
+  .dot { width:7px; height:7px; border-radius:50%; display:inline-block; }
+  .dot.live { background:var(--green); box-shadow:0 0 0 0 rgba(57,208,122,.6); animation:pulse 2.4s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(57,208,122,.5);} 70%{box-shadow:0 0 0 6px rgba(57,208,122,0);} 100%{box-shadow:0 0 0 0 rgba(57,208,122,0);} }
+  .live-tag {
+    font-family:var(--mono); font-size:10px; letter-spacing:1.5px; color:var(--green);
+    border:1px solid rgba(57,208,122,.35); border-radius:5px; padding:2px 6px;
+  }
+
+  /* ── Sub-header (title + lens toggle) ───────────────────────────────── */
+  .subhead { display:flex; align-items:center; gap:16px; padding:14px 16px 10px; }
+  .subhead h1 { margin:0; font-size:15px; font-weight:600; }
+  .subhead .sub { color:var(--fg-muted); font-size:12px; }
+  .lens { margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .lens .label { font-size:11px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:.8px; }
+  .seg { display:inline-flex; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:2px; }
+  .seg button {
+    appearance:none; border:none; background:transparent; color:var(--fg-muted);
+    font:inherit; font-size:12px; padding:4px 11px; border-radius:6px; cursor:pointer;
+  }
+  .seg button.active { background:var(--surface-3); color:var(--fg); box-shadow:inset 0 0 0 1px var(--border); }
+
+  /* ── Board ──────────────────────────────────────────────────────────── */
+  .board { display:flex; gap:10px; padding:4px 16px 28px; overflow-x:auto; align-items:flex-start; }
+  .col { flex:0 0 196px; min-width:196px; display:flex; flex-direction:column; }
+  .col-head {
+    display:flex; align-items:center; gap:8px; padding:7px 9px; margin-bottom:8px;
+    background:var(--surface-1); border:1px solid var(--border);
+    border-radius:8px; position:relative;
+  }
+  .col-head::before { content:""; position:absolute; left:0; top:7px; bottom:7px; width:3px; border-radius:3px; background:var(--accent); }
+  .col-head .name { font-size:12px; font-weight:600; letter-spacing:.2px; }
+  .col-head .count { margin-left:auto; font-family:var(--mono); font-size:11px; color:var(--fg-muted); background:var(--surface-3); padding:1px 7px; border-radius:9px; }
+  .col-body { display:flex; flex-direction:column; gap:8px; min-height:24px; }
+
+  /* ── Cards ──────────────────────────────────────────────────────────── */
+  .card {
+    background:var(--surface-2); border:1px solid var(--border);
+    border-radius:9px; padding:10px 11px; cursor:default;
+    border-top:2px solid var(--accent); transition:transform .08s ease, border-color .12s ease, background .12s ease;
+  }
+  .card:hover { background:var(--surface-3); transform:translateY(-1px); }
+  .card .row { display:flex; align-items:center; gap:8px; }
+  .card .id { font-family:var(--mono); font-size:12px; font-weight:600; color:var(--blue); }
+  .card .title { color:var(--fg); font-size:12.5px; margin:5px 0 9px; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .card .foot { display:flex; align-items:center; gap:7px; }
+  .spacer-x { flex:1; }
+
+  /* chips */
+  .chip { font-family:var(--mono); font-size:10.5px; padding:1.5px 7px; border-radius:6px; white-space:nowrap; }
+  .chip.type { background:var(--surface-3); color:var(--fg-muted); border:1px solid var(--border); }
+  .chip.cost { color:var(--fg-muted); }
+  .chip.pr { color:var(--green); }
+  .chip.pr::before { content:"#"; opacity:.6; }
+  .chip.repo { background:var(--surface-3); color:var(--fg-dim); border:1px solid var(--border-subtle); }
+
+  .phasepill { font-family:var(--mono); font-size:10.5px; padding:1.5px 8px; border-radius:6px; color:#0b0d10; font-weight:600; }
+
+  .wdot { width:8px; height:8px; border-radius:50%; flex:0 0 auto; }
+  .wdot.busy   { background:var(--green); box-shadow:0 0 8px rgba(57,208,122,.55); }
+  .wdot.waiting{ background:var(--yellow); }
+  .wdot.idle   { background:#5b6b80; }
+  .wdot.failed { background:var(--red); box-shadow:0 0 8px rgba(239,93,93,.5); }
+  .wdot.done   { background:#6b7280; }
+
+  /* worker cards */
+  .wcard .wname { font-family:var(--mono); font-size:11px; color:var(--fg-muted); display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
+  .wcard .tickets { display:flex; flex-wrap:wrap; gap:5px; margin:8px 0 9px; }
+  .wcard .tk {
+    font-family:var(--mono); font-size:13px; font-weight:700; color:var(--blue);
+    background:rgba(78,161,255,.10); border:1px solid rgba(78,161,255,.30);
+    padding:3px 9px; border-radius:7px;
+  }
+  .wcard .runtime { font-family:var(--mono); font-size:10.5px; color:var(--fg-dim); }
+  .wcard.preview { border-style:dashed; border-top-style:solid; background:linear-gradient(180deg, rgba(78,161,255,.05), var(--surface-2)); }
+  .preview-tag { font-family:var(--mono); font-size:9.5px; letter-spacing:1px; color:var(--blue); border:1px solid rgba(78,161,255,.35); border-radius:5px; padding:1px 6px; }
+
+  .empty { color:var(--fg-dim); font-size:11.5px; text-align:center; padding:14px 0; border:1px dashed var(--border-subtle); border-radius:8px; }
+
+  footer.legend { display:flex; gap:18px; flex-wrap:wrap; padding:0 16px 24px; color:var(--fg-dim); font-size:11px; }
+  footer.legend .grp { display:flex; align-items:center; gap:6px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+  <header class="chrome">
+    <div class="brand"><span class="spark"></span>Catalyst</div>
+    <nav class="views">
+      <button id="nav-tickets" class="active" onclick="setView('tickets')">Tickets</button>
+      <button id="nav-workers" onclick="setView('workers')">Workers</button>
+    </nav>
+    <div class="spacer"></div>
+    <div class="daemons">
+      <span class="grp"><span class="dot live"></span> daemon</span>
+      <span class="grp"><span class="dot live"></span> broker</span>
+      <span class="grp"><span class="dot live"></span> monitor</span>
+      <span class="live-tag">LIVE</span>
+    </div>
+  </header>
+
+  <div class="subhead">
+    <h1 id="title">Tickets</h1>
+    <span class="sub" id="subtitle">Every ticket the daemon is moving through the pipeline</span>
+    <div class="lens" id="lens-wrap">
+      <span class="label">Group by</span>
+      <div class="seg">
+        <button id="lens-linear" class="active" onclick="setLens('linear')">Linear state</button>
+        <button id="lens-phase" onclick="setLens('phase')">Pipeline</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="board" id="board"></div>
+
+  <footer class="legend" id="legend"></footer>
+
+<script>
+/* ──────────────────────────────────────────────────────────────────────────
+   Live-shaped fixtures — seeded from this morning's real in-flight state
+   (claude agents --json + execution-core/workers/<T>/phase-*.json, 2026-05-29).
+   phase ∈ triage research plan implement verify review pr merge deploy done
+   wstatus ∈ busy waiting idle failed done  (null = no live worker)
+─────────────────────────────────────────────────────────────────────────── */
+const TICKETS = [
+  // ── in-flight, with live workers ──
+  { id:"CTL-682", title:"Broker self-filter regression on filter.wake re-emit", type:"bug",      repo:"catalyst", phase:"research",  wstatus:"idle",    cost:0.41, pr:null,  rt:"6m" },
+  { id:"CTL-713", title:"Surface dispatch-cooldown TTL + GC sweep in event log",  type:"feature",  repo:"catalyst", phase:"research",  wstatus:"busy",    cost:0.88, pr:null,  rt:"11m" },
+  { id:"CTL-683", title:"Scheduler preemption: park + resume low-rank worker",    type:"feature",  repo:"catalyst", phase:"plan",      wstatus:"failed",  cost:1.12, pr:null,  rt:"—",  note:"plan failed · needs human" },
+  { id:"CTL-703", title:"Reaper boot-replay misses unmatched reap-intents",       type:"bug",      repo:"catalyst", phase:"implement", wstatus:"idle",    cost:2.34, pr:null,  rt:"22m" },
+  { id:"CTL-692", title:"Per-phase turn-cap resume after turn-cap-exhausted",     type:"feature",  repo:"catalyst", phase:"implement", wstatus:"idle",    cost:3.07, pr:null,  rt:"31m" },
+  { id:"CTL-680", title:"merge-tree check vs current origin/main in verify",      type:"refactor", repo:"catalyst", phase:"verify",    wstatus:"busy",    cost:4.18, pr:null,  rt:"38m" },
+  { id:"CTL-681", title:"phase-review rebases complementary test conflict",       type:"bug",      repo:"catalyst", phase:"review",    wstatus:"busy",    cost:3.55, pr:null,  rt:"27m" },
+  { id:"CTL-684", title:"Daemon reclaim false-dead premature advance guard",      type:"bug",      repo:"catalyst", phase:"pr",        wstatus:"busy",    cost:5.02, pr:1201,  rt:"44m" },
+  { id:"CTL-709", title:"monitor-merge BEHIND treadmill → arm --auto squash",     type:"bug",      repo:"catalyst", phase:"merge",     wstatus:"busy",    cost:4.71, pr:1198,  rt:"52m" },
+  { id:"CTL-711", title:"Auto-dispatch triage for pre-existing eligible tickets", type:"feature",  repo:"catalyst", phase:"deploy",    wstatus:"busy",    cost:3.90, pr:1191,  rt:"1h 4m" },
+  { id:"ADV-1213",title:"Warranty agreements: canary post-deploy verification",   type:"feature",  repo:"adva",     phase:"deploy",    wstatus:"waiting", cost:6.21, pr:842,   rt:"1h 18m" },
+  { id:"CTL-685", title:"monitor-deploy signal overwrite drops bg_job_id",        type:"bug",      repo:"catalyst", phase:"deploy",    wstatus:"idle",    cost:2.88, pr:1188,  rt:"49m" },
+  { id:"CTL-688", title:"Verify partial multi-phase routes verify→remediate",     type:"bug",      repo:"catalyst", phase:"deploy",    wstatus:"idle",    cost:5.44, pr:1199,  rt:"58m" },
+
+  // ── recently completed (no live worker) ──
+  { id:"CTL-695", title:"phase-monitor-deploy reads merge SHA from signal",       type:"feature",  repo:"catalyst", phase:"done", wstatus:null, cost:4.10, pr:1187 },
+  { id:"CTL-694", title:"Periodic orphan-sweep.sh for unattended host cleanup",   type:"chore",    repo:"catalyst", phase:"done", wstatus:null, cost:3.22, pr:1195 },
+  { id:"CTL-678", title:"Fresh worktree bun install before bun test",             type:"chore",    repo:"catalyst", phase:"done", wstatus:null, cost:1.90, pr:1180 },
+  { id:"CTL-675", title:"Research doc-on-disk unblocks reclaim work-done probe",  type:"refactor", repo:"catalyst", phase:"done", wstatus:null, cost:2.65, pr:1176 },
+  { id:"CTL-670", title:"Revive before first-commit window spawns duplicate",     type:"bug",      repo:"catalyst", phase:"done", wstatus:null, cost:3.01, pr:1171 },
+];
+
+/* Workers: usually 1 worker : 1 ticket : 1 phase. The last card is a forward-
+   looking PREVIEW of the "one worker, multiple tickets, single PR" model. */
+const WORKERS = TICKETS
+  .filter(t => t.wstatus)
+  .map(t => ({
+    name:`o-${t.id}:${t.id}:${t.phase}:1`,
+    tickets:[t.id], phase:t.phase, repo:t.repo, wstatus:t.wstatus, rt:t.rt, cost:t.cost,
+  }));
+WORKERS.push({
+  name:"o-ctl-batch-a:multi:implement:1", tickets:["CTL-689","CTL-690","CTL-691"],
+  phase:"implement", repo:"catalyst", wstatus:"busy", rt:"19m", cost:7.40, preview:true,
+});
+
+/* ── lens definitions ─────────────────────────────────────────────────── */
+const PHASE_C = { triage:"--c-triage", research:"--c-research", plan:"--c-plan",
+  implement:"--c-implement", verify:"--c-verify", review:"--c-review",
+  pr:"--c-pr", merge:"--c-merge", deploy:"--c-deploy", done:"--c-done" };
+
+const PHASE_TO_LINEAR = { triage:"Research", research:"Research", plan:"Plan",
+  implement:"Implement", verify:"Validate", review:"Validate",
+  pr:"PR", merge:"PR", deploy:"Done", done:"Done" };
+
+const LINEAR_COLS = [
+  { key:"Research",  c:"--c-research"  },
+  { key:"Plan",      c:"--c-plan"      },
+  { key:"Implement", c:"--c-implement" },
+  { key:"Validate",  c:"--c-verify"    },
+  { key:"PR",        c:"--c-pr"        },
+  { key:"Done",      c:"--c-done"      },
+];
+const PHASE_COLS = [
+  { key:"triage",   label:"Triage",   c:"--c-triage"   },
+  { key:"research", label:"Research", c:"--c-research" },
+  { key:"plan",     label:"Plan",     c:"--c-plan"     },
+  { key:"implement",label:"Implement",c:"--c-implement"},
+  { key:"verify",   label:"Verify",   c:"--c-verify"   },
+  { key:"review",   label:"Review",   c:"--c-review"   },
+  { key:"pr",       label:"PR",       c:"--c-pr"       },
+  { key:"merge",    label:"Merge",    c:"--c-merge"    },
+  { key:"deploy",   label:"Deploy",   c:"--c-deploy"   },
+];
+const WORKER_COLS = [
+  { key:"busy",    label:"Busy",    c:"--green"  },
+  { key:"waiting", label:"Waiting", c:"--yellow" },
+  { key:"idle",    label:"Idle",    c:"--blue"   },
+  { key:"done",    label:"Done",    c:"--c-done" },
+  { key:"failed",  label:"Failed",  c:"--red"    },
+];
+
+let view = "tickets";   // tickets | workers
+let lens = "linear";    // linear | phase  (tickets view only)
+
+const $ = (id) => document.getElementById(id);
+const cssv = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const esc = (s) => String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+
+function setView(v){
+  view = v;
+  $("nav-tickets").classList.toggle("active", v==="tickets");
+  $("nav-workers").classList.toggle("active", v==="workers");
+  $("lens-wrap").classList.toggle("hidden", v!=="tickets");
+  if (v==="tickets"){ $("title").textContent="Tickets"; $("subtitle").textContent="Every ticket the daemon is moving through the pipeline"; }
+  else { $("title").textContent="Workers"; $("subtitle").textContent="Short-lived workers the daemon has deployed — one per phase"; }
+  render();
+}
+function setLens(l){
+  lens = l;
+  $("lens-linear").classList.toggle("active", l==="linear");
+  $("lens-phase").classList.toggle("active", l==="phase");
+  render();
+}
+
+function ticketCard(t){
+  const col = lens==="phase" ? PHASE_C[t.phase] : PHASE_C[t.phase];
+  const accent = cssv(col);
+  const phaseLabel = t.phase;
+  const wdot = t.wstatus ? `<span class="wdot ${t.wstatus}" title="worker ${t.wstatus}"></span>` : "";
+  const pr = t.pr ? `<span class="chip pr mono">${t.pr}</span>` : "";
+  const note = t.note ? `<span class="chip mono" style="color:var(--red)">${esc(t.note)}</span>` : "";
+  return `
+  <div class="card" style="border-top-color:${accent}">
+    <div class="row">
+      <span class="id">${esc(t.id)}</span>
+      <span class="spacer-x"></span>
+      <span class="chip type">${esc(t.type)}</span>
+    </div>
+    <div class="title">${esc(t.title)}</div>
+    <div class="foot">
+      ${wdot}
+      <span class="phasepill" style="background:${accent}">${esc(phaseLabel)}</span>
+      <span class="spacer-x"></span>
+      ${note || pr || `<span class="chip cost mono">$${t.cost.toFixed(2)}</span>`}
+    </div>
+  </div>`;
+}
+
+function workerCard(w){
+  const accent = cssv(PHASE_C[w.phase]);
+  const chips = w.tickets.map(tk => `<span class="tk">${esc(tk)}</span>`).join("");
+  const previewTag = w.preview ? `<span class="preview-tag">ROADMAP · 1 WORKER → 1 PR</span>` : "";
+  return `
+  <div class="card wcard ${w.preview?'preview':''}" style="border-top-color:${accent}">
+    <div class="row">
+      <span class="wdot ${w.wstatus}"></span>
+      <span class="wname">${esc(w.name)}</span>
+      <span class="spacer-x"></span>
+      <span class="runtime">${esc(w.rt||"")}</span>
+    </div>
+    <div class="tickets">${chips}</div>
+    <div class="foot">
+      <span class="phasepill" style="background:${accent}">${esc(w.phase)}</span>
+      <span class="chip repo mono">${esc(w.repo)}</span>
+      <span class="spacer-x"></span>
+      ${previewTag || `<span class="chip cost mono">$${w.cost.toFixed(2)}</span>`}
+    </div>
+  </div>`;
+}
+
+function column(label, accentVar, count, inner){
+  const accent = cssv(accentVar);
+  return `
+  <div class="col">
+    <div class="col-head" style="">
+      <span class="name">${esc(label)}</span>
+      <span class="count">${count}</span>
+    </div>
+    <div class="col-body">${inner || '<div class="empty">—</div>'}</div>
+  </div>`
+    // inject accent into the ::before bar via inline style on a wrapper
+    .replace('<div class="col-head" style="">', `<div class="col-head" style="--accent:${accent}">`);
+}
+
+function render(){
+  const board = $("board");
+  let html = "";
+
+  if (view === "tickets" && lens === "linear"){
+    for (const c of LINEAR_COLS){
+      const items = TICKETS.filter(t => PHASE_TO_LINEAR[t.phase] === c.key);
+      html += column(c.key, c.c, items.length, items.map(ticketCard).join(""));
+    }
+  } else if (view === "tickets" && lens === "phase"){
+    for (const c of PHASE_COLS){
+      const items = TICKETS.filter(t => t.phase === c.key);
+      html += column(c.label, c.c, items.length, items.map(ticketCard).join(""));
+    }
+  } else { // workers
+    for (const c of WORKER_COLS){
+      const items = WORKERS.filter(w => w.wstatus === c.key);
+      html += column(c.label, c.c, items.length, items.map(workerCard).join(""));
+    }
+  }
+  board.innerHTML = html;
+  renderLegend();
+}
+
+function renderLegend(){
+  let items;
+  if (view==="workers"){
+    items = WORKER_COLS.map(c => `<span class="grp"><span class="dot" style="background:${cssv(c.c)}"></span>${c.label}</span>`);
+    items.unshift(`<span class="grp" style="color:var(--fg-muted)">worker status:</span>`);
+  } else {
+    const cols = lens==="phase" ? PHASE_COLS : LINEAR_COLS.map(c=>({label:c.key,c:c.c}));
+    items = cols.map(c => `<span class="grp"><span class="dot" style="background:${cssv(c.c)}"></span>${c.label||c.key}</span>`);
+    items.unshift(`<span class="grp" style="color:var(--fg-muted)">${lens==="phase"?'pipeline phase:':'linear state:'}</span>`);
+  }
+  $("legend").innerHTML = items.join("");
+}
+
+render();
+</script>
+</body>
+</html>
