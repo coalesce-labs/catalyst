@@ -84,6 +84,31 @@ function writeSignal(ticket, phase, status) {
   writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, status }));
 }
 
+// writeSignalRaw — writes phase-<phase>.json with arbitrary raw fields (e.g.
+// bg_job_id, worktreePath) that the existing writeSignal helper omits.
+function writeSignalRaw(ticket, phase, obj) {
+  const dir = join(orchDir, "workers", ticket);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify(obj));
+}
+
+// readEventLog — reads the current UTC YYYY-MM.jsonl under catalystDir/events/
+// and returns parsed event objects. Returns [] on missing/empty log.
+function readEventLog() {
+  const now = new Date();
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const logPath = join(catalystDir, "events", `${ym}.jsonl`);
+  try {
+    return readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+
 // appendToEventLog — mkdirSync <CATALYST_DIR>/events/ and append to the
 // current UTC YYYY-MM.jsonl (the path getEventLogPath() resolves).
 function appendToEventLog(line) {
@@ -4454,5 +4479,103 @@ describe("resume-after-preemption sweep (CTL-705 Phase 5)", () => {
     // The resume sweep may dispatch CTL-2 at its parkedFrom phase (correct behavior).
     // But the new-work pull (sweep 2) must NOT include CTL-2 in r.dispatched (that's for fresh starts).
     expect(r.dispatched).not.toContain("CTL-2");
+  });
+});
+
+// ── CTL-695: terminal-worker reap sweep ──────────────────────────────────────
+
+describe("schedulerTick — terminal-worker reap sweep (CTL-695)", () => {
+  test("emits phase.terminal.reap-requested for a failed worker with a bg_job_id", () => {
+    writeSignalRaw("CTL-1", "implement", {
+      status: "failed",
+      bg_job_id: "dead1234",
+      worktreePath: "/wt/CTL-1",
+    });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
+    const evts = readEventLog().filter(
+      (e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "dead1234"
+    );
+    expect(evts.length).toBe(1);
+    expect(evts[0].phase).toBe("implement");
+  });
+
+  test("emits for stalled worker and for terminal monitor-deploy done/skipped", () => {
+    writeSignalRaw("CTL-2", "review", { status: "stalled", bg_job_id: "stl12345" });
+    writeSignalRaw("CTL-3", "monitor-deploy", { status: "done", bg_job_id: "fin12345" });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
+    const evts = readEventLog();
+    expect(evts.some((e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "stl12345")).toBe(true);
+    expect(evts.some((e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "fin12345")).toBe(true);
+  });
+
+  test("does NOT re-emit on a second tick (once-marker)", () => {
+    writeSignalRaw("CTL-1", "implement", { status: "failed", bg_job_id: "dead1234" });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
+    const n = readEventLog().filter(
+      (e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "dead1234"
+    ).length;
+    expect(n).toBe(1);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".terminal-reap-implement.applied"))).toBe(true);
+  });
+
+  test("skips a terminal signal with no bg_job_id (no spurious emit, no marker)", () => {
+    writeSignalRaw("CTL-1", "implement", { status: "failed" }); // no bg_job_id
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
+    expect(readEventLog().some((e) => e.event === "phase.terminal.reap-requested")).toBe(false);
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-1", ".terminal-reap-implement.applied"))
+    ).toBe(false);
+  });
+
+  test("does NOT emit terminal-reap for an intermediate done phase that is advancing", () => {
+    // research:done → plan dispatches (advancement sweep); the terminal-reap sweep
+    // must not also emit phase.terminal.reap-requested for the research worker.
+    writeSignalRaw("CTL-4", "research", { status: "done", bg_job_id: "res12345" });
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      const dir = join(od, "workers", ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "running" })
+      );
+      return { code: 0 };
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch });
+    const evts = readEventLog();
+    expect(evts.some((e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "res12345")).toBe(false);
+  });
+});
+
+describe("schedulerTick — predecessor reap on dispatch failure (CTL-695)", () => {
+  test("reaps the finished predecessor when successor dispatch fails (rc!=0)", () => {
+    writeSignalRaw("CTL-5", "research", {
+      status: "done",
+      bg_job_id: "pre12345",
+      worktreePath: "/wt/CTL-5",
+    });
+    const dispatch = () => ({ code: 1 }); // plan dispatch fails
+    schedulerTick(orchDir, { readEligible: () => [], dispatch });
+    expect(
+      readEventLog().some(
+        (e) => e.event === "phase.predecessor.reap-requested" && e.bg_job_id === "pre12345"
+      )
+    ).toBe(true);
+  });
+
+  test("reaps the finished predecessor when verify-dispatched check fails (rc=0, no live signal)", () => {
+    writeSignalRaw("CTL-6", "research", {
+      status: "done",
+      bg_job_id: "pre67890",
+      worktreePath: "/wt/CTL-6",
+    });
+    // rc=0 but dispatch does NOT write a signal → verifyDispatched returns !ok
+    const dispatch = () => ({ code: 0 });
+    schedulerTick(orchDir, { readEligible: () => [], dispatch });
+    expect(
+      readEventLog().some(
+        (e) => e.event === "phase.predecessor.reap-requested" && e.bg_job_id === "pre67890"
+      )
+    ).toBe(true);
   });
 });

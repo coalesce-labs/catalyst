@@ -134,6 +134,9 @@ export class Reaper {
         // CTL-661 hole #3: single-target stop of a reclaimed (genuinely-hung)
         // worker on the recovery happy path. Busy-OK, like the others.
         case "phase.reclaim.reap-requested":
+        // CTL-695: terminal-worker reap — same authoritative single-target
+        // (busy-OK) path as predecessor/yield/supersede/revive/abort.
+        case "phase.terminal.reap-requested":
           await this._handleBgReap(event);
           break;
         // CTL-661 hole #4: the reconcile event is dual-purpose, disambiguated by

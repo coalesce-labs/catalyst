@@ -46,12 +46,27 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 10 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 11 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(10);
+    expect(REAP_INTENT_TYPES.length).toBe(11);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
+  });
+
+  it("accepts phase.terminal.reap-requested (CTL-695)", async () => {
+    const { emitReapIntent, REAP_INTENT_TYPES } = await freshModule();
+    expect(REAP_INTENT_TYPES).toContain("phase.terminal.reap-requested");
+    const ok = await emitReapIntent("phase.terminal.reap-requested", {
+      ticket: "CTL-695",
+      phase: "monitor-deploy",
+      bgJobId: "abcd1234",
+      reason: "ctl-695-terminal-worker",
+    });
+    expect(ok).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("phase.terminal.reap-requested");
+    expect(last.bg_job_id).toBe("abcd1234");
   });
 
   it("accepts phase.reclaim.reap-requested (CTL-661 hole #3)", async () => {

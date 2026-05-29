@@ -24,6 +24,10 @@ export const REAP_INTENT_TYPES = Object.freeze([
   "worktree.presweep.reap-requested",
   "pr.merged.cleanup-requested",
   "orphans.reap-requested",
+  // CTL-695: terminal-worker reap — a phase signal reached failed/stalled, or the
+  // final monitor-deploy phase completed, with no successor dispatch to trigger the
+  // happy-path predecessor reap. Routed to the single-target (busy-OK) reap path.
+  "phase.terminal.reap-requested",
 ]);
 
 // camelCase → snake_case key mapping. The on-disk schema uses snake_case so
