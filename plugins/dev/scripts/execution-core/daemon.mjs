@@ -45,6 +45,10 @@ import {
 } from "./index.mjs";
 import { Reaper, defaultReadActivePhaseSignal } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
+import {
+  startWorktreeRefreshTimer,
+  readWorktreeRefreshConfig,
+} from "./worktree-refresh-timer.mjs";
 import { reconcileBootResume } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
@@ -70,6 +74,8 @@ let _pidFile = null;
 // CTL-649: reap-intent reconciler + periodic orphan-sweep timer.
 let _reaper = null;
 let _orphanTimer = null;
+// CTL-707: periodic background worktree refresh timer.
+let _refreshTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 let _eventWatcher = null;
@@ -114,6 +120,8 @@ export function startDaemon({
   // that only exercise monitor + scheduler.
   enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
   orphanReaperConfig = null,
+  // CTL-707: worktree refresh timer config (catalyst.orchestration.worktreeRefresh).
+  worktreeRefreshConfig = null,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -217,7 +225,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -241,7 +249,7 @@ export function startDaemon({
 //
 // Boot replay is best-effort: if it throws, log and continue with live
 // consumption only.
-function startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir }) {
+function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir }) {
   const eventLogPath = getEventLogPath();
   // CTL-649: the periodic sweep honors the configured recency floor
   // (minIdleSeconds, default 900s). includeInteractive stays at its safe
@@ -289,6 +297,17 @@ function startReaperAndTimer({ orphanReaperConfig, debounceMs, orchDir }) {
     enabled: cfg.enabled !== false,
     intervalSeconds: cfg.intervalSeconds ?? 600,
   });
+
+  // CTL-707: start the periodic worktree-refresh timer.
+  const refreshCfg = worktreeRefreshConfig ?? {};
+  if (refreshCfg.enabled !== false) {
+    _refreshTimer = startWorktreeRefreshTimer({
+      enabled: true,
+      intervalSeconds: refreshCfg.intervalSeconds ?? 300,
+      quietSeconds: refreshCfg.quietSeconds ?? 30,
+      orchDir,
+    });
+  }
 }
 
 // parseEventTailChunk — pure, deterministic split of a freshly-read byte chunk
@@ -425,6 +444,14 @@ export function stopDaemon() {
     }
     _orphanTimer = null;
   }
+  if (_refreshTimer) {
+    try {
+      _refreshTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _refreshTimer = null;
+  }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
   if (_waitWatcher) {
@@ -471,6 +498,8 @@ function main() {
   const configPath =
     process.env.CATALYST_CONFIG_FILE || resolve(process.cwd(), ".catalyst", "config.json");
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
+  // CTL-707: read the worktree-refresh config from the same config file.
+  const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath);
   // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
   // and thread them into startDaemon → scheduler + boot-resume. The
   // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
@@ -497,7 +526,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678
+    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

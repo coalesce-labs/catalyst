@@ -3,9 +3,17 @@
 # Mechanically rebase a build-phase worktree onto origin/<base> at dispatch
 # time, stashing machine-local noise (.catalyst/config.json, .trunk/* symlink
 # dirs) across the rebase. Clean → 0; conflict → abort + restore + 2.
+# CTL-707: adds rebase_onto_base_classified with 4-category conflict triage.
 # Pure git/bash; NO claude, NO force-push, NO PR interaction.
 
 set -uo pipefail
+
+# CTL-707: source rebase-telemetry.sh best-effort so pure-mechanics callers
+# (tests that don't set EVENTS_DIR) still run without the telemetry dependency.
+_WR_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
+_WR_DIR="$(cd "$(dirname "$_WR_SELF")" && pwd)"
+# shellcheck source=./rebase-telemetry.sh
+[[ -f "${_WR_DIR}/rebase-telemetry.sh" ]] && source "${_WR_DIR}/rebase-telemetry.sh" 2>/dev/null || true
 
 # WORKTREE_NOISE_PATHS — single source of truth for files that diverge
 # per-worktree (machine-local noise) and must be stashed before a rebase,
@@ -88,4 +96,147 @@ rebase_onto_base() {
   git rebase --abort 2>/dev/null || true
   noise_stash_pop "$marker"
   return 2
+}
+
+# ─── CTL-707: Layer 2 — dispatch-time conflict classifier ────────────────────
+
+# classify_conflicted_files — populate RT_TEST, RT_NOISE, RT_THOUGHTS, RT_SOURCE
+# arrays with the current rebase's unmerged paths, bucketed by type.
+# Must be called while a rebase is stopped (conflict state).
+classify_conflicted_files() {
+  RT_TEST=(); RT_NOISE=(); RT_THOUGHTS=(); RT_SOURCE=()
+  local files f
+  files="$(git diff --name-only --diff-filter=U 2>/dev/null)"
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    case "$f" in
+      thoughts/*) RT_THOUGHTS+=("$f"); continue ;;
+    esac
+    if printf '%s' "$f" | grep -qE '(\.test\.|\.spec\.|__test__|_test\.)'; then
+      RT_TEST+=("$f")
+    elif printf '%s' "$f" | grep -qE '^(\.catalyst/|\.trunk/)'; then
+      RT_NOISE+=("$f")
+    else
+      RT_SOURCE+=("$f")
+    fi
+  done <<<"$files"
+}
+
+# ctl708_escalate FILES… — CTL-708 coordination stub. Always returns 1
+# (unavailable) until CTL-708 lands; Layer 2 treats non-zero as stall.
+ctl708_escalate() { return 1; }
+
+# _stall_and_return MARKER REASON RC — shared stall helper: abort in-progress
+# rebase, pop the noise stash, emit a stalled event, return the given RC.
+_stall_and_return() {
+  local marker="$1" reason="$2" rc="$3"
+  git rebase --abort 2>/dev/null || true
+  noise_stash_pop "$marker"
+  # Build a JSON array from the stalled files for telemetry.
+  local all_stalled=()
+  case "$reason" in
+    thoughts_symlink_broken)
+      all_stalled=("${RT_THOUGHTS[@]+"${RT_THOUGHTS[@]}"}")
+      ;;
+    source_conflict_ctl708_unavailable|continue_failed)
+      all_stalled=("${RT_SOURCE[@]+"${RT_SOURCE[@]}"}")
+      ;;
+  esac
+  local files_json="[]"
+  if [[ ${#all_stalled[@]} -gt 0 ]]; then
+    files_json="$(printf '%s\n' "${all_stalled[@]}" | jq -R . | jq -s . 2>/dev/null || echo "[]")"
+  fi
+  local category
+  case "$reason" in
+    thoughts_symlink_broken)             category="thoughts" ;;
+    source_conflict_ctl708_unavailable)  category="source"   ;;
+    *)                                   category="unknown"  ;;
+  esac
+  emit_rebase_conflict_stalled \
+    --orch     "${ORCH_ID:-}" \
+    --ticket   "${TICKET:-}" \
+    --phase    "${PHASE:-}" \
+    --reason   "$reason" \
+    --files    "$files_json" \
+    --category "$category" 2>/dev/null || true
+  return "$rc"
+}
+
+# rebase_onto_base_classified BASE
+# Like rebase_onto_base but, on a conflict, categorizes the conflicted files
+# and either auto-resolves (tests/noise only) or returns a typed sentinel.
+#
+# Return codes:
+#   0 — clean or additively auto-resolved
+#   1 — fetch / other pre-rebase failure (proceed un-rebased)
+#   2 — terminal source conflict (CTL-708 unavailable) or continue failed
+#   3 — thoughts/** conflict (symlink safety)
+rebase_onto_base_classified() {
+  local base="$1" marker
+  git fetch --quiet origin "$base" 2>/dev/null || return 1
+  marker="$(noise_stash_push)"
+
+  if git rebase --quiet "origin/${base}" 2>/dev/null; then
+    noise_stash_pop "$marker"
+    emit_auto_rebased \
+      --orch   "${ORCH_ID:-}" \
+      --ticket "${TICKET:-}" \
+      --phase  "${PHASE:-}" \
+      --strategy clean 2>/dev/null || true
+    return 0
+  fi
+
+  # Rebase stopped on a conflict — categorize before deciding.
+  classify_conflicted_files
+  local tc nc sc thc
+  tc="${#RT_TEST[@]}"
+  nc="${#RT_NOISE[@]}"
+  sc="${#RT_SOURCE[@]}"
+  thc="${#RT_THOUGHTS[@]}"
+  emit_rebase_conflict_categorized \
+    --orch          "${ORCH_ID:-}" \
+    --ticket        "${TICKET:-}" \
+    --phase         "${PHASE:-}" \
+    --test-count    "$tc" \
+    --noise-count   "$nc" \
+    --source-count  "$sc" \
+    --thoughts-count "$thc" 2>/dev/null || true
+
+  # thoughts/** → always stall (symlink safety: never auto-resolve).
+  if [[ $thc -gt 0 ]]; then
+    _stall_and_return "$marker" thoughts_symlink_broken 3
+    return
+  fi
+
+  # Source files → try CTL-708; stub always returns unavailable → stall.
+  if [[ $sc -gt 0 ]]; then
+    if ! ctl708_escalate "${RT_SOURCE[@]+"${RT_SOURCE[@]}"}"; then
+      _stall_and_return "$marker" source_conflict_ctl708_unavailable 2
+      return
+    fi
+    # CTL-708 resolved source files; fall through to test+noise resolution.
+  fi
+
+  # Only tests and/or noise remain — resolve additively.
+  if [[ $nc -gt 0 ]]; then
+    git checkout --ours   -- "${RT_NOISE[@]}" 2>/dev/null
+    git add               -- "${RT_NOISE[@]}" 2>/dev/null
+  fi
+  if [[ $tc -gt 0 ]]; then
+    git checkout --theirs -- "${RT_TEST[@]}"  2>/dev/null
+    git add               -- "${RT_TEST[@]}"  2>/dev/null
+  fi
+
+  if git rebase --continue 2>/dev/null; then
+    noise_stash_pop "$marker"
+    emit_auto_rebased \
+      --orch     "${ORCH_ID:-}" \
+      --ticket   "${TICKET:-}" \
+      --phase    "${PHASE:-}" \
+      --strategy additive 2>/dev/null || true
+    return 0
+  fi
+
+  # --continue itself conflicted; stall.
+  _stall_and_return "$marker" continue_failed 2
 }

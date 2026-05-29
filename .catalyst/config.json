@@ -48,6 +48,11 @@
     },
     "orchestration": {
       "dispatchMode": "phase-agents",
+      "worktreeRefresh": {
+        "enabled": true,
+        "intervalSeconds": 300,
+        "quietSeconds": 30
+      },
       "executionCore": {
         "maxParallel": 4,
         "minParallel": 1,

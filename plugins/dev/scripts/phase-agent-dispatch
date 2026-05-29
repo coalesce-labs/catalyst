@@ -593,30 +593,74 @@ if [[ $DRY_RUN -eq 1 ]]; then
 	exit 0
 fi
 
-# ─── CTL-667: front-load merge-conflict surfacing ──────────────────────────
+# ─── CTL-667 + CTL-707: front-load merge-conflict surfacing ─────────────────
 # On a FRESH dispatch of a BUILD phase, rebase this worktree (cwd) onto current
-# origin/<base> so the worker starts current with merged sibling work and any
-# conflict surfaces HERE instead of at monitor-merge. Resume dispatches
-# (RESUME_SESSION set) are skipped — the resumed session assumes the prior tree
-# (CTL-658). Non-build phases (triage/pr/remediate/monitor-*) are skipped.
-# Placed after the --dry-run early-exit (a dry run must never mutate the tree)
-# and before the launch fork. Local-only: no push, no PR interaction (build
-# branches aren't pushed until phase-pr). Helpers live in lib/worktree-rebase.sh.
+# origin/<base>. CTL-707 replaces the binary rebase with a 4-layer classifier
+# (rebase_onto_base_classified): clean → proceed; tests/noise → auto-resolve;
+# thoughts → stall; source → CTL-708 (stub always stalls); research/plan source
+# stall → destroy+recreate worktree and re-dispatch fresh.
+# Resume dispatches (RESUME_SESSION set) are skipped. Non-build phases are skipped.
 if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 	BASE_BRANCH="$(resolve_base_branch)"
-	rebase_onto_base "$BASE_BRANCH"
+	rebase_onto_base_classified "$BASE_BRANCH"
 	REBASE_RC=$?
-	if [[ $REBASE_RC -eq 2 ]]; then
-		# Textual conflict with origin/<base>. Do NOT auto-resolve. Park the
-		# phase to needs-human and do NOT launch a worker. We use failureReason
-		# (not attentionReason) so neither the daemon (TERMINAL-classified →
-		# no revive) nor bash orchestrate-revive retries into the same conflict.
-		echo "phase-agent-dispatch: rebase onto origin/${BASE_BRANCH} conflicted for ${TICKET}/${PHASE}; parking" >&2
+	if [[ $REBASE_RC -eq 2 || $REBASE_RC -eq 3 ]]; then
+		# Determine the stall reason from the rc.
+		if [[ $REBASE_RC -eq 3 ]]; then
+			STALL_REASON="thoughts_conflict_with_origin_main"
+		else
+			STALL_REASON="source_conflict_ctl708_unavailable"
+		fi
+
+		# research/plan + source conflict (rc 2) → destroy+recreate worktree.
+		# thoughts conflict (rc 3) or source on non-research/plan → park as stalled.
+		if [[ $REBASE_RC -eq 2 ]] && { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
+			# CTL-707 Layer 3: destroy and recreate the worktree from origin/<base>.
+			# Derive the main checkout root from this worktree's git common dir.
+			_REPO_ROOT=""
+			if _GCD="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n "$_GCD" ]]; then
+				_REPO_ROOT="$(cd "${_GCD}/.." && pwd 2>/dev/null)" || true
+			fi
+			if [[ -z "$_REPO_ROOT" || ! -d "$_REPO_ROOT" ]]; then
+				echo "phase-agent-dispatch: recreate: cannot resolve repo root; parking instead" >&2
+			else
+				_WT_PATH="$(pwd)"
+				git -C "$_REPO_ROOT" worktree remove --force "$_WT_PATH" 2>/dev/null || true
+				git -C "$_REPO_ROOT" branch -f "$TICKET" "origin/${BASE_BRANCH}" 2>/dev/null || true
+				# CATALYST_RECREATE_WORKTREE_DIR overrides the worktrees base for
+				# testing — passes --worktree-dir so create-worktree.sh uses the
+				# test-local scratch dir instead of the default ~/catalyst/wt/.
+				_RECREATE_WT_DIR_FLAG=""
+				[[ -n "${CATALYST_RECREATE_WORKTREE_DIR:-}" ]] && \
+					_RECREATE_WT_DIR_FLAG="--worktree-dir ${CATALYST_RECREATE_WORKTREE_DIR}"
+				_NEW_WT_OUT="$(cd "$_REPO_ROOT" && \
+					"${SCRIPT_DIR}/create-worktree.sh" \
+					"$TICKET" "$BASE_BRANCH" --reuse-existing ${_RECREATE_WT_DIR_FLAG} 2>/dev/null)"
+				_NEW_WT="$(printf '%s\n' "$_NEW_WT_OUT" | grep '^WORKTREE_PATH=' | cut -d= -f2)"
+				if [[ -n "$_NEW_WT" && -d "$_NEW_WT" ]]; then
+					# Delete the signal file so the second dispatch's idempotency
+					# guard finds no file and writes a fresh one (not "dispatched"
+					# which would short-circuit the re-exec as idempotent).
+					rm -f "$SIGNAL_FILE" 2>/dev/null || true
+					echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
+					cd "$_NEW_WT"
+					exec "$0" --phase "$PHASE" --ticket "$TICKET" \
+						--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
+				else
+					echo "phase-agent-dispatch: recreate failed to produce worktree; parking instead" >&2
+				fi
+			fi
+		fi
+
+		# Park — stalled with a typed reason. We use failureReason so neither the
+		# daemon (TERMINAL-classified → no revive) nor bash orchestrate-revive
+		# retries into the same conflict.
+		echo "phase-agent-dispatch: rebase conflict (rc=${REBASE_RC}) for ${TICKET}/${PHASE}; parking with reason=${STALL_REASON}" >&2
 		TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 		tmp="${SIGNAL_FILE}.tmp.$$"
-		if jq --arg ts "$TS" \
+		if jq --arg ts "$TS" --arg reason "$STALL_REASON" \
 			'.status = "stalled"
-       | .failureReason = "rebase_conflict_with_origin_main"
+       | .failureReason = $reason
        | .updatedAt = $ts
        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
 			"$SIGNAL_FILE" >"$tmp" 2>/dev/null; then
@@ -626,11 +670,11 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 		fi
 		if [[ -x $EMIT_COMPLETE ]]; then
 			"$EMIT_COMPLETE" --phase "$PHASE" --ticket "$TICKET" --status failed \
-				--reason "rebase_conflict_with_origin_main" \
+				--reason "$STALL_REASON" \
 				--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID" \
 				--no-signal-update >/dev/null 2>&1 || true
 		fi
-		jq -n --arg status "stalled" --arg reason "rebase_conflict_with_origin_main" \
+		jq -n --arg status "stalled" --arg reason "$STALL_REASON" \
 			--arg signal "$SIGNAL_FILE" \
 			'. + {status: $status, reason: $reason, signalFile: $signal}' <<<'{}'
 		exit 1

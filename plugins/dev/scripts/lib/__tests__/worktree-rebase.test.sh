@@ -229,6 +229,196 @@ assert_eq "0" "$(cat "$SCRATCH/t6.rc")" "clean rebase with dirty noise returns 0
 assert_eq '{"committed":false,"dirty":true}' "$(cat "$SCRATCH/t6.config")" "dirty noise restored after rebase"
 assert_eq "yes" "$(cat "$SCRATCH/t6.base")" "rebase still advanced onto new base"
 
+# ─── CTL-707 Phase 2: rebase_onto_base_classified ───────────────────────────
+# Each fixture uses the same new_fixture / advance_origin_* helpers above.
+# EVENTS_DIR is pointed at a test-local scratch dir so telemetry doesn't
+# pollute the real event log. ORCH_ID / TICKET / PHASE use test values.
+
+export EVENTS_DIR="${SCRATCH}/events"
+export ORCH_ID="test-orch" TICKET="CTL-TEST" PHASE="implement"
+
+# Helper: last event line from the test EVENTS_DIR.
+last_telem_line() {
+  tail -n1 "${EVENTS_DIR}/$(date -u +%Y-%m).jsonl" 2>/dev/null || echo ""
+}
+
+# ── 7. rebase_onto_base_classified — clean rebase → 0, strategy clean ──────
+echo "7. rebase_onto_base_classified clean → 0"
+new_fixture t7
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t7.rc"
+  [[ -f local.txt && -f upstream.txt ]] && echo yes >"$SCRATCH/t7.both" || echo no >"$SCRATCH/t7.both"
+)
+assert_eq "0" "$(cat "$SCRATCH/t7.rc")" "classified clean rebase → rc 0"
+assert_eq "yes" "$(cat "$SCRATCH/t7.both")" "classified clean: both local + base commits present"
+assert_eq "clean" \
+  "$(jq -r '.body.payload.strategy' <<<"$(last_telem_line)")" \
+  "classified clean: auto-rebased(clean) event emitted"
+
+# ── 8. tests-only conflict → 0, additive resolve ────────────────────────────
+echo "8. rebase_onto_base_classified tests-only conflict → 0"
+new_fixture t8
+(
+  cd "$UP"
+  git checkout --quiet main
+  mkdir -p src
+  printf 'test-a\n' >src/foo.test.ts
+  git add -A && git commit --quiet -m "upstream test"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  mkdir -p src
+  printf 'test-b\n' >src/foo.test.ts
+  git add -A && git commit --quiet -m "local test (same file, different content)"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t8.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t8.rc"
+  git log --oneline >"$SCRATCH/t8.log"
+)
+assert_eq "0" "$(cat "$SCRATCH/t8.rc")" "tests-only conflict → rc 0 (additive)"
+# Work commit should still be in history after --continue.
+WORK_IN_LOG="no"
+grep -q "local test" "$SCRATCH/t8.log" && WORK_IN_LOG="yes"
+assert_eq "yes" "$WORK_IN_LOG" "tests-only: work commit retained after --continue"
+assert_eq "additive" \
+  "$(jq -r '.body.payload.strategy' <<<"$(last_telem_line)")" \
+  "tests-only: auto-rebased(additive) event emitted"
+
+# ── 9. noise-only conflict (.catalyst/config.json) → 0, take-ours ───────────
+echo "9. rebase_onto_base_classified noise-only conflict → 0"
+new_fixture t9
+(
+  cd "$UP"
+  git checkout --quiet main
+  printf '{"upstream":true}\n' >.catalyst/config.json
+  git add -A && git commit --quiet -m "upstream config change"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  printf '{"local":true}\n' >.catalyst/config.json
+  git add -A && git commit --quiet -m "local config change"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t9.rc"
+  cat .catalyst/config.json >"$SCRATCH/t9.config"
+)
+assert_eq "0" "$(cat "$SCRATCH/t9.rc")" "noise-only conflict → rc 0 (take-ours)"
+# In rebase context --ours = origin/main; noise-take-ours uses upstream config.
+assert_eq '{"upstream":true}' "$(cat "$SCRATCH/t9.config")" "noise take-ours: upstream config (ours=origin/main in rebase)"
+
+# ── 10. thoughts/** conflict → 3, HEAD restored ─────────────────────────────
+echo "10. rebase_onto_base_classified thoughts/** conflict → 3"
+new_fixture t10
+(
+  cd "$UP"
+  git checkout --quiet main
+  mkdir -p thoughts/shared
+  printf 'upstream-research\n' >thoughts/shared/notes.md
+  git add -A && git commit --quiet -m "upstream thoughts"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  mkdir -p thoughts/shared
+  printf 'local-research\n' >thoughts/shared/notes.md
+  git add -A && git commit --quiet -m "local thoughts"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t10.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t10.rc"
+  git rev-parse HEAD >"$SCRATCH/t10.head"
+  [[ -d .git/rebase-merge ]] && echo leftover >"$SCRATCH/t10.rebasedir" || echo clean >"$SCRATCH/t10.rebasedir"
+)
+assert_eq "3" "$(cat "$SCRATCH/t10.rc")" "thoughts conflict → rc 3"
+assert_eq "$(cat "$SCRATCH/t10.orig")" "$(cat "$SCRATCH/t10.head")" "thoughts conflict: HEAD restored"
+assert_eq "clean" "$(cat "$SCRATCH/t10.rebasedir")" "thoughts conflict: no rebase-merge leftover"
+# Stalled event must carry reason=thoughts_symlink_broken
+STALL_REASON="$(jq -r '.body.payload.reason' <<<"$(last_telem_line)")"
+assert_eq "thoughts_symlink_broken" "$STALL_REASON" "thoughts conflict: stalled event reason"
+
+# ── 11. source conflict → 2, CTL-708 stub unavailable, HEAD restored ─────────
+echo "11. rebase_onto_base_classified source conflict → 2"
+new_fixture t11
+advance_origin_main_conflict
+(
+  cd "$WORK"
+  printf 'local-edit\n' >shared.txt
+  git add -A && git commit --quiet -m "local conflicting edit"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t11.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t11.rc"
+  git rev-parse HEAD >"$SCRATCH/t11.head"
+  [[ -d .git/rebase-merge ]] && echo leftover >"$SCRATCH/t11.rebasedir" || echo clean >"$SCRATCH/t11.rebasedir"
+)
+assert_eq "2" "$(cat "$SCRATCH/t11.rc")" "source conflict → rc 2"
+assert_eq "$(cat "$SCRATCH/t11.orig")" "$(cat "$SCRATCH/t11.head")" "source conflict: HEAD restored"
+assert_eq "clean" "$(cat "$SCRATCH/t11.rebasedir")" "source conflict: no rebase-merge leftover"
+STALL_REASON2="$(jq -r '.body.payload.reason' <<<"$(last_telem_line)")"
+assert_eq "source_conflict_ctl708_unavailable" "$STALL_REASON2" "source conflict: stalled reason"
+# Categorize event is the second-to-last event; find it by filtering event name.
+CAT_LINE_T11="$(grep 'rebase-conflict-categorized' "${EVENTS_DIR}/$(date -u +%Y-%m).jsonl" 2>/dev/null | tail -n1 || echo "")"
+if [[ -n "$CAT_LINE_T11" ]]; then
+  SC="$(jq -r '.body.payload.source_count' <<<"$CAT_LINE_T11")"
+  TC="$(jq -r '.body.payload.test_count' <<<"$CAT_LINE_T11")"
+  NC="$(jq -r '.body.payload.noise_count' <<<"$CAT_LINE_T11")"
+  THKC="$(jq -r '.body.payload.thoughts_count' <<<"$CAT_LINE_T11")"
+  assert_eq "1" "$SC" "source conflict categorize: source_count=1"
+  assert_eq "0" "$TC" "source conflict categorize: test_count=0"
+  assert_eq "0" "$NC" "source conflict categorize: noise_count=0"
+  assert_eq "0" "$THKC" "source conflict categorize: thoughts_count=0"
+else
+  fail "source conflict categorize: no categorize event found"
+fi
+
+# ── 12. mixed test+noise conflict → 0, both resolved ────────────────────────
+echo "12. rebase_onto_base_classified mixed test+noise conflict → 0"
+new_fixture t12
+(
+  cd "$UP"
+  git checkout --quiet main
+  mkdir -p src
+  printf 'upstream-test\n' >src/bar.test.ts
+  printf '{"upstream":true}\n' >.catalyst/config.json
+  git add -A && git commit --quiet -m "upstream test + config"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  mkdir -p src
+  printf 'local-test\n' >src/bar.test.ts
+  printf '{"local":true}\n' >.catalyst/config.json
+  git add -A && git commit --quiet -m "local test + config"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t12.rc"
+  cat .catalyst/config.json >"$SCRATCH/t12.config"
+)
+assert_eq "0" "$(cat "$SCRATCH/t12.rc")" "mixed test+noise → rc 0"
+assert_eq '{"upstream":true}' "$(cat "$SCRATCH/t12.config")" "mixed: noise takes upstream (ours=origin/main in rebase)"
+
+# ── 13. fetch failure (bogus base) → 1, un-rebased ──────────────────────────
+echo "13. rebase_onto_base_classified fetch failure → 1"
+new_fixture t13
+(
+  cd "$WORK"
+  printf 'local\n' >local.txt
+  git add -A && git commit --quiet -m "local"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t13.orig"
+  rebase_onto_base_classified "no-such-branch-xyz"
+  echo "$?" >"$SCRATCH/t13.rc"
+  git rev-parse HEAD >"$SCRATCH/t13.head"
+)
+assert_eq "1" "$(cat "$SCRATCH/t13.rc")" "fetch failure → rc 1"
+assert_eq "$(cat "$SCRATCH/t13.orig")" "$(cat "$SCRATCH/t13.head")" "fetch failure: HEAD unchanged"
+
 echo
 echo "results: $PASSES passed, $FAILURES failed"
 [ $FAILURES -eq 0 ]
