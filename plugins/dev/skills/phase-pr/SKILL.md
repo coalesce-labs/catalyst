@@ -84,6 +84,65 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
   && mv "$TMP" "$SIGNAL_FILE"
 ```
 
+## Already-merged detection (CTL-714)
+
+Before delegating to `create-pr`, detect whether this branch's `HEAD` is already contained in
+`origin/main` (manual rescue, or a sibling PR landed the same commits). If so, skip PR creation
+to avoid a duplicate / empty-diff PR. Two complementary checks: `git merge-base --is-ancestor`
+(works even if the branch was deleted from the remote) and `gh pr list --state merged` (recovers
+the merged PR number for the downstream probe).
+
+The detection fence is **side-effect-free** so the e2e test can source it in isolation.
+
+```bash phase-pr-already-merged-detect
+git fetch origin main --quiet 2>/dev/null || true
+ALREADY_MERGED=0
+MERGED_PR_NUMBER=""
+MERGED_PR_URL=""
+
+# Check 1: is HEAD already contained in origin/main? (must be in `if` — set -e)
+if git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+  ALREADY_MERGED=1
+fi
+
+# Check 2: does a MERGED PR exist for this branch? (--state merged is required —
+# `gh pr list --head` with no --state returns only OPEN PRs; orchestrate-verify.sh:563)
+BRANCH_NAME="$(git branch --show-current 2>/dev/null || true)"
+if [[ -n "$BRANCH_NAME" ]]; then
+  MERGED_PR_JSON="$(gh pr list --head "$BRANCH_NAME" --state merged \
+    --json number,url --limit 1 2>/dev/null || echo '[]')"
+  MERGED_PR_NUMBER="$(echo "$MERGED_PR_JSON" | jq -r '.[0].number // empty' 2>/dev/null || true)"
+  MERGED_PR_URL="$(echo "$MERGED_PR_JSON" | jq -r '.[0].url // empty' 2>/dev/null || true)"
+  if [[ -n "$MERGED_PR_NUMBER" ]]; then
+    ALREADY_MERGED=1
+  fi
+fi
+```
+
+When `ALREADY_MERGED=1`, write the disposition into the signal file and complete without
+creating a PR:
+
+```bash
+if [[ "$ALREADY_MERGED" -eq 1 ]]; then
+  echo "phase-pr: HEAD already in origin/main — skipping PR creation (CTL-714)" >&2
+  TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  TMP="${SIGNAL_FILE}.tmp.$$"
+  jq --arg ts "$TS" \
+     --arg reason "already-merged-to-main" \
+     --argjson prNum "${MERGED_PR_NUMBER:-null}" \
+     --arg prUrl "${MERGED_PR_URL:-}" '
+    .updatedAt = $ts
+    | .attentionReason = $reason
+    | if $prNum != null then .pr = {number: $prNum, url: $prUrl} else . end
+  ' "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+
+  "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+    --phase "$PHASE" --ticket "$TICKET" --status complete
+  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
+  exit 0
+fi
+```
+
 ## /goal condition
 
 Plan §"Per-phase /goal conditions":
