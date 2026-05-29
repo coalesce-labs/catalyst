@@ -343,6 +343,53 @@ within the same tick's `liveBackgroundCount()`, so the freed slot fills on the
 next tick. The resume sweep runs **before** new-work pull, so a preempted ticket
 always reclaims its slot ahead of brand-new work.
 
+## Dispatch cooldown lifecycle (CTL-713)
+
+The scheduler throttles re-dispatch of a `(ticket, phase)` pair that was refused
+by writing a timestamped marker under `orchDir/.dispatch-cooldowns/<ticket>-<phase>.json`.
+
+**Marker schema** (CTL-713 enriched, backward-compatible with CTL-624 legacy markers):
+
+```json
+{
+  "ticket": "CTL-123",
+  "phase": "research",
+  "code": 2,
+  "failedAt": 1748000000000,
+  "expiresAt": 1748108000000,
+  "consecutiveFailures": 1
+}
+```
+
+**Cooldown windows** (per `code`):
+- `code=2` (`prior_artifact_missing`) → 30 minutes (`SCHEDULER_DISPATCH_PERMANENT_COOLDOWN_MS`). A structural refusal — the prior phase artifact is missing so there is nothing to do yet.
+- All other codes → 60 seconds (`SCHEDULER_DISPATCH_COOLDOWN_MS`). Transient blips that should self-heal.
+
+Legacy markers written by CTL-624 (no `expiresAt`) fall back to the old `failedAt + 60s` computation, so the GC and cooldown checks are backward-compatible.
+
+**GC sweep**: on every tick, the scheduler deletes any marker where _both_:
+- `expiresAt < now()` (expired), AND
+- the ticket is no longer in the eligible set (Done/Canceled)
+
+A still-eligible ticket keeps its marker so `consecutiveFailures` accrues toward escalation.
+The GC emits `phase.scheduler.cooldown-gc.<TICKET>` once per reaped marker.
+
+**Escalation**: after `SCHEDULER_DISPATCH_FAILURE_ESCALATION_THRESHOLD` (default 3) consecutive
+same-code failures on one `(ticket, phase)`, the scheduler applies the `needs-human` label
+via `labelOnce` (idempotent) and emits `phase.dispatch.escalated.<TICKET>`.
+
+**Observability queries**:
+```bash
+# See all GC activity
+grep cooldown-gc ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq .
+
+# See escalations
+grep cooldown-escalated ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq .
+
+# See all dispatch failures (enriched with expiresAt + consecutiveFailures)
+grep '"action":"failed"' ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.subject | startswith("phase.dispatch"))'
+```
+
 ## Related
 
 - [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook

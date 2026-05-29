@@ -458,6 +458,8 @@ export function defaultAppendDispatchFailedEvent({
   target_phase,
   code,
   reason,
+  expiresAt,
+  consecutiveFailures,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -466,7 +468,7 @@ export function defaultAppendDispatchFailedEvent({
       orchId,
       action: "failed",
       reason,
-      payloadExtras: { target_phase, code },
+      payloadExtras: { target_phase, code, ...(expiresAt !== undefined && { expiresAt }), ...(consecutiveFailures !== undefined && { consecutiveFailures }) },
     }),
     "dispatch-failed",
   );
@@ -557,6 +559,45 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
       payloadExtras: { resume_session: resumeSession ?? null },
     }),
     "resumed-after-preemption",
+  );
+}
+
+// CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
+// Emitted once per reaped cooldown marker so GC activity is queryable from the
+// unified event log.
+export function defaultAppendCooldownGcEvent({ ticket, orchId, target_phase }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket,
+      orchId,
+      action: "cooldown-gc",
+      reason: "expired-and-ineligible",
+      payloadExtras: { target_phase },
+    }),
+    "cooldown-gc",
+  );
+}
+
+// CTL-713: dispatch escalation event — phase.dispatch.escalated.<ticket>.
+// Emitted when needs-human is applied after N consecutive same-code dispatch failures.
+export function defaultAppendCooldownEscalatedEvent({
+  ticket,
+  orchId,
+  target_phase,
+  code,
+  consecutiveFailures,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "escalated",
+      reason: "consecutive-dispatch-failures",
+      payloadExtras: { target_phase, code, consecutiveFailures },
+    }),
+    "cooldown-escalated",
   );
 }
 
