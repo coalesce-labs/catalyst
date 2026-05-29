@@ -159,6 +159,7 @@ export function buildLinearEventLogEnvelope(
       const eventName = `linear.comment.${event.action}d`;
       const attrs: Omit<Attributes, "event.name"> = {};
       if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
+      if (event.authorId !== null) attrs["linear.actor.id"] = event.authorId; // CTL-681
       // Comments don't carry team data directly — derive from the ticket prefix
       // so we can both stamp linear.team.key and look up vcs.repository.name.
       const derivedTeamKey = deriveTeamKey(event.ticket);
@@ -181,6 +182,9 @@ export function buildLinearEventLogEnvelope(
           commentId: event.commentId,
           issueId: event.issueId,
           ticket: event.ticket,
+          body: event.body,            // CTL-681
+          authorId: event.authorId,    // CTL-681
+          authorName: event.authorName, // CTL-681
         },
       });
     }

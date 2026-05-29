@@ -68,6 +68,9 @@ export type LinearWebhookEvent =
       ticket: string | null;
       commentId: string | null;
       issueId: string | null;
+      body: string | null;        // CTL-681
+      authorId: string | null;    // CTL-681
+      authorName: string | null;  // CTL-681
       data: Record<string, unknown>;
     }
   | {
@@ -210,12 +213,26 @@ function parseComment(payload: Record<string, unknown>): LinearWebhookEvent {
   if (isObject(data.issue)) {
     ticket = getOptStr(data.issue, "identifier");
   }
+  // CTL-681: capture body + author. Actor precedence mirrors parseIssue:
+  // top-level actor > data.user > data.userId.
+  const actor = isObject(payload.actor) ? payload.actor : null;
+  const userObj = isObject(data.user) ? data.user : null;
+  const authorId =
+    (actor !== null ? getOptStr(actor, "id") : null) ??
+    (userObj !== null ? getOptStr(userObj, "id") : null) ??
+    getOptStr(data, "userId");
+  const authorName =
+    (actor !== null ? getOptStr(actor, "name") : null) ??
+    (userObj !== null ? getOptStr(userObj, "name") : null);
   return {
     kind: "comment",
     action,
     ticket,
     commentId: getOptStr(data, "id"),
     issueId: getOptStr(data, "issueId"),
+    body: getOptStr(data, "body"),
+    authorId,
+    authorName,
     data,
   };
 }

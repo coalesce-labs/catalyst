@@ -337,6 +337,51 @@ describe("parseLinearWebhookEvent — Comment", () => {
     if (ev.kind !== "comment") throw new Error("expected comment kind");
     expect(ev.action).toBe("remove");
   });
+
+  it("CTL-681: captures body from data.body", () => {
+    const ev = parseLinearWebhookEvent("Comment", {
+      action: "create",
+      type: "Comment",
+      data: { id: "c1", body: "hello", issueId: "i1", issue: { id: "i1", identifier: "CTL-99" } },
+    });
+    if (ev.kind !== "comment") throw new Error("expected comment kind");
+    expect(ev.body).toBe("hello");
+  });
+
+  it("CTL-681: captures authorId + authorName from top-level actor", () => {
+    const ev = parseLinearWebhookEvent("Comment", {
+      action: "create",
+      type: "Comment",
+      actor: { id: "u1", name: "Ada" },
+      data: { id: "c1", issueId: "i1" },
+    });
+    if (ev.kind !== "comment") throw new Error("expected comment kind");
+    expect(ev.authorId).toBe("u1");
+    expect(ev.authorName).toBe("Ada");
+  });
+
+  it("CTL-681: falls back to data.user when top-level actor is absent", () => {
+    const ev = parseLinearWebhookEvent("Comment", {
+      action: "create",
+      type: "Comment",
+      data: { id: "c1", issueId: "i1", user: { id: "u2", name: "Bob" } },
+    });
+    if (ev.kind !== "comment") throw new Error("expected comment kind");
+    expect(ev.authorId).toBe("u2");
+    expect(ev.authorName).toBe("Bob");
+  });
+
+  it("CTL-681: null-safe when body and author are absent", () => {
+    const ev = parseLinearWebhookEvent("Comment", {
+      action: "create",
+      type: "Comment",
+      data: { id: "c1", issueId: "i1" },
+    });
+    if (ev.kind !== "comment") throw new Error("expected comment kind");
+    expect(ev.body).toBeNull();
+    expect(ev.authorId).toBeNull();
+    expect(ev.authorName).toBeNull();
+  });
 });
 
 describe("parseLinearWebhookEvent — Cycle", () => {
