@@ -23,6 +23,8 @@ import {
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
   defaultAppendYieldFileSkipEvent,
+  defaultAppendParallelismSampledEvent,
+  defaultAppendParallelismAdjustedEvent,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   readBootEpoch,
@@ -2818,5 +2820,87 @@ describe("preemption event envelopes (CTL-705)", () => {
     expect(env.attributes["event.name"]).toBe("phase.research.resumed-after-preemption.CTL-2");
     expect(env.attributes["event.action"]).toBe("resumed-after-preemption");
     expect(env.body.payload.resume_session).toBe("sess-uuid");
+  });
+});
+
+// CTL-684: parallelism-sampled + parallelism-adjusted event emitter round-trips.
+describe("parallelism event envelopes (CTL-684)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl684-parallelism-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("defaultAppendParallelismSampledEvent emits the expected envelope (CTL-684)", () => {
+    const ok = defaultAppendParallelismSampledEvent({
+      label: "execution-core",
+      load1: 8.5,
+      load5: 5.2,
+      load15: 3.1,
+      memFreePct: 45.0,
+      bgCount: 7,
+      maxParallelCurrent: 10,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-sampled.execution-core");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.attributes["event.action"]).toBe("parallelism-sampled");
+    expect(env.attributes["catalyst.orchestration"]).toBe("execution-core");
+    expect(env.body.payload.load1).toBe(8.5);
+    expect(env.body.payload.load5).toBe(5.2);
+    expect(env.body.payload.load15).toBe(3.1);
+    expect(env.body.payload.mem_free_pct).toBe(45.0);
+    expect(env.body.payload.bg_count).toBe(7);
+    expect(env.body.payload.maxParallel_current).toBe(10);
+  });
+
+  test("defaultAppendParallelismSampledEvent uses 'execution-core' label by default (CTL-684)", () => {
+    defaultAppendParallelismSampledEvent({
+      load1: 1, load5: 1, load15: 1, memFreePct: 80, bgCount: 2, maxParallelCurrent: 5,
+    });
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-sampled.execution-core");
+  });
+
+  test("defaultAppendParallelismAdjustedEvent emits the expected envelope (CTL-684)", () => {
+    const ok = defaultAppendParallelismAdjustedEvent({
+      label: "execution-core",
+      oldMaxParallel: 10,
+      newMaxParallel: 7,
+      reason: "trend-up",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-adjusted.execution-core");
+    expect(env.attributes["event.action"]).toBe("parallelism-adjusted");
+    expect(env.body.payload.old_maxParallel).toBe(10);
+    expect(env.body.payload.new_maxParallel).toBe(7);
+    expect(env.body.payload.reason).toBe("trend-up");
+  });
+
+  test("defaultAppendParallelismAdjustedEvent uses 'execution-core' label by default (CTL-684)", () => {
+    defaultAppendParallelismAdjustedEvent({
+      oldMaxParallel: 5, newMaxParallel: 6, reason: "trend-down",
+    });
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-adjusted.execution-core");
   });
 });
