@@ -32,8 +32,10 @@ import {
   log,
   EVENT_DEBOUNCE_MS,
   readWaitWatcherConfig,
+  readMemorySamplerConfig,
 } from "./config.mjs";
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
+import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import {
   recoverStartup,
   startMonitor,
@@ -78,6 +80,8 @@ let _orphanTimer = null;
 let _refreshTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
+// CTL-685: per-worker memory sampler handle.
+let _memorySampler = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
 let _eventLogCursor = 0;
@@ -126,6 +130,10 @@ export function startDaemon({
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
   enableWaitWatcher = readWaitWatcherConfig().enabled,
+  // CTL-685: per-worker memory sampler. Injectable for tests; gated by a config
+  // knob (default-on, CATALYST_MEMORY_SAMPLER=0 disables) like the wait-watcher.
+  startMemorySampler = realStartMemorySampler,
+  enableMemorySampler = readMemorySamplerConfig().enabled,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -232,6 +240,12 @@ export function startDaemon({
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableWaitWatcher) {
       _waitWatcher = startWaitWatcher({ intervalMs: readWaitWatcherConfig().intervalMs });
+    }
+
+    // CTL-685: start the per-worker memory sampler. Inside the same try/catch so
+    // a throw triggers PID-file cleanup via stopDaemon.
+    if (enableMemorySampler) {
+      _memorySampler = startMemorySampler();
     }
   } catch (err) {
     stopDaemon();
@@ -461,6 +475,15 @@ export function stopDaemon() {
       /* watcher already stopped */
     }
     _waitWatcher = null;
+  }
+  // CTL-685: stop the per-worker memory sampler.
+  if (_memorySampler) {
+    try {
+      _memorySampler.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: memory-sampler stop failed");
+    }
+    _memorySampler = null;
   }
   _eventLogCursor = 0;
   _eventLogLeftover = "";

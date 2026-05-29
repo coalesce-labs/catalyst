@@ -431,6 +431,61 @@ describe("startDaemon", () => {
     stopDaemon();
     expect(stopped).toBe(1);
   });
+
+  // CTL-685: the per-worker memory sampler is started from startDaemon
+  // (default-on), gated by enableMemorySampler, and stopped in stopDaemon —
+  // mirroring the CTL-650 wait-watcher wiring.
+  test("starts the memory-sampler when enabled (CTL-685)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startMemorySampler: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableMemorySampler: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the memory-sampler when disabled (CTL-685)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startMemorySampler: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableMemorySampler: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the memory-sampler and swallows a throwing stop() (CTL-685)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startMemorySampler: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated sampler stop failure");
+        },
+      }),
+      enableMemorySampler: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under

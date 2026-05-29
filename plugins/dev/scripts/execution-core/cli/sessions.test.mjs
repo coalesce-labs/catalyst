@@ -927,3 +927,86 @@ describe("buildWaitingRows", () => {
     expect(rows).toEqual([]); // busy → ACTIVE, not waiting
   });
 });
+
+// ─── CTL-685: memPressure field in buildRows ──────────────────────────────────
+
+describe("buildRows memPressure (CTL-685)", () => {
+  // Fake ps snapshot: one root pid with a given RSS (in KB)
+  function psLinesForRss(pid, rssKb) {
+    return [`${pid} 1 ${rssKb}`];
+  }
+
+  const session = (pid) => ({
+    sessionId: "aaaa1111-2222-3333-4444-555566667777",
+    pid,
+    status: "busy",
+    kind: "background",
+    cwd: "/wt/CTL-685",
+    name: "o-orch:CTL-685:implement:1",
+    startedAt: null,
+  });
+
+  it("memPressure is OK for a low-RSS session (800 MB)", async () => {
+    const s = session(1001);
+    const rows = await buildRows({
+      agents: [s],
+      signalsByBgJobId: new Map(),
+      psLines: psLinesForRss(1001, 819200),
+      cwdExists: () => true,
+      linearStateFor: () => null,
+      lastSeen: () => null,
+      now: 0,
+    });
+    expect(rows[0].memPressure).toBe("OK");
+  });
+
+  it("memPressure is WARN for a mid-RSS session (1800 MB)", async () => {
+    const s = session(1002);
+    const rows = await buildRows({
+      agents: [s],
+      signalsByBgJobId: new Map(),
+      psLines: psLinesForRss(1002, 1843200),
+      cwdExists: () => true,
+      linearStateFor: () => null,
+      lastSeen: () => null,
+      now: 0,
+    });
+    expect(rows[0].memPressure).toBe("WARN");
+  });
+
+  it("memPressure is KILL for a high-RSS session (5000 MB)", async () => {
+    const s = session(1003);
+    const rows = await buildRows({
+      agents: [s],
+      signalsByBgJobId: new Map(),
+      psLines: psLinesForRss(1003, 5120000),
+      cwdExists: () => true,
+      linearStateFor: () => null,
+      lastSeen: () => null,
+      now: 0,
+    });
+    expect(rows[0].memPressure).toBe("KILL");
+  });
+
+  it("memPressure is -- for a pid-less session", async () => {
+    const s = {
+      sessionId: "aaaa1111-2222-3333-4444-555566667778",
+      pid: null,
+      status: "busy",
+      kind: "background",
+      cwd: "/wt/CTL-685",
+      name: "o-orch:CTL-685:implement:1",
+      startedAt: null,
+    };
+    const rows = await buildRows({
+      agents: [s],
+      signalsByBgJobId: new Map(),
+      psLines: [],
+      cwdExists: () => true,
+      linearStateFor: () => null,
+      lastSeen: () => null,
+      now: 0,
+    });
+    expect(rows[0].memPressure).toBe("--");
+  });
+});
