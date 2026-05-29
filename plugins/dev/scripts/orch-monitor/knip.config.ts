@@ -13,7 +13,7 @@ const config: KnipConfig = {
       project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
     },
     ui: {
-      entry: ["index.html", "src/components/ui/*.{ts,tsx}"],
+      entry: ["index.html", "board.html", "src/board/main.tsx", "src/components/ui/*.{ts,tsx}"],
       project: ["src/**/*.{ts,tsx}"],
       ignoreDependencies: [
         "tailwindcss",
