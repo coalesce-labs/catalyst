@@ -9,7 +9,7 @@ description:
   oneshot sessions with recency, and recent event activity (last 30 min) from the event log.
   Encodes all data-source locations and naming conventions as skill knowledge."
 disable-model-invocation: false
-allowed-tools: Read, Glob, Bash(ls *), Bash(find *), Bash(git *), Bash(gh *), Bash(jq *), Bash(linearis *), Bash(stat *), Bash(wc *), Bash(date *), Bash(tail *), Bash(cat *), Bash(plugins/dev/scripts/god-gather.sh *), Bash(kill *)
+allowed-tools: Read, Glob, Bash(ls *), Bash(find *), Bash(git *), Bash(gh *), Bash(jq *), Bash(linearis *), Bash(stat *), Bash(wc *), Bash(date *), Bash(tail *), Bash(cat *), Bash(*god-gather.sh *), Bash(kill *)
 version: 1.0.0
 ---
 
@@ -70,7 +70,14 @@ Determine mode from the argument:
 The helper script collects all state in one pass and outputs JSON:
 
 ```bash
-plugins/dev/scripts/god-gather.sh 2>/dev/null
+# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
+CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
+  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
+fi
+[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+
+"${CATALYST_DEV_SCRIPTS}/god-gather.sh" 2>/dev/null
 ```
 
 The script returns a JSON object with keys: `ts`, `projects`, `sessions`, `recentEvents`,
@@ -249,7 +256,7 @@ for project in $(ls ~/catalyst/wt/ 2>/dev/null); do
 done
 
 # Active sessions (if catalyst-session.sh is available)
-SESS=$(ls ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-session.sh 2>/dev/null | head -1)
+SESS=$(ls ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/catalyst-session.sh 2>/dev/null | sort -V | tail -1)
 [ -x "$SESS" ] && "$SESS" list --active --json 2>/dev/null | jq '.' || echo "session tracking unavailable"
 
 # Recent Claude session activity (mtime of project dirs)

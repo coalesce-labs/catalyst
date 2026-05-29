@@ -27,6 +27,13 @@ coordinates, monitors, and verifies.
 ## Prerequisites
 
 ```bash
+# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
+CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
+  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
+fi
+[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+
 # 1. Git (REQUIRED)
 if ! command -v git &>/dev/null; then
   echo "ERROR: Git is required"
@@ -54,8 +61,8 @@ if ! command -v claude &>/dev/null; then
 fi
 
 # 5. Project setup (REQUIRED — thoughts, config, workflow context)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+if [[ -f "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" ]]; then
+  "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" || exit 1
 fi
 ```
 
@@ -256,7 +263,7 @@ hooks:
 
 ```bash
 # The create-worktree.sh script lives relative to this plugin
-SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/create-worktree.sh"
+SCRIPT="${CATALYST_DEV_SCRIPTS}/create-worktree.sh"
 
 # Resolve --worktree-dir to pass through (omit flag if not configured — script uses its own defaults)
 WT_DIR_FLAG=""
@@ -282,7 +289,7 @@ ORCH_WORKTREE="${WORKTREES_BASE}/${ORCH_NAME}"
 # and SUMMARY.md all live here. Claude CLI output (streams/stderr) lands in
 # workers/output/ so it sits alongside the signal files but does not pollute
 # watchers that scan workers/*.json.
-ORCH_DIR="$("${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh" ensure-run-dir "${ORCH_NAME}")"
+ORCH_DIR="$("${CATALYST_DEV_SCRIPTS}/catalyst-state.sh" ensure-run-dir "${ORCH_NAME}")"
 
 # 2. Create worker worktrees for current wave
 for TICKET_ID in "${WAVE_TICKETS[@]}"; do
@@ -359,7 +366,7 @@ signals + the events log every cycle, so calling it now produces a real header +
 table + waves outline rather than a template skeleton:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+"${CATALYST_DEV_SCRIPTS}/update-dashboard.sh" \
   --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
   >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
@@ -430,12 +437,12 @@ Initialize `state.json`:
 **Register with global state** (immediately after local state initialization):
 
 ```bash
-STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
+STATE_SCRIPT="${CATALYST_DEV_SCRIPTS}/catalyst-state.sh"
 
 # Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
 # where `catalyst-comms` is only a shell alias (which doesn't propagate to
 # subshells) still work. Fall back to PATH for users who have symlinked it.
-COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
+COMMS_BIN="${CATALYST_DEV_SCRIPTS}/catalyst-comms"
 [ -x "$COMMS_BIN" ] || COMMS_BIN="$(command -v catalyst-comms 2>/dev/null || true)"
 if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
   echo "warn: catalyst-comms not found — comms disabled (install: plugins/dev/scripts/install-cli.sh)" >&2
@@ -515,8 +522,8 @@ fi
 **Start session tracking** (alongside the global state registration above):
 
 ```bash
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
-ORCH_STATUS_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-status.sh"
+SESSION_SCRIPT="${CATALYST_DEV_SCRIPTS}/catalyst-session.sh"
+ORCH_STATUS_SCRIPT="${CATALYST_DEV_SCRIPTS}/orchestrate-status.sh"
 if [[ -x "$SESSION_SCRIPT" ]]; then
   CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "orchestrate" \
     --label "${ORCH_NAME}" \
@@ -549,7 +556,7 @@ writes per-project enrollment records — there is nothing to enroll here.
   running, then exit:
 
   ```bash
-  "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-execution-core-route.sh"
+  "${CATALYST_DEV_SCRIPTS}/orchestrate-execution-core-route.sh"
   # Ensures the daemon is running. No enrollment, no wave loop, no Phase 4
   # session. Exit 0 — do not continue to Phase 3.
   ```
@@ -570,7 +577,7 @@ Idempotent at the broker (upserts by `interest_id`); the Phase 4 entry re-invoke
 a belt-and-suspenders.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-register-interests.sh" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" \
   --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json"
@@ -597,7 +604,7 @@ dispatched tickets from whichever `waveNPending` list they lived in, and runs th
 healthcheck:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-dispatch-next" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-dispatch-next" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" \
   --config "${REPO_ROOT}/.catalyst/config.json"
@@ -625,7 +632,7 @@ as reference for the underlying machinery.
 ```bash
 # Inside the wake handler — called once per phase-complete event surfaced
 # via the broker's phase_lifecycle interest.
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-phase-advance" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-phase-advance" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" \
   --ticket "${TICKET}" \
@@ -644,7 +651,7 @@ as reference for the underlying machinery.
 # one-retry-then-escalate policy via .reviveCount + --max-revives, and
 # CTL-452 added the --bg --resume path for phase-mode workers (legacy
 # oneshot workers continue to use -p --resume — backward compatible).
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-revive" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}"
 # On the second consecutive failure (reviveCount ≥ MAX_REVIVES), revive
@@ -662,7 +669,7 @@ as reference for the underlying machinery.
 # dispatches a continuation worker with CATALYST_IS_CONTINUATION=true +
 # CATALYST_HANDOFF_PATH=<path> + CATALYST_CONTINUATION_COUNT=<n>, and bumps
 # .continuationCount on a budget separate from .reviveCount (default 3 vs 10).
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-revive" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}"
 # On budget exhaustion (continuationCount ≥ MAX_CONTINUATIONS), revive marks
@@ -768,7 +775,7 @@ in the same wave.
 
 ```bash
 # Run ONCE, after all workers in this wave have been dispatched.
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-healthcheck" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-healthcheck" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}"
 # Prints a JSON summary on stdout: {"checked":N,"dead":M,"deadTickets":[...]}.
@@ -964,7 +971,7 @@ same `notify_event: "filter.wake.${ORCH_NAME}"`, so the orchestrator's `wait-for
 change.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-register-interests.sh" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" \
   --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json"
@@ -983,7 +990,7 @@ cursor and routes each match through `orchestrate-phase-advance` (for `complete`
 `workers/*.json` for the ticket.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-replay-phase-events.sh" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-replay-phase-events.sh" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" || true
 # Soft-fail with || true so a malformed event log or missing baseline can't
@@ -1169,7 +1176,7 @@ git/PR, the orchestrator reconciles the signal from the authoritative source.
 # so frequent runs are safe. --grace-seconds 0 skips the 15s legacy-PID settle
 # sleep: the phase-mode state.json check has its own --stale-bg-seconds
 # threshold, so the sleep would only add latency to every wake.
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-healthcheck" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-healthcheck" \
   --orch-dir "${ORCH_DIR}" --orch-id "${ORCH_NAME}" --grace-seconds 0 \
   >/dev/null 2>&1 || true
 
@@ -1234,7 +1241,7 @@ done
 # refreshed signal.cost values appear in the same pass. Same inputs produce a
 # byte-identical file. The orch-monitor daemon file-watches DASHBOARD.md and
 # forwards changes to UI clients via SSE.
-"${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+"${CATALYST_DEV_SCRIPTS}/update-dashboard.sh" \
   --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
   >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 ```
@@ -1359,7 +1366,7 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
         if [ -n "${STATE_ON_MERGE:-}" ]; then
           STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
         fi
-        "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+        "${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
           --ticket "${TICKET}" \
           --transition done \
           --config "$CONFIG_FILE" \
@@ -1367,7 +1374,7 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       fi
 
       # Pull latest main in the primary worktree (CTL-198). Non-fatal.
-      "${CLAUDE_PLUGIN_ROOT}/scripts/pull-primary-worktree.sh" \
+      "${CATALYST_DEV_SCRIPTS}/pull-primary-worktree.sh" \
         --branch "${BASE_BRANCH:-main}" 2>&1 || true
 
       # Post-merge verification (CTL-130). Run adversarial verification on
@@ -1384,7 +1391,7 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
             --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg orch "${ORCH_NAME}" --arg w "${TICKET}" \
             '{ts:$ts, orchestrator:$orch, worker:$w, event:"verification-started", detail:null}')"
 
-          "${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-verify.sh" \
+          "${CATALYST_DEV_SCRIPTS}/orchestrate-verify.sh" \
             --worktree "$WORKER_DIR" \
             --ticket "$TICKET" \
             --base-branch "${BASE_BRANCH:-main}" \
@@ -1477,7 +1484,7 @@ both deterministic-set refreshes AND the previously-missing `phase_lifecycle` re
 otherwise leave wave 2 tickets without broker coverage (a localized CTL-491 race).
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-register-interests.sh" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-register-interests.sh" \
   --orch-dir "${ORCH_DIR}" \
   --orch-id "${ORCH_NAME}" \
   --config "${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}/.catalyst/config.json" \
@@ -1553,7 +1560,7 @@ for WORKER_SIGNAL in ${ORCH_DIR}/workers/*.json; do
       # Transition Linear → done now that deploy succeeded.
       STATE_ON_MERGE_FLAG=""
       [ -n "${STATE_ON_MERGE:-}" ] && STATE_ON_MERGE_FLAG="--state ${STATE_ON_MERGE}"
-      "${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+      "${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
         --ticket "${TICKET}" --transition done --config "$CONFIG_FILE" \
         ${STATE_ON_MERGE_FLAG} >/dev/null 2>&1 || true
       ;;
@@ -1707,7 +1714,7 @@ API-stream-idle-timeout'd worker from its original `session_id`. Resumed session
 history, plan context, and PR state at ~10× lower cost than a fresh redispatch.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-revive" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-revive" \
   --orch-dir "$ORCH_DIR" \
   --orch-id "$ORCH_NAME"
 ```
@@ -1738,7 +1745,7 @@ correct fix but dies before calling `resolveReviewThread`, which would otherwise
 dispatch a wasteful second worker.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-resolve-fixed-threads" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-resolve-fixed-threads" \
   --orch-dir "$ORCH_DIR" \
   --orch-id "$ORCH_NAME"
 ```
@@ -1765,7 +1772,7 @@ mergeStateStatus=BLOCKED` and either auto-dispatches `orchestrate-fixup` or esca
 item depending on the cause.
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-fixup" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-auto-fixup" \
   --orch-dir "$ORCH_DIR" \
   --orch-id "$ORCH_NAME"
 ```
@@ -1802,7 +1809,7 @@ DIRTY) and dispatches `orchestrate-rebase` to spawn a worker that rebases the PR
 base, resolves conflicts, and force-pushes (`--force-with-lease`).
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-rebase" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-auto-rebase" \
   --orch-dir "$ORCH_DIR" \
   --orch-id "$ORCH_NAME"
 ```
@@ -2022,7 +2029,7 @@ When all waves are complete:
    terminal state (CTL-230), and persist both alongside any remaining briefings:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/update-dashboard.sh" \
+   "${CATALYST_DEV_SCRIPTS}/update-dashboard.sh" \
      --orch "${ORCH_NAME}" --orch-dir "${ORCH_DIR}" --roll-usage \
      >/dev/null 2>>"${ORCH_DIR}/.update-dashboard.log" || true
 
@@ -2044,7 +2051,7 @@ When all waves are complete:
    `catalyst-archive sync`).
 
    ```bash
-   bun "${CLAUDE_PLUGIN_ROOT}/scripts/orch-monitor/catalyst-archive.ts" sweep "${ORCH_NAME}"
+   bun "${CATALYST_DEV_SCRIPTS}/orch-monitor/catalyst-archive.ts" sweep "${ORCH_NAME}"
    ```
 
    The sweep is idempotent (`ON CONFLICT` upserts). Re-running is safe. If it fails, capture the
@@ -2064,7 +2071,7 @@ When all waves are complete:
    it on the shared queue:
 
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+   "${CATALYST_DEV_SCRIPTS}/add-finding.sh" \
      --title "Short imperative title" \
      --body "Reproduction + expected + observed + any links" \
      --skill orchestrate --severity low
@@ -2080,8 +2087,8 @@ When all waves are complete:
    routine debugging.
 
    ```bash
-   FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
-   CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+   FEEDBACK="${CATALYST_DEV_SCRIPTS}/file-feedback.sh"
+   CONSENT="${CATALYST_DEV_SCRIPTS}/feedback-consent.sh"
    FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-${ORCH_DIR}/findings.jsonl}"
 
    if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then
@@ -2196,7 +2203,7 @@ pre-assigns numbers in the briefing to prevent this.
 # Prints a Markdown "## Migration Number Assignments" section, or nothing if the
 # project has no supabase/migrations/ directory or no ticket in the wave is migration-
 # likely. Safe to append unconditionally to the briefing.
-MIG_SECTION=$("${CLAUDE_PLUGIN_ROOT}/scripts/pre-assign-migrations.sh" \
+MIG_SECTION=$("${CATALYST_DEV_SCRIPTS}/pre-assign-migrations.sh" \
   --migrations-dir "${ORCH_WORKTREE}/supabase/migrations" \
   --tickets "${NEXT_WAVE_TICKETS[*]}") || MIG_SECTION=""
 ```
@@ -2313,11 +2320,11 @@ CLI is not installed (graceful skip).
 
 ```bash
 # Transition via transition-key (reads stateMap.done from config):
-"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+"${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
   --ticket PROJ-123 --transition done --config .catalyst/config.json
 
 # Override with an explicit state name (e.g., --state-on-merge "Shipped"):
-"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+"${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
   --ticket PROJ-123 --state "Shipped" --config .catalyst/config.json
 ```
 
@@ -2438,7 +2445,7 @@ Auto-merge is blocked on unresolved threads.
 **How the orchestrator dispatches:**
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-fixup" "${TICKET}" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-fixup" "${TICKET}" \
   --issues "src/auth/middleware.ts:42: handle null session token
 src/auth/middleware.ts:89: Codex flagged timing-attack comparison
 test/auth.test.ts: add regression test for the null-token path" \
@@ -2491,7 +2498,7 @@ physically impossible — the merged branch is gone.
 **How the orchestrator dispatches:**
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-followup" "${PARENT_TICKET}" \
+"${CATALYST_DEV_SCRIPTS}/orchestrate-followup" "${PARENT_TICKET}" \
   --findings "post-merge: validateSessionToken allows empty string (src/auth/middleware.ts:42)
 post-merge: missing rate-limit on POST /api/auth/token (src/api/auth.ts:18)"
 ```

@@ -35,8 +35,15 @@ write-back to the briefing markdown ships in Phase 4 (CTL-465). See
 ## Step 1: Prelude — start session, resolve date, load briefing
 
 ```bash
-SCRIPT_DIR="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/briefing-followup"
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/catalyst-session.sh"
+# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
+CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
+  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
+fi
+[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+
+SCRIPT_DIR="${CATALYST_DEV_SCRIPTS}/briefing-followup"
+SESSION_SCRIPT="${CATALYST_DEV_SCRIPTS}/catalyst-session.sh"
 
 CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "briefing-followup" \
   --ticket "" --workflow "${CATALYST_SESSION_ID:-}")

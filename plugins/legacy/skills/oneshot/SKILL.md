@@ -31,9 +31,16 @@ provides persistent handoff documents between phases.
 ## Prerequisites
 
 ```bash
+# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
+CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
+  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
+fi
+[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+
 # 0. Check project setup (thoughts, config, workflow context init)
-if [[ -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" ]]; then
-  "${CLAUDE_PLUGIN_ROOT}/scripts/check-project-setup.sh" || exit 1
+if [[ -f "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" ]]; then
+  "${CATALYST_DEV_SCRIPTS}/check-project-setup.sh" || exit 1
 fi
 
 # 1. Validate thoughts system (REQUIRED)
@@ -126,7 +133,7 @@ if [ -z "$ORCH_DIR" ]; then
 fi
 
 # Resolve global state script path
-STATE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-state.sh"
+STATE_SCRIPT="${CATALYST_DEV_SCRIPTS}/catalyst-state.sh"
 ```
 
 **Shared comms channel (CTL-111 / CTL-249):** if `CATALYST_COMMS_CHANNEL` is set by the
@@ -141,7 +148,7 @@ at **minimum 4 messages** per run: start + phase transitions + done. Inbound rea
 # Resolve the catalyst-comms binary. Prefer the plugin-shipped copy so installs
 # where `catalyst-comms` is only a shell alias (which doesn't propagate to
 # subshells) still work. Fall back to PATH for users who have symlinked it.
-COMMS_BIN="${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"
+COMMS_BIN="${CATALYST_DEV_SCRIPTS}/catalyst-comms"
 [ -x "$COMMS_BIN" ] || COMMS_BIN="$(command -v catalyst-comms 2>/dev/null || true)"
 if [ -z "$COMMS_BIN" ] || [ ! -x "$COMMS_BIN" ]; then
   echo "warn: catalyst-comms not found — worker comms disabled" >&2
@@ -393,7 +400,7 @@ if [ -f "$SIGNAL_FILE" ]; then
     # within the configured window; terminal transitions (pr-created, merging,
     # done, failed, stalled, deploy-failed) flush any pending queue and emit
     # immediately, with PR enrichment when --to is PR-bearing.
-    EMITTER="${CLAUDE_PLUGIN_ROOT:-/Users/ryan/.claude/plugins/cache/catalyst/catalyst-dev/8.1.0}/scripts/emit-worker-status-change.sh"
+    EMITTER="${CATALYST_DEV_SCRIPTS}/emit-worker-status-change.sh"
     if [ -x "$EMITTER" ]; then
       "$EMITTER" emit \
         --orch "$ORCH_ID" \
@@ -500,7 +507,7 @@ Start a catalyst-session at the very beginning of the workflow, before Phase 1. 
 the entire oneshot lifecycle and records phase transitions, PR creation, and completion.
 
 ```bash
-SESSION_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/catalyst-session.sh"
+SESSION_SCRIPT="${CATALYST_DEV_SCRIPTS}/catalyst-session.sh"
 if [[ -x "$SESSION_SCRIPT" ]]; then
   CATALYST_SESSION_ID=$("$SESSION_SCRIPT" start --skill "oneshot" \
     --ticket "${TICKET_ID:-}" \
@@ -566,7 +573,7 @@ This phase runs in the current session to allow user interaction during research
 1. **Parse input**: Determine if ticket ID or freeform query
 2. **Register ticket in workflow context (REQUIRED if ticket-based)** — immediately after parsing:
    ```bash
-   "${CLAUDE_PLUGIN_ROOT}/scripts/workflow-context.sh" set-ticket "TICKET-ID"
+   "${CATALYST_DEV_SCRIPTS}/workflow-context.sh" set-ticket "TICKET-ID"
    ```
    This ensures `.catalyst/.workflow-context.json` exists and `currentTicket` is set before any
    other work begins. Downstream skills and hooks depend on this file existing.
@@ -1050,7 +1057,7 @@ if [ -n "$ORCH_ID" ] && [ -f "$STATE_SCRIPT" ]; then
 fi
 
 # Transition Linear ticket to done (worker owns this in CTL-252 contract)
-"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+"${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
   --ticket "$TICKET_ID" --transition done --config .catalyst/config.json 2>/dev/null || true
 
 # End session
@@ -1096,7 +1103,7 @@ The orchestrator's Phase 4 poll loop transitions the Linear ticket to `stateMap.
 confirms `state=MERGED` via the shared helper (CTL-69):
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/linear-transition.sh" \
+"${CATALYST_DEV_SCRIPTS}/linear-transition.sh" \
   --ticket "$TICKET_ID" --transition done --config .catalyst/config.json
 ```
 
@@ -1115,7 +1122,7 @@ Standalone oneshot runs (no orchestrator) use a session-scoped queue path derive
 bugs spotted in adjacent code, recurring manual steps), record it on the queue:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/scripts/add-finding.sh" \
+"${CATALYST_DEV_SCRIPTS}/add-finding.sh" \
   --title "Short imperative title" \
   --body "Reproduction + expected + observed + any links" \
   --skill oneshot --severity low
@@ -1132,8 +1139,8 @@ expected to be set — the helper silently skips filing when consent is not alre
 prompts. Standalone oneshot runs prompt interactively once and persist "yes":
 
 ```bash
-FEEDBACK="${CLAUDE_PLUGIN_ROOT}/scripts/file-feedback.sh"
-CONSENT="${CLAUDE_PLUGIN_ROOT}/scripts/feedback-consent.sh"
+FEEDBACK="${CATALYST_DEV_SCRIPTS}/file-feedback.sh"
+CONSENT="${CATALYST_DEV_SCRIPTS}/feedback-consent.sh"
 FINDINGS_FILE="${CATALYST_FINDINGS_FILE:-.catalyst/findings/${CATALYST_SESSION_ID:-current}.jsonl}"
 
 if [ -x "$FEEDBACK" ] && [ -f "$FINDINGS_FILE" ] && [ -s "$FINDINGS_FILE" ]; then

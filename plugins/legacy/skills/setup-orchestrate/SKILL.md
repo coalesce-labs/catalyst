@@ -57,17 +57,24 @@ Determine which mode the user invoked:
 Build the flag string from the parsed input and call the standalone script:
 
 ```bash
+# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
+CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
+if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
+  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
+fi
+[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+
 # For ticket IDs:
-"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --tickets "<ticket-ids>"
+"${CATALYST_DEV_SCRIPTS}/setup-orchestrator.sh" --tickets "<ticket-ids>"
 
 # For cycle mode:
-"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --cycle current
+"${CATALYST_DEV_SCRIPTS}/setup-orchestrator.sh" --cycle current
 
 # For project mode:
-"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --project "<project-name>"
+"${CATALYST_DEV_SCRIPTS}/setup-orchestrator.sh" --project "<project-name>"
 
 # For auto mode:
-"${CLAUDE_PLUGIN_ROOT}/scripts/setup-orchestrator.sh" --auto <N>
+"${CATALYST_DEV_SCRIPTS}/setup-orchestrator.sh" --auto <N>
 ```
 
 The script handles everything: validation, config reading, state init, worktree creation.
