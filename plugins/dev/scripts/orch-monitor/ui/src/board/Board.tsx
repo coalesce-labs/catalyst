@@ -210,7 +210,9 @@ function TicketCard({ t, colorBy }: { t: Ticket; colorBy: ColorBy }) {
         {t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{fmtAgo(t.updatedAt)}</span>
+        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+          {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
+        </span>
         <span style={{ flex: 1 }} />
         {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
       </div>
@@ -257,13 +259,18 @@ function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
 }
 
 // ── column + board scaffolding (wide Linear columns, internal vertical scroll) ──
-function Column({ label, color, count, children }: { label: string; color: string; count: number; children: React.ReactNode }) {
+function Column({ label, color, count, live = 0, children }: { label: string; color: string; count: number; live?: number; children: React.ReactNode }) {
   return (
     <div style={{ flex: "0 0 300px", width: 300, display: "flex", flexDirection: "column", minHeight: 0, maxHeight: "100%" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px 12px" }}>
         <span style={{ width: 9, height: 9, borderRadius: "50%", background: color, flex: "0 0 auto" }} />
         <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{label}</span>
         <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{count}</span>
+        {live > 0 && (
+          <span title={`${live} worker${live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
+            <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{live} live
+          </span>
+        )}
       </div>
       <div className="cat-scroll" style={{ display: "flex", flexDirection: "column", gap: 8, overflowY: "auto", paddingRight: 4, paddingBottom: 12 }}>
         {count === 0
@@ -287,8 +294,9 @@ function TicketBoard({ tickets, lens, colorBy, fill }: { tickets: Ticket[]; lens
     <BoardScroll fill={fill}>
       {cols.map((c: any) => {
         const items = lens === "linear" ? tickets.filter((t) => t.linearState === c.key) : tickets.filter((t) => t.phase === c.key);
+        const live = items.filter((t) => t.activeState === "active").length;
         return (
-          <Column key={c.key} label={c.label || c.key} color={c.c} count={items.length}>
+          <Column key={c.key} label={c.label || c.key} color={c.c} count={items.length} live={live}>
             {items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} />)}
           </Column>
         );
@@ -500,7 +508,7 @@ export function Board() {
         {/* subhead */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : view === "workers" ? "Workers" : "Capacity & queue"}</h1>
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Every ticket the daemon is moving through the pipeline" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
+          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
           <span style={{ flex: 1 }} />
           {repos.length > 1 && <Seg value={repo} onChange={setRepo} options={[{ k: "all", label: "All" }, ...repos.map((r) => ({ k: r, label: r }))]} />}
           {view === "tickets" && <>
