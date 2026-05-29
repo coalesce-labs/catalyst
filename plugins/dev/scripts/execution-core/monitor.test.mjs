@@ -11,9 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseStateChangedEvent,
+  parseIssueUpdatedEvent,
+  parseCommentCreatedEvent,
   reconcileProject,
   reconcileAll,
   handleStateChangedEvent,
+  handleIssueUpdatedEvent,
+  handleCommentCreatedEvent,
   sweepMissingTriage,
   startMonitor,
   stopMonitor,
@@ -868,6 +872,272 @@ describe("sweepMissingTriage (CTL-711)", () => {
       ticket: "ENG-1",
       phase: "triage",
     });
+    stopMonitor();
+  });
+});
+
+// --- CTL-681 Phase 3: parseIssueUpdatedEvent + handleIssueUpdatedEvent ------
+
+// Helper to build a canonical OTel-shaped linear.issue.updated event.
+function issueUpdatedEvent({ identifier, teamKey, toState, toLabels, toProject, toPriority } = {}) {
+  return {
+    attributes: {
+      "event.name": "linear.issue.updated",
+      "linear.issue.identifier": identifier ?? "ENG-9",
+    },
+    body: {
+      payload: {
+        ticket: identifier ?? "ENG-9",
+        teamKey: teamKey ?? "ENG",
+        toState: toState ?? "Todo",
+        toLabels: toLabels ?? null,
+        toProject: toProject ?? null,
+        toPriority: toPriority ?? null,
+      },
+    },
+  };
+}
+
+describe("parseIssueUpdatedEvent (CTL-681)", () => {
+  test("canonical OTel shape → returns parsed object", () => {
+    const parsed = parseIssueUpdatedEvent(issueUpdatedEvent({ identifier: "ENG-5" }));
+    expect(parsed).toMatchObject({ identifier: "ENG-5", teamKey: "ENG", toState: "Todo" });
+  });
+
+  test("legacy flat shape → returns parsed object", () => {
+    const parsed = parseIssueUpdatedEvent({
+      event: "linear.issue.updated",
+      detail: { ticket: "ENG-7", teamKey: "ENG", toState: "Backlog", toLabels: ["p0"] },
+    });
+    expect(parsed).toMatchObject({ identifier: "ENG-7", toState: "Backlog" });
+    expect(parsed.toLabels).toEqual(["p0"]);
+  });
+
+  test("returns null for linear.issue.state_changed", () => {
+    expect(
+      parseIssueUpdatedEvent({
+        attributes: { "event.name": "linear.issue.state_changed", "linear.issue.identifier": "ENG-1" },
+        body: { payload: {} },
+      })
+    ).toBeNull();
+  });
+
+  test("returns null for linear.comment.created", () => {
+    expect(
+      parseIssueUpdatedEvent({
+        attributes: { "event.name": "linear.comment.created", "linear.issue.identifier": "ENG-1" },
+        body: { payload: {} },
+      })
+    ).toBeNull();
+  });
+
+  test("returns null for empty object", () => {
+    expect(parseIssueUpdatedEvent({})).toBeNull();
+  });
+
+  test("returns null when no identifier extractable", () => {
+    expect(
+      parseIssueUpdatedEvent({
+        attributes: { "event.name": "linear.issue.updated" },
+        body: { payload: { teamKey: "ENG" } },
+      })
+    ).toBeNull();
+  });
+});
+
+describe("handleIssueUpdatedEvent (CTL-681)", () => {
+  test("adds a newly-eligible ticket when it matches the query", () => {
+    enroll("ENG", { status: "Todo", label: "p0" });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Todo", toLabels: ["p0"] })
+    );
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toContain("ENG-9");
+  });
+
+  test("label-only change with no label filter: ticket is added when state matches", () => {
+    enroll("ENG", { status: "Todo", label: null });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Todo", toLabels: ["something"] })
+    );
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toContain("ENG-9");
+  });
+
+  test("removes a now-ineligible ticket when it loses the required label", () => {
+    enroll("ENG", { status: "Todo", label: "p0" });
+    setProjectEligible("ENG", [{ identifier: "ENG-9", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Todo", toLabels: [] })
+    );
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).not.toContain("ENG-9");
+  });
+
+  test("team mismatch is a no-op (wrong teamKey)", () => {
+    enroll("ENG", { status: "Todo" });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "PROJ-1", teamKey: "PROJ", toState: "Todo" })
+    );
+    expect(getEligibleSet("ENG")).toEqual([]);
+  });
+
+  test("wrong state is not eligible (ticket absent after fold)", () => {
+    enroll("ENG", { status: "Todo" });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "In Progress" })
+    );
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).not.toContain("ENG-9");
+  });
+
+  test("priority floor respected: toPriority exceeds query.priority → not eligible", () => {
+    enroll("ENG", { status: "Todo", priority: 2 });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Todo", toPriority: 3 })
+    );
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).not.toContain("ENG-9");
+  });
+
+  test("cache write-through: toState written to cache", () => {
+    enroll("ENG", { status: "Todo" });
+    const cache = createTicketStateCache({ now: () => 0 });
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Done" }),
+      { cache }
+    );
+    expect(cache.get("ENG-9")).toBe("Done");
+  });
+
+  test("no orchDir: does not throw", () => {
+    enroll("ENG", { status: "Todo" });
+    expect(() =>
+      handleIssueUpdatedEvent(issueUpdatedEvent(), { orchDir: undefined })
+    ).not.toThrow();
+  });
+
+  test("abortWorker is NEVER called (issue-updated is a projection edit, not a kill)", () => {
+    enroll("ENG", { status: "Todo" });
+    const abortWorker = mock(() => {});
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ identifier: "ENG-9", toState: "Backlog" }),
+      { abortWorker }
+    );
+    expect(abortWorker).not.toHaveBeenCalled();
+  });
+
+  test("no poll: the injected exec is never called by handleIssueUpdatedEvent", () => {
+    enroll("ENG", { status: "Todo" });
+    const exec = mock(() => ({ code: 0, stdout: "{}", stderr: "" }));
+    handleIssueUpdatedEvent(issueUpdatedEvent(), { exec });
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  test("readNewEvents integration: a linear.issue.updated line triggers the eligible fold", () => {
+    enroll("ENG", { status: "Todo" });
+    // Write the event first (using appendEventLog which creates the dir), seed
+    // the tailer at offset 0 so readNewEvents drains from the start.
+    const line = JSON.stringify(issueUpdatedEvent({ identifier: "ENG-42", toState: "Todo" }));
+    appendEventLog(line + "\n");
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
+    seedTailerFromCursor();
+    readNewEvents();
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toContain("ENG-42");
+  });
+});
+
+// --- CTL-681 Phase 4: parseCommentCreatedEvent + handleCommentCreatedEvent ---
+
+function commentCreatedEvent({ ticket, commentId, body, authorId, authorName } = {}) {
+  return {
+    attributes: {
+      "event.name": "linear.comment.created",
+      "linear.issue.identifier": ticket ?? "ENG-9",
+    },
+    body: {
+      payload: {
+        ticket: ticket ?? "ENG-9",
+        commentId: commentId ?? "c-1",
+        issueId: "i-1",
+        body: body ?? "a comment",
+        authorId: authorId ?? "u-1",
+        authorName: authorName ?? "Alice",
+      },
+    },
+  };
+}
+
+describe("parseCommentCreatedEvent (CTL-681)", () => {
+  test("canonical shape → parsed payload with all fields", () => {
+    const parsed = parseCommentCreatedEvent(commentCreatedEvent({ ticket: "ENG-5" }));
+    expect(parsed).toMatchObject({ ticket: "ENG-5", commentId: "c-1", body: "a comment" });
+  });
+
+  test("legacy flat shape via event.detail → same result", () => {
+    const parsed = parseCommentCreatedEvent({
+      event: "linear.comment.created",
+      detail: { ticket: "ENG-7", commentId: "c-7", issueId: "i-1", body: "hi", authorId: "u2", authorName: "Bob" },
+    });
+    expect(parsed).toMatchObject({ ticket: "ENG-7", body: "hi", authorId: "u2" });
+  });
+
+  test("returns null for other event names", () => {
+    expect(parseCommentCreatedEvent({ attributes: { "event.name": "linear.issue.updated" }, body: { payload: {} } })).toBeNull();
+    expect(parseCommentCreatedEvent({ attributes: { "event.name": "linear.comment.updated" }, body: { payload: {} } })).toBeNull();
+  });
+
+  test("returns null for empty object", () => {
+    expect(parseCommentCreatedEvent({})).toBeNull();
+  });
+});
+
+describe("handleCommentCreatedEvent (CTL-681)", () => {
+  test("invokes onComment with parsed payload when provided", () => {
+    const onComment = mock(() => {});
+    handleCommentCreatedEvent(commentCreatedEvent(), { onComment });
+    expect(onComment).toHaveBeenCalledTimes(1);
+    expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "ENG-9", body: "a comment" });
+  });
+
+  test("no-op when onComment is undefined (never throws)", () => {
+    expect(() => handleCommentCreatedEvent(commentCreatedEvent())).not.toThrow();
+  });
+
+  test("no-op (no throw) when event is non-comment (parsed = null)", () => {
+    expect(() =>
+      handleCommentCreatedEvent(
+        { attributes: { "event.name": "linear.issue.updated" }, body: { payload: {} } },
+        { onComment: mock(() => {}) }
+      )
+    ).not.toThrow();
+  });
+
+  test("does not touch the eligible set (no upsert/remove)", () => {
+    enroll("ENG", { status: "Todo" });
+    setProjectEligible("ENG", [{ identifier: "ENG-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    handleCommentCreatedEvent(commentCreatedEvent({ ticket: "ENG-1" }));
+    expect(getEligibleSet("ENG")).toHaveLength(1); // unchanged
+  });
+
+  test("bot-authored comment fires onComment (not suppressed)", () => {
+    const onComment = mock(() => {});
+    handleCommentCreatedEvent(
+      commentCreatedEvent({ authorId: "bot-uuid-123" }),
+      { onComment }
+    );
+    expect(onComment).toHaveBeenCalledTimes(1);
+  });
+
+  test("readNewEvents integration: a linear.comment.created line invokes onComment via tailerOpts", () => {
+    const onComment = mock(() => {});
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onComment });
+    const line = JSON.stringify(commentCreatedEvent({ ticket: "ENG-10" }));
+    appendFileSync(eventLogPath(), line + "\n");
+    readNewEvents();
+    expect(onComment).toHaveBeenCalledTimes(1);
+    expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "ENG-10" });
     stopMonitor();
   });
 });

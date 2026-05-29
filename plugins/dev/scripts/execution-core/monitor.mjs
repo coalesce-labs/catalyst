@@ -27,7 +27,7 @@ import { dirname, basename, join } from "node:path";
 import { getEventLogPath, RECONCILE_INTERVAL_MS, EVENT_DEBOUNCE_MS, log } from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
-import { setProjectEligible, removeTicket, dropProject, getEligibleSet } from "./eligible-set.mjs";
+import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
@@ -64,6 +64,111 @@ export function parseStateChangedEvent(event) {
     teamKey: payload.teamKey ?? null,
     toState: payload.toState ?? null,
   };
+}
+
+// parseIssueUpdatedEvent — accept both canonical OTel and legacy flat shapes.
+// Returns null for anything that is not a linear.issue.updated event or that
+// lacks an extractable ticket identifier. CTL-681.
+export function parseIssueUpdatedEvent(event) {
+  const name = event?.attributes?.["event.name"] ?? event?.event;
+  if (name !== "linear.issue.updated") return null;
+  const payload = event?.body?.payload ?? event?.detail ?? {};
+  const identifier =
+    event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? payload.identifier ?? null;
+  if (!identifier) return null;
+  return {
+    identifier,
+    teamKey: payload.teamKey ?? null,
+    toState: payload.toState ?? null,
+    toLabels: payload.toLabels ?? null,
+    toProject: payload.toProject ?? null,
+    toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
+  };
+}
+
+// parseCommentCreatedEvent — accept canonical OTel and legacy flat shapes.
+// Returns null for anything that is not a linear.comment.created event. CTL-681.
+export function parseCommentCreatedEvent(event) {
+  const name = event?.attributes?.["event.name"] ?? event?.event;
+  if (name !== "linear.comment.created") return null;
+  const payload = event?.body?.payload ?? event?.detail ?? {};
+  const ticket =
+    event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? null;
+  return {
+    ticket,
+    commentId: payload.commentId ?? null,
+    issueId: payload.issueId ?? null,
+    body: payload.body ?? null,
+    authorId: payload.authorId ?? null,
+    authorName: payload.authorName ?? null,
+  };
+}
+
+// ticketMatchesQuery — eligibility predicate for a linear.issue.updated fold.
+// All conditions must hold: state matches, label matches (or no label filter),
+// project matches (or no project filter), priority within floor (or no filter).
+// Mirrors linear-query.mjs:144-148 priority semantics. CTL-681.
+function ticketMatchesQuery(query, { toState, toLabels, toProject, toPriority }) {
+  if (toState !== query.status) return false;
+  if (query.label !== null) {
+    if (!Array.isArray(toLabels) || !toLabels.includes(query.label)) return false;
+  }
+  if (query.project !== null && toProject !== query.project) return false;
+  if (query.priority !== null) {
+    if (typeof toPriority !== "number" || toPriority < 1 || toPriority > query.priority) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// handleIssueUpdatedEvent — fold a linear.issue.updated event into the eligible
+// projection by evaluating the ticket against each matching project's query.
+// Upserts (newly eligible) or removes (no longer eligible) without a Linear poll.
+// Never aborts a worker — this is a projection edit only. CTL-681.
+export function handleIssueUpdatedEvent(
+  event,
+  {
+    cache,
+    abortWorker: _abortWorker, // accepted for signature symmetry, never invoked
+  } = {}
+) {
+  const parsed = parseIssueUpdatedEvent(event);
+  if (!parsed) return;
+  if (cache) cache.set(parsed.identifier, parsed.toState);
+  for (const p of listProjects()) {
+    const query = resolveEligibleQuery(p);
+    if (query.team !== parsed.teamKey) continue;
+    if (ticketMatchesQuery(query, parsed)) {
+      upsertTicket(query.team, {
+        identifier: parsed.identifier,
+        state: parsed.toState,
+        priority: parsed.toPriority,
+        project: parsed.toProject ?? null,
+      });
+    } else {
+      removeTicket(query.team, parsed.identifier);
+    }
+  }
+}
+
+// handleCommentCreatedEvent — parse a linear.comment.created event and surface
+// it via a log.info line and an injectable onComment callback. No eligibility
+// changes — this is a pure hook seam. CTL-681.
+export function handleCommentCreatedEvent(event, { onComment } = {}) {
+  const parsed = parseCommentCreatedEvent(event);
+  if (!parsed) return;
+  log.info(
+    { ticket: parsed.ticket, commentId: parsed.commentId, authorId: parsed.authorId },
+    "monitor: comment.created observed (CTL-681 hook seam)"
+  );
+  if (typeof onComment === "function") {
+    try {
+      onComment(parsed);
+    } catch (err) {
+      log.warn({ err: err.message }, "onComment subscriber threw — ignored");
+    }
+  }
 }
 
 // --- Reconcile -----------------------------------------------------------
@@ -439,6 +544,8 @@ export function readNewEvents() {
         continue; // skip a malformed line, keep tailing
       }
       handleStateChangedEvent(event, tailerOpts);
+      handleIssueUpdatedEvent(event, tailerOpts);   // CTL-681
+      handleCommentCreatedEvent(event, tailerOpts); // CTL-681
     }
   } catch {
     // log file not yet created or a transient read error — best-effort
@@ -475,6 +582,7 @@ export function startMonitor({
   dispatch,
   abortWorker,
   cache, // CTL-634: shared state cache for event-driven write-through
+  onComment, // CTL-681: optional comment subscriber
 } = {}) {
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
@@ -482,7 +590,7 @@ export function startMonitor({
   // undefined, handleStateChangedEvent falls back to its real default.
   // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
   // populates the same instance the scheduler reads.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache };
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment };
   reconcileAll({ exec });
   sweepMissingTriage({ orchDir, dispatch }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
