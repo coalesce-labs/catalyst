@@ -6,21 +6,24 @@
 // dispatch), the byte-offset event-log tailer, the periodic reconcile timer,
 // and the startMonitor/stopMonitor lifecycle.
 //
-// Event-vs-poll division of labour (CTL-681 — was rewritten):
-// A linear.issue.state_changed event handles two cases inline (no poll):
-//   - DRAG_OUT_STATES (Backlog/Canceled/Duplicate) → confident immediate
-//     removal + abortWorker.
-//   - →Triage / →Ready-without-triage-artifact → one-shot triage dispatch.
-// Every other →Ready / unknown-new-state case is now a NO-OP — the
-// per-event scoping reconcile that used to fire here (because the parsed
-// event was missing project/labels/priority) is gone. CTL-681 captures those
-// fields in the event payload so a future incremental projection update can
-// fold the change without a poll; until that lands, the eligible set picks up
-// the new ticket on the next periodic reconcile (RECONCILE_INTERVAL_MS, 10
-// min) or on operator-restart startup reconcile. This trade-off — up to
-// ~10 min staleness for new Ready tickets in exchange for zero per-event
-// Linear polls — was explicitly chosen to remove the per-tick poll baseline
-// that exhausted the 2500/hr quota.
+// Event-vs-poll division of labour (CTL-681):
+// Three event types are handled inline by the tailer, with no Linear poll:
+//   linear.issue.state_changed:
+//     - DRAG_OUT_STATES (Backlog/Canceled/Duplicate) → confident immediate
+//       removal + abortWorker.
+//     - →Triage / →Ready-without-triage-artifact → one-shot triage dispatch.
+//     - All other states: no-op (pipeline write-backs, unknown states).
+//   linear.issue.updated (CTL-681, handleIssueUpdatedEvent):
+//     - Evaluates the ticket against each project's eligibleQuery from the
+//       event payload (toState/toLabels/toProject/toPriority — no poll).
+//     - Upserts the ticket when it matches; removes it when it does not.
+//     - Up to one reconcile interval of staleness only for brand-new adds
+//       whose relations the event payload omits; removals are instant.
+//   linear.comment.created (CTL-681, handleCommentCreatedEvent):
+//     - Surfaces parsed comment (ticket, body, author) via log.info and an
+//       injectable onComment callback. No eligible-set changes, no poll.
+// The 10-min periodic reconcile (RECONCILE_INTERVAL_MS) remains the
+// missed-webhook backstop for all three handlers.
 
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -302,13 +305,10 @@ export function handleStateChangedEvent(
       //
       // CTL-681: anything that does NOT trigger the triage auto-dispatch
       // (an already-triaged Ready, an unknown new state, or a standalone
-      // monitor with no orchDir) is now a NO-OP — the pre-CTL-681 debounced
-      // reconcile that fired here is gone. The eligible set picks up the new
-      // ticket on the next periodic reconcile (RECONCILE_INTERVAL_MS, ~10 min).
-      // The event payload now carries project/labels/priority (CTL-681 parser
-      // change) so a follow-up PR can fold the change incrementally into the
-      // projection without a poll; until then the 10-min reconcile + startup
-      // reconcile are the only Linear list-polls.
+      // monitor with no orchDir) is a NO-OP here. The handleIssueUpdatedEvent
+      // fold (wired below readNewEvents) handles label/project/priority changes
+      // incrementally without a poll. The 10-min reconcile remains the
+      // missed-webhook backstop.
       if (
         parsed.toState === query.status &&
         orchDir &&
@@ -328,7 +328,7 @@ export function handleStateChangedEvent(
             team: p.team,
             toState: parsed.toState,
           },
-          "monitor: →Ready event observed; per-event scoping poll removed (CTL-681), relying on 10-min reconcile"
+          "monitor: →Ready event (no triage dispatch); handleIssueUpdatedEvent folds projection, 10-min reconcile backstop (CTL-681)"
         );
       }
     } else if (DRAG_OUT_STATES.has(parsed.toState)) {
