@@ -330,6 +330,38 @@ else
 fi
 ```
 
+CTL-709: push the branch and open a draft PR now that commits exist (past the empty-branch gate).
+The draft is fail-open — a push or PR failure prints a warning but does **not** block `--status
+complete`. Phase-pr detects and promotes the draft instead of creating a new PR (avoiding the
+`create-pr` interactive "PR already exists" hang). Gated on `draftPr.enabled` (default `true`)
+so it can be disabled with one config key. Writes `.draftPr={number,url,isDraft}` into the signal
+file so downstream phases can see the PR number without querying GitHub.
+
+```bash phase-implement-draft-pr
+# CTL-709: open a draft PR + push as soon as we have commits, so CI runs during
+# verify/review and CTL-708 can see the branch. Fail-open — never blocks completion.
+if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  if [[ "$(draft_pr_enabled)" == "true" ]]; then
+    draft_pr_push || true
+    DPR_OUT="$(draft_pr_ensure "main" "$TICKET" 2>/dev/null || true)"
+    if [[ -n "${DPR_OUT}" ]]; then
+      DPR_NUM="$(printf '%s' "$DPR_OUT" | cut -f1)"
+      DPR_URL="$(printf '%s' "$DPR_OUT" | cut -f2)"
+      DPR_DRAFT="$(printf '%s' "$DPR_OUT" | cut -f3)"
+      TS_DPR=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+      TMP="${SIGNAL_FILE}.tmp.$$"
+      jq --arg ts "$TS_DPR" --argjson num "${DPR_NUM:-null}" \
+         --arg url "${DPR_URL:-}" --argjson draft "${DPR_DRAFT:-false}" \
+         '.updatedAt=$ts | if $num!=null and $num!="" then .draftPr={number:($num|tonumber),url:$url,isDraft:$draft} else . end' \
+         "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE" || true
+      echo "phase-implement: draft PR #${DPR_NUM:-?} ${DPR_URL:-}" >&2
+    fi
+  fi
+fi
+```
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then

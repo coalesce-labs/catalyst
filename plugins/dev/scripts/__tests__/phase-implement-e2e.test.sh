@@ -1015,6 +1015,281 @@ assert_grep 'active 2m 5s' "$LOG_FOOT" "mirror-footer: footer renders active wor
 assert_grep 'catalyst session `sess_FOOTERTEST`' "$LOG_FOOT" "mirror-footer: footer renders catalyst session id"
 assert_grep 'session uuid `abcd1234-aaaa-bbbb-cccc-000011112222`' "$LOG_FOOT" "mirror-footer: footer renders long session uuid"
 
+# ─── Test 19 (CTL-709): phase-implement draft-pr block contract ───────────────
+echo ""
+echo "Test 19 (CTL-709): phase-implement contract — draft-pr block present + wired correctly"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  # Uniquely-named fence must exist so the harness can extract + run it.
+  assert_grep 'phase-implement-draft-pr' "$SKILL_IMPLEMENT" "body contains uniquely-named phase-implement-draft-pr fence"
+  # Must source lib/draft-pr.sh.
+  assert_grep 'draft-pr\.sh' "$SKILL_IMPLEMENT" "fence sources lib/draft-pr.sh"
+  # Must gate on draft_pr_enabled.
+  assert_grep 'draft_pr_enabled' "$SKILL_IMPLEMENT" "fence gates on draft_pr_enabled (config knob)"
+  # Must call draft_pr_push and draft_pr_ensure.
+  assert_grep 'draft_pr_push' "$SKILL_IMPLEMENT" "fence calls draft_pr_push"
+  assert_grep 'draft_pr_ensure' "$SKILL_IMPLEMENT" "fence calls draft_pr_ensure"
+  # Must write .draftPr into signal file via jq atomic tmp-mv.
+  assert_grep '\.draftPr' "$SKILL_IMPLEMENT" "fence writes .draftPr into signal file"
+  # Must be fail-open: no bare exit 1 inside the fence on PR failure.
+  DRAFT_PR_FENCE_BODY="${SCRATCH}/t19-draft-pr-fence.sh"
+  awk '
+    /^```bash phase-implement-draft-pr$/ {grab=1; next}
+    grab && /^```[ \t]*$/ {grab=0}
+    grab {print}
+  ' "$SKILL_IMPLEMENT" > "$DRAFT_PR_FENCE_BODY"
+  if [[ -s "$DRAFT_PR_FENCE_BODY" ]]; then
+    pass "Test 19: draft-pr fence extractable from SKILL.md"
+    # Fail-open: no bare `exit 1` that would kill the phase on PR failure.
+    if grep -qE '^\s*exit 1' "$DRAFT_PR_FENCE_BODY" 2>/dev/null; then
+      fail "Test 19: draft-pr fence must not contain bare 'exit 1' (fail-open required)"
+    else
+      pass "Test 19: draft-pr fence is fail-open (no bare exit 1)"
+    fi
+    # No emit-complete inside the draft-pr fence (that belongs to terminal emit).
+    if grep -q 'emit-complete' "$DRAFT_PR_FENCE_BODY" 2>/dev/null; then
+      fail "Test 19: draft-pr fence must not call emit-complete (phase wiring concern)"
+    else
+      pass "Test 19: draft-pr fence does not call emit-complete"
+    fi
+  else
+    fail "Test 19: draft-pr fence not extractable — no \`\`\`bash phase-implement-draft-pr\`\`\` fence found"
+  fi
+fi
+
+# ─── Test 20 (CTL-709): draft-pr fence ordering ───────────────────────────────
+echo ""
+echo "Test 20 (CTL-709): phase-implement-draft-pr fence appears after empty-branch gate and before terminal emit"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  LINE_GATE=$(grep -n 'phase-implement-empty-branch-gate' "$SKILL_IMPLEMENT" | head -1 | cut -d: -f1)
+  LINE_DRAFT=$(grep -n 'phase-implement-draft-pr' "$SKILL_IMPLEMENT" | head -1 | cut -d: -f1)
+  # Use the EMIT= variable assignment in the terminal emit block (not the prose mention).
+  LINE_EMIT=$(grep -n 'EMIT=.*phase-agent-emit-complete' "$SKILL_IMPLEMENT" | head -1 | cut -d: -f1)
+  if [[ -n "$LINE_GATE" && -n "$LINE_DRAFT" && -n "$LINE_EMIT" ]]; then
+    if [[ "$LINE_DRAFT" -gt "$LINE_GATE" ]]; then
+      pass "Test 20: draft-pr fence is AFTER empty-branch gate (line $LINE_DRAFT > $LINE_GATE)"
+    else
+      fail "Test 20: draft-pr fence must appear AFTER empty-branch gate (draft=$LINE_DRAFT gate=$LINE_GATE)"
+    fi
+    if [[ "$LINE_DRAFT" -lt "$LINE_EMIT" ]]; then
+      pass "Test 20: draft-pr fence is BEFORE terminal --status complete (line $LINE_DRAFT < $LINE_EMIT)"
+    else
+      fail "Test 20: draft-pr fence must appear BEFORE terminal emit (draft=$LINE_DRAFT emit=$LINE_EMIT)"
+    fi
+  else
+    fail "Test 20: could not locate all three anchors (gate=$LINE_GATE draft=$LINE_DRAFT emit=$LINE_EMIT)"
+  fi
+fi
+
+# ─── Test 21 (CTL-709): draft-pr fence behavior — enabled + commits → push + draft PR
+echo ""
+echo "Test 21 (CTL-709): draft-pr fence behavior — enabled + commits → push + draft PR"
+DRAFT_FENCE_FILE="${SCRATCH}/t21-fence.sh"
+awk '
+  /^```bash phase-implement-draft-pr$/ {grab=1; next}
+  grab && /^```[ \t]*$/ {grab=0}
+  grab {print}
+' "$SKILL_IMPLEMENT" > "$DRAFT_FENCE_FILE" 2>/dev/null || true
+
+if [[ ! -s "$DRAFT_FENCE_FILE" ]]; then
+  fail "Test 21: skipped — draft-pr fence not yet extractable"
+else
+  pass "Test 21: draft-pr fence extractable"
+
+  # Minimal git repo with one commit + stubbed gh/git for the fence.
+  build_git_fixture_one_commit() {
+    local repo_dir="$1"
+    local bare_dir="${repo_dir}-bare.git"
+    mkdir -p "$repo_dir"
+    git init --quiet "$bare_dir" --bare -b main
+    (
+      cd "$repo_dir" || exit 1
+      git init --quiet --initial-branch=main
+      git config user.email "test@example.com"
+      git config user.name "Test"
+      echo "base" > base.txt
+      git add base.txt
+      git commit --quiet -m "base commit"
+      git remote add origin "$bare_dir"
+      git push --quiet origin main
+      git checkout --quiet -b CTL-709
+      echo "change" > change.txt
+      git add change.txt
+      git commit --quiet -m "feat: implement draft-pr"
+    )
+  }
+
+  T21_DIR="${SCRATCH}/t21"
+  T21_REPO="${T21_DIR}/repo"
+  T21_BIN="${T21_DIR}/bin"
+  T21_PLUGIN="${T21_DIR}/plugin"
+  T21_SIGNAL_DIR="${T21_DIR}/orch/workers/CTL-709"
+  mkdir -p "$T21_BIN" "$T21_PLUGIN/scripts/lib" "$T21_SIGNAL_DIR"
+  build_git_fixture_one_commit "$T21_REPO"
+
+  # Copy real lib so the fence can source it.
+  cp "${REPO_ROOT}/plugins/dev/scripts/lib/draft-pr.sh" "${T21_PLUGIN}/scripts/lib/draft-pr.sh"
+
+  # gh stub: view exits 1 (no existing PR), create --draft returns URL.
+  T21_GH_LOG="${T21_DIR}/gh.log"
+  cat > "${T21_BIN}/gh" <<GHSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T21_GH_LOG}"
+if [[ "\$1" == "pr" && "\$2" == "view" ]]; then exit 1; fi
+if [[ "\$1" == "pr" && "\$2" == "create" ]]; then
+  echo "https://github.com/test/repo/pull/77"
+  exit 0
+fi
+if [[ "\$1" == "repo" && "\$2" == "view" ]]; then
+  echo '{"defaultBranchRef":{"name":"main"}}'
+  exit 0
+fi
+exit 0
+GHSTUB
+  chmod +x "${T21_BIN}/gh"
+
+  # Signal file with required variables.
+  T21_SIGNAL="${T21_SIGNAL_DIR}/phase-implement.json"
+  printf '{"status":"running","ticket":"CTL-709","phase":"implement"}\n' > "$T21_SIGNAL"
+
+  # No config → draftPr.enabled defaults to true.
+  (
+    cd "$T21_REPO" || exit 1
+    git push -u origin HEAD --quiet 2>/dev/null || true
+    PATH="${T21_BIN}:${PATH}" \
+      PLUGIN_ROOT="${T21_PLUGIN}" \
+      SIGNAL_FILE="$T21_SIGNAL" \
+      TICKET="CTL-709" \
+      PHASE="implement" \
+      ORCH_DIR="${T21_DIR}/orch" \
+      bash "$DRAFT_FENCE_FILE" >"${T21_DIR}/stdout.log" 2>"${T21_DIR}/stderr.log"
+    echo "$?" > "${T21_DIR}/exit-code"
+  )
+
+  assert_eq "0" "$(cat "${T21_DIR}/exit-code")" "Test 21: draft-pr fence exits 0 (enabled + commits)"
+  if grep -q '\-\-draft' "$T21_GH_LOG" 2>/dev/null; then
+    pass "Test 21: gh pr create --draft was called"
+  else
+    fail "Test 21: gh pr create --draft should be called — log: $(cat "$T21_GH_LOG" 2>/dev/null)"
+  fi
+  # Signal file should have .draftPr.number
+  DRAFT_PR_NUM="$(jq -r '.draftPr.number // empty' "$T21_SIGNAL" 2>/dev/null || true)"
+  if [[ -n "$DRAFT_PR_NUM" ]]; then
+    pass "Test 21: signal file has .draftPr.number set (=$DRAFT_PR_NUM)"
+  else
+    fail "Test 21: signal file .draftPr.number should be set — signal: $(cat "$T21_SIGNAL" 2>/dev/null)"
+  fi
+fi
+
+# ─── Test 22 (CTL-709): draft-pr fence behavior — disabled → no-op
+echo ""
+echo "Test 22 (CTL-709): draft-pr fence behavior — draftPr.enabled=false → no-op"
+if [[ ! -s "$DRAFT_FENCE_FILE" ]]; then
+  fail "Test 22: skipped — draft-pr fence not extractable"
+else
+  T22_DIR="${SCRATCH}/t22"
+  T22_REPO="${T22_DIR}/repo"
+  T22_BIN="${T22_DIR}/bin"
+  T22_PLUGIN="${T22_DIR}/plugin"
+  T22_SIGNAL_DIR="${T22_DIR}/orch/workers/CTL-709"
+  mkdir -p "$T22_BIN" "$T22_PLUGIN/scripts/lib" "$T22_SIGNAL_DIR"
+  build_git_fixture_one_commit "$T22_REPO"
+
+  cp "${REPO_ROOT}/plugins/dev/scripts/lib/draft-pr.sh" "${T22_PLUGIN}/scripts/lib/draft-pr.sh"
+
+  # gh stub that fails loudly if called unexpectedly.
+  T22_GH_LOG="${T22_DIR}/gh.log"
+  cat > "${T22_BIN}/gh" <<GHSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T22_GH_LOG}"
+echo "gh should NOT be called when draftPr.enabled=false" >&2
+exit 1
+GHSTUB
+  chmod +x "${T22_BIN}/gh"
+
+  T22_SIGNAL="${T22_SIGNAL_DIR}/phase-implement.json"
+  printf '{"status":"running","ticket":"CTL-709","phase":"implement"}\n' > "$T22_SIGNAL"
+
+  T22_CONFIG="${T22_DIR}/config.json"
+  printf '{"catalyst":{"orchestration":{"draftPr":{"enabled":false}}}}\n' > "$T22_CONFIG"
+
+  (
+    cd "$T22_REPO" || exit 1
+    PATH="${T22_BIN}:${PATH}" \
+      PLUGIN_ROOT="${T22_PLUGIN}" \
+      SIGNAL_FILE="$T22_SIGNAL" \
+      TICKET="CTL-709" \
+      PHASE="implement" \
+      ORCH_DIR="${T22_DIR}/orch" \
+      CATALYST_CONFIG_PATH="$T22_CONFIG" \
+      bash "$DRAFT_FENCE_FILE" >"${T22_DIR}/stdout.log" 2>"${T22_DIR}/stderr.log"
+    echo "$?" > "${T22_DIR}/exit-code"
+  )
+
+  assert_eq "0" "$(cat "${T22_DIR}/exit-code")" "Test 22: draft-pr fence exits 0 when disabled"
+  if [[ -f "$T22_GH_LOG" ]] && grep -q '.' "$T22_GH_LOG" 2>/dev/null; then
+    fail "Test 22: gh must NOT be called when draftPr.enabled=false — log: $(cat "$T22_GH_LOG")"
+  else
+    pass "Test 22: gh NOT called (feature disabled)"
+  fi
+  DRAFT_PR_FIELD="$(jq -r '.draftPr // "absent"' "$T22_SIGNAL" 2>/dev/null || echo 'absent')"
+  if [[ "$DRAFT_PR_FIELD" == "absent" || "$DRAFT_PR_FIELD" == "null" ]]; then
+    pass "Test 22: .draftPr field absent in signal when disabled"
+  else
+    fail "Test 22: .draftPr should be absent when disabled — got: $DRAFT_PR_FIELD"
+  fi
+fi
+
+# ─── Test 23 (CTL-709): draft-pr fence behavior — gh create fails → fail-open
+echo ""
+echo "Test 23 (CTL-709): draft-pr fence — gh pr create fails entirely → fail-open, phase still completes"
+if [[ ! -s "$DRAFT_FENCE_FILE" ]]; then
+  fail "Test 23: skipped — draft-pr fence not extractable"
+else
+  T23_DIR="${SCRATCH}/t23"
+  T23_REPO="${T23_DIR}/repo"
+  T23_BIN="${T23_DIR}/bin"
+  T23_PLUGIN="${T23_DIR}/plugin"
+  T23_SIGNAL_DIR="${T23_DIR}/orch/workers/CTL-709"
+  mkdir -p "$T23_BIN" "$T23_PLUGIN/scripts/lib" "$T23_SIGNAL_DIR"
+  build_git_fixture_one_commit "$T23_REPO"
+
+  cp "${REPO_ROOT}/plugins/dev/scripts/lib/draft-pr.sh" "${T23_PLUGIN}/scripts/lib/draft-pr.sh"
+
+  # gh stub: all operations fail.
+  T23_GH_LOG="${T23_DIR}/gh.log"
+  cat > "${T23_BIN}/gh" <<GHSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T23_GH_LOG}"
+echo "gh stub: all operations fail" >&2
+exit 1
+GHSTUB
+  chmod +x "${T23_BIN}/gh"
+
+  T23_SIGNAL="${T23_SIGNAL_DIR}/phase-implement.json"
+  printf '{"status":"running","ticket":"CTL-709","phase":"implement"}\n' > "$T23_SIGNAL"
+
+  (
+    cd "$T23_REPO" || exit 1
+    git push -u origin HEAD --quiet 2>/dev/null || true
+    PATH="${T23_BIN}:${PATH}" \
+      PLUGIN_ROOT="${T23_PLUGIN}" \
+      SIGNAL_FILE="$T23_SIGNAL" \
+      TICKET="CTL-709" \
+      PHASE="implement" \
+      ORCH_DIR="${T23_DIR}/orch" \
+      bash "$DRAFT_FENCE_FILE" >"${T23_DIR}/stdout.log" 2>"${T23_DIR}/stderr.log"
+    echo "$?" > "${T23_DIR}/exit-code"
+  )
+
+  assert_eq "0" "$(cat "${T23_DIR}/exit-code")" "Test 23: fence exits 0 even when gh fails (fail-open)"
+  DRAFT_PR_FIELD="$(jq -r '.draftPr // "absent"' "$T23_SIGNAL" 2>/dev/null || echo 'absent')"
+  if [[ "$DRAFT_PR_FIELD" == "absent" || "$DRAFT_PR_FIELD" == "null" ]]; then
+    pass "Test 23: .draftPr absent/null in signal when gh fails"
+  else
+    fail "Test 23: .draftPr should be absent when gh fails — got: $DRAFT_PR_FIELD"
+  fi
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
