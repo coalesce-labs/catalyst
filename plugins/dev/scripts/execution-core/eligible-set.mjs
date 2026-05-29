@@ -131,6 +131,26 @@ export function dropProject(projectKey) {
   }
 }
 
+// upsertTicket — insert or merge a single ticket into a project's eligible set
+// and persist. CTL-681: the event-driven fold (handleIssueUpdatedEvent) adds a
+// newly-eligible ticket from the webhook payload alone, with no Linear poll.
+// Merge-over-existing preserves the richer fields (title, relations,
+// inverseRelations) the last reconcile filled in, since the event payload does
+// not carry them. writeProjection's skip-when-unchanged guard makes a no-op
+// upsert produce zero disk writes.
+export function upsertTicket(projectKey, ticket, { query } = {}) {
+  let entry = eligible.get(projectKey);
+  if (!entry) {
+    entry = { tickets: new Map(), source: null, query: null };
+    eligible.set(projectKey, entry);
+  }
+  const prev = entry.tickets.get(ticket.identifier);
+  entry.tickets.set(ticket.identifier, { ...(prev ?? {}), ...ticket });
+  entry.source = "event";
+  if (query !== undefined) entry.query = query;
+  writeProjection(projectKey);
+}
+
 // getEligibleSet - a sorted copy of a project's eligible tickets. Callers may
 // mutate the result freely; the internal state is never exposed.
 export function getEligibleSet(projectKey) {
