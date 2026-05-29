@@ -36,6 +36,21 @@ export default [
     },
   },
   {
+    // Plain Node ESM (e.g. lib/board-data.mjs) — not in the TS project, so the
+    // type-checked rules can't run; disable them and the fs/child-process
+    // security rules (same posture as the .ts block above).
+    files: ["**/*.mjs"],
+    languageOptions: {
+      globals: { ...globals.node },
+    },
+    rules: {
+      ...tseslint.configs.disableTypeChecked.rules,
+      "security/detect-non-literal-fs-filename": "off",
+      "security/detect-child-process": "off",
+      "security/detect-object-injection": "off",
+    },
+  },
+  {
     files: ["__tests__/**/*.ts"],
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
