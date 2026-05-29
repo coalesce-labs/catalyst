@@ -47,7 +47,15 @@ import {
   clearDispatchCooldown,
   dispatchCooldownPath,
   verifyDispatchedSignal,
+  gcDispatchCooldowns,
+  maybeEscalateDispatchFailures,
   __resetForTests,
+  // CTL-705: Phase 2 helpers
+  STAGE_RANK,
+  stageRankForTicket,
+  readWorkerPriority,
+  writeWorkerPriority,
+  buildGlobalRanking,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
@@ -669,7 +677,8 @@ describe("dispatch cool-down helpers", () => {
   });
 
   test("within the window → in cool-down; past the window → not", () => {
-    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 5_000);
+    // code=1 (transient) → 60s window (CTL-713: code=2 uses 30 min permanent window).
+    recordDispatchFailure(orchDir, "CTL-1", "research", 1, 5_000);
     // 30 s later (< 60 s window) → still cooling down.
     expect(inDispatchCooldown(orchDir, "CTL-1", "research", 35_000)).toBe(true);
     // 61 s later (> 60 s window) → window elapsed.
@@ -696,6 +705,52 @@ describe("dispatch cool-down helpers", () => {
     writeFileSync(dispatchCooldownPath(orchDir, "CTL-1", "research"), "not json");
     expect(inDispatchCooldown(orchDir, "CTL-1", "research", 6_000)).toBe(false);
   });
+
+  // ── CTL-713: enriched marker schema (TTL + ticket + consecutiveFailures) ──
+
+  test("recordDispatchFailure stamps ticket, expiresAt, and consecutiveFailures", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 1, 5_000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-1", "research"), "utf8"));
+    expect(m).toMatchObject({ ticket: "CTL-1", phase: "research", code: 1, failedAt: 5_000 });
+    expect(m.expiresAt).toBe(5_000 + 60_000);
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("code=2 (prior_artifact_missing) uses the permanent cooldown window", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "plan", 2, 5_000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-1", "plan"), "utf8"));
+    expect(m.expiresAt).toBe(5_000 + 30 * 60 * 1000);
+  });
+
+  test("consecutiveFailures increments on same-code overwrite, resets on a different code", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "research", 1, 1_000);
+    recordDispatchFailure(orchDir, "CTL-1", "research", 1, 2_000);
+    let m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-1", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(2);
+    recordDispatchFailure(orchDir, "CTL-1", "research", 2, 3_000);
+    m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-1", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("recordDispatchFailure returns the written marker", () => {
+    const m = recordDispatchFailure(orchDir, "CTL-1", "review", 2, 5_000);
+    expect(m).toMatchObject({ ticket: "CTL-1", phase: "review", code: 2, consecutiveFailures: 1 });
+    expect(m.expiresAt).toBe(5_000 + 30 * 60 * 1000);
+  });
+
+  test("inDispatchCooldown honors expiresAt for permanent (code=2) markers", () => {
+    recordDispatchFailure(orchDir, "CTL-1", "plan", 2, 5_000);
+    expect(inDispatchCooldown(orchDir, "CTL-1", "plan", 5_000 + 5 * 60 * 1000)).toBe(true);
+    expect(inDispatchCooldown(orchDir, "CTL-1", "plan", 5_000 + 31 * 60 * 1000)).toBe(false);
+  });
+
+  test("inDispatchCooldown falls back to failedAt+COOLDOWN_MS for legacy markers without expiresAt", () => {
+    mkdirSync(join(orchDir, ".dispatch-cooldowns"), { recursive: true });
+    writeFileSync(dispatchCooldownPath(orchDir, "CTL-9", "research"),
+      JSON.stringify({ phase: "research", code: 1, failedAt: 5_000 }));
+    expect(inDispatchCooldown(orchDir, "CTL-9", "research", 35_000)).toBe(true);
+    expect(inDispatchCooldown(orchDir, "CTL-9", "research", 66_000)).toBe(false);
+  });
 });
 
 // ── CTL-624: dispatch cool-down wired into schedulerTick ──
@@ -711,9 +766,12 @@ describe("dispatch cool-down (schedulerTick)", () => {
     },
   ];
 
-  test("a refused new-work dispatch (code 2) writes a cool-down marker and stops re-dispatching", () => {
+  test("a refused new-work dispatch (transient code) writes a cool-down marker and stops re-dispatching", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const dispatch = fakeDispatch({ code: 2 });
+    // code=1 is a transient failure → 60 s window (code=2 uses the 30-min
+    // permanent window, covered separately by the recordDispatchFailure unit
+    // tests). The < 60 s / > 60 s assertions below depend on the transient TTL.
+    const dispatch = fakeDispatch({ code: 1 });
     const marker = dispatchCooldownPath(orchDir, "CTL-3", "research");
 
     // Tick 1 at t=1000: dispatch refused → 1 call, marker written.
@@ -721,6 +779,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 1_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(1);
     expect(existsSync(marker)).toBe(true);
@@ -730,6 +789,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 30_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(1);
 
@@ -738,6 +798,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       readEligible: () => eligibleOne("CTL-3"),
       dispatch,
       now: () => 70_000,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toHaveLength(2);
   });
@@ -746,11 +807,14 @@ describe("dispatch cool-down (schedulerTick)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const marker = dispatchCooldownPath(orchDir, "CTL-4", "research");
 
-    // First a refusal seeds the marker.
+    // First a refusal seeds the marker. code=1 is transient (60 s window) so
+    // the t=70_000 success below lands past the window; code=2 would hold a
+    // 30-min permanent marker and suppress the clearing dispatch entirely.
     schedulerTick(orchDir, {
       readEligible: () => eligibleOne("CTL-4"),
-      dispatch: fakeDispatch({ code: 2 }),
+      dispatch: fakeDispatch({ code: 1 }),
       now: () => 1_000,
+      liveBackgroundCount: () => 0,
     });
     expect(existsSync(marker)).toBe(true);
 
@@ -760,6 +824,7 @@ describe("dispatch cool-down (schedulerTick)", () => {
       dispatch: fakeDispatch({ code: 0 }),
       now: () => 70_000,
       verifyDispatched: verifyOk, // CTL-611: not testing the verifier here
+      liveBackgroundCount: () => 0,
     });
     expect(existsSync(marker)).toBe(false);
   });
@@ -787,6 +852,104 @@ describe("dispatch cool-down (schedulerTick)", () => {
 
     schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 30_000 });
     expect(dispatch.calls).toHaveLength(1); // suppressed within window
+  });
+});
+
+// ── CTL-713: GC sweep ──
+describe("dispatch cool-down GC", () => {
+  test("gcDispatchCooldowns deletes an expired marker for a non-eligible ticket", () => {
+    recordDispatchFailure(orchDir, "CTL-DONE", "review", 1, 1_000); // expiresAt = 61_000
+    const deleted = gcDispatchCooldowns(orchDir, new Set(["CTL-LIVE"]), 100_000);
+    expect(deleted).toEqual([{ ticket: "CTL-DONE", phase: "review" }]);
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-DONE", "review"))).toBe(false);
+  });
+
+  test("gc keeps a marker whose ticket is still eligible even if expired", () => {
+    recordDispatchFailure(orchDir, "CTL-LIVE", "research", 1, 1_000);
+    gcDispatchCooldowns(orchDir, new Set(["CTL-LIVE"]), 100_000);
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-LIVE", "research"))).toBe(true);
+  });
+
+  test("gc keeps an unexpired marker for a non-eligible ticket", () => {
+    recordDispatchFailure(orchDir, "CTL-DONE", "research", 1, 1_000); // expiresAt = 61_000
+    gcDispatchCooldowns(orchDir, new Set(), 30_000); // before expiry
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-DONE", "research"))).toBe(true);
+  });
+
+  test("gc reaps a legacy marker (no expiresAt/ticket) using failedAt+COOLDOWN_MS and filename", () => {
+    mkdirSync(join(orchDir, ".dispatch-cooldowns"), { recursive: true });
+    writeFileSync(join(orchDir, ".dispatch-cooldowns", "CTL-671-monitor-deploy.json"),
+      JSON.stringify({ phase: "monitor-deploy", code: 1, failedAt: 1_000 }));
+    const deleted = gcDispatchCooldowns(orchDir, new Set(), 100_000);
+    expect(deleted).toEqual([{ ticket: "CTL-671", phase: "monitor-deploy" }]);
+  });
+
+  test("gc tolerates a missing .dispatch-cooldowns dir and malformed files", () => {
+    expect(gcDispatchCooldowns(orchDir, new Set(), 100_000)).toEqual([]);
+    mkdirSync(join(orchDir, ".dispatch-cooldowns"), { recursive: true });
+    writeFileSync(join(orchDir, ".dispatch-cooldowns", "junk.json"), "not json");
+    expect(() => gcDispatchCooldowns(orchDir, new Set(), 100_000)).not.toThrow();
+  });
+
+  test("schedulerTick runs the GC sweep and emits a cooldown-gc event per reaped marker", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    recordDispatchFailure(orchDir, "CTL-GONE", "review", 1, 1_000);
+    const events = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      now: () => 100_000,
+      appendCooldownGcEvent: (e) => events.push(e),
+    });
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-GONE", "review"))).toBe(false);
+    expect(events).toEqual([expect.objectContaining({ ticket: "CTL-GONE", target_phase: "review" })]);
+  });
+});
+
+// ── CTL-713: consecutive-failure escalation ──
+describe("dispatch cool-down escalation", () => {
+  const fakeWriteStatus = (applied) => ({
+    applyLabel: ({ ticket, label }) => { applied.push({ ticket, label }); return { applied: true }; },
+    transition: () => {},
+    applyPhaseStatus: () => {},
+  });
+
+  test("maybeEscalateDispatchFailures applies needs-human at the threshold", () => {
+    const applied = [];
+    const ws = fakeWriteStatus(applied);
+    const marker = { ticket: "CTL-5", phase: "research", code: 2, consecutiveFailures: 3 };
+    const events = [];
+    maybeEscalateDispatchFailures(orchDir, marker, { writeStatus: ws, appendEvent: (e) => events.push(e) });
+    expect(applied).toEqual([{ ticket: "CTL-5", label: "needs-human" }]);
+    expect(events).toEqual([expect.objectContaining({ ticket: "CTL-5", target_phase: "research", consecutiveFailures: 3 })]);
+  });
+
+  test("maybeEscalateDispatchFailures is a no-op below the threshold", () => {
+    const applied = [];
+    const ws = fakeWriteStatus(applied);
+    maybeEscalateDispatchFailures(orchDir, { ticket: "CTL-5", phase: "research", code: 2, consecutiveFailures: 2 },
+      { writeStatus: ws, appendEvent: () => {} });
+    expect(applied).toEqual([]);
+  });
+
+  test("schedulerTick escalates after N consecutive same-code refusals on new-work", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 2 });
+    const applied = [];
+    const ws = fakeWriteStatus(applied);
+    let t = 0;
+    for (let i = 0; i < 3; i++) {
+      schedulerTick(orchDir, {
+        readEligible: () => [{ identifier: "CTL-7", priority: 1, createdAt: "x", state: "Todo",
+                               relations: { nodes: [] }, inverseRelations: { nodes: [] } }],
+        dispatch,
+        writeStatus: ws,
+        liveBackgroundCount: () => 0,
+        now: () => (t += 31 * 60 * 1000),
+      });
+    }
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "needs-human" });
   });
 });
 
@@ -948,6 +1111,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass the dispatch verifier
+      liveBackgroundCount: () => 0,
     });
     // 2 free slots, both ready → both dispatched, urgent (CTL-8) first.
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-8", "CTL-9"]);
@@ -1013,7 +1177,7 @@ describe("schedulerTick — new-work pull", () => {
         inverseRelations: { nodes: [] },
       },
     ];
-    schedulerTick(orchDir, { readEligible: () => eligible, dispatch });
+    schedulerTick(orchDir, { readEligible: () => eligible, dispatch, liveBackgroundCount: () => 0 });
     expect(dispatch.calls).toHaveLength(1);
     expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-1", phase: "research" });
   });
@@ -1119,6 +1283,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+      liveBackgroundCount: () => 0,
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
@@ -1554,6 +1719,7 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
       readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
       dispatch,
       exec,
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-1"]);
   });
@@ -2148,6 +2314,7 @@ describe("CTL-539 — idempotent dispatch across a crash", () => {
       readEligible: () => eligible,
       dispatch,
       verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
     });
     expect(r1.dispatched).toEqual(["CTL-9"]);
 
@@ -2244,6 +2411,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       dispatch: okDispatch,
       writeStatus,
       verifyDispatched: verifyOk, // CTL-611
+      liveBackgroundCount: () => 0,
     });
     expect(writes).toContainEqual(expect.objectContaining({ ticket: "CTL-2", phase: "research" }));
   });
@@ -3260,6 +3428,14 @@ describe("CTL-653: schedulerTick verify⇄remediate cycle (end-to-end)", () => {
         writeStatus: noopWriteStatus,
         reclaimDeadWork: () => "noop",
         verifyDispatched: verifyOk, // CTL-611: cyclingDispatch writes status:"done", not a runnable dispatched signal; bypass the verifier
+        // CTL-705: inject the liveBackgroundCount seam so this end-to-end cycle
+        // test does NOT shell out to the real `claude agents --json` once per
+        // tick. With no eligible/queued tickets the slot-counting sweeps (0.5
+        // preemption, 2 new-work) are no-ops anyway, so a free-slot stub is
+        // behavior-preserving — and it makes the 12-tick run deterministic
+        // instead of dependent on real subprocess latency (which timed the test
+        // out under load even after the scheduler hoisted the call 3x→1x).
+        liveBackgroundCount: () => 0,
       });
     }
   };
