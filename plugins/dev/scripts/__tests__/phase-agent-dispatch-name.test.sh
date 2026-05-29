@@ -32,7 +32,8 @@ assert_jq() {
 	local label="$1" json="$2" filter="$3"
 	local got
 	got=$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)
-	if [ "$got" = "true" ] || [ -n "$got" ]; then
+	# Treat jq boolean false / null / empty output as failure.
+	if [ "$got" = "true" ] || ([ -n "$got" ] && [ "$got" != "false" ] && [ "$got" != "null" ]); then
 		PASSES=$((PASSES + 1))
 		echo "  PASS: $label"
 	else
@@ -43,9 +44,9 @@ assert_jq() {
 	fi
 }
 
-echo "phase-agent-dispatch --name / --attempt tests (CTL-649)"
+echo "phase-agent-dispatch --name / --attempt tests (CTL-688)"
 
-# ── 1. default attempt=1, name includes structured form ──────────────────────
+# ── 1. default attempt=1 → "<TICKET> <PHASE>" (no suffix) ────────────────────
 setup_orch_fixture "o-test-1" "CTL-999"
 OUT=$(dispatch_dry --phase triage --ticket CTL-999)
 RC=$?
@@ -55,10 +56,11 @@ if [ $RC -ne 0 ]; then
 	FAILURES=$((FAILURES + 1))
 else
 	assert_jq "default attempt is 1" "$OUT" '.attempt == 1 | tostring | test("true")'
-	assert_jq "sessionName uses structured shape" "$OUT" '.sessionName | test("^o-o-test-1:CTL-999:triage:1$")'
+	assert_jq "sessionName is '<TICKET> <PHASE>' with no suffix" "$OUT" \
+		'.sessionName | test("^CTL-999 triage$")'
 fi
 
-# ── 2. --attempt 3 threads into sessionName ──────────────────────────────────
+# ── 2. --attempt 3 → "<TICKET> <PHASE> #3" ───────────────────────────────────
 setup_orch_fixture "o-test-2" "CTL-999"
 OUT=$(dispatch_dry --phase triage --ticket CTL-999 --attempt 3)
 RC=$?
@@ -67,11 +69,12 @@ if [ $RC -ne 0 ]; then
 	echo "    output: $OUT"
 	FAILURES=$((FAILURES + 1))
 else
-	assert_jq "sessionName includes attempt=3 suffix" "$OUT" '.sessionName | test("o-test-2:CTL-999:triage:3$")'
+	assert_jq "sessionName appends ' #3' for attempt 3" "$OUT" \
+		'.sessionName | test("^CTL-999 triage #3$")'
 	assert_jq "attempt field is numeric 3" "$OUT" '.attempt == 3 | tostring | test("true")'
 fi
 
-# ── 3. invalid --attempt rejected ────────────────────────────────────────────
+# ── 3. invalid --attempt rejected (UNCHANGED) ─────────────────────────────────
 setup_orch_fixture "o-test-1" "CTL-999"
 if "$DISPATCH" --dry-run --phase triage --ticket CTL-999 --attempt "abc" >/dev/null 2>&1; then
 	echo "  FAIL: invalid --attempt should have been rejected"
@@ -81,7 +84,7 @@ else
 	echo "  PASS: invalid --attempt rejected"
 fi
 
-# ── 4. orch_id sourced from env when no --orch-id ────────────────────────────
+# ── 4. env-only orch_id path still dispatches; name no longer carries orch id ─
 setup_orch_fixture "o-env-only" "CTL-100"
 OUT=$(dispatch_dry --phase triage --ticket CTL-100)
 RC=$?
@@ -90,8 +93,8 @@ if [ $RC -ne 0 ]; then
 	echo "    output: $OUT"
 	FAILURES=$((FAILURES + 1))
 else
-	assert_jq "sessionName uses env CATALYST_ORCHESTRATOR_ID" "$OUT" \
-		'.sessionName | test("^o-o-env-only:CTL-100:triage:1$")'
+	assert_jq "sessionName is '<TICKET> <PHASE>' (orch id not in name)" "$OUT" \
+		'.sessionName | test("^CTL-100 triage$")'
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

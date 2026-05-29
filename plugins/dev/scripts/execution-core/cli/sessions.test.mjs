@@ -129,17 +129,35 @@ describe("RSS attribution (single ps snapshot, ancestor walk)", () => {
   });
 });
 
-describe("parseSessionName (structured --name from Phase 1)", () => {
-  it("parses o-<orchId>:<ticket>:<phase>:<attempt>", () => {
-    expect(parseSessionName("o-adv-1103-1088:CTL-649:implement:1")).toEqual({
-      orchestratorId: "o-adv-1103-1088",
+describe("parseSessionName (scannable --name from CTL-688)", () => {
+  it("parses '<TICKET> <PHASE>' with default attempt 1", () => {
+    expect(parseSessionName("CTL-649 implement")).toEqual({
+      orchestratorId: "CTL-649",
       ticket: "CTL-649",
       phase: "implement",
       attempt: 1,
     });
   });
 
-  it("returns null for a legacy prompt-derived name", () => {
+  it("parses the '#<N>' retry suffix", () => {
+    expect(parseSessionName("ADV-1034 plan #2")).toEqual({
+      orchestratorId: "ADV-1034",
+      ticket: "ADV-1034",
+      phase: "plan",
+      attempt: 2,
+    });
+  });
+
+  it("parses a hyphenated phase name", () => {
+    expect(parseSessionName("CTL-1 monitor-merge")).toMatchObject({
+      ticket: "CTL-1",
+      phase: "monitor-merge",
+      attempt: 1,
+    });
+  });
+
+  it("returns null for a legacy colon/prompt-derived name", () => {
+    expect(parseSessionName("o-adv-1103-1088:CTL-649:implement:1")).toBeNull();
     expect(parseSessionName("phase monitor merge")).toBeNull();
   });
 
@@ -157,7 +175,7 @@ describe("buildRows (joins agents + worker signals + rss, injected deps)", () =>
       kind: "background",
       startedAt: 1000,
       sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd",
-      name: "o-test:CTL-1:implement:1",
+      name: "CTL-1 implement",
       status: "idle",
     },
   ];
