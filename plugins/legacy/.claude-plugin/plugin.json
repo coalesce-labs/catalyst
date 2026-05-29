@@ -1,0 +1,20 @@
+{
+  "name": "catalyst-legacy",
+  "version": "1.0.0",
+  "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate, briefing-followup, iterate-plan. Superseded by catalyst-dev's execution-core/phase-agent pipeline.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce-labs.com",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "legacy",
+    "orchestration",
+    "wave",
+    "oneshot",
+    "workflow"
+  ],
+  "license": "MIT"
+}
