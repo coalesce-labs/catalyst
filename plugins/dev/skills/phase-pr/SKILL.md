@@ -143,6 +143,61 @@ if [[ "$ALREADY_MERGED" -eq 1 ]]; then
 fi
 ```
 
+## Existing open PR detection (CTL-709)
+
+CTL-709's `phase-implement` may have already opened a draft PR for this branch. Detect it here so
+we can **promote** it (`gh pr ready`) rather than re-entering `create-pr`'s interactive
+"PR already exists" prompt (`create-pr/SKILL.md:96–104`) — that prompt would hang a `--bg`
+worker forever. Detection order: merged → existing-open → create-new. The detection fence is
+**side-effect-free** so the e2e test can source it in isolation.
+
+```bash phase-pr-existing-pr-detect
+# CTL-709: phase-implement may have already opened a (draft) PR for this branch.
+# Detect it here so we can promote it rather than re-entering create-pr's
+# interactive "PR already exists" prompt (create-pr/SKILL.md:96 — would hang --bg).
+EXISTING_PR_NUMBER=""
+EXISTING_PR_URL=""
+EXISTING_PR_IS_DRAFT=""
+EXISTING_PR_JSON="$(gh pr view --json number,url,state,isDraft 2>/dev/null || true)"
+if [[ -n "$EXISTING_PR_JSON" ]]; then
+  if [[ "$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.state // empty' 2>/dev/null)" == "OPEN" ]]; then
+    EXISTING_PR_NUMBER="$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.number // empty' 2>/dev/null || true)"
+    EXISTING_PR_URL="$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.url // empty' 2>/dev/null || true)"
+    EXISTING_PR_IS_DRAFT="$(printf '%s' "$EXISTING_PR_JSON" | jq -r '.isDraft // false' 2>/dev/null || true)"
+  fi
+fi
+```
+
+When an existing open PR is found, promote it (if draft) and finish — **without** delegating to
+`create-pr`. The promote-and-finish block is NOT side-effect-free.
+
+```bash
+if [[ -n "$EXISTING_PR_NUMBER" ]]; then
+  echo "phase-pr: promoting existing PR #${EXISTING_PR_NUMBER} (draft=${EXISTING_PR_IS_DRAFT})" >&2
+  if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
+    if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+      # shellcheck source=/dev/null
+      source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+      draft_pr_promote || gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
+    else
+      gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
+    fi
+  fi
+  # Enrich the PR body now that the draft is ready (deferred from phase-implement to keep
+  # its End block free of Task-tool calls — research Q4).
+  #
+  # Use the Task tool to invoke /catalyst-dev:describe-pr on $EXISTING_PR_NUMBER.
+  # describe-pr is non-interactive when CATALYST_PHASE is set (it skips the Linear
+  # inReview transition — the coordinator owns that — create-pr/SKILL.md:226–232).
+  TS2=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  TMP="${SIGNAL_FILE}.tmp.$$"
+  jq --argjson pr "$EXISTING_PR_NUMBER" --arg url "$EXISTING_PR_URL" --arg ts "$TS2" \
+     '.pr={number:$pr,url:$url} | .updatedAt=$ts' \
+     "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
+  echo "phase-pr: existing PR #${EXISTING_PR_NUMBER} promoted — skipping create-pr delegation" >&2
+fi
+```
+
 ## /goal condition
 
 Plan §"Per-phase /goal conditions":
@@ -160,14 +215,17 @@ the reasoning happens upstream in `create-pr` itself.
 
 ## Phase-specific work
 
-1. Invoke `/catalyst-dev:create-pr` via the Task tool. The canonical skill
-   handles: branch push, base-branch resolution, idempotent PR creation if
-   one already exists, `describe-pr` invocation, and Linear `inReview`
-   transition.
+1. When `EXISTING_PR_NUMBER` is set (the draft opened by `phase-implement` was detected and
+   promoted above): invoke `/catalyst-dev:describe-pr` via the Task tool on `$EXISTING_PR_NUMBER`.
+   Then proceed directly to the End block — **do not** invoke `/catalyst-dev:create-pr`.
 
-2. After `create-pr` returns, capture the PR metadata via `gh` and write it
-   into the phase signal file so `phase-monitor-merge` can read it directly
-   without re-querying GitHub:
+2. When `EXISTING_PR_NUMBER` is empty (Phase 3 draft creation failed or was disabled):
+   invoke `/catalyst-dev:create-pr` via the Task tool. The canonical skill handles: branch push,
+   base-branch resolution, idempotent PR creation if one already exists, `describe-pr`
+   invocation, and Linear `inReview` transition.
+
+3. After either path, capture the PR metadata via `gh` and write it into the phase signal file
+   so `phase-monitor-merge` can read it directly without re-querying GitHub:
 
    ```bash
    PR_INFO=$(gh pr view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
@@ -185,7 +243,7 @@ the reasoning happens upstream in `create-pr` itself.
    fi
    ```
 
-3. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND
+4. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND
    rebase) is **not** run here — that is `phase-monitor-merge`'s
    responsibility. `create-pr`'s own brief monitoring window stays inside
    `create-pr`; phase-pr exits as soon as the PR exists in `OPEN` state.
