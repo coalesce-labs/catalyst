@@ -133,20 +133,23 @@ export function rssTotalForPid(snapshot, pid) {
 // ─── Pure: name parsing ──────────────────────────────────────────────────────
 
 /**
- * parseSessionName — decode the structured name Phase 1 stamps at dispatch:
- *   o-<orchId>:<ticket>:<phase>:<attempt>
- * orchId itself never contains a colon (it is hyphen-joined). Returns null for
- * a legacy prompt-derived name ("phase monitor merge") or empty input.
+ * parseSessionName — decode the scannable name CTL-688 stamps at dispatch:
+ *   <TICKET> <PHASE>        — attempt 1 (no suffix)
+ *   <TICKET> <PHASE> #<N>  — retry attempt N
+ * Under execution-core ORCH_ID == ticket (dispatch.mjs:59), so orchestratorId
+ * is derivable from the ticket token. Returns null for legacy colon-form names
+ * ("o-...:...:...:1") or prompt-derived names ("phase monitor merge").
  */
 export function parseSessionName(name) {
   if (!name) return null;
-  const parts = String(name).split(":");
-  if (parts.length !== 4) return null;
-  const [orchestratorId, ticket, phase, attemptRaw] = parts;
-  if (!orchestratorId.startsWith("o-")) return null;
-  const attempt = Number(attemptRaw);
-  if (!Number.isInteger(attempt)) return null;
-  return { orchestratorId, ticket, phase, attempt };
+  // Matches "<TICKET> <PHASE>" or "<TICKET> <PHASE> #<N>".
+  // Phase may be hyphenated (e.g. "monitor-merge"); ticket and phase are
+  // single whitespace-delimited tokens; the " #<N>" suffix is optional.
+  const m = String(name).match(/^(\S+)\s+(\S+)(?:\s+#(\d+))?$/);
+  if (!m) return null;
+  const [, ticket, phase, attemptRaw] = m;
+  const attempt = attemptRaw ? Number(attemptRaw) : 1;
+  return { orchestratorId: ticket, ticket, phase, attempt };
 }
 
 // ─── I/O: signal index ───────────────────────────────────────────────────────

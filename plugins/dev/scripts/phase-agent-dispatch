@@ -565,12 +565,16 @@ DISPATCH_ENV=(
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
 
-# CTL-649: structured session name. `claude --name` is in dispatch.respawnFlags
-# (verified empirically) so it survives daemon restart. The structured form
-# (`o-<orchId>:<ticket>:<phase>:<attempt>`) is what the new
-# `catalyst-execution-core sessions list` joins on; before this, the daemon
-# roster surfaces prompt-derived auto-names that operators can't grep.
-SESSION_NAME="o-${ORCH_ID}:${TICKET}:${PHASE}:${ATTEMPT}"
+# CTL-688: scannable session name. `claude --name` is in dispatch.respawnFlags
+# (verified empirically) so it survives daemon restart. Format:
+#   <TICKET> <PHASE>        — default (attempt 1)
+#   <TICKET> <PHASE> #<N>  — retries (attempt > 1)
+# Short and grep-able; no redundant orch-id prefix (under execution-core
+# ORCH_ID == ticket, so the old `o-<orchId>:<ticket>:...` repeated the ticket).
+SESSION_NAME="${TICKET} ${PHASE}"
+if [[ "${ATTEMPT}" -gt 1 ]]; then
+	SESSION_NAME="${SESSION_NAME} #${ATTEMPT}"
+fi
 
 if [[ $DRY_RUN -eq 1 ]]; then
 	# Dry-run prints the command it would have run without spawning anything.
