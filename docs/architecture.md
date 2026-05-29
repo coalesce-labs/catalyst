@@ -229,7 +229,7 @@ single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator
 events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
 sequence in `orchestrate-phase-advance`, and dispatches the next `--bg` job.
 
-### Dispatch-time rebase (front-load conflict surfacing, CTL-667)
+### Dispatch-time rebase (front-load conflict surfacing, CTL-667 + CTL-707)
 
 On a **fresh** dispatch of a **build** phase (`research`, `plan`, `implement`, `verify`,
 `review`), `phase-agent-dispatch` rebases the ticket's worktree (its cwd) onto current
@@ -237,27 +237,44 @@ On a **fresh** dispatch of a **build** phase (`research`, `plan`, `implement`, `
 detection: the worker starts current with merged sibling work, and a conflict surfaces here
 instead of riding stale assumptions all the way to `monitor-merge` (CTL-608).
 
-The rebase is gated and mechanical:
+CTL-707 replaced the binary CTL-667 rebase with a **4-layer strategy**:
+
+- **Layer 1 — Periodic background refresh** (`execution-core/worktree-refresh-timer.mjs`):
+  the daemon timer keeps every idle running worktree current with `origin/<base>` so dispatch-time
+  rebases are trivial. Config: `catalyst.orchestration.worktreeRefresh.{enabled, intervalSeconds, quietSeconds}`.
+- **Layer 2 — Dispatch-time conflict classifier** (`lib/worktree-rebase.sh:rebase_onto_base_classified`):
+  on a conflict, enumerates conflicted files and categorizes them. Tests-only → additive
+  auto-resolve (`git checkout --theirs`); noise (`.catalyst/`, `.trunk/`) → `--ours`; `thoughts/**`
+  → stall rc=3; real source → CTL-708 stub (always unavailable) → stall rc=2.
+- **Layer 3 — Phase-aware fallback** (`phase-agent-dispatch`): terminal source conflict (rc=2) on
+  `research`/`plan` → destroy+recreate worktree from `origin/<base>` and re-dispatch fresh (no
+  committed code to lose). Same conflict on `implement`/`verify`/`review` → park to `needs-human`.
+  Thoughts conflict (rc=3) → park on all phases.
+- **Layer 4 — Telemetry** (`lib/rebase-telemetry.sh`): four canonical events emitted by all layers:
+
+| Event name | Severity | Emitted by |
+|------------|----------|------------|
+| `phase.<phase>.stale-base-detected.<ticket>` | WARN | Layer 1 (refresh timer) |
+| `phase.<phase>.auto-rebased.<ticket>` | INFO | Layer 1 + Layer 2 (clean or additive) |
+| `phase.<phase>.rebase-conflict-categorized.<ticket>` | WARN | Layer 2 (before stall decision) |
+| `phase.<phase>.rebase-conflict-stalled.<ticket>` | ERROR | Layer 2 (terminal stall) |
+
+**Loki queries** (add `| json` before field filters):
+```
+{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.auto-rebased\\..*"
+{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.rebase-conflict-stalled\\..*"
+{job="catalyst-events"} | json | attributes["event.name"] =~ "phase\\..*\\.stale-base-detected\\..*"
+```
+
+The rebase is otherwise unchanged from CTL-667:
 
 - **Fresh-only.** A resume dispatch (`--resume-session` set, CTL-658) skips it — the resumed
   session assumes the prior tree.
 - **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`
-  phases are exempt (the monitor phases operate on the PR / merged SHA and have their own
-  `BEHIND` handling). The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`,
-  drift-guarded against `PHASES`.
-- **Local-only.** It never pushes and never touches the open PR (build branches aren't pushed
-  until `phase-pr`); machine-local noise (`.catalyst/config.json`, `.trunk/*`) is stashed across
-  the rebase. The git logic lives in `lib/worktree-rebase.sh` (`resolve_base_branch` +
-  `rebase_onto_base`).
-- **Clean → proceed.** A clean rebase falls through to the normal worker launch.
-- **Conflict → park.** A textual conflict aborts the rebase (HEAD returns to the pre-rebase
-  commit), rewrites the phase signal to `status:"stalled"` +
-  `failureReason:"rebase_conflict_with_origin_main"`, emits `phase.<phase>.failed.<ticket>`, and
-  exits **without launching a worker**. The daemon TERMINAL-classifies the stalled signal (no
-  revive) and the scheduler sweep applies the `needs-human` label — the conflict is never
-  auto-resolved.
-- **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc≠2) is non-fatal;
-  the phase proceeds as status quo, with `monitor-merge` remaining the backstop.
+  phases are exempt. The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`.
+- **Local-only.** It never pushes and never touches the open PR; machine-local noise
+  (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.
+- **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc=1) is non-fatal.
 
 ### Unified data-flow
 

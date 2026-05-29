@@ -48,10 +48,15 @@
     },
     "orchestration": {
       "dispatchMode": "phase-agents",
+      "worktreeRefresh": {
+        "enabled": true,
+        "intervalSeconds": 300,
+        "quietSeconds": 30
+      },
       "executionCore": {
         "maxParallel": 4,
         "minParallel": 1,
-        "maxParallelCeiling": 10,
+        "maxParallelCeiling": 40,
         "eligibleQuery": {
           "status": "Todo",
           "team": null,
