@@ -1001,8 +1001,8 @@ assert_eq "1" "$RC29" "conflict park: dispatcher exits 1"
 CLAUDE_INVOKED="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
 assert_eq "no" "$CLAUDE_INVOKED" "conflict park: claude --bg was NOT invoked"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "conflict park: signal status = stalled"
-assert_eq "rebase_conflict_with_origin_main" "$(jq -r '.failureReason' "$SIGNAL")" \
-	"conflict park: signal failureReason = rebase_conflict_with_origin_main"
+assert_eq "source_conflict_ctl708_unavailable" "$(jq -r '.failureReason' "$SIGNAL")" \
+	"conflict park: signal failureReason = source_conflict_ctl708_unavailable (CTL-707)"
 NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 assert_eq "$ORIG_HEAD" "$NOW_HEAD" "conflict park: worktree HEAD back at the original local commit (abort succeeded)"
 if grep -rqs '"phase.implement.failed.CTL-100"' "${CATALYST_DIR}/events/"; then
@@ -1162,6 +1162,207 @@ export CATALYST_MACHINE_CONFIG="${TEST_DIR}/machine-config.json"
 		>"${TEST_DIR}/m34c.out" 2>/dev/null)
 MODEL_D=$(jq -r '.model' "${TEST_DIR}/m34c.out")
 assert_eq "opus" "$MODEL_D" "default fallthrough: triage → opus when neither config sets it"
+
+# ─── CTL-707: 4-layer conflict classifier integration tests ──────────────────
+# Extend the CTL-667 git fixture helpers (git_worktree_fixture /
+# advance_origin_*) that are already in scope above.
+
+# advance_origin_test_conflict → push a commit adding a test file that will
+# conflict with a same-name work-branch test file.
+advance_origin_test_conflict() {
+	(
+		cd "$GUP" && git checkout --quiet main
+		mkdir -p src
+		printf 'upstream-test\n' >src/ctl707.test.ts
+		git add -A && git commit --quiet -m "upstream test"
+		git push --quiet origin main
+	)
+}
+# seed_local_test_commit → commit a conflicting test file + plan artifact.
+seed_local_test_commit() {
+	mkdir -p "${GWORK}/thoughts/shared/plans"
+	printf '# plan\n' >"${GWORK}/thoughts/shared/plans/2026-05-28-ctl-100.md"
+	mkdir -p "${GWORK}/src"
+	printf 'local-test\n' >"${GWORK}/src/ctl707.test.ts"
+	(cd "$GWORK" && git add -A && git commit --quiet -m "local test + plan")
+}
+# advance_origin_thoughts_conflict → push a commit adding a thoughts file.
+advance_origin_thoughts_conflict() {
+	(
+		cd "$GUP" && git checkout --quiet main
+		mkdir -p thoughts/shared
+		printf 'upstream-research\n' >thoughts/shared/ctl707.md
+		git add -A && git commit --quiet -m "upstream thoughts"
+		git push --quiet origin main
+	)
+}
+# seed_local_thoughts_commit → commit a conflicting thoughts file + verify-gate.
+seed_local_thoughts_commit() {
+	local signal_dir="$1"
+	mkdir -p "${GWORK}/thoughts/shared"
+	printf 'local-research\n' >"${GWORK}/thoughts/shared/ctl707.md"
+	# verify needs phase-implement.json as prior artifact
+	printf '{"ticket":"CTL-100","phase":"implement","status":"done"}\n' \
+		>"${signal_dir}/phase-implement.json"
+	(cd "$GWORK" && git add -A && git commit --quiet -m "local thoughts")
+}
+# seed_local_source_plan_commit → commit a source conflict + research artifact.
+seed_local_source_plan_commit() {
+	mkdir -p "${GWORK}/thoughts/shared/research"
+	printf '# research\n' >"${GWORK}/thoughts/shared/research/2026-05-28-ctl-100.md"
+	printf 'local-edit\n' >"${GWORK}/shared.txt"
+	(cd "$GWORK" && git add -A && git commit --quiet -m "local source conflict + research")
+}
+
+# ─── Test 35 (CTL-707): tests-only conflict → auto-resolve, worker spawned ───
+echo ""
+echo "Test 35 (CTL-707): tests-only conflict → auto-resolved (additive), worker spawned"
+fresh_env t35_tests_only
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+git_worktree_fixture t35
+advance_origin_test_conflict
+seed_local_test_commit
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+RC35=$?
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+assert_eq "0" "$RC35" "tests-only: dispatch exits 0"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "tests-only: claude --bg WAS invoked"
+SIGNAL_STATUS="$(jq -r '.status // empty' "$SIGNAL" 2>/dev/null || echo "")"
+assert_eq "running" "$SIGNAL_STATUS" "tests-only: signal status = running (not stalled)"
+unset CATALYST_DIR
+
+# ─── Test 36 (CTL-707): source conflict on implement → stalled, no worker ────
+echo ""
+echo "Test 36 (CTL-707): source conflict on implement → stalled, no worker"
+fresh_env t36_source_implement
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+git_worktree_fixture t36
+advance_origin_conflict
+mkdir -p "${GWORK}/thoughts/shared/plans"
+printf '# plan\n' >"${GWORK}/thoughts/shared/plans/2026-05-28-ctl-100.md"
+printf 'local-edit\n' >"${GWORK}/shared.txt"
+(cd "$GWORK" && git add -A && git commit --quiet -m "local conflict + plan")
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t36.out" 2>/dev/null)
+RC36=$?
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+assert_eq "1" "$RC36" "source implement: dispatch exits 1"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "source implement: claude --bg NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "source implement: signal stalled"
+FAIL_REASON36="$(jq -r '.failureReason' "$SIGNAL")"
+assert_eq "source_conflict_ctl708_unavailable" "$FAIL_REASON36" "source implement: failureReason=source_conflict_ctl708_unavailable"
+unset CATALYST_DIR
+
+# ─── Test 37 (CTL-707): thoughts conflict on verify → stalled, no worker ─────
+echo ""
+echo "Test 37 (CTL-707): thoughts conflict on verify → stalled, no worker"
+fresh_env t37_thoughts_verify
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+git_worktree_fixture t37
+advance_origin_thoughts_conflict
+seed_local_thoughts_commit "$WORKER_DIR"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase verify --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t37.out" 2>/dev/null)
+RC37=$?
+SIGNAL="${WORKER_DIR}/phase-verify.json"
+# Use the implement signal (it's the prior artifact that was pre-seeded).
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+VSIGNAL="${WORKER_DIR}/phase-verify.json"
+assert_eq "1" "$RC37" "thoughts verify: dispatch exits 1"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "thoughts verify: claude --bg NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$VSIGNAL")" "thoughts verify: signal stalled"
+FAIL_REASON37="$(jq -r '.failureReason' "$VSIGNAL")"
+assert_eq "thoughts_conflict_with_origin_main" "$FAIL_REASON37" "thoughts verify: failureReason=thoughts_conflict_with_origin_main"
+unset CATALYST_DIR
+
+# ─── Test 38 (CTL-707): source conflict on plan → recreate worktree, re-dispatch
+# Uses a REAL git linked worktree (git worktree add) so the recreate path can
+# resolve REPO_ROOT via --git-common-dir and call create-worktree.sh correctly.
+echo ""
+echo "Test 38 (CTL-707): source conflict on research → worktree recreated, worker spawned (no --resume)"
+fresh_env t38_plan_recreate
+export CATALYST_DIR="${TEST_DIR}/catalyst-events"
+mkdir -p "${CATALYST_DIR}/events"
+
+# Build fixture: bare origin → main clone (GMAIN) → linked worktree (GWORK).
+T38_ORIGIN="${TEST_DIR}/t38-origin.git"
+T38_UP="${TEST_DIR}/t38-up"
+T38_MAIN="${TEST_DIR}/t38-main"
+T38_WT_BASE="${TEST_DIR}/t38-wt"
+# GWORK lives at the same path create-worktree.sh will recreate it to.
+GWORK="${T38_WT_BASE}/CTL-100"
+git init --quiet --bare -b main "$T38_ORIGIN"
+git clone --quiet "$T38_ORIGIN" "$T38_UP" 2>/dev/null
+(
+	cd "$T38_UP"
+	printf 'base-line\n' >shared.txt
+	mkdir -p .catalyst
+	git add -A && git commit --quiet -m "initial"
+	git push --quiet origin main
+)
+git clone --quiet "$T38_ORIGIN" "$T38_MAIN" 2>/dev/null
+# Create the linked worktree BEFORE advancing origin so the local commit
+# diverges from the initial commit (not origin/main) — this produces a
+# genuine conflict when rebased.
+mkdir -p "$T38_WT_BASE"
+(cd "$T38_MAIN" && git worktree add --quiet -b CTL-100 "$GWORK" main 2>/dev/null)
+# Local commit: ONLY change shared.txt (no thoughts file — it doesn't exist yet).
+(
+	cd "$GWORK"
+	printf 'local-edit\n' >shared.txt
+	git add shared.txt && git commit --quiet -m "local source change"
+)
+# Now advance origin/main with the conflicting change + research artifact.
+# The thoughts file is added only here, so the rebase conflict is source-only.
+(
+	cd "$T38_UP" && git checkout --quiet main
+	printf 'upstream-edit\n' >shared.txt
+	mkdir -p thoughts/shared/research
+	printf '# research\n' >thoughts/shared/research/2026-05-28-ctl-100.md
+	git add -A && git commit --quiet -m "upstream: conflict + research artifact"
+	git push --quiet origin main
+)
+# Tell the dispatch's recreate path to create the new worktree under the test-local dir.
+export CATALYST_RECREATE_WORKTREE_DIR="$T38_WT_BASE"
+# Use RESEARCH phase — prior artifact is triage.json (easily seeded) rather than
+# plan's research glob. The prior-artifact gate runs BEFORE the rebase block so the
+# artifact must exist in the work branch; for research the only gate is triage.json.
+printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase research --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t38.out" 2>/dev/null)
+RC38=$?
+SIGNAL="${WORKER_DIR}/phase-research.json"
+assert_eq "0" "$RC38" "recreate: final dispatch exits 0 (second dispatch succeeds)"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "recreate: claude --bg WAS invoked"
+# Verify no --resume flag in any invocation.
+LOG38="$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")"
+assert_not_contains "$LOG38" "--resume" "recreate: no --resume-session in claude invocation"
+# New worktree HEAD should differ from original (recreated from origin/main).
+NEW_HEAD="$(cd "$GWORK" && git rev-parse HEAD 2>/dev/null || echo missing)"
+assert_eq "yes" "$([[ "$NEW_HEAD" != "$ORIG_HEAD" ]] && echo yes || echo no)" \
+	"recreate: worktree HEAD changed (recreated from origin/main)"
+unset CATALYST_DIR
+unset CATALYST_RECREATE_WORKTREE_DIR
+
+# ─── Test 39 (CTL-707): fetch failure on plan → proceed un-rebased, worker spawned
+echo ""
+echo "Test 39 (CTL-707): fetch failure → proceed un-rebased, worker launched"
+fresh_env t39_fetch_fail
+git_worktree_fixture t39
+seed_local_plan_commit
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+# Override base branch to one that does not exist on origin → fetch fails (rc 1).
+(cd "$GWORK" && CATALYST_BASE_BRANCH=no-such-branch-ctl707 "$DISPATCH" \
+	--phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "fetch fail: worktree HEAD unchanged (un-rebased)"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "fetch fail: worker still spawned"
 
 echo ""
 echo "─────────────────────────────────────────────"
