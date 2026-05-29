@@ -741,9 +741,12 @@ describe("dispatch cool-down (schedulerTick)", () => {
     },
   ];
 
-  test("a refused new-work dispatch (code 2) writes a cool-down marker and stops re-dispatching", () => {
+  test("a refused new-work dispatch (transient code) writes a cool-down marker and stops re-dispatching", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
-    const dispatch = fakeDispatch({ code: 2 });
+    // code=1 is a transient failure → 60 s window (code=2 uses the 30-min
+    // permanent window, covered separately by the recordDispatchFailure unit
+    // tests). The < 60 s / > 60 s assertions below depend on the transient TTL.
+    const dispatch = fakeDispatch({ code: 1 });
     const marker = dispatchCooldownPath(orchDir, "CTL-3", "research");
 
     // Tick 1 at t=1000: dispatch refused → 1 call, marker written.
@@ -779,10 +782,12 @@ describe("dispatch cool-down (schedulerTick)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const marker = dispatchCooldownPath(orchDir, "CTL-4", "research");
 
-    // First a refusal seeds the marker.
+    // First a refusal seeds the marker. code=1 is transient (60 s window) so
+    // the t=70_000 success below lands past the window; code=2 would hold a
+    // 30-min permanent marker and suppress the clearing dispatch entirely.
     schedulerTick(orchDir, {
       readEligible: () => eligibleOne("CTL-4"),
-      dispatch: fakeDispatch({ code: 2 }),
+      dispatch: fakeDispatch({ code: 1 }),
       now: () => 1_000,
       liveBackgroundCount: () => 0,
     });
