@@ -12,7 +12,7 @@
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-ONESHOT="${REPO_ROOT}/plugins/dev/skills/oneshot/SKILL.md"
+ONESHOT="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
 WAIT_FOR_GITHUB="${REPO_ROOT}/plugins/dev/skills/wait-for-github/SKILL.md"
 MONITOR_EVENTS="${REPO_ROOT}/plugins/dev/skills/monitor-events/SKILL.md"
 

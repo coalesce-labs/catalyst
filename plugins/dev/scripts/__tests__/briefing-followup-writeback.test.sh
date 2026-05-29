@@ -14,7 +14,7 @@ BF_DIR="${REPO_ROOT}/plugins/dev/scripts/briefing-followup"
 WRITEBACK="${BF_DIR}/writeback.sh"
 RECORD="${BF_DIR}/record-resolution.sh"
 LIB="${REPO_ROOT}/plugins/dev/scripts/briefing-frontmatter-lib.sh"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/briefing-followup/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/briefing-followup/SKILL.md"
 
 FAILURES=0
 PASSES=0

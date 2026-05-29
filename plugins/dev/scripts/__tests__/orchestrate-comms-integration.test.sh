@@ -13,8 +13,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 COMMS="${REPO_ROOT}/plugins/dev/scripts/catalyst-comms"
-ORCH_SKILL="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
-ONESHOT_SKILL="${REPO_ROOT}/plugins/dev/skills/oneshot/SKILL.md"
+ORCH_SKILL="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
+ONESHOT_SKILL="${REPO_ROOT}/plugins/legacy/skills/oneshot/SKILL.md"
 COMMS_SKILL="${REPO_ROOT}/plugins/dev/skills/catalyst-comms/SKILL.md"
 
 FAILURES=0
@@ -203,16 +203,18 @@ grep -qi "Worker Traffic Contract\|minimum 4 messages\|baseline traffic" "$COMMS
   || fail "catalyst-comms: worker traffic contract missing"
 
 # ── 13. CTL-127: plugin-root-first binary resolution ─────────────────────
-# Both skills must resolve catalyst-comms via ${CLAUDE_PLUGIN_ROOT}/scripts
-# before falling back to PATH, so shell-alias installs work in non-interactive
-# subshells.
-grep -q 'COMMS_BIN="\${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"' "$ORCH_SKILL" \
-  && pass "orchestrate: resolves COMMS_BIN via plugin root (CTL-127)" \
-  || fail "orchestrate: COMMS_BIN plugin-root resolver missing (CTL-127)"
+# Both skills must resolve catalyst-comms via the plugin scripts dir before
+# falling back to PATH, so shell-alias installs work in non-interactive
+# subshells. CTL-726 moved these skills to catalyst-legacy and swapped the
+# resolver from ${CLAUDE_PLUGIN_ROOT}/scripts to the cross-plugin
+# ${CATALYST_DEV_SCRIPTS} (the dev scripts stay in catalyst-dev); accept either.
+grep -qE 'COMMS_BIN="\$\{(CLAUDE_PLUGIN_ROOT:-\}/scripts|CATALYST_DEV_SCRIPTS\})/catalyst-comms"' "$ORCH_SKILL" \
+  && pass "orchestrate: resolves COMMS_BIN via plugin scripts dir (CTL-127/CTL-726)" \
+  || fail "orchestrate: COMMS_BIN plugin-root resolver missing (CTL-127/CTL-726)"
 
-grep -q 'COMMS_BIN="\${CLAUDE_PLUGIN_ROOT:-}/scripts/catalyst-comms"' "$ONESHOT_SKILL" \
-  && pass "oneshot: resolves COMMS_BIN via plugin root (CTL-127)" \
-  || fail "oneshot: COMMS_BIN plugin-root resolver missing (CTL-127)"
+grep -qE 'COMMS_BIN="\$\{(CLAUDE_PLUGIN_ROOT:-\}/scripts|CATALYST_DEV_SCRIPTS\})/catalyst-comms"' "$ONESHOT_SKILL" \
+  && pass "oneshot: resolves COMMS_BIN via plugin scripts dir (CTL-127/CTL-726)" \
+  || fail "oneshot: COMMS_BIN plugin-root resolver missing (CTL-127/CTL-726)"
 
 grep -q 'warn: catalyst-comms not found' "$ORCH_SKILL" \
   && pass "orchestrate: warns when catalyst-comms missing (CTL-127)" \
