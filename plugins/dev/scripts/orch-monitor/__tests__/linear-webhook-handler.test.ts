@@ -371,6 +371,69 @@ describe("createLinearWebhookHandler", () => {
   });
 });
 
+describe("buildLinearEventLogEnvelope — comment fields (CTL-681)", () => {
+  it("comment envelope includes body, authorId, authorName in body.payload", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "comment",
+        action: "create",
+        ticket: "CTL-99",
+        commentId: "c1",
+        issueId: "i1",
+        body: "hello there",
+        authorId: "u1",
+        authorName: "Ada",
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["body"]).toBe("hello there");
+    expect(payload["authorId"]).toBe("u1");
+    expect(payload["authorName"]).toBe("Ada");
+  });
+
+  it("comment envelope with no body/author has null values in payload", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "comment",
+        action: "create",
+        ticket: "CTL-99",
+        commentId: "c1",
+        issueId: "i1",
+        body: null,
+        authorId: null,
+        authorName: null,
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["body"]).toBeNull();
+    expect(payload["authorId"]).toBeNull();
+    expect(payload["authorName"]).toBeNull();
+  });
+
+  it("bot-authored comment is NOT suppressed (pin Finding 5)", async () => {
+    const eventLog2 = new FakeEventLog();
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog: eventLog2,
+      botUserId: "bot-uuid-123",
+    });
+    const botComment = {
+      action: "create",
+      type: "Comment",
+      actor: { id: "bot-uuid-123", name: "Catalyst Bot" },
+      data: { id: "c2", body: "Automated comment", issueId: "i1" },
+    };
+    await handler.handle(makeReq(botComment, { "linear-event": "Comment" }));
+    expect(eventLog2.appends.length).toBe(1);
+  });
+});
+
 describe("buildLinearEventLogEnvelope (canonical)", () => {
   it("Issue update → topic from event.topic, linear.issue.identifier from ticket", () => {
     const env = buildLinearEventLogEnvelope(
@@ -618,6 +681,9 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         ticket: "CTL-1",
         commentId: "c1",
         issueId: "i1",
+        body: null,
+        authorId: null,
+        authorName: null,
         data: {},
       },
       TS
@@ -760,6 +826,9 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         ticket: "ADV-42",
         commentId: "c1",
         issueId: "i1",
+        body: null,
+        authorId: null,
+        authorName: null,
         data: {},
       },
       TS,
@@ -778,6 +847,9 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         ticket: "FOO-1",
         commentId: "c1",
         issueId: "i1",
+        body: null,
+        authorId: null,
+        authorName: null,
         data: {},
       },
       TS,
@@ -795,6 +867,9 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         ticket: null,
         commentId: "c1",
         issueId: "i1",
+        body: null,
+        authorId: null,
+        authorName: null,
         data: {},
       },
       TS,

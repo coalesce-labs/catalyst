@@ -18,6 +18,7 @@ import {
   removeTicket,
   dropProject,
   getEligibleSet,
+  upsertTicket,
 } from "./eligible-set.mjs";
 
 // Keys touched by this suite — afterEach drops them so the module-level
@@ -214,5 +215,71 @@ describe("atomic write durability", () => {
     expect(existsSync(`${projFile("crashy")}.tmp`)).toBe(false);
     // remove the stand-in directory so the afterEach dropProject is quiet
     rmSync(projFile("crashy"), { recursive: true, force: true });
+  });
+});
+
+// CTL-681: upsertTicket — insert or merge a single ticket into the eligible set.
+describe("upsertTicket (CTL-681)", () => {
+  test("adds a brand-new ticket to an empty project and writes the projection", () => {
+    upsertTicket("beta", { identifier: "B-1", state: "Todo", priority: 2 });
+    const set = getEligibleSet("beta");
+    expect(set.map((t) => t.identifier)).toEqual(["B-1"]);
+    expect(existsSync(projFile("beta"))).toBe(true);
+  });
+
+  test("adds a ticket to an existing project alongside prior tickets (sorted)", () => {
+    setProjectEligible("beta", [{ identifier: "B-2", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    upsertTicket("beta", { identifier: "B-1", state: "Todo", priority: 2 });
+    expect(getEligibleSet("beta").map((t) => t.identifier)).toEqual(["B-1", "B-2"]);
+  });
+
+  test("merging over an existing ticket preserves relations, updates state/priority", () => {
+    setProjectEligible(
+      "beta",
+      [{ identifier: "B-1", state: "Todo", priority: 1, relations: [{ id: "r1" }] }],
+      { source: "reconcile", query: {} }
+    );
+    upsertTicket("beta", { identifier: "B-1", state: "In Progress", priority: 2 });
+    const ticket = getEligibleSet("beta").find((t) => t.identifier === "B-1");
+    expect(ticket.state).toBe("In Progress");
+    expect(ticket.priority).toBe(2);
+    expect(ticket.relations).toEqual([{ id: "r1" }]);
+  });
+
+  test("creates the project entry if absent (new projectKey)", () => {
+    expect(getEligibleSet("gamma")).toEqual([]);
+    upsertTicket("gamma", { identifier: "G-1", state: "Todo", priority: 1 });
+    expect(getEligibleSet("gamma").map((t) => t.identifier)).toEqual(["G-1"]);
+  });
+
+  test("stamps source = 'event'", () => {
+    upsertTicket("beta", { identifier: "B-1", state: "Todo", priority: 1 });
+    const doc = JSON.parse(readFileSync(projFile("beta"), "utf8"));
+    expect(doc.source).toBe("event");
+  });
+
+  test("skip-write when [identifier, state, priority] tuple is unchanged (mtime stable)", async () => {
+    setProjectEligible("beta", [{ identifier: "B-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("beta")).mtimeMs;
+    await sleep(15);
+    upsertTicket("beta", { identifier: "B-1", state: "Todo", priority: 1 });
+    expect(statSync(projFile("beta")).mtimeMs).toBe(mtime1);
+  });
+
+  test("rewrites the projection when upserted ticket changes state", async () => {
+    setProjectEligible("beta", [{ identifier: "B-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("beta")).mtimeMs;
+    await sleep(15);
+    upsertTicket("beta", { identifier: "B-1", state: "In Progress", priority: 1 });
+    expect(statSync(projFile("beta")).mtimeMs).toBeGreaterThan(mtime1);
   });
 });
