@@ -601,6 +601,52 @@ export function defaultAppendCooldownEscalatedEvent({
   );
 }
 
+// CTL-684: auto-tuner parallelism-sampled event — phase.scheduler.parallelism-sampled.<label>.
+// Emitted once per sample while background workers are active. `label` is "execution-core"
+// for host-wide tuning; payload carries the full pressure snapshot.
+export function defaultAppendParallelismSampledEvent({
+  label = "execution-core",
+  load1,
+  load5,
+  load15,
+  memFreePct,
+  bgCount,
+  maxParallelCurrent,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket: label,
+      orchId: label,
+      action: "parallelism-sampled",
+      reason: "sample",
+      payloadExtras: { load1, load5, load15, mem_free_pct: memFreePct, bg_count: bgCount, maxParallel_current: maxParallelCurrent },
+    }),
+    "parallelism-sampled",
+  );
+}
+
+// CTL-684: auto-tuner parallelism-adjusted event — phase.scheduler.parallelism-adjusted.<label>.
+// Emitted only when maxParallel actually changes (write-on-change).
+export function defaultAppendParallelismAdjustedEvent({
+  label = "execution-core",
+  oldMaxParallel,
+  newMaxParallel,
+  reason,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket: label,
+      orchId: label,
+      action: "parallelism-adjusted",
+      reason,
+      payloadExtras: { old_maxParallel: oldMaxParallel, new_maxParallel: newMaxParallel },
+    }),
+    "parallelism-adjusted",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass

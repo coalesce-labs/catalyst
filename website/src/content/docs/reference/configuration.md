@@ -1001,6 +1001,31 @@ the resolved ceiling). Other `executionCore` fields (`eligibleQuery` lives in
 the central registry; `dispatchMode` and structural daemon fields elsewhere
 in the config) remain boot-time only.
 
+**Auto-tuner (CTL-684).** The daemon runs a side-car auto-tuner that samples
+`os.loadavg()` and `os.freemem()` on a 30-second cadence while background
+workers are active, applies an asymmetric trend-based decision rule, and writes
+the adjusted `executionCore.maxParallel` into the Layer-2 config file. The
+scheduler's hot-reload picks up the new value on its next tick — no daemon
+restart required. Shrink is multiplicative (`×0.75`, fast back-off); growth is
+additive (`+1`, slow ramp) to resist oscillation. Every write is atomic
+(tmp + rename) and write-on-change only.
+
+The auto-tuner is controlled by environment variables:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `EXECUTION_CORE_AUTOTUNE` | `1` (on) | Set to `0` to disable all sampling and Layer-2 writes |
+| `EXECUTION_CORE_AUTOTUNE_SAMPLE_INTERVAL_MS` | `30000` | Sample cadence in ms |
+| `EXECUTION_CORE_AUTOTUNE_WINDOW_SAMPLES` | `10` | Rolling window depth (~5 min at 30s) |
+| `EXECUTION_CORE_AUTOTUNE_TREND_MIN_SAMPLES` | `3` | Consecutive samples required to declare a trend |
+| `EXECUTION_CORE_AUTOTUNE_LOAD_SAFE_FACTOR` | `4` | `load1 < cores × factor` threshold for growth |
+| `EXECUTION_CORE_AUTOTUNE_MEM_CRITICAL_PCT` | `5` | Free-memory % below which drops to `minParallel` |
+| `EXECUTION_CORE_AUTOTUNE_MEM_WARN_PCT` | `20` | Free-memory % below which growth is suppressed |
+
+Tuner events appear in the unified event log as
+`phase.scheduler.parallelism-sampled.execution-core` and
+`phase.scheduler.parallelism-adjusted.execution-core`.
+
 Resolution order for both `phaseAgents.models` and `phaseAgents.turnCaps` is **CLI flag >
 `modelOverrides[phase][ticket]` > `models[phase]` (or `turnCaps[phase]`) > built-in default**. The
 dispatcher reads `dispatchMode` at

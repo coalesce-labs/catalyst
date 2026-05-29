@@ -181,3 +181,32 @@ export function readMemorySamplerConfig() {
     killSustainedSamples: Number(process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES) || 3,
   };
 }
+
+// --- Auto-tuner (CTL-684) ---
+// Sample cadence — how often the auto-tuner polls load + memory.
+export const AUTOTUNE_SAMPLE_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_SAMPLE_INTERVAL_MS) || 30_000;
+
+// Rolling window depth (number of samples ≈ window_seconds/cadence).
+export const AUTOTUNE_WINDOW_SAMPLES =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_WINDOW_SAMPLES) || 10;
+
+// Consecutive samples required before a trend is declared.
+export const AUTOTUNE_TREND_MIN_SAMPLES =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_TREND_MIN_SAMPLES) || 3;
+
+// Load average "safe" multiplier — load1 must be below cores × factor for a
+// down-trend decision to proceed.
+export const AUTOTUNE_LOAD_SAFE_FACTOR =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_LOAD_SAFE_FACTOR) || 4;
+
+// Memory-free threshold for critical guard (below this → drop to minParallel).
+export const AUTOTUNE_MEM_CRITICAL_PCT =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_MEM_CRITICAL_PCT) || 5;
+
+// Memory-free threshold for warn guard (below this → suppress growth).
+export const AUTOTUNE_MEM_WARN_PCT =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_MEM_WARN_PCT) || 20;
+
+// Kill-switch: EXECUTION_CORE_AUTOTUNE=0 disables all sampling and Layer-2 writes.
+export const AUTOTUNE_ENABLED = process.env.EXECUTION_CORE_AUTOTUNE !== "0";

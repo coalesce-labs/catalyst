@@ -1,12 +1,24 @@
-// config.test.mjs — CTL-650 Phase 4 + CTL-685. Config knobs:
+// config.test.mjs — CTL-650 Phase 4 + CTL-685 + CTL-684. Config knobs:
 //   readWaitWatcherConfig() → { enabled, intervalMs }
 //   readMemorySamplerConfig() → { enabled, intervalMs, warnThresholdMb,
 //                                  killThresholdMb, killEnabled, killSustainedSamples }
+//   CTL-684: auto-tuner config constants and kill-switch.
 //
 // Run: cd plugins/dev/scripts/execution-core && bun test config.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { readWaitWatcherConfig, EVENT_DEBOUNCE_MS, readMemorySamplerConfig } from "./config.mjs";
+import {
+  readWaitWatcherConfig,
+  EVENT_DEBOUNCE_MS,
+  readMemorySamplerConfig,
+  AUTOTUNE_SAMPLE_INTERVAL_MS,
+  AUTOTUNE_WINDOW_SAMPLES,
+  AUTOTUNE_TREND_MIN_SAMPLES,
+  AUTOTUNE_LOAD_SAFE_FACTOR,
+  AUTOTUNE_MEM_CRITICAL_PCT,
+  AUTOTUNE_MEM_WARN_PCT,
+  AUTOTUNE_ENABLED,
+} from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
 
@@ -106,5 +118,40 @@ describe("readMemorySamplerConfig (CTL-685)", () => {
   test("zero interval falls back to 30000", () => {
     process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS = "0";
     expect(readMemorySamplerConfig().intervalMs).toBe(30_000);
+  });
+});
+
+// CTL-684: auto-tuner config constants.
+// Note: env vars are read at module import time, so we test the already-imported
+// default values here (the module is loaded once per test run). Env-override
+// tests require a fresh require/import which is not straightforward in ESM — the
+// defaults are tested by asserting the expected literals below.
+describe("auto-tuner defaults (CTL-684)", () => {
+  test("AUTOTUNE_SAMPLE_INTERVAL_MS defaults to 30000", () => {
+    expect(AUTOTUNE_SAMPLE_INTERVAL_MS).toBe(30_000);
+  });
+
+  test("AUTOTUNE_WINDOW_SAMPLES defaults to 10", () => {
+    expect(AUTOTUNE_WINDOW_SAMPLES).toBe(10);
+  });
+
+  test("AUTOTUNE_TREND_MIN_SAMPLES defaults to 3", () => {
+    expect(AUTOTUNE_TREND_MIN_SAMPLES).toBe(3);
+  });
+
+  test("AUTOTUNE_LOAD_SAFE_FACTOR defaults to 4", () => {
+    expect(AUTOTUNE_LOAD_SAFE_FACTOR).toBe(4);
+  });
+
+  test("AUTOTUNE_MEM_CRITICAL_PCT defaults to 5", () => {
+    expect(AUTOTUNE_MEM_CRITICAL_PCT).toBe(5);
+  });
+
+  test("AUTOTUNE_MEM_WARN_PCT defaults to 20", () => {
+    expect(AUTOTUNE_MEM_WARN_PCT).toBe(20);
+  });
+
+  test("AUTOTUNE_ENABLED defaults to true (kill-switch off)", () => {
+    expect(AUTOTUNE_ENABLED).toBe(true);
   });
 });

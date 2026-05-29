@@ -56,7 +56,7 @@
       "executionCore": {
         "maxParallel": 4,
         "minParallel": 1,
-        "maxParallelCeiling": 10,
+        "maxParallelCeiling": 40,
         "eligibleQuery": {
           "status": "Todo",
           "team": null,

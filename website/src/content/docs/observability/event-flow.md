@@ -390,6 +390,31 @@ grep cooldown-escalated ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq .
 grep '"action":"failed"' ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq 'select(.subject | startswith("phase.dispatch"))'
 ```
 
+## Auto-tuner parallelism events (CTL-684)
+
+The execution-core daemon's side-car auto-tuner emits two scheduler events into
+the unified event log, using `"execution-core"` as the host-wide sentinel label
+(no real ticket is attached):
+
+| Event name | Trigger | Payload fields |
+|---|---|---|
+| `phase.scheduler.parallelism-sampled.execution-core` | Every sample while bg workers are active (default 30s) | `load1`, `load5`, `load15`, `mem_free_pct`, `bg_count`, `maxParallel_current` |
+| `phase.scheduler.parallelism-adjusted.execution-core` | Only when `maxParallel` actually changes | `old_maxParallel`, `new_maxParallel`, `reason` (e.g. `trend-up`, `mem-critical`, `trend-down`) |
+
+The `reason` field on an adjusted event maps directly to the decision-matrix row
+that fired. See the
+[auto-tuner config knobs](../reference/configuration#auto-tuner-ctl-684)
+for env-var overrides and the kill-switch.
+
+**Observability queries**:
+```bash
+# See all parallelism samples
+grep parallelism-sampled ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq .
+
+# See all adjustments and their reasons
+grep parallelism-adjusted ~/catalyst/events/$(date -u +%Y-%m).jsonl | jq '{reason: .body.payload.reason, old: .body.payload.old_maxParallel, new: .body.payload.new_maxParallel}'
+```
+
 ## Related
 
 - [catalyst-events CLI](./catalyst-events/) — command reference and jq filter cookbook
