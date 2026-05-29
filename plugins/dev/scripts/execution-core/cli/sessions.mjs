@@ -25,7 +25,8 @@ import { fileURLToPath } from "node:url";
 import { shortIdFromSessionId, isSelfSession } from "../claude-ids.mjs";
 import { readWorkerSignals, TERMINAL } from "../signal-reader.mjs";
 import { emitReapIntent } from "../reap-intent.mjs";
-import { getRunsRoot, getExecutionCoreDir, getEventLogPath } from "../config.mjs";
+import { getRunsRoot, getExecutionCoreDir, getEventLogPath, readMemorySamplerConfig } from "../config.mjs";
+import { classifyMemPressure } from "../memory-sampler.mjs";
 import { lastSeenMsForSession, findTranscript, defaultProjectsDir } from "../session-recency.mjs";
 import { scanEventsChunked } from "../event-tail.mjs";
 import { classifyWaitState, isWaitingState } from "../wait-state-classifier.mjs";
@@ -298,6 +299,13 @@ export async function buildRows({
       elapsedMs: s.startedAt ? now - s.startedAt : null,
       lastSeenMs: s.sessionId ? roundOrNull(lastSeen(s.sessionId, { now })) : null,
       rssKb: s.pid ? rssTotalForPid(snapshot, s.pid) : 0,
+      // CTL-685: memory-pressure level derived from rssKb; "--" when pid absent.
+      memPressure: s.pid
+        ? classifyMemPressure(
+            (s.pid ? rssTotalForPid(snapshot, s.pid) : 0) / 1024,
+            readMemorySamplerConfig()
+          )
+        : "--",
     });
   }
   applyDuplicates(rows);
@@ -681,10 +689,11 @@ function printTable(rows) {
     const kind = String(r.kind ?? "-").padEnd(11);
     const age = humanDuration(r.elapsedMs).padStart(5);
     const lastSeen = humanDuration(r.lastSeenMs).padStart(9);
+    const mem = String(r.memPressure ?? "--").padEnd(4);
     process.stdout.write(
       `${r.classification.padEnd(9)} ${r.shortId}  ${String(r.ticket ?? "-").padEnd(10)} ` +
         `${String(r.phase ?? "-").padEnd(16)} ${kind} ${age} ${lastSeen} ` +
-        `${String(rssMb).padStart(6)}MB  ${r.cwd ?? ""}${interactive}\n`
+        `${String(rssMb).padStart(6)}MB ${mem}  ${r.cwd ?? ""}${interactive}\n`
     );
   }
   process.stdout.write("──\n");

@@ -152,3 +152,32 @@ export function readWaitWatcherConfig() {
     intervalMs: EVENT_DEBOUNCE_MS,
   };
 }
+
+// CTL-685 — per-worker memory sampler constants. Exported as named constants
+// for callers that want a single snapshot; readMemorySamplerConfig() re-reads
+// from process.env on every call so tests can manipulate env vars freely.
+export const MEMORY_SAMPLE_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS) || 30_000;
+
+export const WORKER_RSS_WARN_MB =
+  Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500;
+
+export const WORKER_RSS_KILL_MB =
+  Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000;
+
+export const WORKER_OOM_KILLER =
+  process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0";
+
+export const KILL_SUSTAINED_SAMPLES =
+  Number(process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES) || 3;
+
+export function readMemorySamplerConfig() {
+  return {
+    enabled: process.env.CATALYST_MEMORY_SAMPLER !== "0",
+    intervalMs: Number(process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS) || 30_000,
+    warnThresholdMb: Number(process.env.EXECUTION_CORE_WORKER_RSS_WARN_MB) || 1500,
+    killThresholdMb: Number(process.env.EXECUTION_CORE_WORKER_RSS_KILL_MB) || 4000,
+    killEnabled: process.env.EXECUTION_CORE_WORKER_OOM_KILLER !== "0",
+    killSustainedSamples: Number(process.env.EXECUTION_CORE_KILL_SUSTAINED_SAMPLES) || 3,
+  };
+}
