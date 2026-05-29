@@ -46,6 +46,7 @@ import {
   recordDispatchFailure,
   clearDispatchCooldown,
   dispatchCooldownPath,
+  escalateDispatchExhausted,
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
@@ -1082,6 +1083,102 @@ describe("CTL-653: maybeEscalateRemediateExhausted", () => {
   });
   test("verify not done → no-op false", () => {
     expect(maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "running" }, "fail", 99)).toBe(false);
+  });
+});
+
+// ─── CTL-712: escalateDispatchExhausted — retry ceiling → stalled ───
+describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () => {
+  test("creates phase-<phase>.json with status:stalled when no signal exists", () => {
+    expect(escalateDispatchExhausted(orchDir, "CTL-712", "pr")).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
+  });
+
+  test("the stalled signal makes the ticket NOT in-flight", () => {
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr");
+    expect(isTicketInFlight(readPhaseSignals(orchDir, "CTL-712"))).toBe(false);
+  });
+
+  test("merges over an existing half-written signal (preserves bg_job_id)", () => {
+    const p = join(orchDir, "workers", "CTL-712", "phase-pr.json");
+    mkdirSync(join(orchDir, "workers", "CTL-712"), { recursive: true });
+    writeFileSync(p, JSON.stringify({ ticket: "CTL-712", phase: "pr", status: "dispatched", bg_job_id: "abc123" }));
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr");
+    const sig = JSON.parse(readFileSync(p, "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.bg_job_id).toBe("abc123");
+  });
+
+  test("idempotent: a second call returns true and leaves it stalled", () => {
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr");
+    expect(escalateDispatchExhausted(orchDir, "CTL-712", "pr")).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+  });
+
+  test("clears the dispatch cool-down marker on escalation", () => {
+    recordDispatchFailure(orchDir, "CTL-712", "pr", 2, 1_000);
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr");
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-712", "pr"))).toBe(false);
+  });
+});
+
+// ─── CTL-712: dispatch retry ceiling wired into schedulerTick ───
+describe("CTL-712: dispatch retry ceiling (schedulerTick)", () => {
+  let prevMax;
+  beforeEach(() => {
+    prevMax = process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+    process.env.SCHEDULER_MAX_DISPATCH_RETRIES = "3";
+  });
+  afterEach(() => {
+    if (prevMax === undefined) delete process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+    else process.env.SCHEDULER_MAX_DISPATCH_RETRIES = prevMax;
+  });
+
+  const noWrites = () => ({ applyPhaseStatus() {}, applyTerminalDone() {} });
+
+  test("a refused advancement dispatch stalls + escalates after N failures, then stops", () => {
+    writeSignal("CTL-712", "review", "done"); // FSM next = pr; review.json artifact is absent
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 2 });
+    const labels = [];
+    const writeStatus = { ...noWrites(), applyLabel: (a) => { labels.push(a); return { applied: true }; } };
+
+    // 3 ticks, each past the code=2 permanent cooldown window (CTL-713: 30 min)
+    // → 3 refused dispatches → consecutiveFailures hits the ceiling on the 3rd.
+    const STEP_MS = 31 * 60_000; // > DISPATCH_PERMANENT_COOLDOWN_MS so each tick re-dispatches
+    for (let i = 0; i < 3; i++) {
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus,
+        verifyDispatched: verifyOk,
+        now: () => 1_000 + i * STEP_MS,
+      });
+    }
+    expect(dispatch.calls).toHaveLength(3);
+
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
+
+    // Next tick: ticket is no longer in-flight → zero further dispatches; needs-human applied.
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus,
+      verifyDispatched: verifyOk,
+      now: () => 1_000 + 4 * STEP_MS,
+    });
+    expect(dispatch.calls).toHaveLength(3); // unchanged
+    expect(labels.some((l) => l.label === "needs-human")).toBe(true);
   });
 });
 
