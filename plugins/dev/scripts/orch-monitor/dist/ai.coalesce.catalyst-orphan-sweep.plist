@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for periodic orphan sweep (CTL-694).
+
+  Instructions:
+    1. Copy to ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
+    2. Replace REPLACE_WITH_ABSOLUTE with the absolute path to orphan-sweep.sh
+       (e.g. /Users/you/.claude/plugins/marketplaces/catalyst/plugins/dev/scripts)
+    3. Replace REPLACE_HOME with your home directory (e.g. /Users/you)
+    4. Load:
+         launchctl load -w ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
+    5. Verify:
+         launchctl list | grep orphan-sweep
+         tail -f ~/catalyst/orphan-sweep.log
+
+  To unload:
+    launchctl unload ~/Library/LaunchAgents/ai.coalesce.catalyst-orphan-sweep.plist
+
+  For a one-shot test run:
+    bash REPLACE_WITH_ABSOLUTE/orphan-sweep.sh --dry-run
+
+  See: docs/orphan-sweep.md
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.coalesce.catalyst-orphan-sweep</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>REPLACE_WITH_ABSOLUTE/orphan-sweep.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>1800</integer>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_HOME/catalyst/orphan-sweep.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_HOME/catalyst/orphan-sweep.log</string>
+</dict>
+</plist>
