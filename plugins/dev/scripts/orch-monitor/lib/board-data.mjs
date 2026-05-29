@@ -195,7 +195,8 @@ export function assembleBoard() {
     const p = parseAgentName(a.name);
     if (!p) continue;
     const runtimeMs = a.startedAt ? Date.now() - a.startedAt : null;
-    const cost = costs[p.ticket]?.costUSD ?? 0;
+    // null (not 0) when there is no metrics row — distinguishes "no data" from "free".
+    const cost = costs[p.ticket]?.costUSD ?? null;
     workers.push({
       name: a.name, ticket: p.ticket, tickets: [p.ticket], phase: p.phase,
       status: a.status || "idle", repo: repoFor(p.ticket), team: teamFor(p.ticket),
@@ -221,7 +222,7 @@ export function assembleBoard() {
       phase: cur.phase, status: cur.status, model: cur.model,
       linearState: PHASE_TO_LINEAR[cur.phase] || "Research",
       workerStatus: live?.status || null,
-      costUSD: costs[id]?.costUSD ?? 0, tokens: costs[id]?.tokens ?? 0,
+      costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
       pr: prFor(id),
       updatedAt: ticketUpdatedAt(id),
     });

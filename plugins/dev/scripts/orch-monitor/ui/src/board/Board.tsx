@@ -3,12 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 // ── types (mirror lib/board-data.mjs) ───────────────────────────────────────
 type Worker = {
   name: string; ticket: string; tickets: string[]; phase: string; status: string;
-  repo: string; team: string; runtimeMs: number | null; costUSD: number;
+  repo: string; team: string; runtimeMs: number | null; costUSD: number | null;
 };
 type Ticket = {
   id: string; title: string; type: string; repo: string; team: string;
   phase: string; status: string; model: string | null; linearState: string;
-  workerStatus: string | null; costUSD: number; tokens: number; pr: number | null;
+  workerStatus: string | null; costUSD: number | null; tokens: number | null; pr: number | null;
 };
 type QueueItem = {
   id: string; title: string; priority: number; createdAt: string;
@@ -54,9 +54,42 @@ const WORKER_COLS = [
   { key: "idle", label: "Idle", c: C.blue }, { key: "done", label: "Done", c: "#6b7280" },
   { key: "failed", label: "Failed", c: C.red },
 ];
+// Axis B — live worker runtime (claude agents --json): busy / idle / waiting.
 const WSTATUS_C: Record<string, string> = {
   busy: C.green, waiting: C.yellow, idle: "#5b6b80", failed: C.red, done: "#6b7280",
 };
+
+// Axis A — phase-signal lifecycle. Only the "needs attention / not-plain-done"
+// states get a badge; running/done/dispatched render via the phase pill + dot.
+const STATUS_META: Record<string, { label: string; fg: string; bg: string }> = {
+  failed: { label: "failed", fg: "#f4a8a8", bg: "rgba(239,93,93,0.14)" },
+  stalled: { label: "stalled", fg: "#f4dc8a", bg: "rgba(234,188,59,0.14)" },
+  "turn-cap-exhausted": { label: "turn-cap", fg: "#f4dc8a", bg: "rgba(234,188,59,0.14)" },
+  preempted: { label: "paused", fg: "#9ec7f4", bg: "rgba(78,161,255,0.14)" },
+  aborted: { label: "aborted", fg: "#8b93a1", bg: "#1c2028" },
+  superseded: { label: "superseded", fg: "#8b93a1", bg: "#1c2028" },
+  skipped: { label: "skipped", fg: "#5b626f", bg: "#16191f" },
+};
+
+function StatusBadge({ status }: { status: string }) {
+  const m = STATUS_META[status];
+  if (!m) return null;
+  return (
+    <span style={{
+      fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6,
+      color: m.fg, background: m.bg, whiteSpace: "nowrap",
+    }}>{m.label}</span>
+  );
+}
+
+// cost: real number → "$x.xx"; null → "—" (no metrics row, not "free").
+function Cost({ v }: { v: number | null }) {
+  return (
+    <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>
+      {v == null ? "—" : `$${v.toFixed(2)}`}
+    </span>
+  );
+}
 
 const fmtRuntime = (ms: number | null) => {
   if (!ms || !Number.isFinite(ms) || ms < 0) return "";
@@ -141,11 +174,9 @@ function TicketCard({ t }: { t: Ticket }) {
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         {t.workerStatus && <Dot color={WSTATUS_C[t.workerStatus] || C.fgDim} pulse={t.workerStatus === "busy"} />}
         <PhasePill phase={t.phase} />
+        <StatusBadge status={t.status} />
         <span style={{ flex: 1 }} />
-        {t.status === "failed"
-          ? <Chip mono color={C.red}>failed</Chip>
-          : t.pr ? <Chip mono color={C.green}>#{t.pr}</Chip>
-          : <Chip mono>${t.costUSD.toFixed(2)}</Chip>}
+        {t.pr ? <Chip mono color={C.green}>#{t.pr}</Chip> : <Cost v={t.costUSD} />}
       </div>
     </div>
   );
@@ -180,7 +211,7 @@ function WorkerCard({ w }: { w: Worker }) {
         <PhasePill phase={w.phase} />
         <Chip mono bg={C.s3} bd={C.borderSubtle} color={C.fgDim}>{w.repo}</Chip>
         <span style={{ flex: 1 }} />
-        <Chip mono>${w.costUSD.toFixed(2)}</Chip>
+        <Cost v={w.costUSD} />
       </div>
     </div>
   );
