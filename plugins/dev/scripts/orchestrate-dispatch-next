@@ -12,7 +12,7 @@
 #                             [--worktree-base <path>]
 #                             [--max-parallel <n>]
 #                             [--session-id <id>]
-#                             [--worker-command <cmd>]    # default "/catalyst-dev:oneshot"
+#                             [--worker-command <cmd>]    # default "/catalyst-legacy:oneshot"
 #                             [--worker-args <str>]       # default "--auto-merge"
 #                             [--comms-channel <name>]    # default "orch-<orch-id>"
 #                             [--phase <name>]            # CTL-449: dispatch a phase-agent via
@@ -62,7 +62,7 @@ ORCH_ID=""
 WORKTREE_BASE=""
 MAX_PARALLEL=""
 SESSION_ID=""
-WORKER_COMMAND="/catalyst-dev:oneshot"
+WORKER_COMMAND="/catalyst-legacy:oneshot"
 WORKER_ARGS="--auto-merge"
 COMMS_CHANNEL=""
 PHASE=""
@@ -232,14 +232,14 @@ if [ -z "$PHASE" ] && [[ ! $WORKER_COMMAND =~ ^/[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]
 	cat >&2 <<EOF
 ERROR: --worker-command "$WORKER_COMMAND" is not a plugin-namespaced slash command.
 
-Plugin skills must be invoked as /<plugin-name>:<skill-name>, e.g. /catalyst-dev:oneshot.
+Plugin skills must be invoked as /<plugin-name>:<skill-name>, e.g. /catalyst-legacy:oneshot.
 A bare slash like /oneshot is passed to claude as literal prompt text; no skill expansion
 happens and the worker exits without doing any work.
 
 If this came from .catalyst/config.json, change:
   catalyst.orchestration.workerCommand: "/oneshot"
 to:
-  catalyst.orchestration.workerCommand: "/catalyst-dev:oneshot"
+  catalyst.orchestration.workerCommand: "/catalyst-legacy:oneshot"
 EOF
 	exit 2
 fi

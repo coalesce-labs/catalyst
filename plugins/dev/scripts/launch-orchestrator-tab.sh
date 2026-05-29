@@ -61,25 +61,25 @@ case "$ARGS" in
   --project\ *)
     SETUP_FLAG="--project"
     SETUP_VAL="${ARGS#--project }"
-    CLAUDE_INVOCATION="/catalyst-dev:orchestrate --project \"$SETUP_VAL\""
+    CLAUDE_INVOCATION="/catalyst-legacy:orchestrate --project \"$SETUP_VAL\""
     CONTEXT_LABEL="$(slugify "$SETUP_VAL")"
     ;;
   --cycle\ *)
     SETUP_FLAG="--cycle"
     SETUP_VAL="${ARGS#--cycle }"
-    CLAUDE_INVOCATION="/catalyst-dev:orchestrate --cycle $SETUP_VAL"
+    CLAUDE_INVOCATION="/catalyst-legacy:orchestrate --cycle $SETUP_VAL"
     CONTEXT_LABEL="cycle_$(slugify "$SETUP_VAL")"
     ;;
   --auto\ *)
     SETUP_FLAG="--auto"
     SETUP_VAL="${ARGS#--auto }"
-    CLAUDE_INVOCATION="/catalyst-dev:orchestrate --auto $SETUP_VAL"
+    CLAUDE_INVOCATION="/catalyst-legacy:orchestrate --auto $SETUP_VAL"
     CONTEXT_LABEL="auto${SETUP_VAL}"
     ;;
   *)
     SETUP_FLAG="--tickets"
     SETUP_VAL="$ARGS"
-    CLAUDE_INVOCATION="/catalyst-dev:orchestrate $ARGS"
+    CLAUDE_INVOCATION="/catalyst-legacy:orchestrate $ARGS"
     CONTEXT_LABEL="$(printf '%s' "$ARGS" | tr ' ' '_')"
     ;;
 esac
