@@ -463,7 +463,7 @@ export function validatePerProjectBudgets(concurrency) {
 // `maxParallelCeiling`, but only when each bound is a valid integer (CTL-665).
 // Bounds bite only when present, so the empty-`concurrency` legacy path stays
 // unclamped — every existing state.json-driven test is untouched.
-function clampToBounds(value, { minParallel, maxParallelCeiling } = {}) {
+export function clampToBounds(value, { minParallel, maxParallelCeiling } = {}) {
   let resolved = value;
   if (Number.isInteger(minParallel) && resolved < minParallel) resolved = minParallel;
   if (Number.isInteger(maxParallelCeiling) && resolved > maxParallelCeiling) {
