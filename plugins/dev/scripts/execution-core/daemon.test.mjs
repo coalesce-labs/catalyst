@@ -751,3 +751,56 @@ describe("stopDaemon", () => {
     expect(existsSync(pidFile)).toBe(false);
   });
 });
+
+// CTL-684: auto-tuner wiring in startDaemon + stopDaemon.
+describe("auto-tuner wiring (CTL-684)", () => {
+  test("startDaemon invokes startAutoTuner once with configPath + layer2Path", () => {
+    const calls = [];
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      configPath: "/fake/config.json",
+      layer2Path: "/fake/layer2.json",
+      startAutoTuner: (opts) => {
+        calls.push(opts);
+        return () => {};
+      },
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].configPath).toBe("/fake/config.json");
+    expect(calls[0].layer2Path).toBe("/fake/layer2.json");
+    stopDaemon();
+  });
+
+  test("stopDaemon calls the stored _stopAutoTuner", () => {
+    const stopped = [];
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startAutoTuner: () => () => stopped.push("autoTuner"),
+    });
+    stopDaemon();
+    expect(stopped).toEqual(["autoTuner"]);
+  });
+
+  test("a throwing startAutoTuner triggers stopDaemon cleanup (daemon does not start half-up)", () => {
+    let pidFile = null;
+    try {
+      pidFile = join(process.env.CATALYST_DIR, "daemon2.pid");
+      startDaemon({
+        recover: () => {},
+        startMonitor: () => {},
+        startScheduler: () => {},
+        watchRegistry: false,
+        pidFile,
+        startAutoTuner: () => { throw new Error("tuner boot failed"); },
+      });
+    } catch {}
+    // PID file must be removed by stopDaemon's cleanup path
+    if (pidFile) expect(existsSync(pidFile)).toBe(false);
+  });
+});

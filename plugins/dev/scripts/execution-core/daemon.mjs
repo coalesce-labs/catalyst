@@ -65,6 +65,7 @@ import {
   mergeExecutionCoreConcurrency,
 } from "./scheduler.mjs";
 import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
+import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -82,6 +83,8 @@ let _refreshTimer = null;
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
 let _memorySampler = null;
+// CTL-684: auto-tuner stop handle.
+let _stopAutoTuner = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
 let _eventLogCursor = 0;
@@ -150,6 +153,10 @@ export function startDaemon({
   // override). Null in tests; production main() resolves it from
   // CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json.
   layer2Path = null,
+  // CTL-684: auto-tuner injectable seams (production uses the real module;
+  // tests inject spies). The stop handle is stored so stopDaemon can tear it
+  // down symmetrically with the scheduler block.
+  startAutoTuner: startAutoTunerFn = startAutoTuner,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -203,6 +210,11 @@ export function startDaemon({
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
     schedulerFn({ orchDir, cache, concurrency, configPath, layer2Path }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
+    // CTL-684: start the side-car auto-tuner AFTER the scheduler so the
+    // scheduler's first tick runs with the operator's current Layer-2 value
+    // before any auto-tune adjustments. configPath + layer2Path are threaded
+    // so the tuner can re-read the merged concurrency on every sample.
+    _stopAutoTuner = startAutoTunerFn({ configPath, layer2Path });
 
     if (watchRegistry) {
       // Watch the execution-core dir for registry.json changes — the registry is
@@ -484,6 +496,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: memory-sampler stop failed");
     }
     _memorySampler = null;
+  }
+  // CTL-684: stop the auto-tuner.
+  if (_stopAutoTuner) {
+    try {
+      _stopAutoTuner();
+    } catch {
+      /* tuner already stopped */
+    }
+    _stopAutoTuner = null;
   }
   _eventLogCursor = 0;
   _eventLogLeftover = "";
