@@ -5,30 +5,15 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
-// ── types (mirror lib/board-data.mjs /board-data) ───────────────────────────
-type ActiveState = "active" | "stuck" | null;
-type Worker = {
-  name: string; ticket: string; tickets: string[]; phase: string; status: string;
-  activeState: ActiveState; working: boolean; lastActiveMs: number | null;
-  repo: string; team: string; runtimeMs: number | null; costUSD: number | null;
-  sessionId?: string;
-};
-type Ticket = {
-  id: string; title: string; type: string; repo: string; team: string;
-  phase: string; status: string; model: string | null; linearState: string;
-  workerStatus: string | null; activeState: ActiveState; working: boolean; lastActiveMs: number | null;
-  priority: number; estimate: number | null; scope: string | null; project: string | null;
-  costUSD: number | null; tokens: number | null; pr: number | null; updatedAt: string;
-};
-type QueueItem = {
-  id: string; title: string; priority: number; createdAt: string; repo: string; team: string;
-  rank: number; estimate: number | null; scope: string | null; project: string | null;
-};
-type BoardPayload = {
-  generatedAt: string;
-  config: { maxParallel: number; inFlight: number; freeSlots: number; active: number; working: number; stuck: number };
-  repos: string[]; workers: Worker[]; tickets: Ticket[]; queue: QueueItem[];
-};
+// ── types + transport (hoisted to ./types + ./board-client for CTL-733 PR-2b) ─
+import { connectBoard } from "./board-client";
+import type {
+  BoardPayload,
+  BoardWorker as Worker,
+  BoardTicket as Ticket,
+  BoardActiveState as ActiveState,
+} from "./types";
+import type { ConnectionStatus } from "@/lib/types";
 
 // ── tokens (orch-monitor DESIGN.md) ─────────────────────────────────────────
 const C = {
@@ -457,7 +442,7 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
 
 export function Board() {
   const [data, setData] = useState<BoardPayload | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [view, setView] = useState<View>("tickets");
   const [lens, setLens] = useState<"linear" | "phase">("linear");
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
@@ -465,49 +450,21 @@ export function Board() {
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
 
-  // CTL-733: subscribe to the server's shared snapshot over SSE (no per-tab
-  // polling) — the monitor computes the board once and pushes it to every tab.
-  // Falls back to a one-shot /api/board poll only if SSE never connects (e.g.
-  // `bun run dev` standalone, where the dev middleware serves /api/board but not
-  // the stream). A transient drop after a good connection is left to
-  // EventSource's own auto-reconnect, not the poll fallback.
+  // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
+  // ONE EventSource (+ an IndexedDB cache) across every tab, with a direct
+  // per-tab EventSource fallback. Boots from cache for an instant warm paint and
+  // re-requests a fresh snapshot whenever the tab regains focus.
   useEffect(() => {
     let alive = true;
-    let es: EventSource | null = null;
-    let pollTimer: ReturnType<typeof setTimeout> | undefined;
-    let controller: AbortController | undefined;
-    let everOpened = false;
-    let polling = false;
-    const apply = (j: BoardPayload) => { if (alive) { setData(j); setErr(null); } };
-
-    const poll = async () => {
-      if (!alive) return;
-      controller?.abort(); controller = new AbortController();
-      try {
-        const r = await fetch("/api/board", { signal: controller.signal });
-        apply(await r.json());
-      } catch (e) { if (alive && (e as Error)?.name !== "AbortError") setErr(String(e)); }
-      if (alive && !document.hidden) pollTimer = setTimeout(poll, 4000);
-    };
-
-    es = new EventSource("/api/board/stream");
-    es.addEventListener("board", (ev) => {
-      everOpened = true;
-      try { apply(JSON.parse((ev as MessageEvent).data) as BoardPayload); } catch { /* ignore frame */ }
+    const conn = connectBoard({
+      onSnapshot: (p) => { if (alive) setData(p); },
+      onStatus: (s) => { if (alive) setStatus(s); },
     });
-    es.onerror = () => {
-      if (everOpened) return; // good connection dropped → let EventSource reconnect
-      es?.close(); es = null;
-      if (alive && !polling) { polling = true; void poll(); } // SSE unavailable → poll
-    };
-
-    const onVis = () => { if (!document.hidden && polling) { clearTimeout(pollTimer); void poll(); } };
+    const onVis = () => { if (!document.hidden) conn.requestReconcile(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       alive = false;
-      es?.close();
-      clearTimeout(pollTimer);
-      controller?.abort();
+      conn.close();
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
@@ -543,7 +500,7 @@ export function Board() {
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
-            <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: err ? C.red : C.green, border: `1px solid ${err ? "rgba(239,93,93,0.35)" : "rgba(57,208,122,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{err ? "OFFLINE" : "LIVE"}</span>
+            <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: status === "connected" ? C.green : C.red, border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{status === "connected" ? "LIVE" : "OFFLINE"}</span>
           </div>
         </header>
 
@@ -565,8 +522,7 @@ export function Board() {
 
         {/* body */}
         <div style={{ flex: 1, minHeight: 0 }}>
-          {!data && !err && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
-          {err && <div style={{ color: C.red, padding: 24 }}>Board data unavailable: {err}</div>}
+          {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {data && view === "tickets" && (combined
             ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill />
             : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} /></Lane>)}</div>)}
