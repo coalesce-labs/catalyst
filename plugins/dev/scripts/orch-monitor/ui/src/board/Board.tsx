@@ -465,23 +465,51 @@ export function Board() {
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
 
+  // CTL-733: subscribe to the server's shared snapshot over SSE (no per-tab
+  // polling) — the monitor computes the board once and pushes it to every tab.
+  // Falls back to a one-shot /api/board poll only if SSE never connects (e.g.
+  // `bun run dev` standalone, where the dev middleware serves /api/board but not
+  // the stream). A transient drop after a good connection is left to
+  // EventSource's own auto-reconnect, not the poll fallback.
   useEffect(() => {
-    let alive = true; let timer: ReturnType<typeof setTimeout> | undefined; let controller: AbortController | undefined;
-    const tick = async () => {
+    let alive = true;
+    let es: EventSource | null = null;
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let controller: AbortController | undefined;
+    let everOpened = false;
+    let polling = false;
+    const apply = (j: BoardPayload) => { if (alive) { setData(j); setErr(null); } };
+
+    const poll = async () => {
       if (!alive) return;
       controller?.abort(); controller = new AbortController();
       try {
         const r = await fetch("/api/board", { signal: controller.signal });
-        const j = await r.json();
-        if (alive) { setData(j); setErr(null); }
+        apply(await r.json());
       } catch (e) { if (alive && (e as Error)?.name !== "AbortError") setErr(String(e)); }
-      schedule();
+      if (alive && !document.hidden) pollTimer = setTimeout(poll, 4000);
     };
-    const schedule = () => { if (alive && !document.hidden) timer = setTimeout(tick, 4000); };
-    tick();
-    const onVis = () => { if (!document.hidden) { clearTimeout(timer); tick(); } };
+
+    es = new EventSource("/api/board/stream");
+    es.addEventListener("board", (ev) => {
+      everOpened = true;
+      try { apply(JSON.parse((ev as MessageEvent).data) as BoardPayload); } catch { /* ignore frame */ }
+    });
+    es.onerror = () => {
+      if (everOpened) return; // good connection dropped → let EventSource reconnect
+      es?.close(); es = null;
+      if (alive && !polling) { polling = true; void poll(); } // SSE unavailable → poll
+    };
+
+    const onVis = () => { if (!document.hidden && polling) { clearTimeout(pollTimer); void poll(); } };
     document.addEventListener("visibilitychange", onVis);
-    return () => { alive = false; clearTimeout(timer); controller?.abort(); document.removeEventListener("visibilitychange", onVis); };
+    return () => {
+      alive = false;
+      es?.close();
+      clearTimeout(pollTimer);
+      controller?.abort();
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   const repos = data?.repos ?? [];
