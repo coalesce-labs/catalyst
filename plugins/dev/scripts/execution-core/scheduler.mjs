@@ -1384,6 +1384,11 @@ export function schedulerTick(
   const reclaimed = [];
   const revived = [];
   const reviveSuppressed = [];
+  // CTL-735: workers deferred by the post-(re)dispatch grace window (absent but
+  // recently dispatched → not yet registered in `claude agents`). A high count
+  // here with low `revived` is the healthy steady state during the controlled
+  // daemon re-enable — it means the storm-causing re-revive race is suppressed.
+  const revivePending = [];
   const escalated = [];
   // CTL-643: drop terminal tickets from the reclaim attention set.
   // reclaimDeadWorkIfPossible already short-circuits on terminal signals
@@ -1464,6 +1469,12 @@ export function schedulerTick(
           break;
         case "revive-suppressed":
           reviveSuppressed.push(entry);
+          break;
+        case "revive-pending":
+          // CTL-735: absent worker still inside its post-dispatch grace window —
+          // deferred, not revived. Surfaced (not silent) so the controlled
+          // re-enable can confirm the storm-causing re-revive race is suppressed.
+          revivePending.push(entry);
           break;
         case "escalated":
           escalated.push(entry);
@@ -2049,6 +2060,7 @@ export function schedulerTick(
     reclaimed,
     revived,
     reviveSuppressed,
+    revivePending,
     escalated,
     advanced,
     dispatched,

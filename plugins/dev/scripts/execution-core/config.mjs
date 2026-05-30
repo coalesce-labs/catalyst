@@ -150,6 +150,20 @@ export const IDLE_CONFIRM_TICKS =
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
 
+// CTL-735 — post-(re)dispatch grace window for the `absent` liveness class. A
+// worker whose bg_job_id is `absent` from the eventually-consistent `claude
+// agents` snapshot but whose signal was (re)dispatched within this window has
+// almost certainly just not registered yet (a fresh `claude --bg` takes seconds
+// to appear, slower under load) — NOT crashed. The reclaim sweep defers reviving
+// it until the window elapses: the missing analog of IDLE_CONFIRM_TICKS for
+// `absent`. Without it, the de-starved fast tick (CTL-731, ~2-4s) re-classifies
+// each just-revived worker as dead and revives it again → the revive storm.
+// Deliberately generous (90s) so a fresh worker registers even under high load,
+// while a genuinely-crashed fresh worker waits at most this long before revive.
+// Env-overridable for tuning from real failures.
+export const REVIVE_GRACE_MS =
+  Number(process.env.EXECUTION_CORE_REVIVE_GRACE_MS) || 90_000;
+
 // CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
 // continuously classifies live sessions and emits agent.waiting_on_user /
 // agent.resumed transition events. CATALYST_WAIT_WATCHER=0 disables it (the

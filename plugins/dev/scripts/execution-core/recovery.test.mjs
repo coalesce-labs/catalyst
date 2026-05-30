@@ -462,7 +462,7 @@ describe("recoverStartup", () => {
 
 // implementSignal — a bg-shaped phase-implement signal with the orchestrator +
 // session-id fields the reclaim path threads into emit-complete.
-function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-x" } = {}) {
+function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-x", startedAt } = {}) {
   return {
     ticket,
     phase: "implement",
@@ -476,6 +476,10 @@ function implementSignal({ ticket = "CTL-9", status = "running", bgJobId = "job-
       status,
       bg_job_id: bgJobId,
       catalystSessionId: `sess_${ticket}_abc`,
+      // CTL-735: only present when a test exercises the post-(re)dispatch grace
+      // window. Absent by default so the existing absent-revive tests (which can't
+      // prove worker freshness) keep their pre-CTL-735 revive behaviour.
+      ...(startedAt !== undefined ? { startedAt } : {}),
     },
   };
 }
@@ -570,6 +574,79 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
     expect(r).toBe("revived");
     expect(reviveDispatch.calls.length).toBe(1);
     expect(reviveDispatch.calls[0][0].resumeSession).toBe("uuid-resume");
+  });
+});
+
+// CTL-735: post-(re)dispatch grace window — the missing analog of the
+// idle-confirmation streak for `absent`. A worker whose NEW bg_job_id is merely
+// `absent` from the eventually-consistent `claude agents` snapshot but whose
+// signal was (re)dispatched within REVIVE_GRACE_MS has almost certainly just not
+// registered yet, NOT crashed. Without this the de-starved fast tick (CTL-731)
+// re-classifies each just-revived worker as dead and revives it again every
+// ~2-4s → the revive storm (5→18→62→74 workers, load 72).
+describe("reclaimDeadWorkIfPossible — CTL-735 post-revive grace window", () => {
+  const orch = "/orch";
+  const NOW = 1_000_000;
+  const GRACE = 90_000;
+
+  // The revive seams shared by these cases — a probe that says "work not done"
+  // (so control reaches branch (C) revive) plus the budget/storm gates open.
+  const reviveSeams = (reviveDispatch) => ({
+    statJob: () => null,
+    probes: { implement: recorder(false) },
+    emitComplete: recorder({ code: 0 }),
+    appendReviveEvent: recorder(true),
+    reviveDispatch,
+    countReviveEvents: recorder(0),
+    countDistinctRevivingTickets: recorder(1),
+    writeReviveMarker: recorder(undefined),
+    killBgJob: recorder(undefined),
+    applyStalledLabel: recorder({ applied: true }),
+    resolveSession: () => null,
+    liveness: () => "absent",
+    reviveGraceMs: GRACE,
+    now: () => NOW,
+  });
+
+  test("absent worker (re)dispatched WITHIN the grace window → 'revive-pending', NOT revived", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const sig = implementSignal({
+      // startedAt 10s ago — well inside the 90s grace window.
+      startedAt: new Date(NOW - 10_000).toISOString(),
+    });
+    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
+    expect(r).toBe("revive-pending");
+    expect(reviveDispatch.calls.length).toBe(0); // the storm-causing re-revive is suppressed
+  });
+
+  test("absent worker (re)dispatched PAST the grace window → revives (genuinely dead)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const sig = implementSignal({
+      // startedAt 100s ago — past the 90s window, so a still-absent worker is real death.
+      startedAt: new Date(NOW - 100_000).toISOString(),
+    });
+    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("absent worker with NO startedAt → revives (back-compat: cannot prove freshness)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const sig = implementSignal(); // no startedAt
+    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("grace window applies ONLY to absent — a busy worker is still suppressed as before", () => {
+    // A busy worker within the window must NOT become 'revive-pending'; it keeps
+    // its CTL-662 'alive-busy-suppressed' verdict (the grace guard is absent-only).
+    const reviveDispatch = recorder({ code: 0 });
+    const seams = reviveSeams(reviveDispatch);
+    seams.liveness = () => "busy";
+    const sig = implementSignal({ startedAt: new Date(NOW - 10_000).toISOString() });
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
+    expect(r).toBe("alive-busy-suppressed");
   });
 });
 
