@@ -122,7 +122,14 @@ describe("parseStateChangedEvent", () => {
       },
       body: { payload: { teamKey: "ENG", toState: "In Progress" } },
     });
-    expect(parsed).toEqual({ identifier: "ENG-1", teamKey: "ENG", toState: "In Progress" });
+    expect(parsed).toEqual({
+      identifier: "ENG-1",
+      teamKey: "ENG",
+      toState: "In Progress",
+      toLabels: null,
+      toProject: null,
+      toPriority: null,
+    });
   });
 
   test("reads event.event + event.detail (legacy flat shape)", () => {
@@ -130,7 +137,14 @@ describe("parseStateChangedEvent", () => {
       event: "linear.issue.state_changed",
       detail: { ticket: "ENG-2", teamKey: "ENG", toState: "Done" },
     });
-    expect(parsed).toEqual({ identifier: "ENG-2", teamKey: "ENG", toState: "Done" });
+    expect(parsed).toEqual({
+      identifier: "ENG-2",
+      teamKey: "ENG",
+      toState: "Done",
+      toLabels: null,
+      toProject: null,
+      toPriority: null,
+    });
   });
 
   test("returns null for a non-state_changed event", () => {

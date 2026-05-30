@@ -27,7 +27,13 @@
 
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
-import { getEventLogPath, RECONCILE_INTERVAL_MS, EVENT_DEBOUNCE_MS, log } from "./config.mjs";
+import {
+  getEventLogPath,
+  RECONCILE_INTERVAL_MS,
+  EVENT_DEBOUNCE_MS,
+  TAILER_POLL_INTERVAL_MS,
+  log,
+} from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
@@ -66,6 +72,12 @@ export function parseStateChangedEvent(event) {
     identifier,
     teamKey: payload.teamKey ?? null,
     toState: payload.toState ?? null,
+    // CTL triage-entry fix (Phase 0): carry the projection-fold fields so a
+    // →status transition can be folded into the eligible set from the event
+    // payload (no Linear poll), the same way handleIssueUpdatedEvent does.
+    toLabels: payload.toLabels ?? null,
+    toProject: payload.toProject ?? null,
+    toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
   };
 }
 
@@ -309,6 +321,21 @@ export function handleStateChangedEvent(
       // fold (wired below readNewEvents) handles label/project/priority changes
       // incrementally without a poll. The 10-min reconcile remains the
       // missed-webhook backstop.
+      //
+      // CTL triage-entry fix (Phase 0): a →status (Todo) transition arrives as a
+      // `state_changed` event, which handleIssueUpdatedEvent ignores (it only
+      // folds `linear.issue.updated`). Without this fold a ticket entering Todo
+      // is invisible to the scheduler until the 10-min reconcile. Fold it into
+      // the eligible projection here, straight from the event payload (no Linear
+      // poll), mirroring handleIssueUpdatedEvent's upsert.
+      if (parsed.toState === query.status && ticketMatchesQuery(query, parsed)) {
+        upsertTicket(query.team, {
+          identifier: parsed.identifier,
+          state: parsed.toState,
+          priority: parsed.toPriority,
+          project: parsed.toProject ?? null,
+        });
+      }
       if (
         parsed.toState === query.status &&
         orchDir &&
@@ -458,6 +485,9 @@ let lastLogPath = "";
 let leftoverBuf = "";
 let watcher = null;
 let reconcileTimer = null;
+// CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
+// fs.watch fails to fire (the common case for cross-process appends on macOS).
+let tailerPollTimer = null;
 let tailerOpts = {};
 
 // fileSizeOrZero — current byte size of a file, or 0 when it does not exist
@@ -577,6 +607,7 @@ export function startMonitor({
   exec,
   debounceMs = EVENT_DEBOUNCE_MS,
   reconcileIntervalMs = RECONCILE_INTERVAL_MS,
+  tailerPollMs = TAILER_POLL_INTERVAL_MS, // CTL triage-entry fix (Phase 0)
   resumeFromCursor = true,
   orchDir,
   dispatch,
@@ -600,6 +631,14 @@ export function startMonitor({
     seedTailerAtEof();
   }
   startTailing();
+  // CTL triage-entry fix (Phase 0): poll-drain the event log. fs.watch
+  // (startTailing) is unreliable for cross-process appends, so without this the
+  // tailer's fast path (triage dispatch + eligible fold) never fires on live
+  // webhooks — new work waits for the 10-min reconcile or a restart. The poll
+  // is cheap (readNewEvents reads only bytes past the durable cursor).
+  if (tailerPollMs > 0) {
+    tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+  }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
     sweepMissingTriage({ orchDir, dispatch }); // CTL-711: catch tickets that appeared between webhooks
@@ -613,6 +652,10 @@ export function stopMonitor() {
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     reconcileTimer = null;
+  }
+  if (tailerPollTimer) {
+    clearInterval(tailerPollTimer);
+    tailerPollTimer = null;
   }
   watcher?.close();
   watcher = null;
