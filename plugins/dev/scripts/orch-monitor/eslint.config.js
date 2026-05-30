@@ -5,7 +5,18 @@ import globals from "globals";
 
 export default [
   {
-    ignores: ["node_modules/**", "public/**", "ui/**", "eslint.config.js"],
+    // Declaration files (*.d.ts / *.d.mts) are pure types with no runtime to
+    // lint, and they don't match the typed-linting `**/*.ts` files block (which
+    // sets parserOptions.projectService), so type-checked rules would error on
+    // them. Skip them — same posture as the existing public/ui ignores.
+    ignores: [
+      "node_modules/**",
+      "public/**",
+      "ui/**",
+      "eslint.config.js",
+      "**/*.d.ts",
+      "**/*.d.mts",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,

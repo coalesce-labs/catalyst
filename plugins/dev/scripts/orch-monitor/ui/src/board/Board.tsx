@@ -471,7 +471,7 @@ export function Board() {
       if (!alive) return;
       controller?.abort(); controller = new AbortController();
       try {
-        const r = await fetch("/board-data", { signal: controller.signal });
+        const r = await fetch("/api/board", { signal: controller.signal });
         const j = await r.json();
         if (alive) { setData(j); setErr(null); }
       } catch (e) { if (alive && (e as Error)?.name !== "AbortError") setErr(String(e)); }
