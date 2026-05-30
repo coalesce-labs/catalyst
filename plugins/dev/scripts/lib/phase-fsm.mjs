@@ -2,21 +2,36 @@
 //
 // CTL-531: collapses the scattered phase-advance control flow — phase_next() in
 // orchestrate-phase-advance, the revive decision tree in orchestrate-revive, and the
-// stall escalation in orchestrate-healthcheck — into a single pure, zero-dependency
-// transition table (NEXT_PHASE) plus a transition(state, event) function. Imports nothing.
+// stall escalation in orchestrate-healthcheck — into a single pure transition table
+// (NEXT_PHASE) plus a transition(state, event) function.
+//
+// The phase-LIST constants (PHASES, NEXT_PHASE, PHASE_LINEAR_KEY, REMEDIATE_PHASE,
+// ANCILLARY_PHASES, REMEDIATE_CYCLE_CAP) are now DERIVED from the single workflow
+// descriptor (lib/workflow.default.json) and re-exported here for back-compat — see
+// workflow-descriptor.mjs + docs/workflow-descriptors-design.md. This file keeps the
+// FSM vocabulary, the transition()/phaseIndex() logic, and the validation helpers.
 
-// ─── State vocabulary ───
-export const PHASES = [
-  "triage",
-  "research",
-  "plan",
-  "implement",
-  "verify",
-  "review",
-  "pr",
-  "monitor-merge",
-  "monitor-deploy",
-];
+import {
+  PHASES,
+  NEXT_PHASE,
+  PHASE_LINEAR_KEY,
+  REMEDIATE_PHASE,
+  ANCILLARY_PHASES,
+  REMEDIATE_CYCLE_CAP,
+} from "./workflow-descriptor.mjs";
+
+// Re-export the descriptor-derived constants so every existing importer of
+// phase-fsm.mjs (scheduler, recovery, …) is unaffected by the provenance swap.
+export {
+  PHASES,
+  NEXT_PHASE,
+  PHASE_LINEAR_KEY,
+  REMEDIATE_PHASE,
+  ANCILLARY_PHASES,
+  REMEDIATE_CYCLE_CAP,
+};
+
+// ─── State vocabulary (FSM-only; not part of the pipeline descriptor) ───
 export const PARK_STATE = "needs-input";
 export const TERMINAL_SUCCESS = "done";
 export const TERMINAL_FAILURE = "stalled";
@@ -29,19 +44,13 @@ export const EVENT_TYPES = new Set(["complete", "failed", "turn-cap-exhausted", 
 export const REVIVE_BUDGET = 1;
 
 // ─── CTL-653: remediate — a router-orchestrated conditional detour, NOT a linear edge ───
-// `remediate` is a fix-capable phase the scheduler's router (deriveAdvancement)
-// detours into when `verify` produces a verdict-fail, then cycles back to a
-// fresh `verify`. It is deliberately NOT a member of PHASES / NEXT_PHASE: the
-// pure FSM stays a single-successor table (the happy-path edge loop stays 9
-// phases) and the conditional cycle lives entirely in the router. It IS a
-// *known ancillary phase* so the validation/order/Linear-key helpers accept it
-// (else applyPhaseStatus({phase:"remediate"}) and recovery's supersede guard
-// would throw on an "unknown phase").
-export const REMEDIATE_PHASE = "remediate";
-export const ANCILLARY_PHASES = [REMEDIATE_PHASE];
-// Max remediation attempts before escalating to needs-human. Distinct from
-// REVIVE_BUDGET (crash-revive = 1) so a crash never consumes verdict-cycle budget.
-export const REMEDIATE_CYCLE_CAP = 3;
+// `remediate` is `descriptor.ancillarySteps` (NOT in PHASES / NEXT_PHASE): the pure
+// FSM stays a single-successor table and the verify⇄remediate cycle lives entirely
+// in the router (deriveAdvancement). It IS a *known ancillary phase* so the
+// validation/order/Linear-key helpers accept it (else applyPhaseStatus({phase:
+// "remediate"}) and recovery's supersede guard would throw on an "unknown phase").
+// REMEDIATE_CYCLE_CAP (the descriptor cycle cap) is distinct from REVIVE_BUDGET
+// (crash-revive = 1) so a crash never consumes verdict-cycle budget.
 
 // isKnownPhase — true for any linear pipeline phase OR a known ancillary phase
 // (remediate). Lets consumers validate a phase name without re-deriving the set.
@@ -49,43 +58,16 @@ export function isKnownPhase(phase) {
   return PHASES.includes(phase) || ANCILLARY_PHASES.includes(phase);
 }
 
-// ─── Transition table — the happy path (replaces phase_next()) ───
-export const NEXT_PHASE = {
-  triage: "research",
-  research: "plan",
-  plan: "implement",
-  implement: "verify",
-  verify: "review",
-  review: "pr",
-  pr: "monitor-merge",
-  "monitor-merge": "monitor-deploy",
-  "monitor-deploy": TERMINAL_SUCCESS,
-};
-
 // ─── Phase → Linear stateMap key — the 9→5 collapse (CTL-558) ───
-// Each pipeline phase maps to a `.catalyst.linear.stateMap` key; linear-transition.sh
-// resolves that key to a Linear workflow-state name (config stateMap > default_state_for).
-// The keys are the legacy stateMap vocabulary — an execution-core repo's stateMap
-// re-targets the SAME keys onto the 5 collapsed states (Research/Plan/Implement/
-// Validate/PR), see setup-execution-core-states.sh:build_execution_core_state_map.
-//   • `triage` → null: the human owns the Triage state; the daemon does not write it back.
-//   • verify + review collapse onto `verifying`/`reviewing` (both → Validate).
-//   • pr + monitor-merge + monitor-deploy collapse onto `inReview` (→ PR) while in flight;
-//     terminal Done is written separately on monitor-deploy completion (TERMINAL_LINEAR_KEY).
-export const PHASE_LINEAR_KEY = {
-  triage: null,
-  research: "research",
-  plan: "planning",
-  implement: "inProgress",
-  verify: "verifying",
-  review: "reviewing",
-  pr: "inReview",
-  "monitor-merge": "inReview",
-  "monitor-deploy": "inReview",
-  // CTL-653: the ancillary remediate phase maps to its own stateMap key
-  // (`remediating` → "Remediate"); it is not part of the 9→5 collapse.
-  [REMEDIATE_PHASE]: "remediating",
-};
+// PHASE_LINEAR_KEY (derived from each descriptor step's `linearKey`) maps each phase
+// to a `.catalyst.linear.stateMap` key; linear-transition.sh resolves that key to a
+// Linear workflow-state name. An execution-core repo's stateMap re-targets the SAME
+// keys onto the 5 collapsed states (Research/Plan/Implement/Validate/PR).
+//   • `triage` → null: the human owns the Triage state; the daemon does not write it.
+//   • verify + review → verifying/reviewing (both → Validate).
+//   • pr + monitor-merge + monitor-deploy → inReview (→ PR) while in flight; terminal
+//     Done is written separately on monitor-deploy completion (TERMINAL_LINEAR_KEY).
+//   • remediate → remediating (→ "Remediate"); not part of the 9→5 collapse.
 
 // The stateMap key for the terminal success state — written when monitor-deploy completes.
 export const TERMINAL_LINEAR_KEY = "done";
