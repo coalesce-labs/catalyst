@@ -1364,6 +1364,90 @@ NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 assert_eq "$ORIG_HEAD" "$NOW_HEAD" "fetch fail: worktree HEAD unchanged (un-rebased)"
 assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "fetch fail: worker still spawned"
 
+# ─── CTL-736 Phase 1: atomic single-flight generation claim + fencing token ──
+# The claim makes a duplicate worker spawn structurally impossible: each
+# (ticket, phase, generation) is O_EXCL-claimed, exactly one dispatcher wins.
+
+echo ""
+echo "Test 40 (CTL-736): fresh dispatch stamps generation=1 + exports CATALYST_GENERATION"
+fresh_env t40_generation
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "1" "$(jq -r '.generation' "$SIGNAL")" "fresh dispatch: signal.generation = 1"
+assert_eq "yes" "$([[ -f "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"fresh dispatch: O_EXCL claim file triage.claim.1 created"
+# The fencing token reaches the worker env. Use --dry-run (side-effect-free,
+# read-only generation) in a SEPARATE fixture so its env array is inspectable.
+fresh_env t40_env
+DRY=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+GEN_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("CATALYST_GENERATION="))')
+assert_eq "CATALYST_GENERATION=1" "$GEN_ENTRY" "dry-run env array carries CATALYST_GENERATION=1"
+assert_eq "no" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"dry-run never creates a real claim file (preview is side-effect-free)"
+
+echo ""
+echo "Test 41 (CTL-736): two concurrent dispatches → exactly one claude --bg spawn"
+fresh_env t41_concurrent
+# Launch two near-simultaneous dispatches for the same (ticket, phase). The
+# O_EXCL claim serializes them: exactly one wins (spawns), the other no-ops.
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/c1.out" 2>/dev/null &
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/c2.out" 2>/dev/null &
+wait
+SPAWN_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG" 2>/dev/null || echo 0)
+assert_eq "1" "$SPAWN_COUNT" "exactly one claude --bg spawn across two concurrent dispatches"
+# Exactly one stdout reports a live spawn (status=running); the other no-ops.
+RUNNING_COUNT=0
+IDEMPOTENT_COUNT=0
+for f in "${TEST_DIR}/c1.out" "${TEST_DIR}/c2.out"; do
+	S=$(jq -r '.status // empty' "$f" 2>/dev/null || echo "")
+	[[ $S == "running" ]] && RUNNING_COUNT=$((RUNNING_COUNT + 1))
+	[[ "$(jq -r '.idempotent // false' "$f" 2>/dev/null || echo false)" == "true" ]] && \
+		IDEMPOTENT_COUNT=$((IDEMPOTENT_COUNT + 1))
+done
+assert_eq "1" "$RUNNING_COUNT" "exactly one dispatch reports status=running (the winner)"
+assert_eq "1" "$IDEMPOTENT_COUNT" "exactly one dispatch reports idempotent:true (the loser)"
+
+echo ""
+echo "Test 42 (CTL-736): a revive (stalled signal) bumps the generation and re-claims"
+fresh_env t42_revive
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "1" "$(jq -r '.generation' "$SIGNAL")" "first dispatch: generation = 1"
+# Simulate the daemon's defaultReviveDispatch: flip the signal to stalled.
+TMP_REVIVE="${SIGNAL}.tmp"
+jq '.status = "stalled" | .attentionReason = "ctl-587-revive-reset"' "$SIGNAL" >"$TMP_REVIVE" && mv "$TMP_REVIVE" "$SIGNAL"
+rm -f "$CLAUDE_STUB_LOG" # count only the revive's spawn
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+assert_eq "2" "$(jq -r '.generation' "$SIGNAL")" "revive: generation bumped to 2"
+assert_eq "yes" "$([[ -f "${WORKER_DIR}/triage.claim.2" ]] && echo yes || echo no)" \
+	"revive: fresh O_EXCL claim file triage.claim.2 created"
+assert_eq "1" "$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG" 2>/dev/null || echo 0)" \
+	"revive spawned exactly one new worker"
+
+echo ""
+echo "Test 43 (CTL-736): fresh dispatch targets a FIXED gen (not high-water+1) → claim-lost, no spawn"
+fresh_env t43_fixed_target
+# Pre-seed a held claim at generation 1 with NO signal file. A fresh dispatch
+# must target generation 1 (fixed by the absent signal) and collide with the
+# tombstone — NOT advance to gen 2 off the claim-file high-water mark (which
+# would WIN and double-spawn). This deterministically exercises the new
+# `claim-lost` loser branch (the concurrent Test 41 loser can also exit via the
+# older status short-circuit, so it doesn't pin this branch).
+printf '{"generation":1,"claimedAt":"2026-05-30T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43=$?
+assert_eq "0" "$RC43" "fixed-target claim-lost exits 0"
+assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" "loser stdout status = claim-lost (not a fresh spawn at gen 2)"
+assert_eq "true" "$(echo "$STDOUT" | jq -r '.idempotent')" "loser stdout idempotent = true"
+assert_eq "1" "$(echo "$STDOUT" | jq -r '.generation')" "loser reports the contested generation = 1 (fixed target)"
+assert_eq "no" "$([[ -e "${WORKER_DIR}/triage.claim.2" ]] && echo yes || echo no)" \
+	"fresh dispatch did NOT advance to gen 2 (proves target is fixed, not high-water+1)"
+assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo no)" \
+	"loser writes no signal file (bows out before the signal write)"
+assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

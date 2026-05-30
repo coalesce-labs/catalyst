@@ -440,8 +440,10 @@ mkdir -p "$WORKER_DIR" 2>/dev/null || die "cannot create $WORKER_DIR"
 # Idempotency: if a signal exists and its status is one of dispatched|running|done,
 # we no-op. Failed signals are overwritten (retry path).
 EXISTING_STATUS=""
+EXISTING_GENERATION=""
 if [[ -f $SIGNAL_FILE ]]; then
 	EXISTING_STATUS=$(jq -r '.status // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+	EXISTING_GENERATION=$(jq -r '.generation // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
 fi
 
 if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXISTING_STATUS == "done" ]]; then
@@ -454,12 +456,91 @@ if [[ $EXISTING_STATUS == "dispatched" || $EXISTING_STATUS == "running" || $EXIS
 		--arg job "$EXISTING_JOB" \
 		--arg signal "$SIGNAL_FILE" \
 		--arg status "$EXISTING_STATUS" \
+		--arg generation "$EXISTING_GENERATION" \
 		--argjson dryRun "$DRY_RUN" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: (if $job == "" then null else $job end),
       signalFile: $signal, status: $status, idempotent: true,
+      generation: (if $generation == "" then null else ($generation | tonumber) end),
       dryRun: ($dryRun == 1)}'
 	exit 0
+fi
+
+# ─── CTL-736 Phase 1: atomic single-flight generation claim ─────────────────
+#
+# The status short-circuit above is a soft check-then-write: two near-
+# simultaneous ticks on a `stalled` (revive) or absent (fresh) signal both fall
+# through it and both spawn — the revive-storm root cause. The claim closes
+# that race deterministically: every concurrent dispatcher computes the SAME
+# target generation from observable state, then O_EXCL-creates
+# ${WORKER_DIR}/<phase>.claim.<generation>. Exactly one wins; every loser
+# no-ops as `idempotent` exactly like the soft guard did.
+#
+#   TARGET_GENERATION is fixed by the state the racers all observe:
+#     • fresh (no signal)                     → 1
+#     • revive/retry (stalled|failed|… signal) → signal.generation + 1
+#   It must NOT be derived from the live claim-file high-water mark: a staggered
+#   pair would then see each other's claim and advance to DIFFERENT generations,
+#   each winning its own — re-opening the very double-spawn this closes.
+#
+# The won generation is the FENCING TOKEN: written into the signal and exported
+# as CATALYST_GENERATION so a stale (false-dead-revived) worker self-disqualifies
+# in phase-agent-emit-complete before any outcome — so even if the still-live
+# snapshot trigger spawns extra workers across generations, only the current one
+# can write a result.
+#
+# The claim is PURE BASH (`set -o noclobber` → the `>` open uses O_CREAT|O_EXCL):
+# no node/bun startup in the dispatch path — both because the path must stay
+# fast (cf. lib/phase-sequence.sh: "adding a node-startup dependency to the
+# recovery sweep would change the failure modes") AND because two `bun`
+# instances launched simultaneously race on the execution-core lockfile and one
+# returns empty — which would silently re-open the double-spawn this closes.
+# The claim-file FORMAT is kept in sync with execution-core/claim.mjs
+# claimPath(): ${WORKER_DIR}/<phase>.claim.<generation>.
+#
+# --dry-run NEVER claims (a preview must be side-effect-free): it computes the
+# would-be generation without creating the claim file.
+if [[ -z $EXISTING_STATUS ]]; then
+	TARGET_GENERATION=1
+else
+	# Any non-(dispatched|running|done) signal that reached here is a revive or
+	# retry (stalled, failed, refused, …) → claim the next generation.
+	TARGET_GENERATION=$((${EXISTING_GENERATION:-0} + 1))
+fi
+GENERATION="$TARGET_GENERATION"
+
+if [[ $DRY_RUN -eq 0 ]]; then
+	CLAIM_FILE="${WORKER_DIR}/${PHASE}.claim.${TARGET_GENERATION}"
+	CLAIM_BODY="{\"generation\":${TARGET_GENERATION},\"claimedAt\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+	# Atomic create-exclusive-and-write: with noclobber the `>` fails (does not
+	# truncate) if CLAIM_FILE already exists — exactly one concurrent dispatcher
+	# wins the generation. Subshell so noclobber never leaks to the rest of the
+	# script.
+	if ! (set -o noclobber && printf '%s\n' "$CLAIM_BODY" >"$CLAIM_FILE") 2>/dev/null; then
+		# The write failed. Disambiguate the two causes — they must NOT collapse:
+		#   • file now EXISTS → EEXIST, a concurrent dispatcher won this
+		#     generation → no-op idempotent (race-free equivalent of the soft
+		#     status guard).
+		#   • file ABSENT → a genuine I/O error (EACCES / ENOSPC / read-only fs).
+		#     The claim is best-effort and must NEVER fail-closed: skipping the
+		#     dispatch here would strand the phase. Log and fall through to spawn
+		#     un-fenced (degraded, matching the no-runtime fallback).
+		if [[ -e $CLAIM_FILE ]]; then
+			jq -nc \
+				--arg ticket "$TICKET" \
+				--arg phase "$PHASE" \
+				--arg model "$MODEL" \
+				--argjson turnCap "$TURN_CAP" \
+				--arg signal "$SIGNAL_FILE" \
+				--argjson generation "$TARGET_GENERATION" \
+				--argjson dryRun "$DRY_RUN" \
+				'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+          bg_job_id: null, signalFile: $signal, status: "claim-lost", idempotent: true,
+          generation: $generation, dryRun: ($dryRun == 1)}'
+			exit 0
+		fi
+		echo "phase-agent-dispatch: claim write failed (no claim file at ${CLAIM_FILE}, not a lost race) for ${TICKET}/${PHASE}; proceeding un-fenced (generation=${GENERATION})" >&2
+	fi
 fi
 
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -477,9 +558,10 @@ jq -nc \
 	--arg orch "$ORCH_ID" \
 	--arg ts "$TS" \
 	--arg wt "$WORKTREE_PATH_RESOLVED" \
+	--argjson generation "$GENERATION" \
 	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
-    worktreePath: $wt,
+    worktreePath: $wt, generation: $generation,
     startedAt: $ts, updatedAt: $ts}' >"$SIGNAL_FILE" ||
 	die "failed to write signal file $SIGNAL_FILE"
 
@@ -561,6 +643,11 @@ DISPATCH_ENV=(
 	"CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
 	"CATALYST_PHASE=${PHASE}"
 	"CATALYST_TICKET=${TICKET}"
+	# CTL-736 Phase 1: the fencing token. The worker asserts
+	# signal.generation === CATALYST_GENERATION (phase-agent-emit-complete's
+	# fence-check) before emitting any outcome — a stale (false-dead-revived)
+	# generation bows out instead of double-completing.
+	"CATALYST_GENERATION=${GENERATION}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
@@ -646,6 +733,10 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 					# guard finds no file and writes a fresh one (not "dispatched"
 					# which would short-circuit the re-exec as idempotent).
 					rm -f "$SIGNAL_FILE" 2>/dev/null || true
+					# CTL-736: this is a DELIBERATE clean restart — drop the claim
+					# tombstones too, so the re-exec's fresh (no-signal ⇒ gen 1)
+					# claim is exclusive and wins instead of colliding on gen 1.
+					rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
 					echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
 					cd "$_NEW_WT"
 					exec "$0" --phase "$PHASE" --ticket "$TICKET" \
