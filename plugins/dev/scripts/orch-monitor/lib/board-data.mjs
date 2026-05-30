@@ -339,6 +339,21 @@ export function assembleBoard() {
   const mp = maxParallel();
   const repos = [...new Set([...workers, ...tickets].map((x) => x.repo))].sort();
 
+  // ── anomaly detection: >1 live worker for the same ticket should never happen
+  // (revive-duplicate orphans). Surface it loudly rather than make the operator
+  // hunt for it. Each entry lists the dup workers so the UI can flag + reap them.
+  const byTicket = {};
+  for (const w of workers) (byTicket[w.ticket] ||= []).push(w);
+  const duplicateWorkers = Object.entries(byTicket)
+    .filter(([, ws]) => ws.length > 1)
+    .map(([ticket, ws]) => ({
+      ticket, count: ws.length, repo: repoFor(ticket),
+      active: ws.filter((w) => w.activeState === "active").length,
+      stuck: ws.filter((w) => w.activeState === "stuck").length,
+      workers: ws.map((w) => ({ sessionId: w.sessionId, activeState: w.activeState, phase: w.phase, runtimeMs: w.runtimeMs })),
+    }))
+    .sort((a, b) => b.count - a.count);
+
   return {
     generatedAt: new Date().toISOString(),
     config: {
@@ -347,6 +362,7 @@ export function assembleBoard() {
       working: workers.filter((w) => w.working).length,
       stuck: workers.filter((w) => w.activeState === "stuck").length,
     },
+    anomalies: { duplicateWorkers },
     repos,
     workers: workers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,

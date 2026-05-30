@@ -24,9 +24,11 @@ type QueueItem = {
   id: string; title: string; priority: number; createdAt: string; repo: string; team: string;
   rank: number; estimate: number | null; scope: string | null; project: string | null;
 };
+type DuplicateWorkers = { ticket: string; count: number; repo: string; active: number; stuck: number; workers: { sessionId?: string; activeState: ActiveState; phase: string; runtimeMs: number | null }[] };
 type BoardPayload = {
   generatedAt: string;
   config: { maxParallel: number; inFlight: number; freeSlots: number; active: number; working: number; stuck: number };
+  anomalies?: { duplicateWorkers: DuplicateWorkers[] };
   repos: string[]; workers: Worker[]; tickets: Ticket[]; queue: QueueItem[];
 };
 
@@ -288,7 +290,7 @@ function Column({ label, color, count, live = 0, children }: { label: string; co
 }
 function BoardScroll({ children, fill }: { children: React.ReactNode; fill: boolean }) {
   return (
-    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "calc(100vh - 104px)" : "auto" }}>
+    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "100%" : "auto" }}>
       {children}
     </div>
   );
@@ -375,7 +377,7 @@ function QueueView({ data }: { data: BoardPayload }) {
   const rank = (w: Worker) => (isActive(w.activeState) ? 0 : w.activeState === "stuck" ? 2 : 1);
   const inflight = [...workers].sort((a, b) => rank(a) - rank(b) || (b.runtimeMs ?? 0) - (a.runtimeMs ?? 0));
   return (
-    <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", padding: "2px 16px 24px" }}>
+    <div className="cat-scroll" style={{ overflowY: "auto", height: "100%", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
         <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
           <Stat label="Max parallel" value={String(config.maxParallel)} />
@@ -448,6 +450,28 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
   );
 }
 
+// Loud, unmissable callout: >1 live worker on one ticket should never happen
+// (revive-duplicate orphans). Don't make the operator hunt — surface + list them.
+function AnomalyBanner({ dups }: { dups: DuplicateWorkers[] }) {
+  if (!dups.length) return null;
+  return (
+    <div style={{ margin: "0 16px 10px", padding: "10px 14px", borderRadius: 10, background: "rgba(239,93,93,0.12)", border: "1px solid rgba(239,93,93,0.55)", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 8, color: C.red, fontWeight: 700, fontSize: 13 }}>
+        <svg width="16" height="16" viewBox="0 0 14 14"><rect x="0.5" y="0.5" width="13" height="13" rx="3" fill="#ef5d5d" /><rect x="6.1" y="2.8" width="1.8" height="5.2" rx="0.9" fill="#1b1206" /><rect x="6.1" y="9.4" width="1.8" height="1.9" rx="0.95" fill="#1b1206" /></svg>
+        {dups.length} ticket{dups.length > 1 ? "s" : ""} with duplicate workers
+      </span>
+      <span style={{ color: C.fgMuted, fontSize: 12 }}>Orphaned revive-duplicates holding slots — should be reaped.</span>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {dups.map((d) => (
+          <span key={d.ticket} style={{ fontFamily: C.mono, fontSize: 11, color: C.fg, background: "rgba(239,93,93,0.18)", border: "1px solid rgba(239,93,93,0.4)", padding: "2px 8px", borderRadius: 7 }}>
+            {d.ticket} ×{d.count}<span style={{ color: C.fgDim }}> ({d.active} active · {d.stuck} stuck)</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Board() {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -504,6 +528,7 @@ export function Board() {
           <span style={{ flex: 1 }} />
           <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11.5, color: C.fgMuted }}>
             {data && <span style={{ display: "flex", alignItems: "center", gap: 6, color: C.fg }}><span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{data.config.active} active{data.config.stuck > 0 ? ` · ${data.config.stuck} stuck` : ""}</span>}
+            {data?.anomalies?.duplicateWorkers?.length ? <span style={{ display: "flex", alignItems: "center", gap: 5, color: C.red, fontWeight: 600 }}><Dot color={C.red} /> {data.anomalies.duplicateWorkers.length} dup</span> : null}
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
             <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
@@ -525,16 +550,19 @@ export function Board() {
         </div>
 
         {/* body */}
-        <div style={{ flex: 1, minHeight: 0 }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+          {data?.anomalies?.duplicateWorkers?.length ? <AnomalyBanner dups={data.anomalies.duplicateWorkers} /> : null}
+          <div style={{ flex: 1, minHeight: 0 }}>
           {!data && !err && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {err && <div style={{ color: C.red, padding: 24 }}>Board data unavailable: {err}</div>}
           {data && view === "tickets" && (combined
             ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} /></Lane>)}</div>)}
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "100%", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
             ? <WorkerBoard workers={fWorkers} tickets={data.tickets} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} fill={false} /></Lane>)}</div>)}
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "100%", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} fill={false} /></Lane>)}</div>)}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
+          </div>
         </div>
       </div>
     </TooltipProvider>
