@@ -892,26 +892,56 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
 // (triage/research/plan/implement) and their artifacts are never touched.
 const REMEDIATE_CYCLE_FILES = ["phase-verify.json", "phase-remediate.json", "verify.json"];
 
+// REMEDIATE_CYCLE_CLAIM_PHASES — the cycle members whose CTL-736 single-flight
+// claim tombstones (`<phase>.claim.<gen>`) must ALSO be dropped on a reset.
+// GATE-0: the reset deletes the signal files above, so the re-dispatch derives a
+// fresh generation 1 (phase-agent-dispatch reads the generation from the
+// now-absent signal). A leftover `verify.claim.1` / `remediate.claim.1` from the
+// prior cycle would collide on the O_EXCL create → claim-lost → the re-verify is
+// silently suppressed and the self-healing cycle stalls to needs-human. The
+// worktree-recreate path drops claims for exactly this reason
+// (phase-agent-dispatch:735-739); the cycle reset must do the same.
+const REMEDIATE_CYCLE_CLAIM_PHASES = ["verify", REMEDIATE_PHASE];
+
 // maybeResetForRemediateCycle — CTL-653 re-entry. A completed remediate cycles
 // back to a fresh verify, but deriveAdvancement's `next.phase in sig` guard
 // blocks re-dispatching verify while its signal exists. Rather than special-
 // casing the guard, reset the cycle by deleting the verify+remediate signals
-// (and verify.json). The next deriveAdvancement then sees implement as the
-// latest `done` phase and cleanly re-dispatches verify. The cycle count
+// (and verify.json) AND their claim tombstones (GATE-0). The next
+// deriveAdvancement then sees implement as the latest `done` phase and cleanly
+// re-dispatches verify at a fresh, exclusive generation. The cycle count
 // survives because it is event-counted (countRemediateCycles), not signal-stored.
 // Returns true when a reset happened (so the caller re-reads the signals).
 export function maybeResetForRemediateCycle(
   orchDir,
   ticket,
-  { rm = rmSync, readSignals = readPhaseSignals } = {}
+  { rm = rmSync, readSignals = readPhaseSignals, readdir = readdirSync } = {}
 ) {
   const sig = readSignals(orchDir, ticket);
   if (sig[REMEDIATE_PHASE] !== "done") return false;
+  const workerDir = join(orchDir, "workers", ticket);
   for (const f of REMEDIATE_CYCLE_FILES) {
     try {
-      rm(join(orchDir, "workers", ticket, f), { force: true });
+      rm(join(workerDir, f), { force: true });
     } catch {
       // best-effort — a missing file is the desired end state anyway
+    }
+  }
+  // GATE-0: also drop the cycle members' claim tombstones so the re-dispatch's
+  // fresh (no-signal ⇒ gen 1) claim is exclusive and wins instead of colliding.
+  let claimEntries;
+  try {
+    claimEntries = readdir(workerDir);
+  } catch {
+    claimEntries = []; // worker dir gone — nothing to clean
+  }
+  for (const f of claimEntries) {
+    if (REMEDIATE_CYCLE_CLAIM_PHASES.some((p) => f.startsWith(`${p}.claim.`))) {
+      try {
+        rm(join(workerDir, f), { force: true });
+      } catch {
+        // best-effort
+      }
     }
   }
   return true;

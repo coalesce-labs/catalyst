@@ -1040,6 +1040,24 @@ describe("CTL-653: maybeResetForRemediateCycle", () => {
     expect(existsSync(join(wdir, "phase-implement.json"))).toBe(true);
     expect(existsSync(join(wdir, "triage.json"))).toBe(true);
   });
+  test("GATE-0: clears the cycle members' claim tombstones (verify/remediate) so the re-verify wins a fresh gen-1 claim", () => {
+    writeSignal("CTL-736", "implement", "done");
+    writeSignal("CTL-736", "verify", "done");
+    writeSignal("CTL-736", "remediate", "done");
+    const wdir = join(orchDir, "workers", "CTL-736");
+    // leftover CTL-736 claim tombstones from the first verify + the remediate
+    writeFileSync(join(wdir, "verify.claim.1"), "{}");
+    writeFileSync(join(wdir, "remediate.claim.1"), "{}");
+    // an UNRELATED phase's claim must survive (only the cycle members are cleared)
+    writeFileSync(join(wdir, "implement.claim.1"), "{}");
+
+    expect(maybeResetForRemediateCycle(orchDir, "CTL-736")).toBe(true);
+    // cycle-member claims cleared → the re-dispatch's fresh (no-signal ⇒ gen 1)
+    // claim is exclusive and wins instead of colliding on the leftover gen-1 file
+    expect(existsSync(join(wdir, "verify.claim.1"))).toBe(false);
+    expect(existsSync(join(wdir, "remediate.claim.1"))).toBe(false);
+    expect(existsSync(join(wdir, "implement.claim.1"))).toBe(true);
+  });
   test("remediate not done → no-op, returns false (cycle signals untouched)", () => {
     writeSignal("CTL-653", "verify", "done");
     writeSignal("CTL-653", "remediate", "running");
