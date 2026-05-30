@@ -14,13 +14,14 @@
 // managed-agents port lands, only the executors here swap to control-plane
 // APIs. The schema, the producers, and the consumer count are all stable.
 
-import { spawnSync, execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
+import { getAgentsCached } from "./claude-agents.mjs";
 import { log } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -642,13 +643,17 @@ async function defaultExecutorReap(shortId) {
   }
 }
 
-async function defaultAgents() {
-  try {
-    const out = execFileSync(CLAUDE_BIN, ["agents", "--json"], { encoding: "utf8" });
-    return JSON.parse(out);
-  } catch {
-    return [];
-  }
+// CTL-731: the reaper runs on the shared daemon event loop alongside the
+// scheduler. Pre-CTL-731 it shelled out `claude agents --json` SYNCHRONOUSLY
+// here every pass — and under heavy session load (many duplicate workers) that
+// call balloons to multiple seconds, blocking the loop and starving the
+// scheduler tick (a self-sustaining wedge: dupes make `claude agents` slow → the
+// sync read blocks the loop → the scheduler can't tick → can't reclaim the dupes).
+// Route it through the warm, never-blocking snapshot instead — the same primitive
+// the scheduler/autotune/wait-watcher use. Returns last-good synchronously and
+// fires a background refresh when stale; never spawns on the calling thread.
+export async function defaultAgents() {
+  return getAgentsCached().agents;
 }
 
 async function defaultEmit(eventType, fields) {

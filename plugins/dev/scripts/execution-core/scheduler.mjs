@@ -1421,12 +1421,30 @@ export function schedulerTick(
   // POPULATED. A cold / never-populated snapshot returns agents:[] — binding that
   // empty list would make EVERY live worker resolve to "absent" (agentForShortId
   // over []) and trigger a mass false-revive on the first post-boot tick, before
-  // the async read has resolved. When unpopulated, leave liveAgents null so the
-  // reclaim falls back to its per-worker real read (pre-CTL-731 behavior) for the
-  // one cold tick; the snapshot warms within a sub-second and later ticks use it.
-  // A populated-but-stale snapshot is fine for reclaim (≤ a few seconds old, same
-  // as the pre-existing 5s TTL) — only NEW-work dispatch needs the isFresh gate.
+  // the async read has resolved. When unpopulated, leave liveAgents null; in
+  // production (a wired snapshot seam) reclaimColdSkip below then defers the whole
+  // sweep for that one cold tick, and the snapshot warms within a sub-second so
+  // later ticks reclaim against it. A null seam (tests) keeps the legacy
+  // per-worker real read. A populated-but-stale snapshot is fine for reclaim (≤ a
+  // few seconds old, same as the 5s TTL) — only NEW-work dispatch needs isFresh.
   const liveAgents = liveSnapshot && liveSnapshot.populated ? liveSnapshot.agents : null;
+
+  // CTL-731: when a snapshot seam is wired (production) but the snapshot is still
+  // COLD (never-populated — the first post-boot tick, before the async read
+  // resolves), SKIP the reclaim sweep this tick rather than fall back to a
+  // per-worker SYNC `claude agents` read for EVERY in-flight worker. Under heavy
+  // session load that fan-out of synchronous spawns re-starves the loop (the very
+  // failure mode Phase 00 removed) and would wedge the boot tick. The snapshot
+  // warms within a sub-second async refresh (getAgentsCached already fired one);
+  // the next tick reclaims against the shared warm list. A null seam (tests) keeps
+  // the legacy per-worker reclaim path.
+  const reclaimColdSkip = Boolean(livenessSnapshot) && !liveAgents;
+  if (reclaimColdSkip) {
+    log.info(
+      {},
+      "scheduler: reclaim sweep skipped — liveness snapshot cold, awaiting warm read (CTL-731)",
+    );
+  }
 
   // CTL-702: scan worker dirs for yield tombstones. Emit once per unique
   // absolute path per daemon lifetime (deduped via observedYieldFiles).
@@ -1448,6 +1466,7 @@ export function schedulerTick(
   }
 
   for (const sig of readWorkerSignals(orchDir)) {
+    if (reclaimColdSkip) break; // CTL-731: cold snapshot — defer reclaim to the next (warm) tick
     if (!inFlightTickets.has(sig.ticket)) continue;
     // CTL-705: a parked ("preempted") worker is paused, not dead. Its signal
     // preserves the now-killed bg_job_id, so classifyWorker would route it
