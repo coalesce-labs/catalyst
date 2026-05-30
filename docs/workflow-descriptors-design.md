@@ -562,6 +562,70 @@ v2.0  ── workflow/v2 schema: executor + trigger adapters widen the enums; of
             become reachable. Gated on the §10.7 hard problems.
 ```
 
+### 10.9 Event-driven state transitions — unifying triggers and edges
+
+A refinement raised after v1 (and a better framing than §10.4's start-only triggers): **a trigger that
+*starts* a workflow and an event that *advances* it are the same primitive — a registered bus event →
+a workflow state change.** The descriptor becomes a true event-driven state machine on the bus we
+already have.
+
+**Today's two edge kinds, made explicit:**
+- *worker-completion edge* (the default): a step advances when its worker emits
+  `phase.<step>.complete.<ticket>` (`deriveAdvancement` walks these). This is v1.
+- *event-gated edge* (v2): a step advances when an **arbitrary registered bus event** matches —
+  e.g. `monitor-merge` advances on `github.pull_request.merged`, `monitor-deploy` on a
+  `deployment.success`. **This already happens today — but imperatively, hardcoded inside the
+  `phase-monitor-merge`/`phase-monitor-deploy` skills** (they block on `catalyst-events wait-for`,
+  then emit their own `phase.complete`). v2 lifts that into the descriptor as data:
+
+```json
+{ "id": "monitor-merge", "linearKey": "inReview",
+  "advanceOn": { "event": "github.pull_request.merged", "to": "monitor-deploy" } }
+```
+
+**Engine mechanism — reuse the existing substrate, add nothing new:** the bus, the broker (routes by
+interest), `catalyst-events wait-for` (blocks on predicates), and `monitor.mjs`'s tailer already
+exist. The engine registers each descriptor `advanceOn` as an interest; on a matching event
+**correlated to the in-flight instance** (the bus envelope already stamps `linear.issue.identifier` /
+`catalyst.orchestration` = the work-item key), it advances the FSM and dispatches the next step — **no
+worker emit required.** A pure event-wait step can therefore be **workerless** (the engine just waits
+for the event and advances), which *removes* the `monitor-merge`/`monitor-deploy` wait-loops rather
+than reimplementing them.
+
+**The reused condition vocabulary:** `advanceOn` carries the same closed `{field, op, value}` predicate
+(`when`) as §5, so "advance on `github.pull_request.merged` **where** `pr.base == main`" needs no new
+DSL.
+
+**Bounding + correctness (the real risks):**
+- An event-gated edge is **asynchronous** — the event may never come. It needs a **timeout →
+  escalate/skip**, exactly like `monitor-deploy`'s `skipped` path today.
+- The **work-done-probe completeness gate** generalizes: every step must have **either** a
+  `workDoneProbe` (worker edge) **or** an `advanceOn` event (event edge) — a step with neither is a
+  validation error.
+- **Fencing/idempotency:** the CTL-736 **generation token** still arbitrates — an external event that
+  arrives twice advances the instance **once** (keyed by `(instance, generation)`); a late event for a
+  superseded generation is dropped by the same fence that drops a stale worker completion.
+
+**v1 reservation: essentially none.** `next` routes already allow `{when, to}`; `advanceOn` is a
+purely **additive** key in the `workflow/v2` schema (`additionalProperties:false` rejects it in v1, so
+no v1 field is spent). The one thing worth reserving now is a **`workflowId`/`instanceId`** namespace
+on signals/events if/when multi-workflow (§10.10) lands.
+
+### 10.10 Named / multi-workflow (likely not v1)
+
+The descriptor already has `id` (`"default"`) + `schemaVersion` — so multi-workflow is **just an
+id-keyed registry** (`.catalyst/workflows/<id>.json`: built-in `default` + user-named `pr-review`,
+`hotfix`, …). A trigger event selects **which** workflow to instantiate: each descriptor declares its
+`trigger` with an optional `match` predicate (the same `{field, op, value}`), and the engine
+instantiates the **first match** (ambiguity → explicit `priority`, resolving the §10.4 open question).
+A workflow **instance** is keyed by `(workflowId, workItemId)` so a ticket-pipeline and a PR-review
+pipeline can touch related work items without signal collision; `linearMirror` is per-descriptor
+(a non-Linear workflow mirrors nothing).
+
+**Recommendation:** v1 ships the single, unnamed `default` — naming is a v2 authoring nicety (the
+`catalyst-workflow` CLI), **not needed for v1**, and the `id`/`schemaVersion`/`trigger` shape already
+reserves it. This is pure v2, gated behind the §10.8 ladder.
+
 ## 11. Docs & website update plan
 
 (Numbered 11 to sit after the v2 section; produced from a full `website/` audit.) The pipeline is
