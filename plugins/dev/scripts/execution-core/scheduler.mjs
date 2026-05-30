@@ -1520,6 +1520,9 @@ export function schedulerTick(
           // CTL-606: superseded-noop also buckets here — a dead predecessor signal
           // the ticket has already advanced past. Invisible by design (the active
           // phase is progressing normally); surfacing it would be noise.
+          // CTL-735: inert-stale also buckets here — an abandoned historical dir
+          // too old to revive. Invisible by design (steady-state; ~85 such dirs
+          // would otherwise be persistent noise).
           break;
       }
     } catch (err) {

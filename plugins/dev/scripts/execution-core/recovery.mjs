@@ -32,6 +32,7 @@ import {
   IDLE_CONFIRM_TICKS,
   BUSY_CEILING_MS,
   REVIVE_GRACE_MS,
+  REVIVE_MAX_AGE_MS,
 } from "./config.mjs";
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
@@ -1171,6 +1172,11 @@ export function reclaimDeadWorkIfPossible(
     // every standalone/test caller that does not set it) disables the cap →
     // pre-CTL-735 behaviour.
     reviveBudgetRemaining = undefined,
+    // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
+    // signal has not been touched in this long is an abandoned historical dir,
+    // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
+    // tests; defaults to the env-overridable config const.
+    reviveMaxAgeMs = REVIVE_MAX_AGE_MS,
     // CTL-662 — busy-forever backstop ceiling (measured from signal.startedAt).
     // The SOLE long backstop now that the mtime triggers are gone: a busy worker
     // past it with no committed work is flagged for human, never silent-reclaimed.
@@ -1455,6 +1461,28 @@ export function reclaimDeadWorkIfPossible(
   // genuinely between-turns with no committed work). A `busy` worker can never
   // reach here (the busy branch above returns first), so the revive/re-dispatch
   // path below is correct for both reclaim-eligible cases.
+
+  // CTL-735 Guard 3 — inert stale tickets. By here the worker is reclaim-eligible
+  // (absent or idle-confirmed), past its grace window, work NOT done. If its
+  // signal has not been touched in reviveMaxAgeMs it is an abandoned historical
+  // dir (isTicketInFlight keeps any non-terminal signal in-flight forever, so a
+  // worker that crashed at `running` and never flipped terminal is swept every
+  // tick). Reviving it wastes budget and — once MAX_REVIVES is hit — would
+  // escalate a long-dead ticket to needs-human. Treat it as inert: no revive, no
+  // escalate, no event. Branch (B) reclaim already ran above, so a genuinely
+  // work-done old worker was cleaned up; only no-work abandoned dirs reach here.
+  // A signal with no parseable timestamp (legacy) falls through unchanged.
+  const lastActiveMs = Math.max(
+    Date.parse(signal.raw?.updatedAt ?? "") || 0,
+    Date.parse(signal.raw?.startedAt ?? "") || 0,
+  );
+  if (lastActiveMs > 0 && now() - lastActiveMs > reviveMaxAgeMs) {
+    log.info(
+      { ticket, phase, prevBgJobId, ageMs: now() - lastActiveMs, reviveMaxAgeMs },
+      "ctl-735: signal too old to revive — abandoned historical dir, inert",
+    );
+    return "inert-stale";
+  }
 
   // Per-ticket revive budget from events.jsonl. The events file is the
   // authoritative counter — more truthful than the signal file (which the

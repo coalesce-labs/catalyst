@@ -654,6 +654,90 @@ describe("reclaimDeadWorkIfPossible — CTL-735 post-revive grace window", () =>
 // per-tick revive budget; once exhausted, an otherwise-revivable worker is
 // `revive-capped` (deferred to a later tick) instead of dispatched. This bounds
 // a fast loop that would otherwise outrun the event-count-lagged storm-breaker.
+// CTL-735 Guard 3 — keep long-dead tickets inert. isTicketInFlight treats any
+// ticket with a non-terminal signal as in-flight, so a worker that crashed at
+// `running` and never flipped terminal stays swept forever. Reviving such an
+// abandoned historical dir wastes budget and — once MAX_REVIVES is hit —
+// escalates dozens of long-dead tickets to needs-human. An absent/idle worker
+// whose signal has not been touched in REVIVE_MAX_AGE_MS (24h, well above any
+// real phase) is inert: no revive, no escalate. Branch (B) reclaim (work IS done)
+// still runs, so a genuinely-completed old worker is still cleaned up.
+describe("reclaimDeadWorkIfPossible — CTL-735 inert stale tickets", () => {
+  const orch = "/orch";
+  const NOW = 10_000_000_000; // a large epoch so "24h ago" is positive
+  const AGE = 24 * 60 * 60_000;
+
+  const seams = (reviveDispatch, escalate, probeDone, extra = {}) => ({
+    statJob: () => null,
+    probes: { implement: recorder(probeDone) },
+    emitComplete: recorder({ code: 0 }),
+    appendEvent: recorder(undefined),
+    appendReviveEvent: recorder(true),
+    appendEscalatedEvent: escalate,
+    reviveDispatch,
+    countReviveEvents: recorder(0),
+    countDistinctRevivingTickets: recorder(1),
+    writeReviveMarker: recorder(undefined),
+    killBgJob: recorder(undefined),
+    applyStalledLabel: recorder({ applied: true }),
+    resolveSession: () => null,
+    postReclaimMirror: () => {},
+    liveness: () => "absent",
+    reviveMaxAgeMs: AGE,
+    now: () => NOW,
+    ...extra,
+  });
+
+  test("absent, work-not-done, signal older than REVIVE_MAX_AGE_MS → 'inert-stale' (no revive, no escalate)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const escalate = recorder(undefined);
+    const sig = implementSignal({
+      // updatedAt 25h ago — past the 24h inert threshold.
+      startedAt: new Date(NOW - 25 * 60 * 60_000).toISOString(),
+    });
+    sig.raw.updatedAt = new Date(NOW - 25 * 60 * 60_000).toISOString();
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams(reviveDispatch, escalate, false));
+    expect(r).toBe("inert-stale");
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(escalate.calls.length).toBe(0);
+  });
+
+  test("absent, work-not-done, signal WITHIN the age window → revives (fresh crash, not abandoned)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const escalate = recorder(undefined);
+    // 10 min ago: past the 90s grace window (Guard 1) but well within the 24h
+    // inert threshold (Guard 3) — a genuine recent crash that should revive.
+    const sig = implementSignal({
+      startedAt: new Date(NOW - 10 * 60_000).toISOString(),
+    });
+    sig.raw.updatedAt = new Date(NOW - 10 * 60_000).toISOString();
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams(reviveDispatch, escalate, false));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("old signal but work IS done → still reclaimed (branch B), NOT left inert", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const escalate = recorder(undefined);
+    const sig = implementSignal({
+      startedAt: new Date(NOW - 25 * 60 * 60_000).toISOString(),
+    });
+    sig.raw.updatedAt = new Date(NOW - 25 * 60 * 60_000).toISOString();
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams(reviveDispatch, escalate, true));
+    expect(r).toBe("reclaimed");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("old signal with NO parseable timestamps → revives (back-compat: cannot judge age)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const escalate = recorder(undefined);
+    const sig = implementSignal(); // no startedAt/updatedAt
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams(reviveDispatch, escalate, false));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+});
+
 describe("reclaimDeadWorkIfPossible — CTL-735 per-tick revive cap", () => {
   const orch = "/orch";
 
