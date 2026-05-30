@@ -15,7 +15,9 @@ quality through adversarial verification.
 
 - [Workers and signal files](./orchestration/workers/) — lifecycle, signal-file schema, state
   machine
-- [Phase agents](./orchestration/phase-agents/) — the nine-phase `claude --bg` worker pipeline that
+- [Workflow descriptors](./orchestration/workflows/) — the phase pipeline as declarative JSON data
+  (one source of truth), with per-step model / effort / prompt levers
+- [Phase agents](./orchestration/phase-agents/) — the `claude --bg` worker pipeline that
   replaces the long `oneshot` worker once `dispatchMode` is `"phase-agents"`
 - [Verification and reward-hacking defense](./orchestration/verification/) — how the orchestrator
   adversarially checks worker output
@@ -355,7 +357,7 @@ dispatch paths based on `catalyst.orchestration.dispatchMode`:
   `--output-format stream-json --verbose`, producing real-time NDJSON the monitor tails for live
   worker activity. Each runs `/catalyst-dev:oneshot <ticket>` autonomously and owns the full PR
   lifecycle through merge.
-- **`"phase-agents"`** — dispatches nine short-lived `claude --bg` jobs per ticket, one per phase,
+- **`"phase-agents"`** — dispatches short-lived `claude --bg` jobs per ticket, one per phase (per the default [workflow descriptor](./orchestration/workflows/)),
   advancing on `phase.<name>.complete.<ticket>` broker events. See
   [Phase agents](./orchestration/phase-agents/) for the full pipeline, model assignment, and cost
   economics. This is the post–2026-06-15 path that keeps the worker dispatch on the subscription

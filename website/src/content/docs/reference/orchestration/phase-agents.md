@@ -14,6 +14,10 @@ into nine short-lived skills the orchestrator dispatches one at a time. Each pha
 emits a `phase.<name>.complete.<ticket>` event, and exits. The orchestrator wakes on the event and
 dispatches the next phase.
 
+This default pipeline is one instance of a [workflow descriptor](/reference/orchestration/workflows/) —
+the JSON definition of the steps, their order, and the per-step model / effort / prompt levers. The
+phases documented below are the default descriptor's `steps[]`.
+
 The decomposition is the answer to the **2026-06-15 Agent-SDK-Credit billing change**. After that
 date every `claude -p` call bills against the Agent-SDK-Credit budget; `claude --bg` jobs continue
 to draw from the Max 20x subscription pool. Moving worker dispatch off `-p` to `--bg` keeps a
@@ -406,6 +410,8 @@ For the first real run against a low-risk ticket:
 
 ## Related
 
+- [Workflow descriptors](/reference/orchestration/workflows/) — the pipeline as data; this page
+  documents the default descriptor's steps
 - [Workers and signal files](/reference/orchestration/workers/) — signal-file schema (shared between
   oneshot and phase-agent workers)
 - [Verification and reward-hacking defense](/reference/orchestration/verification/) — the
