@@ -526,4 +526,97 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(result.reviveCapped).toHaveLength(3);
     expect(reviveDispatchCalls).toHaveLength(2); // only the uncapped revives dispatched
   });
+
+  // CTL-735 — the storm reproduction (handoff action item #3). This mirrors the
+  // real incident: many fast ticks (~2-4s) over multiple dead-bg signals whose
+  // freshly-revived replacement worker NEVER appears in the eventually-consistent
+  // `claude agents` snapshot (liveness always `absent` — the worst case). Pre-fix,
+  // every tick re-revived every worker → 5→18→62→74 workers, load 72. Post-fix the
+  // structural guards (grace window + per-tick cap) bound TOTAL revives: each
+  // worker revives exactly once and then sits `revive-pending` for the rest of the
+  // grace window. Budget is left always-available (countReviveEvents=0) so this
+  // isolates the structural guards, NOT the per-ticket MAX_REVIVES backstop.
+  test("storm repro: many fast ticks × 5 always-absent dead workers → bounded revives (no storm)", () => {
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      seedSignal(`CTL-735-T${i}`, "implement", {
+        status: "running",
+        bg_job_id: `dead-bg-${i}`,
+        orchestrator: `CTL-735-T${i}`,
+        // 10 min ago — past the 90s grace window, within the 24h inert ceiling →
+        // eligible to revive on the first tick.
+        startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+      });
+    }
+
+    // A controllable clock: each tick advances 3s (the fast de-starved cadence).
+    // 20 ticks = 60s total, strictly inside the 90s grace window, so a worker
+    // revived on tick K stays revive-pending for every remaining tick.
+    let clock = Date.now();
+    const TICK_MS = 3_000;
+    const TICKS = 20;
+
+    const reviveDispatchCalls = [];
+    const perTickRevived = [];
+
+    // Simulated dispatcher: rewrite the phase signal exactly as the real
+    // defaultReviveDispatch → phase-agent-dispatch does — fresh startedAt + new
+    // bg + status running — so the next tick re-reads a freshly-(re)dispatched
+    // worker (which the grace window must then defer).
+    const simulatedReviveDispatch = ({ orchDir: od, ticket, phase }) => {
+      reviveDispatchCalls.push({ ticket, tick: reviveDispatchCalls.length });
+      writeFileSync(
+        join(od, "workers", ticket, `phase-${phase}.json`),
+        JSON.stringify({
+          ticket,
+          phase,
+          status: "running",
+          bg_job_id: `revived-bg-${ticket}`,
+          orchestrator: ticket,
+          startedAt: new Date(clock).toISOString(), // fresh — arms the grace window
+          updatedAt: new Date(clock).toISOString(),
+        }),
+      );
+      return { code: 0 };
+    };
+
+    for (let t = 0; t < TICKS; t++) {
+      const result = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        now: () => clock,
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => ({ applied: true }),
+        },
+        teardownWorktree: () => true,
+        reclaimDeadWork: (od, sig, opts) =>
+          reclaimDeadWorkIfPossible(od, sig, {
+            ...opts, // carries the per-tick reviveBudgetRemaining
+            statJob: () => null,
+            probes: { implement: () => false }, // work NOT done → revive territory
+            liveness: () => "absent", // worst case: replacement never registers
+            reviveDispatch: simulatedReviveDispatch,
+            applyStalledLabel: () => ({ applied: true }),
+            killBgJob: () => {},
+            countReviveEvents: () => 0, // budget always available — isolate structural guards
+            countDistinctRevivingTickets: () => 1, // storm-breaker NOT tripped
+            now: () => clock,
+          }),
+      });
+      perTickRevived.push(result.revived.length);
+      clock += TICK_MS;
+    }
+
+    // THE storm assertion: each of the 5 workers revived EXACTLY ONCE across all
+    // 20 ticks — not once per tick. Pre-fix this would be ~5 × 20 = 100 revives.
+    expect(reviveDispatchCalls).toHaveLength(N);
+    // And the per-tick cap held every tick (never more than 2 revives in one tick).
+    expect(Math.max(...perTickRevived)).toBeLessThanOrEqual(2);
+    // Every worker revived once and only once.
+    const revivedTickets = new Set(reviveDispatchCalls.map((c) => c.ticket));
+    expect(revivedTickets.size).toBe(N);
+  });
 });
