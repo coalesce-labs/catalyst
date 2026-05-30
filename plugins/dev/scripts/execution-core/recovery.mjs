@@ -1164,6 +1164,13 @@ export function reclaimDeadWorkIfPossible(
     // the eventually-consistent `claude agents` snapshot is deferred (revive-
     // pending) rather than re-revived. Injectable so tests drive it deterministically.
     reviveGraceMs = REVIVE_GRACE_MS,
+    // CTL-735 — per-tick revive budget, threaded in by the scheduler sweep
+    // (PER_TICK_REVIVE_CAP minus revives already performed this tick). When <= 0
+    // an otherwise-revivable worker is `revive-capped` (deferred) rather than
+    // dispatched, so one tick cannot mass-revive. `undefined` (the default and
+    // every standalone/test caller that does not set it) disables the cap →
+    // pre-CTL-735 behaviour.
+    reviveBudgetRemaining = undefined,
     // CTL-662 — busy-forever backstop ceiling (measured from signal.startedAt).
     // The SOLE long backstop now that the mtime triggers are gone: a busy worker
     // past it with no committed work is flagged for human, never silent-reclaimed.
@@ -1479,6 +1486,22 @@ export function reclaimDeadWorkIfPossible(
       "ctl-587: revive suppressed (storm-breaker open)",
     );
     return "revive-suppressed";
+  }
+
+  // CTL-735 — per-tick revive cap. Even with the per-ticket budget and the
+  // event-counted storm-breaker open, the de-starved fast tick can mass-revive
+  // many distinct dead workers in a single sweep before the storm-breaker's
+  // event count catches up. The scheduler threads the remaining per-tick budget;
+  // once exhausted, defer this worker (revive-capped) to a later tick rather than
+  // dispatch. No event is emitted (we did NOT revive) and no marker is written,
+  // so the next tick re-evaluates cleanly. Gated on a finite budget so standalone
+  // callers (no scheduler) keep pre-CTL-735 behaviour.
+  if (Number.isFinite(reviveBudgetRemaining) && reviveBudgetRemaining <= 0) {
+    log.warn(
+      { ticket, phase, prevBgJobId },
+      "ctl-735: revive deferred — per-tick revive cap reached (revive-capped)",
+    );
+    return "revive-capped";
   }
 
   // CTL-658: resolve a `claude --resume`-compatible session id from the dead

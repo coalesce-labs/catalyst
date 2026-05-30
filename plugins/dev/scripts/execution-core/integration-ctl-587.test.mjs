@@ -476,4 +476,54 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
       else process.env.CATALYST_REVIVE_JOBS_DIR = prevJobsDir;
     }
   });
+
+  // CTL-735 Guard 2 — the storm bound. Many dead-bg signals in ONE tick (the
+  // ~85-dir mass-revive scenario the de-starved fast loop hit) must NOT all
+  // revive at once: the per-tick cap bounds revives so a fast loop cannot outrun
+  // the event-count-lagged storm-breaker. With EXECUTION_CORE_PER_TICK_REVIVE_CAP=2,
+  // exactly 2 of 5 revivable workers revive this tick; the other 3 are
+  // `revive-capped` (deferred, no dispatch) and re-evaluated next tick. (No
+  // startedAt on the signals → Guard 1's grace window does not defer them, so the
+  // CAP is what bounds the count.)
+  test("per-tick revive cap bounds a mass-revive tick (5 dead → 2 revived, 3 capped)", () => {
+    for (let i = 0; i < 5; i++) {
+      seedSignal(`CTL-735-S${i}`, "implement", {
+        status: "running",
+        bg_job_id: `dead-bg-${i}`,
+        orchestrator: `CTL-735-S${i}`,
+      });
+    }
+
+    const reviveDispatchCalls = [];
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      perTickReviveCap: 2, // injected — bound revives to 2 this tick
+      writeStatus: {
+        applyPhaseStatus: () => {},
+        applyTerminalDone: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts, // carries the scheduler's per-tick reviveBudgetRemaining
+          statJob: () => null, // bg dead
+          probes: { implement: () => false }, // work NOT done → branch (C)
+          reviveDispatch: (args) => {
+            reviveDispatchCalls.push(args);
+            return { code: 0 };
+          },
+          applyStalledLabel: () => ({ applied: true }),
+          killBgJob: () => {},
+          countReviveEvents: () => 0, // per-ticket budget available for all
+          countDistinctRevivingTickets: () => 1, // storm-breaker NOT tripped
+        }),
+    });
+
+    // The cap — not the per-ticket budget or storm-breaker — is what bounds this.
+    expect(result.revived).toHaveLength(2);
+    expect(result.reviveCapped).toHaveLength(3);
+    expect(reviveDispatchCalls).toHaveLength(2); // only the uncapped revives dispatched
+  });
 });

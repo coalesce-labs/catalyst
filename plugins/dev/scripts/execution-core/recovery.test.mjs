@@ -650,6 +650,64 @@ describe("reclaimDeadWorkIfPossible — CTL-735 post-revive grace window", () =>
   });
 });
 
+// CTL-735 Guard 2 — per-tick revive cap. The scheduler passes the remaining
+// per-tick revive budget; once exhausted, an otherwise-revivable worker is
+// `revive-capped` (deferred to a later tick) instead of dispatched. This bounds
+// a fast loop that would otherwise outrun the event-count-lagged storm-breaker.
+describe("reclaimDeadWorkIfPossible — CTL-735 per-tick revive cap", () => {
+  const orch = "/orch";
+
+  // All gates open so control reaches branch (C) and WOULD revive absent the cap.
+  const openReviveSeams = (reviveDispatch, extra = {}) => ({
+    statJob: () => null,
+    probes: { implement: recorder(false) },
+    emitComplete: recorder({ code: 0 }),
+    appendReviveEvent: recorder(true),
+    reviveDispatch,
+    countReviveEvents: recorder(0),
+    countDistinctRevivingTickets: recorder(1),
+    writeReviveMarker: recorder(undefined),
+    killBgJob: recorder(undefined),
+    applyStalledLabel: recorder({ applied: true }),
+    resolveSession: () => null,
+    liveness: () => "absent",
+    ...extra,
+  });
+
+  test("reviveBudgetRemaining = 0 → 'revive-capped', does NOT dispatch", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal(),
+      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 0 }),
+    );
+    expect(r).toBe("revive-capped");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("reviveBudgetRemaining = 1 → revives normally (budget available)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal(),
+      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 1 }),
+    );
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("reviveBudgetRemaining undefined → revives (back-compat: no cap enforced)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal(),
+      openReviveSeams(reviveDispatch), // no reviveBudgetRemaining
+    );
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+});
+
 describe("reclaimDeadWorkIfPossible", () => {
   const orch = "/orch";
 

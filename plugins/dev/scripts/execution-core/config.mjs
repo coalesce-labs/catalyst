@@ -164,6 +164,17 @@ export const BUSY_CEILING_MS =
 export const REVIVE_GRACE_MS =
   Number(process.env.EXECUTION_CORE_REVIVE_GRACE_MS) || 90_000;
 
+// CTL-735 — per-tick revive cap. The reclaim sweep revives at most this many
+// dead workers per scheduler tick; further revivable workers are `revive-capped`
+// (deferred to a later tick), so a fast (de-starved) loop cannot mass-revive ~85
+// historical worker dirs and outrun the event-count-lagged storm-breaker before
+// it clamps. The grace window (REVIVE_GRACE_MS) stops the re-revive RACE; this
+// cap bounds the BREADTH of a single tick. Deliberately small (2) — genuine
+// crashes are rare, so 2/tick clears a real backlog within a few ticks while
+// turning any storm into a slow, observable trickle. Env-overridable for tuning.
+export const PER_TICK_REVIVE_CAP =
+  Number(process.env.EXECUTION_CORE_PER_TICK_REVIVE_CAP) || 2;
+
 // CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
 // continuously classifies live sessions and emits agent.waiting_on_user /
 // agent.resumed transition events. CATALYST_WAIT_WATCHER=0 disables it (the
