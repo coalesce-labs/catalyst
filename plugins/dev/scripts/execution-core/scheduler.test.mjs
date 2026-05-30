@@ -1468,6 +1468,56 @@ describe("schedulerTick — new-work pull", () => {
     });
     expect(r.dispatched).toEqual(["CTL-9"]);
   });
+
+  // CTL-731: a COLD/never-populated snapshot must NOT bind its empty agents list
+  // into the reclaim liveness — doing so would resolve every live worker to
+  // "absent" (agentForShortId over []) and mass-false-revive on the first
+  // post-boot tick. Cold → reclaim falls back to its own per-worker real read.
+  test("a cold liveness snapshot does NOT bind reclaim liveness (no boot mass-false-revive)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the reclaim sweep visits
+    const reclaimOpts = [];
+    const reclaimDeadWork = (_orchDir, _sig, opts) => {
+      reclaimOpts.push(opts);
+      return "noop";
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      reclaimDeadWork,
+      liveBackgroundCount: () => 1,
+      livenessSnapshot: () => ({ populated: false, agents: [], isFresh: false }),
+      livenessIsFresh: () => false,
+    });
+    expect(reclaimOpts.length).toBeGreaterThan(0);
+    // cold → no injected liveness binding (reclaim uses its default real read)
+    expect(reclaimOpts.every((o) => o.liveness === undefined)).toBe(true);
+  });
+
+  test("a populated liveness snapshot binds the shared agents into reclaim liveness", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-1", "implement", "running");
+    const reclaimOpts = [];
+    const reclaimDeadWork = (_orchDir, _sig, opts) => {
+      reclaimOpts.push(opts);
+      return "noop";
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      reclaimDeadWork,
+      liveBackgroundCount: () => 1,
+      livenessSnapshot: () => ({
+        populated: true,
+        agents: [{ sessionId: "1111-2222", kind: "background", status: "idle" }],
+        isFresh: true,
+      }),
+      livenessIsFresh: () => true,
+    });
+    expect(reclaimOpts.length).toBeGreaterThan(0);
+    // populated → reclaim receives the bound shared-snapshot liveness fn
+    expect(reclaimOpts.every((o) => typeof o.liveness === "function")).toBe(true);
+  });
 });
 
 // ── CTL-706: per-project cap + reserve wired into schedulerTick ──
