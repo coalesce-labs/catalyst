@@ -17,15 +17,17 @@ function boardData(): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         if (!req.url || req.url.split("?")[0] !== "/api/board") return next();
-        try {
-          const payload = assembleBoard();
-          res.setHeader("content-type", "application/json");
-          res.setHeader("cache-control", "no-store");
-          res.end(JSON.stringify(payload));
-        } catch (err) {
-          res.statusCode = 500;
-          res.end(JSON.stringify({ error: String(err) }));
-        }
+        // CTL-733: assembleBoard() is async now.
+        assembleBoard()
+          .then((payload) => {
+            res.setHeader("content-type", "application/json");
+            res.setHeader("cache-control", "no-store");
+            res.end(JSON.stringify(payload));
+          })
+          .catch((err) => {
+            res.statusCode = 500;
+            res.end(JSON.stringify({ error: String(err) }));
+          });
       });
     },
   };

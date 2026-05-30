@@ -10,7 +10,8 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
-import { assembleBoard, type BoardPayload } from "./lib/board-data.mjs";
+import type { BoardPayload } from "./lib/board-data.mjs";
+import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -217,23 +218,6 @@ export interface CreateServerOptions {
 }
 
 const DEFAULT_PORT = 7400;
-
-// CTL-730: serve the CTL-727 Worker/Ticket board payload from the monitor.
-// assembleBoard() is synchronous and costs ~0.5–1.7s; a short in-process cache
-// collapses N polling tabs into at most one recompute per BOARD_CACHE_TTL_MS so
-// the board (now the default page) can't jank the server event loop. CTL-733
-// replaces this lazy cache with an async reactive snapshot + SSE push.
-const BOARD_CACHE_TTL_MS = 2_000;
-let _boardCache: { ts: number; payload: BoardPayload } | null = null;
-function getBoardPayload(): BoardPayload {
-  const now = Date.now();
-  if (_boardCache && now - _boardCache.ts < BOARD_CACHE_TTL_MS) {
-    return _boardCache.payload;
-  }
-  const payload = assembleBoard();
-  _boardCache = { ts: now, payload };
-  return payload;
-}
 
 function resolveVersion(): string {
   const candidates = [
@@ -746,6 +730,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
     SSEFilter
   >();
   const encoder = new TextEncoder();
+
+  // CTL-733: one shared, reactively-recomputed board snapshot pushed over SSE
+  // (/api/board/stream) — replaces per-tab polling of /api/board. Subscriber-
+  // gated, so it does zero work when no board tab is open.
+  const boardSnapshot = createBoardSnapshotManager();
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of BUS_BROADCAST_EVENTS) {
@@ -1754,7 +1743,54 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         if (url.pathname === "/api/board") {
-          return Response.json(getBoardPayload());
+          return Response.json(await boardSnapshot.getLatest());
+        }
+
+        // CTL-733: SSE push of the shared board snapshot. The client (Board.tsx /
+        // the board SharedWorker) opens ONE of these and receives a `board` event
+        // on connect and on every reactive recompute — no per-tab polling.
+        if (url.pathname === "/api/board/stream") {
+          let unsubscribe: (() => void) | null = null;
+          let closed = false;
+          const send = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            snap: BoardPayload,
+          ) => {
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(`event: board\ndata: ${JSON.stringify(snap)}\n\n`),
+              );
+            } catch {
+              // client went away between recompute and enqueue
+              unsubscribe?.();
+              unsubscribe = null;
+            }
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // subscribe first so no recompute is missed between bootstrap + subscribe
+              unsubscribe = boardSnapshot.subscribe((snap) => send(controller, snap));
+              try {
+                send(controller, await boardSnapshot.getLatest());
+              } catch (err) {
+                console.error(`[server] board stream initial snapshot failed:`, err);
+              }
+            },
+            cancel() {
+              closed = true;
+              unsubscribe?.();
+              unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
         }
 
         return new Response("Not Found", { status: 404 });
@@ -1855,6 +1891,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
   server.stop = ((closeActiveConnections?: boolean) => {
     for (const u of unsubscribers) u();
     watcher?.stop();
+    boardSnapshot.stop();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();

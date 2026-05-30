@@ -79,4 +79,4 @@ export interface BoardPayload {
 
 export const PHASE_ORDER: string[];
 export const PHASE_TO_LINEAR: Record<string, string>;
-export function assembleBoard(): BoardPayload;
+export function assembleBoard(): Promise<BoardPayload>;

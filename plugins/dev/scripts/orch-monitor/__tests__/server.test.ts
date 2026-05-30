@@ -108,6 +108,29 @@ describe("SSE server", () => {
     // dev box where those binaries exist. CI lacks them → fast ENOENT fallback.
   }, 30_000);
 
+  // CTL-733: the board is pushed over SSE; first frame is the bootstrap snapshot.
+  it("should stream the board snapshot over SSE at /api/board/stream", async () => {
+    const controller = new AbortController();
+    const res = await fetch(`${baseUrl}/api/board/stream`, { signal: controller.signal });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/event-stream");
+
+    const reader = res.body!.getReader();
+    const { value } = await reader.read();
+    const chunk = new TextDecoder().decode(value);
+    expect(chunk).toContain("event: board");
+    expect(chunk).toContain("data: ");
+
+    const dataMatch = chunk.match(/data: (.+)/);
+    expect(dataMatch).toBeTruthy();
+    const snap = JSON.parse(dataMatch![1]) as { workers: unknown[]; tickets: unknown[] };
+    expect(Array.isArray(snap.workers)).toBe(true);
+    expect(Array.isArray(snap.tickets)).toBe(true);
+
+    await reader.cancel().catch(() => {});
+    controller.abort();
+  }, 30_000);
+
   it("should serve current snapshot at /api/snapshot", async () => {
     const res = await fetch(`${baseUrl}/api/snapshot`);
     expect(res.status).toBe(200);
