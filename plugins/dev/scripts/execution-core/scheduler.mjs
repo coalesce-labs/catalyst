@@ -38,6 +38,17 @@ import {
   REMEDIATE_PHASE,
   REMEDIATE_CYCLE_CAP,
 } from "../lib/phase-fsm.mjs";
+// CTL workflow descriptor (provenance swap): the pipeline-shape constants
+// (STAGE_RANK, TERMINAL_PHASE, NEW_WORK_ENTRY_PHASE, NON_PREEMPTABLE_PHASES) are
+// derived from lib/workflow.default.json. STAGE_RANK + NON_PREEMPTABLE_PHASES are
+// re-exported here for back-compat (scheduler.test.mjs imports them from here).
+import {
+  STAGE_RANK,
+  TERMINAL_PHASE,
+  NEW_WORK_ENTRY_PHASE,
+  NON_PREEMPTABLE_PHASES,
+} from "../lib/workflow-descriptor.mjs";
+export { STAGE_RANK, NON_PREEMPTABLE_PHASES };
 // CTL-653: the verdict-router reads (verify.json verdict + event-counted cycle
 // budget) live here. deriveAdvancement stays pure — the impure reads happen in
 // the sweep and are injected, so the router itself is unit-testable.
@@ -90,33 +101,20 @@ import { log, getEligibleDir, getEventLogPath, PER_TICK_REVIVE_CAP } from "./con
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
 // occupies a slot (the ticket is mid-pipeline), so isTicketInFlight checks the
 // phase, not just the status.
-const TERMINAL_PHASE = "monitor-deploy";
+// TERMINAL_PHASE ("monitor-deploy") is imported from workflow-descriptor.mjs (above).
 
 // New work enters the pipeline at `research`: a Ready ticket has already been
 // triaged (the →Triage watcher dispatched its triage agent — monitor.mjs). The
 // scheduler never dispatches `triage`. CTL-565 Part B. Deliberately NOT
 // PHASES[0] ("triage"); the FSM still owns chaining research → plan → … .
-const NEW_WORK_ENTRY_PHASE = "research";
+// NEW_WORK_ENTRY_PHASE ("research") is imported from workflow-descriptor.mjs (above).
 
-// CTL-705: STAGE_RANK — integer stage index for every pipeline phase + remediate.
-// Higher = later in the pipeline = closer to done (shortest-remaining-time-first
-// for preemption targeting). Deliberately duplicates PHASES order here rather than
-// computing it dynamically, so scheduler-rank.mjs stays a pure leaf (no imports).
-// Key ORDER mirrors [...PHASES, "remediate"] (drift guard in scheduler.test.mjs).
-// Any reorder to PHASES must update both keys AND values here.
-// Values: 0..9 with remediate=4 sitting between implement(3) and verify(5).
-export const STAGE_RANK = Object.freeze({
-  triage: 0,
-  research: 1,
-  plan: 2,
-  implement: 3,
-  verify: 5,
-  review: 6,
-  pr: 7,
-  "monitor-merge": 8,
-  "monitor-deploy": 9,
-  remediate: 4, // ancillary phase — appended last so Object.keys() == [...PHASES, "remediate"]
-});
+// CTL-705: STAGE_RANK — integer stage index for every pipeline phase + remediate
+// (higher = later = closer to done, for shortest-remaining-time-first preemption).
+// Derived from each descriptor step's explicit `rank` (non-dense: remediate=4 sits
+// between implement=3 and verify=5; key ORDER == [...PHASES, "remediate"], asserted
+// by the drift guard in workflow-descriptor.test.mjs + scheduler.test.mjs).
+// Imported + re-exported above from workflow-descriptor.mjs.
 
 // TERMINAL_SIGNAL_STATUSES — statuses that indicate a phase is definitively done
 // (success or failure). Used by stageRankForTicket to skip phases that no longer
@@ -208,9 +206,9 @@ export function buildGlobalRanking(orchDir, eligible) {
 
 // CTL-705 Phase 4: preemption constants and module state.
 
-// Phases that must never be preempted: monitor-deploy is a passive observer of
-// deployment outcomes; triage runs once at pipeline entry and is brief.
-export const NON_PREEMPTABLE_PHASES = new Set(["triage", "monitor-deploy"]);
+// Phases that must never be preempted (descriptor steps with preemptable:false):
+// monitor-deploy is a passive observer of deployment outcomes; triage runs once at
+// pipeline entry and is brief. Imported + re-exported above from workflow-descriptor.mjs.
 
 // Minimum wall-clock seconds a worker must have been running before it becomes
 // a preemption candidate — prevents stopping a worker that just started.

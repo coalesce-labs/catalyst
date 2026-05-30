@@ -1,0 +1,32 @@
+{
+  "$comment": "Default ticket pipeline — the single source of truth for the phase-list constants that were duplicated across phase-fsm.mjs and scheduler.mjs. Derived by workflow-descriptor.mjs; drift-guarded against the historical literals in workflow-descriptor.test.mjs. See docs/workflow-descriptors-design.md. v1 = provenance swap only (no behavior change); the per-step model/effort/preamble levers + conditional rules land in a later phase.",
+  "schemaVersion": "workflow/v1",
+  "id": "default",
+  "trigger": { "kind": "linear.ready" },
+  "linearMirror": true,
+  "entryStep": "research",
+  "terminalStep": "monitor-deploy",
+  "steps": [
+    { "id": "triage",         "rank": 0, "preemptable": false, "linearKey": null,          "next": "research" },
+    { "id": "research",       "rank": 1, "linearKey": "research",   "next": "plan" },
+    { "id": "plan",           "rank": 2, "linearKey": "planning",   "next": "implement" },
+    { "id": "implement",      "rank": 3, "linearKey": "inProgress", "next": "verify" },
+    { "id": "verify",         "rank": 5, "linearKey": "verifying",  "next": "review" },
+    { "id": "review",         "rank": 6, "linearKey": "reviewing",  "next": "pr" },
+    { "id": "pr",             "rank": 7, "linearKey": "inReview",   "next": "monitor-merge" },
+    { "id": "monitor-merge",  "rank": 8, "linearKey": "inReview",   "next": "monitor-deploy" },
+    { "id": "monitor-deploy", "rank": 9, "preemptable": false, "linearKey": "inReview", "next": null }
+  ],
+  "ancillarySteps": [
+    { "id": "remediate", "rank": 4, "linearKey": "remediating", "cycleWith": "verify" }
+  ],
+  "cycles": [
+    {
+      "id": "verify-remediate",
+      "members": ["verify", "remediate"],
+      "cap": 3,
+      "countBy": "event",
+      "reset": { "signals": ["phase-verify.json", "phase-remediate.json", "verify.json"], "releaseClaims": true }
+    }
+  ]
+}
