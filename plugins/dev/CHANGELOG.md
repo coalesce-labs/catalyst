@@ -1,5 +1,22 @@
 # Changelog
 
+## [10.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.2...catalyst-dev-v10.3.0) (2026-05-30)
+
+
+### Features
+
+* **dev:** board real-time layer — async assembleBoard + reactive SSE push (CTL-733) ([#1230](https://github.com/coalesce-labs/catalyst/issues/1230)) ([f034a14](https://github.com/coalesce-labs/catalyst/commit/f034a14f9ea2557547918c3d9b4fb938f79721d4))
+* **dev:** live Worker/Ticket board UI wired to execution-core (CTL-727) ([#1216](https://github.com/coalesce-labs/catalyst/issues/1216)) ([0d5aac0](https://github.com/coalesce-labs/catalyst/commit/0d5aac09c0b3b128e4c1ee5e1437b7873283b6a0))
+* **dev:** real shadcn components + Linear-style board UX (CTL-727) ([#1219](https://github.com/coalesce-labs/catalyst/issues/1219)) ([d8396d2](https://github.com/coalesce-labs/catalyst/commit/d8396d24f42c58a9cbcf01a1b06bc7a2449d35c7))
+* **dev:** serve the Worker/Ticket board from the monitor (CTL-730) ([#1229](https://github.com/coalesce-labs/catalyst/issues/1229)) ([50e9b2e](https://github.com/coalesce-labs/catalyst/commit/50e9b2e87aa79a0b441bc7fc6c144e3b23df4501))
+* **dev:** Workers board Status↔Pipeline column toggle (CTL-732) ([#1228](https://github.com/coalesce-labs/catalyst/issues/1228)) ([4468bc7](https://github.com/coalesce-labs/catalyst/commit/4468bc75d678001c182f48910002097a41214187))
+
+
+### Bug Fixes
+
+* **dev:** stabilize main — revive idle/budget gaps + cache-only de-starvation reconciliation (CTL-735 / CTL-736 PR-0) ([#1234](https://github.com/coalesce-labs/catalyst/issues/1234)) ([dbabfbb](https://github.com/coalesce-labs/catalyst/commit/dbabfbbf976d4ce65440d71de2efb57b3fff0d3e))
+* **dev:** worker session short-code to distinguish revive-duplicates (CTL-727) ([#1223](https://github.com/coalesce-labs/catalyst/issues/1223)) ([b3d1fdf](https://github.com/coalesce-labs/catalyst/commit/b3d1fdf22c75173bcd3045082d8f850d79b3fdff))
+
 ## [10.2.2](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.1...catalyst-dev-v10.2.2) (2026-05-28)
 
 
