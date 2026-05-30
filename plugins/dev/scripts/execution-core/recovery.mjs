@@ -31,6 +31,8 @@ import {
   log,
   IDLE_CONFIRM_TICKS,
   BUSY_CEILING_MS,
+  REVIVE_GRACE_MS,
+  REVIVE_MAX_AGE_MS,
 } from "./config.mjs";
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
@@ -1158,6 +1160,23 @@ export function reclaimDeadWorkIfPossible(
     bumpIdleStreak = defaultBumpIdleStreak,
     resetIdleStreak = defaultResetIdleStreak,
     idleConfirmTicks = IDLE_CONFIRM_TICKS,
+    // CTL-735 — post-(re)dispatch grace window for the `absent` class. A worker
+    // (re)dispatched within this window whose new bg_job_id is not yet visible in
+    // the eventually-consistent `claude agents` snapshot is deferred (revive-
+    // pending) rather than re-revived. Injectable so tests drive it deterministically.
+    reviveGraceMs = REVIVE_GRACE_MS,
+    // CTL-735 — per-tick revive budget, threaded in by the scheduler sweep
+    // (PER_TICK_REVIVE_CAP minus revives already performed this tick). When <= 0
+    // an otherwise-revivable worker is `revive-capped` (deferred) rather than
+    // dispatched, so one tick cannot mass-revive. `undefined` (the default and
+    // every standalone/test caller that does not set it) disables the cap →
+    // pre-CTL-735 behaviour.
+    reviveBudgetRemaining = undefined,
+    // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
+    // signal has not been touched in this long is an abandoned historical dir,
+    // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
+    // tests; defaults to the env-overridable config const.
+    reviveMaxAgeMs = REVIVE_MAX_AGE_MS,
     // CTL-662 — busy-forever backstop ceiling (measured from signal.startedAt).
     // The SOLE long backstop now that the mtime triggers are gone: a busy worker
     // past it with no committed work is flagged for human, never silent-reclaimed.
@@ -1418,6 +1437,54 @@ export function reclaimDeadWorkIfPossible(
   // reach here (the busy branch above returns first), so the revive/re-dispatch
   // path below is correct for both reclaim-eligible cases.
 
+  // CTL-735 Guard 1 — post-(re)dispatch grace window: the missing analog of the
+  // idle-confirmation streak for `absent`. A just-(re)dispatched worker has a NEW
+  // bg_job_id that a freshly-spawned `claude --bg` has not yet registered in the
+  // eventually-consistent `claude agents` snapshot (seconds normally, slower under
+  // load), so `liveness` reports `absent` — looking exactly like a crash. Before
+  // CTL-735 the sweep treated that as unambiguous death and revived again; at the
+  // de-starved ~2-4s tick rate (CTL-731) it re-revived each worker every tick →
+  // the revive storm (5→18→62→74 workers, load 72). Defer reviving an `absent`
+  // worker whose signal was (re)dispatched within reviveGraceMs. Placed inside
+  // branch (C) (work NOT done) so a just-completed worker still reclaims promptly
+  // via branch (B) above — only the storm-causing RE-REVIVE is deferred.
+  // Self-clearing: once startedAt ages past the window a still-absent worker is
+  // genuinely dead and proceeds to revive below. `idle` is unaffected (it has its
+  // own confirmation streak); a signal with no parseable startedAt (legacy) falls
+  // through to the pre-CTL-735 revive behaviour.
+  if (live === "absent") {
+    const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
+    if (Number.isFinite(startedAtMs) && now() - startedAtMs < reviveGraceMs) {
+      log.info(
+        { ticket, phase, prevBgJobId, sinceDispatchMs: now() - startedAtMs, reviveGraceMs },
+        "ctl-735: absent worker within post-dispatch grace window — revive deferred (revive-pending)",
+      );
+      return "revive-pending";
+    }
+  }
+
+  // CTL-735 Guard 3 — inert stale tickets. By here the worker is reclaim-eligible
+  // (absent or idle-confirmed), past its grace window, work NOT done. If its
+  // signal has not been touched in reviveMaxAgeMs it is an abandoned historical
+  // dir (isTicketInFlight keeps any non-terminal signal in-flight forever, so a
+  // worker that crashed at `running` and never flipped terminal is swept every
+  // tick). Reviving it wastes budget and — once MAX_REVIVES is hit — would
+  // escalate a long-dead ticket to needs-human. Treat it as inert: no revive, no
+  // escalate, no event. Branch (B) reclaim already ran above, so a genuinely
+  // work-done old worker was cleaned up; only no-work abandoned dirs reach here.
+  // A signal with no parseable timestamp (legacy) falls through unchanged.
+  const lastActiveMs = Math.max(
+    Date.parse(signal.raw?.updatedAt ?? "") || 0,
+    Date.parse(signal.raw?.startedAt ?? "") || 0,
+  );
+  if (lastActiveMs > 0 && now() - lastActiveMs > reviveMaxAgeMs) {
+    log.info(
+      { ticket, phase, prevBgJobId, ageMs: now() - lastActiveMs, reviveMaxAgeMs },
+      "ctl-735: signal too old to revive — abandoned historical dir, inert",
+    );
+    return "inert-stale";
+  }
+
   // Per-ticket revive budget from events.jsonl. The events file is the
   // authoritative counter — more truthful than the signal file (which the
   // dispatcher rewrites each spawn). CTL-655: window the count to the current
@@ -1448,6 +1515,22 @@ export function reclaimDeadWorkIfPossible(
       "ctl-587: revive suppressed (storm-breaker open)",
     );
     return "revive-suppressed";
+  }
+
+  // CTL-735 — per-tick revive cap. Even with the per-ticket budget and the
+  // event-counted storm-breaker open, the de-starved fast tick can mass-revive
+  // many distinct dead workers in a single sweep before the storm-breaker's
+  // event count catches up. The scheduler threads the remaining per-tick budget;
+  // once exhausted, defer this worker (revive-capped) to a later tick rather than
+  // dispatch. No event is emitted (we did NOT revive) and no marker is written,
+  // so the next tick re-evaluates cleanly. Gated on a finite budget so standalone
+  // callers (no scheduler) keep pre-CTL-735 behaviour.
+  if (Number.isFinite(reviveBudgetRemaining) && reviveBudgetRemaining <= 0) {
+    log.warn(
+      { ticket, phase, prevBgJobId },
+      "ctl-735: revive deferred — per-tick revive cap reached (revive-capped)",
+    );
+    return "revive-capped";
   }
 
   // CTL-658: resolve a `claude --resume`-compatible session id from the dead

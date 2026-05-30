@@ -84,7 +84,7 @@ import * as linearWrite from "./linear-write.mjs";
 // a cycle. label-guard.mjs is the leaf module both can import.
 import { labelOnce } from "./label-guard.mjs";
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath, PER_TICK_REVIVE_CAP } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1317,6 +1317,12 @@ export function schedulerTick(
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
+    // CTL-735 — max revives per tick. The reclaim sweep threads the remaining
+    // budget (cap minus revives so far this tick) into reclaimDeadWork; once
+    // exhausted, further revivable workers are `revive-capped` (deferred). Bounds
+    // a fast loop so it cannot mass-revive ahead of the storm-breaker. Injectable
+    // for tests; defaults to the env-overridable config const.
+    perTickReviveCap = PER_TICK_REVIVE_CAP,
     // CTL-665: the committed worker-slot concurrency knobs (maxParallel +
     // minParallel/maxParallelCeiling bounds), threaded from the daemon via
     // startScheduler → runningOpts → runTick. Empty {} preserves the legacy
@@ -1384,6 +1390,15 @@ export function schedulerTick(
   const reclaimed = [];
   const revived = [];
   const reviveSuppressed = [];
+  // CTL-735: workers deferred by the post-(re)dispatch grace window (absent but
+  // recently dispatched → not yet registered in `claude agents`). A high count
+  // here with low `revived` is the healthy steady state during the controlled
+  // daemon re-enable — it means the storm-causing re-revive race is suppressed.
+  const revivePending = [];
+  // CTL-735: workers deferred because this tick's per-tick revive cap was reached.
+  // A non-empty bucket means a real backlog is draining at the bounded rate (not a
+  // storm); it empties over subsequent ticks as the cap re-arms.
+  const reviveCapped = [];
   const escalated = [];
   // CTL-643: drop terminal tickets from the reclaim attention set.
   // reclaimDeadWorkIfPossible already short-circuits on terminal signals
@@ -1453,6 +1468,10 @@ export function schedulerTick(
       if (liveAgents) {
         reclaimOpts.liveness = (bgJobId) => livenessForBgJob(bgJobId, { agents: liveAgents });
       }
+      // CTL-735: remaining per-tick revive budget = cap minus revives already
+      // performed this tick. reclaimDeadWork returns "revive-capped" (deferred)
+      // once this is <= 0 instead of dispatching, so one sweep cannot mass-revive.
+      reclaimOpts.reviveBudgetRemaining = perTickReviveCap - revived.length;
       const r = reclaimDeadWork(orchDir, sig, reclaimOpts);
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
@@ -1464,6 +1483,18 @@ export function schedulerTick(
           break;
         case "revive-suppressed":
           reviveSuppressed.push(entry);
+          break;
+        case "revive-pending":
+          // CTL-735: absent worker still inside its post-dispatch grace window —
+          // deferred, not revived. Surfaced (not silent) so the controlled
+          // re-enable can confirm the storm-causing re-revive race is suppressed.
+          revivePending.push(entry);
+          break;
+        case "revive-capped":
+          // CTL-735: this tick's per-tick revive cap was reached — deferred to a
+          // later tick. Surfaced so the re-enable can confirm a backlog drains at
+          // the bounded rate rather than storming.
+          reviveCapped.push(entry);
           break;
         case "escalated":
           escalated.push(entry);
@@ -1489,6 +1520,9 @@ export function schedulerTick(
           // CTL-606: superseded-noop also buckets here — a dead predecessor signal
           // the ticket has already advanced past. Invisible by design (the active
           // phase is progressing normally); surfacing it would be noise.
+          // CTL-735: inert-stale also buckets here — an abandoned historical dir
+          // too old to revive. Invisible by design (steady-state; ~85 such dirs
+          // would otherwise be persistent noise).
           break;
       }
     } catch (err) {
@@ -2049,6 +2083,8 @@ export function schedulerTick(
     reclaimed,
     revived,
     reviveSuppressed,
+    revivePending,
+    reviveCapped,
     escalated,
     advanced,
     dispatched,
