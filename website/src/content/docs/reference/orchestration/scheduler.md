@@ -136,3 +136,9 @@ placing them in the lowest-priority band. During the rollout window such a
 worker could be a preemption candidate if a higher-priority ticket is queued;
 the 60s min-runtime and 30s hysteresis guards limit the blast radius. The
 condition is transient — every new dispatch writes `priority.json`.
+
+## Related
+
+- [Workflow descriptors](/reference/orchestration/workflows/) — the stage ranks and the
+  non-preemptable set are sourced from the descriptor's per-step `rank` / `preemptable` fields
+- [Phase agents](/reference/orchestration/phase-agents/) — the phase pipeline the scheduler dispatches
