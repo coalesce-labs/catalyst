@@ -1402,7 +1402,16 @@ export function schedulerTick(
   // proven starvation source). Its freshness gates new-work admission later. Null
   // snapshot seam (test default) → legacy per-worker liveness, fresh-by-default.
   const liveSnapshot = livenessSnapshot ? livenessSnapshot() : null;
-  const liveAgents = liveSnapshot ? liveSnapshot.agents : null;
+  // CTL-731: only bind the snapshot's agents into the reclaim liveness when it is
+  // POPULATED. A cold / never-populated snapshot returns agents:[] — binding that
+  // empty list would make EVERY live worker resolve to "absent" (agentForShortId
+  // over []) and trigger a mass false-revive on the first post-boot tick, before
+  // the async read has resolved. When unpopulated, leave liveAgents null so the
+  // reclaim falls back to its per-worker real read (pre-CTL-731 behavior) for the
+  // one cold tick; the snapshot warms within a sub-second and later ticks use it.
+  // A populated-but-stale snapshot is fine for reclaim (≤ a few seconds old, same
+  // as the pre-existing 5s TTL) — only NEW-work dispatch needs the isFresh gate.
+  const liveAgents = liveSnapshot && liveSnapshot.populated ? liveSnapshot.agents : null;
 
   // CTL-702: scan worker dirs for yield tombstones. Emit once per unique
   // absolute path per daemon lifetime (deduped via observedYieldFiles).
