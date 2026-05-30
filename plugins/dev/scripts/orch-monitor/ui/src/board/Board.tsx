@@ -310,14 +310,20 @@ function TicketBoard({ tickets, lens, colorBy, fill }: { tickets: Ticket[]; lens
     </BoardScroll>
   );
 }
-function WorkerBoard({ workers, tickets, fill }: { workers: Worker[]; tickets: Ticket[]; fill: boolean }) {
+function WorkerBoard({ workers, tickets, grouping, fill }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
+  const cols = grouping === "phase" ? PHASE_COLS : WORKER_COLS;
   return (
     <BoardScroll fill={fill}>
-      {WORKER_COLS.map((c) => {
-        const items = workers.filter((w) => (w.activeState ?? "active") === c.key);
+      {cols.map((c: any) => {
+        const items = grouping === "phase"
+          ? workers.filter((w) => w.phase === c.key)
+          : workers.filter((w) => (w.activeState ?? "active") === c.key);
+        // Status columns are already split by liveness (Active/Stuck), so the
+        // "N live" chip is redundant there; only surface it in the phase lens.
+        const live = grouping === "phase" ? items.filter((w) => w.activeState === "active").length : 0;
         return (
-          <Column key={c.key} label={c.label} color={c.c} count={items.length}>
+          <Column key={c.key} label={c.label} color={c.c} count={items.length} live={live}>
             {items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} />)}
           </Column>
         );
@@ -440,6 +446,7 @@ function QueueView({ data }: { data: BoardPayload }) {
 
 // ── shell (real shadcn Tabs + ToggleGroup, TooltipProvider) ─────────────────
 type View = "tickets" | "workers" | "queue";
+type WorkerGrouping = "status" | "phase";
 function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string }[] }) {
   return (
     <ToggleGroup type="single" value={value} onValueChange={(v) => v && onChange(v as T)} variant="outline" size="sm">
@@ -453,6 +460,7 @@ export function Board() {
   const [err, setErr] = useState<string | null>(null);
   const [view, setView] = useState<View>("tickets");
   const [lens, setLens] = useState<"linear" | "phase">("linear");
+  const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
   const [repo, setRepo] = useState<string>("all");
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
@@ -522,6 +530,9 @@ export function Board() {
             <Seg value={colorBy} onChange={setColorBy} options={[{ k: "phase", label: "Phase" }, { k: "status", label: "Status" }, { k: "repo", label: "Repo" }, { k: "type", label: "Type" }]} />
             <Seg value={swimlanes ? "lanes" : "flat"} onChange={(v) => setSwimlanes(v === "lanes")} options={[{ k: "flat", label: "Combined" }, { k: "lanes", label: "Repo lanes" }]} />
           </>}
+          {view === "workers" && (
+            <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }]} />
+          )}
         </div>
 
         {/* body */}
@@ -532,8 +543,8 @@ export function Board() {
             ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill />
             : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
-            ? <WorkerBoard workers={fWorkers} tickets={data.tickets} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} fill={false} /></Lane>)}</div>)}
+            ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
         </div>
       </div>
