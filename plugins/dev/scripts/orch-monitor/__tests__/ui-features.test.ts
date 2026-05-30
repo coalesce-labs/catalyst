@@ -54,7 +54,9 @@ beforeAll(async () => {
   server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath: join(tmpDir, "annotations.db") });
   baseUrl = `http://localhost:${server.port}`;
 
-  const res = await fetch(`${baseUrl}/`);
+  // CTL-730: the legacy React dashboard (this file's subject) moved to /legacy;
+  // / now serves the CTL-727 board.
+  const res = await fetch(`${baseUrl}/legacy`);
   html = await res.text();
 });
 

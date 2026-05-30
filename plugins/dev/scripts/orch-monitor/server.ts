@@ -10,6 +10,7 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
+import { assembleBoard, type BoardPayload } from "./lib/board-data.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -216,6 +217,23 @@ export interface CreateServerOptions {
 }
 
 const DEFAULT_PORT = 7400;
+
+// CTL-730: serve the CTL-727 Worker/Ticket board payload from the monitor.
+// assembleBoard() is synchronous and costs ~0.5–1.7s; a short in-process cache
+// collapses N polling tabs into at most one recompute per BOARD_CACHE_TTL_MS so
+// the board (now the default page) can't jank the server event loop. CTL-733
+// replaces this lazy cache with an async reactive snapshot + SSE push.
+const BOARD_CACHE_TTL_MS = 2_000;
+let _boardCache: { ts: number; payload: BoardPayload } | null = null;
+function getBoardPayload(): BoardPayload {
+  const now = Date.now();
+  if (_boardCache && now - _boardCache.ts < BOARD_CACHE_TTL_MS) {
+    return _boardCache.payload;
+  }
+  const payload = assembleBoard();
+  _boardCache = { ts: now, payload };
+  return payload;
+}
 
 function resolveVersion(): string {
   const candidates = [
@@ -1638,9 +1656,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(detail);
         }
 
+        // CTL-730: the CTL-727 Worker/Ticket board is the default monitor page.
+        // The old orchestrator-centric dashboard moves to /legacy during the
+        // transition (index.html still built + served, just not at root).
+        if (url.pathname === "/" || url.pathname === "/index.html") {
+          const file = Bun.file(join(publicDir, "board.html"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
+          return new Response("board.html not found", { status: 500 });
+        }
+
         if (
-          url.pathname === "/" ||
-          url.pathname === "/index.html" ||
+          url.pathname === "/legacy" ||
+          url.pathname === "/legacy/" ||
           url.pathname === "/history"
         ) {
           const htmlFile =
@@ -1720,6 +1751,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
             eventCount24h: stats.eventCount24h,
             eventCount24hByRepo: stats.eventCount24hByRepo,
           });
+        }
+
+        if (url.pathname === "/api/board") {
+          return Response.json(getBoardPayload());
         }
 
         return new Response("Not Found", { status: 404 });

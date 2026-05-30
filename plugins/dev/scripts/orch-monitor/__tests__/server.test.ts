@@ -63,13 +63,50 @@ afterAll(() => {
 });
 
 describe("SSE server", () => {
-  it("should serve index.html at /", async () => {
+  // CTL-730: the CTL-727 Worker/Ticket board is the default page at /.
+  it("should serve the board (board.html) at /", async () => {
     const res = await fetch(`${baseUrl}/`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain("board-root");
   });
+
+  // CTL-730: the legacy orchestrator dashboard moves to /legacy.
+  it("should serve the legacy dashboard at /legacy", async () => {
+    const res = await fetch(`${baseUrl}/legacy`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('id="root"');
+  });
+
+  // CTL-730: the board payload is served by the monitor (was a dev-only Vite
+  // middleware). assembleBoard() degrades to empty arrays when execution-core
+  // state / the `claude` CLI are absent (as in CI), so we assert shape only.
+  it("should serve the board payload at /api/board", async () => {
+    const res = await fetch(`${baseUrl}/api/board`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const data = (await res.json()) as {
+      generatedAt: string;
+      config: { maxParallel: number; inFlight: number };
+      repos: unknown[];
+      workers: unknown[];
+      tickets: unknown[];
+      queue: unknown[];
+    };
+    expect(typeof data.generatedAt).toBe("string");
+    expect(typeof data.config?.maxParallel).toBe("number");
+    expect(Array.isArray(data.workers)).toBe(true);
+    expect(Array.isArray(data.tickets)).toBe(true);
+    expect(Array.isArray(data.queue)).toBe(true);
+    // assembleBoard() shells out to claude/linearis/sqlite3 (each with its own
+    // multi-second timeout); generous bound so the route test isn't flaky on a
+    // dev box where those binaries exist. CI lacks them → fast ENOENT fallback.
+  }, 30_000);
 
   it("should serve current snapshot at /api/snapshot", async () => {
     const res = await fetch(`${baseUrl}/api/snapshot`);
@@ -669,23 +706,24 @@ describe("PR merge write-through to signal file", () => {
   });
 });
 
-describe("React UI index.html", () => {
+// CTL-730: the legacy React dashboard moved from / to /legacy.
+describe("React UI legacy dashboard (/legacy)", () => {
   it("serves React app entry point", async () => {
-    const res = await fetch(`${baseUrl}/`);
+    const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
     expect(html).toContain('id="root"');
     expect(html).toContain('type="module"');
   });
 
   it("references Vite-built CSS asset", async () => {
-    const res = await fetch(`${baseUrl}/`);
+    const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
     expect(html).toContain('rel="stylesheet"');
     expect(html).toContain("/assets/");
   });
 
   it("serves built JS asset", async () => {
-    const res = await fetch(`${baseUrl}/`);
+    const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
     const match = html.match(/src="(\/assets\/index-[^"]+\.js)"/);
     expect(match).toBeTruthy();
@@ -698,7 +736,7 @@ describe("React UI index.html", () => {
   });
 
   it("serves built CSS asset", async () => {
-    const res = await fetch(`${baseUrl}/`);
+    const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
     const match = html.match(/href="(\/assets\/index-[^"]+\.css)"/);
     expect(match).toBeTruthy();
