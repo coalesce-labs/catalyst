@@ -9,6 +9,8 @@ import {
   listClaudeAgentsResult,
   cachedListClaudeAgents,
   resetLivenessCache,
+  refreshAgents,
+  getAgentsCached,
   agentForShortId,
   isBgJobAlive,
   livenessForBgJob,
@@ -276,5 +278,179 @@ describe("claudeStop", () => {
       throw new Error("spawn EACCES");
     };
     expect(claudeStop("12345678", { spawn }).ok).toBe(false);
+  });
+});
+
+// --- Phase 00 (CTL-731): hardened async liveness read ---------------------
+//
+// The daemon event loop was starved because `countBackgroundAgents` shelled out
+// SYNCHRONOUSLY (execFileSync) every scheduler tick + autotune + per-worker
+// reclaim. The hardened read replaces that hot path with ONE warm, shared,
+// never-blocking snapshot. These tests pin the five safeguards from the plan:
+// (a) async read, (b) timeout + child-kill, (c) single-flight, (d) backoff,
+// (e) non-blocking getter that serves last-good and exposes freshness.
+describe("refreshAgents + getAgentsCached (Phase 00 hardened liveness read)", () => {
+  beforeEach(() => resetLivenessCache());
+
+  test("(a/e) getAgentsCached returns last-good SYNCHRONOUSLY without awaiting the refresher", async () => {
+    // Populate a good snapshot.
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
+    // Now read while stale, with a refresher that NEVER resolves — the getter
+    // must still return the last-good snapshot immediately (no await).
+    let refreshFired = false;
+    const got = getAgentsCached({
+      now: () => 999_999, // far past staleMs
+      staleMs: 5000,
+      refresh: () => {
+        refreshFired = true;
+        return new Promise(() => {}); // hangs forever
+      },
+    });
+    expect(got.agents).toEqual(agents); // last-good, returned synchronously
+    expect(got.isFresh).toBe(false);
+    expect(got.populated).toBe(true);
+    expect(refreshFired).toBe(true); // fired a background refresh (fire-and-forget)
+  });
+
+  test("(e) cold start: never-populated snapshot → populated:false, isFresh:false, agents:[]", () => {
+    const got = getAgentsCached({ now: () => 1000, refresh: async () => [] });
+    expect(got.populated).toBe(false);
+    expect(got.isFresh).toBe(false);
+    expect(got.agents).toEqual([]);
+  });
+
+  test("(c) single-flight: three concurrent refresh() calls spawn the read exactly once", async () => {
+    let calls = 0;
+    let resolveExec;
+    const execFileAsync = () => {
+      calls += 1;
+      return new Promise((res) => {
+        resolveExec = () => res(JSON.stringify(agents));
+      });
+    };
+    const p1 = refreshAgents({ execFileAsync, now: () => 1000 });
+    const p2 = refreshAgents({ execFileAsync, now: () => 1000 });
+    const p3 = refreshAgents({ execFileAsync, now: () => 1000 });
+    expect(calls).toBe(1); // only the first caller spawned the read
+    resolveExec();
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    expect(r1).toEqual(agents);
+    expect(r2).toEqual(agents);
+    expect(r3).toEqual(agents);
+  });
+
+  test("(b) timeout: a hung refresher aborts the child at the deadline and serves last-good", async () => {
+    // Pre-populate so there IS a last-good to fall back to.
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
+    let capturedSignal = null;
+    const hanging = (_bin, _args, opts) => {
+      capturedSignal = opts.signal; // the AbortSignal the read is bound to
+      return new Promise(() => {}); // never resolves
+    };
+    let timeoutCb = null;
+    const setTimer = (cb) => {
+      timeoutCb = cb;
+      return 1; // fake handle
+    };
+    const clearTimer = () => {};
+    const p = refreshAgents({
+      execFileAsync: hanging,
+      now: () => 5000,
+      timeoutMs: 3000,
+      setTimer,
+      clearTimer,
+    });
+    timeoutCb(); // fire the deadline
+    const result = await p;
+    expect(result).toEqual(agents); // fell back to last-good, did NOT throw
+    expect(capturedSignal?.aborted).toBe(true); // child was killed, not leaked
+  });
+
+  test("(b) timeout with NO prior snapshot falls back to [] (never throws)", async () => {
+    const hanging = () => new Promise(() => {});
+    let timeoutCb = null;
+    const p = refreshAgents({
+      execFileAsync: hanging,
+      now: () => 5000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+    });
+    timeoutCb();
+    expect(await p).toEqual([]);
+  });
+
+  test("(d) backoff: after the failure threshold, getAgentsCached does NOT fire a new refresh until the window elapses", async () => {
+    // Drive 3 consecutive failures at a fixed clock so the backoff window is
+    // deterministic. Each await lets the single-flight latch clear.
+    const failing = async () => {
+      throw new Error("claude agents down");
+    };
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 });
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 });
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 }); // 3rd → backoff armed
+
+    // Within the backoff window → no refresh fired.
+    let fired = 0;
+    getAgentsCached({
+      now: () => 1500, // 1000 + base backoff (1000) = 2000 window; 1500 < 2000
+      staleMs: 5000,
+      refresh: async () => {
+        fired += 1;
+        return [];
+      },
+    });
+    expect(fired).toBe(0); // suppressed by backoff
+
+    // Past the backoff window → refresh fires again.
+    getAgentsCached({
+      now: () => 3000, // > 2000
+      staleMs: 5000,
+      refresh: async () => {
+        fired += 1;
+        return [];
+      },
+    });
+    expect(fired).toBe(1);
+  });
+
+  test("(d) backoff: below the threshold every stale read still retries (no premature suppression)", async () => {
+    const failing = async () => {
+      throw new Error("down");
+    };
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 }); // 1st failure only
+    let fired = 0;
+    getAgentsCached({
+      now: () => 1001,
+      staleMs: 5000,
+      refresh: async () => {
+        fired += 1;
+        return [];
+      },
+    });
+    expect(fired).toBe(1); // still retries (1 failure < threshold)
+  });
+
+  test("a successful refresh resets the failure counter / backoff", async () => {
+    const failing = async () => {
+      throw new Error("down");
+    };
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 });
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 });
+    await refreshAgents({ execFileAsync: failing, now: () => 1000 }); // backoff armed
+    // A success clears it.
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1100 });
+    const snap = getAgentsCached({ now: () => 1100, staleMs: 5000 });
+    expect(snap.isFresh).toBe(true);
+    expect(snap.agents).toEqual(agents);
+  });
+
+  test("countBackgroundAgents sources from the warm snapshot (no exec) when agents not injected", async () => {
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
+    // now === snapshot ts → fresh → getAgentsCached does not fire a refresher.
+    expect(countBackgroundAgents({ now: () => 1000 })).toBe(2);
   });
 });

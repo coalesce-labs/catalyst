@@ -723,6 +723,62 @@ describe("startMonitor — resumeFromCursor", () => {
     startMonitor({ exec, reconcileIntervalMs: 60_000 }); // no resumeFromCursor
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-2"]);
   });
+
+  // CTL-731 Phase 00: the boot gap-drain must be FOLD-ONLY. It advances the
+  // cursor and applies idempotent projection folds (upsert/remove), but must NOT
+  // re-run dispatch side-effects (dispatchTriage) for events already acted on
+  // before the restart — both to avoid duplicate triage dispatches AND to keep
+  // startMonitor from blocking on a burst of synchronous subprocess spawns.
+  test("CTL-731: boot gap-drain folds eligibility but does NOT dispatch triage for a gap →status event", () => {
+    const orchDir = join(catalystDir, "execution-core");
+    enroll("ENG", { status: "Todo" });
+    const exec = execReturning({ ENG: [] }); // reconcile + sweep see nothing eligible
+    // A →Todo transition in the downtime gap. In steady-state this folds ENG-5
+    // into the eligible set AND (CTL-625, no triage.json) auto-dispatches triage.
+    appendEventLog(
+      `${JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-5", teamKey: "ENG", toState: "Todo", toPriority: 2 },
+      })}\n`
+    );
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec,
+      orchDir,
+      dispatch,
+      resumeFromCursor: true,
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 0, // no steady-state poll during this synchronous test
+    });
+    // Fold KEPT — ENG-5 is eligible (folded from the gap event, no Linear poll).
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-5"]);
+    // Side-effect SKIPPED — the fold-only boot drain did not dispatch triage.
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("CTL-731: boot gap-drain does NOT dispatch triage for a gap →Triage transition (no duplicate on restart)", () => {
+    const orchDir = join(catalystDir, "execution-core");
+    enroll("ENG", { status: "Todo" }); // triageStatus defaults to "Triage"
+    const exec = execReturning({ ENG: [] });
+    appendEventLog(
+      `${JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-7", teamKey: "ENG", toState: "Triage" },
+      })}\n`
+    );
+    saveCursor({ logPath: eventLogPath(), byteOffset: 0 });
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec,
+      orchDir,
+      dispatch,
+      resumeFromCursor: true,
+      reconcileIntervalMs: 60_000,
+      tailerPollMs: 0,
+    });
+    expect(dispatch).not.toHaveBeenCalled(); // a Triage ticket is never re-dispatched at boot
+  });
 });
 
 // CTL-634 Tier 1 — every state_changed event write-through-refreshes the

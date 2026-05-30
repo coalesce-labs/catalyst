@@ -41,8 +41,6 @@ let prevJobsRoot;
 const enrolledTeams = new Set();
 const registryEntries = [];
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "exec-core-int-"));
@@ -113,31 +111,25 @@ function mockExec(nodesByTeam) {
 }
 
 describe("execution-core integration — acceptance criteria", () => {
-  test("CTL-681: AC1 — a state_changed event INTO the eligible state is a NO-OP; the periodic reconcile (or operator-triggered reconcileAll) adds the ticket", async () => {
-    // Pre-CTL-681 AC1: the event triggered a debounced per-event poll which
-    // rediscovered ENG-9 and folded it into the eligible set. That per-event
-    // poll was the load that exhausted the Linear 2500/hr quota.
-    //
-    // Post-CTL-681 AC1: the event is a no-op (per-event scoping reconcile
-    // removed). The webhook parser now captures project/labels/priority so a
-    // follow-up PR can fold the change incrementally without a poll; until then
-    // the eligible set is refreshed by the periodic reconcile timer
-    // (RECONCILE_INTERVAL_MS, 10 min in prod) or the startup reconcile. This
-    // test demonstrates BOTH halves of the new contract.
+  test("CTL-731 Phase 0 (reverses CTL-681 AC1): a state_changed event INTO the eligible state folds the ticket in immediately, no poll", () => {
+    // History: pre-CTL-681 the →status event triggered a debounced per-event
+    // poll that rediscovered the ticket — the load that exhausted the Linear
+    // 2500/hr quota. CTL-681 made the event a no-op (poll removed), deferring
+    // discovery to the 10-min reconcile, and captured project/labels/priority on
+    // the parsed event "so a follow-up PR can fold the change incrementally
+    // without a poll." CTL-731 Phase 0 IS that follow-up: a →Todo transition is
+    // folded straight from the event payload into the eligible projection — new
+    // work is visible within one tailer poll, not 10 minutes, and with ZERO
+    // Linear queries (reported.ENG stays empty to prove no poll ran).
     enroll("ENG", { status: "Todo" });
     const reported = { ENG: [] };
     const exec = mockExec(reported);
     startMonitor({ exec, debounceMs: 25, reconcileIntervalMs: 60_000 });
     expect(getEligibleSet("ENG")).toEqual([]); // startup reconcile: empty
 
-    reported.ENG = [node("ENG-9")]; // linearis now reports ENG-9 as Todo
-    handleStateChangedEvent(evt("ENG-9", "ENG", "Todo"), { exec, debounceMs: 25 });
-    await sleep(70);
-    // The event itself did NOT add ENG-9 — that's the deliberate change.
-    expect(getEligibleSet("ENG")).toEqual([]);
-
-    // The next periodic reconcile (here driven directly) picks it up.
-    reconcileAll({ exec });
+    // The →Todo event folds ENG-9 in directly from the payload — no Linear poll
+    // (reported.ENG is still []), no reconcile, no 10-min wait.
+    handleStateChangedEvent(evt("ENG-9", "ENG", "Todo"), { exec });
     expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-9"]);
   });
 
@@ -272,6 +264,12 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       orchDir,
       dispatch,
       readEligible,
+      // CTL-731: pin the live background count so the new-work pull is
+      // deterministic. Without it startScheduler shells out to the REAL
+      // `claude agents --json`, whose count depends on whatever sessions happen
+      // to be running on the host — the long-standing env-dependent flake. An
+      // injected count also satisfies the staleness gate (treated as trusted).
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
     });
@@ -337,6 +335,12 @@ describe("execution-core integration — crash recovery (CTL-539)", () => {
       orchDir,
       dispatch,
       readEligible,
+      // CTL-731: pin the live background count so the new-work pull is
+      // deterministic. Without it startScheduler shells out to the REAL
+      // `claude agents --json`, whose count depends on whatever sessions happen
+      // to be running on the host — the long-standing env-dependent flake. An
+      // injected count also satisfies the staleness gate (treated as trusted).
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
     });

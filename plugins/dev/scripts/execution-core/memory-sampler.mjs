@@ -10,7 +10,7 @@
 // markOom, resolveMeta) so tick() is fully unit-testable with no real I/O.
 
 import { execFileSync } from "node:child_process";
-import { cachedListClaudeAgents } from "./claude-agents.mjs";
+import { getAgentsCached } from "./claude-agents.mjs";
 import { claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { parsePsSnapshot, rssTotalForPid, parseSessionName } from "./cli/sessions.mjs";
@@ -92,7 +92,11 @@ export function classifyMemPressure(rssMb, { warnThresholdMb, killThresholdMb })
 export function startMemorySampler({
   clock = realClock(),
   config = readMemorySamplerConfig(),
-  listAgents = cachedListClaudeAgents,
+  // CTL-731: read the warm, never-blocking snapshot. Pre-CTL-731 this was the 5s
+  // TTL sync cache (cachedListClaudeAgents) — still a synchronous execFileSync on
+  // a cache miss, on the shared daemon event loop. getAgentsCached never spawns
+  // on the calling thread.
+  listAgents = () => getAgentsCached().agents,
   psLines = defaultPsLines,
   emit = emitMemoryEvent,
   killWorker = claudeStop,

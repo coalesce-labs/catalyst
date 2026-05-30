@@ -11,7 +11,7 @@
 // one. This module centralizes both so recovery, the reaper, and the scheduler
 // share ONE liveness / termination / concurrency primitive.
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -77,11 +77,164 @@ export function cachedListClaudeAgents({
   return _livenessCache.agents ?? [];
 }
 
+// --- Phase 00 (CTL-731): hardened async liveness read --------------------
+//
+// THE FIX for daemon event-loop starvation. Pre-CTL-731 the scheduler's hot
+// path read liveness via `countBackgroundAgents → listClaudeAgents →
+// execFileSync('claude agents --json')` — a SYNCHRONOUS subprocess spawn on
+// EVERY scheduler tick + autotune pass + per-worker reclaim. Live instrumentation
+// proved this monopolized the event loop: a 2s `setInterval` logged 0 ticks in
+// 90s, so the tailer poll never advanced the cursor and live new-work discovery
+// never happened. A hung `claude agents` RPC (the CTL-692 failure mode) wedged
+// the loop indefinitely because the sync read had no timeout.
+//
+// This block replaces that hot path with ONE warm, shared, never-blocking
+// snapshot combining five safeguards — each necessary; a bare `{timeout:3000}`
+// on the sync read alone regresses into repeated-3s-block / stale-count /
+// cold-start-over-spawn failure modes:
+//   (a) ASYNC read (execFile→promise, never execFileSync) — a hung RPC no longer
+//       blocks the loop; the timer fires, the loop continues, the cache updates
+//       when the read resolves or times out.
+//   (b) TIMEOUT (~3s, env-tunable) — on the deadline the child is ABORTED (killed,
+//       not leaked) and the refresh is treated as a failure (serve last-good).
+//   (c) SINGLE-FLIGHT — one in-flight `claude agents --json` at a time; concurrent
+//       callers (scheduler tick, reaper, autotune) join the same promise.
+//   (d) BACKOFF — after N consecutive failures, stop re-attempting every call and
+//       serve last-good for an exponential window so a persistently-hung binary is
+//       not hammered each tick. Reset on first success.
+//   (e) NON-BLOCKING getter — getAgentsCached() returns last-good SYNCHRONOUSLY
+//       (never awaits); if stale and no refresh is in flight (and not backed off)
+//       it fires a fire-and-forget single-flight refresh. Exposes snapshot age /
+//       isFresh so the scheduler can gate new-work dispatch on staleness.
+const LIVENESS_TIMEOUT_MS = Number(process.env.CATALYST_LIVENESS_TIMEOUT_MS) || 3_000;
+// Stale threshold for the non-blocking getter (and the scheduler's dispatch gate).
+// 2× the TTL: a snapshot older than this is "stale" and a background refresh is
+// kicked; the scheduler holds NEW-work dispatch while stale (fail-safe — never
+// over-spawn on an unknown/old count). Advancement of in-flight phases is
+// independent of this and continues regardless.
+const LIVENESS_STALE_MS = Number(process.env.CATALYST_LIVENESS_STALE_MS) || 2 * LIVENESS_TTL_MS;
+// Backoff: below this many consecutive failures every stale read retries; at/above
+// it, suppress refresh for an exponential window (base × 2^over, capped).
+const LIVENESS_BACKOFF_AFTER = Number(process.env.CATALYST_LIVENESS_BACKOFF_AFTER) || 3;
+const LIVENESS_BACKOFF_BASE_MS = 1_000;
+const LIVENESS_BACKOFF_CAP_MS = Number(process.env.CATALYST_LIVENESS_BACKOFF_CAP_MS) || 30_000;
+
+let _asyncSnap = { ts: 0, agents: null }; // agents:null ⇒ never populated
+let _inflight = null; // (c) single-flight latch — a Promise or null
+let _failures = 0; // (d) consecutive failure counter
+let _backoffUntil = 0; // (d) suppress refresh until now() ≥ this
+
+// backoffWindowMs — 0 below the failure threshold (retry every stale read), then
+// exponential (base × 2^over) capped at LIVENESS_BACKOFF_CAP_MS.
+function backoffWindowMs(failures) {
+  if (failures < LIVENESS_BACKOFF_AFTER) return 0;
+  const over = failures - LIVENESS_BACKOFF_AFTER; // 0, 1, 2, …
+  return Math.min(LIVENESS_BACKOFF_CAP_MS, LIVENESS_BACKOFF_BASE_MS * 2 ** over);
+}
+
+// defaultExecFileAsync — the production async reader: execFile wrapped as a
+// promise, bound to an AbortSignal so the timeout path can kill the child.
+function defaultExecFileAsync(bin, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) => {
+      if (err) reject(err);
+      else resolve(stdout);
+    });
+  });
+}
+
+// refreshAgents — perform ONE async, timed, single-flight `claude agents --json`
+// read and update the shared snapshot. Returns the resolved agents array (or the
+// last-good / [] on failure); never rejects. Concurrent callers join the same
+// in-flight promise (anti-stampede). Injectable seams: execFileAsync (the async
+// reader), now (clock), timeoutMs, setTimer/clearTimer (the deadline timer).
+export function refreshAgents({
+  execFileAsync = defaultExecFileAsync,
+  now = Date.now,
+  timeoutMs = LIVENESS_TIMEOUT_MS,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  if (_inflight) return _inflight; // (c) join the in-flight read
+  const controller = new AbortController();
+  let timer = null;
+  const run = (async () => {
+    try {
+      const out = await Promise.race([
+        // (a) async read, bound to the abort signal for (b).
+        execFileAsync(CLAUDE_BIN, ["agents", "--json"], {
+          encoding: "utf8",
+          signal: controller.signal,
+        }),
+        // (b) deadline: abort the child and reject so we fall back to last-good.
+        new Promise((_, reject) => {
+          timer = setTimer(() => {
+            controller.abort();
+            reject(new Error("claude agents --json timed out"));
+          }, timeoutMs);
+        }),
+      ]);
+      const parsed = JSON.parse(out);
+      if (!Array.isArray(parsed)) throw new Error("claude agents --json: non-array JSON");
+      _asyncSnap = { ts: now(), agents: parsed };
+      _failures = 0; // (d) success resets backoff
+      _backoffUntil = 0;
+      return parsed;
+    } catch {
+      _failures += 1; // (d) arm/extend backoff
+      _backoffUntil = now() + backoffWindowMs(_failures);
+      return _asyncSnap.agents ?? []; // serve last-good (or [] cold)
+    } finally {
+      if (timer !== null) clearTimer(timer);
+      _inflight = null; // (c) release the latch
+    }
+  })();
+  _inflight = run;
+  return run;
+}
+
+// getAgentsCached — (e) the non-blocking consumer API. Returns the last-good
+// snapshot SYNCHRONOUSLY (never awaits a subprocess). When the snapshot is stale
+// AND no refresh is in flight AND we are not in a backoff window, it fires a
+// fire-and-forget single-flight refresh so the next read is fresh. The returned
+// object carries freshness metadata so the scheduler can gate new-work dispatch.
+//   { agents, populated, ageMs, isFresh, ts }
+export function getAgentsCached({
+  now = Date.now,
+  staleMs = LIVENESS_STALE_MS,
+  refresh = refreshAgents,
+} = {}) {
+  const t = now();
+  const populated = _asyncSnap.agents !== null;
+  const ageMs = populated ? t - _asyncSnap.ts : Infinity;
+  const isFresh = populated && ageMs < staleMs;
+  if (!isFresh && !_inflight && t >= _backoffUntil) {
+    // Fire-and-forget: never await, never throw out of the getter.
+    try {
+      Promise.resolve(refresh({ now })).catch(() => {});
+    } catch {
+      /* a synchronous throw from a test refresher must not break the getter */
+    }
+  }
+  return {
+    agents: populated ? _asyncSnap.agents : [],
+    populated,
+    ageMs,
+    isFresh,
+    ts: _asyncSnap.ts,
+  };
+}
+
 // resetLivenessCache — drop the memoized snapshot. Test seam, and an explicit
 // invalidation hook for callers that just changed the fleet (e.g. right after a
 // dispatch or a `claude stop`) and want the next read to reflect it immediately.
+// CTL-731: also resets the async snapshot + single-flight/backoff state.
 export function resetLivenessCache() {
   _livenessCache = { ts: 0, agents: null };
+  _asyncSnap = { ts: 0, agents: null };
+  _inflight = null;
+  _failures = 0;
+  _backoffUntil = 0;
 }
 
 // agentForShortId — the agent record whose sessionId truncates to `shortId`, or
@@ -153,8 +306,13 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
 // tallied. An absent/unknown kind is NOT counted as background (fail-low so a
 // kind-reporting quirk can never inflate the in-flight count and starve
 // dispatch).
-export function countBackgroundAgents({ exec, agents } = {}) {
-  const list = agents ?? listClaudeAgents({ exec });
+//
+// CTL-731: when `agents` is not injected, source from the warm, never-blocking
+// snapshot (getAgentsCached) instead of a synchronous execFileSync. This is the
+// scheduler/autotune hot path — it must NOT spawn a subprocess on the event loop.
+// Tests inject `agents` directly (pure logic) and are unaffected.
+export function countBackgroundAgents({ agents, now } = {}) {
+  const list = agents ?? getAgentsCached(now ? { now } : {}).agents;
   return list.filter((a) => a?.kind === "background").length;
 }
 
