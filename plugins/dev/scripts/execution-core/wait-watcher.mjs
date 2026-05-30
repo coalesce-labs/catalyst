@@ -9,7 +9,7 @@
 // bounded. Every dependency is injected (the startDaemon/Reaper test idiom) so
 // the tick is fully unit-testable with a fake clock + fake emitter.
 
-import { listClaudeAgents } from "./claude-agents.mjs";
+import { getAgentsCached } from "./claude-agents.mjs";
 import { indexSignalsByBgJobId } from "./cli/sessions.mjs";
 import { createTranscriptTracker } from "./transcript-tail.mjs";
 import { findTranscript, defaultProjectsDir } from "./session-recency.mjs";
@@ -31,7 +31,7 @@ function realClock() {
  * @param {object} opts
  * @param {object}   [opts.clock=realClock()]                  fake-clock seam
  * @param {number}   [opts.intervalMs=EVENT_DEBOUNCE_MS]       tick cadence
- * @param {Function} [opts.listAgents=listClaudeAgents]        live-session enumerator
+ * @param {Function} [opts.listAgents]                        live-session enumerator (default: warm getAgentsCached snapshot, CTL-731)
  * @param {Function} [opts.indexSignals=indexSignalsByBgJobId] signal join (ticket/phase)
  * @param {Function} [opts.makeTracker]                        per-session tracker factory
  * @param {Function} [opts.findTranscriptFn=findTranscript]    transcript locator
@@ -41,7 +41,10 @@ function realClock() {
 export function startWaitWatcher({
   clock = realClock(),
   intervalMs = EVENT_DEBOUNCE_MS,
-  listAgents = listClaudeAgents,
+  // CTL-731: read the warm, never-blocking snapshot instead of a synchronous
+  // execFileSync per wait-watcher tick (this runs on the shared daemon event
+  // loop, so a sync `claude agents --json` here starves all timers).
+  listAgents = () => getAgentsCached().agents,
   indexSignals = indexSignalsByBgJobId,
   makeTracker = (p) => createTranscriptTracker({ path: p }),
   findTranscriptFn = findTranscript,

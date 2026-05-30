@@ -27,7 +27,13 @@
 
 import { watch, openSync, fstatSync, readSync, closeSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
-import { getEventLogPath, RECONCILE_INTERVAL_MS, EVENT_DEBOUNCE_MS, log } from "./config.mjs";
+import {
+  getEventLogPath,
+  RECONCILE_INTERVAL_MS,
+  EVENT_DEBOUNCE_MS,
+  TAILER_POLL_INTERVAL_MS,
+  log,
+} from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
@@ -66,6 +72,12 @@ export function parseStateChangedEvent(event) {
     identifier,
     teamKey: payload.teamKey ?? null,
     toState: payload.toState ?? null,
+    // CTL triage-entry fix (Phase 0): carry the projection-fold fields so a
+    // →status transition can be folded into the eligible set from the event
+    // payload (no Linear poll), the same way handleIssueUpdatedEvent does.
+    toLabels: payload.toLabels ?? null,
+    toProject: payload.toProject ?? null,
+    toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
   };
 }
 
@@ -268,6 +280,14 @@ export function handleStateChangedEvent(
     cache, // CTL-634: write-through target shared with the scheduler read path
     applyTriageStatus = defaultApplyTriageStatus, // CTL-704: injectable for tests
     appendEvent = defaultAppendEvent, // CTL-704: injectable for tests
+    // CTL-731 Phase 00: fold-only mode for the boot/large-gap catch-up. When true,
+    // apply only the idempotent projection folds (cache.set + upsert/removeTicket)
+    // and SKIP every dispatch side-effect (dispatchTriage, abortWorker). The boot
+    // gap-drain re-reads events already acted on before the restart; re-running
+    // their spawns both blocks startMonitor (synchronous `claude --bg` / linearis
+    // bursts) and double-dispatches triage. Live side-effects fire only on the
+    // steady-state poll/watch path (foldOnly defaults to false).
+    foldOnly = false,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -286,13 +306,17 @@ export function handleStateChangedEvent(
       // →Triage — one-shot dispatch the triage phase agent. NOT the eligible
       // set: a Triage ticket is never scheduler-pulled. Idempotent downstream
       // (phase-agent-dispatch no-ops an existing signal file).
-      dispatchTriage(parsed.identifier, {
-        dispatch,
-        orchDir,
-        applyTriageStatus,
-        appendEvent,
-        orchId: parsed.identifier,
-      });
+      // CTL-731: skipped during the fold-only boot drain (no eligible fold here,
+      // so the entire branch is a no-op when foldOnly).
+      if (!foldOnly) {
+        dispatchTriage(parsed.identifier, {
+          dispatch,
+          orchDir,
+          applyTriageStatus,
+          appendEvent,
+          orchId: parsed.identifier,
+        });
+      }
     } else if (!parsed.toState || parsed.toState === query.status) {
       // →Ready (or an unknown new state). CTL-625: a confirmed →Ready
       // (toState === query.status) for a ticket with no prior triage.json means
@@ -309,7 +333,23 @@ export function handleStateChangedEvent(
       // fold (wired below readNewEvents) handles label/project/priority changes
       // incrementally without a poll. The 10-min reconcile remains the
       // missed-webhook backstop.
+      //
+      // CTL triage-entry fix (Phase 0): a →status (Todo) transition arrives as a
+      // `state_changed` event, which handleIssueUpdatedEvent ignores (it only
+      // folds `linear.issue.updated`). Without this fold a ticket entering Todo
+      // is invisible to the scheduler until the 10-min reconcile. Fold it into
+      // the eligible projection here, straight from the event payload (no Linear
+      // poll), mirroring handleIssueUpdatedEvent's upsert.
+      if (parsed.toState === query.status && ticketMatchesQuery(query, parsed)) {
+        upsertTicket(query.team, {
+          identifier: parsed.identifier,
+          state: parsed.toState,
+          priority: parsed.toPriority,
+          project: parsed.toProject ?? null,
+        });
+      }
       if (
+        !foldOnly && // CTL-731: boot drain folds eligibility only, no dispatch
         parsed.toState === query.status &&
         orchDir &&
         !hasTriageArtifact(orchDir, parsed.identifier)
@@ -338,7 +378,11 @@ export function handleStateChangedEvent(
       // non-member is a safe no-op. abortWorker no-ops when the ticket was
       // never dispatched.
       removeTicket(p.team, parsed.identifier);
-      if (orchDir) {
+      // CTL-731: removeTicket is an idempotent fold (kept on the boot drain);
+      // abortWorker is a side-effect (kill + worktree teardown) — skip it during
+      // the fold-only catch-up so a restart does not re-abort a worker for a
+      // drag-out already handled before the downtime.
+      if (!foldOnly && orchDir) {
         abortWorker(orchDir, parsed.identifier, { repoRoot: p.repoRoot });
       }
     } else {
@@ -458,6 +502,9 @@ let lastLogPath = "";
 let leftoverBuf = "";
 let watcher = null;
 let reconcileTimer = null;
+// CTL triage-entry fix (Phase 0): the poll timer that drains the event log when
+// fs.watch fails to fire (the common case for cross-process appends on macOS).
+let tailerPollTimer = null;
 let tailerOpts = {};
 
 // fileSizeOrZero — current byte size of a file, or 0 when it does not exist
@@ -502,7 +549,13 @@ export function seedTailerFromCursor() {
 //
 // Exported for deterministic test drives + the CTL-539 startup gap-drain; the
 // index.mjs barrel deliberately does not re-export it.
-export function readNewEvents() {
+//
+// CTL-731 Phase 00: `foldOnly` (default false) is threaded to the per-event
+// handlers for the boot/large-gap catch-up — it applies projection folds only
+// (no dispatchTriage / abortWorker / onComment side-effects). The steady-state
+// poll/watch path calls readNewEvents() with no args (foldOnly false), so live
+// events still fire their full side-effects.
+export function readNewEvents({ foldOnly = false } = {}) {
   const logPath = getEventLogPath();
   if (logPath !== lastLogPath) {
     lastLogPath = logPath;
@@ -543,9 +596,13 @@ export function readNewEvents() {
       } catch {
         continue; // skip a malformed line, keep tailing
       }
-      handleStateChangedEvent(event, tailerOpts);
-      handleIssueUpdatedEvent(event, tailerOpts);   // CTL-681
-      handleCommentCreatedEvent(event, tailerOpts); // CTL-681
+      // CTL-731: handleStateChangedEvent gates its dispatch side-effects on
+      // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
+      // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
+      // the fold-only boot drain so replayed comments don't re-fire subscribers.
+      handleStateChangedEvent(event, { ...tailerOpts, foldOnly });
+      handleIssueUpdatedEvent(event, tailerOpts); // CTL-681
+      handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
     // log file not yet created or a transient read error — best-effort
@@ -577,6 +634,7 @@ export function startMonitor({
   exec,
   debounceMs = EVENT_DEBOUNCE_MS,
   reconcileIntervalMs = RECONCILE_INTERVAL_MS,
+  tailerPollMs = TAILER_POLL_INTERVAL_MS, // CTL triage-entry fix (Phase 0)
   resumeFromCursor = true,
   orchDir,
   dispatch,
@@ -595,11 +653,27 @@ export function startMonitor({
   sweepMissingTriage({ orchDir, dispatch }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
-    readNewEvents(); // drain the cursor→EOF downtime gap immediately
+    // CTL-731 Phase 00: drain the cursor→EOF downtime gap FOLD-ONLY. Pre-CTL-731
+    // this synchronous drain re-ran dispatchTriage/applyTriageStatus
+    // (spawnSync claude --bg + linearis) for every gap event, blocking
+    // startMonitor for ~20-30s AND double-dispatching triage for events already
+    // acted on before the restart. Fold-only advances the cursor + applies the
+    // idempotent projection folds; live side-effects resume on the poll/watch
+    // path below. reconcileAll (above) is the authoritative eligible rebuild and
+    // sweepMissingTriage (above) the intended boot triage backstop.
+    readNewEvents({ foldOnly: true });
   } else {
     seedTailerAtEof();
   }
   startTailing();
+  // CTL triage-entry fix (Phase 0): poll-drain the event log. fs.watch
+  // (startTailing) is unreliable for cross-process appends, so without this the
+  // tailer's fast path (triage dispatch + eligible fold) never fires on live
+  // webhooks — new work waits for the 10-min reconcile or a restart. The poll
+  // is cheap (readNewEvents reads only bytes past the durable cursor).
+  if (tailerPollMs > 0) {
+    tailerPollTimer = setInterval(() => readNewEvents(), tailerPollMs);
+  }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
     sweepMissingTriage({ orchDir, dispatch }); // CTL-711: catch tickets that appeared between webhooks
@@ -613,6 +687,10 @@ export function stopMonitor() {
   if (reconcileTimer) {
     clearInterval(reconcileTimer);
     reconcileTimer = null;
+  }
+  if (tailerPollTimer) {
+    clearInterval(tailerPollTimer);
+    tailerPollTimer = null;
   }
   watcher?.close();
   watcher = null;

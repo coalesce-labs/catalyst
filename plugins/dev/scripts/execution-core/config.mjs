@@ -115,6 +115,16 @@ export const RECONCILE_INTERVAL_MS =
 export const EVENT_DEBOUNCE_MS =
   Number(process.env.EXECUTION_CORE_DEBOUNCE_MS) || 5_000;
 
+// CTL triage-entry fix (Phase 0): poll interval for draining the unified event
+// log. The fs.watch tailer (startTailing) is unreliable for cross-process
+// appends on macOS — it often never fires, leaving live webhook events
+// undrained until the 10-min reconcile or a restart. This short poll calls
+// readNewEvents() deterministically so new-work discovery is near-instant.
+// readNewEvents is cheap (fstat + read of only the bytes appended since the
+// durable cursor) and idempotent, so a tight interval is safe.
+export const TAILER_POLL_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_TAILER_POLL_MS) || 2_000;
+
 // CTL-533: a worker whose signal has not been updated within this window is
 // "stale" — a precondition for the Step G stalled scan to consult git/PR
 // state. A stale signal alone is never stall evidence (CTL-32). Default 15 min,

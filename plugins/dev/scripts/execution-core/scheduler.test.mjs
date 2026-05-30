@@ -1390,6 +1390,84 @@ describe("schedulerTick — new-work pull", () => {
       { orchDir, ticket: "CTL-X", phase: "research" },
     ]);
   });
+
+  // ── CTL-731 Phase 00: staleness-gate new-work dispatch ──
+  // A stale/never-populated liveness snapshot means we cannot trust the live
+  // background count, so the scheduler HOLDS new-work admission (freeSlots → 0)
+  // rather than over-spawning on an unknown count. Advancement of in-flight
+  // phases is independent of the live count and must continue.
+  test("a stale liveness snapshot holds new-work dispatch (freeSlots → 0)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-9",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // would otherwise show 3 free slots
+      livenessIsFresh: () => false, // but the snapshot is stale/cold → hold
+    });
+    expect(dispatch.calls).toHaveLength(0);
+    expect(r.dispatched).toEqual([]);
+  });
+
+  test("a stale liveness snapshot still advances in-flight phases (advancement is count-independent)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done"); // should advance to research
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-X",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      livenessIsFresh: () => false, // stale → new-work held, advancement unaffected
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.dispatched).toEqual([]); // CTL-X held by the staleness gate
+  });
+
+  test("a fresh liveness snapshot (default) dispatches new work normally", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch();
+    const eligible = [
+      {
+        identifier: "CTL-9",
+        priority: 1,
+        createdAt: "x",
+        state: "Todo",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [] },
+      },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      livenessIsFresh: () => true, // explicit; also the default
+    });
+    expect(r.dispatched).toEqual(["CTL-9"]);
+  });
 });
 
 // ── CTL-706: per-project cap + reserve wired into schedulerTick ──
