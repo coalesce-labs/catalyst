@@ -271,6 +271,55 @@ assert_eq "skipped" "$NEW_STATUS" "signal file status updated to skipped"
 assert_eq "true" "$HAS_COMPLETED" "skipped is terminal → completedAt set"
 assert_eq "abc" "$BG" "bg_job_id preserved (memory: project_phase_monitor_deploy_signal_overwrite)"
 
+# ─── CTL-736 Phase 1: fencing check (stale generation bows out) ──────────────
+
+echo ""
+echo "Test 12 (CTL-736): stale generation (mine < signal) bows out — no event, no signal write"
+fresh_env t12
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"ticket":"CTL-100","phase":"implement","status":"running","generation":3}' >"$SIGNAL"
+CATALYST_GENERATION=2 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+RC=$?
+assert_eq "0" "$RC" "stale-generation emit exits 0 (clean bow-out)"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "stale-generation emit does NOT flip the signal (still running)"
+LINE=$(read_event_line)
+assert_eq "" "$LINE" "stale-generation emit writes no phase event"
+
+echo ""
+echo "Test 13 (CTL-736): current generation (mine == signal) proceeds normally"
+fresh_env t13
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"ticket":"CTL-100","phase":"implement","status":"running","generation":2}' >"$SIGNAL"
+CATALYST_GENERATION=2 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "current-generation emit flips the signal to done"
+EVENT_NAME=$(read_event_line | jq -r '.attributes."event.name"')
+assert_eq "phase.implement.complete.CTL-100" "$EVENT_NAME" "current-generation emit writes the complete event"
+
+echo ""
+echo "Test 14 (CTL-736): a higher generation than the signal proceeds (never a false bow-out)"
+fresh_env t14
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"ticket":"CTL-100","phase":"implement","status":"running","generation":2}' >"$SIGNAL"
+CATALYST_GENERATION=3 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "mine > signal still emits (fences only on mine < signal)"
+
+echo ""
+echo "Test 15 (CTL-736): no CATALYST_GENERATION (legacy worker) proceeds — fail-open"
+fresh_env t15
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"ticket":"CTL-100","phase":"implement","status":"running","generation":5}' >"$SIGNAL"
+unset CATALYST_GENERATION
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "unfenced worker (no CATALYST_GENERATION) still emits"
+
+echo ""
+echo "Test 16 (CTL-736): legacy signal without a generation field proceeds — fail-open"
+fresh_env t16
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"ticket":"CTL-100","phase":"implement","status":"running"}' >"$SIGNAL"
+CATALYST_GENERATION=2 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "signal without generation field still emits (no fence data)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

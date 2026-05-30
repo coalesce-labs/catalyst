@@ -149,6 +149,35 @@ if [[ $PHASE == *.* ]]; then
 	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
 fi
 
+# ─── 0. CTL-736 Phase 1: fencing check (stale generation bows out) ───────────
+#
+# A worker carries its dispatch generation in CATALYST_GENERATION. If the phase
+# signal has since advanced (a revive claimed a higher generation — this worker
+# is a false-dead-revived duplicate), this worker must NOT write an outcome: a
+# stale `complete`/`failed` would overwrite the live worker's signal or post a
+# duplicate Linear mirror. This is the STRUCTURAL replacement for the runtime
+# `bg_job_id != mine` orphan-bow-out heuristics scattered across the phase
+# skills (see the memory entries on duplicate-worker disambiguation).
+#
+# Pure bash + jq (no node/bun startup here, mirroring the dispatch path). The
+# semantics MUST match execution-core/claim.mjs `isCurrentGeneration`: bow out
+# ONLY when both generations are numeric AND mine < signal; on any missing /
+# non-numeric value, proceed (fail-open) so legacy workers and unfenced
+# dispatches are unaffected.
+if [[ -n ${CATALYST_GENERATION:-} && -n $ORCH_DIR ]]; then
+	_FENCE_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	if [[ -f $_FENCE_SIGNAL ]]; then
+		_SIG_GEN=$(jq -r '.generation // empty' "$_FENCE_SIGNAL" 2>/dev/null || echo "")
+		# Only act when BOTH are plain integers; anything else fails open.
+		if [[ $CATALYST_GENERATION =~ ^[0-9]+$ && $_SIG_GEN =~ ^[0-9]+$ ]]; then
+			if ((CATALYST_GENERATION < _SIG_GEN)); then
+				echo "phase-agent-emit-complete: stale-generation-bow-out — mine=${CATALYST_GENERATION} < signal=${_SIG_GEN} for ${TICKET}/${PHASE}; not emitting" >&2
+				exit 0
+			fi
+		fi
+	fi
+fi
+
 # ─── 1. Emit canonical event ────────────────────────────────────────────────
 
 EVENT_NAME="phase.${PHASE}.${STATUS}.${TICKET}"
