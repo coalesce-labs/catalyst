@@ -11,6 +11,7 @@ type Worker = {
   name: string; ticket: string; tickets: string[]; phase: string; status: string;
   activeState: ActiveState; working: boolean; lastActiveMs: number | null;
   repo: string; team: string; runtimeMs: number | null; costUSD: number | null;
+  sessionId?: string;
 };
 type Ticket = {
   id: string; title: string; type: string; repo: string; team: string;
@@ -236,6 +237,11 @@ function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
         <ActivityDot state={w.activeState} fallback={accent} />
         {info && <PriorityIcon p={info.priority} />}
         <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>{w.ticket}</span>
+        {w.sessionId && (
+          <Tooltip><TooltipTrigger asChild>
+            <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, padding: "0 5px", borderRadius: 5 }}>{w.sessionId.slice(0, 7)}</span>
+          </TooltipTrigger><TooltipContent>worker {w.sessionId} · {w.name}</TooltipContent></Tooltip>
+        )}
         {w.tickets.length > 1 && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>+{w.tickets.length - 1}</span>}
         <span style={{ flex: 1 }} />
         {attempt > 1 && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.yellow }}>retry #{attempt}</span>}
