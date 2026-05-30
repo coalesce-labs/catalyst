@@ -48,17 +48,40 @@ describe("countReviveEvents", () => {
     expect(countReviveEvents({ ticket: "CTL-9", path: join(dir, "events.jsonl") })).toBe(0);
   });
 
-  test("counts only the matching ticket + phase + action", () => {
+  test("counts the matching ticket + revive action across ALL phases (CTL-735)", () => {
+    // CTL-604 made revive phase-agnostic (triage/research/plan/verify, not just
+    // implement). The per-ticket budget MUST count every phase's revive, else a
+    // non-implement phase never exhausts MAX_REVIVES and slow-loops forever (the
+    // triage/verify storm seen at the CTL-731 re-enable).
     const { path } = tempLog([
-      makeEvent({ ticket: "CTL-9", ts: "2026-05-24T00:00:00Z" }), // match
-      makeEvent({ ticket: "CTL-9", ts: "2026-05-24T00:01:00Z" }), // match
-      makeEvent({ ticket: "CTL-10", ts: "2026-05-24T00:00:00Z" }), // diff ticket
-      makeEvent({ ticket: "CTL-9", action: "reclaim", ts: "2026-05-24T00:02:00Z" }), // diff action
-      makeEvent({ ticket: "CTL-9", phase: "plan", ts: "2026-05-24T00:03:00Z" }), // diff phase
+      makeEvent({ ticket: "CTL-9", phase: "implement", ts: "2026-05-24T00:00:00Z" }), // match
+      makeEvent({ ticket: "CTL-9", phase: "implement", ts: "2026-05-24T00:01:00Z" }), // match
+      makeEvent({ ticket: "CTL-10", ts: "2026-05-24T00:00:00Z" }), // diff ticket — excluded
+      makeEvent({ ticket: "CTL-9", action: "reclaim", ts: "2026-05-24T00:02:00Z" }), // diff action — excluded
+      makeEvent({ ticket: "CTL-9", phase: "plan", ts: "2026-05-24T00:03:00Z" }), // plan revive — NOW counts
       "not json", // skipped
       "", // skipped (empty)
     ]);
-    expect(countReviveEvents({ ticket: "CTL-9", path })).toBe(2);
+    expect(countReviveEvents({ ticket: "CTL-9", path })).toBe(3);
+  });
+
+  test("counts triage and verify revives (phase-agnostic budget) (CTL-735)", () => {
+    const { path } = tempLog([
+      makeEvent({ ticket: "CTL-728", phase: "triage", ts: "2026-05-24T00:00:00Z" }),
+      makeEvent({ ticket: "CTL-728", phase: "triage", ts: "2026-05-24T00:01:00Z" }),
+      makeEvent({ ticket: "CTL-726", phase: "verify", ts: "2026-05-24T00:00:00Z" }),
+    ]);
+    expect(countReviveEvents({ ticket: "CTL-728", path })).toBe(2);
+    expect(countReviveEvents({ ticket: "CTL-726", path })).toBe(1);
+  });
+
+  test("does not let a similar ticket id bleed across (suffix-safe)", () => {
+    const { path } = tempLog([
+      makeEvent({ ticket: "CTL-728", phase: "triage", ts: "2026-05-24T00:00:00Z" }),
+      makeEvent({ ticket: "CTL-7281", phase: "triage", ts: "2026-05-24T00:01:00Z" }),
+      makeEvent({ ticket: "CTL-1728", phase: "triage", ts: "2026-05-24T00:02:00Z" }),
+    ]);
+    expect(countReviveEvents({ ticket: "CTL-728", path })).toBe(1);
   });
 
   test("respects orchId filter when set", () => {

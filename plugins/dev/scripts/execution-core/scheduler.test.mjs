@@ -1469,13 +1469,16 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-9"]);
   });
 
-  // CTL-731: a COLD/never-populated snapshot must NOT bind its empty agents list
-  // into the reclaim liveness — doing so would resolve every live worker to
-  // "absent" (agentForShortId over []) and mass-false-revive on the first
-  // post-boot tick. Cold → reclaim falls back to its own per-worker real read.
-  test("a cold liveness snapshot does NOT bind reclaim liveness (no boot mass-false-revive)", () => {
+  // CTL-731: a COLD/never-populated snapshot with a WIRED seam (production) must
+  // SKIP the whole reclaim sweep for that one boot tick (reclaimColdSkip) — NOT
+  // bind its empty agents list (which would resolve every live worker to "absent"
+  // and mass-false-revive) AND not fall back to a per-worker SYNC `claude agents`
+  // read for every worker (N synchronous spawns that re-starve the loop, the very
+  // failure mode Phase 00 removed). The snapshot warms within a sub-second; the
+  // next (warm) tick reclaims against the shared list.
+  test("a cold liveness snapshot SKIPS the reclaim sweep (no boot mass-false-revive, no per-worker re-starve)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the reclaim sweep visits
+    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the sweep would visit
     const reclaimOpts = [];
     const reclaimDeadWork = (_orchDir, _sig, opts) => {
       reclaimOpts.push(opts);
@@ -1489,8 +1492,29 @@ describe("schedulerTick — new-work pull", () => {
       livenessSnapshot: () => ({ populated: false, agents: [], isFresh: false }),
       livenessIsFresh: () => false,
     });
+    // cold + wired seam → the entire sweep is deferred; reclaimDeadWork never runs
+    expect(reclaimOpts.length).toBe(0);
+  });
+
+  // The skip is gated on a WIRED seam: a null livenessSnapshot (legacy/test
+  // harnesses) keeps the per-worker reclaim path so those callers are unaffected.
+  test("a null liveness seam still runs the per-worker reclaim sweep (reclaimColdSkip off)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-1", "implement", "running");
+    const reclaimOpts = [];
+    const reclaimDeadWork = (_orchDir, _sig, opts) => {
+      reclaimOpts.push(opts);
+      return "noop";
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      reclaimDeadWork,
+      liveBackgroundCount: () => 1,
+      livenessSnapshot: null, // no seam → reclaimColdSkip is false
+      livenessIsFresh: () => false,
+    });
     expect(reclaimOpts.length).toBeGreaterThan(0);
-    // cold → no injected liveness binding (reclaim uses its default real read)
     expect(reclaimOpts.every((o) => o.liveness === undefined)).toBe(true);
   });
 

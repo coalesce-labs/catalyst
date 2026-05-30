@@ -1437,27 +1437,28 @@ export function reclaimDeadWorkIfPossible(
   // reach here (the busy branch above returns first), so the revive/re-dispatch
   // path below is correct for both reclaim-eligible cases.
 
-  // CTL-735 Guard 1 — post-(re)dispatch grace window: the missing analog of the
-  // idle-confirmation streak for `absent`. A just-(re)dispatched worker has a NEW
-  // bg_job_id that a freshly-spawned `claude --bg` has not yet registered in the
-  // eventually-consistent `claude agents` snapshot (seconds normally, slower under
-  // load), so `liveness` reports `absent` — looking exactly like a crash. Before
-  // CTL-735 the sweep treated that as unambiguous death and revived again; at the
-  // de-starved ~2-4s tick rate (CTL-731) it re-revived each worker every tick →
-  // the revive storm (5→18→62→74 workers, load 72). Defer reviving an `absent`
-  // worker whose signal was (re)dispatched within reviveGraceMs. Placed inside
-  // branch (C) (work NOT done) so a just-completed worker still reclaims promptly
-  // via branch (B) above — only the storm-causing RE-REVIVE is deferred.
-  // Self-clearing: once startedAt ages past the window a still-absent worker is
-  // genuinely dead and proceeds to revive below. `idle` is unaffected (it has its
-  // own confirmation streak); a signal with no parseable startedAt (legacy) falls
-  // through to the pre-CTL-735 revive behaviour.
-  if (live === "absent") {
+  // CTL-735 Guard 1 — post-(re)dispatch grace window. A just-(re)dispatched worker
+  // needs time to start working before the sweep judges it dead. It can present as
+  // EITHER `absent` (a freshly-spawned `claude --bg` not yet registered in the
+  // eventually-consistent `claude agents` snapshot) OR `idle` (registered but
+  // waiting for its first turn — common for triage/verify, which don't go `busy`
+  // immediately like implement does). Before CTL-735 the sweep revived an absent
+  // worker as dead; the short idle-confirmation streak (~2 ticks) re-revived an
+  // idle one every ~20-30s. Both produced the de-starved revive storm (5→18→62→74
+  // workers, load 72; live re-enable showed the idle path storm triage/verify).
+  // Defer reviving an `absent` OR `idle` worker whose signal was (re)dispatched
+  // within reviveGraceMs. `busy` is already handled above (a working worker is
+  // never reclaimed). Placed inside branch (C) (work NOT done) so a just-completed
+  // worker still reclaims promptly via branch (B). Self-clearing: once startedAt
+  // ages past the window the worker is judged on its real liveness and proceeds to
+  // revive below. A signal with no parseable startedAt (legacy) falls through to
+  // the pre-CTL-735 revive behaviour.
+  if (live === "absent" || live === "idle") {
     const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
     if (Number.isFinite(startedAtMs) && now() - startedAtMs < reviveGraceMs) {
       log.info(
-        { ticket, phase, prevBgJobId, sinceDispatchMs: now() - startedAtMs, reviveGraceMs },
-        "ctl-735: absent worker within post-dispatch grace window — revive deferred (revive-pending)",
+        { ticket, phase, prevBgJobId, live, sinceDispatchMs: now() - startedAtMs, reviveGraceMs },
+        "ctl-735: worker within post-dispatch grace window — revive deferred (revive-pending)",
       );
       return "revive-pending";
     }

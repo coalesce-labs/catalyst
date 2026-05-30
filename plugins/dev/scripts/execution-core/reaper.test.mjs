@@ -6,7 +6,13 @@ import {
   ticketFromCwd,
   groupBackgroundSessionsByTicket,
   CLEANUP_GRACE_MS,
+  defaultAgents,
 } from "./reaper.mjs";
+import {
+  refreshAgents,
+  getAgentsCached,
+  resetLivenessCache,
+} from "./claude-agents.mjs";
 
 function silentLog() {
   return { info: () => {}, warn: () => {}, error: () => {} };
@@ -18,6 +24,36 @@ function agentsFixture(rows = []) {
 
 beforeEach(() => {
   delete process.env.CLAUDE_CODE_SESSION_ID;
+});
+
+// CTL-731 de-starvation: the reaper's default agent source must read through the
+// warm, never-blocking getAgentsCached snapshot — NOT a synchronous
+// execFileSync("claude agents --json") on the shared daemon loop (the starvation
+// source). These lock in that defaultAgents delegates to the cached snapshot.
+describe("defaultAgents (CTL-731 non-blocking agent source)", () => {
+  beforeEach(() => resetLivenessCache());
+
+  it("returns the warm getAgentsCached snapshot, never spawning synchronously", async () => {
+    const rows = [
+      { sessionId: "11111111-aaaa-bbbb-cccc-dddddddddddd", status: "idle", kind: "background" },
+      { sessionId: "22222222-aaaa-bbbb-cccc-dddddddddddd", status: "busy", kind: "background" },
+    ];
+    // Populate the async snapshot via the same async seam the scheduler uses —
+    // no real subprocess, and crucially no SYNC spawn.
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(rows) });
+
+    const fromCache = getAgentsCached().agents;
+    const fromReaper = await defaultAgents();
+
+    expect(fromReaper).toEqual(rows);
+    expect(fromReaper).toEqual(fromCache);
+  });
+
+  it("serves [] from a cold snapshot rather than blocking on a read", async () => {
+    // Cold cache (just reset) → getter returns [] synchronously and only fires a
+    // fire-and-forget refresh; defaultAgents must mirror that, never await a spawn.
+    expect(await defaultAgents()).toEqual([]);
+  });
 });
 
 describe("Reaper._handleBgReap", () => {
