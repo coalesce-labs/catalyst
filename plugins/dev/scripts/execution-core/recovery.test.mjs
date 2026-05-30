@@ -638,9 +638,39 @@ describe("reclaimDeadWorkIfPossible — CTL-735 post-revive grace window", () =>
     expect(reviveDispatch.calls.length).toBe(1);
   });
 
-  test("grace window applies ONLY to absent — a busy worker is still suppressed as before", () => {
-    // A busy worker within the window must NOT become 'revive-pending'; it keeps
-    // its CTL-662 'alive-busy-suppressed' verdict (the grace guard is absent-only).
+  test("idle worker (re)dispatched WITHIN the grace window → 'revive-pending' (registered, not yet working)", () => {
+    // A freshly-revived worker commonly registers as `idle` (waiting for its
+    // first turn) before it goes `busy`. The short idle-confirmation streak
+    // (~2 ticks) would otherwise re-revive it every ~20-30s — the triage/verify
+    // storm seen at re-enable. The grace window must cover idle too, not just
+    // absent. idleConfirmTicks/bumpIdleStreak injected so the worker reaches
+    // branch (C) on the first idle observation (where the grace check lives).
+    const reviveDispatch = recorder({ code: 0 });
+    const seams = reviveSeams(reviveDispatch);
+    seams.liveness = () => "idle";
+    seams.idleConfirmTicks = 1;
+    seams.bumpIdleStreak = () => 1;
+    seams.resetIdleStreak = () => {};
+    const sig = implementSignal({ startedAt: new Date(NOW - 10_000).toISOString() });
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
+    expect(r).toBe("revive-pending");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("idle worker PAST the grace window → revives (genuinely idle-done, not just-started)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const seams = reviveSeams(reviveDispatch);
+    seams.liveness = () => "idle";
+    seams.idleConfirmTicks = 1;
+    seams.bumpIdleStreak = () => 1;
+    seams.resetIdleStreak = () => {};
+    const sig = implementSignal({ startedAt: new Date(NOW - 100_000).toISOString() });
+    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("a busy worker is suppressed as alive (busy is handled before the grace window)", () => {
     const reviveDispatch = recorder({ code: 0 });
     const seams = reviveSeams(reviveDispatch);
     seams.liveness = () => "busy";

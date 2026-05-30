@@ -36,7 +36,14 @@ import { statSync } from "node:fs";
 import { scanEventsChunked } from "./event-tail.mjs";
 import { getEventLogPath } from "./config.mjs";
 
-const REVIVE_NAME_PREFIX = "phase.implement.revive.";
+// CTL-735: revive events are phase-agnostic — `phase.<phase>.revive.<ticket>`.
+// CTL-604 extended revive to triage/research/plan/verify, but this scan still
+// matched only `phase.implement.revive.` — so the per-ticket budget (MAX_REVIVES)
+// and the storm-breaker never counted non-implement revives, and those phases
+// slow-looped forever (the triage/verify storm at the CTL-731 re-enable). Match
+// ANY single phase segment. (`[^.]+` is one segment, so this does NOT match
+// `phase.remediate.complete.` or `phase.revive.reap-requested`.)
+const REVIVE_NAME_RE = /^phase\.[^.]+\.revive\./;
 const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
 
 // Per-path incremental index. We retain ONLY the two event families the counters
@@ -46,7 +53,7 @@ const _index = new Map(); // path -> { cursor, leftover, events: [{ name, orchId
 function isRelevant(name) {
   return (
     typeof name === "string" &&
-    (name.startsWith(REVIVE_NAME_PREFIX) || name.startsWith(REMEDIATE_NAME_PREFIX))
+    (REVIVE_NAME_RE.test(name) || name.startsWith(REMEDIATE_NAME_PREFIX))
   );
 }
 
@@ -97,9 +104,15 @@ function refreshIndex(path) {
 // full `event.name`, with the optional orchId / since filters applied exactly
 // as the pre-CTL-673 whole-file scan did.
 function countByExactName(target, { orchId, since, path }) {
+  return countByMatch((name) => name === target, { orchId, since, path });
+}
+
+// countByMatch — like countByExactName but matches names via a predicate, so the
+// phase-agnostic revive counter (CTL-735) can match `phase.<any>.revive.<ticket>`.
+function countByMatch(nameMatches, { orchId, since, path }) {
   let n = 0;
   for (const ev of refreshIndex(path).events) {
-    if (ev.name !== target) continue;
+    if (typeof ev.name !== "string" || !nameMatches(ev.name)) continue;
     if (orchId && ev.orchId !== orchId) continue;
     if (since && ev.ts && ev.ts < since) continue;
     n++;
@@ -113,7 +126,16 @@ function countByExactName(target, { orchId, since, path }) {
 // match is tolerant of a missing attribute on either side (defensive default).
 export function countReviveEvents({ ticket, orchId, since, path = getEventLogPath() } = {}) {
   if (!ticket) throw new Error("countReviveEvents: ticket required");
-  return countByExactName(`${REVIVE_NAME_PREFIX}${ticket}`, { orchId, since, path });
+  // CTL-735: match `phase.<any-phase>.revive.<ticket>` (the suffix uniquely
+  // identifies a revive for this exact ticket — `.revive.CTL-728` cannot match
+  // `.revive.CTL-7281`/`.revive.CTL-1728`). Phase-agnostic so every phase's
+  // revive consumes the per-ticket MAX_REVIVES budget, not just implement.
+  const suffix = `.revive.${ticket}`;
+  return countByMatch((name) => name.startsWith("phase.") && name.endsWith(suffix), {
+    orchId,
+    since,
+    path,
+  });
 }
 
 // countRemediateCycles — number of phase.remediate.complete.<ticket> envelopes
@@ -141,7 +163,7 @@ export function countDistinctRevivingTickets({
   const cutoff = now() - windowMs;
   const seen = new Set();
   for (const ev of refreshIndex(path).events) {
-    if (typeof ev.name !== "string" || !ev.name.startsWith(REVIVE_NAME_PREFIX)) continue;
+    if (typeof ev.name !== "string" || !REVIVE_NAME_RE.test(ev.name)) continue; // CTL-735: any phase
     const tsMs = Date.parse(ev.ts || "");
     if (!Number.isFinite(tsMs) || tsMs < cutoff) continue;
     if (ev.label) seen.add(ev.label);
