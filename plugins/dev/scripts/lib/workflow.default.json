@@ -6,7 +6,6 @@
   "linearMirror": true,
   "entryStep": "research",
   "terminalStep": "monitor-deploy",
-  "defaults": { "model": "opus", "effort": "medium" },
   "steps": [
     { "id": "triage",         "rank": 0, "preemptable": false, "linearKey": null,          "next": "research" },
     { "id": "research",       "rank": 1, "linearKey": "research",   "next": "plan" },

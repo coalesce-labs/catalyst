@@ -1448,6 +1448,48 @@ assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo
 	"loser writes no signal file (bows out before the signal write)"
 assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
 
+# ─── Test 44 (CTL descriptor v1.1): plan dispatch threads per-step launch levers ───
+# A large-scope ticket fires the plan step's rule: --effort max + an
+# --append-system-prompt carrying the /workflows directive + --model opusplan.
+echo ""
+echo "Test 44 (descriptor v1.1): large ticket → plan launches with effort:max + /workflows postamble + model:opusplan"
+fresh_env t44
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
+printf '%s\n' '{"estimated_scope":"large","classification":"feature"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase plan --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--effort" "large plan: claude invoked with --effort"
+T44_EFFORT=$(grep -A1 '^--effort$' "$CLAUDE_STUB_LOG" | sed -n '2p')
+assert_eq "max" "$T44_EFFORT" "large plan: --effort value is max"
+assert_contains "$LOG" "--append-system-prompt" "large plan: claude invoked with --append-system-prompt"
+assert_contains "$LOG" "/workflows" "large plan: append-system-prompt carries the /workflows directive"
+assert_contains "$LOG" "opusplan" "large plan: rule overrides model to opusplan"
+
+# ─── Test 45 (CTL descriptor v1.1): small ticket keeps base levers, no escalation ───
+echo ""
+echo "Test 45 (descriptor v1.1): small ticket → plan launches with effort:high, no /workflows, no opusplan"
+fresh_env t45
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
+printf '%s\n' '{"estimated_scope":"small","classification":"feature"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase plan --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+T45_EFFORT=$(grep -A1 '^--effort$' "$CLAUDE_STUB_LOG" | sed -n '2p')
+assert_eq "high" "$T45_EFFORT" "small plan: --effort value is high (step base, no rule)"
+if echo "$LOG" | grep -q "/workflows"; then
+	fail "small plan: must NOT carry the /workflows escalation"
+else
+	pass "small plan: no /workflows escalation"
+fi
+if echo "$LOG" | grep -q "opusplan"; then
+	fail "small plan: must NOT escalate model to opusplan"
+else
+	pass "small plan: model not escalated to opusplan"
+fi
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"

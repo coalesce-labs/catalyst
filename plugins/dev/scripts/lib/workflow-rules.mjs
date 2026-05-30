@@ -159,3 +159,51 @@ export function descriptorStep(descriptor, stepId) {
 export function resolveDescriptorStep(descriptor, stepId, context) {
   return resolveStep(descriptorStep(descriptor, stepId), context);
 }
+
+// ─── CLI: resolve a step's launch levers for phase-agent-dispatch ───
+// One `bun` call, hoisted BEFORE the claim window, FAIL-OPEN: the dispatcher
+// proceeds with today's exact launch (no --effort / --append-system-prompt,
+// default model) if this errors or prints nothing. Reads only the descriptor
+// JSON — never the execution-core lockfile — so it cannot race the CTL-736 claim.
+//   bun workflow-rules.mjs resolve --phase <id> [--ticket id] [--scope s] \
+//     [--priority n] [--verify-verdict v] [--remediate-cycle-count n] [--descriptor path]
+//   → {"model": "opusplan"|null, "effort": "max"|null, "appendSystemPrompt": "…"|null}
+if (import.meta.main) {
+  const argv = process.argv.slice(2);
+  if (argv[0] !== "resolve") {
+    process.stderr.write("usage: workflow-rules.mjs resolve --phase <id> [--ticket id] [--scope s] [--descriptor path]\n");
+    process.exit(2);
+  }
+  const opt = (n, d = null) => {
+    const i = argv.indexOf(`--${n}`);
+    return i >= 0 && i + 1 < argv.length ? argv[i + 1] : d;
+  };
+  const { readFileSync } = await import("node:fs");
+  const descriptorPath = opt("descriptor");
+  const desc = descriptorPath
+    ? JSON.parse(readFileSync(descriptorPath, "utf8"))
+    : (await import("./workflow-descriptor.mjs")).descriptor;
+  const ctx = buildContext({
+    scope: opt("scope") || null,
+    priority: opt("priority") != null ? Number(opt("priority")) : null,
+    verifyVerdict: opt("verify-verdict"),
+    remediateCycleCount: Number(opt("remediate-cycle-count") ?? 0) || 0,
+    ticketId: opt("ticket"),
+  });
+  let resolved = {};
+  try {
+    resolved = resolveDescriptorStep(desc, opt("phase"), ctx);
+  } catch (e) {
+    // unknown/ancillary step or malformed rule → no levers (fail-open). Log for
+    // diagnosis; the dispatcher still launches with today's defaults.
+    process.stderr.write(`workflow-rules resolve: ${e.message}\n`);
+  }
+  const lines = [...(resolved.preamble ?? []), ...(resolved.postamble ?? [])];
+  process.stdout.write(
+    JSON.stringify({
+      model: resolved.model ?? null,
+      effort: resolved.effort ?? null,
+      appendSystemPrompt: lines.length ? lines.join("\n") : null,
+    })
+  );
+}

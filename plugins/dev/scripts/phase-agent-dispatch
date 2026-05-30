@@ -329,7 +329,35 @@ compose_otel_resource_attrs() {
 	printf '%s\n' "$attrs"
 }
 
-# ─── Resolve model: CLI > modelOverrides > models > default ────────────────
+# ─── CTL workflow descriptor v1.1: resolve per-step launch levers ───────────
+# Hoisted BEFORE the claim window (never inside it). ONE fail-open `bun` call to
+# the pure rules resolver — it reads only the descriptor JSON, never the
+# execution-core lockfile, so it cannot race the CTL-736 single-flight claim. On
+# any failure the dispatcher launches with today's EXACT defaults (no
+# --effort/--append-system-prompt, DEFAULT_MODEL). The descriptor model is the
+# innermost default in resolve_model below.
+DESCRIPTOR_MODEL="$DEFAULT_MODEL"
+WORKER_EFFORT=""
+APPEND_SYSTEM_PROMPT=""
+_WF_RULES="${SCRIPT_DIR}/lib/workflow-rules.mjs"
+if [[ -f "$_WF_RULES" ]] && command -v bun >/dev/null 2>&1; then
+	_TRIAGE_JSON="${ORCH_DIR}/workers/${TICKET}/triage.json"
+	_TRIAGE_SCOPE=""
+	[[ -f "$_TRIAGE_JSON" ]] &&
+		_TRIAGE_SCOPE="$(jq -r '.estimated_scope // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
+	_WF_RESOLVED="$(bun "$_WF_RULES" resolve --phase "$PHASE" --ticket "$TICKET" \
+		--scope "$_TRIAGE_SCOPE" 2>/dev/null || true)"
+	if [[ -n "$_WF_RESOLVED" ]]; then
+		_WF_M="$(jq -r '.model // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
+		_WF_E="$(jq -r '.effort // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
+		_WF_A="$(jq -r '.appendSystemPrompt // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
+		[[ -n "$_WF_M" ]] && DESCRIPTOR_MODEL="$_WF_M"
+		[[ -n "$_WF_E" ]] && WORKER_EFFORT="$_WF_E"
+		[[ -n "$_WF_A" ]] && APPEND_SYSTEM_PROMPT="$_WF_A"
+	fi
+fi
+
+# ─── Resolve model: CLI > modelOverrides > models > descriptor > default ────
 
 resolve_model() {
 	if [[ -n $MODEL_FLAG ]]; then
@@ -344,7 +372,7 @@ resolve_model() {
 		echo "$override"
 		return
 	fi
-	config_value ".catalyst.orchestration.phaseAgents.models[\"${PHASE}\"]" "$DEFAULT_MODEL"
+	config_value ".catalyst.orchestration.phaseAgents.models[\"${PHASE}\"]" "$DESCRIPTOR_MODEL"
 }
 MODEL="$(resolve_model)"
 
@@ -803,10 +831,23 @@ CLAUDE_BIN="$(executor_claude_bin)"
 # invokes us from inside a herestring/`while read` loop can't have its loop
 # stdin drained. Harmless for normal callers (fd 0 already a tty/pipe).
 spawn_claude_bg() {
-	env "${DISPATCH_ENV[@]}" \
-		"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-		--model "$MODEL" "$@" \
-		>"$BG_OUT" 2>"$BG_ERR" </dev/null
+	# CTL descriptor v1.1: thread the resolved per-step levers. ADDITIVE +
+	# fail-open — when WORKER_EFFORT and APPEND_SYSTEM_PROMPT are both empty the
+	# launch is byte-identical to today (no --effort / --append-system-prompt).
+	if [[ -n "$WORKER_EFFORT" || -n "$APPEND_SYSTEM_PROMPT" ]]; then
+		local _levers=()
+		[[ -n "$WORKER_EFFORT" ]] && _levers+=(--effort "$WORKER_EFFORT")
+		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
+		env "${DISPATCH_ENV[@]}" \
+			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
+			--model "$MODEL" "${_levers[@]}" "$@" \
+			>"$BG_OUT" 2>"$BG_ERR" </dev/null
+	else
+		env "${DISPATCH_ENV[@]}" \
+			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
+			--model "$MODEL" "$@" \
+			>"$BG_OUT" 2>"$BG_ERR" </dev/null
+	fi
 }
 
 # CTL-658: resume-first-then-fresh launch. When --resume-session is set, attempt
