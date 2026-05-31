@@ -1,5 +1,20 @@
 # Changelog
 
+## [10.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.3.0...catalyst-dev-v10.4.0) (2026-05-31)
+
+
+### Features
+
+* **dev:** atomic single-flight worker claim + fencing token (CTL-736 Phase 1) ([#1235](https://github.com/coalesce-labs/catalyst/issues/1235)) ([d09fb2b](https://github.com/coalesce-labs/catalyst/commit/d09fb2b24ddfcb4a4067b2e3d6fbc2dd8266398a))
+* **dev:** board SharedWorker + IndexedDB real-time client (CTL-733 PR-2b) ([#1242](https://github.com/coalesce-labs/catalyst/issues/1242)) ([4a76d27](https://github.com/coalesce-labs/catalyst/commit/4a76d2739637c114f73002acaace8d6bb98a7eba))
+* **dev:** CTL-736 Phase 2-3 — state.json death trigger + progress probe (retire the revive-storm guard stack) ([#1245](https://github.com/coalesce-labs/catalyst/issues/1245)) ([0a0624a](https://github.com/coalesce-labs/catalyst/commit/0a0624a6b7bc81454d3059c80f4a3a18ce567c03))
+* **dev:** per-step conditional levers — model/effort/preamble in dispatch (descriptor v1.1) ([#1239](https://github.com/coalesce-labs/catalyst/issues/1239)) ([673bdc1](https://github.com/coalesce-labs/catalyst/commit/673bdc1841b3dc1c9fffc44d38850f76355723fa))
+
+
+### Bug Fixes
+
+* **dev:** clear verify/remediate claim tombstones on cycle reset (CTL-736 GATE-0) ([#1237](https://github.com/coalesce-labs/catalyst/issues/1237)) ([5c50ded](https://github.com/coalesce-labs/catalyst/commit/5c50dedaf41c0a051c9c1ab3d359797e5eb4c04c))
+
 ## [10.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.2...catalyst-dev-v10.3.0) (2026-05-30)
 
 
