@@ -62,11 +62,11 @@ to `priority: 5` (lowest band).
 
 ## Sweep order
 
-Each tick runs five sweeps in sequence:
+Each tick runs six sweeps in sequence:
 
 | Sweep | Name | What it does |
 |---|---|---|
-| 0 | Reclaim | Close signals for dead-but-work-done workers |
+| 0 | Reclaim/Revive | For each dead worker (per the local `state.json` lifecycle): close its signal if work is done, revive it if it made forward progress, or stop + flag needs-human if it made none |
 | 0.5 | Preemption | Stop the lowest-ranked worker when Urgent is queued and all slots are full |
 | 1 | Advancement | Dispatch the FSM-owed next phase for each in-flight ticket |
 | 1.5 | Resume | Re-dispatch preempted workers at `parkedFrom` when a slot frees |
@@ -83,8 +83,10 @@ worker, the scheduler preempts that worker:
 2. Rewrites the worker's phase signal: `status: "preempted"`, `parkedFrom: <phase>`, `attentionReason: "preempted-by-priority"`.
 3. Emits `phase.<phase>.preempted.<TICKET>` to the unified event log.
 
-The preempted worker is excluded from the reclaim sweep (no false revive)
-and the advancement sweep (status ≠ `"done"`).
+The preempted worker is excluded from the reclaim sweep — its signal status is
+`"preempted"` (non-terminal but not a crash), so the reclaim sweep's death
+trigger and progress gate never treat it as a dead worker to revive — and from
+the advancement sweep (status ≠ `"done"`).
 
 ### Safety guards
 

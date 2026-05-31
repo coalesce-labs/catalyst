@@ -636,6 +636,13 @@ model) is the runtime fallback when the key is missing.
   `attentionReason="revive-budget-exhausted"`. Revives are once-per-phase;
   the second `phase.<name>.failed` for the same phase escalates immediately
   rather than retrying.
+  > **Superseded by CTL-736 (2026-05):** the `MAX_REVIVES` count-based revive
+  > budget described here was retired. Worker death is now determined by the
+  > authoritative local `~/.claude/jobs/<id>/state.json` lifecycle (not a revive
+  > count or the `claude agents` snapshot), and retries are bounded by a
+  > **progress gate** — a dead worker is revived only while it makes forward
+  > progress and is stopped + flagged `needs-human` (never respawned) once it
+  > makes none. See the [scheduler reference](https://github.com/coalesce-labs/catalyst/blob/main/website/src/content/docs/reference/orchestration/scheduler.md).
 - **Legacy mode preserved**: `oneshot-legacy` is unchanged. Existing projects
   that haven't set `dispatchMode = "phase-agents"` continue to run one
   long-lived `claude -p /oneshot` per ticket. Cutover is per-project, not

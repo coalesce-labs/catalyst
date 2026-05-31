@@ -65,9 +65,13 @@ doesn't double-post — and **fail-open** (a `linearis` failure logs and continu
 phase). Each comment body is hard-truncated to 30,000 bytes (under Linear's effective comment cap)
 with a truncation marker.
 
-**Caveat:** the mirror lives in each skill's End block, so a phase the execution-core daemon
-*reclaims* (false-declares dead and advances past) never runs its End block and posts no comment —
-the daemon's reclaim path has no mirror fallback.
+**Caveat:** the mirror normally lives in each skill's End block, so a phase whose worker dies
+before reaching its End block would otherwise post no comment. The execution-core daemon's reclaim
+path (CTL-664) covers this: when it reclaims a dead worker whose work is already committed, it posts
+the equivalent "Phase Reclaim" comment itself, guarded by the same `.linear-mirror-<phase>`
+first-writer-wins marker. The daemon declares death from the worker's local
+`~/.claude/jobs/<id>/state.json` lifecycle (terminal `.state` / `firstTerminalAt`, or a missing job
+dir), so it only reclaims a genuinely-finished worker.
 
 #### Run-metadata footer
 

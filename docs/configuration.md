@@ -328,8 +328,13 @@ This file is **written by Claude Code, not Catalyst**. Catalyst reads it read-on
 
 - **Session continuation** — `resumeSessionId` (Claude Code ≥2.x) is the primary field passed as
   `--resume-session` when boot-resume or turn-cap revival re-launches a phase-agent.
-- **Job liveness probes** — the `state` field (`"running"` / `"stopped"`) is read by
-  `defaultStatJob` to determine if a bg job is still alive.
+- **Job liveness probes** — the `state` field (`"working"` while running; `"stopped"` / `"failed"` /
+  `"done"` / `"blocked"` when terminal) and the `firstTerminalAt` field are read by `defaultStatJob`,
+  then fed to `jobLifecycle()`, which returns `alive` (state is `working`, or state.json is
+  present-but-unreadable), `dead-terminal` (`firstTerminalAt` is set, or `state` is one of the
+  terminal values), or `dead-gone` (the job dir is missing). `firstTerminalAt` is the authoritative
+  state-name-agnostic death signal; the file's mtime is deliberately not used as a death signal (a
+  long in-process sub-agent fan-out keeps `state` at `working` while mtime ages). [CTL-736]
 - **Worktree validation** — `cwd` is read during orphan detection.
 
 The legacy `linkScanPath` field (Claude Code <2.x) is still read as a fallback for sessions
