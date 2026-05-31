@@ -141,27 +141,16 @@ export const STALE_WORKER_CUTOFF_MS =
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
 
-// CTL-735 — per-tick revive cap. The reclaim sweep revives at most this many
-// dead workers per scheduler tick; further revivable workers are `revive-capped`
-// (deferred to a later tick), so a fast (de-starved) loop cannot mass-revive ~85
-// historical worker dirs and outrun the event-count-lagged storm-breaker before
-// it clamps. The grace window (REVIVE_GRACE_MS) stops the re-revive RACE; this
-// cap bounds the BREADTH of a single tick. Deliberately small (2) — genuine
-// crashes are rare, so 2/tick clears a real backlog within a few ticks while
-// turning any storm into a slow, observable trickle. Env-overridable for tuning.
-export const PER_TICK_REVIVE_CAP =
-  Number(process.env.EXECUTION_CORE_PER_TICK_REVIVE_CAP) || 2;
-
-// CTL-735 — revival age ceiling. `isTicketInFlight` treats any ticket with a
-// non-terminal signal as in-flight, so a worker that crashed at `running` and
-// never flipped terminal stays swept forever. An absent/idle worker whose signal
-// has not been touched in this long is an abandoned historical dir (a long-since
-// Done or dead ticket), NOT a fresh crash — reviving it wastes budget and, once
-// MAX_REVIVES is hit, escalates dozens of dead tickets to needs-human. Such a
-// worker is treated as inert (no revive, no escalate). Deliberately well above
-// any real phase duration (24h) — a genuine multi-hour crash is still revived;
-// only a day-stale signal is inert. A signal with no parseable timestamp falls
-// through to the pre-CTL-735 path (cannot judge age). Env-overridable.
+// CTL-735 — revival age ceiling (KEPT in CTL-736). `isTicketInFlight` treats any
+// ticket with a non-terminal signal as in-flight, so a worker that crashed at
+// `running` and never flipped terminal stays swept forever. A reclaim-eligible
+// worker whose signal has not been touched in this long is an abandoned historical
+// dir (a long-since Done or dead ticket), NOT a fresh crash — it is treated as
+// inert (no revive, no escalate) BEFORE the Phase-3 progress gate, so the ~85
+// day-stale debris dirs do not each get a one-shot no-progress needs-human flag.
+// Deliberately well above any real phase duration (24h) — a genuine multi-hour
+// crash is still revived; only a day-stale signal is inert. A signal with no
+// parseable timestamp falls through (cannot judge age). Env-overridable.
 export const REVIVE_MAX_AGE_MS =
   Number(process.env.EXECUTION_CORE_REVIVE_MAX_AGE_MS) || 24 * 60 * 60_000;
 

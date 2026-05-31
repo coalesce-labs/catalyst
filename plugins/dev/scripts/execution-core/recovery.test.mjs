@@ -762,59 +762,11 @@ describe("reclaimDeadWorkIfPossible — CTL-735 inert stale tickets", () => {
   });
 });
 
-describe("reclaimDeadWorkIfPossible — CTL-735 per-tick revive cap", () => {
-  const orch = "/orch";
-
-  // All gates open so control reaches branch (C) and WOULD revive absent the cap.
-  const openReviveSeams = (reviveDispatch, extra = {}) => ({
-    statJob: () => null,
-    probes: { implement: recorder(false) },
-    emitComplete: recorder({ code: 0 }),
-    appendReviveEvent: recorder(true),
-    reviveDispatch,
-    countReviveEvents: recorder(0),
-    countDistinctRevivingTickets: recorder(1),
-    writeReviveMarker: recorder(undefined),
-    killBgJob: recorder(undefined),
-    applyStalledLabel: recorder({ applied: true }),
-    resolveSession: () => null,
-    liveness: () => "absent",
-    ...extra,
-  });
-
-  test("reviveBudgetRemaining = 0 → 'revive-capped', does NOT dispatch", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 0 }),
-    );
-    expect(r).toBe("revive-capped");
-    expect(reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("reviveBudgetRemaining = 1 → revives normally (budget available)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 1 }),
-    );
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("reviveBudgetRemaining undefined → revives (back-compat: no cap enforced)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch), // no reviveBudgetRemaining
-    );
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-});
+// CTL-736 Phase 3: the CTL-735 per-tick revive cap (`revive-capped`) is DELETED.
+// The progress gate (revive only while forward progress advances; stop on zero
+// progress) plus the Phase-1 O_EXCL claim bound retries structurally, so a single
+// tick can no longer mass-revive a backlog of dead workers. Its test block is
+// removed with the mechanism; see the CTL-736 progress-gate block below.
 
 describe("reclaimDeadWorkIfPossible", () => {
   const orch = "/orch";
@@ -902,15 +854,10 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(0);
   });
 
-  // CTL-587: this case used to return 'not-applicable' (a silent dead-end).
-  // It now escalates immediately — no probe means no way to verify the work,
-  // so the human must look. needs-human label is applied via the injected seam.
-  test("CTL-587: dead worker, probe NOT done + revive budget exhausted → 'escalated' + needs-human label", () => {
-    // CTL-641: every pipeline phase now has a probe, so the old branch-(A)
-    // "no-probe-for-phase" escalation is unreachable for real phases (and CTL-606's
-    // supersede guard throws on a non-PHASES phase before branch (A) is reached).
-    // The reachable "dead worker → needs-human" path is branch (C) once the revive
-    // budget is spent.
+  // CTL-736: the reachable "dead worker → needs-human" path is the branch-(C)
+  // no-progress STOP (a dead worker that made zero forward progress is flagged,
+  // never respawned), replacing the deleted MAX_REVIVES budget-exhausted path.
+  test("CTL-736: dead worker, probe NOT done + ZERO progress → 'no-progress-stopped' + needs-human label", () => {
     const sig = { ...implementSignal(), phase: "verify" };
     sig.raw.phase = "verify";
     const emit = recorder({ code: 0 });
@@ -918,19 +865,21 @@ describe("reclaimDeadWorkIfPossible", () => {
     const applyLabel = recorder({ applied: true });
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
-      statJob: () => null, // bg dead
+      statJob: () => null, // bg dead → dead-gone
       probes: { verify: recorder(false) }, // artifact NOT complete
       emitComplete: emit,
       appendEvent: recorder(undefined),
       appendEscalatedEvent: appendEscalated,
       applyStalledLabel: applyLabel,
       reviveDispatch,
-      countReviveEvents: recorder(2), // budget exhausted (MAX_REVIVES)
+      // zero forward progress (current 0 <= prior 0) → STOP, never respawn.
+      progressMark: () => 0,
+      readProgressMark: () => 0,
     });
-    expect(r).toBe("escalated");
+    expect(r).toBe("no-progress-stopped");
     expect(emit.calls.length).toBe(0);
     expect(reviveDispatch.calls.length).toBe(0);
-    expect(appendEscalated.calls[0][0].reason).toBe("revive-budget-exhausted");
+    expect(appendEscalated.calls[0][0].reason).toBe("no-progress");
     expect(applyLabel.calls[0][0].ticket).toBe("CTL-9");
   });
 
@@ -1438,7 +1387,6 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   // stale state.json mtime) and threads every CTL-587 seam through opts.
   function setupReviveScenario({
     reviveCount = 0,
-    distinctRevivingTickets = 1,
     probeResult = false, // false = "work not done" → enters CTL-587 territory
     phase = "implement",
     ticket = "CTL-9",
@@ -1447,8 +1395,11 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime — > STALE_MS
     // CTL-655: boot-time window seam. Default to a no-marker reader so every
     // existing scenario behaves exactly as before (since=undefined → the
-    // injected countReviveEvents recorder value is the unwindowed count).
+    // injected countReviveEvents recorder value is the unwindowed attempt count).
     readBootSince = () => undefined,
+    // CTL-736 Phase 3: progress gate. Default = progressed (current 1 > prior 0)
+    // so the scenario revives; noProgress:true → current 0 <= prior 0 → STOP path.
+    noProgress = false,
   } = {}) {
     const sig = {
       ...implementSignal({ ticket, status: "running", bgJobId }),
@@ -1474,7 +1425,6 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
         countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
         // CTL-664: stub the reclaim mirror so the probeResult:true scenarios
         // (branch B) stay hermetic and don't spawn a real `linearis`.
@@ -1482,9 +1432,13 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         readBootSince, // CTL-655: inject the boot-time window reader
         // CTL-736: the death trigger is now the state.json lifecycle (jobLifecycle),
         // not the `claude agents` snapshot. "dead-gone" (the job dir vanished) is
-        // the reclaim-eligible case these revive/escalate/storm scenarios exercise.
+        // the reclaim-eligible case these revive/escalate scenarios exercise.
         // statJob above still supplies the prev_state_json_mtime telemetry.
         jobLifecycle: () => "dead-gone",
+        // CTL-736 Phase 3 progress-gate seams (replace MAX_REVIVES/storm/per-tick).
+        progressMark: () => (noProgress ? 0 : 1),
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
         now: () => nowMs,
       },
     };
@@ -1506,18 +1460,14 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(2);
   });
 
-  test("budget exhausted: count=2 → 'escalated', applies needs-human label, no dispatch", () => {
-    const s = setupReviveScenario({ reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
-    expect(s.opts.applyStalledLabel.calls[0][0].ticket).toBe("CTL-9");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].final_attempt_count).toBe(2);
-  });
+  // CTL-736 Phase 3: the MAX_REVIVES budget-exhausted escalation and the
+  // fleet-wide storm-breaker (revive-suppressed) are DELETED — a worker now
+  // revives as long as it makes forward progress, and STOPS (no-progress-stopped)
+  // when it does not. The escalation MECHANISM (CTL-679 breaker, CTL-638 cool-down)
+  // is now exercised through that no-progress STOP path instead of budget-exhausted.
 
-  test("CTL-679: breaker open → 'rate-limited-deferred', no escalation event, no label write", () => {
-    const s = setupReviveScenario({ reviveCount: 2 }); // would otherwise escalate
+  test("CTL-679: breaker open on the no-progress STOP → 'rate-limited-deferred', no escalation event, no label write", () => {
+    const s = setupReviveScenario({ noProgress: true }); // zero progress → STOP path
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
       ...s.opts,
       breaker: { isOpen: () => true },
@@ -1525,44 +1475,20 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(r).toBe("rate-limited-deferred");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0); // never respawned
   });
 
-  test("CTL-679: breaker closed → escalation proceeds as normal", () => {
-    const s = setupReviveScenario({ reviveCount: 2 });
+  test("CTL-679: breaker closed on the no-progress STOP → 'no-progress-stopped', needs-human applied, no respawn", () => {
+    const s = setupReviveScenario({ noProgress: true });
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
       ...s.opts,
       breaker: { isOpen: () => false },
     });
-    expect(r).toBe("escalated");
+    expect(r).toBe("no-progress-stopped");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
-  });
-
-  test("storm-breaker: distinct=4 > 3 → 'revive-suppressed', no dispatch", () => {
-    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 4 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(1);
-    expect(s.opts.appendReviveSuppressedEvent.calls[0][0].window_distinct_tickets).toBe(4);
-  });
-
-  test("storm-breaker at the threshold: distinct=3 is NOT suppressed (>3, not >=3)", () => {
-    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 3 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-  });
-
-  // CTL-641: pr/monitor-merge are now registered, so branch (A) is reached only
-  // by a genuinely-unknown phase. Use one to keep the no-probe guard under test.
-  test("probe NOT done + revive budget exhausted → 'escalated' immediately", () => {
-    // CTL-641/CTL-606: branch (A) "no-probe-for-phase" is now unreachable (all
-    // real phases are probed; unknown phases throw at the supersede guard). The
-    // budget-exhausted escalation is the reachable dead-end-to-human path.
-    const s = setupReviveScenario({ phase: "verify", probeResult: false, reviveCount: 2 });
-    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(r).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("verify");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0); // never respawned
+    expect(s.opts.killBgJob.calls.length).toBe(1); // the dead worker is stopped
   });
 
   // CTL-604: research/plan now share the bounded revive/re-dispatch path with
@@ -1592,35 +1518,24 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.countReviveEvents.calls[0][0]).toHaveProperty("orchId");
   });
 
-  // CTL-655: fail-open — a missing/unreadable marker yields no `since`, so the
-  // counter is unwindowed and the budget still exhausts (today's behavior).
+  // CTL-655: the boot 'since' windows the attempt counter; a missing marker is
+  // fail-open (since=undefined → unwindowed count). CTL-736: the count is now the
+  // revive ATTEMPT NUMBER (telemetry), not a budget gate, so the worker revives.
   test("omits 'since' when boot marker is absent (fail-open)", () => {
     const s = setupReviveScenario({
       reviveCount: 2,
       readBootSince: () => undefined,
     });
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(r).toBe("escalated");
+    expect(r).toBe("revived"); // CTL-736: no MAX_REVIVES gate — progress drives it
     expect(s.opts.countReviveEvents.calls[0][0].since).toBeUndefined();
+    expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(3); // count 2 + 1
   });
 
   test("dead plan worker, probe NOT done → 'revived'", () => {
     const s = setupReviveScenario({ phase: "plan", probeResult: false, reviveCount: 0 });
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
     expect(s.opts.reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("dead research worker, revive budget exhausted → 'escalated' (revive-budget-exhausted)", () => {
-    const s = setupReviveScenario({ phase: "research", probeResult: false, reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("dead research worker, storm-breaker open → 'revive-suppressed'", () => {
-    const s = setupReviveScenario({ phase: "research", probeResult: false, distinctRevivingTickets: 4 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 
   test("CTL-662: defensive stop fires on the revive path unconditionally (the mtime quiet-window gate is gone)", () => {
@@ -1644,14 +1559,13 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(body.prev_bg_job_id).toBe("bg-9");
   });
 
-  test("escalation still records 'escalated' even when applyStalledLabel fails (no dispatch)", () => {
-    // Failure to apply the label still returns 'escalated' so the scheduler
-    // records the outcome. The labelOnce semantics in scheduler.mjs guard
-    // re-application — a verify-failed result returns no marker, so the next
-    // tick retries the label apply.
-    const s = setupReviveScenario({ reviveCount: 2 });
+  test("no-progress escalation still records the outcome even when applyStalledLabel fails (no dispatch)", () => {
+    // CTL-736: a failed label apply still returns 'no-progress-stopped' so the
+    // scheduler records the outcome. labelOnce guards re-application — a
+    // verify-failed result returns no marker, so the next tick retries the apply.
+    const s = setupReviveScenario({ noProgress: true });
     s.opts.applyStalledLabel = recorder({ applied: false, reason: "verify-failed" });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 
@@ -1746,6 +1660,98 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   });
 });
 
+// --- CTL-736 Phase 3: the progress gate (revive-while-progressing vs stop) -----
+
+describe("reclaimDeadWorkIfPossible — CTL-736 progress gate", () => {
+  const orch = "/orch";
+
+  // A reclaim-eligible (dead-gone), work-not-done worker with the downstream
+  // revive/escalate seams stubbed; progressMark / readProgressMark are the levers.
+  function gateSeams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      jobLifecycle: () => "dead-gone",
+      probes: { implement: () => false }, // work NOT done → branch (C)
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(true),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      writeProgressMark: recorder(undefined),
+      resolveSession: () => null,
+      readBootSince: () => undefined,
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  test("progress advanced since the last attempt ⇒ 'revived' + new high-water recorded (gen+1 via dispatch)", () => {
+    const writeProgressMark = recorder(undefined);
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 5, // 5 commits now…
+      readProgressMark: () => 2, // …vs 2 recorded → advanced
+      writeProgressMark,
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+    expect(writeProgressMark.calls.length).toBe(1);
+    expect(writeProgressMark.calls[0]).toEqual([orch, "CTL-9", "implement", 5]);
+  });
+
+  test("zero progress since the last attempt ⇒ 'no-progress-stopped', NEVER respawned + needs-human", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const killBgJob = recorder(undefined);
+    const writeProgressMark = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2, // unchanged…
+      readProgressMark: () => 2, // …same high-water → no forward progress
+      reviveDispatch,
+      appendEscalatedEvent,
+      killBgJob,
+      writeProgressMark,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0); // the futile respawn is suppressed
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+    expect(killBgJob.calls.length).toBe(1); // the dead worker is stopped
+    expect(writeProgressMark.calls.length).toBe(0); // no new high-water on a stop
+  });
+
+  test("first death with no prior mark (readProgressMark -1) always gets one revive — even at zero progress", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 0, // a worker that crashed before its first commit…
+      readProgressMark: () => -1, // …no prior mark → 0 > -1 → one retry
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("the SECOND zero-progress death (mark now recorded at 0) stops — bounds the futile loop", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 0,
+      readProgressMark: () => 0, // the first revive recorded 0; still 0 → stop
+      reviveDispatch,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+});
+
 // CTL-736 Phase 2: the CTL-662 busy-suppression and idle-confirmation+absent
 // describe blocks are DELETED. The busy/idle/absent three-valued `claude agents`
 // snapshot trigger is replaced by the state.json lifecycle (jobLifecycle →
@@ -1796,12 +1802,12 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
         // (job dir vanished) is reclaim-eligible, the case these escalation
         // cool-down scenarios exercise.
         jobLifecycle: () => "dead-gone",
-        // CTL-641 + CTL-606: every real phase now has a probe (so branch (A) is
-        // skipped) and CTL-606's supersede guard throws on a non-PHASES phase, so
-        // these storm-prevention tests can no longer reach the old branch-(A)
-        // no-probe escalation. They instead drive the reachable branch-(C)
-        // revive-budget-exhausted escalation: a probe-false real phase with the
-        // revive budget exhausted (reviveCount default below = MAX_REVIVES).
+        // CTL-736 Phase 3: drive escalation through the reachable no-progress STOP
+        // path (zero forward progress → escalateOnce + needs-human, never respawn),
+        // replacing the deleted MAX_REVIVES budget-exhausted escalation.
+        progressMark: () => 0,
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
         probes: { [overrides.phase ?? "implement"]: recorder(overrides.probeResult ?? false) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
@@ -1811,8 +1817,7 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
         reviveDispatch: recorder({ code: 0 }),
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
-        countReviveEvents: recorder(overrides.reviveCount ?? 2), // default = MAX_REVIVES → budget-exhausted escalation
-        countDistinctRevivingTickets: recorder(1),
+        countReviveEvents: recorder(overrides.reviveCount ?? 0),
         writeReviveMarker: recorder(undefined),
         now: () => overrides.nowMs ?? 1_000 + 6 * 60 * 1000,
         staleMs: 5 * 60 * 1000,
@@ -1823,15 +1828,16 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
   }
 
   test("acceptance: second tick on same (ticket, phase) suppresses — exactly one event + one label write", () => {
-    const s = setupAt(orchDir, { phase: "pr" }); // branch (C): revive-budget-exhausted
+    const s = setupAt(orchDir, { phase: "pr" }); // branch (C): no-progress STOP
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
 
-    // 1,500 simulated ticks in the storm window — every one suppressed.
+    // 1,500 simulated ticks in the storm window — the escalation cool-down keeps
+    // the event + label at exactly one even though every tick re-stops the worker.
     for (let i = 0; i < 1500; i++) {
-      expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+      expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     }
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1); // NOT 1,501
     expect(s.opts.applyStalledLabel.calls.length).toBe(1); // NOT 1,501
@@ -1842,32 +1848,36 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     const s = setupAt(orchDir, { phase: "pr", nowMs: clock });
     s.opts.now = () => clock;
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     clock += 10 * 60 * 1000 + 1; // jump past the 10-min default window
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(2);
   });
 
   test("different phase on the same ticket gets an independent cool-down (pr → monitor-merge advancement)", () => {
     // Reproduces the live CTL-624 timeline: escalations on `pr` for a stretch,
     // then on `monitor-merge` after `pr` completes. Both should escalate; only
-    // the WITHIN-phase repeats are suppressed.
+    // the WITHIN-phase repeats are suppressed (cool-down keeps the event count
+    // pinned, even though the return is no-progress-stopped each time).
     const sPr = setupAt(orchDir, { phase: "pr" });
-    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalated");
-    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("no-progress-stopped");
+    const eventsAfterPr = sPr.opts.appendEscalatedEvent.calls.length;
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("no-progress-stopped");
+    expect(sPr.opts.appendEscalatedEvent.calls.length).toBe(eventsAfterPr); // suppressed
 
     const sMm = setupAt(orchDir, { phase: "monitor-merge" });
-    expect(reclaimDeadWorkIfPossible(sMm.orch, sMm.sig, sMm.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(sMm.orch, sMm.sig, sMm.opts)).toBe("no-progress-stopped");
+    expect(sMm.opts.appendEscalatedEvent.calls.length).toBe(1); // independent cool-down → fired
   });
 
-  test("revive-budget-exhausted branch also respects the cool-down", () => {
-    // Repro: implement phase, budget exhausted → escalation path. Second tick
-    // must suppress just like the no-probe branch.
-    const s = setupAt(orchDir, { phase: "implement", reviveCount: 2 });
+  test("the no-progress escalation branch also respects the cool-down", () => {
+    // Repro: implement phase, zero progress → escalation path. Second tick must
+    // suppress the escalation event/label just like any other escalation.
+    const s = setupAt(orchDir, { phase: "implement" });
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
   });
 
@@ -1880,22 +1890,24 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     s.opts.inEscalationCooldownFn = inCd;
     s.opts.recordEscalationFn = recCd;
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(inCd.calls.length).toBe(1);
     expect(recCd.calls.length).toBe(1);
     // recordEscalationFn signature: (orchDir, ticket, phase, reason, now)
     expect(recCd.calls[0][1]).toBe("CTL-9");
     expect(recCd.calls[0][2]).toBe("pr");
-    expect(recCd.calls[0][3]).toBe("revive-budget-exhausted");
+    expect(recCd.calls[0][3]).toBe("no-progress");
   });
 
-  test("escalation-suppressed return path does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
+  test("cool-down-suppressed escalation does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
     // Pure-fake seams to make the suppression observable as zero side-effects.
+    // The worker is still STOPPED (no-progress-stopped); only the escalation
+    // event/label is throttled by the cool-down.
     const s = setupAt(orchDir, { phase: "pr" });
     s.opts.inEscalationCooldownFn = recorder(true); // cool-down already armed
     s.opts.recordEscalationFn = recorder(undefined);
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
     expect(s.opts.recordEscalationFn.calls.length).toBe(0);

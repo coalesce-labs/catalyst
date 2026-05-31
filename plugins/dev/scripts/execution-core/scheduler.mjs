@@ -95,7 +95,7 @@ import * as linearWrite from "./linear-write.mjs";
 // a cycle. label-guard.mjs is the leaf module both can import.
 import { labelOnce } from "./label-guard.mjs";
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath, PER_TICK_REVIVE_CAP } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1345,12 +1345,10 @@ export function schedulerTick(
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
-    // CTL-735 — max revives per tick. The reclaim sweep threads the remaining
-    // budget (cap minus revives so far this tick) into reclaimDeadWork; once
-    // exhausted, further revivable workers are `revive-capped` (deferred). Bounds
-    // a fast loop so it cannot mass-revive ahead of the storm-breaker. Injectable
-    // for tests; defaults to the env-overridable config const.
-    perTickReviveCap = PER_TICK_REVIVE_CAP,
+    // CTL-736 Phase 3: the CTL-735 per-tick revive cap (perTickReviveCap /
+    // reviveBudgetRemaining) is DELETED. The progress gate + Phase-1 O_EXCL claim
+    // bound the mass-revive storm structurally, so the sweep no longer threads a
+    // per-tick budget into reclaimDeadWork.
     // CTL-665: the committed worker-slot concurrency knobs (maxParallel +
     // minParallel/maxParallelCeiling bounds), threaded from the daemon via
     // startScheduler → runningOpts → runTick. Empty {} preserves the legacy
@@ -1417,16 +1415,15 @@ export function schedulerTick(
   // marker; 'escalated' fires `needs-human` via the per-phase recovery path.
   const reclaimed = [];
   const revived = [];
+  // CTL-736: reviveSuppressed now marks ONLY the audit-append-failure path (the
+  // revive event could not be persisted, so the dispatch is skipped to preserve
+  // the attempt counter). The fleet-wide storm-breaker that used to populate it is
+  // deleted. The CTL-735 revivePending (grace window) + reviveCapped (per-tick cap)
+  // buckets are deleted with their mechanisms.
   const reviveSuppressed = [];
-  // CTL-735: workers deferred by the post-(re)dispatch grace window (absent but
-  // recently dispatched → not yet registered in `claude agents`). A high count
-  // here with low `revived` is the healthy steady state during the controlled
-  // daemon re-enable — it means the storm-causing re-revive race is suppressed.
-  const revivePending = [];
-  // CTL-735: workers deferred because this tick's per-tick revive cap was reached.
-  // A non-empty bucket means a real backlog is draining at the bounded rate (not a
-  // storm); it empties over subsequent ticks as the cap re-arms.
-  const reviveCapped = [];
+  // CTL-736 Phase 3: workers STOPPED for making zero forward progress (the futile
+  // idle-respawn loop) — flagged needs-human, never respawned.
+  const noProgressStopped = [];
   const escalated = [];
   // CTL-643: drop terminal tickets from the reclaim attention set.
   // reclaimDeadWorkIfPossible already short-circuits on terminal signals
@@ -1500,10 +1497,9 @@ export function schedulerTick(
       if (liveAgents) {
         reclaimOpts.liveness = (bgJobId) => livenessForBgJob(bgJobId, { agents: liveAgents });
       }
-      // CTL-735: remaining per-tick revive budget = cap minus revives already
-      // performed this tick. reclaimDeadWork returns "revive-capped" (deferred)
-      // once this is <= 0 instead of dispatching, so one sweep cannot mass-revive.
-      reclaimOpts.reviveBudgetRemaining = perTickReviveCap - revived.length;
+      // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
+      // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
+      // claim bound the mass-revive storm structurally.
       const r = reclaimDeadWork(orchDir, sig, reclaimOpts);
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
@@ -1514,19 +1510,15 @@ export function schedulerTick(
           revived.push(entry);
           break;
         case "revive-suppressed":
+          // CTL-736: the revive event could not be persisted (audit-append failure)
+          // so the dispatch was skipped to preserve the attempt counter; retries
+          // next tick. (The fleet-wide storm-breaker that also used this is gone.)
           reviveSuppressed.push(entry);
           break;
-        case "revive-pending":
-          // CTL-735: absent worker still inside its post-dispatch grace window —
-          // deferred, not revived. Surfaced (not silent) so the controlled
-          // re-enable can confirm the storm-causing re-revive race is suppressed.
-          revivePending.push(entry);
-          break;
-        case "revive-capped":
-          // CTL-735: this tick's per-tick revive cap was reached — deferred to a
-          // later tick. Surfaced so the re-enable can confirm a backlog drains at
-          // the bounded rate rather than storming.
-          reviveCapped.push(entry);
+        case "no-progress-stopped":
+          // CTL-736 Phase 3: a dead worker that made zero forward progress was
+          // stopped + flagged needs-human, never respawned (the futile idle loop).
+          noProgressStopped.push(entry);
           break;
         case "escalated":
           escalated.push(entry);
@@ -2115,8 +2107,7 @@ export function schedulerTick(
     reclaimed,
     revived,
     reviveSuppressed,
-    revivePending,
-    reviveCapped,
+    noProgressStopped,
     escalated,
     advanced,
     dispatched,
