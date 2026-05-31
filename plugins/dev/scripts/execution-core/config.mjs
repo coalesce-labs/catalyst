@@ -154,23 +154,6 @@ export const BUSY_CEILING_MS =
 export const REVIVE_MAX_AGE_MS =
   Number(process.env.EXECUTION_CORE_REVIVE_MAX_AGE_MS) || 24 * 60 * 60_000;
 
-// CTL-736 Phase 2 — liveness-source selector for the reclaim death trigger.
-// 'state-json' (default, post-cutover): the authoritative local
-// ~/.claude/jobs/<bg>/state.json lifecycle (jobLifecycle in recovery.mjs) is
-// the death trigger — deterministic, fan-out-safe, no eventually-consistent
-// snapshot lag. 'shadow': act on state.json BUT also compute the legacy
-// `claude agents` snapshot verdict and log `liveness-shadow-mismatch` on
-// disagreement (live A/B observability). 'snapshot': the legacy
-// livenessForBgJob trigger — an env-only production rollback if the state.json
-// path ever misbehaves (no cache hotfix needed). Re-reads env per call (reader
-// idiom) so it can be flipped per-test and live; an unrecognized value falls
-// back to the safe 'state-json' default.
-const LIVENESS_SOURCES = new Set(["snapshot", "shadow", "state-json"]);
-export function readLivenessConfig() {
-  const raw = process.env.EXECUTION_CORE_LIVENESS_SOURCE;
-  return { source: LIVENESS_SOURCES.has(raw) ? raw : "state-json" };
-}
-
 // CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
 // continuously classifies live sessions and emits agent.waiting_on_user /
 // agent.resumed transition events. CATALYST_WAIT_WATCHER=0 disables it (the

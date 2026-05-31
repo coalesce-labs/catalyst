@@ -11,7 +11,6 @@ import {
   readWaitWatcherConfig,
   EVENT_DEBOUNCE_MS,
   readMemorySamplerConfig,
-  readLivenessConfig,
   AUTOTUNE_SAMPLE_INTERVAL_MS,
   AUTOTUNE_WINDOW_SAMPLES,
   AUTOTUNE_TREND_MIN_SAMPLES,
@@ -119,45 +118,6 @@ describe("readMemorySamplerConfig (CTL-685)", () => {
   test("zero interval falls back to 30000", () => {
     process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS = "0";
     expect(readMemorySamplerConfig().intervalMs).toBe(30_000);
-  });
-});
-
-// CTL-736 Phase 2: liveness-source selector. readLivenessConfig re-reads
-// EXECUTION_CORE_LIVENESS_SOURCE on every call (reader idiom) so the cutover
-// knob can be flipped per-test and as an env-only production rollback.
-const LIVENESS_ENV = "EXECUTION_CORE_LIVENESS_SOURCE";
-let savedLivenessEnv;
-describe("readLivenessConfig (CTL-736 Phase 2)", () => {
-  beforeEach(() => {
-    savedLivenessEnv = process.env[LIVENESS_ENV];
-    delete process.env[LIVENESS_ENV];
-  });
-  afterEach(() => {
-    if (savedLivenessEnv === undefined) delete process.env[LIVENESS_ENV];
-    else process.env[LIVENESS_ENV] = savedLivenessEnv;
-  });
-
-  test("defaults to 'state-json' (the post-cutover authoritative trigger)", () => {
-    expect(readLivenessConfig().source).toBe("state-json");
-  });
-
-  test("accepts the three valid modes", () => {
-    for (const v of ["snapshot", "shadow", "state-json"]) {
-      process.env[LIVENESS_ENV] = v;
-      expect(readLivenessConfig().source).toBe(v);
-    }
-  });
-
-  test("an unrecognized value falls back to the safe default 'state-json'", () => {
-    process.env[LIVENESS_ENV] = "garbage";
-    expect(readLivenessConfig().source).toBe("state-json");
-  });
-
-  test("re-reads env on every call (not import-time pinned)", () => {
-    process.env[LIVENESS_ENV] = "snapshot";
-    expect(readLivenessConfig().source).toBe("snapshot");
-    process.env[LIVENESS_ENV] = "shadow";
-    expect(readLivenessConfig().source).toBe("shadow");
   });
 });
 

@@ -464,4 +464,69 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     // No tick re-revived an already-converged worker: total revives == N exactly.
     expect(perTickRevived.reduce((a, b) => a + b, 0)).toBe(N);
   });
+
+  // CTL-736 Phase 3: the PROGRESS-GATE storm bound (distinct from the `alive`-
+  // suppression bound above). A worker that stays dead-gone every tick while
+  // making ZERO forward progress — the CTL-728/729 futile-respawn loop the gate
+  // retires — must revive EXACTLY ONCE (the first-death retry) and then STOP on
+  // every subsequent tick, never respawning. Here jobLifecycle is FIXED at
+  // dead-gone (the worker never re-registers), and a SHARED progress store is
+  // read/written across ticks so the gate, not `alive` suppression, is the bound.
+  test("progress gate bounds a perpetually-dead zero-progress worker: revive once, then STOP every tick", () => {
+    seedSignal("CTL-736-NP", "implement", {
+      status: "running",
+      bg_job_id: "dead-bg-np",
+      orchestrator: "CTL-736-NP",
+    });
+
+    let progressStore = -1; // shared high-water across ticks (absent ⇒ -1)
+    const reviveDispatchCalls = [];
+    const escalations = [];
+    const perTick = [];
+
+    for (let t = 0; t < 8; t++) {
+      const result = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: () => ({ code: 0 }),
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => {},
+          applyLabel: () => ({ applied: true }),
+        },
+        teardownWorktree: () => true,
+        reclaimDeadWork: (od, sig, opts) =>
+          reclaimDeadWorkIfPossible(od, sig, {
+            ...opts,
+            statJob: () => null,
+            jobLifecycle: () => "dead-gone", // never re-registers
+            probes: { implement: () => false }, // work NOT done → branch (C)
+            progressMark: () => 0, // measures zero progress every tick
+            readProgressMark: () => progressStore,
+            writeProgressMark: (_o, _t, _p, v) => {
+              progressStore = v;
+            },
+            reviveDispatch: (args) => {
+              reviveDispatchCalls.push(args);
+              return { code: 0 };
+            },
+            appendEscalatedEvent: (e) => escalations.push(e),
+            applyStalledLabel: () => ({ applied: true }),
+            killBgJob: () => {},
+            countReviveEvents: () => 0,
+            // real cooldown seams (orchDir is a real tmp dir) → escalation fires
+            // once, then the CTL-638 cool-down suppresses the repeat.
+          }),
+      });
+      perTick.push({ revived: result.revived.length, stopped: result.noProgressStopped.length });
+    }
+
+    // Tick 0: progress 0 > stored -1 → revive once, store := 0.
+    // Ticks 1-7: progress 0 <= stored 0 → no-progress-stopped, NEVER respawned.
+    expect(reviveDispatchCalls).toHaveLength(1);
+    expect(perTick[0]).toEqual({ revived: 1, stopped: 0 });
+    expect(perTick.slice(1).every((p) => p.revived === 0 && p.stopped === 1)).toBe(true);
+    // Escalation fired (needs-human), and the cool-down kept it to one audit event.
+    expect(escalations).toHaveLength(1);
+    expect(escalations[0].reason).toBe("no-progress");
+  });
 });

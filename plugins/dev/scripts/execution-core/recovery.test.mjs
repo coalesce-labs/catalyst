@@ -34,6 +34,7 @@ import {
   detectColdStart,
   readBootSince,
   readExecCoreBootEpoch,
+  clearProgressMarks,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -1090,18 +1091,16 @@ describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () =>
     };
   }
 
-  test("state-json: alive (state=working) ⇒ 'alive-suppressed' — never reclaimed, no idle streak/grace", () => {
+  test("alive (state=working) ⇒ 'alive-suppressed' — never reclaimed, no idle streak/grace", () => {
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "state-json",
       jobLifecycle: () => "alive",
     }));
     expect(r).toBe("alive-suppressed");
   });
 
-  test("state-json: dead-terminal + work done ⇒ 'reclaimed' immediately (no grace/streak)", () => {
+  test("dead-terminal + work done ⇒ 'reclaimed' immediately (no grace/streak)", () => {
     const emitComplete = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "state-json",
       jobLifecycle: () => "dead-terminal",
       probes: { implement: () => true },
       emitComplete,
@@ -1110,55 +1109,25 @@ describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () =>
     expect(emitComplete.calls.length).toBe(1);
   });
 
-  test("state-json: dead-gone + work NOT done ⇒ 'revived' immediately, even with a fresh startedAt (no grace window)", () => {
+  test("dead-gone + work NOT done ⇒ 'revived' immediately, even with a fresh startedAt (no grace window)", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(
       orch,
       // startedAt = now: pre-CTL-736 this was deferred 'revive-pending' by the 90s grace.
       implementSignal({ status: "running", startedAt: new Date(1_000_000).toISOString() }),
-      seams({ livenessSource: "state-json", jobLifecycle: () => "dead-gone", reviveDispatch }),
+      seams({ jobLifecycle: () => "dead-gone", reviveDispatch }),
     );
     expect(r).toBe("revived");
     expect(reviveDispatch.calls.length).toBe(1);
   });
 
-  test("state-json: never consults the legacy `claude agents` snapshot seam", () => {
-    const liveness = recorder("busy");
-    reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "state-json",
-      jobLifecycle: () => "alive",
-      liveness,
+  test("the death trigger is jobLifecycle (state.json), consulted with the worker's bg_job_id", () => {
+    const jobLifecycle = recorder("alive");
+    reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running", bgJobId: "bg-77" }), seams({
+      jobLifecycle,
     }));
-    expect(liveness.calls.length).toBe(0);
-  });
-
-  test("shadow: logs the mismatch but ACTS ON state.json (jobLifecycle), not the snapshot", () => {
-    // jobLifecycle says alive; snapshot says absent (disagreement). Acts on alive.
-    const liveness = recorder("absent");
-    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "shadow",
-      jobLifecycle: () => "alive",
-      liveness,
-    }));
-    expect(r).toBe("alive-suppressed"); // acted on state.json, not the absent snapshot
-    expect(liveness.calls.length).toBe(1); // but DID consult the snapshot (to compare/log)
-  });
-
-  test("snapshot rollback: busy ⇒ alive-suppressed; absent ⇒ reclaim-eligible (revive, no streak/grace)", () => {
-    const busy = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "snapshot",
-      liveness: () => "busy",
-    }));
-    expect(busy).toBe("alive-suppressed");
-
-    const reviveDispatch = recorder({ code: 0 });
-    const absent = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
-      livenessSource: "snapshot",
-      liveness: () => "absent",
-      reviveDispatch,
-    }));
-    expect(absent).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
+    expect(jobLifecycle.calls.length).toBe(1);
+    expect(jobLifecycle.calls[0][0]).toBe("bg-77");
   });
 
   test("alive past BUSY_CEILING_MS with no committed work ⇒ 'escalated' (no silent reclaim)", () => {
@@ -1167,7 +1136,6 @@ describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () =>
       orch,
       implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
       seams({
-        livenessSource: "state-json",
         jobLifecycle: () => "alive",
         busyCeilingMs: 1,
         now: () => 10_000,
@@ -2794,6 +2762,51 @@ describe("readBootSince — CTL-655 boot-time window reader", () => {
     // Empty-string bootedAt is also rejected.
     writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
     expect(readBootSince(dir)).toBeUndefined();
+  });
+});
+
+// CTL-736 Phase 3: at daemon boot, every per-(ticket, phase) progress high-water
+// marker is cleared so a stale mark from a prior run cannot false-STOP this run's
+// first death (the gate's "first death gets one revive" guarantee is per-run).
+describe("clearProgressMarks — CTL-736 boot-time progress reset", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl736-progress-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function writeWorkerFile(ticket, name, body = "x") {
+    const d = join(orchDir, "workers", ticket);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, name), body);
+  }
+
+  test("deletes every .progress-<phase> marker across all worker dirs", () => {
+    writeWorkerFile("CTL-1", ".progress-implement", "4");
+    writeWorkerFile("CTL-1", ".progress-verify", "120");
+    writeWorkerFile("CTL-2", ".progress-research", "800");
+    clearProgressMarks(orchDir);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-implement"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-verify"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-2", ".progress-research"))).toBe(false);
+  });
+
+  test("leaves non-progress worker files untouched (signals, claims, revive markers)", () => {
+    writeWorkerFile("CTL-1", "phase-implement.json", "{}");
+    writeWorkerFile("CTL-1", "implement.claim.1", "{}");
+    writeWorkerFile("CTL-1", ".revive-1.applied", "ts");
+    writeWorkerFile("CTL-1", ".progress-implement", "4");
+    clearProgressMarks(orchDir);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", "implement.claim.1"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".revive-1.applied"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-implement"))).toBe(false);
+  });
+
+  test("no workers dir → no-op (fail-open, no throw)", () => {
+    expect(() => clearProgressMarks(orchDir)).not.toThrow();
   });
 });
 

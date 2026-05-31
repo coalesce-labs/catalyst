@@ -60,7 +60,7 @@ import { fetchTicketState } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
-import { countBackgroundAgents, getAgentsCached, livenessForBgJob } from "./claude-agents.mjs";
+import { countBackgroundAgents, getAgentsCached } from "./claude-agents.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
 // is the real recovery-module function; tests inject a fake. See
@@ -927,14 +927,19 @@ export function maybeResetForRemediateCycle(
   }
   // GATE-0: also drop the cycle members' claim tombstones so the re-dispatch's
   // fresh (no-signal ⇒ gen 1) claim is exclusive and wins instead of colliding.
-  let claimEntries;
+  // CTL-736 Phase 3: AND drop their `.progress-<phase>` high-water markers, so the
+  // fresh verify/remediate attempt is measured from zero — a stale high-water from
+  // the prior cycle would otherwise false-STOP the new attempt on its first death.
+  let workerEntries;
   try {
-    claimEntries = readdir(workerDir);
+    workerEntries = readdir(workerDir);
   } catch {
-    claimEntries = []; // worker dir gone — nothing to clean
+    workerEntries = []; // worker dir gone — nothing to clean
   }
-  for (const f of claimEntries) {
-    if (REMEDIATE_CYCLE_CLAIM_PHASES.some((p) => f.startsWith(`${p}.claim.`))) {
+  for (const f of workerEntries) {
+    const isCycleClaim = REMEDIATE_CYCLE_CLAIM_PHASES.some((p) => f.startsWith(`${p}.claim.`));
+    const isCycleProgress = REMEDIATE_CYCLE_CLAIM_PHASES.some((p) => f === `.progress-${p}`);
+    if (isCycleClaim || isCycleProgress) {
       try {
         rm(join(workerDir, f), { force: true });
       } catch {
@@ -1362,18 +1367,15 @@ export function schedulerTick(
     // its slot. Interactive sessions are excluded (unlimited). Injectable for
     // tests so a unit tick need not shell out to `claude`.
     liveBackgroundCount = () => countBackgroundAgents(),
-    // CTL-731 Phase 00: the hardened-liveness seams. `livenessSnapshot` returns
-    // the warm, never-blocking `claude agents` snapshot once per tick (the daemon
-    // injects `() => getAgentsCached()`); when non-null, the SAME agents list is
-    // bound into the per-worker reclaim liveness so the reclaim sweep no longer
-    // shells out synchronously per worker (a hot-loop starvation source). Null
-    // (the test default) preserves the legacy per-worker liveness path.
-    // `livenessIsFresh` gates new-work admission: a stale/never-populated snapshot
-    // means the live count is untrustworthy, so we HOLD new dispatch (fail-safe,
-    // never over-spawn) while advancement of in-flight phases continues. Defaults
-    // to fresh so existing tests (which inject only liveBackgroundCount) dispatch
-    // exactly as before.
-    livenessSnapshot = null,
+    // CTL-731 Phase 00 / CTL-736: `livenessIsFresh` gates new-work admission — a
+    // stale/never-populated `claude agents` snapshot means the live count is
+    // untrustworthy, so we HOLD new dispatch (fail-safe, never over-spawn) while
+    // advancement of in-flight phases continues. Defaults to fresh so existing
+    // tests (which inject only liveBackgroundCount) dispatch exactly as before.
+    // (The companion `livenessSnapshot` seam that bound the shared agents list
+    // into the per-worker reclaim liveness was removed with CTL-736: the reclaim
+    // death trigger now reads each worker's local state.json and never consults
+    // the snapshot.)
     livenessIsFresh = () => true,
     // CTL-611: injectable verifier + audit-event emitter so tests can pin the
     // demotion path independently of fixture choice (fakeDispatch / recorder).
@@ -1405,14 +1407,14 @@ export function schedulerTick(
   // every active worker signal (readWorkerSignals returns one per ticket — the
   // active, non-terminal-first phase) and asks reclaimDeadWork to decide.
   // Reclaim is a strict superset of "do nothing": only the dead+work-done case
-  // mutates the signal; all other classes (terminal/running/unknown/not-done/
-  // not-applicable) are zero-action no-ops.
-  // CTL-587: reclaimDeadWork now returns up to 8 discriminators. The four
-  // that callers can act on (HUD, daemon log) populate parallel arrays; the
-  // others (noop, not-done, not-applicable, reclaim-failed, superseded-noop)
-  // are silent because they describe "no externally-visible change" — the next
-  // tick will re-evaluate. The 'reviveSuppressed' bucket is the storm-breaker
-  // marker; 'escalated' fires `needs-human` via the per-phase recovery path.
+  // mutates the signal; all other classes (terminal/running/unknown/alive-
+  // suppressed/superseded-noop) are zero-action no-ops.
+  // CTL-736: reclaimDeadWork's actionable returns populate parallel arrays for
+  // the HUD / daemon log; the rest (noop, reclaim-failed, superseded-noop,
+  // inert-stale, alive-suppressed, rate-limited-deferred, escalation-suppressed)
+  // are silent — they describe "no externally-visible change" the next tick
+  // re-evaluates. 'reviveSuppressed' now marks only the audit-append-failure
+  // path; 'noProgressStopped' + 'escalated' fire `needs-human`.
   const reclaimed = [];
   const revived = [];
   // CTL-736: reviveSuppressed now marks ONLY the audit-append-failure path (the
@@ -1435,27 +1437,14 @@ export function schedulerTick(
   // failed/stalled/aborted" — exactly the set this sweep cares about.
   const inFlightTickets = listInFlightTickets(orchDir);
 
-  // CTL-731 Phase 00: read the warm, never-blocking `claude agents` snapshot ONCE
-  // per tick (no subprocess on the event loop). Its agents list is bound into the
-  // per-worker reclaim liveness below so the reclaim sweep — which iterates every
-  // in-flight worker — no longer shells out `claude agents --json` per worker (a
-  // proven starvation source). Its freshness gates new-work admission later. Null
-  // snapshot seam (test default) → legacy per-worker liveness, fresh-by-default.
-  const liveSnapshot = livenessSnapshot ? livenessSnapshot() : null;
-  // CTL-731: only bind the snapshot's agents into the reclaim liveness when it is
-  // POPULATED. Used ONLY by the non-default `snapshot`/`shadow` LIVENESS_SOURCE
-  // escape-hatch modes (see recovery.mjs reclaimDeadWorkIfPossible); the default
-  // `state-json` death trigger reads each worker's local state.json and never
-  // consults this list. A populated-but-stale snapshot is fine for reclaim
-  // (≤ a few seconds old, same as the 5s TTL) — only NEW-work dispatch needs isFresh.
-  const liveAgents = liveSnapshot && liveSnapshot.populated ? liveSnapshot.agents : null;
-
-  // CTL-736 Phase 2: the CTL-731 reclaimColdSkip (skip the whole reclaim sweep on
-  // a cold snapshot) is DELETED. It existed because the cold `claude agents`
-  // snapshot would resolve every worker to "absent" and mass-false-revive. The
-  // default state-json death trigger reads a LOCAL per-worker state.json — there
-  // is no cold/warm distinction and no per-worker `claude agents` fan-out to
-  // guard against, so the sweep runs every tick.
+  // CTL-736: the reclaim death trigger is the authoritative LOCAL state.json
+  // lifecycle (jobLifecycle), so the reclaim sweep no longer reads the `claude
+  // agents` snapshot at all. The CTL-731 per-tick snapshot read + per-worker
+  // liveness binding AND the cold-snapshot skip (reclaimColdSkip) are both gone:
+  // a local statSync of one job dir per worker has no cold/warm distinction and
+  // no per-worker subprocess fan-out to guard against, so the sweep runs every
+  // tick. (New-work admission still gates on `livenessIsFresh()` below — a
+  // separate concern that keeps the snapshot warm for concurrency counting.)
 
   // CTL-702: scan worker dirs for yield tombstones. Emit once per unique
   // absolute path per daemon lifetime (deduped via observedYieldFiles).
@@ -1490,13 +1479,9 @@ export function schedulerTick(
     try {
       const team = teamOf(sig.ticket);
       const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
-      // CTL-731 Phase 00: when we have a warm snapshot, bind its agents list into
-      // the reclaim's liveness reader so it resolves busy/idle/absent against the
-      // ONE shared `claude agents` read instead of shelling out per worker.
+      // CTL-736: reclaim reads only the local state.json lifecycle — no snapshot
+      // liveness binding (the death trigger never consults `claude agents`).
       const reclaimOpts = { repoRoot };
-      if (liveAgents) {
-        reclaimOpts.liveness = (bgJobId) => livenessForBgJob(bgJobId, { agents: liveAgents });
-      }
       // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.
@@ -1529,24 +1514,22 @@ export function schedulerTick(
           // escalation in events.jsonl already; surfacing this would re-recreate
           // the noise the cool-down exists to prevent.
           break;
-        case "alive-quiet-suppressed":
-          // CTL-610: the bg worker is alive (kill -0) but quiet on a long tool
-          // call (the pre-first-output window for research/plan, or a long
-          // synchronous Edit/Bash inside implement). Invisible by design — no
-          // duplicate spawn, no state change; the next tick re-evaluates the
-          // mtime + pidAlive pair. Surfacing it in result.revived / .escalated
-          // / .reviveSuppressed would re-create the very revive-storm noise the
-          // (C0) guard exists to suppress (and would re-feed the scheduler's own
-          // fs.watch fast path via any audit-event write — CTL-638 lineage).
+        case "rate-limited-deferred":
+          // CTL-736/CTL-679: a no-progress STOP whose needs-human escalation
+          // deferred because the Linear breaker is open. The worker WAS stopped;
+          // the label retries next tick once the breaker closes. Bucket it with
+          // the no-progress stops so the killed-but-pending-flag worker is visible
+          // (rather than silently invisible in `default`).
+          noProgressStopped.push(entry);
           break;
         default:
-          // noop | not-done | not-applicable | reclaim-failed → invisible.
+          // noop | reclaim-failed → invisible.
           // CTL-606: superseded-noop also buckets here — a dead predecessor signal
           // the ticket has already advanced past. Invisible by design (the active
           // phase is progressing normally); surfacing it would be noise.
-          // CTL-735: inert-stale also buckets here — an abandoned historical dir
-          // too old to revive. Invisible by design (steady-state; ~85 such dirs
-          // would otherwise be persistent noise).
+          // CTL-736: alive-suppressed (worker still working) + inert-stale (an
+          // abandoned historical dir too old to revive) also bucket here — both
+          // steady-state non-events that would otherwise be persistent noise.
           break;
       }
     } catch (err) {
@@ -2197,21 +2180,17 @@ function runTick() {
       // a unit test can drive freeSlots deterministically without shelling
       // out to `claude agents`. Undefined here keeps the production default.
       liveBackgroundCount: runningOpts.liveBackgroundCount,
-      // CTL-731 Phase 00: production wiring for the hardened-liveness seams.
-      // Both read the ONE warm, never-blocking snapshot (getAgentsCached) — no
-      // subprocess on the event loop. livenessSnapshot binds the shared agents
-      // list into the per-worker reclaim liveness; livenessIsFresh gates new-work
-      // dispatch on staleness.
+      // CTL-731 Phase 00: production wiring for the new-work staleness gate. It
+      // reads the ONE warm, never-blocking snapshot (getAgentsCached) — no
+      // subprocess on the event loop — and HOLDS new dispatch when the live count
+      // is untrustworthy.
       //
       // Coupling: an injected liveBackgroundCount means the caller is supplying a
       // deterministic, trustworthy count (the CTL-676 test seam), so the staleness
-      // gate has nothing to protect against — default freshness to true and skip
-      // the snapshot-derived reclaim binding (avoids a real `claude agents` spawn
-      // in tests). Production never injects liveBackgroundCount, so it always gets
-      // the real snapshot + real freshness. Explicit overrides win over both.
-      livenessSnapshot:
-        runningOpts.livenessSnapshot ??
-        (runningOpts.liveBackgroundCount !== undefined ? null : () => getAgentsCached()),
+      // gate has nothing to protect against — default freshness to true. Production
+      // never injects liveBackgroundCount, so it gets the real freshness. An
+      // explicit override wins over both. (The CTL-736 reclaim death trigger reads
+      // local state.json, so the old snapshot-derived reclaim binding is gone.)
       livenessIsFresh:
         runningOpts.livenessIsFresh ??
         (runningOpts.liveBackgroundCount !== undefined ? () => true : () => getAgentsCached().isFresh),
@@ -2257,7 +2236,6 @@ export function startScheduler({
   // schedulerTick where it defaults to countBackgroundAgents (the live
   // `claude agents --json` count). Symmetric with the existing dispatch /
   // exec / writeStatus / teardownWorktree seams on schedulerTick.
-  livenessSnapshot, // CTL-731: optional override; runTick defaults to getAgentsCached.
   livenessIsFresh, // CTL-731: optional override; runTick defaults to getAgentsCached().isFresh.
   preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
@@ -2276,7 +2254,6 @@ export function startScheduler({
     configPath, // CTL-676: per-tick Layer-1 re-read source
     layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)
     liveBackgroundCount, // CTL-676: test seam
-    livenessSnapshot, // CTL-731: optional override (default getAgentsCached in runTick)
     livenessIsFresh, // CTL-731: optional override (default getAgentsCached().isFresh)
   };
 
