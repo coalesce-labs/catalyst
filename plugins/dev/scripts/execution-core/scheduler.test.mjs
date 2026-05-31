@@ -1487,16 +1487,15 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-9"]);
   });
 
-  // CTL-731: a COLD/never-populated snapshot with a WIRED seam (production) must
-  // SKIP the whole reclaim sweep for that one boot tick (reclaimColdSkip) — NOT
-  // bind its empty agents list (which would resolve every live worker to "absent"
-  // and mass-false-revive) AND not fall back to a per-worker SYNC `claude agents`
-  // read for every worker (N synchronous spawns that re-starve the loop, the very
-  // failure mode Phase 00 removed). The snapshot warms within a sub-second; the
-  // next (warm) tick reclaims against the shared list.
-  test("a cold liveness snapshot SKIPS the reclaim sweep (no boot mass-false-revive, no per-worker re-starve)", () => {
+  // CTL-736 Phase 2: the CTL-731 reclaimColdSkip is DELETED. A cold/never-populated
+  // snapshot no longer skips the reclaim sweep — the default state-json death
+  // trigger reads each worker's LOCAL state.json (no `claude agents` snapshot, no
+  // per-worker fan-out, no cold/warm distinction). The sweep runs every tick; a
+  // cold snapshot simply leaves liveAgents null so no snapshot liveness is bound
+  // (the escape-hatch snapshot/shadow modes fall back to their own reader).
+  test("a cold liveness snapshot no longer skips the reclaim sweep (state.json trigger needs no warm snapshot)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the sweep would visit
+    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the sweep visits
     const reclaimOpts = [];
     const reclaimDeadWork = (_orchDir, _sig, opts) => {
       reclaimOpts.push(opts);
@@ -1510,8 +1509,9 @@ describe("schedulerTick — new-work pull", () => {
       livenessSnapshot: () => ({ populated: false, agents: [], isFresh: false }),
       livenessIsFresh: () => false,
     });
-    // cold + wired seam → the entire sweep is deferred; reclaimDeadWork never runs
-    expect(reclaimOpts.length).toBe(0);
+    // cold snapshot → sweep STILL runs (CTL-1 visited); no snapshot liveness bound.
+    expect(reclaimOpts.length).toBe(1);
+    expect(reclaimOpts[0].liveness).toBeUndefined();
   });
 
   // The skip is gated on a WIRED seam: a null livenessSnapshot (legacy/test

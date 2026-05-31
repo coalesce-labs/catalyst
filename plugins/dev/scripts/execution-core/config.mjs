@@ -132,15 +132,6 @@ export const TAILER_POLL_INTERVAL_MS =
 export const STALE_WORKER_CUTOFF_MS =
   Number(process.env.EXECUTION_CORE_STALE_WORKER_CUTOFF_MS) || 15 * 60_000;
 
-// CTL-662 — idle-confirmation streak length. A phase worker observed `idle` by
-// `claude agents` is reclaim-eligible only after this many CONSECUTIVE idle
-// observations (a counter persisted on the signal, NOT an mtime window). A
-// couple of ticks confirms the worker is genuinely between-turns done, not
-// momentarily idle between sub-agent fan-out rounds. Env-overridable so tuning
-// from real failures needs no code change (the operator decision on the ticket).
-export const IDLE_CONFIRM_TICKS =
-  Number(process.env.EXECUTION_CORE_IDLE_CONFIRM_TICKS) || 2;
-
 // CTL-662 — busy-forever backstop ceiling. With STALE_MS / HUNG_CUTOFF_MS gone,
 // this is the SOLE long backstop: a worker that stays `busy` past this elapsed
 // time with no committed work flags for human (escalateOnce) — NEVER a silent
@@ -149,20 +140,6 @@ export const IDLE_CONFIRM_TICKS =
 // genuinely wedged worker does. Env-overridable for tuning.
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
-
-// CTL-735 — post-(re)dispatch grace window for the `absent` liveness class. A
-// worker whose bg_job_id is `absent` from the eventually-consistent `claude
-// agents` snapshot but whose signal was (re)dispatched within this window has
-// almost certainly just not registered yet (a fresh `claude --bg` takes seconds
-// to appear, slower under load) — NOT crashed. The reclaim sweep defers reviving
-// it until the window elapses: the missing analog of IDLE_CONFIRM_TICKS for
-// `absent`. Without it, the de-starved fast tick (CTL-731, ~2-4s) re-classifies
-// each just-revived worker as dead and revives it again → the revive storm.
-// Deliberately generous (90s) so a fresh worker registers even under high load,
-// while a genuinely-crashed fresh worker waits at most this long before revive.
-// Env-overridable for tuning from real failures.
-export const REVIVE_GRACE_MS =
-  Number(process.env.EXECUTION_CORE_REVIVE_GRACE_MS) || 90_000;
 
 // CTL-735 — per-tick revive cap. The reclaim sweep revives at most this many
 // dead workers per scheduler tick; further revivable workers are `revive-capped`
@@ -187,6 +164,23 @@ export const PER_TICK_REVIVE_CAP =
 // through to the pre-CTL-735 path (cannot judge age). Env-overridable.
 export const REVIVE_MAX_AGE_MS =
   Number(process.env.EXECUTION_CORE_REVIVE_MAX_AGE_MS) || 24 * 60 * 60_000;
+
+// CTL-736 Phase 2 — liveness-source selector for the reclaim death trigger.
+// 'state-json' (default, post-cutover): the authoritative local
+// ~/.claude/jobs/<bg>/state.json lifecycle (jobLifecycle in recovery.mjs) is
+// the death trigger — deterministic, fan-out-safe, no eventually-consistent
+// snapshot lag. 'shadow': act on state.json BUT also compute the legacy
+// `claude agents` snapshot verdict and log `liveness-shadow-mismatch` on
+// disagreement (live A/B observability). 'snapshot': the legacy
+// livenessForBgJob trigger — an env-only production rollback if the state.json
+// path ever misbehaves (no cache hotfix needed). Re-reads env per call (reader
+// idiom) so it can be flipped per-test and live; an unrecognized value falls
+// back to the safe 'state-json' default.
+const LIVENESS_SOURCES = new Set(["snapshot", "shadow", "state-json"]);
+export function readLivenessConfig() {
+  const raw = process.env.EXECUTION_CORE_LIVENESS_SOURCE;
+  return { source: LIVENESS_SOURCES.has(raw) ? raw : "state-json" };
+}
 
 // CTL-650 — the push-based session wait-state watcher. Default ON; the daemon
 // continuously classifies live sessions and emits agent.waiting_on_user /

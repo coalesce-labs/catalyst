@@ -394,9 +394,11 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         reclaimDeadWork: (od, sig, opts) =>
           reclaimDeadWorkIfPossible(od, sig, {
             ...opts,
-            // 'running' classification + ancient mtime → effectively dead via the
-            // staleness path (also past hungCutoffMs so pidAlive is never read).
-            statJob: () => ({ exists: true, mtimeMs: 1000 }),
+            // CTL-736: the liveness job dir is gone (dead-gone) → reclaim-eligible.
+            // resolveSession reads a SEPARATE dir (CATALYST_REVIVE_JOBS_DIR) where
+            // the resume jsonl still lives, so the revive carries a resumeSession.
+            statJob: () => null,
+            jobLifecycle: () => "dead-gone",
             probes: { implement: () => false }, // work NOT done → revive territory
             reviveDispatch: (args) => {
               reviveDispatchCalls.push(args);
@@ -452,7 +454,9 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         reclaimDeadWork: (od, sig, opts) =>
           reclaimDeadWorkIfPossible(od, sig, {
             ...opts,
-            statJob: () => ({ exists: true, mtimeMs: 1000 }),
+            // CTL-736: dead-gone (no state.json for feedface) → reclaim-eligible.
+            statJob: () => null,
+            jobLifecycle: () => "dead-gone",
             probes: { implement: () => false },
             reviveDispatch: (args) => {
               reviveDispatchCalls.push(args);
@@ -527,45 +531,42 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
     expect(reviveDispatchCalls).toHaveLength(2); // only the uncapped revives dispatched
   });
 
-  // CTL-735 — the storm reproduction (handoff action item #3). This mirrors the
-  // real incident: many fast ticks (~2-4s) over multiple dead-bg signals whose
-  // freshly-revived replacement worker NEVER appears in the eventually-consistent
-  // `claude agents` snapshot (liveness always `absent` — the worst case). Pre-fix,
-  // every tick re-revived every worker → 5→18→62→74 workers, load 72. Post-fix the
-  // structural guards (grace window + per-tick cap) bound TOTAL revives: each
-  // worker revives exactly once and then sits `revive-pending` for the rest of the
-  // grace window. Budget is left always-available (countReviveEvents=0) so this
-  // isolates the structural guards, NOT the per-ticket MAX_REVIVES backstop.
-  test("storm repro: many fast ticks × 5 always-absent dead workers → bounded revives (no storm)", () => {
+  // CTL-736 — the storm reproduction (PR #1232), re-cast for the state.json death
+  // trigger. The original storm came from the eventually-consistent `claude
+  // agents` snapshot: a freshly-revived worker showed `absent` before it
+  // registered, so every fast tick re-revived it (5→18→62→74 workers, load 72).
+  // The structural fix is now the AUTHORITATIVE local state.json lifecycle — a
+  // revived worker writes state=working immediately, so jobLifecycle reads `alive`
+  // on the very next tick and suppresses re-revive. Convergence needs NO grace
+  // window, NO idle streak, NO per-tick cap: each worker revives EXACTLY ONCE.
+  // (This assertion is intentionally cap-independent so it holds across Phase 2
+  // — per-tick cap still present — and Phase 3, which removes it.)
+  test("storm repro: many fast ticks × 5 dead workers → each revives once then converges (state.json alive)", () => {
     const N = 5;
     for (let i = 0; i < N; i++) {
       seedSignal(`CTL-735-T${i}`, "implement", {
         status: "running",
         bg_job_id: `dead-bg-${i}`,
         orchestrator: `CTL-735-T${i}`,
-        // 10 min ago — past the 90s grace window, within the 24h inert ceiling →
-        // eligible to revive on the first tick.
         startedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
         updatedAt: new Date(Date.now() - 10 * 60_000).toISOString(),
       });
     }
 
-    // A controllable clock: each tick advances 3s (the fast de-starved cadence).
-    // 20 ticks = 60s total, strictly inside the 90s grace window, so a worker
-    // revived on tick K stays revive-pending for every remaining tick.
     let clock = Date.now();
     const TICK_MS = 3_000;
     const TICKS = 20;
 
     const reviveDispatchCalls = [];
     const perTickRevived = [];
+    // A revived worker registers immediately (writes state=working) → jobLifecycle
+    // reads `alive` thereafter. The `registered` set simulates that local
+    // state.json transition — the structural replacement for the grace window.
+    const registered = new Set();
 
-    // Simulated dispatcher: rewrite the phase signal exactly as the real
-    // defaultReviveDispatch → phase-agent-dispatch does — fresh startedAt + new
-    // bg + status running — so the next tick re-reads a freshly-(re)dispatched
-    // worker (which the grace window must then defer).
     const simulatedReviveDispatch = ({ orchDir: od, ticket, phase }) => {
       reviveDispatchCalls.push({ ticket, tick: reviveDispatchCalls.length });
+      registered.add(ticket); // the replacement worker is now live (state=working)
       writeFileSync(
         join(od, "workers", ticket, `phase-${phase}.json`),
         JSON.stringify({
@@ -574,7 +575,7 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
           status: "running",
           bg_job_id: `revived-bg-${ticket}`,
           orchestrator: ticket,
-          startedAt: new Date(clock).toISOString(), // fresh — arms the grace window
+          startedAt: new Date(clock).toISOString(),
           updatedAt: new Date(clock).toISOString(),
         }),
       );
@@ -594,14 +595,16 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
         teardownWorktree: () => true,
         reclaimDeadWork: (od, sig, opts) =>
           reclaimDeadWorkIfPossible(od, sig, {
-            ...opts, // carries the per-tick reviveBudgetRemaining
+            ...opts, // carries the per-tick reviveBudgetRemaining (Phase 2)
             statJob: () => null,
+            // state.json lifecycle: a registered (revived) worker is `alive` →
+            // suppressed; an unregistered one is `dead-gone` → revives once.
+            jobLifecycle: () => (registered.has(sig.ticket) ? "alive" : "dead-gone"),
             probes: { implement: () => false }, // work NOT done → revive territory
-            liveness: () => "absent", // worst case: replacement never registers
             reviveDispatch: simulatedReviveDispatch,
             applyStalledLabel: () => ({ applied: true }),
             killBgJob: () => {},
-            countReviveEvents: () => 0, // budget always available — isolate structural guards
+            countReviveEvents: () => 0, // budget always available — isolate the trigger
             countDistinctRevivingTickets: () => 1, // storm-breaker NOT tripped
             now: () => clock,
           }),
@@ -610,13 +613,13 @@ describe("CTL-587 end-to-end (schedulerTick + recovery)", () => {
       clock += TICK_MS;
     }
 
-    // THE storm assertion: each of the 5 workers revived EXACTLY ONCE across all
-    // 20 ticks — not once per tick. Pre-fix this would be ~5 × 20 = 100 revives.
+    // THE convergence assertion: each of the 5 workers revived EXACTLY ONCE across
+    // all 20 ticks (pre-fix: ~5 × 20 = 100). The state.json `alive` suppression —
+    // not a grace window or per-tick cap — bounds it.
     expect(reviveDispatchCalls).toHaveLength(N);
-    // And the per-tick cap held every tick (never more than 2 revives in one tick).
-    expect(Math.max(...perTickRevived)).toBeLessThanOrEqual(2);
-    // Every worker revived once and only once.
     const revivedTickets = new Set(reviveDispatchCalls.map((c) => c.ticket));
     expect(revivedTickets.size).toBe(N);
+    // No tick re-revived an already-converged worker: total revives == N exactly.
+    expect(perTickRevived.reduce((a, b) => a + b, 0)).toBe(N);
   });
 });
