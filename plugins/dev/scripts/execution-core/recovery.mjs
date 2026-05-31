@@ -29,9 +29,7 @@ import {
   getJobsRoot,
   getEventLogPath,
   log,
-  IDLE_CONFIRM_TICKS,
   BUSY_CEILING_MS,
-  REVIVE_GRACE_MS,
   REVIVE_MAX_AGE_MS,
 } from "./config.mjs";
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -39,10 +37,15 @@ import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-read
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
-import { livenessForBgJob, claudeStop } from "./claude-agents.mjs";
+import { claudeStop } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
-import { WORK_DONE_PROBES, hasProbe, describeProbe } from "./work-done-probes.mjs";
+import {
+  WORK_DONE_PROBES,
+  hasProbe,
+  describeProbe,
+  defaultProgressMark,
+} from "./work-done-probes.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
@@ -55,10 +58,7 @@ import {
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
 } from "./label-guard.mjs";
-import {
-  countReviveEvents as defaultCountReviveEvents,
-  countDistinctRevivingTickets as defaultCountDistinctRevivingTickets,
-} from "./event-scan.mjs";
+import { countReviveEvents as defaultCountReviveEvents } from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(
@@ -101,8 +101,14 @@ export function resolvePhaseSessionId(
 }
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
-// the job dir is gone (the worker's process no longer exists), else its mtime
-// and parsed .state. Injectable so tests never touch real Claude job state.
+// the job dir is gone (the worker's process no longer exists), else its mtime,
+// parsed .state, and .firstTerminalAt. Injectable so tests never touch real
+// Claude job state.
+//
+// CTL-736 Phase 2: firstTerminalAt is the state-name-agnostic death signal —
+// Claude stamps it the moment a job reaches a terminal lifecycle state, so
+// jobLifecycle can declare death even when the .state string is one we don't
+// enumerate. Null for a live/non-terminal job (and when state.json is unreadable).
 export function defaultStatJob(bgJobId) {
   const file = join(getJobsRoot(), bgJobId, "state.json");
   let st;
@@ -112,26 +118,62 @@ export function defaultStatJob(bgJobId) {
     return null; // job dir missing → worker is gone
   }
   let state = null;
+  let firstTerminalAt = null;
   try {
-    state = JSON.parse(readFileSync(file, "utf8"))?.state ?? null;
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    state = parsed?.state ?? null;
+    firstTerminalAt = parsed?.firstTerminalAt ?? null;
   } catch {
     /* state.json unreadable — liveness still proven by the dir existing */
   }
-  return { exists: true, mtimeMs: st.mtimeMs, state };
+  return { exists: true, mtimeMs: st.mtimeMs, state, firstTerminalAt };
+}
+
+// CTL-736 Phase 2 — the authoritative job-lifecycle terminal states. These are
+// the `state` values Claude writes into ~/.claude/jobs/<id>/state.json when a
+// `claude --bg` job reaches a terminal lifecycle (empirically: stopped/failed/
+// done/blocked; `working` is the sole non-terminal value). DISTINCT from the
+// worker-SIGNAL `TERMINAL` set imported from signal-reader.mjs (phase signal
+// status like done/skipped) — do not conflate the two.
+export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+
+// jobLifecycle — CTL-736 Phase 2's deterministic, LOCAL death verdict from a
+// `claude --bg` job's state.json, replacing the eventually-consistent `claude
+// agents` snapshot (livenessForBgJob) in the reclaim death trigger:
+//   'dead-gone'     — the job dir is gone (statJob null): the worker is gone.
+//   'dead-terminal' — firstTerminalAt is set OR .state ∈ TERMINAL_JOB_STATES:
+//                     Claude marked the job terminal. Definitive — no grace
+//                     window or idle-confirmation streak needed.
+//   'alive'         — any other readable state (notably 'working', or an
+//                     unreadable state.json whose dir still exists). mtime is
+//                     NOT consulted: a multi-minute in-process sub-agent fan-out
+//                     keeps .state non-terminal while mtime ages, and the
+//                     pre-CTL-662 mtime trigger false-reclaimed exactly that
+//                     (the worker-10d6f123 failure). Pure given statJob.
+export function jobLifecycle(bgJobId, { statJob = defaultStatJob } = {}) {
+  const job = statJob(bgJobId);
+  if (!job) return "dead-gone";
+  if (job.firstTerminalAt || TERMINAL_JOB_STATES.has(job.state)) return "dead-terminal";
+  return "alive";
 }
 
 // classifyWorker — PURE given statJob. One WorkerSignal (from readWorkerSignals)
 // → a liveness class:
 //   'terminal' — signal status is terminal; the phase finished, nothing to attach
-//   'running'  — non-terminal + the bg job dir exists → re-attached
-//   'dead'     — non-terminal + the bg job dir is gone → a lost worker
+//   'running'  — non-terminal signal + the bg job is alive (state.json non-terminal)
+//   'dead'     — non-terminal signal + the bg job is terminal OR its dir is gone
 //   'unknown'  — no bg_job_id (legacy pid signal, or an orphan `dispatched`
 //                signal written before claude --bg was spawned)
+//
+// CTL-736 Phase 2: consults the job LIFECYCLE (jobLifecycle → state.json), not
+// mere job-dir existence. A never-cleaned-up dir whose .state is terminal
+// (stopped/failed/done/blocked) now classifies 'dead' instead of 'running' —
+// the discard the plan called out (16,462 retained job dirs, 0 pid files).
 export function classifyWorker(signal, { statJob = defaultStatJob } = {}) {
   if (TERMINAL.has(signal?.status)) return "terminal";
   const live = signal?.liveness;
   if (live?.kind !== "bg" || !live?.value) return "unknown";
-  return statJob(live.value) ? "running" : "dead";
+  return jobLifecycle(live.value, { statJob }) === "alive" ? "running" : "dead";
 }
 
 // reconstructWorkerState — scan ${orchDir}/workers/ via the canonical reader and
@@ -867,6 +909,42 @@ export function writeBootMarker(orchDir, { now = () => new Date().toISOString() 
   }
 }
 
+// clearProgressMarks — CTL-736 Phase 3: delete every per-(ticket, phase) progress
+// high-water marker (`workers/<ticket>/.progress-<phase>`). Called at daemon boot
+// (alongside writeBootMarker) so a stale high-water left by a PRIOR daemon run
+// cannot false-STOP the FIRST death of this run (the progress gate's "a first
+// death always gets one revive" guarantee is per-run, windowed the same way the
+// revive ATTEMPT count is windowed by daemon-boot.json). Best-effort + fail-open:
+// a missing workers dir or an unlink error just leaves the marker, costing at
+// most one extra revive evaluation. Injectable rm for tests.
+export function clearProgressMarks(orchDir, { rm = rmSync } = {}) {
+  let entries;
+  try {
+    entries = readdirSync(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return; // no workers dir yet — nothing to clear
+  }
+  for (const d of entries) {
+    if (!d.isDirectory()) continue;
+    const dir = join(orchDir, "workers", d.name);
+    let files;
+    try {
+      files = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (f.startsWith(".progress-")) {
+        try {
+          rm(join(dir, f), { force: true });
+        } catch {
+          /* best-effort — a leftover marker only costs one extra revive eval */
+        }
+      }
+    }
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // CTL-640: cold-start detection. The reference epoch = max(OS boot, claude-daemon
 // start). If that epoch is newer than EVERY ~/.claude/jobs/<id>/state.json mtime,
@@ -1008,115 +1086,110 @@ function defaultWriteReviveMarker({ orchDir, ticket, attempt }) {
   }
 }
 
-// CTL-662 — the reclaim death-trigger is now the worker's `claude agents`
-// status (busy/idle/absent via livenessForBgJob), NOT state.json mtime. The
-// three pre-CTL-662 time triggers (the 5-min mtime-staleness death flag, the
-// CTL-587 defensive-kill quiet-window gate, and the CTL-610 keep-alive ceiling)
-// are all gone: an in-process sub-agent fan-out keeps the parent's turn `busy`
-// while state.json mtime goes stale, so mtime is a false death signal (the
-// proven worker-10d6f123 failure). Reclaim eligibility is driven by status + an
-// idle-confirmation streak (IDLE_CONFIRM_TICKS) and bounded only by the high
-// BUSY_CEILING_MS no-progress human-flag backstop — both env-overridable
-// tunables imported from config.mjs.
+// CTL-736 — the reclaim death-trigger is the authoritative LOCAL state.json
+// lifecycle (jobLifecycle → alive | dead-terminal | dead-gone), NOT the
+// eventually-consistent `claude agents` snapshot and NOT state.json mtime. An
+// in-process sub-agent fan-out keeps .state=working while mtime goes stale, so
+// mtime was a false death signal (the proven worker-10d6f123 failure) and the
+// snapshot showed a fresh worker `absent` before it registered (the CTL-735
+// storm). The single long backstop that survives is the BUSY_CEILING_MS
+// no-committed-work human-flag escalation on an `alive` worker — an
+// env-overridable tunable imported from config.mjs.
 
-// CTL-587 — auto-revival constants. MAX_REVIVES is the per-ticket budget
-// (counted from events.jsonl). STORM_WINDOW_MS + STORM_THRESHOLD form the
-// breaker that suppresses revives when too many tickets are reviving at once
-// (a Linear-side or fleet-wide outage).
-const MAX_REVIVES = 2;
+// CTL-736 Phase 3: the MAX_REVIVES per-ticket budget and the STORM_THRESHOLD
+// fleet-wide storm-breaker are DELETED — the progress gate (revive only while a
+// worker makes forward progress; stop on zero progress) plus the Phase-1 O_EXCL
+// claim bound retries structurally, no heuristic budget needed. STORM_WINDOW_MS
+// is retained ONLY as the `window_ms` field of the revive-suppressed audit event
+// emitted on the audit-append-failure path below.
 const STORM_WINDOW_MS = 10 * 60 * 1000;
-const STORM_THRESHOLD = 3;
 
-// CTL-662 — idle-confirmation streak markers. The consecutive-idle-observation
-// counter is persisted as a per-(ticket, phase) worker-dir marker
-// (`.idle-streak-<phase>`), the same durable-state mechanism as the CTL-587
-// .revive-N.applied markers and the CTL-638 escalation cool-downs — a PERSISTED
-// counter, NOT an mtime window (the invariant the plan requires). A re-dispatch
-// recreates the worker dir, so the streak naturally resets on revive.
-function idleStreakMarkerPath(orchDir, ticket, phase) {
-  return join(orchDir, "workers", ticket, `.idle-streak-${phase}`);
+// CTL-736 Phase 2: the CTL-662 idle-confirmation streak markers
+// (`.idle-streak-<phase>` + idleStreakMarkerPath / read / bump / reset) are
+// DELETED. They existed to confirm an eventually-consistent `claude agents`
+// `idle` reading across consecutive ticks before reclaiming. The authoritative
+// local state.json lifecycle (jobLifecycle) has no such ambiguity — `working`
+// is alive, terminal is dead — so no streak is needed.
+
+// CTL-736 Phase 3 — progress high-water mark. Persisted per-(ticket, phase) as a
+// worker-dir marker (`.progress-<phase>`), the same durable-state mechanism as
+// the CTL-587 .revive-N.applied markers. The reclaim path compares the CURRENT
+// progressMark (commits-ahead / artifact bytes) against this stored high-water to
+// decide revive (progressed) vs stop (zero progress). defaultReadProgressMark
+// returns -1 when absent so a first death always gets one revive.
+function progressMarkPath(orchDir, ticket, phase) {
+  return join(orchDir, "workers", ticket, `.progress-${phase}`);
 }
-function defaultReadIdleStreak(orchDir, ticket, phase) {
+function defaultReadProgressMark(orchDir, ticket, phase) {
   try {
-    const n = parseInt(readFileSync(idleStreakMarkerPath(orchDir, ticket, phase), "utf8"), 10);
-    return Number.isFinite(n) && n > 0 ? n : 0;
+    const n = parseInt(readFileSync(progressMarkPath(orchDir, ticket, phase), "utf8"), 10);
+    return Number.isFinite(n) ? n : -1;
   } catch {
-    return 0; // marker absent → no prior idle observation
+    return -1; // marker absent → no prior progress observation
   }
 }
-// defaultBumpIdleStreak — increment + persist the counter, returning the NEW
-// count. Fail-open: a write failure returns the would-be count so a transient
-// fs error never wedges the streak (worst case: one extra idle tick before
-// reclaim, harmless).
-function defaultBumpIdleStreak(orchDir, ticket, phase) {
-  const next = defaultReadIdleStreak(orchDir, ticket, phase) + 1;
+// defaultWriteProgressMark — persist the new high-water mark. Fail-open: a write
+// failure only costs one extra revive evaluation next tick (harmless).
+function defaultWriteProgressMark(orchDir, ticket, phase, value) {
   try {
-    writeFileSync(idleStreakMarkerPath(orchDir, ticket, phase), String(next));
+    writeFileSync(progressMarkPath(orchDir, ticket, phase), String(value));
   } catch (err) {
-    log.warn({ ticket, phase, err: err.message }, "ctl-662: idle-streak write failed");
-  }
-  return next;
-}
-function defaultResetIdleStreak(orchDir, ticket, phase) {
-  try {
-    const path = idleStreakMarkerPath(orchDir, ticket, phase);
-    if (existsSync(path)) rmSync(path);
-  } catch {
-    /* best-effort — a stale streak marker only delays the next reclaim by ticks */
+    log.warn({ ticket, phase, err: err.message }, "ctl-736: progress-mark write failed");
   }
 }
 
-// reclaimDeadWorkIfPossible — one signal in, one decision out. CTL-662 swaps the
-// death TRIGGER from state.json mtime (the false signal: an in-process sub-agent
-// fan-out keeps the parent's turn busy while mtime goes stale) to the worker's
-// `claude agents` status via livenessForBgJob → busy|idle|absent. Every
-// CTL-587/606/610/661 behavioral guarantee on the reclaim-eligible path below is
-// preserved; only what makes a worker reclaim-eligible changes. The return set:
+// reclaimDeadWorkIfPossible — one signal in, one decision out. CTL-736 swaps the
+// death TRIGGER from the eventually-consistent `claude agents` snapshot to the
+// authoritative LOCAL state.json lifecycle (jobLifecycle → alive | dead-terminal
+// | dead-gone), and replaces the ~14 heuristic revive-storm guards with two
+// deterministic primitives: the Phase-1 O_EXCL claim + fencing generation (no
+// duplicate spawn) and the Phase-3 progress gate (revive only while forward
+// progress advances; stop, never respawn, on zero progress). The return set:
 //
 //   'noop'                classifyWorker says terminal (phase finished) or
 //                         unknown (no bg_job_id). No action.
-//   'alive-busy-suppressed' worker is `busy` (a live session with an open turn —
-//                         including the in-process sub-agent fan-out that keeps
-//                         the parent busy while state.json mtime goes stale: the
-//                         CTL-662 false-reclaim fix). NEVER auto-reclaimed at any
-//                         elapsed time. Resets the idle streak. The sole permitted
-//                         action is the BUSY_CEILING_MS no-progress backstop.
-//   'idle-pending'        worker is `idle` (live, between turns) but has not yet
-//                         reached idleConfirmTicks consecutive idle observations.
-//                         Streak incremented + persisted; no reclaim this tick.
-//   'reclaimed'           reclaim-eligible (absent, or idle-confirmed) + work IS
+//   'alive-suppressed'    jobLifecycle is `alive` (state.json non-terminal, e.g.
+//                         working — INCLUDING a multi-minute in-process sub-agent
+//                         fan-out with stale mtime: the CTL-662 false-reclaim fix).
+//                         NEVER auto-reclaimed. The sole permitted action is the
+//                         BUSY_CEILING_MS no-committed-work escalation backstop.
+//   'reclaimed'           reclaim-eligible (dead-terminal / dead-gone) + work IS
 //                         done. Canonical reclaim audit appended, emit-complete
 //                         flipped the signal, session ended.
 //   'reclaim-failed'      reclaim-eligible + work IS done BUT emit-complete exited
 //                         non-zero. Signal NOT mutated (atomic rename); retries.
-//   'revived'             reclaim-eligible + probe says work NOT done + revive
-//                         budget available + storm-breaker closed. Signal reset to
-//                         'stalled', defaultDispatch invoked, .revive-N.applied
-//                         marker written. CTL-604: every probed phase shares this.
-//   'revive-suppressed'   reclaim-eligible + work NOT done + storm-breaker OPEN
-//                         (>3 distinct tickets reviving in last 10min). No
-//                         dispatch; suppress event audited; next tick re-evaluates.
-//   'escalated'           reclaim-eligible + (revive budget exhausted OR no
-//                         work-done probe for this phase: verify/review/pr/
-//                         monitor-*) OR a `busy` worker past BUSY_CEILING_MS with
-//                         no committed work. needs-human label applied (CTL-587
-//                         verified applyLabel); ticket stays put for human triage.
+//   'revived'             reclaim-eligible + probe says work NOT done + progress
+//                         ADVANCED since the last attempt. Signal reset to
+//                         'stalled', defaultDispatch invoked (bumps the fencing
+//                         generation), high-water mark + .revive-N.applied marker
+//                         written. CTL-604: every probed phase shares this.
+//   'no-progress-stopped' reclaim-eligible + work NOT done + ZERO forward progress
+//                         since the last attempt (the futile idle-respawn loop).
+//                         The dead worker is stopped and needs-human applied;
+//                         NEVER respawned. (Phase-3 replacement for the deleted
+//                         MAX_REVIVES budget + storm-breaker.)
+//   'rate-limited-deferred' a no-progress STOP whose needs-human escalation is
+//                         deferred because the Linear breaker is open (CTL-679);
+//                         the worker is still stopped, the label retries next tick.
+//   'revive-suppressed'   reclaim-eligible + work NOT done BUT the revive audit
+//                         event could not be persisted (disk error) — dispatch
+//                         skipped to preserve the attempt counter; retries.
+//   'inert-stale'         reclaim-eligible + work NOT done + the signal is older
+//                         than reviveMaxAgeMs — an abandoned historical dir, left
+//                         inert (no revive, no escalate). (CTL-735, kept.)
+//   'escalated' / 'escalation-suppressed'
+//                         an `alive` worker past BUSY_CEILING_MS with no committed
+//                         work (the backstop), behind the CTL-638 cool-down.
 //   'superseded-noop'     reclaim-eligible BUT the signal's phase precedes the
-//                         ticket's latest-dispatched phase (CTL-606). A stale
-//                         predecessor left at `running`; acting would spuriously
-//                         flag needs-human or spawn a duplicate at a past phase.
-//                         A reap-intent is emitted so the reaper stops the bg.
+//                         ticket's latest-dispatched phase (CTL-606). A reap-intent
+//                         is emitted so the reaper stops the bg.
 //
-// CTL-662: a worker is reclaim-eligible iff livenessForBgJob is `absent` (not a
-// live `claude agents` session) OR `idle` for idleConfirmTicks consecutive
-// observations. state.json mtime is no longer a decision input on ANY branch.
-//
-// The function stays pure given its injected seams: statJob / probes /
-// emitComplete / appendEvent (pre-CTL-587) plus the CTL-587 seams
-// (appendReviveEvent, appendEscalatedEvent, appendReviveSuppressedEvent,
-// reviveDispatch, applyStalledLabel, killBgJob, countReviveEvents,
-// countDistinctRevivingTickets, writeReviveMarker) plus the CTL-662 liveness +
-// idle-streak seams. All have real defaults for prod; tests override every one.
+// The function stays pure given its injected seams: statJob / jobLifecycle (the
+// death trigger) / probes / progressMark + read/writeProgressMark (the Phase-3
+// progress gate) / emitComplete / the CTL-587 revive+escalate seams
+// (appendReviveEvent, appendEscalatedEvent, reviveDispatch, applyStalledLabel,
+// killBgJob, countReviveEvents, writeReviveMarker) + the CTL-638 cool-down +
+// CTL-679 breaker. All have real defaults for prod; tests override every one.
 export function reclaimDeadWorkIfPossible(
   orchDir,
   signal,
@@ -1132,14 +1205,25 @@ export function reclaimDeadWorkIfPossible(
     reviveDispatch = defaultReviveDispatch,
     applyStalledLabel = defaultApplyStalledLabel,
     killBgJob = defaultKillBgJob,
+    // CTL-736 Phase 3: countReviveEvents now supplies the revive ATTEMPT NUMBER
+    // for the audit event + `.revive-N.applied` marker only (telemetry) — it is
+    // no longer a budget gate (the progress gate bounds retries).
     countReviveEvents = defaultCountReviveEvents,
     // CTL-655 — boot-time window reader. Reads <orchDir>/daemon-boot.json and
-    // returns its `bootedAt` (or undefined) so the revive budget counts only
-    // revives from the current daemon run. Named ...Fn to avoid shadowing the
-    // module-level readBootSince used as the default.
+    // returns its `bootedAt` (or undefined) so the attempt count windows to the
+    // current daemon run. Named ...Fn to avoid shadowing the module-level
+    // readBootSince used as the default.
     readBootSince: readBootSinceFn = readBootSince,
-    countDistinctRevivingTickets = defaultCountDistinctRevivingTickets,
     writeReviveMarker = defaultWriteReviveMarker,
+    // CTL-736 Phase 3 — progress probe seams. progressMark returns a monotonic-ish
+    // non-negative forward-progress token (commits-ahead / artifact bytes);
+    // read/writeProgressMark persist the per-(ticket, phase) high-water mark under
+    // workers/<ticket>/.progress-<phase>. Replace the MAX_REVIVES budget, the
+    // storm-breaker, and the per-tick cap: revive only while progress advances,
+    // stop (never respawn) on zero progress.
+    progressMark = defaultProgressMark,
+    readProgressMark = defaultReadProgressMark,
+    writeProgressMark = defaultWriteProgressMark,
     // CTL-638 — per-(ticket, phase) escalation cool-down. Defaults read/write
     // markers under orchDir/.escalation-cooldowns/; tests can inject fakes to
     // run multiple escalations against the same scenario without filesystem
@@ -1149,29 +1233,12 @@ export function reclaimDeadWorkIfPossible(
     // CTL-606 — supersede guard. Returns the ticket's dispatched phase names so
     // the guard can detect a dead signal the pipeline has already advanced past.
     listTicketPhases = (t) => listDispatchedPhases(orchDir, t),
-    // CTL-662 — three-valued liveness reader (replaces the pre-CTL-662 mtime
-    // staleness check + the CTL-610 keep-alive pair). "busy" → never
-    // auto-reclaim; "idle" → reclaim-eligible only after an
-    // idle-confirmation streak; "absent" (not a live `claude agents` session) →
-    // reclaim-eligible immediately.
-    liveness = livenessForBgJob,
-    // CTL-662 — idle-confirmation streak seams. The consecutive-idle counter is
-    // a per-(ticket, phase) worker-dir marker, NOT an mtime window.
-    bumpIdleStreak = defaultBumpIdleStreak,
-    resetIdleStreak = defaultResetIdleStreak,
-    idleConfirmTicks = IDLE_CONFIRM_TICKS,
-    // CTL-735 — post-(re)dispatch grace window for the `absent` class. A worker
-    // (re)dispatched within this window whose new bg_job_id is not yet visible in
-    // the eventually-consistent `claude agents` snapshot is deferred (revive-
-    // pending) rather than re-revived. Injectable so tests drive it deterministically.
-    reviveGraceMs = REVIVE_GRACE_MS,
-    // CTL-735 — per-tick revive budget, threaded in by the scheduler sweep
-    // (PER_TICK_REVIVE_CAP minus revives already performed this tick). When <= 0
-    // an otherwise-revivable worker is `revive-capped` (deferred) rather than
-    // dispatched, so one tick cannot mass-revive. `undefined` (the default and
-    // every standalone/test caller that does not set it) disables the cap →
-    // pre-CTL-735 behaviour.
-    reviveBudgetRemaining = undefined,
+    // CTL-736 — THE death trigger: the authoritative LOCAL state.json lifecycle
+    // (alive | dead-terminal | dead-gone). Aliased ...Fn to avoid shadowing the
+    // module-level jobLifecycle used as the default. This fully replaces the
+    // eventually-consistent `claude agents` snapshot reader (livenessForBgJob),
+    // which is no longer consulted by the reclaim/death path at all.
+    jobLifecycle: jobLifecycleFn = jobLifecycle,
     // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
     // signal has not been touched in this long is an abandoned historical dir,
     // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
@@ -1258,46 +1325,54 @@ export function reclaimDeadWorkIfPossible(
     return "escalated";
   }
 
-  // CTL-662 — THE DEATH TRIGGER. The worker's `claude agents` status, not its
-  // state.json mtime. busy → alive (never auto-reclaim); idle → reclaim-eligible
-  // after a confirmation streak; absent → reclaim-eligible immediately.
-  const live = liveness(prevBgJobId);
+  // CTL-736 — THE DEATH TRIGGER. The authoritative LOCAL state.json lifecycle
+  // (jobLifecycle → alive | dead-terminal | dead-gone), NOT the eventually-
+  // consistent `claude agents` snapshot. Deterministic and fan-out-safe: a
+  // multi-minute in-process sub-agent fan-out keeps .state=working (alive) while
+  // mtime ages, so mtime is never read. A terminal .state / firstTerminalAt is
+  // definitively dead; a missing job dir is dead-gone.
+  //
+  // (The earlier draft of this work added LIVENESS_SOURCE `snapshot`/`shadow`
+  // rollback modes. They were removed: both re-broke on the deleted idle-streak/
+  // grace/cold-skip machinery — `snapshot` reclaimed a live idle worker on the
+  // first tick, and a cold snapshot re-introduced the CTL-731 per-worker
+  // synchronous `claude agents` starvation. A degraded rollback that misfires in
+  // the very incident it would be used for is a footgun; the real rollback for a
+  // state.json regression is reverting this change.)
+  const lifecycle = jobLifecycleFn(prevBgJobId, { statJob });
 
-  // ── busy: NEVER auto-reclaimed at any elapsed time. This is the CTL-662 fix:
-  //    a phase worker's in-process Task sub-agent fan-out keeps the parent turn
-  //    `busy` while state.json mtime goes stale, so the pre-CTL-662 mtime trigger
-  //    false-reclaimed it (the proven worker-10d6f123 failure). The only action
-  //    permitted on a busy worker is the high-ceiling no-progress backstop: a
-  //    worker busy past BUSY_CEILING_MS whose work-done probe is STILL false is
-  //    flagged for human (escalateOnce) — never a silent reclaim-and-advance. A
-  //    busy worker that has already committed work is left to emit its own
-  //    authoritative complete. A single busy observation resets any in-progress
-  //    idle-confirmation streak.
-  if (live === "busy") {
-    resetIdleStreak(orchDir, ticket, phase);
+  // ── alive: NEVER auto-reclaimed. The job's state.json lifecycle is
+  //    non-terminal (`working`, or an unreadable-but-present state.json). The
+  //    fan-out-safe replacement for the CTL-662 busy short-circuit: no idle
+  //    streak, no grace window — `working` is immediately authoritative. The
+  //    sole permitted action is the no-committed-work backstop: an alive worker
+  //    past busyCeilingMs whose work-done probe is STILL false is flagged for
+  //    human (escalateOnce), never a silent reclaim-and-advance. (CTL-736
+  //    Phase 3 generalizes this ceiling into the progress probe.)
+  if (lifecycle === "alive") {
     const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
     if (Number.isFinite(startedAtMs) && now() - startedAtMs > busyCeilingMs) {
       const workDone = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
       if (!workDone) {
         log.warn(
-          { ticket, phase, prevBgJobId, busyForMs: now() - startedAtMs },
-          "ctl-662: busy worker past BUSY_CEILING_MS with no committed work — escalating (never silent reclaim)",
+          { ticket, phase, prevBgJobId, aliveForMs: now() - startedAtMs },
+          "ctl-736: alive worker past BUSY_CEILING_MS with no committed work — escalating (never silent reclaim)",
         );
         return escalateOnce("busy-ceiling-exceeded", 0);
       }
     }
-    log.info({ ticket, phase, prevBgJobId }, "ctl-662: busy worker — reclaim suppressed");
-    return "alive-busy-suppressed";
+    log.info({ ticket, phase, prevBgJobId }, "ctl-736: alive worker — reclaim suppressed");
+    return "alive-suppressed";
   }
 
-  // ── idle | absent share the reclaim-eligible path below.
+  // ── dead-terminal | dead-gone share the reclaim-eligible path below.
   // CTL-606 — supersede guard. The reclaim sweep is fed ONE signal per ticket by
   // readWorkerSignals→byActivePhase, which ranks by status+recency, NOT phase
   // order. A stale predecessor left at `running` (never flipped to `done`) can
   // shadow the real, already-advanced phase. If the dead signal's phase precedes
   // the ticket's latest-dispatched phase, the ticket has moved on — escalating or
   // reviving it would spuriously flag needs-human or spawn a duplicate worker at
-  // a past phase. Runs only once a worker is reclaim-eligible (not busy).
+  // a past phase. Runs only once a worker is reclaim-eligible (not alive).
   // CTL-702: defensive — listTicketPhases is read off the filesystem; if a
   // future on-disk variant slips past signal-reader's filter (e.g. yield
   // tombstone, manual operator file), isKnownPhase skips it instead of
@@ -1326,23 +1401,9 @@ export function reclaimDeadWorkIfPossible(
     return "superseded-noop";
   }
 
-  // ── idle requires an idle-confirmation streak before it is reclaim-eligible: a
-  //    couple of CONSECUTIVE idle observations confirm the worker is genuinely
-  //    between-turns done, not momentarily idle between sub-agent fan-out rounds.
-  //    `absent` skips this — absence is unambiguous. The streak is a persisted
-  //    per-(ticket, phase) counter (NOT an mtime window). Once we proceed to act
-  //    (reclaim/revive below), the streak is cleared.
-  if (live === "idle") {
-    const streak = bumpIdleStreak(orchDir, ticket, phase);
-    if (streak < idleConfirmTicks) {
-      log.info(
-        { ticket, phase, streak, idleConfirmTicks },
-        "ctl-662: idle worker pending confirmation — not yet reclaim-eligible",
-      );
-      return "idle-pending";
-    }
-  }
-  resetIdleStreak(orchDir, ticket, phase);
+  // CTL-736 Phase 2: a dead-terminal/dead-gone worker is reclaim-eligible
+  // immediately — the idle-confirmation streak (and its `.idle-streak-<phase>`
+  // markers) are deleted; the state.json lifecycle is unambiguous.
 
   // (A) No probe registered for this phase → escalate. The pre-CTL-587 silent
   //     'not-applicable' return is now an actionable outcome: the worker is
@@ -1377,14 +1438,13 @@ export function reclaimDeadWorkIfPossible(
         reason: "ctl-661-reclaim-happy-path",
       }).catch(() => {});
     }
-    // CTL-664/CTL-662: derive the reclaim observability fields from values
-    // already computed above. Post-CTL-662 this reclaim branch is reached ONLY
-    // for an `absent` bg job or an idle-confirmed one — `busy` returns at
-    // alive-busy-suppressed and an unconfirmed `idle` returns at idle-pending
-    // above, and mtime is no longer a reclaim trigger. So the death signal
-    // reflects the liveness verdict the trigger actually acted on, never the
-    // obsolete "mtime". Kept as a single const so the mirror body reuses it.
-    const death_signal = live === "absent" ? "absent" : "idle-confirmed";
+    // CTL-736 Phase 2 / CTL-664: derive the reclaim observability field from the
+    // jobLifecycle verdict the trigger acted on. This branch is reached ONLY for
+    // a reclaim-eligible worker (`dead-terminal` — Claude marked the job
+    // stopped/failed/done/blocked — or `dead-gone` — the job dir vanished); an
+    // `alive` worker returns at alive-suppressed above. Kept as a single const so
+    // the mirror body reuses it. (`prev_state_json_mtime` stays as telemetry.)
+    const death_signal = lifecycle;
     const probe_checked = describeProbe(phase);
     appendEvent({
       phase,
@@ -1430,48 +1490,27 @@ export function reclaimDeadWorkIfPossible(
   //     defaultReviveDispatch is phase-agnostic (resets the signal to `stalled`
   //     and re-launches via phase-agent-dispatch).
 
-  // CTL-662: by the time control reaches branch (C) the worker is reclaim-
-  // eligible — either `absent` (a real crash: no live `claude agents` session)
-  // or `idle`-confirmed (live but idle for idleConfirmTicks consecutive ticks,
-  // genuinely between-turns with no committed work). A `busy` worker can never
-  // reach here (the busy branch above returns first), so the revive/re-dispatch
-  // path below is correct for both reclaim-eligible cases.
+  // CTL-736 Phase 2: by the time control reaches branch (C) the worker is
+  // reclaim-eligible — `dead-terminal` (Claude marked the job
+  // stopped/failed/done/blocked) or `dead-gone` (the job dir vanished). Both are
+  // definitive local verdicts, so the revive/re-dispatch path below is correct.
+  //
+  // The CTL-735 post-dispatch grace window (Guard 1, `revive-pending`) is DELETED:
+  // it existed only because the eventually-consistent `claude agents` snapshot
+  // showed a freshly-spawned worker as `absent`/`idle` before it registered. The
+  // local state.json has no such lag — a just-(re)dispatched worker writes
+  // state=working immediately, so jobLifecycle reads `alive` and never reaches
+  // branch (C) until the job is genuinely terminal. No grace window is needed.
 
-  // CTL-735 Guard 1 — post-(re)dispatch grace window. A just-(re)dispatched worker
-  // needs time to start working before the sweep judges it dead. It can present as
-  // EITHER `absent` (a freshly-spawned `claude --bg` not yet registered in the
-  // eventually-consistent `claude agents` snapshot) OR `idle` (registered but
-  // waiting for its first turn — common for triage/verify, which don't go `busy`
-  // immediately like implement does). Before CTL-735 the sweep revived an absent
-  // worker as dead; the short idle-confirmation streak (~2 ticks) re-revived an
-  // idle one every ~20-30s. Both produced the de-starved revive storm (5→18→62→74
-  // workers, load 72; live re-enable showed the idle path storm triage/verify).
-  // Defer reviving an `absent` OR `idle` worker whose signal was (re)dispatched
-  // within reviveGraceMs. `busy` is already handled above (a working worker is
-  // never reclaimed). Placed inside branch (C) (work NOT done) so a just-completed
-  // worker still reclaims promptly via branch (B). Self-clearing: once startedAt
-  // ages past the window the worker is judged on its real liveness and proceeds to
-  // revive below. A signal with no parseable startedAt (legacy) falls through to
-  // the pre-CTL-735 revive behaviour.
-  if (live === "absent" || live === "idle") {
-    const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
-    if (Number.isFinite(startedAtMs) && now() - startedAtMs < reviveGraceMs) {
-      log.info(
-        { ticket, phase, prevBgJobId, live, sinceDispatchMs: now() - startedAtMs, reviveGraceMs },
-        "ctl-735: worker within post-dispatch grace window — revive deferred (revive-pending)",
-      );
-      return "revive-pending";
-    }
-  }
-
-  // CTL-735 Guard 3 — inert stale tickets. By here the worker is reclaim-eligible
-  // (absent or idle-confirmed), past its grace window, work NOT done. If its
-  // signal has not been touched in reviveMaxAgeMs it is an abandoned historical
-  // dir (isTicketInFlight keeps any non-terminal signal in-flight forever, so a
-  // worker that crashed at `running` and never flipped terminal is swept every
-  // tick). Reviving it wastes budget and — once MAX_REVIVES is hit — would
-  // escalate a long-dead ticket to needs-human. Treat it as inert: no revive, no
-  // escalate, no event. Branch (B) reclaim already ran above, so a genuinely
+  // CTL-735 Guard 3 — inert stale tickets (KEPT in CTL-736: orthogonal to the
+  // liveness mechanism). By here the worker is reclaim-eligible (dead-terminal or
+  // dead-gone), work NOT done. If its signal has not been touched in reviveMaxAgeMs
+  // it is an abandoned historical dir (isTicketInFlight keeps any non-terminal
+  // signal in-flight forever, so a worker that crashed at `running` and never
+  // flipped terminal is swept every tick). This gate runs BEFORE the progress gate
+  // so the ~85 day-stale debris dirs are treated as inert (no revive, no escalate,
+  // no event) rather than each getting a one-shot no-progress escalation →
+  // needs-human storm. Branch (B) reclaim already ran above, so a genuinely
   // work-done old worker was cleaned up; only no-work abandoned dirs reach here.
   // A signal with no parseable timestamp (legacy) falls through unchanged.
   const lastActiveMs = Math.max(
@@ -1486,53 +1525,61 @@ export function reclaimDeadWorkIfPossible(
     return "inert-stale";
   }
 
-  // Per-ticket revive budget from events.jsonl. The events file is the
-  // authoritative counter — more truthful than the signal file (which the
-  // dispatcher rewrites each spawn). CTL-655: window the count to the current
-  // daemon run via the boot marker, so a clean restart resets a budget burned
-  // by a prior crash storm. `since` is undefined when the marker is absent →
-  // the count is unwindowed (the pre-CTL-655 behavior).
+  // CTL-736 Phase 3 — THE progress gate. Replaces the MAX_REVIVES per-ticket
+  // budget, the fleet-wide storm-breaker, and the per-tick revive cap with ONE
+  // local, deterministic rule: a worker that ADVANCED its progress mark since the
+  // last attempt is resumably revived (gen+1 — duplicate spawn is structurally
+  // impossible via the Phase-1 O_EXCL claim + fencing generation, so no heuristic
+  // budget is needed); a worker with ZERO new forward progress is a futile
+  // respawn (the CTL-728/729 idle-never-takes-a-turn loop, research §3) → STOP +
+  // flag needs-human, NEVER respawn. progressMark is monotonic-ish (commits-ahead
+  // for code phases, artifact byte-size for doc/JSON phases); readProgressMark
+  // returns -1 when no prior mark exists, so a first death always gets one revive
+  // (a genuine early crash is retry-worthy) and a SECOND no-progress death stops.
+  //
+  // The gate is `<=` (stop on flat OR lower), NOT `===`. progressMark falls open
+  // to 0 on a read failure (git error, worktree lock) — `<=` then errs toward a
+  // STOP (a bounded, recoverable needs-human flag), whereas `===` would treat a
+  // transient low read as "changed" and revive forever (the very storm this
+  // retires). A legitimate decrease (origin/main advanced past the worker's
+  // commits) likewise stops → needs-human, which is the correct conservative
+  // outcome for a worker that is no longer ahead.
+  const currentProgress = progressMark({ ticket, phase, repoRoot, orchDir });
+  const lastProgress = readProgressMark(orchDir, ticket, phase);
+  if (currentProgress <= lastProgress) {
+    // Stop the dead worker (the reaper + an inline best-effort stop) and flag for
+    // human — do NOT spawn another worker that would also make no progress. The
+    // no-progress STOP is terminal (needs-human, no successor dispatch), so it
+    // routes through the CTL-695 `phase.terminal.reap-requested` single-target
+    // (busy-OK) reap path the reaper already handles — NOT a bespoke event type.
+    if (prevBgJobId) {
+      emitReapIntent("phase.terminal.reap-requested", {
+        ticket,
+        phase,
+        bgJobId: prevBgJobId,
+        worktreePath: signal.raw?.worktreePath,
+        reason: "ctl-736-no-progress-stopped",
+      }).catch(() => {});
+      killBgJob({ bgJobId: prevBgJobId });
+    }
+    log.warn(
+      { ticket, phase, prevBgJobId, currentProgress, lastProgress },
+      "ctl-736: no forward progress since last attempt — stopping, not respawning",
+    );
+    // needs-human (cool-down + breaker guarded). When the Linear breaker is open
+    // the escalation defers — surface that so the scheduler does not record a
+    // clean stop (the worker is killed, but the label retries next tick).
+    const esc = escalateOnce("no-progress", currentProgress);
+    return esc === "rate-limited-deferred" ? "rate-limited-deferred" : "no-progress-stopped";
+  }
+  // Forward progress was made → record the new high-water mark and revive below.
+  writeProgressMark(orchDir, ticket, phase, currentProgress);
+
+  // Attempt number for the revive audit + `.revive-N.applied` marker. This is now
+  // TELEMETRY ONLY (no longer a budget gate — the progress gate bounds retries).
+  // CTL-655: window the count to the current daemon run via the boot marker.
   const since = readBootSinceFn(orchDir);
   const priorRevives = countReviveEvents({ ticket, orchId, since });
-  if (priorRevives >= MAX_REVIVES) {
-    return escalateOnce("revive-budget-exhausted", priorRevives);
-  }
-
-  // Storm-breaker: if many distinct tickets are reviving inside the window,
-  // assume something is wrong fleet-wide and suppress (do nothing this tick).
-  const distinctStormTickets = countDistinctRevivingTickets({
-    windowMs: STORM_WINDOW_MS,
-    now,
-  });
-  if (distinctStormTickets > STORM_THRESHOLD) {
-    appendReviveSuppressedEvent({
-      phase,
-      ticket,
-      orchId,
-      window_distinct_tickets: distinctStormTickets,
-    });
-    log.warn(
-      { ticket, phase, distinctStormTickets },
-      "ctl-587: revive suppressed (storm-breaker open)",
-    );
-    return "revive-suppressed";
-  }
-
-  // CTL-735 — per-tick revive cap. Even with the per-ticket budget and the
-  // event-counted storm-breaker open, the de-starved fast tick can mass-revive
-  // many distinct dead workers in a single sweep before the storm-breaker's
-  // event count catches up. The scheduler threads the remaining per-tick budget;
-  // once exhausted, defer this worker (revive-capped) to a later tick rather than
-  // dispatch. No event is emitted (we did NOT revive) and no marker is written,
-  // so the next tick re-evaluates cleanly. Gated on a finite budget so standalone
-  // callers (no scheduler) keep pre-CTL-735 behaviour.
-  if (Number.isFinite(reviveBudgetRemaining) && reviveBudgetRemaining <= 0) {
-    log.warn(
-      { ticket, phase, prevBgJobId },
-      "ctl-735: revive deferred — per-tick revive cap reached (revive-capped)",
-    );
-    return "revive-capped";
-  }
 
   // CTL-658: resolve a `claude --resume`-compatible session id from the dead
   // worker's bg_job_id BEFORE the defensive kill. When a UUID resolves we are

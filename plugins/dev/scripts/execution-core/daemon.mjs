@@ -64,7 +64,7 @@ import {
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
 } from "./scheduler.mjs";
-import { writeBootMarker } from "./recovery.mjs"; // CTL-655: window the revive budget to this run
+import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -165,6 +165,9 @@ export function startDaemon({
   // the current run (a clean restart resets a budget burned by a prior storm).
   // Must precede schedulerFn (the first reclaim read). Fail-open internally.
   writeBootMarker(orchDir);
+  // CTL-736 Phase 3: reset the per-(ticket, phase) progress high-water markers so a
+  // stale mark from a prior daemon run cannot false-STOP the first death this run.
+  clearProgressMarks(orchDir);
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
 

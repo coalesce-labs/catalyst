@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   classifyWorker,
+  jobLifecycle,
   reconstructWorkerState,
   defaultStatJob,
   recoverStartup,
@@ -33,6 +34,7 @@ import {
   detectColdStart,
   readBootSince,
   readExecCoreBootEpoch,
+  clearProgressMarks,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -148,6 +150,65 @@ describe("classifyWorker", () => {
     // bg_job_id null short-circuits to 'unknown' without touching the fs.
     expect(() => classifyWorker(bgSignal("dispatched", null))).not.toThrow();
     expect(classifyWorker(bgSignal("dispatched", null))).toBe("unknown");
+  });
+
+  // CTL-736 Phase 2: classifyWorker now CONSULTS .state (it no longer treats
+  // job-dir existence alone as "running"). A terminal job lifecycle is "dead"
+  // even though the never-cleaned-up job dir still exists.
+  test("CTL-736: terminal .state + dir present → 'dead' (job lifecycle, not dir existence)", () => {
+    for (const state of ["stopped", "failed", "done", "blocked"]) {
+      expect(
+        classifyWorker(bgSignal("running", "job-term"), {
+          statJob: () => ({ exists: true, mtimeMs: Date.now(), state }),
+        }),
+      ).toBe("dead");
+    }
+  });
+
+  test("CTL-736: firstTerminalAt set + dir present → 'dead' even when .state name is unknown", () => {
+    expect(
+      classifyWorker(bgSignal("running", "job-ft"), {
+        statJob: () => ({ exists: true, mtimeMs: Date.now(), state: "weird", firstTerminalAt: "2026-05-30T00:00:00Z" }),
+      }),
+    ).toBe("dead");
+  });
+
+  test("CTL-736: non-terminal 'working' .state + STALE mtime → 'running' (fan-out safe)", () => {
+    // The CTL-662 killer: an in-process sub-agent fan-out keeps .state=working
+    // while mtime ages. mtime must NOT be a death input.
+    expect(
+      classifyWorker(bgSignal("running", "job-fanout"), {
+        statJob: () => ({ exists: true, mtimeMs: 0, state: "working" }),
+      }),
+    ).toBe("running");
+  });
+});
+
+// --- jobLifecycle — authoritative state.json death verdict (CTL-736 Phase 2) ---
+
+describe("jobLifecycle", () => {
+  test("terminal .state ⇒ 'dead-terminal' (definitive, no grace/streak)", () => {
+    for (const state of ["stopped", "failed", "done", "blocked"]) {
+      expect(jobLifecycle("j", { statJob: () => ({ exists: true, state }) })).toBe("dead-terminal");
+    }
+  });
+
+  test("firstTerminalAt set ⇒ 'dead-terminal' even if the .state name is unknown", () => {
+    expect(
+      jobLifecycle("j", { statJob: () => ({ exists: true, state: "x", firstTerminalAt: "2026-05-30T00:00:00Z" }) }),
+    ).toBe("dead-terminal");
+  });
+
+  test("non-terminal 'working' .state ⇒ 'alive', INCLUDING during a fan-out (stale mtime)", () => {
+    expect(jobLifecycle("j", { statJob: () => ({ exists: true, state: "working", mtimeMs: 0 }) })).toBe("alive");
+  });
+
+  test("a dir present with state:null (unreadable state.json) ⇒ 'alive' (presence proves liveness)", () => {
+    expect(jobLifecycle("j", { statJob: () => ({ exists: true, state: null, mtimeMs: 1 }) })).toBe("alive");
+  });
+
+  test("missing job dir ⇒ 'dead-gone'", () => {
+    expect(jobLifecycle("j", { statJob: () => null })).toBe("dead-gone");
   });
 });
 
@@ -277,6 +338,28 @@ describe("defaultStatJob", () => {
     expect(res?.exists).toBe(true);
     expect(typeof res?.mtimeMs).toBe("number");
     expect(res?.state).toBe("running");
+  });
+
+  // CTL-736 Phase 2: jobLifecycle needs the firstTerminalAt timestamp (set by
+  // Claude when a job reaches a terminal lifecycle state) as a state-name-agnostic
+  // death signal, so defaultStatJob must surface it.
+  test("CTL-736: surfaces firstTerminalAt when present in state.json", () => {
+    const dir = join(jobsRoot, "job-terminal");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "state.json"),
+      JSON.stringify({ state: "stopped", firstTerminalAt: "2026-05-30T12:00:00Z" }),
+    );
+    const res = defaultStatJob("job-terminal");
+    expect(res?.state).toBe("stopped");
+    expect(res?.firstTerminalAt).toBe("2026-05-30T12:00:00Z");
+  });
+
+  test("CTL-736: firstTerminalAt is null when absent (non-terminal job)", () => {
+    const dir = join(jobsRoot, "job-working");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "state.json"), JSON.stringify({ state: "working" }));
+    expect(defaultStatJob("job-working")?.firstTerminalAt).toBeNull();
   });
 
   test("returns liveness with state:null when state.json is unreadable JSON", () => {
@@ -584,101 +667,13 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
 // registered yet, NOT crashed. Without this the de-starved fast tick (CTL-731)
 // re-classifies each just-revived worker as dead and revives it again every
 // ~2-4s → the revive storm (5→18→62→74 workers, load 72).
-describe("reclaimDeadWorkIfPossible — CTL-735 post-revive grace window", () => {
-  const orch = "/orch";
-  const NOW = 1_000_000;
-  const GRACE = 90_000;
-
-  // The revive seams shared by these cases — a probe that says "work not done"
-  // (so control reaches branch (C) revive) plus the budget/storm gates open.
-  const reviveSeams = (reviveDispatch) => ({
-    statJob: () => null,
-    probes: { implement: recorder(false) },
-    emitComplete: recorder({ code: 0 }),
-    appendReviveEvent: recorder(true),
-    reviveDispatch,
-    countReviveEvents: recorder(0),
-    countDistinctRevivingTickets: recorder(1),
-    writeReviveMarker: recorder(undefined),
-    killBgJob: recorder(undefined),
-    applyStalledLabel: recorder({ applied: true }),
-    resolveSession: () => null,
-    liveness: () => "absent",
-    reviveGraceMs: GRACE,
-    now: () => NOW,
-  });
-
-  test("absent worker (re)dispatched WITHIN the grace window → 'revive-pending', NOT revived", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const sig = implementSignal({
-      // startedAt 10s ago — well inside the 90s grace window.
-      startedAt: new Date(NOW - 10_000).toISOString(),
-    });
-    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
-    expect(r).toBe("revive-pending");
-    expect(reviveDispatch.calls.length).toBe(0); // the storm-causing re-revive is suppressed
-  });
-
-  test("absent worker (re)dispatched PAST the grace window → revives (genuinely dead)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const sig = implementSignal({
-      // startedAt 100s ago — past the 90s window, so a still-absent worker is real death.
-      startedAt: new Date(NOW - 100_000).toISOString(),
-    });
-    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("absent worker with NO startedAt → revives (back-compat: cannot prove freshness)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const sig = implementSignal(); // no startedAt
-    const r = reclaimDeadWorkIfPossible(orch, sig, reviveSeams(reviveDispatch));
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("idle worker (re)dispatched WITHIN the grace window → 'revive-pending' (registered, not yet working)", () => {
-    // A freshly-revived worker commonly registers as `idle` (waiting for its
-    // first turn) before it goes `busy`. The short idle-confirmation streak
-    // (~2 ticks) would otherwise re-revive it every ~20-30s — the triage/verify
-    // storm seen at re-enable. The grace window must cover idle too, not just
-    // absent. idleConfirmTicks/bumpIdleStreak injected so the worker reaches
-    // branch (C) on the first idle observation (where the grace check lives).
-    const reviveDispatch = recorder({ code: 0 });
-    const seams = reviveSeams(reviveDispatch);
-    seams.liveness = () => "idle";
-    seams.idleConfirmTicks = 1;
-    seams.bumpIdleStreak = () => 1;
-    seams.resetIdleStreak = () => {};
-    const sig = implementSignal({ startedAt: new Date(NOW - 10_000).toISOString() });
-    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
-    expect(r).toBe("revive-pending");
-    expect(reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("idle worker PAST the grace window → revives (genuinely idle-done, not just-started)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const seams = reviveSeams(reviveDispatch);
-    seams.liveness = () => "idle";
-    seams.idleConfirmTicks = 1;
-    seams.bumpIdleStreak = () => 1;
-    seams.resetIdleStreak = () => {};
-    const sig = implementSignal({ startedAt: new Date(NOW - 100_000).toISOString() });
-    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("a busy worker is suppressed as alive (busy is handled before the grace window)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const seams = reviveSeams(reviveDispatch);
-    seams.liveness = () => "busy";
-    const sig = implementSignal({ startedAt: new Date(NOW - 10_000).toISOString() });
-    const r = reclaimDeadWorkIfPossible(orch, sig, seams);
-    expect(r).toBe("alive-busy-suppressed");
-  });
-});
+// CTL-736 Phase 2: the CTL-735 post-revive grace window (`revive-pending`) is
+// DELETED. It existed only to absorb the eventually-consistent `claude agents`
+// snapshot lag (a freshly-spawned worker shows `absent`/`idle` before it
+// registers). The authoritative local state.json lifecycle has no such lag — a
+// just-(re)dispatched worker writes state=working immediately, so jobLifecycle
+// reads `alive` and the grace window has nothing to guard against. Its test
+// block is removed with the mechanism.
 
 // CTL-735 Guard 2 — per-tick revive cap. The scheduler passes the remaining
 // per-tick revive budget; once exhausted, an otherwise-revivable worker is
@@ -768,59 +763,11 @@ describe("reclaimDeadWorkIfPossible — CTL-735 inert stale tickets", () => {
   });
 });
 
-describe("reclaimDeadWorkIfPossible — CTL-735 per-tick revive cap", () => {
-  const orch = "/orch";
-
-  // All gates open so control reaches branch (C) and WOULD revive absent the cap.
-  const openReviveSeams = (reviveDispatch, extra = {}) => ({
-    statJob: () => null,
-    probes: { implement: recorder(false) },
-    emitComplete: recorder({ code: 0 }),
-    appendReviveEvent: recorder(true),
-    reviveDispatch,
-    countReviveEvents: recorder(0),
-    countDistinctRevivingTickets: recorder(1),
-    writeReviveMarker: recorder(undefined),
-    killBgJob: recorder(undefined),
-    applyStalledLabel: recorder({ applied: true }),
-    resolveSession: () => null,
-    liveness: () => "absent",
-    ...extra,
-  });
-
-  test("reviveBudgetRemaining = 0 → 'revive-capped', does NOT dispatch", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 0 }),
-    );
-    expect(r).toBe("revive-capped");
-    expect(reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("reviveBudgetRemaining = 1 → revives normally (budget available)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch, { reviveBudgetRemaining: 1 }),
-    );
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("reviveBudgetRemaining undefined → revives (back-compat: no cap enforced)", () => {
-    const reviveDispatch = recorder({ code: 0 });
-    const r = reclaimDeadWorkIfPossible(
-      orch,
-      implementSignal(),
-      openReviveSeams(reviveDispatch), // no reviveBudgetRemaining
-    );
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-  });
-});
+// CTL-736 Phase 3: the CTL-735 per-tick revive cap (`revive-capped`) is DELETED.
+// The progress gate (revive only while forward progress advances; stop on zero
+// progress) plus the Phase-1 O_EXCL claim bound retries structurally, so a single
+// tick can no longer mass-revive a backlog of dead workers. Its test block is
+// removed with the mechanism; see the CTL-736 progress-gate block below.
 
 describe("reclaimDeadWorkIfPossible", () => {
   const orch = "/orch";
@@ -841,39 +788,37 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(appendEvent.calls.length).toBe(0);
   });
 
-  test("CTL-662: a BUSY worker is 'alive-busy-suppressed', never reclaimed (regardless of elapsed time)", () => {
-    // The CTL-662 fix: a busy worker (a live `claude agents` session with an open
-    // turn — e.g. an in-process sub-agent fan-out) is NEVER auto-reclaimed, even
-    // though its state.json mtime may be arbitrarily stale.
+  test("CTL-736: an ALIVE worker (state.json non-terminal) is 'alive-suppressed', never reclaimed (regardless of mtime)", () => {
+    // The CTL-736 fan-out-safe fix: an alive worker (state.json .state=working,
+    // e.g. an in-process sub-agent fan-out) is NEVER auto-reclaimed, even though
+    // its state.json mtime may be arbitrarily stale (mtime is not consulted).
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      statJob: () => ({ exists: true, mtimeMs: 1_000, state: "working" }),
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent: recorder(undefined),
-      liveness: () => "busy",
       now: () => 1_000 + 60 * 60 * 1000, // an hour past mtime — irrelevant now
     });
-    expect(r).toBe("alive-busy-suppressed");
-    expect(probe.calls.length).toBe(0); // busy short-circuits before the probe
+    expect(r).toBe("alive-suppressed");
+    expect(probe.calls.length).toBe(0); // alive short-circuits before the probe
     expect(emit.calls.length).toBe(0);
   });
 
-  test("CTL-662: an ABSENT worker (no live session) with work done is reclaimed", () => {
-    // absent = not listed by `claude agents` (crashed/exited) → reclaim-eligible
-    // immediately, no idle-confirmation needed. Replaces the pre-CTL-662
-    // stale-mtime "effectively dead" trigger.
+  test("CTL-736: a DEAD-GONE worker (job dir gone) with work done is reclaimed immediately", () => {
+    // dead-gone = the job dir vanished (crashed/exited) → reclaim-eligible
+    // immediately, no idle-confirmation, no grace window. Replaces the
+    // pre-CTL-736 `claude agents` absent trigger.
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const appendEvent = recorder(undefined);
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      statJob: () => null, // job dir gone → dead-gone
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent,
       postReclaimMirror: () => {}, // CTL-664: keep the test hermetic (no linearis spawn)
-      liveness: () => "absent",
       now: () => 1_000,
     });
     expect(r).toBe("reclaimed");
@@ -882,18 +827,17 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(appendEvent.calls.length).toBe(1);
   });
 
-  test("CTL-662: a BUSY worker with work done is still suppressed (left to emit its own complete)", () => {
+  test("CTL-736: an ALIVE worker with work done is still suppressed (left to emit its own complete)", () => {
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: 1_000_000 }),
+      statJob: () => ({ exists: true, mtimeMs: 1_000_000, state: "working" }),
       probes: { implement: probe },
       emitComplete: emit,
       appendEvent: recorder(undefined),
-      liveness: () => "busy",
       now: () => 1_000_000 + 60_000,
     });
-    expect(r).toBe("alive-busy-suppressed");
+    expect(r).toBe("alive-suppressed");
     expect(emit.calls.length).toBe(0);
   });
 
@@ -911,15 +855,10 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(0);
   });
 
-  // CTL-587: this case used to return 'not-applicable' (a silent dead-end).
-  // It now escalates immediately — no probe means no way to verify the work,
-  // so the human must look. needs-human label is applied via the injected seam.
-  test("CTL-587: dead worker, probe NOT done + revive budget exhausted → 'escalated' + needs-human label", () => {
-    // CTL-641: every pipeline phase now has a probe, so the old branch-(A)
-    // "no-probe-for-phase" escalation is unreachable for real phases (and CTL-606's
-    // supersede guard throws on a non-PHASES phase before branch (A) is reached).
-    // The reachable "dead worker → needs-human" path is branch (C) once the revive
-    // budget is spent.
+  // CTL-736: the reachable "dead worker → needs-human" path is the branch-(C)
+  // no-progress STOP (a dead worker that made zero forward progress is flagged,
+  // never respawned), replacing the deleted MAX_REVIVES budget-exhausted path.
+  test("CTL-736: dead worker, probe NOT done + ZERO progress → 'no-progress-stopped' + needs-human label", () => {
     const sig = { ...implementSignal(), phase: "verify" };
     sig.raw.phase = "verify";
     const emit = recorder({ code: 0 });
@@ -927,19 +866,21 @@ describe("reclaimDeadWorkIfPossible", () => {
     const applyLabel = recorder({ applied: true });
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, sig, {
-      statJob: () => null, // bg dead
+      statJob: () => null, // bg dead → dead-gone
       probes: { verify: recorder(false) }, // artifact NOT complete
       emitComplete: emit,
       appendEvent: recorder(undefined),
       appendEscalatedEvent: appendEscalated,
       applyStalledLabel: applyLabel,
       reviveDispatch,
-      countReviveEvents: recorder(2), // budget exhausted (MAX_REVIVES)
+      // zero forward progress (current 0 <= prior 0) → STOP, never respawn.
+      progressMark: () => 0,
+      readProgressMark: () => 0,
     });
-    expect(r).toBe("escalated");
+    expect(r).toBe("no-progress-stopped");
     expect(emit.calls.length).toBe(0);
     expect(reviveDispatch.calls.length).toBe(0);
-    expect(appendEscalated.calls[0][0].reason).toBe("revive-budget-exhausted");
+    expect(appendEscalated.calls[0][0].reason).toBe("no-progress");
     expect(applyLabel.calls[0][0].ticket).toBe("CTL-9");
   });
 
@@ -997,7 +938,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       phase: "implement",
       ticket: "CTL-9",
       orchId: "CTL-9",
-      death_signal: "absent", // statJob:()=>null → klass 'dead' → absent
+      death_signal: "dead-gone", // statJob:()=>null → jobLifecycle 'dead-gone'
       probe_passed: true,
       probe_checked: expect.any(String),
       completion_origin: "inferred",
@@ -1008,19 +949,17 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(order[1][1]).toEqual({ orchDir: orch, signal: sig });
   });
 
-  // CTL-662: mtime is no longer a reclaim trigger, so a reclaim is never
-  // labeled death_signal='mtime'. The branch-(B) reclaim is reached only for an
-  // `absent` bg job or an idle-confirmed one — the death signal must report that
-  // liveness verdict. prev_state_json_mtime survives as pure telemetry (the last
-  // state.json write time), independent of the death-signal decision.
-  test("CTL-662: reclaim of an idle-confirmed worker reports death_signal='idle-confirmed' (never 'mtime') + prev_state_json_mtime", () => {
+  // CTL-736: mtime is no longer a reclaim trigger, so a reclaim is never
+  // labeled death_signal='mtime'. The branch-(B) reclaim is reached only for a
+  // dead-terminal or dead-gone job — the death signal must report that
+  // jobLifecycle verdict. prev_state_json_mtime survives as pure telemetry (the
+  // last state.json write time), independent of the death-signal decision.
+  test("CTL-736: reclaim of a dead-terminal worker reports death_signal='dead-terminal' (never 'mtime') + prev_state_json_mtime", () => {
     const staleMtime = 1_000;
     let appended = null;
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), {
-      statJob: () => ({ mtimeMs: staleMtime }), // state.json present but stale — NOT a trigger
-      liveness: () => "idle", // CTL-662: status is the trigger
-      bumpIdleStreak: () => 99, // already past IDLE_CONFIRM_TICKS → reclaim-eligible
-      resetIdleStreak: () => {},
+      // state.json present, stale mtime, but .state terminal → dead-terminal.
+      statJob: () => ({ exists: true, mtimeMs: staleMtime, state: "stopped" }),
       probes: { implement: () => true },
       emitComplete: () => ({ code: 0 }),
       appendEvent: (args) => {
@@ -1030,7 +969,7 @@ describe("reclaimDeadWorkIfPossible", () => {
       repoRoot: "/repo",
     });
     expect(r).toBe("reclaimed");
-    expect(appended.death_signal).toBe("idle-confirmed");
+    expect(appended.death_signal).toBe("dead-terminal");
     expect(appended.death_signal).not.toBe("mtime");
     expect(appended.prev_state_json_mtime).toBe(staleMtime);
   });
@@ -1116,6 +1055,99 @@ describe("reclaimDeadWorkIfPossible", () => {
   });
 });
 
+// --- CTL-736 Phase 2: the state.json death trigger + LIVENESS_SOURCE modes ---
+
+describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () => {
+  const orch = "/orch";
+
+  // Deterministic seam set: all downstream gates open so the verdict from the
+  // death trigger is what the test observes. now() is fixed; the breaker/cooldown
+  // are stubbed so escalateOnce is hermetic.
+  function seams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      probes: { implement: () => false },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(true),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      countDistinctRevivingTickets: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  test("alive (state=working) ⇒ 'alive-suppressed' — never reclaimed, no idle streak/grace", () => {
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
+      jobLifecycle: () => "alive",
+    }));
+    expect(r).toBe("alive-suppressed");
+  });
+
+  test("dead-terminal + work done ⇒ 'reclaimed' immediately (no grace/streak)", () => {
+    const emitComplete = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), seams({
+      jobLifecycle: () => "dead-terminal",
+      probes: { implement: () => true },
+      emitComplete,
+    }));
+    expect(r).toBe("reclaimed");
+    expect(emitComplete.calls.length).toBe(1);
+  });
+
+  test("dead-gone + work NOT done ⇒ 'revived' immediately, even with a fresh startedAt (no grace window)", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      // startedAt = now: pre-CTL-736 this was deferred 'revive-pending' by the 90s grace.
+      implementSignal({ status: "running", startedAt: new Date(1_000_000).toISOString() }),
+      seams({ jobLifecycle: () => "dead-gone", reviveDispatch }),
+    );
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("the death trigger is jobLifecycle (state.json), consulted with the worker's bg_job_id", () => {
+    const jobLifecycle = recorder("alive");
+    reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running", bgJobId: "bg-77" }), seams({
+      jobLifecycle,
+    }));
+    expect(jobLifecycle.calls.length).toBe(1);
+    expect(jobLifecycle.calls[0][0]).toBe("bg-77");
+  });
+
+  test("alive past BUSY_CEILING_MS with no committed work ⇒ 'escalated' (no silent reclaim)", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("escalated");
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("busy-ceiling-exceeded");
+  });
+});
+
 // --- CTL-661 Phase 2: reap-intent on the reclaim happy path (B) -------------
 //
 // When a stale-by-mtime worker reaches branch (B) (probe says work IS done) it
@@ -1137,12 +1169,12 @@ describe("reclaimDeadWorkIfPossible — CTL-661 reclaim happy-path reap-intent",
     const emitReap = recorder(Promise.resolve(true));
     const r = reclaimDeadWorkIfPossible(orch, staleReclaimable(), {
       statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      jobLifecycle: () => "dead-gone", // CTL-736: reclaim-eligible via state.json
       probes: { implement: () => true },
       emitComplete: recorder({ code: 0 }),
       appendEvent: recorder(undefined),
-      pidAlive: () => false, // genuinely dead → alive-quiet gate stays open
       emitReapIntent: emitReap,
-      now: () => 1_000 + 6 * 60 * 1000, // 6 min past mtime — stale
+      now: () => 1_000 + 6 * 60 * 1000,
     });
     expect(r).toBe("reclaimed");
     expect(emitReap.calls.length).toBe(1);
@@ -1178,10 +1210,10 @@ describe("reclaimDeadWorkIfPossible — CTL-661 reclaim happy-path reap-intent",
     const emitReap = recorder(Promise.resolve(true));
     const r = reclaimDeadWorkIfPossible(orch, sig, {
       statJob: () => ({ exists: true, mtimeMs: 1_000 }),
+      jobLifecycle: () => "dead-gone", // CTL-736: reclaim-eligible via state.json
       probes: { implement: () => true },
       emitComplete: recorder({ code: 0 }),
       appendEvent: recorder(undefined),
-      pidAlive: () => false,
       emitReapIntent: emitReap,
       now: () => 1_000 + 6 * 60 * 1000,
     });
@@ -1220,7 +1252,7 @@ describe("CTL-664: reclaim Linear mirror", () => {
           orchDir: orch,
           ticket: "CTL-9",
           phase: "implement",
-          deathSignal: "absent", // statJob:()=>null → klass 'dead' → absent
+          deathSignal: "dead-gone", // statJob:()=>null → jobLifecycle 'dead-gone'
           reclaimedBgJobId: "job-x", // implementSignal default bgJobId
         }),
       ],
@@ -1323,7 +1355,6 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   // stale state.json mtime) and threads every CTL-587 seam through opts.
   function setupReviveScenario({
     reviveCount = 0,
-    distinctRevivingTickets = 1,
     probeResult = false, // false = "work not done" → enters CTL-587 territory
     phase = "implement",
     ticket = "CTL-9",
@@ -1332,8 +1363,11 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     nowMs = 1_000 + 6 * 60 * 1000, // 6 min past mtime — > STALE_MS
     // CTL-655: boot-time window seam. Default to a no-marker reader so every
     // existing scenario behaves exactly as before (since=undefined → the
-    // injected countReviveEvents recorder value is the unwindowed count).
+    // injected countReviveEvents recorder value is the unwindowed attempt count).
     readBootSince = () => undefined,
+    // CTL-736 Phase 3: progress gate. Default = progressed (current 1 > prior 0)
+    // so the scenario revives; noProgress:true → current 0 <= prior 0 → STOP path.
+    noProgress = false,
   } = {}) {
     const sig = {
       ...implementSignal({ ticket, status: "running", bgJobId }),
@@ -1359,17 +1393,20 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
         countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
         writeReviveMarker: recorder(undefined),
         // CTL-664: stub the reclaim mirror so the probeResult:true scenarios
         // (branch B) stay hermetic and don't spawn a real `linearis`.
         postReclaimMirror: recorder(undefined),
         readBootSince, // CTL-655: inject the boot-time window reader
-        // CTL-662: the death trigger is now status, not mtime. "absent" (no live
-        // `claude agents` session) is the reclaim-eligible case these revive/
-        // escalate/storm scenarios exercise — equivalent to the pre-CTL-662
-        // stale-mtime "effectively dead" they used to stage.
-        liveness: () => "absent",
+        // CTL-736: the death trigger is now the state.json lifecycle (jobLifecycle),
+        // not the `claude agents` snapshot. "dead-gone" (the job dir vanished) is
+        // the reclaim-eligible case these revive/escalate scenarios exercise.
+        // statJob above still supplies the prev_state_json_mtime telemetry.
+        jobLifecycle: () => "dead-gone",
+        // CTL-736 Phase 3 progress-gate seams (replace MAX_REVIVES/storm/per-tick).
+        progressMark: () => (noProgress ? 0 : 1),
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
         now: () => nowMs,
       },
     };
@@ -1391,18 +1428,14 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(2);
   });
 
-  test("budget exhausted: count=2 → 'escalated', applies needs-human label, no dispatch", () => {
-    const s = setupReviveScenario({ reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
-    expect(s.opts.applyStalledLabel.calls[0][0].ticket).toBe("CTL-9");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].final_attempt_count).toBe(2);
-  });
+  // CTL-736 Phase 3: the MAX_REVIVES budget-exhausted escalation and the
+  // fleet-wide storm-breaker (revive-suppressed) are DELETED — a worker now
+  // revives as long as it makes forward progress, and STOPS (no-progress-stopped)
+  // when it does not. The escalation MECHANISM (CTL-679 breaker, CTL-638 cool-down)
+  // is now exercised through that no-progress STOP path instead of budget-exhausted.
 
-  test("CTL-679: breaker open → 'rate-limited-deferred', no escalation event, no label write", () => {
-    const s = setupReviveScenario({ reviveCount: 2 }); // would otherwise escalate
+  test("CTL-679: breaker open on the no-progress STOP → 'rate-limited-deferred', no escalation event, no label write", () => {
+    const s = setupReviveScenario({ noProgress: true }); // zero progress → STOP path
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
       ...s.opts,
       breaker: { isOpen: () => true },
@@ -1410,44 +1443,20 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(r).toBe("rate-limited-deferred");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0); // never respawned
   });
 
-  test("CTL-679: breaker closed → escalation proceeds as normal", () => {
-    const s = setupReviveScenario({ reviveCount: 2 });
+  test("CTL-679: breaker closed on the no-progress STOP → 'no-progress-stopped', needs-human applied, no respawn", () => {
+    const s = setupReviveScenario({ noProgress: true });
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, {
       ...s.opts,
       breaker: { isOpen: () => false },
     });
-    expect(r).toBe("escalated");
+    expect(r).toBe("no-progress-stopped");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
-  });
-
-  test("storm-breaker: distinct=4 > 3 → 'revive-suppressed', no dispatch", () => {
-    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 4 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(1);
-    expect(s.opts.appendReviveSuppressedEvent.calls[0][0].window_distinct_tickets).toBe(4);
-  });
-
-  test("storm-breaker at the threshold: distinct=3 is NOT suppressed (>3, not >=3)", () => {
-    const s = setupReviveScenario({ reviveCount: 0, distinctRevivingTickets: 3 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-  });
-
-  // CTL-641: pr/monitor-merge are now registered, so branch (A) is reached only
-  // by a genuinely-unknown phase. Use one to keep the no-probe guard under test.
-  test("probe NOT done + revive budget exhausted → 'escalated' immediately", () => {
-    // CTL-641/CTL-606: branch (A) "no-probe-for-phase" is now unreachable (all
-    // real phases are probed; unknown phases throw at the supersede guard). The
-    // budget-exhausted escalation is the reachable dead-end-to-human path.
-    const s = setupReviveScenario({ phase: "verify", probeResult: false, reviveCount: 2 });
-    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(r).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].phase).toBe("verify");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
+    expect(s.opts.reviveDispatch.calls.length).toBe(0); // never respawned
+    expect(s.opts.killBgJob.calls.length).toBe(1); // the dead worker is stopped
   });
 
   // CTL-604: research/plan now share the bounded revive/re-dispatch path with
@@ -1477,35 +1486,24 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.countReviveEvents.calls[0][0]).toHaveProperty("orchId");
   });
 
-  // CTL-655: fail-open — a missing/unreadable marker yields no `since`, so the
-  // counter is unwindowed and the budget still exhausts (today's behavior).
+  // CTL-655: the boot 'since' windows the attempt counter; a missing marker is
+  // fail-open (since=undefined → unwindowed count). CTL-736: the count is now the
+  // revive ATTEMPT NUMBER (telemetry), not a budget gate, so the worker revives.
   test("omits 'since' when boot marker is absent (fail-open)", () => {
     const s = setupReviveScenario({
       reviveCount: 2,
       readBootSince: () => undefined,
     });
     const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(r).toBe("escalated");
+    expect(r).toBe("revived"); // CTL-736: no MAX_REVIVES gate — progress drives it
     expect(s.opts.countReviveEvents.calls[0][0].since).toBeUndefined();
+    expect(s.opts.appendReviveEvent.calls[0][0].attempt).toBe(3); // count 2 + 1
   });
 
   test("dead plan worker, probe NOT done → 'revived'", () => {
     const s = setupReviveScenario({ phase: "plan", probeResult: false, reviveCount: 0 });
     expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
     expect(s.opts.reviveDispatch.calls.length).toBe(1);
-  });
-
-  test("dead research worker, revive budget exhausted → 'escalated' (revive-budget-exhausted)", () => {
-    const s = setupReviveScenario({ phase: "research", probeResult: false, reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("dead research worker, storm-breaker open → 'revive-suppressed'", () => {
-    const s = setupReviveScenario({ phase: "research", probeResult: false, distinctRevivingTickets: 4 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revive-suppressed");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 
   test("CTL-662: defensive stop fires on the revive path unconditionally (the mtime quiet-window gate is gone)", () => {
@@ -1529,14 +1527,13 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(body.prev_bg_job_id).toBe("bg-9");
   });
 
-  test("escalation still records 'escalated' even when applyStalledLabel fails (no dispatch)", () => {
-    // Failure to apply the label still returns 'escalated' so the scheduler
-    // records the outcome. The labelOnce semantics in scheduler.mjs guard
-    // re-application — a verify-failed result returns no marker, so the next
-    // tick retries the label apply.
-    const s = setupReviveScenario({ reviveCount: 2 });
+  test("no-progress escalation still records the outcome even when applyStalledLabel fails (no dispatch)", () => {
+    // CTL-736: a failed label apply still returns 'no-progress-stopped' so the
+    // scheduler records the outcome. labelOnce guards re-application — a
+    // verify-failed result returns no marker, so the next tick retries the apply.
+    const s = setupReviveScenario({ noProgress: true });
     s.opts.applyStalledLabel = recorder({ applied: false, reason: "verify-failed" });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.reviveDispatch.calls.length).toBe(0);
   });
 
@@ -1631,271 +1628,105 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
   });
 });
 
-// --- CTL-662: busy-suppression (replaces the CTL-610/661 alive-quiet gate) -
-//
-// The pre-CTL-662 reclaim trigger was state.json mtime (5min stale → dead), with
-// the CTL-610/661 alive-quiet gate papering over false positives by checking the
-// bg pid within a 15min hung cutoff. CTL-662 deletes that whole time-based
-// machinery: the trigger is now the worker's `claude agents` status
-// (livenessForBgJob → busy|idle|absent). A `busy` worker — including the
-// in-process Task sub-agent fan-out that keeps the parent's turn busy while
-// state.json mtime goes arbitrarily stale (the proven worker-10d6f123 failure) —
-// is NEVER auto-reclaimed, escalated, or revived, regardless of elapsed time,
-// revive budget, or storm conditions. The sole permitted action on a busy worker
-// is the high-ceiling no-progress backstop (escalateOnce past BUSY_CEILING_MS
-// with no committed work — never a silent reclaim-and-advance).
+// --- CTL-736 Phase 3: the progress gate (revive-while-progressing vs stop) -----
 
-describe("reclaimDeadWorkIfPossible — CTL-662 busy-suppression", () => {
-  // A `busy` worker (a live `claude agents` session with an open turn). Defaults
-  // to probe=false (work not done) so we prove a busy worker is suppressed even
-  // when the work-done probe would otherwise revive it. `startedAt` is omitted by
-  // default so the busy-ceiling backstop never trips unless a test supplies it.
-  function setupBusyScenario({
-    reviveCount = 0,
-    distinctRevivingTickets = 1,
-    probeResult = false,
-    phase = "implement",
-    ticket = "CTL-9",
-    bgJobId = "bg-9",
-    startedAt,
-    nowMs = 2_000_000,
-  } = {}) {
-    const sig = {
-      ...implementSignal({ ticket, status: "running", bgJobId }),
-      phase,
-    };
-    sig.raw.phase = phase;
-    if (startedAt !== undefined) sig.raw.startedAt = startedAt;
+describe("reclaimDeadWorkIfPossible — CTL-736 progress gate", () => {
+  const orch = "/orch";
+
+  // A reclaim-eligible (dead-gone), work-not-done worker with the downstream
+  // revive/escalate seams stubbed; progressMark / readProgressMark are the levers.
+  function gateSeams(extra = {}) {
     return {
-      orch: "/orch",
-      sig,
-      opts: {
-        repoRoot: "/repo",
-        // mtime is arbitrarily stale — it is no longer a decision input.
-        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
-        probes: { [phase]: recorder(probeResult) },
-        emitComplete: recorder({ code: 0 }),
-        appendEvent: recorder(undefined),
-        appendReviveEvent: recorder(undefined),
-        appendEscalatedEvent: recorder(undefined),
-        appendReviveSuppressedEvent: recorder(undefined),
-        reviveDispatch: recorder({ code: 0 }),
-        applyStalledLabel: recorder({ applied: true }),
-        killBgJob: recorder(undefined),
-        countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
-        writeReviveMarker: recorder(undefined),
-        inEscalationCooldownFn: () => false,
-        recordEscalationFn: recorder(undefined),
-        liveness: recorder("busy"),
-        bumpIdleStreak: recorder(1),
-        resetIdleStreak: recorder(undefined),
-        // CTL-664: stub the reclaim mirror so a probeResult:true scenario
-        // (reclaim branch) stays hermetic (no `linearis` spawn).
-        postReclaimMirror: recorder(undefined),
-        now: () => nowMs,
-      },
+      repoRoot: "/repo",
+      jobLifecycle: () => "dead-gone",
+      probes: { implement: () => false }, // work NOT done → branch (C)
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(true),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      writeProgressMark: recorder(undefined),
+      resolveSession: () => null,
+      readBootSince: () => undefined,
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
     };
   }
 
-  test("busy → 'alive-busy-suppressed' (no dispatch, no budget, no marker, no kill, no escalate, no events)", () => {
-    const s = setupBusyScenario({ reviveCount: 0 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendReviveEvent.calls.length).toBe(0);
-    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
-    expect(s.opts.writeReviveMarker.calls.length).toBe(0);
-    expect(s.opts.killBgJob.calls.length).toBe(0);
-    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
-    // The trigger MUST consult liveness with the signal's bg_job_id.
-    expect(s.opts.liveness.calls.length).toBeGreaterThanOrEqual(1);
-    expect(s.opts.liveness.calls[0][0]).toBe("bg-9");
+  test("progress advanced since the last attempt ⇒ 'revived' + new high-water recorded (gen+1 via dispatch)", () => {
+    const writeProgressMark = recorder(undefined);
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 5, // 5 commits now…
+      readProgressMark: () => 2, // …vs 2 recorded → advanced
+      writeProgressMark,
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+    expect(writeProgressMark.calls.length).toBe(1);
+    expect(writeProgressMark.calls[0]).toEqual([orch, "CTL-9", "implement", 5]);
   });
 
-  test("busy + revive budget exhausted → still 'alive-busy-suppressed' (NEVER false-escalate a busy worker)", () => {
-    // The worst case the fix exists to prevent: a busy worker (a long sub-agent
-    // fan-out) whose budget two prior false-revives consumed must NOT be escalated
-    // to needs-human just because the budget is spent — it is alive and working.
-    const s = setupBusyScenario({ reviveCount: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
-    expect(s.opts.applyStalledLabel.calls.length).toBe(0);
+  test("zero progress since the last attempt ⇒ 'no-progress-stopped', NEVER respawned + needs-human", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const killBgJob = recorder(undefined);
+    const writeProgressMark = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 2, // unchanged…
+      readProgressMark: () => 2, // …same high-water → no forward progress
+      reviveDispatch,
+      appendEscalatedEvent,
+      killBgJob,
+      writeProgressMark,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0); // the futile respawn is suppressed
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+    expect(killBgJob.calls.length).toBe(1); // the dead worker is stopped
+    expect(writeProgressMark.calls.length).toBe(0); // no new high-water on a stop
   });
 
-  test("busy + storm-breaker open → still 'alive-busy-suppressed' (status check precedes storm bookkeeping)", () => {
-    const s = setupBusyScenario({ distinctRevivingTickets: 4 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.appendReviveSuppressedEvent.calls.length).toBe(0);
+  test("first death with no prior mark (readProgressMark -1) always gets one revive — even at zero progress", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 0, // a worker that crashed before its first commit…
+      readProgressMark: () => -1, // …no prior mark → 0 > -1 → one retry
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
   });
 
-  test("busy + work appears done → 'alive-busy-suppressed', NOT reclaimed (left to emit its own complete)", () => {
-    // A busy worker whose probe reads done is still suppressed: it is live and its
-    // own emit-complete is authoritative. Reclaiming it would flip the signal out
-    // from under a running worker (the pre-CTL-661 hole the gate exists to close).
-    const s = setupBusyScenario({ probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.emitComplete.calls.length).toBe(0);
-    expect(s.opts.appendEvent.calls.length).toBe(0);
-  });
-
-  test("busy resets any in-progress idle-confirmation streak", () => {
-    // A single busy observation between idle ticks must reset the streak so a
-    // worker that flickers idle→busy→idle is never reclaimed on a stale count.
-    const s = setupBusyScenario();
-    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
-    expect(s.opts.resetIdleStreak.calls[0]).toEqual(["/orch", "CTL-9", "implement"]);
-    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
-  });
-
-  test("busy past BUSY_CEILING_MS with NO committed work → 'escalated' (busy-ceiling-exceeded), never silent reclaim", () => {
-    // The sole long backstop. A worker busy longer than the ceiling whose
-    // work-done probe is STILL false is flagged for a human — genuinely wedged,
-    // not progressing. It is escalated, NEVER silently reclaimed-and-advanced.
-    const startedAt = "2026-05-27T00:00:00Z";
-    const s = setupBusyScenario({
-      probeResult: false,
-      startedAt,
-      nowMs: Date.parse(startedAt) + 7 * 60 * 60 * 1000, // 7h > 6h ceiling
-    });
-    const r = reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(r).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("busy-ceiling-exceeded");
-    expect(s.opts.applyStalledLabel.calls.length).toBe(1);
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-  });
-
-  test("busy past BUSY_CEILING_MS but work IS done → 'alive-busy-suppressed' (progressing, not wedged)", () => {
-    // Past the ceiling but the probe reads done → it is making progress, not
-    // wedged. Suppress and let it emit its own complete; do not escalate.
-    const startedAt = "2026-05-27T00:00:00Z";
-    const s = setupBusyScenario({
-      probeResult: true,
-      startedAt,
-      nowMs: Date.parse(startedAt) + 7 * 60 * 60 * 1000,
-    });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
-  });
-
-  test("busy WITHIN BUSY_CEILING_MS is suppressed regardless of work-done (backstop not yet armed)", () => {
-    const startedAt = "2026-05-27T00:00:00Z";
-    const s = setupBusyScenario({
-      probeResult: false,
-      startedAt,
-      nowMs: Date.parse(startedAt) + 60 * 60 * 1000, // 1h < 6h ceiling
-    });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("alive-busy-suppressed");
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
+  test("the SECOND zero-progress death (mark now recorded at 0) stops — bounds the futile loop", () => {
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "running" }), gateSeams({
+      progressMark: () => 0,
+      readProgressMark: () => 0, // the first revive recorded 0; still 0 → stop
+      reviveDispatch,
+    }));
+    expect(r).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0);
   });
 });
 
-// --- CTL-662: idle-confirmation + absent reclaim --------------------------
-//
-// `absent` (not listed by `claude agents` → crashed/exited) is reclaim-eligible
-// immediately — absence is unambiguous. `idle` (live, between turns) is
-// reclaim-eligible only after IDLE_CONFIRM_TICKS CONSECUTIVE idle observations,
-// counted by a persisted per-(ticket, phase) streak marker (NOT an mtime window).
-// Once reclaim-eligible, the existing CTL-574/587/604 branches decide:
-// work-done → reclaim+advance; work-not-done → revive (budget/storm permitting).
-// This path replaces the pre-CTL-662 stale-mtime "effectively dead" trigger; the
-// revive/escalate/storm behaviour on it is otherwise unchanged.
-
-describe("reclaimDeadWorkIfPossible — CTL-662 idle-confirmation + absent reclaim", () => {
-  function setup({
-    live = "idle",
-    streak = 0, // the NEW post-increment count bumpIdleStreak returns this tick
-    idleConfirmTicks = 2,
-    probeResult = false,
-    reviveCount = 0,
-    distinctRevivingTickets = 1,
-    phase = "implement",
-    ticket = "CTL-9",
-    bgJobId = "bg-9",
-  } = {}) {
-    const sig = {
-      ...implementSignal({ ticket, status: "running", bgJobId }),
-      phase,
-    };
-    sig.raw.phase = phase;
-    return {
-      orch: "/orch",
-      sig,
-      opts: {
-        repoRoot: "/repo",
-        statJob: () => ({ exists: true, mtimeMs: 1_000 }),
-        probes: { [phase]: recorder(probeResult) },
-        emitComplete: recorder({ code: 0 }),
-        appendEvent: recorder(undefined),
-        appendReviveEvent: recorder(undefined),
-        appendEscalatedEvent: recorder(undefined),
-        appendReviveSuppressedEvent: recorder(undefined),
-        reviveDispatch: recorder({ code: 0 }),
-        applyStalledLabel: recorder({ applied: true }),
-        killBgJob: recorder(undefined),
-        countReviveEvents: recorder(reviveCount),
-        countDistinctRevivingTickets: recorder(distinctRevivingTickets),
-        writeReviveMarker: recorder(undefined),
-        inEscalationCooldownFn: () => false,
-        recordEscalationFn: recorder(undefined),
-        listTicketPhases: () => ["triage", "research", "plan", "implement"],
-        liveness: recorder(live),
-        bumpIdleStreak: recorder(streak),
-        resetIdleStreak: recorder(undefined),
-        idleConfirmTicks,
-        now: () => 2_000_000,
-      },
-    };
-  }
-
-  test("idle, streak below confirm threshold → 'idle-pending' (bumped, not reclaimed)", () => {
-    const s = setup({ live: "idle", streak: 1, idleConfirmTicks: 2 });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("idle-pending");
-    expect(s.opts.bumpIdleStreak.calls.length).toBe(1);
-    expect(s.opts.bumpIdleStreak.calls[0]).toEqual(["/orch", "CTL-9", "implement"]);
-    // No reclaim/revive/escalate this tick — the streak is still building.
-    expect(s.opts.emitComplete.calls.length).toBe(0);
-    expect(s.opts.reviveDispatch.calls.length).toBe(0);
-    expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
-  });
-
-  test("idle, streak reaches confirm threshold + work done → 'reclaimed' (streak cleared)", () => {
-    const s = setup({ live: "idle", streak: 2, idleConfirmTicks: 2, probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
-    expect(s.opts.emitComplete.calls.length).toBe(1);
-    // Once we proceed to act, the persisted streak is cleared.
-    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
-  });
-
-  test("idle, streak reaches confirm threshold + work NOT done → 'revived' (streak cleared)", () => {
-    const s = setup({ live: "idle", streak: 2, idleConfirmTicks: 2, probeResult: false });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-    expect(s.opts.reviveDispatch.calls.length).toBe(1);
-    expect(s.opts.resetIdleStreak.calls.length).toBe(1);
-  });
-
-  test("absent → reclaim-eligible immediately (no idle-confirmation), work done → 'reclaimed'", () => {
-    const s = setup({ live: "absent", probeResult: true });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("reclaimed");
-    expect(s.opts.emitComplete.calls.length).toBe(1);
-    // Absence skips the streak entirely — bump is never called.
-    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
-  });
-
-  test("absent + work NOT done → 'revived' (no idle-confirmation needed)", () => {
-    const s = setup({ live: "absent", probeResult: false });
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("revived");
-    expect(s.opts.reviveDispatch.calls.length).toBe(1);
-    expect(s.opts.bumpIdleStreak.calls.length).toBe(0);
-  });
-
-  test("the trigger consults liveness with the signal's bg_job_id (not a stale value)", () => {
-    const s = setup({ live: "absent", probeResult: true, bgJobId: "bg-77" });
-    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
-    expect(s.opts.liveness.calls[0][0]).toBe("bg-77");
-  });
-});
+// CTL-736 Phase 2: the CTL-662 busy-suppression and idle-confirmation+absent
+// describe blocks are DELETED. The busy/idle/absent three-valued `claude agents`
+// snapshot trigger is replaced by the state.json lifecycle (jobLifecycle →
+// alive | dead-terminal | dead-gone). `alive` (≈ the old `busy`) is covered by
+// the new "CTL-736 state.json death trigger" block + the main-block alive tests;
+// dead-terminal/dead-gone reclaim/revive is covered by the CTL-587 block. The
+// idle-confirmation streak and its markers no longer exist.
 
 // --- CTL-638: per-(ticket, phase) escalation cool-down ---------------------
 //
@@ -1935,12 +1766,16 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
       opts: {
         repoRoot: "/repo",
         statJob: () => ({ exists: true, mtimeMs: 1_000 }),
-        // CTL-641 + CTL-606: every real phase now has a probe (so branch (A) is
-        // skipped) and CTL-606's supersede guard throws on a non-PHASES phase, so
-        // these storm-prevention tests can no longer reach the old branch-(A)
-        // no-probe escalation. They instead drive the reachable branch-(C)
-        // revive-budget-exhausted escalation: a probe-false real phase with the
-        // revive budget exhausted (reviveCount default below = MAX_REVIVES).
+        // CTL-736: the death trigger is the state.json lifecycle. "dead-gone"
+        // (job dir vanished) is reclaim-eligible, the case these escalation
+        // cool-down scenarios exercise.
+        jobLifecycle: () => "dead-gone",
+        // CTL-736 Phase 3: drive escalation through the reachable no-progress STOP
+        // path (zero forward progress → escalateOnce + needs-human, never respawn),
+        // replacing the deleted MAX_REVIVES budget-exhausted escalation.
+        progressMark: () => 0,
+        readProgressMark: () => 0,
+        writeProgressMark: recorder(undefined),
         probes: { [overrides.phase ?? "implement"]: recorder(overrides.probeResult ?? false) },
         emitComplete: recorder({ code: 0 }),
         appendEvent: recorder(undefined),
@@ -1950,8 +1785,7 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
         reviveDispatch: recorder({ code: 0 }),
         applyStalledLabel: recorder({ applied: true }),
         killBgJob: recorder(undefined),
-        countReviveEvents: recorder(overrides.reviveCount ?? 2), // default = MAX_REVIVES → budget-exhausted escalation
-        countDistinctRevivingTickets: recorder(1),
+        countReviveEvents: recorder(overrides.reviveCount ?? 0),
         writeReviveMarker: recorder(undefined),
         now: () => overrides.nowMs ?? 1_000 + 6 * 60 * 1000,
         staleMs: 5 * 60 * 1000,
@@ -1962,15 +1796,16 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
   }
 
   test("acceptance: second tick on same (ticket, phase) suppresses — exactly one event + one label write", () => {
-    const s = setupAt(orchDir, { phase: "pr" }); // branch (C): revive-budget-exhausted
+    const s = setupAt(orchDir, { phase: "pr" }); // branch (C): no-progress STOP
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
     expect(s.opts.applyStalledLabel.calls.length).toBe(1);
 
-    // 1,500 simulated ticks in the storm window — every one suppressed.
+    // 1,500 simulated ticks in the storm window — the escalation cool-down keeps
+    // the event + label at exactly one even though every tick re-stops the worker.
     for (let i = 0; i < 1500; i++) {
-      expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+      expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     }
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1); // NOT 1,501
     expect(s.opts.applyStalledLabel.calls.length).toBe(1); // NOT 1,501
@@ -1981,32 +1816,36 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     const s = setupAt(orchDir, { phase: "pr", nowMs: clock });
     s.opts.now = () => clock;
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     clock += 10 * 60 * 1000 + 1; // jump past the 10-min default window
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(2);
   });
 
   test("different phase on the same ticket gets an independent cool-down (pr → monitor-merge advancement)", () => {
     // Reproduces the live CTL-624 timeline: escalations on `pr` for a stretch,
     // then on `monitor-merge` after `pr` completes. Both should escalate; only
-    // the WITHIN-phase repeats are suppressed.
+    // the WITHIN-phase repeats are suppressed (cool-down keeps the event count
+    // pinned, even though the return is no-progress-stopped each time).
     const sPr = setupAt(orchDir, { phase: "pr" });
-    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalated");
-    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("no-progress-stopped");
+    const eventsAfterPr = sPr.opts.appendEscalatedEvent.calls.length;
+    expect(reclaimDeadWorkIfPossible(sPr.orch, sPr.sig, sPr.opts)).toBe("no-progress-stopped");
+    expect(sPr.opts.appendEscalatedEvent.calls.length).toBe(eventsAfterPr); // suppressed
 
     const sMm = setupAt(orchDir, { phase: "monitor-merge" });
-    expect(reclaimDeadWorkIfPossible(sMm.orch, sMm.sig, sMm.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(sMm.orch, sMm.sig, sMm.opts)).toBe("no-progress-stopped");
+    expect(sMm.opts.appendEscalatedEvent.calls.length).toBe(1); // independent cool-down → fired
   });
 
-  test("revive-budget-exhausted branch also respects the cool-down", () => {
-    // Repro: implement phase, budget exhausted → escalation path. Second tick
-    // must suppress just like the no-probe branch.
-    const s = setupAt(orchDir, { phase: "implement", reviveCount: 2 });
+  test("the no-progress escalation branch also respects the cool-down", () => {
+    // Repro: implement phase, zero progress → escalation path. Second tick must
+    // suppress the escalation event/label just like any other escalation.
+    const s = setupAt(orchDir, { phase: "implement" });
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
-    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("revive-budget-exhausted");
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
+    expect(s.opts.appendEscalatedEvent.calls[0][0].reason).toBe("no-progress");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(1);
   });
 
@@ -2019,22 +1858,24 @@ describe("reclaimDeadWorkIfPossible — CTL-638 escalation storm prevention", ()
     s.opts.inEscalationCooldownFn = inCd;
     s.opts.recordEscalationFn = recCd;
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalated");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(inCd.calls.length).toBe(1);
     expect(recCd.calls.length).toBe(1);
     // recordEscalationFn signature: (orchDir, ticket, phase, reason, now)
     expect(recCd.calls[0][1]).toBe("CTL-9");
     expect(recCd.calls[0][2]).toBe("pr");
-    expect(recCd.calls[0][3]).toBe("revive-budget-exhausted");
+    expect(recCd.calls[0][3]).toBe("no-progress");
   });
 
-  test("escalation-suppressed return path does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
+  test("cool-down-suppressed escalation does NOT call appendEscalatedEvent / applyStalledLabel / recordEscalationFn", () => {
     // Pure-fake seams to make the suppression observable as zero side-effects.
+    // The worker is still STOPPED (no-progress-stopped); only the escalation
+    // event/label is throttled by the cool-down.
     const s = setupAt(orchDir, { phase: "pr" });
     s.opts.inEscalationCooldownFn = recorder(true); // cool-down already armed
     s.opts.recordEscalationFn = recorder(undefined);
 
-    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("escalation-suppressed");
+    expect(reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts)).toBe("no-progress-stopped");
     expect(s.opts.appendEscalatedEvent.calls.length).toBe(0);
     expect(s.opts.applyStalledLabel.calls.length).toBe(0);
     expect(s.opts.recordEscalationFn.calls.length).toBe(0);
@@ -2859,17 +2700,16 @@ describe("reclaimDeadWorkIfPossible — CTL-606 supersede guard", () => {
     expect(r).toBe("reclaimed");
   });
 
-  test("guard never fires for a busy (live) signal — no listTicketPhases read on the hot path", () => {
-    // CTL-662: a live worker is now `busy`, which returns 'alive-busy-suppressed'
-    // from the status branch ABOVE the supersede guard — so the guard's
-    // listTicketPhases read is never reached for a live worker.
+  test("guard never fires for an alive (state=working) signal — no listTicketPhases read on the hot path", () => {
+    // CTL-736: a live worker has a non-terminal state.json lifecycle (`alive`),
+    // which returns 'alive-suppressed' from the trigger branch ABOVE the
+    // supersede guard — so the guard's listTicketPhases read is never reached.
     const listSpy = recorder(["triage", "research", "plan", "implement"]);
     const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
-      statJob: () => ({ exists: true, mtimeMs: Date.now() }),
-      liveness: () => "busy",
+      statJob: () => ({ exists: true, mtimeMs: Date.now(), state: "working" }),
       listTicketPhases: listSpy,
     });
-    expect(r).toBe("alive-busy-suppressed");
+    expect(r).toBe("alive-suppressed");
     expect(listSpy.calls.length).toBe(0); // guard runs only on the reclaim-eligible path
   });
 
@@ -2922,6 +2762,51 @@ describe("readBootSince — CTL-655 boot-time window reader", () => {
     // Empty-string bootedAt is also rejected.
     writeFileSync(join(dir, "daemon-boot.json"), JSON.stringify({ bootedAt: "" }));
     expect(readBootSince(dir)).toBeUndefined();
+  });
+});
+
+// CTL-736 Phase 3: at daemon boot, every per-(ticket, phase) progress high-water
+// marker is cleared so a stale mark from a prior run cannot false-STOP this run's
+// first death (the gate's "first death gets one revive" guarantee is per-run).
+describe("clearProgressMarks — CTL-736 boot-time progress reset", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl736-progress-"));
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function writeWorkerFile(ticket, name, body = "x") {
+    const d = join(orchDir, "workers", ticket);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, name), body);
+  }
+
+  test("deletes every .progress-<phase> marker across all worker dirs", () => {
+    writeWorkerFile("CTL-1", ".progress-implement", "4");
+    writeWorkerFile("CTL-1", ".progress-verify", "120");
+    writeWorkerFile("CTL-2", ".progress-research", "800");
+    clearProgressMarks(orchDir);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-implement"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-verify"))).toBe(false);
+    expect(existsSync(join(orchDir, "workers", "CTL-2", ".progress-research"))).toBe(false);
+  });
+
+  test("leaves non-progress worker files untouched (signals, claims, revive markers)", () => {
+    writeWorkerFile("CTL-1", "phase-implement.json", "{}");
+    writeWorkerFile("CTL-1", "implement.claim.1", "{}");
+    writeWorkerFile("CTL-1", ".revive-1.applied", "ts");
+    writeWorkerFile("CTL-1", ".progress-implement", "4");
+    clearProgressMarks(orchDir);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", "implement.claim.1"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".revive-1.applied"))).toBe(true);
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".progress-implement"))).toBe(false);
+  });
+
+  test("no workers dir → no-op (fail-open, no throw)", () => {
+    expect(() => clearProgressMarks(orchDir)).not.toThrow();
   });
 });
 

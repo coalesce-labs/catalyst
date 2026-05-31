@@ -11,6 +11,7 @@ import {
   readVerifyVerdict,
   describeProbe,
   WORK_DONE_PROBE_DESCRIPTIONS,
+  defaultProgressMark,
 } from "./work-done-probes.mjs";
 
 // makeRunGit — a deterministic `git` fake keyed on the trailing positional args.
@@ -744,5 +745,86 @@ describe("CTL-664: probe descriptions", () => {
 
   test("describeProbe returns a safe fallback for an unknown phase", () => {
     expect(describeProbe("nonexistent")).toBe("unknown");
+  });
+});
+
+// --- CTL-736 Phase 3: defaultProgressMark (forward-progress quantity) ---------
+
+describe("defaultProgressMark (CTL-736 Phase 3)", () => {
+  const WT = "/wt/CTL-9";
+
+  test("returns 0 when no ticket is supplied", () => {
+    expect(defaultProgressMark({ phase: "implement" })).toBe(0);
+  });
+
+  test("implement/remediate → commits-ahead count of origin/main", () => {
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-9", WT), stderr: "" },
+      "rev-list --count origin/main..HEAD": { code: 0, stdout: "3\n", stderr: "" },
+    });
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "implement", repoRoot: "/repo" }, { runGit })).toBe(3);
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "remediate", repoRoot: "/repo" }, { runGit })).toBe(3);
+  });
+
+  test("implement → 0 when the worktree does not resolve (no progress observable)", () => {
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("OTHER", WT), stderr: "" },
+    });
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "implement", repoRoot: "/repo" }, { runGit })).toBe(0);
+  });
+
+  test("implement → 0 when the rev-list git call fails (safe default)", () => {
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-9", WT), stderr: "" },
+      "rev-list --count origin/main..HEAD": { code: 128, stdout: "", stderr: "bad ref" },
+    });
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "implement", repoRoot: "/repo" }, { runGit })).toBe(0);
+  });
+
+  test("research/plan → byte size of the matching markdown artifact (grows = progress)", () => {
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-9", WT), stderr: "" },
+    });
+    const listArtifacts = makeListArtifacts({
+      "thoughts/shared/research": ["2026-05-30-ctl-9.md"],
+      "thoughts/shared/plans": ["2026-05-30-ctl-9.md"],
+    });
+    const readArtifact = makeReadArtifact({ "ctl-9.md": "x".repeat(742) });
+    expect(
+      defaultProgressMark({ ticket: "CTL-9", phase: "research", repoRoot: "/repo" }, { runGit, listArtifacts, readArtifact }),
+    ).toBe(742);
+    expect(
+      defaultProgressMark({ ticket: "CTL-9", phase: "plan", repoRoot: "/repo" }, { runGit, listArtifacts, readArtifact }),
+    ).toBe(742);
+  });
+
+  test("research → 0 when no matching artifact exists", () => {
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-9", WT), stderr: "" },
+    });
+    const listArtifacts = makeListArtifacts({ "thoughts/shared/research": ["unrelated.md"] });
+    expect(
+      defaultProgressMark({ ticket: "CTL-9", phase: "research", repoRoot: "/repo" }, { runGit, listArtifacts }),
+    ).toBe(0);
+  });
+
+  test("JSON worker-dir phases (verify/triage/review) → artifact byte size", () => {
+    const body = JSON.stringify({ regression_risk: 3, findings: [] });
+    const readFile = (p) =>
+      p.endsWith("/workers/CTL-9/verify.json") ? { ok: true, content: body } : { ok: false, content: "" };
+    expect(
+      defaultProgressMark({ ticket: "CTL-9", phase: "verify", orchDir: "/orch" }, { readFile }),
+    ).toBe(body.length);
+  });
+
+  test("JSON worker-dir phase → 0 when the artifact is absent", () => {
+    const readFile = () => ({ ok: false, content: "" });
+    expect(
+      defaultProgressMark({ ticket: "CTL-9", phase: "triage", orchDir: "/orch" }, { readFile }),
+    ).toBe(0);
+  });
+
+  test("an unknown phase → 0 (no progress signal)", () => {
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "mystery", orchDir: "/orch" })).toBe(0);
   });
 });

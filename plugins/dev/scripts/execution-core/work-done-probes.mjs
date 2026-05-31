@@ -356,3 +356,67 @@ export const WORK_DONE_PROBE_DESCRIPTIONS = {
 export function describeProbe(phase) {
   return WORK_DONE_PROBE_DESCRIPTIONS[phase] ?? "unknown";
 }
+
+// CTL-736 Phase 3: per-phase worker-dir JSON artifact whose byte-size measures
+// forward progress (a growing artifact = progress, even before it is "done").
+const PROGRESS_ARTIFACT = {
+  triage: "triage.json",
+  verify: "verify.json",
+  review: "review.json",
+  "monitor-deploy": "phase-monitor-deploy.json",
+  pr: "phase-pr.json",
+  "monitor-merge": "phase-monitor-merge.json",
+};
+
+// defaultProgressMark — CTL-736 Phase 3's forward-progress quantity for the
+// reclaim path. Unlike the boolean work-done probes, this returns a MONOTONIC-ish
+// non-negative integer so the reclaim path can tell progressed-then-died (revive)
+// from zero-progress (stop, never respawn): code phases (implement/remediate) →
+// commits-ahead-of-origin/main count; doc phases (research/plan) → matching
+// markdown byte size; JSON worker-dir phases → artifact byte size. 0 on any miss
+// (no worktree, no artifact, git failure) — the safe "no progress observed"
+// default. Pure given the injected seams; never throws.
+export function defaultProgressMark(
+  { ticket, phase, repoRoot, orchDir } = {},
+  {
+    runGit = defaultRunGit,
+    listArtifacts = defaultListArtifacts,
+    readArtifact = defaultReadArtifact,
+    readFile = defaultReadFile,
+  } = {},
+) {
+  if (!ticket) return 0;
+
+  // Code phases: commits ahead of origin/main on the ticket worktree.
+  if (phase === "implement" || phase === "remediate") {
+    const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+    if (!worktreePath) return 0;
+    const ahead = runGit(["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"]);
+    if (ahead.code !== 0) return 0;
+    return Math.max(0, Number(ahead.stdout.trim()) || 0);
+  }
+
+  // Worktree markdown artifacts: research/plan → byte size of the matching doc.
+  if (phase === "research" || phase === "plan") {
+    const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+    if (!worktreePath) return 0;
+    const subdir = phase === "research" ? "thoughts/shared/research" : "thoughts/shared/plans";
+    let files;
+    try {
+      files = listArtifacts(`${worktreePath}/${subdir}`);
+    } catch {
+      return 0;
+    }
+    const match = (Array.isArray(files) ? files : []).find((f) => matchesTicket(f, ticket));
+    if (!match) return 0;
+    return (readArtifact(`${worktreePath}/${subdir}/${match}`) || "").length;
+  }
+
+  // JSON worker-dir phases (triage/verify/review/pr/monitor-*): artifact byte size.
+  const name = PROGRESS_ARTIFACT[phase];
+  if (name && orchDir) {
+    const { ok, content } = readFile(workerArtifact(orchDir, ticket, name));
+    return ok ? content.length : 0;
+  }
+  return 0;
+}

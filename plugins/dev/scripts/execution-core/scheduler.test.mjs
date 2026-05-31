@@ -1058,6 +1058,24 @@ describe("CTL-653: maybeResetForRemediateCycle", () => {
     expect(existsSync(join(wdir, "remediate.claim.1"))).toBe(false);
     expect(existsSync(join(wdir, "implement.claim.1"))).toBe(true);
   });
+  test("CTL-736: clears the cycle members' .progress-<phase> high-water markers (fresh verify/remediate not false-STOPPED)", () => {
+    writeSignal("CTL-736P", "implement", "done");
+    writeSignal("CTL-736P", "verify", "done");
+    writeSignal("CTL-736P", "remediate", "done");
+    const wdir = join(orchDir, "workers", "CTL-736P");
+    // leftover progress high-waters from the prior cycle's verify + remediate…
+    writeFileSync(join(wdir, ".progress-verify"), "120");
+    writeFileSync(join(wdir, ".progress-remediate"), "3");
+    // …and an UNRELATED phase's progress marker, which must survive.
+    writeFileSync(join(wdir, ".progress-implement"), "4");
+
+    expect(maybeResetForRemediateCycle(orchDir, "CTL-736P")).toBe(true);
+    // cycle-member progress markers cleared → the fresh verify/remediate attempt
+    // is measured from zero, not false-STOPPED by the prior cycle's high-water.
+    expect(existsSync(join(wdir, ".progress-verify"))).toBe(false);
+    expect(existsSync(join(wdir, ".progress-remediate"))).toBe(false);
+    expect(existsSync(join(wdir, ".progress-implement"))).toBe(true);
+  });
   test("remediate not done → no-op, returns false (cycle signals untouched)", () => {
     writeSignal("CTL-653", "verify", "done");
     writeSignal("CTL-653", "remediate", "running");
@@ -1487,79 +1505,40 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual(["CTL-9"]);
   });
 
-  // CTL-731: a COLD/never-populated snapshot with a WIRED seam (production) must
-  // SKIP the whole reclaim sweep for that one boot tick (reclaimColdSkip) — NOT
-  // bind its empty agents list (which would resolve every live worker to "absent"
-  // and mass-false-revive) AND not fall back to a per-worker SYNC `claude agents`
-  // read for every worker (N synchronous spawns that re-starve the loop, the very
-  // failure mode Phase 00 removed). The snapshot warms within a sub-second; the
-  // next (warm) tick reclaims against the shared list.
-  test("a cold liveness snapshot SKIPS the reclaim sweep (no boot mass-false-revive, no per-worker re-starve)", () => {
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-1", "implement", "running"); // an in-flight worker the sweep would visit
-    const reclaimOpts = [];
-    const reclaimDeadWork = (_orchDir, _sig, opts) => {
-      reclaimOpts.push(opts);
-      return "noop";
-    };
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      reclaimDeadWork,
-      liveBackgroundCount: () => 1,
-      livenessSnapshot: () => ({ populated: false, agents: [], isFresh: false }),
-      livenessIsFresh: () => false,
+  // CTL-736: the reclaim death trigger is the LOCAL state.json lifecycle, so the
+  // sweep no longer reads the `claude agents` snapshot nor binds a per-worker
+  // liveness — the CTL-731 reclaimColdSkip + snapshot-binding are both deleted.
+  // The sweep runs every tick (no cold/warm distinction) and NEVER passes a
+  // `liveness` reclaim option, regardless of snapshot state.
+  for (const [label, livenessSnapshot, livenessIsFresh] of [
+    ["cold/unpopulated snapshot", () => ({ populated: false, agents: [], isFresh: false }), () => false],
+    ["null snapshot seam (legacy/test)", null, () => false],
+    [
+      "populated snapshot",
+      () => ({ populated: true, agents: [{ sessionId: "1111-2222", kind: "background", status: "idle" }], isFresh: true }),
+      () => true,
+    ],
+  ]) {
+    test(`reclaim sweep runs and binds NO snapshot liveness — ${label}`, () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+      writeSignal("CTL-1", "implement", "running"); // an in-flight worker the sweep visits
+      const reclaimOpts = [];
+      const reclaimDeadWork = (_orchDir, _sig, opts) => {
+        reclaimOpts.push(opts);
+        return "noop";
+      };
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        reclaimDeadWork,
+        liveBackgroundCount: () => 1,
+        livenessSnapshot,
+        livenessIsFresh,
+      });
+      expect(reclaimOpts.length).toBe(1); // sweep runs every tick
+      expect(reclaimOpts[0].liveness).toBeUndefined(); // state.json trigger — no snapshot binding
     });
-    // cold + wired seam → the entire sweep is deferred; reclaimDeadWork never runs
-    expect(reclaimOpts.length).toBe(0);
-  });
-
-  // The skip is gated on a WIRED seam: a null livenessSnapshot (legacy/test
-  // harnesses) keeps the per-worker reclaim path so those callers are unaffected.
-  test("a null liveness seam still runs the per-worker reclaim sweep (reclaimColdSkip off)", () => {
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-1", "implement", "running");
-    const reclaimOpts = [];
-    const reclaimDeadWork = (_orchDir, _sig, opts) => {
-      reclaimOpts.push(opts);
-      return "noop";
-    };
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      reclaimDeadWork,
-      liveBackgroundCount: () => 1,
-      livenessSnapshot: null, // no seam → reclaimColdSkip is false
-      livenessIsFresh: () => false,
-    });
-    expect(reclaimOpts.length).toBeGreaterThan(0);
-    expect(reclaimOpts.every((o) => o.liveness === undefined)).toBe(true);
-  });
-
-  test("a populated liveness snapshot binds the shared agents into reclaim liveness", () => {
-    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-1", "implement", "running");
-    const reclaimOpts = [];
-    const reclaimDeadWork = (_orchDir, _sig, opts) => {
-      reclaimOpts.push(opts);
-      return "noop";
-    };
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      reclaimDeadWork,
-      liveBackgroundCount: () => 1,
-      livenessSnapshot: () => ({
-        populated: true,
-        agents: [{ sessionId: "1111-2222", kind: "background", status: "idle" }],
-        isFresh: true,
-      }),
-      livenessIsFresh: () => true,
-    });
-    expect(reclaimOpts.length).toBeGreaterThan(0);
-    // populated → reclaim receives the bound shared-snapshot liveness fn
-    expect(reclaimOpts.every((o) => typeof o.liveness === "function")).toBe(true);
-  });
+  }
 });
 
 // ── CTL-706: per-project cap + reserve wired into schedulerTick ──
