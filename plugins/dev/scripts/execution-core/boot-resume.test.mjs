@@ -625,3 +625,28 @@ describe("defaultAppendBootResumeEvent envelope", () => {
     expect(countReviveEvents({ ticket: "CTL-RT-654" })).toBe(0);
   });
 });
+
+// CTL-549: selectBootResumeCandidates skips needs-input signals
+describe("selectBootResumeCandidates — needs-input guard (CTL-549)", () => {
+  test("skips tickets with needs-input signal (not re-dispatched on reboot)", () => {
+    writeSignal(orchDir, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      worktreePath: "/wt/CTL-1",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 4 });
+    expect(out.map((c) => c.ticket)).not.toContain("CTL-1");
+  });
+
+  test("other in-flight tickets are still resumed normally alongside a parked one", () => {
+    writeSignal(orchDir, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      worktreePath: "/wt/CTL-1",
+    });
+    writeSignal(orchDir, "CTL-2", "verify", { worktreePath: "/wt/CTL-2" });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 4 });
+    expect(out.map((c) => c.ticket)).not.toContain("CTL-1");
+    expect(out.map((c) => c.ticket)).toContain("CTL-2");
+  });
+});

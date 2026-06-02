@@ -1280,6 +1280,14 @@ export function reclaimDeadWorkIfPossible(
   // below; the job dir's existence/mtime is no longer the death signal.
   if (klass === "terminal" || klass === "unknown") return "noop";
 
+  // CTL-549: needs-input signals are intentionally parked awaiting a human
+  // comment. Neither reclaim nor escalate — the comment-wake path in daemon.mjs
+  // handles re-dispatch. Treat as noop so the per-tick sweep never interferes.
+  if (signal?.status === "needs-input") {
+    log.debug({ ticket: signal.ticket }, "reclaimDeadWork: skipping needs-input (parked for human)");
+    return "noop";
+  }
+
   const { ticket, phase } = signal;
   const orchId = signal.raw?.orchestrator;
   const prevBgJobId = signal.raw?.bg_job_id ?? null;
