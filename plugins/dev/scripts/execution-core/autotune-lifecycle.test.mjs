@@ -147,6 +147,29 @@ describe("autoTuneTick", () => {
     });
     expect(() => autoTuneTick(state, seams)).not.toThrow();
   });
+
+  test("autoTuneTick passes layer1Max from readLayer1Concurrency to decideMaxParallel", () => {
+    // Seed 2 down-trend samples; seam provides a 3rd completing the trend.
+    // Layer-2 has maxParallel=1, Layer-1 has maxParallel=4, mem=ok → should jump to 4.
+    const downSamples = [
+      { load1: 2, load5: 4, load15: 6, memFreePct: 50, coreCount: 4 },
+      { load1: 1, load5: 3, load15: 5, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: downSamples, trendMinSamples: 3 });
+    const decisions = [];
+    const seams = makeSeams({
+      loadavg: () => [1, 2, 4], // 3rd down-trend sample (load1<load5<load15)
+      freemem: () => 8e9,
+      totalmem: () => 16e9,   // 50% free = ok
+      cpus: () => Array(4),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({ maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 }),
+      writeLayer2: (v) => { decisions.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toBe(4); // jumped to layer1Max, not 2
+  });
 });
 
 // --- startAutoTuner / stopAutoTuner lifecycle --------------------------------

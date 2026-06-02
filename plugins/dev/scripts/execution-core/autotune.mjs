@@ -110,6 +110,7 @@ export function decideMaxParallel({
   loadSafeFactor,
   criticalPct,
   warnPct,
+  layer1Max = null,   // CTL-750: Layer-1 committed maxParallel for fast recovery target
 }) {
   const { maxParallel: current, minParallel, maxParallelCeiling } = concurrency;
   const clamp = (v) => clampToBounds(v, { minParallel, maxParallelCeiling });
@@ -145,6 +146,10 @@ export function decideMaxParallel({
       // CTL-750: allow slow recovery from absolute floor even under mem-warn.
       if (current <= minParallel) return { next: clamp(current + 1), reason: "mem-warn-recovery" };
       return { next: clamp(current), reason: "mem-warn" };
+    }
+    // CTL-750: jump to Layer-1's committed target when recovering from below it.
+    if (layer1Max !== null && current < layer1Max) {
+      return { next: clamp(layer1Max), reason: "recovery-to-layer1" };
     }
     return { next: clamp(current + 1), reason: "trend-down" };
   }
@@ -209,6 +214,7 @@ export function autoTuneTick(state, seams) {
     totalmem,
     cpus,
     readConcurrency,
+    readLayer1Concurrency,  // CTL-750: optional seam for Layer-1 committed maxParallel
     writeLayer2,
     appendSampledEvent,
     appendAdjustedEvent,
@@ -226,6 +232,12 @@ export function autoTuneTick(state, seams) {
 
     const concurrency = readConcurrency();
     const current = concurrency.maxParallel ?? 3;
+    // CTL-750: pass Layer-1's committed target so decideMaxParallel can jump on recovery.
+    // Fail-safe: if the seam is absent (old callers), layer1Max stays null.
+    const layer1 = readLayer1Concurrency?.();
+    const layer1Max = (Number.isInteger(layer1?.maxParallel) && layer1.maxParallel > 0)
+      ? layer1.maxParallel
+      : null;
 
     try {
       appendSampledEvent({
@@ -246,6 +258,7 @@ export function autoTuneTick(state, seams) {
       loadSafeFactor: state.loadSafeFactor,
       criticalPct: state.criticalPct,
       warnPct: state.warnPct,
+      layer1Max,  // CTL-750
     });
 
     if (next !== current) {
@@ -308,6 +321,8 @@ export function startAutoTuner({
         readExecutionCoreConcurrency(configPath),
         readExecutionCoreConcurrencyLayer2(layer2Path),
       ),
+    // CTL-750: Layer-1 only (no Layer-2 merge) — the committed operator target.
+    readLayer1Concurrency: () => readExecutionCoreConcurrency(configPath),
     writeLayer2: (next) => writeLayer2MaxParallel(layer2Path, next),
     appendSampledEvent,
     appendAdjustedEvent,
