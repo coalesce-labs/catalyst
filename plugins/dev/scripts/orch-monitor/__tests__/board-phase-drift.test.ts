@@ -61,6 +61,9 @@ import { PHASE_ORDER, PHASE_TO_LINEAR } from "../lib/board-data.mjs";
 
 const SOT = "workflow.default.json (via lib/workflow-descriptor.mjs PHASES)";
 
+// formatters.ts is pure (no imports) → direct import is safe under bun test.
+import { PHASE_COLORS as FMT_PHASE_COLORS } from "../ui/src/lib/formatters.ts";
+
 // ── Board.tsx text extraction ───────────────────────────────────────────────
 // We read Board.tsx as TEXT (never import it) because it pulls in React + CSS +
 // "@/…" path-aliased modules that don't resolve under `bun test`. This mirrors
@@ -229,6 +232,25 @@ test("Board.tsx PHASE_C keys cover every descriptor PHASE (color map is a supers
         `color entry. (PHASE_C legitimately also includes ancillary "${ANCILLARY_PHASES.join(
           '", "',
         )}" + display aliases like merge/deploy/done, so extra keys are fine.)`,
+    );
+  }
+  expect(missing).toEqual([]);
+});
+
+// ── Requirement 8 (CTL-754): TicketCard renders phaseSummary strip via PHASE_C ─
+test("TicketCard renders the phaseSummary strip from PHASE_C (CTL-754)", () => {
+  expect(boardSrc).toContain("phaseSummary");
+  expect(/phaseSummary[\s\S]{0,400}PHASE_C\[/.test(boardSrc)).toBe(true);
+});
+
+// ── Requirement 9 (CTL-754): formatters.ts PHASE_COLORS covers canonical phases ─
+test("formatters.ts PHASE_COLORS covers every canonical pipeline phase", () => {
+  const missing = [...PHASES].filter((p) => !(p in FMT_PHASE_COLORS));
+  if (missing.length) {
+    throw new Error(
+      `DRIFT: ui/src/lib/formatters.ts PHASE_COLORS is missing canonical phase color(s): ` +
+        `${JSON.stringify(missing)}.\nAdd them (alongside the legacy verb-form keys) so ` +
+        `phaseColor("<phase>") resolves on the canonical board path.`,
     );
   }
   expect(missing).toEqual([]);

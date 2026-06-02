@@ -28,6 +28,12 @@ export interface BoardPhaseCost {
   turns: number;
 }
 
+export interface BoardPhaseTiming {
+  phase: string;
+  status: string;
+  durationMs: number | null;
+}
+
 export interface BoardTicket {
   id: string;
   title: string;
@@ -50,6 +56,7 @@ export interface BoardTicket {
   tokens: number | null;
   turns: number | null;
   phaseCosts: Record<string, BoardPhaseCost> | null;
+  phaseSummary: BoardPhaseTiming[];
   pr: number | null;
   updatedAt: string;
   subSteps?: WorkflowSubStep[];

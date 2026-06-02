@@ -155,6 +155,33 @@ function deriveCurrentPhase(phaseSigs) {
   return { phase: "done", status: "done", model: lastTerminal?.model || null };
 }
 
+// CTL-754: per-phase timing for the board progression strip. Pure + exported so
+// it is unit-testable (assembleBoard itself is not — WORKERS_DIR is a homedir
+// const and it shells out to `claude agents`). `now` is passed in for the same
+// reason. Terminal phases without a completedAt yield null (unknown), not a
+// now-anchored runaway duration.
+export function buildPhaseSummary(phaseSigs, now) {
+  return phaseSigs
+    .map((sig, i) => {
+      if (!sig || !sig.startedAt) return null;
+      const start = Date.parse(sig.startedAt);
+      if (!Number.isFinite(start)) return null;
+      let end = null;
+      if (sig.completedAt) {
+        const c = Date.parse(sig.completedAt);
+        end = Number.isFinite(c) ? c : null;
+      } else if (!TERMINAL.has(sig.status)) {
+        end = now;
+      }
+      return {
+        phase: PHASE_ORDER[i],
+        status: sig.status,
+        durationMs: end != null ? end - start : null,
+      };
+    })
+    .filter(Boolean);
+}
+
 function ticketUpdatedAt(phaseSigs) {
   let max = "";
   for (const sig of phaseSigs) {
@@ -355,6 +382,7 @@ export async function assembleBoard() {
   let tickets = await Promise.all([...ticketIds].map(async (id) => {
     const { phaseSigs, triage, prSigs } = await readTicketArtifacts(id);
     const cur = deriveCurrentPhase(phaseSigs);
+    const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
     return {
       id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
@@ -372,6 +400,7 @@ export async function assembleBoard() {
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
         : null,
       phaseCosts: phaseCostsByTicket[id] ?? null,
+      phaseSummary,
       pr: prFor(prSigs),
       updatedAt: ticketUpdatedAt(phaseSigs),
     };
