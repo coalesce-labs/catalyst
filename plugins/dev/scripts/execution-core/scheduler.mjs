@@ -1968,8 +1968,24 @@ export function schedulerTick(
         inFlightTickets,
         orchDir,
       });
-      if (verdict?.hard_dependencies?.length > 0) {
-        for (const dep of verdict.hard_dependencies) {
+      // CTL-537 (phase-review hardening): the verdict is LLM-generated, so its
+      // hard_dependencies IDs are untrusted. Only honor an edge that arbitrates
+      // the pair THIS gate is deciding — candidate must be the current ticket
+      // and blocked_by must be a currently in-flight ticket. Dropping anything
+      // else prevents a hallucinated/prompt-injected ID from writing a durable
+      // blocked-by edge on an unrelated ticket (which D5 would wrongly stall).
+      const rawDeps = verdict?.hard_dependencies ?? [];
+      const validDeps = rawDeps.filter(
+        (dep) => dep.candidate === t.identifier && inFlightTickets.has(dep.blocked_by)
+      );
+      if (rawDeps.length > validDeps.length) {
+        log.warn(
+          { candidate: t.identifier, dropped: rawDeps.length - validDeps.length },
+          "sequencing: dropped hard_dependencies not arbitrating the (candidate, in-flight) pair"
+        );
+      }
+      if (validDeps.length > 0) {
+        for (const dep of validDeps) {
           safeWrite(
             () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
             { ticket: dep.candidate, phase: "sequencing" }

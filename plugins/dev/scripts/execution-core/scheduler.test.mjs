@@ -4924,6 +4924,41 @@ describe("CTL-537 sequencing seam (schedulerTick)", () => {
     expect(dispatchedNew).toBe(false);
   });
 
+  test("untrusted dep ids dropped → no blocked-by write, falls through to verdict (phase-review hardening)", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const blockedByRelationCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => ({ applied: true, reason: null }),
+      applyBlockedByRelation: (args) => { blockedByRelationCalls.push(args); return { applied: true, reason: null }; },
+    };
+    // LLM returns deps that DON'T arbitrate the (CTL-NEW, in-flight) pair:
+    // one with a foreign candidate, one blocked_by a non-in-flight ticket.
+    const checkSequencing = () => ({
+      verdict: "go",
+      reason: "",
+      hard_dependencies: [
+        { candidate: "CTL-OTHER", blocked_by: "CTL-IN", reason: "hallucinated candidate" },
+        { candidate: "CTL-NEW", blocked_by: "CTL-NOTLIVE", reason: "blocked_by not in-flight" },
+      ],
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      writeStatus,
+    });
+    // No durable blocked-by edge written for the bogus deps
+    expect(blockedByRelationCalls).toHaveLength(0);
+    // With no VALID hard dep and a "go" verdict, dispatch proceeds
+    const dispatchedNew = dispatch.calls.some(
+      (c) => c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW")
+    );
+    expect(dispatchedNew).toBe(true);
+  });
+
   test("seam undefined → byte-for-byte legacy: dispatch proceeds with one in-flight + free slot", () => {
     const dispatch = fakeDispatch({ code: 0 });
     schedulerTick(orchDir, {
