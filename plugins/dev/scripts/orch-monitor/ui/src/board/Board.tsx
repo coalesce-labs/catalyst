@@ -6,6 +6,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
+import { fmtDuration } from "../lib/formatters";
 // ── types + transport (hoisted to ./types + ./board-client for CTL-733 PR-2b) ─
 import { connectBoard } from "./board-client";
 import type {
@@ -44,6 +45,12 @@ const PHASE_COLS = [
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
 ];
+// Phase statuses that mean a phase is no longer running. MUST stay in lock-step
+// with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
+// board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
+// terminal status added there cannot silently render here as a live phase
+// (CTL-754).
+const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"];
 
 type ColorBy = "phase" | "status" | "repo" | "type";
 const TYPE_C: Record<string, string> = {
@@ -114,6 +121,33 @@ function PhasePill({ phase }: { phase: string }) {
   // muted treatment (dark tint bg + colored fg) — keeps phase identity without
   // a wall of fully-saturated pills competing with the status signal.
   return <span style={{ fontFamily: C.mono, fontSize: 10.5, padding: "1.5px 8px", borderRadius: 6, color: c, fontWeight: 600, background: `${c}22`, whiteSpace: "nowrap" }}>{phase}</span>;
+}
+function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: string; durationMs: number | null }[] }) {
+  if (!phaseSummary.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 3, marginTop: 7, flexWrap: "wrap", alignItems: "center" }}>
+      {phaseSummary.map((p) => {
+        const c = PHASE_C[p.phase] || C.blue;
+        const running = !TERMINAL_STATUSES.includes(p.status) && p.durationMs != null;
+        return (
+          <Tooltip key={p.phase}>
+            <TooltipTrigger asChild>
+              <span style={{
+                width: 16, height: 4, borderRadius: 2, background: c,
+                opacity: p.status === "failed" ? 0.4 : 1,
+                outline: running ? `1px solid ${c}` : undefined,
+                display: "inline-block", flex: "0 0 auto",
+              }} />
+            </TooltipTrigger>
+            <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>
+              {p.phase}{p.durationMs != null ? ` · ${fmtDuration(p.durationMs)}` : ""}
+              {p.status === "failed" ? " · failed" : running ? " · running" : ""}
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
 }
 const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
 function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
@@ -201,6 +235,7 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
         <ScopeChip scope={t.scope} estimate={t.estimate} />
         {t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
       </div>
+      <PhaseStrip phaseSummary={t.phaseSummary} />
       <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
         <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
           {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}

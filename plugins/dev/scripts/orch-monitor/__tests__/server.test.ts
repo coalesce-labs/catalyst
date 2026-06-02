@@ -748,7 +748,12 @@ describe("React UI legacy dashboard (/legacy)", () => {
   it("serves built JS asset", async () => {
     const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
-    const match = html.match(/src="(\/assets\/index-[^"]+\.js)"/);
+    // Entry chunk is named after the vite rollupOptions.input KEY (ui/vite.config.ts:
+    // `input: { main: index.html, board: board.html }`), so the legacy dashboard's
+    // entry is /assets/main-<hash>.js. Accept the legacy `index-` prefix too so a
+    // single-entry rebuild doesn't re-break this. (CTL-754: index.html was rebuilt
+    // from the multi-entry config, renaming index-* -> main-*.)
+    const match = html.match(/src="(\/assets\/(?:main|index)-[^"]+\.js)"/);
     expect(match).toBeTruthy();
     if (match) {
       const jsRes = await fetch(`${baseUrl}${match[1]}`);
@@ -761,7 +766,9 @@ describe("React UI legacy dashboard (/legacy)", () => {
   it("serves built CSS asset", async () => {
     const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
-    const match = html.match(/href="(\/assets\/index-[^"]+\.css)"/);
+    // The entry's stylesheet is emitted under the `app-` chunk (the bundled CSS
+    // chunk name), or `index-` on a legacy single-entry build. (CTL-754 rebuild.)
+    const match = html.match(/href="(\/assets\/(?:app|index)-[^"]+\.css)"/);
     expect(match).toBeTruthy();
     if (match) {
       const cssRes = await fetch(`${baseUrl}${match[1]}`);
