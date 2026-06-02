@@ -362,8 +362,8 @@ cmd_phase() {
 
 # Metric keys expose a stable CLI surface; internal column names live in METRIC_MAP.
 # declare -A is bash 4+; macOS still ships bash 3.2, so use parallel arrays instead.
-METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms)
-METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms)
+METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms --turns)
+METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms num_turns)
 
 metric_col_for_flag() {
   local flag="$1" i
@@ -573,12 +573,16 @@ cmd_end() {
       done)   outcome="success" ;;
       failed) outcome="fail" ;;
     esac
+    local skill_name phase_name=""
+    skill_name=$(db_exec "SELECT COALESCE(skill_name,'') FROM sessions WHERE session_id = $(sql_quote "$sid");")
+    [[ "$skill_name" == phase-* ]] && phase_name="${skill_name#phase-}"
     local args=(
       --event "claude_code.session.outcome"
       --outcome "$outcome"
       --session-id "$sid"
     )
-    [[ -n "$reason" ]] && args+=(--reason "$reason")
+    [[ -n "$reason" ]]     && args+=(--reason "$reason")
+    [[ -n "$phase_name" ]] && args+=(--phase "$phase_name")
     "$emit_bin" "${args[@]}" >/dev/null 2>&1 || true
   fi
 
@@ -591,14 +595,18 @@ emit_iteration_metric() {
   local emit="${CATALYST_EMIT_METRIC:-$SCRIPT_DIR/emit-otel-metric.sh}"
   [[ -x "$emit" ]] || return 0
 
-  local plan_count fix_count ticket started_at
+  local plan_count fix_count ticket started_at skill_name
   plan_count=$(db_exec "SELECT COALESCE(plan_iterations,0) FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
   fix_count=$( db_exec "SELECT COALESCE(fix_iterations,0)  FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
   ticket=$(    db_exec "SELECT COALESCE(ticket_key,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
   started_at=$(db_exec "SELECT started_at                  FROM sessions        WHERE session_id = $(sql_quote "$sid");")
+  skill_name=$(db_exec "SELECT COALESCE(skill_name,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
 
   plan_count="${plan_count:-0}"
   fix_count="${fix_count:-0}"
+
+  local phase_name=""
+  [[ "$skill_name" == phase-* ]] && phase_name="${skill_name#phase-}"
 
   local start_s=""
   if [[ -n "$started_at" ]]; then
@@ -609,8 +617,10 @@ emit_iteration_metric() {
   local start_ns=""
   [[ -n "$start_s" ]] && start_ns="${start_s}000000000"
 
-  "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
-  "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
+  "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" \
+    ${start_ns:+--start-ns "$start_ns"} ${phase_name:+--phase "$phase_name"} 2>/dev/null || true
+  "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" \
+    ${start_ns:+--start-ns "$start_ns"} ${phase_name:+--phase "$phase_name"} 2>/dev/null || true
 }
 
 cmd_heartbeat() {

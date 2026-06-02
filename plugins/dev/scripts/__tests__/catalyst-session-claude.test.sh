@@ -218,6 +218,18 @@ NOREPO_HAS="$(printf '%s' "$NOREPO_LINE" | jq -r '.attributes | has("vcs.reposit
 expect_eq "session.phase omits vcs.repository.name when \$REPO unset" \
   "false" "$NOREPO_HAS"
 
+# ─── 13. CTL-748: metric --turns persists num_turns to session_metrics ───────
+SID_TURNS="$(bash "$SESSION_SCRIPT" start --skill phase-research)"
+expect_not_empty "start returns id for turns test" "$SID_TURNS"
+
+bash "$SESSION_SCRIPT" metric "$SID_TURNS" \
+  --cost 0.25 --input 1000 --output 500 \
+  --cache-read 0 --cache-creation 0 --duration-ms 10000 --turns 12
+
+STORED_TURNS="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT num_turns FROM session_metrics WHERE session_id = '${SID_TURNS}';")"
+expect_eq "metric --turns writes num_turns to DB" "12" "$STORED_TURNS"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

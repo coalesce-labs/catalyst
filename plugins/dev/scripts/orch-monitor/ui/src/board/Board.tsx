@@ -200,6 +200,7 @@ function TicketCard({ t, colorBy }: { t: Ticket; colorBy: ColorBy }) {
           {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
         </span>
         <span style={{ flex: 1 }} />
+        {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
         {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
       </div>
     </div>

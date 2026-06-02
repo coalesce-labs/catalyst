@@ -489,6 +489,11 @@ export function WorkerDetailDrawer({
               label="tokens"
               value={tokens > 0 ? fmtTokens(tokens) : "—"}
             />
+            <MetricPill
+              icon={<RotateCw className="h-3 w-3 text-muted" />}
+              label="turns"
+              value={worker.cost?.numTurns != null ? String(worker.cost.numTurns) : "—"}
+            />
             {worker.activity && (
               <>
                 <MetricPill

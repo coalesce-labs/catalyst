@@ -94,6 +94,7 @@ interface SessionRow {
   input_tokens: number | null;
   output_tokens: number | null;
   cache_read_tokens: number | null;
+  num_turns: number | null;
   pr_number: number | null;
   pr_url: string | null;
   ci_status: string | null;
@@ -118,6 +119,7 @@ function rowToState(row: SessionRow): SessionState {
           inputTokens: row.input_tokens ?? 0,
           outputTokens: row.output_tokens ?? 0,
           cacheReadTokens: row.cache_read_tokens ?? 0,
+          numTurns: row.num_turns ?? 0,
         };
 
   const pr: SessionPr | null =
@@ -215,6 +217,7 @@ export function readSessionStore(
         m.input_tokens,
         m.output_tokens,
         m.cache_read_tokens,
+        m.num_turns,
         p.pr_number,
         p.pr_url,
         p.ci_status,

@@ -98,13 +98,12 @@ Plan §"Per-phase /goal conditions":
 ```
 /goal "`gh pr view --json merged` returns `true` for the PR linked to
        ${TICKET} (PR #${PR_NUMBER}) AND Linear state is `Done` (I have
-       printed both confirmations to my transcript); OR I have stopped after
-       50 turns or 24 wall-clock hours."
+       printed both confirmations to my transcript);
+       OR 24 wall-clock hours have elapsed without merge completion
+       and I have recorded status:timeout."
 ```
 
-Turn cap defaults to 50 — high relative to other phases because the work is
-event-driven and one wake = one turn. Wall-clock cap is 24h (per plan
-§Failure handling).
+Wall-clock cap is 24h (per plan §Failure handling).
 
 ## Phase-specific work — active listen loop
 
