@@ -135,8 +135,8 @@ done
 [[ -n $STATUS ]] || die "--status is required"
 
 case "$STATUS" in
-complete | failed | turn-cap-exhausted | skipped) ;;
-*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', or 'skipped' (got: $STATUS)" ;;
+complete | failed | turn-cap-exhausted | skipped | park) ;;
+*) die "--status must be 'complete', 'failed', 'turn-cap-exhausted', 'skipped', or 'park' (got: $STATUS)" ;;
 esac
 
 # Validate ticket shape against the same pattern the broker uses.
@@ -240,12 +240,11 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		failed) NEW_STATUS="failed" ;;
 		turn-cap-exhausted) NEW_STATUS="turn-cap-exhausted" ;;
 		skipped) NEW_STATUS="skipped" ;; # CTL-512: monitor-deploy terminal-no-deploy
+		park) NEW_STATUS="needs-input" ;; # CTL-549: parked waiting for human comment
 		esac
-		# turn-cap-exhausted is NOT a terminal state — leave completedAt unset so
-		# consumers can distinguish "worker stopped at cap, awaiting continuation"
-		# from "worker reached its definition of done". CTL-512: skipped IS terminal
-		# (slot frees), so it falls through to the default SET_COMPLETED branch.
-		if [[ $STATUS == "turn-cap-exhausted" ]]; then
+		# turn-cap-exhausted and park are NOT terminal states — leave completedAt unset.
+		# CTL-512: skipped IS terminal (slot frees), so it falls through to SET_COMPLETED.
+		if [[ $STATUS == "turn-cap-exhausted" || $STATUS == "park" ]]; then
 			SET_COMPLETED='.'
 		else
 			SET_COMPLETED='.completedAt = $ts'
@@ -255,11 +254,13 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			--arg ts "$TS" \
 			--arg reason "$REASON" \
 			--arg handoff "$HANDOFF_PATH" \
+			--arg phase "$PHASE" \
 			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
            | (if \$reason  == \"\" then . else .failureReason = \$reason end)
-           | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)" \
+           | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
+           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
 			mv "$TMP" "$SIGNAL_FILE"
 		else
@@ -285,6 +286,7 @@ if [[ -n $SESSION_ID ]] && [[ -x "${SCRIPT_DIR}/catalyst-session.sh" ]]; then
 	complete) SESSION_OUTCOME=done ;;
 	skipped) SESSION_OUTCOME=done ;;
 	turn-cap-exhausted) SESSION_OUTCOME=failed ;;
+	park) SESSION_OUTCOME=failed ;;
 	*) SESSION_OUTCOME=failed ;;
 	esac
 	REASON_FLAG=()

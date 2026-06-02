@@ -320,6 +320,61 @@ echo '{"ticket":"CTL-100","phase":"implement","status":"running"}' >"$SIGNAL"
 CATALYST_GENERATION=2 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
 assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "signal without generation field still emits (no fence data)"
 
+# ─── CTL-549: park status ───────────────────────────────────────────────────
+
+echo ""
+echo "Test 17 (CTL-549): --status park is accepted (exit 0)"
+fresh_env t17
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 \
+	--status park --handoff-path /tmp/handoff.md \
+	>/dev/null 2>&1
+assert_eq "0" "$?" "park: script exits 0"
+
+echo ""
+echo "Test 18 (CTL-549): signal file gets status=needs-input and parkedFrom=implement"
+fresh_env t18
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' \
+	>"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 \
+	--status park --handoff-path /tmp/handoff.md >/dev/null 2>&1
+SIG="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+STATUS=$(jq -r '.status' "$SIG")
+PARKED_FROM=$(jq -r '.parkedFrom' "$SIG")
+HANDOFF=$(jq -r '.handoffPath' "$SIG")
+assert_eq "needs-input" "$STATUS" "park: signal status=needs-input"
+assert_eq "implement" "$PARKED_FROM" "park: signal parkedFrom=implement"
+assert_eq "/tmp/handoff.md" "$HANDOFF" "park: signal handoffPath set"
+
+echo ""
+echo "Test 19 (CTL-549): completedAt is NOT set on park (non-terminal)"
+fresh_env t19
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' \
+	>"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status park >/dev/null 2>&1
+SIG="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+COMPLETED_AT=$(jq -r '.completedAt // "absent"' "$SIG")
+assert_eq "absent" "$COMPLETED_AT" "park: completedAt not set"
+
+echo ""
+echo "Test 20 (CTL-549): event name is phase.implement.park.CTL-100"
+fresh_env t20
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status park >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 20: no event line emitted for park"
+else
+	EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+	assert_eq "phase.implement.park.CTL-100" "$EVENT_NAME" "park: event name is phase.implement.park.CTL-100"
+fi
+
+echo ""
+echo "Test 21 (CTL-549): unknown status 'parked' still rejected (exit 1)"
+fresh_env t21
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status parked 2>/dev/null
+assert_eq "1" "$?" "invalid status parked: exits 1"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
