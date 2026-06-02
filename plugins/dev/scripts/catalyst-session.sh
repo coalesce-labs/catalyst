@@ -362,8 +362,8 @@ cmd_phase() {
 
 # Metric keys expose a stable CLI surface; internal column names live in METRIC_MAP.
 # declare -A is bash 4+; macOS still ships bash 3.2, so use parallel arrays instead.
-METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms)
-METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms)
+METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms --turns)
+METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms num_turns)
 
 metric_col_for_flag() {
   local flag="$1" i

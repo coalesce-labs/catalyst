@@ -296,9 +296,11 @@ if [ -n "$CATALYST_SID" ] && [ -x "$SESSION_SH" ]; then
   CRD=$( echo "$USAGE" | jq -r '.cacheReadTokens')
   CCR=$( echo "$USAGE" | jq -r '.cacheCreationTokens')
   DUR=$( echo "$USAGE" | jq -r '.durationMs')
+  TURNS=$(echo "$USAGE" | jq -r '.numTurns // 0')
   if "$SESSION_SH" metric "$CATALYST_SID" \
        --cost "$COST" --input "$ITOK" --output "$OTOK" \
        --cache-read "$CRD" --cache-creation "$CCR" --duration-ms "$DUR" \
+       --turns "$TURNS" \
        >/dev/null 2>&1; then
     log_action "wrote-metric"
   else
