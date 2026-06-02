@@ -245,6 +245,38 @@ export function applyTriageStatus({
   }
 }
 
+// ALLOWED_ESTIMATE_POINTS — the Fibonacci-derived points scale used by the
+// reference-class lookup tool (CTL-751). Only these values are accepted by
+// applyEstimate; anything else is rejected without calling linearis.
+const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
+
+// applyEstimate — write a numeric estimate to a ticket's Linear estimate field
+// (CTL-751). Best-effort, never throws; mirrors applyLabel shape (try/catch,
+// log.warn, tagged return). No read-back (the estimate field is not subject to
+// the label silent-success gap; a verifying read-back can be added as follow-up).
+export function applyEstimate({ ticket, estimate, exec = defaultExec }) {
+  if (!ALLOWED_ESTIMATE_POINTS.has(estimate)) {
+    return { applied: false, reason: "invalid-estimate" };
+  }
+  try {
+    const res = exec("linearis", ["issues", "update", ticket, "--estimate", String(estimate)]);
+    if (res.code !== 0) {
+      log.warn(
+        { ticket, estimate, code: res.code, stderr: res.stderr },
+        "linear-write: estimate write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, estimate, reason: "transient", err: err.message },
+      "linear-write: estimate write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
+  }
+}
+
 // applyBlockedByRelation — additively write a durable blocked-by edge
 // (CTL-537). Best-effort, never throws; mirrors applyLabel but without a
 // read-back: a blocked-by relation is durable (research:140) and the seam

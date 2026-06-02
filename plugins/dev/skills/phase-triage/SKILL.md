@@ -278,8 +278,27 @@ The bash body above is fully self-sufficient — the e2e test exercises only tha
 runs this skill, it should:
 
 1. Run the bash body to produce the baseline `triage.json` and Linear comment.
+
 2. Read the ticket back, refine the classification + scope estimate with model-quality judgement,
    and re-write `triage.json` if anything changed.
+
+**2b. Anchor a numeric estimate against the reference class (CTL-751).** Run:
+
+```bash
+bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
+  --corpus "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-corpus.json" \
+  --title "<ticket title>" --json
+```
+
+where `REPO_ROOT` is the repo root (the worktree's checkout path, e.g. the directory containing
+`plugins/`). Parse `reference_class.points` from the JSON output. If the command succeeds and
+yields a points value in `{1, 3, 5, 8, 13}`, re-write `triage.json` adding
+`"estimate": <points>` alongside the existing `estimated_scope` field. If the lookup errors or
+returns no usable points value, leave `triage.json` without an `estimate` field — the coordinator
+then skips the Linear estimate write for this ticket (Q4 design decision: no SCOPE_POINTS
+fallback for the Linear estimate field). The bash body intentionally does **not** write `estimate`
+(CTL-558 guard).
+
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.
 

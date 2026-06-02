@@ -145,6 +145,21 @@ export function stageRankForTicket(signals) {
 }
 
 // readWorkerPriority — read workers/<T>/priority.json → {priority, createdAt}.
+// readTriageEstimate — read workers/<T>/triage.json and return the numeric
+// `.estimate` if it is one of the allowed Fibonacci points {1,3,5,8,13}
+// (CTL-751). Returns null on missing file, unparseable JSON, absent field,
+// or non-allowed value. Never throws.
+const ALLOWED_ESTIMATE_POINTS_SET = new Set([1, 3, 5, 8, 13]);
+function readTriageEstimate(orchDir, ticket) {
+  try {
+    const raw = readFileSync(join(orchDir, "workers", ticket, "triage.json"), "utf8");
+    const { estimate } = JSON.parse(raw);
+    return ALLOWED_ESTIMATE_POINTS_SET.has(estimate) ? estimate : null;
+  } catch {
+    return null;
+  }
+}
+
 // Missing or unreadable → {priority: 5, createdAt: null} (safe lowest-band
 // default). Never throws.
 export function readWorkerPriority(orchDir, ticket) {
@@ -1756,6 +1771,17 @@ export function schedulerTick(
           ticket,
           phase: next,
         });
+        // CTL-751: on triage→research advance, write the reference-class
+        // estimate to Linear if triage.json carries a valid numeric `.estimate`.
+        if (next === "research") {
+          const est = readTriageEstimate(orchDir, ticket);
+          if (est !== null) {
+            safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
+              ticket,
+              phase: next,
+            });
+          }
+        }
       } else {
         // CTL-611 Gap 1 demotion: rc=0 but no live bg job. Same on-disk
         // effects as a real rc!=0 failure so the broker / HUD / operator can
