@@ -52,24 +52,16 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: "Getting Started",
+          label: "Start Here",
           autogenerate: { directory: "getting-started" },
         },
         {
-          label: "Guided Workflows",
-          autogenerate: { directory: "guided-workflows" },
-        },
-        {
-          label: "Observability",
-          autogenerate: { directory: "observability" },
+          label: "The Autonomous Workflow",
+          autogenerate: { directory: "autonomous-workflow" },
         },
         {
           label: "Reference",
           autogenerate: { directory: "reference" },
-        },
-        {
-          label: "Plugins",
-          autogenerate: { directory: "plugins" },
         },
         {
           label: "Changelogs",
