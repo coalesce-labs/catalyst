@@ -163,23 +163,8 @@ output, not the filesystem) can decide pass/fail from what the agent prints.
        gate (tsc/test/lint on the touched files) showing `exit 0` to my
        transcript. The router re-dispatches `verify` to re-check the whole
        diff (CTL-653) — I do NOT re-run the full verify suite myself.
-       (Linear status is written by the coordinator — CTL-558 — not this agent.)
-       OR I am within ~5 turns of the 40-turn cap, in which case I have
-       (a) written a structured handoff to
-           thoughts/shared/handoffs/${TICKET}/<ts>_turn-cap-continuation.md
-           using the bash template in the 'Failure handling' section,
-       (b) called phase-agent-emit-complete --status turn-cap-exhausted
-           --handoff-path <the file> --reason 'turn cap hit (N)', and
-       (c) exited 0 (cleanly — the orchestrator dispatches a continuation
-           worker on a separate budget)."
+       (Linear status is written by the coordinator — CTL-558 — not this agent.)"
 ```
-
-Turn cap defaults to 40 (from `phase-agent-dispatch:phase_default_turn_cap`) and
-is overridable via `.catalyst/config.json:catalyst.orchestration.phaseAgents.turnCaps.remediate`.
-
-**CTL-484 parity:** impending cap exhaustion takes the second `/goal` branch —
-write a handoff, emit `phase.remediate.turn-cap-exhausted.<TICKET>`, exit 0.
-`orchestrate-revive` dispatches a continuation worker on a separate budget.
 
 ## Phase-specific work
 
@@ -339,90 +324,14 @@ fi
 
 ## Failure handling
 
-Two failure modes — turn-cap exhaustion (recoverable via continuation) and hard
-error (caller-supplied reason). The branch is determined by the reason string:
-anything starting with `turn cap hit` takes the CTL-484 continuation path;
-everything else takes the hard-error path.
+One failure mode — hard error (caller-supplied reason).
 
 ```bash
 REASON="${1:-remediation failed}"  # caller-supplied short string
 
-# ── CTL-484: turn-cap branch — write handoff, emit turn-cap-exhausted, exit 0.
-if [[ "$REASON" =~ ^turn\ cap\ hit ]]; then
-  TS_HO=$(date -u +%Y-%m-%d_%H-%M-%S)
-  HANDOFF_DIR="thoughts/shared/handoffs/${TICKET}"
-  HANDOFF_FILE="${HANDOFF_DIR}/${TS_HO}_turn-cap-continuation.md"
-  mkdir -p "$HANDOFF_DIR"
-
-  GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
-  BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-  BASE_REF=$(git merge-base HEAD main 2>/dev/null || echo HEAD)
-  DIFF_STAT=$(git diff --stat "${BASE_REF}..HEAD" 2>/dev/null || echo "")
-  CONT_N="${CATALYST_CONTINUATION_COUNT:-1}"
-
-  cat > "$HANDOFF_FILE" <<EOF
----
-date: $(date -u +%Y-%m-%d)
-researcher: phase-remediate
-git_commit: ${GIT_COMMIT}
-branch: ${BRANCH}
-topic: "Continuation handoff for ${TICKET} (remediate turn cap hit)"
-status: in-progress
-type: handoff
-source_ticket: ${TICKET}
-source_artifact: ${VERIFY_ARTIFACT:-unknown}
----
-
-# ${TICKET} — remediate turn-cap continuation handoff
-
-## Task(s)
-
-Fix the verify findings in \`${VERIFY_ARTIFACT:-the worker's verify.json}\`.
-The previous session reached its 40-turn cap before finishing. The continuation
-worker should resume from the first unaddressed finding and commit the rest.
-
-## Recent changes (this session)
-
-\`\`\`
-${DIFF_STAT}
-\`\`\`
-
-Last commit: \`${GIT_COMMIT}\`
-Branch: \`${BRANCH}\`
-
-## Action Items & Next Steps
-
-1. You are reading this handoff via \`CATALYST_HANDOFF_PATH\` — the Prelude
-   block has already cat'd it to the transcript.
-2. Re-read verify.json's findings[]; cross-check against \`git log --oneline
-   ${BASE_REF}..HEAD\`. **Do NOT redo committed fixes.**
-3. Address the remaining high-severity / regression_risk findings, commit.
-4. On completion, call \`phase-agent-emit-complete --status complete\`
-   (terminal). The router re-dispatches verify to re-check.
-5. If you also hit the cap, write a fresh continuation handoff here and emit
-   \`--status turn-cap-exhausted\` again. Budget is 3 continuations per phase.
-
-## Other Notes
-
-- Catalyst session: ${CATALYST_SESSION_ID:-unknown}
-- Continuation count: ${CONT_N}
-- verify.json: ${VERIFY_ARTIFACT:-unknown}
-EOF
-
-  "$EMIT" --phase "$PHASE" --ticket "$TICKET" \
-    --status turn-cap-exhausted \
-    --reason "$REASON" \
-    --handoff-path "$HANDOFF_FILE"
-
-  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
-    "phase-remediate turn-cap-exhausted; handoff: ${HANDOFF_FILE}" \
-    --as "$TICKET" --type info --orch "$ORCH_ID" >/dev/null 2>&1 || true
-  exit 0
-fi
-
-# ── Hard-error branch: emit failed + attention, exit non-zero. A `failed`
-#    event lets the FSM revive remediate once (REVIVE_BUDGET) before stalling —
-#    distinct from the verdict-cycle cap, which counts `complete` events.
+# Hard-error: emit failed + attention, exit non-zero. A `failed` event lets
+# the FSM revive remediate once (REVIVE_BUDGET) before stalling — distinct
+# from the verdict-cycle cap, which counts `complete` events.
 "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status failed --reason "$REASON"
 [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
   "phase-remediate failed: ${REASON}" \

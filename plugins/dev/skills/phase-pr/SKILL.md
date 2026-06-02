@@ -206,7 +206,7 @@ Plan §"Per-phase /goal conditions":
 /goal "`gh pr view --json number,state,headRefName` shows an open PR linked
        to ${TICKET} AND Linear state is `In Review` AND describe-pr has run
        successfully (I have printed the PR URL and `describe-pr ran` to my
-       transcript); OR I have stopped after 12 turns."
+       transcript)."
 ```
 
 Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`).

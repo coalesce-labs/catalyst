@@ -31,8 +31,7 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
        acronyms_expanded, dependencies, and a non-empty summary — refined with
        real analysis (not just the deterministic placeholders), AND posted the
        triage analysis comment to the Linear ticket, AND printed the triage.json
-       path on stdout. OR I have stopped after 15 turns and recorded a partial
-       triage.json with whatever I could classify."
+       path on stdout."
 ```
 
 CTL-656: the `/goal` evaluator keeps the agent working until the triage is

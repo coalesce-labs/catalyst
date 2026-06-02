@@ -120,8 +120,7 @@ RESEARCH_DOC="${RESEARCH_MATCHES[-1]}"
 /goal "I have written thoughts/shared/plans/<date>-${ticket-lower}.md containing the
        full plan with: Overview, Phase 1..N sections each with Tests First (Red),
        Implementation (Green), Refactor, and Success Criteria (Automated + Manual).
-       I have printed the path on stdout. OR I have stopped after 25 turns and
-       printed a clear partial-progress summary."
+       I have printed the path on stdout."
 ```
 
 ## Work block

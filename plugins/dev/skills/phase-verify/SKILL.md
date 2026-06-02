@@ -114,8 +114,7 @@ fi
 /goal "I have written ${ORCH_DIR}/workers/${TICKET}/verify.json with the schema
        {regression_risk:int, findings:[...], tests_attempted:int, gates:{...}} AND
        I have NOT modified any application source files (only test files). I have
-       printed the path on stdout. OR I have stopped after 20 turns and recorded
-       a partial verify.json with whatever I have."
+       printed the path on stdout."
 ```
 
 ## Work block
