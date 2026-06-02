@@ -53,11 +53,13 @@ function defaultResolveProject(ticket) {
 // when null/undefined → today's fresh-start behaviour. `spawn` is injectable so
 // the unit test can assert the built arg array without a real spawn.
 export function defaultRunPhaseAgent(
-  { orchDir, ticket, phase, worktreePath, resumeSession },
+  { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath },
   { spawn = spawnSync } = {},
 ) {
   const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
   if (resumeSession) args.push("--resume-session", resumeSession);
+  const extraEnv = {};
+  if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
   const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
     cwd: worktreePath,
     encoding: "utf8",
@@ -68,6 +70,7 @@ export function defaultRunPhaseAgent(
       CATALYST_PHASE: phase,
       CATALYST_TICKET: ticket,
       CATALYST_EXECUTION_CORE: "1",
+      ...extraEnv,
     },
   });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
@@ -91,7 +94,7 @@ export function defaultRunPhaseAgent(
 // verbatim to runPhaseAgent so the spawned phase-agent-dispatch carries
 // `--resume-session`. Absent on every cold dispatch — only the revive path sets it.
 export function defaultDispatch(
-  { orchDir, ticket, phase, expectedWorktreePath, resumeSession },
+  { orchDir, ticket, phase, expectedWorktreePath, resumeSession, handoffPath },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
@@ -125,7 +128,7 @@ export function defaultDispatch(
       worktreePath: wt.worktreePath,
     };
   }
-  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession });
+  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession, handoffPath });
   return { ...res, worktreePath: wt.worktreePath };
 }
 
@@ -135,9 +138,10 @@ export function defaultDispatch(
 // green because the key is not added when the value is falsy.
 export function dispatchTicket(
   orchDir, ticket, phase,
-  { dispatch = defaultDispatch, resumeSession } = {},
+  { dispatch = defaultDispatch, resumeSession, handoffPath } = {},
 ) {
   const args = { orchDir, ticket, phase };
   if (resumeSession) args.resumeSession = resumeSession;
+  if (handoffPath) args.handoffPath = handoffPath;
   return dispatch(args);
 }
