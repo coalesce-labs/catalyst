@@ -21,6 +21,12 @@ export interface BoardWorker {
   sessionId: string;
 }
 
+export interface BoardPhaseCost {
+  costUSD: number;
+  tokens: number;
+  turns: number;
+}
+
 export interface BoardTicket {
   id: string;
   title: string;
@@ -41,6 +47,8 @@ export interface BoardTicket {
   project: string | null;
   costUSD: number | null;
   tokens: number | null;
+  turns: number | null;
+  phaseCosts: Record<string, BoardPhaseCost> | null;
   pr: number | null;
   updatedAt: string;
 }

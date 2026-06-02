@@ -14,6 +14,7 @@ export interface WorkerCost {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  numTurns?: number;
 }
 
 export interface TaskSummary {

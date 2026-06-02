@@ -30,6 +30,7 @@ export interface WorkerCost {
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  numTurns?: number;
 }
 
 export interface WorkerState {
@@ -373,6 +374,7 @@ function toWorkerState(signal: Record<string, unknown>): WorkerState {
       inputTokens: asNumber(c.inputTokens),
       outputTokens: asNumber(c.outputTokens),
       cacheReadTokens: asNumber(c.cacheReadTokens),
+      numTurns: asNumber(c.numTurns),
     };
   }
 

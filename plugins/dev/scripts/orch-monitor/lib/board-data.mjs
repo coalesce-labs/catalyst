@@ -230,6 +230,35 @@ async function costByTicket() {
   return map;
 }
 
+// ── cost + turns rollup per ticket per phase ─────────────────────────────────
+async function costByPhase() {
+  const map = {};
+  if (!(await exists(DB))) return map;
+  try {
+    const sql =
+      "SELECT s.ticket_key, s.skill_name, ROUND(COALESCE(SUM(m.cost_usd),0),4), " +
+      "COALESCE(SUM(m.input_tokens+m.output_tokens),0), COALESCE(SUM(m.num_turns),0) " +
+      "FROM sessions s JOIN session_metrics m ON m.session_id=s.session_id " +
+      "WHERE s.ticket_key IS NOT NULL AND s.skill_name LIKE 'phase-%' " +
+      "GROUP BY s.ticket_key, s.skill_name;";
+    const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
+      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+    });
+    for (const line of stdout.trim().split("\n")) {
+      if (!line) continue;
+      const [tk, skill, cost, tokens, turns] = line.split("\t");
+      const phase = skill.replace(/^phase-/, "");
+      if (!map[tk]) map[tk] = {};
+      map[tk][phase] = {
+        costUSD: Number(cost) || 0,
+        tokens: Number(tokens) || 0,
+        turns: Number(turns) || 0,
+      };
+    }
+  } catch { /* sqlite missing or schema pre-migration */ }
+  return map;
+}
+
 // ── ranked eligible queue (mirrors scheduler-rank.mjs compareTickets) ───────
 const PRIORITY_RANK = (p) => (p && p >= 1 && p <= 4 ? p : 5); // 1=urgent..4=low, 0/none→5
 function compareQueued(a, b) {
@@ -288,8 +317,8 @@ async function readTicketArtifacts(id) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, eligible, linfo, mp] = await Promise.all([
-    liveAgents(), costByTicket(), loadEligible(), linearInfo(), maxParallel(),
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp] = await Promise.all([
+    liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -339,6 +368,10 @@ export async function assembleBoard() {
       estimate: linfo[id]?.estimate ?? null, scope: ticketScope(triage),
       project: linfo[id]?.project ?? null,
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
+      turns: phaseCostsByTicket[id]
+        ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
+        : null,
+      phaseCosts: phaseCostsByTicket[id] ?? null,
       pr: prFor(prSigs),
       updatedAt: ticketUpdatedAt(phaseSigs),
     };

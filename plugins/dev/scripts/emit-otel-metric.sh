@@ -41,6 +41,7 @@ COUNT=""
 LINEAR_KEY=""
 START_NS=""
 SCOPE="catalyst.session"
+PHASE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --linear-key) LINEAR_KEY="$2"; shift 2 ;;
     --start-ns)   START_NS="$2";   shift 2 ;;
     --scope)      SCOPE="$2";      shift 2 ;;
+    --phase)      PHASE="$2";      shift 2 ;;
     *) die_silent ;;  # unknown flag — silent noop, we're on the session-end hot path
   esac
 done
@@ -92,6 +94,7 @@ PAYLOAD=$(jq -nc \
   --arg count      "$COUNT" \
   --arg start_ns   "$START_NS" \
   --arg now_ns     "$NOW_NS" \
+  --arg phase      "$PHASE" \
   '{
     resourceLogs: null,
     resourceMetrics: [{
@@ -110,7 +113,12 @@ PAYLOAD=$(jq -nc \
           unit: "1",
           sum: {
             dataPoints: [{
-              attributes: [{key: "kind", value: {stringValue: $kind}}],
+              attributes: (
+                [{key: "kind", value: {stringValue: $kind}}] +
+                (if $phase == "" then [] else
+                  [{key: "phase", value: {stringValue: $phase}}]
+                end)
+              ),
               startTimeUnixNano: $start_ns,
               timeUnixNano: $now_ns,
               asInt: $count
