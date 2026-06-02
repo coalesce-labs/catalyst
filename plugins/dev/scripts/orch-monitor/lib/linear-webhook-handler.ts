@@ -152,6 +152,8 @@ export function buildLinearEventLogEnvelope(
           toProject: event.toProject,
           toProjectId: event.toProjectId,
           previousFromValues: event.previousFromValues,
+          description: event.description,           // CTL-749
+          descriptionChanged: event.descriptionChanged, // CTL-749
         },
       });
     }

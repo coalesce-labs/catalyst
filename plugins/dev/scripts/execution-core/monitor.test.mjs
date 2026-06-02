@@ -949,7 +949,7 @@ describe("sweepMissingTriage (CTL-711)", () => {
 // --- CTL-681 Phase 3: parseIssueUpdatedEvent + handleIssueUpdatedEvent ------
 
 // Helper to build a canonical OTel-shaped linear.issue.updated event.
-function issueUpdatedEvent({ identifier, teamKey, toState, toLabels, toProject, toPriority } = {}) {
+function issueUpdatedEvent({ identifier, teamKey, toState, toLabels, toProject, toPriority, description, descriptionChanged, actorId, actorName } = {}) {
   return {
     attributes: {
       "event.name": "linear.issue.updated",
@@ -963,6 +963,10 @@ function issueUpdatedEvent({ identifier, teamKey, toState, toLabels, toProject, 
         toLabels: toLabels ?? null,
         toProject: toProject ?? null,
         toPriority: toPriority ?? null,
+        description: description ?? null,
+        descriptionChanged: descriptionChanged ?? false,
+        actorId: actorId ?? null,
+        actorName: actorName ?? null,
       },
     },
   };
@@ -1208,6 +1212,61 @@ describe("handleCommentCreatedEvent (CTL-681)", () => {
     readNewEvents();
     expect(onComment).toHaveBeenCalledTimes(1);
     expect(onComment.mock.calls[0][0]).toMatchObject({ ticket: "ENG-10" });
+    stopMonitor();
+  });
+});
+
+// --- CTL-749: parseIssueUpdatedEvent description fields + onUpdate seam -----
+
+describe("parseIssueUpdatedEvent — description fields (CTL-749)", () => {
+  test("extracts description and descriptionChanged from payload", () => {
+    const parsed = parseIssueUpdatedEvent(
+      issueUpdatedEvent({ description: "new text", descriptionChanged: true })
+    );
+    expect(parsed).toMatchObject({ description: "new text", descriptionChanged: true });
+  });
+
+  test("description is null and descriptionChanged false when absent from payload", () => {
+    const parsed = parseIssueUpdatedEvent(issueUpdatedEvent({}));
+    expect(parsed.description).toBeNull();
+    expect(parsed.descriptionChanged).toBe(false);
+  });
+});
+
+describe("handleIssueUpdatedEvent — onUpdate seam (CTL-749)", () => {
+  test("calls onUpdate with parsed payload when descriptionChanged", () => {
+    const onUpdate = mock(() => {});
+    handleIssueUpdatedEvent(
+      issueUpdatedEvent({ descriptionChanged: true, description: "new" }),
+      { onUpdate }
+    );
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({ descriptionChanged: true, description: "new" });
+  });
+
+  test("calls onUpdate even when descriptionChanged is false (subscriber decides)", () => {
+    const onUpdate = mock(() => {});
+    handleIssueUpdatedEvent(issueUpdatedEvent({ descriptionChanged: false }), { onUpdate });
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  test("no-op when onUpdate is undefined (never throws)", () => {
+    expect(() => handleIssueUpdatedEvent(issueUpdatedEvent())).not.toThrow();
+  });
+
+  test("onUpdate subscriber throw is swallowed (fail-open)", () => {
+    const onUpdate = mock(() => { throw new Error("subscriber boom"); });
+    expect(() => handleIssueUpdatedEvent(issueUpdatedEvent(), { onUpdate })).not.toThrow();
+  });
+
+  test("readNewEvents integration: a linear.issue.updated line invokes onUpdate via tailerOpts", () => {
+    const onUpdate = mock(() => {});
+    startMonitor({ exec: execReturning({}), reconcileIntervalMs: 60_000, onUpdate });
+    const line = JSON.stringify(issueUpdatedEvent({ identifier: "ENG-20", descriptionChanged: true, description: "updated" }));
+    appendFileSync(eventLogPath(), line + "\n");
+    readNewEvents();
+    expect(onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({ identifier: "ENG-20", descriptionChanged: true });
     stopMonitor();
   });
 });

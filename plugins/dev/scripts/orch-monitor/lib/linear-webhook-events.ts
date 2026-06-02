@@ -61,6 +61,10 @@ export type LinearWebhookEvent =
        * without re-parsing the raw webhook payload.
        */
       previousFromValues: Record<string, unknown>;
+      /** Current description text from data.description; null when absent. CTL-749. */
+      description: string | null;
+      /** True when "description" key appears in updatedFrom (description was edited). CTL-749. */
+      descriptionChanged: boolean;
     }
   | {
       kind: "comment";
@@ -165,6 +169,8 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const toProject = projectObj !== null ? getOptStr(projectObj, "name") : null;
   const toProjectId =
     projectObj !== null ? getOptStr(projectObj, "id") : getOptStr(data, "projectId");
+  const description = getOptStr(data, "description") ?? null; // CTL-749
+  const descriptionChanged = updatedFromKeys.includes("description"); // CTL-749
   return {
     kind: "issue",
     action,
@@ -183,6 +189,8 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     toProject,
     toProjectId,
     previousFromValues: updatedFrom,
+    description,
+    descriptionChanged,
   };
 }
 
