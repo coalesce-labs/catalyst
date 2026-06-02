@@ -137,6 +137,7 @@ export {
   tryDeterministicRoute,
   tryTicketLifecycleRoute,
   tryPhaseLifecycleRoute,
+  tryWorkflowSubstepRoute,
   shouldSkipEvent,
   buildGroqPrompt,
   classifyBatch,
