@@ -1,32 +1,21 @@
 ---
-title: Getting Started
-description: Get up and running with Catalyst in 5 minutes.
+title: Install Catalyst
+description: Get Catalyst installed and running in your project in about five minutes.
 sidebar:
   order: 2
 ---
 
-Get Catalyst installed and working in your project in under 5 minutes.
+Get Catalyst installed and running in about five minutes.
 
-## Prerequisites
+## What you need first
 
-- **macOS** — Catalyst is built and tested on macOS only. Other platforms are unsupported.
-- **Claude Code** — [Install Claude Code](https://docs.anthropic.com/en/docs/claude-code) before running setup
-- **Git** — required for repository detection and thoughts system
+- **macOS** — Catalyst is built and tested on macOS only.
+- **Claude Code** — [install it](https://docs.anthropic.com/en/docs/claude-code) before you start.
+- **Git** — needed to detect your repo and run the thoughts system.
 
-The setup script checks for and installs additional dependencies automatically:
+The setup script installs the rest for you: `jq`, `sqlite3`, the HumanLayer CLI, and Bun (the runtime behind the dashboard and broker). It also offers to set up optional tools — the GitHub CLI (`gh`), the Linearis CLI, `agent-browser`, and `direnv`.
 
-| Dependency | Required? | Auto-installed? |
-|-----------|-----------|-----------------|
-| jq | Yes | Yes (via Homebrew or apt-get) |
-| sqlite3 | Yes | Included with macOS |
-| HumanLayer CLI | Yes | Yes (via pip) |
-| GitHub CLI (gh) | Optional | Opens install page |
-| Linearis CLI | Optional | Shows npm install command |
-| agent-browser | Optional | Shows npm install command |
-| Bun | Required | For the broker, forwarder, HUD, and orch-monitor dashboard |
-| direnv | Recommended | Per-project env vars, API key isolation |
-
-## Run the Setup Script
+## 1. Run the setup script
 
 ```bash
 curl -O https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh
@@ -34,17 +23,9 @@ chmod +x setup-catalyst.sh
 ./setup-catalyst.sh
 ```
 
-The script will:
+It checks your platform, installs the prerequisites, creates your project config, sets up a shared thoughts repository, and asks for any API tokens (like Linear).
 
-- Verify platform (macOS) and check/install prerequisites (HumanLayer, jq, sqlite3)
-- Set up a thoughts repository (one per org)
-- Create project configuration
-- Configure worktree directories
-- Initialize the SQLite session database (`~/catalyst/catalyst.db`)
-- Prompt for API tokens (Linear, Sentry, etc.)
-- Link your project to shared thoughts
-
-## Install the Plugin
+## 2. Install the plugin
 
 In Claude Code:
 
@@ -55,40 +36,30 @@ In Claude Code:
 
 Restart Claude Code after installing.
 
-## Install the catalyst-* CLIs
+## 3. Install the command-line tools
 
-Several Catalyst skills invoke shell tools by bare name (`catalyst-broker`, `catalyst-comms`, `catalyst-events`, `catalyst-filter`, `catalyst-session`, `catalyst-state`, `catalyst-db`, `catalyst-monitor`, `catalyst-thoughts`, `catalyst-claude`, `catalyst-hud`, `catalyst-hud-classic`, ...). Install symlinks to them on your PATH:
+Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more). Install them onto your PATH:
 
 ```bash
 bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh
 ```
 
-Default install location is `$HOME/.catalyst/bin` — the canonical Catalyst home, alongside `~/.catalyst/{runs,wt,archives,catalyst.db}`. Same pattern as `~/.cargo/bin`, `~/.volta/bin`, `~/.deno/bin`, `~/.bun/bin` — `rm -rf ~/.catalyst/` removes every trace of Catalyst from your machine. Override with `--bin-dir <path>` or `CATALYST_BIN_DIR=<path>`.
-
-If `$HOME/.catalyst/bin` isn't already on your PATH, the installer appends an `export PATH=...` line to your shell's rc file (`~/.zshrc`, `~/.bashrc`, or `~/.config/fish/config.fish` depending on `$SHELL`). The append is idempotent — re-running install doesn't duplicate the line. Open a new terminal (or `source ~/.zshrc`) to pick up the change.
-
-Verify the install:
+They install to `$HOME/.catalyst/bin`. If that folder isn't on your PATH, the installer adds it to your shell's startup file. Open a new terminal to pick up the change, then check it worked:
 
 ```bash
 which catalyst-events
 catalyst-events help
-catalyst-broker --help    # canonical event broker (CTL-315)
 ```
 
-`catalyst-filter` is preserved as a backward-compatibility shim that delegates to
-`catalyst-broker` — existing scripts keep working unchanged.
+## 4. Add Catalyst to your project
 
-If you previously ran the installer and have `alias catalyst-*=...` lines in `~/.zshrc` or `~/.bashrc` pointing at a local clone, remove them — they shadow the marketplace install.
-
-## Add Catalyst Context to Your Project
-
-Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code understands the available workflows:
+Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code knows the available workflows:
 
 ```bash
 cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
 ```
 
-## Try It Out
+## 5. Try it
 
 Start a Claude Code session and run:
 
@@ -96,75 +67,33 @@ Start a Claude Code session and run:
 /research-codebase
 ```
 
-Follow the prompts to research your codebase. Catalyst will spawn parallel agents, document what exists, and save findings to `thoughts/shared/research/`.
+Follow the prompts. Catalyst spawns helper agents, documents what your code does, and saves the findings to `thoughts/shared/research/`.
 
-## Optional Plugins
+## Optional plugins
 
-Catalyst is an 8-plugin system. Install what you need:
+Catalyst is a set of plugins. Install only what you need:
 
 ```bash
-# Product strategy (PRDs, north star, prioritization)
-/plugin install catalyst-pm
-
-# PM operations (cycle/backlog/cadence/Linear ops)
-/plugin install catalyst-pm-ops
-
-# Meeting workflows (agendas, notes, cleanup)
-/plugin install catalyst-meeting-hygiene
-
-# User research, metrics, and prototyping
-/plugin install catalyst-discovery
-
-# Analytics (PostHog integration)
-/plugin install catalyst-analytics
-
-# Debugging (Sentry integration)
-/plugin install catalyst-debugging
-
-# Workflow discovery (advanced users)
-/plugin install catalyst-meta
+/plugin install catalyst-pm           # product strategy
+/plugin install catalyst-pm-ops       # cycle, backlog, and cadence ops
+/plugin install catalyst-analytics    # PostHog analytics
+/plugin install catalyst-debugging    # Sentry error monitoring
+/plugin install catalyst-meta         # workflow discovery
 ```
 
-## Keeping Plugins Up to Date
+See [Plugins](/reference/plugins/) for what each one does.
 
-Catalyst plugins are updated frequently. There are two ways to stay current.
+## Keeping plugins up to date
 
-### Automatic Updates
-
-Claude Code checks for plugin updates at session start. If a new version has been released, it pulls the update automatically. You just need to restart Claude Code (exit and reopen, or start a new session) to load the new version.
-
-To confirm auto-updates are working, your plugins should show as installed from the marketplace:
+Claude Code checks for plugin updates when a session starts and pulls them automatically. Restart Claude Code to load a new version. To force an update now:
 
 ```bash
-/plugins
-```
-
-### Manual Updates
-
-If you want to pull the latest right now — for example, a release just dropped — you can force an update:
-
-```bash
-# Fetch latest from the marketplace
 /plugins update
-
-# Restart Claude Code to load the new version
 ```
 
-### Checking Versions
+Check your installed versions any time with `/plugins`.
 
-```bash
-# See installed plugins and current versions
-/plugins
-```
+## Next steps
 
-Compare against the latest releases:
-
-- [Documentation — Changelogs](https://catalyst.coalescelabs.ai/changelog/catalyst-dev/) — per-plugin changelogs on the docs site
-- [GitHub Releases](https://github.com/coalesce-labs/catalyst/releases) — release notes with full commit history
-
-## Next Steps
-
-- [Setup Health Check](/reference/setup-health-check/) — Validate your install and auto-fix common issues
-- [Configuration](/reference/configuration/) — Two-layer config system, secrets management, and schema reference
-- [Development Workflow](/reference/workflows/) — Walk through the research-plan-implement cycle
-- [Multi-Project Setup](/getting-started/multi-project/) — Managing multiple clients or projects
+- [How Catalyst works](/getting-started/how-catalyst-works/) — the autonomous loop, end to end
+- [Configuration](/reference/configuration/) — the settings Catalyst reads
