@@ -39,6 +39,7 @@ OUTCOME=""
 SESSION_ID=""
 REASON=""
 LINEAR_KEY=""
+PHASE=""
 EXTRA_ATTRS=()
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --session-id)  SESSION_ID="$2"; shift 2 ;;
     --reason)      REASON="$2"; shift 2 ;;
     --linear-key)  LINEAR_KEY="$2"; shift 2 ;;
+    --phase)       PHASE="$2"; shift 2 ;;
     --attr)        EXTRA_ATTRS+=("$2"); shift 2 ;;
     -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)             die "unknown flag: $1" ;;
@@ -109,6 +111,11 @@ LOG_ATTRS_JSON=$(jq -nc \
 if [[ -n "$REASON" ]]; then
   LOG_ATTRS_JSON=$(echo "$LOG_ATTRS_JSON" \
     | jq -c --arg r "$REASON" '. + [{key:"reason",value:{stringValue:$r}}]')
+fi
+
+if [[ -n "$PHASE" ]]; then
+  LOG_ATTRS_JSON=$(echo "$LOG_ATTRS_JSON" \
+    | jq -c --arg p "$PHASE" '. + [{key:"phase",value:{stringValue:$p}}]')
 fi
 
 for kv in "${EXTRA_ATTRS[@]}"; do

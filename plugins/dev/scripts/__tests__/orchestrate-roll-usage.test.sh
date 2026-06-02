@@ -394,6 +394,7 @@ CREATE TABLE session_metrics (
   cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
   cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
   duration_ms           INTEGER NOT NULL DEFAULT 0,
+  num_turns             INTEGER NOT NULL DEFAULT 0,
   updated_at            TEXT NOT NULL,
   plan_iterations       INTEGER NOT NULL DEFAULT 0,
   fix_iterations        INTEGER NOT NULL DEFAULT 0
@@ -814,6 +815,26 @@ run "phase: unknown-model signal.cost.outputTokens == 567" \
 # Reset env so subsequent (none here) tests don't inherit the override.
 unset CATALYST_DB_FILE
 unset CATALYST_BG_JOBS_DIR
+
+# ─── Test 31: CTL-748 — numTurns flows through to session_metrics.num_turns ──
+# Uses the legacy stream path (build_stream_with_result) which embeds
+# num_turns=12 in the result event. After roll-usage the DB row must show 12.
+ORCH_DIR=$(setup_orch "orch-t31")
+CATALYST_DB="${CATALYST_DIR}/catalyst.db"
+export CATALYST_DB_FILE="$CATALYST_DB"
+init_test_db
+SID_31="sess_t31_dddd"
+seed_session "$SID_31" "T-31"
+build_stream_with_result "${ORCH_DIR}/workers/output/T-31-stream.jsonl" \
+  "0.50" "500" "250" "100" "50" "12" "30000" "15000"
+build_signal_with_sid "${ORCH_DIR}/workers/T-31.json" "T-31" "$SID_31"
+
+"$HELPER" --orch "orch-t31" --ticket "T-31" --orch-dir "$ORCH_DIR"
+
+run "CTL-748: num_turns=12 persisted to session_metrics" \
+  bash -c "[ \"\$(sqlite3 '$CATALYST_DB' \"SELECT num_turns FROM session_metrics WHERE session_id='${SID_31}';\")\" = '12' ]"
+
+unset CATALYST_DB_FILE
 
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"

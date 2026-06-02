@@ -105,8 +105,7 @@ REGRESSION_RISK=$(jq -r '.regression_risk // 0' "$VERIFY_ARTIFACT")
 /goal "I have written ${ORCH_DIR}/workers/${TICKET}/review.json with
        {findings:[...], remediationCommit:string|null, reviewPassed:bool} AND any
        HIGH-severity finding with a deterministic fix has a corresponding
-       remediation commit on HEAD. I have printed the path on stdout. OR I have
-       stopped after 25 turns and recorded a partial review.json."
+       remediation commit on HEAD. I have printed the path on stdout."
 ```
 
 ## Work block

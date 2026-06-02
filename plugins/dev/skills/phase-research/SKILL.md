@@ -106,8 +106,7 @@ TRIAGE_SUMMARY=$(jq -r '.summary // .classification // ""' "$TRIAGE_FILE" 2>/dev
 /goal "I have written thoughts/shared/research/<date>-${ticket-lower}.md with valid
        frontmatter, a 'Summary' section, a 'Findings' section containing at least 10
        file:line references, and a 'References' section linking related thoughts/plans.
-       I have printed the path on stdout. OR I have stopped after 35 turns and printed
-       a clear partial-progress summary."
+       I have printed the path on stdout."
 ```
 
 Replace `<date>` with `$(date -u +%Y-%m-%d)` and `<ticket-lower>` with the lowercased

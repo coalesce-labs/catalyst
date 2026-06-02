@@ -393,21 +393,24 @@ else
   fail "claude stub captured no invocation"
 fi
 
-# ─── Test 9 (CTL-484): phase-implement turn-cap handoff write + new emit shape
+# ─── Test 9 (CTL-748): phase-implement keeps daemon-resume orientation but
+#     no longer self-writes a turn-cap handoff or self-emits turn-cap-exhausted.
 echo ""
-echo "Test 9 (CTL-484): phase-implement SKILL.md has continuation preamble + handoff write block"
+echo "Test 9 (CTL-748): phase-implement SKILL.md keeps continuation Prelude, drops self-stop handoff write"
 if [[ -f "$SKILL_IMPLEMENT" ]]; then
-  # Prelude check for CATALYST_IS_CONTINUATION — the resumed worker reads
-  # CATALYST_HANDOFF_PATH and orients without re-walking the plan.
+  # Prelude still orients a daemon-resumed continuation worker: it reads
+  # CATALYST_IS_CONTINUATION / CATALYST_HANDOFF_PATH so a --resume session
+  # picks up where the previous one left off (CTL-613 daemon-side resume).
   assert_grep 'CATALYST_IS_CONTINUATION' "$SKILL_IMPLEMENT" "Prelude checks CATALYST_IS_CONTINUATION env var"
   assert_grep 'CATALYST_HANDOFF_PATH'    "$SKILL_IMPLEMENT" "Prelude reads CATALYST_HANDOFF_PATH"
-  # Failure block has a turn-cap branch that writes a handoff and emits
-  # --status turn-cap-exhausted --handoff-path <path>.
-  assert_grep 'turn-cap-exhausted' "$SKILL_IMPLEMENT" "skill body references turn-cap-exhausted status"
-  assert_grep 'turn-cap-continuation\.md|turn-cap-continuation' "$SKILL_IMPLEMENT" "writes handoff named turn-cap-continuation.md"
-  assert_grep '\-\-handoff-path' "$SKILL_IMPLEMENT" "passes --handoff-path to phase-agent-emit-complete"
-  # /goal block updated to describe the new cap-exit behavior.
-  assert_grep 'turn-cap-exhausted|continuation' "$SKILL_IMPLEMENT" "/goal block references turn-cap-exhausted or continuation"
+  # CTL-748 removed the skill-side self-stop machinery: the failure block no
+  # longer writes a turn-cap-continuation handoff or self-emits
+  # turn-cap-exhausted. The turn cap is now enforced daemon-side.
+  assert_not_grep 'turn-cap-exhausted' "$SKILL_IMPLEMENT" "skill body no longer self-emits turn-cap-exhausted"
+  assert_not_grep 'turn-cap-continuation' "$SKILL_IMPLEMENT" "skill body no longer writes a turn-cap-continuation handoff"
+  assert_not_grep '[-][-]handoff-path' "$SKILL_IMPLEMENT" "skill body no longer passes --handoff-path"
+  # /goal block no longer carries turn-cap self-stop language (CTL-748).
+  assert_not_grep 'OR I have stopped after .*turn' "$SKILL_IMPLEMENT" "/goal block has no turn-cap self-stop clause"
 fi
 
 # Test 10 (CTL-484): the new emitter status round-trips through the canonical
