@@ -1986,3 +1986,67 @@ describe("GET /api/status/webhook-tunnel", () => {
     }
   });
 });
+
+describe("/api/ticket-substeps (CTL-753)", () => {
+  it("returns empty subSteps array when no events exist", async () => {
+    const res = await fetch(`${baseUrl}/api/ticket-substeps?ticket=CTL-100`);
+    expect(res.status).toBe(200);
+    const data = await res.json() as { ticket: string; subSteps: unknown[] };
+    expect(data.ticket).toBe("CTL-100");
+    expect(Array.isArray(data.subSteps)).toBe(true);
+    expect(data.subSteps).toHaveLength(0);
+  });
+
+  it("returns 400 for missing ticket param", async () => {
+    const res = await fetch(`${baseUrl}/api/ticket-substeps`);
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for ticket with path traversal (..)", async () => {
+    const res = await fetch(`${baseUrl}/api/ticket-substeps?ticket=../etc/passwd`);
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for ticket with null byte", async () => {
+    const res = await fetch(`${baseUrl}/api/ticket-substeps?ticket=CTL-100%00`);
+    expect(res.status).toBe(400);
+  });
+
+  it("returns matching substep events from event log", async () => {
+    const substepTmp = mkdtempSync(join(tmpdir(), "substep-test-"));
+    const substepWt = join(substepTmp, "wt");
+    const catalystDir = join(substepTmp, "catalyst");
+    const eventsDir = join(catalystDir, "events");
+    mkdirSync(substepWt, { recursive: true });
+    mkdirSync(eventsDir, { recursive: true });
+
+    const month = new Date().toISOString().slice(0, 7);
+    const event = JSON.stringify({
+      ts: "2026-06-02T10:00:00Z",
+      resource: { "service.name": "catalyst.workflow" },
+      attributes: { "event.name": "workflow.substep.started.CTL-100" },
+      body: { payload: { workflowName: "research", stepLabel: "Phase 1", stepIndex: 0, status: "started" } },
+    });
+    writeFileSync(join(eventsDir, `${month}.jsonl`), event + "\n");
+
+    const substepAnnotationsDb = join(substepTmp, "annotations.db");
+    const substepServer = createServer({
+      port: 0,
+      wtDir: substepWt,
+      catalystDir,
+      startWatcher: false,
+      annotationsDbPath: substepAnnotationsDb,
+    });
+    try {
+      const substepUrl = `http://localhost:${substepServer.port}`;
+      const res = await fetch(`${substepUrl}/api/ticket-substeps?ticket=CTL-100`);
+      expect(res.status).toBe(200);
+      const data = await res.json() as { ticket: string; subSteps: Array<{ workflowName: string }> };
+      expect(data.subSteps.length).toBeGreaterThan(0);
+      expect(data.subSteps[0]?.workflowName).toBe("research");
+    } finally {
+      void substepServer.stop(true);
+      rmSync(substepTmp, { recursive: true, force: true });
+    }
+  });
+});
