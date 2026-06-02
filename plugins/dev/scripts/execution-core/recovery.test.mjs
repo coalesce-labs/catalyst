@@ -3038,3 +3038,36 @@ describe("parallelism event envelopes (CTL-684)", () => {
     expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-adjusted.execution-core");
   });
 });
+
+// CTL-549: reclaimDeadWorkIfPossible returns "noop" for needs-input signal
+describe("reclaimDeadWorkIfPossible — needs-input guard (CTL-549)", () => {
+  test("returns 'noop' for a needs-input signal without touching any seams", () => {
+    const orch = "/orch";
+    const sig = implementSignal({ status: "needs-input" });
+    const probed = [];
+    const dispatched = [];
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ state: "stopped", firstTerminalAt: "2026-01-01T00:00:00Z" }),
+      probes: { implement: () => { probed.push(true); return false; } },
+      reviveDispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      appendReviveEvent: () => {},
+      appendEscalatedEvent: () => {},
+      appendReviveSuppressedEvent: () => {},
+      applyStalledLabel: () => {},
+      killBgJob: () => {},
+      countReviveEvents: () => 0,
+      writeReviveMarker: () => {},
+      readBootSince: () => undefined,
+      progressMark: () => 0,
+      readProgressMark: () => 0,
+      writeProgressMark: () => {},
+      emitReapIntent: () => {},
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(probed).toHaveLength(0);
+    expect(dispatched).toHaveLength(0);
+  });
+});

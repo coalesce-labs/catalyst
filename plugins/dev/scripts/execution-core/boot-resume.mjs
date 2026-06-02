@@ -121,6 +121,15 @@ export function selectBootResumeCandidates({
   for (const ticket of inFlight) {
     const active = activePhaseForTicket(byTicket.get(ticket) ?? []);
     if (!active) continue; // mid-advance: terminal active signal, nothing to resume
+    // CTL-549: needs-input is intentionally parked — never auto-resume on reboot.
+    // The comment-wake path in daemon.mjs handles re-dispatch when the human replies.
+    if (active.status === "needs-input") {
+      logger.debug(
+        { ticket, phase: active.phase },
+        "boot-resume: skipping needs-input (awaiting human comment)"
+      );
+      continue;
+    }
     if (!active.worktreePath) {
       logger.warn(
         { ticket, phase: active.phase },

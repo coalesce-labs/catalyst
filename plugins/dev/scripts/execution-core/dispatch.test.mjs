@@ -288,4 +288,82 @@ describe("dispatchTicket", () => {
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, resumeSession: "uuid-123" });
     expect(calls[0].resumeSession).toBe("uuid-123");
   });
+
+  // CTL-549: handoffPath thread-through
+  test("backward compat: no handoffPath → dispatch receives no handoffPath key", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
+    expect("handoffPath" in calls[0]).toBe(false);
+  });
+
+  test("forwards handoffPath to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "implement", { dispatch, handoffPath: "/path/to/handoff.md" });
+    expect(calls[0].handoffPath).toBe("/path/to/handoff.md");
+  });
+});
+
+// CTL-549: handoffPath → CATALYST_HANDOFF_PATH env var in spawned process
+describe("defaultRunPhaseAgent — handoffPath env injection (CTL-549)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("sets CATALYST_HANDOFF_PATH when handoffPath provided", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", handoffPath: "/path/to/handoff.md" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBe("/path/to/handoff.md");
+  });
+
+  test("does NOT set CATALYST_HANDOFF_PATH when handoffPath absent", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBeUndefined();
+  });
+});
+
+// CTL-549: defaultDispatch forwards handoffPath to runPhaseAgent
+describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
+  const seams = (handoffPath) => {
+    const calls = [];
+    return {
+      resolveProject: () => ({ repoRoot: "/repo" }),
+      createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
+      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      calls,
+      handoffPath,
+    };
+  };
+
+  test("forwards handoffPath to runPhaseAgent when set", () => {
+    const s = seams("/path/to/handoff.md");
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", handoffPath: "/path/to/handoff.md" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].handoffPath).toBe("/path/to/handoff.md");
+  });
+
+  test("handoffPath is undefined on a cold dispatch (no handoffPath)", () => {
+    const s = seams(undefined);
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].handoffPath).toBeUndefined();
+  });
 });
