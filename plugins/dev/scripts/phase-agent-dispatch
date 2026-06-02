@@ -343,10 +343,13 @@ _WF_RULES="${SCRIPT_DIR}/lib/workflow-rules.mjs"
 if [[ -f "$_WF_RULES" ]] && command -v bun >/dev/null 2>&1; then
 	_TRIAGE_JSON="${ORCH_DIR}/workers/${TICKET}/triage.json"
 	_TRIAGE_SCOPE=""
-	[[ -f "$_TRIAGE_JSON" ]] &&
+	_TRIAGE_ESTIMATE=""
+	if [[ -f "$_TRIAGE_JSON" ]]; then
 		_TRIAGE_SCOPE="$(jq -r '.estimated_scope // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
+		_TRIAGE_ESTIMATE="$(jq -r '.estimate // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
+	fi
 	_WF_RESOLVED="$(bun "$_WF_RULES" resolve --phase "$PHASE" --ticket "$TICKET" \
-		--scope "$_TRIAGE_SCOPE" 2>/dev/null || true)"
+		--scope "$_TRIAGE_SCOPE" --estimate "$_TRIAGE_ESTIMATE" 2>/dev/null || true)"
 	if [[ -n "$_WF_RESOLVED" ]]; then
 		_WF_M="$(jq -r '.model // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
 		_WF_E="$(jq -r '.effort // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"

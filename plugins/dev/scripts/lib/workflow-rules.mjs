@@ -46,9 +46,11 @@ export class WorkflowRuleError extends Error {
 }
 
 // buildContext — assemble the documented context object from raw inputs. `scope`
-// comes from triage.json.estimated_scope; estimate is derived from SCOPE_POINTS.
+// comes from triage.json.estimated_scope; `estimate` overrides scope-derived
+// points when present (CTL-747 forward-compat seam for CTL-746 numeric points).
 export function buildContext({
   scope = null,
+  estimate = null,
   priority = null,
   labels = [],
   team = null,
@@ -59,7 +61,12 @@ export function buildContext({
   return {
     ticket: {
       scope,
-      estimate: scope != null ? (SCOPE_POINTS[scope] ?? null) : null,
+      estimate:
+        estimate != null
+          ? estimate
+          : scope != null
+            ? (SCOPE_POINTS[scope] ?? null)
+            : null,
       priority,
       labels,
       team,
@@ -166,12 +173,13 @@ export function resolveDescriptorStep(descriptor, stepId, context) {
 // default model) if this errors or prints nothing. Reads only the descriptor
 // JSON — never the execution-core lockfile — so it cannot race the CTL-736 claim.
 //   bun workflow-rules.mjs resolve --phase <id> [--ticket id] [--scope s] \
-//     [--priority n] [--verify-verdict v] [--remediate-cycle-count n] [--descriptor path]
-//   → {"model": "opusplan"|null, "effort": "max"|null, "appendSystemPrompt": "…"|null}
+//     [--estimate <N>] [--priority n] [--verify-verdict v] \
+//     [--remediate-cycle-count n] [--descriptor path]
+//   → {"model": null, "effort": "high"|null, "appendSystemPrompt": "…"|null}
 if (import.meta.main) {
   const argv = process.argv.slice(2);
   if (argv[0] !== "resolve") {
-    process.stderr.write("usage: workflow-rules.mjs resolve --phase <id> [--ticket id] [--scope s] [--descriptor path]\n");
+    process.stderr.write("usage: workflow-rules.mjs resolve --phase <id> [--ticket id] [--scope s] [--estimate <N>] [--descriptor path]\n");
     process.exit(2);
   }
   const opt = (n, d = null) => {
@@ -183,8 +191,14 @@ if (import.meta.main) {
   const desc = descriptorPath
     ? JSON.parse(readFileSync(descriptorPath, "utf8"))
     : (await import("./workflow-descriptor.mjs")).descriptor;
+  const _estRaw = opt("estimate");
+  const _estimate =
+    _estRaw != null && _estRaw !== "" && !Number.isNaN(Number(_estRaw))
+      ? Number(_estRaw)
+      : null;
   const ctx = buildContext({
     scope: opt("scope") || null,
+    estimate: _estimate,
     priority: opt("priority") != null ? Number(opt("priority")) : null,
     verifyVerdict: opt("verify-verdict"),
     remediateCycleCount: Number(opt("remediate-cycle-count") ?? 0) || 0,
