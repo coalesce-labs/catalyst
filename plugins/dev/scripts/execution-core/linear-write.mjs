@@ -245,6 +245,30 @@ export function applyTriageStatus({
   }
 }
 
+// applyBlockedByRelation — additively write a durable blocked-by edge
+// (CTL-537). Best-effort, never throws; mirrors applyLabel but without a
+// read-back: a blocked-by relation is durable (research:140) and the seam
+// re-evaluates next tick if the write fails.
+export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }) {
+  try {
+    const res = exec("linearis", ["issues", "update", ticket, "--blocked-by", blockedBy]);
+    if (res.code !== 0) {
+      log.warn(
+        { ticket, blockedBy, code: res.code, stderr: res.stderr },
+        "linear-write: blocked-by write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, blockedBy, reason: "transient", err: err.message },
+      "linear-write: blocked-by write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
+  }
+}
+
 // classifyLabelFailure — map a `linearis issues update --labels` stderr to
 // one of the tagged reason codes. The substrings are the literal forms observed
 // in ~/catalyst/execution-core/daemon.log:

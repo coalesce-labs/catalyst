@@ -96,6 +96,7 @@ import * as linearWrite from "./linear-write.mjs";
 import { labelOnce } from "./label-guard.mjs";
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
+import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1399,6 +1400,10 @@ export function schedulerTick(
     // CTL-713: GC + escalation emitters. Injectable for tests.
     appendCooldownGcEvent = defaultAppendCooldownGcEvent,
     appendCooldownEscalatedEvent = defaultAppendCooldownEscalatedEvent,
+    // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
+    // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
+    // it). Production wires defaultCheckSequencing via runTick/startScheduler.
+    checkSequencing = undefined,
   } = {}
 ) {
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
@@ -1955,6 +1960,26 @@ export function schedulerTick(
   const dispatched = [];
   for (const t of selected) {
     if (inDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, now())) continue; // CTL-624: throttle refused re-dispatch
+    // CTL-537: sequencing gate — only when a worker is already in-flight and a
+    // seam is wired. Fail-open verdicts dispatch normally.
+    if (inFlightCount >= 1 && checkSequencing) {
+      const verdict = checkSequencing({
+        candidate: t.identifier,
+        inFlightTickets,
+        orchDir,
+      });
+      if (verdict?.hard_dependencies?.length > 0) {
+        for (const dep of verdict.hard_dependencies) {
+          safeWrite(
+            () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
+            { ticket: dep.candidate, phase: "sequencing" }
+          );
+        }
+        continue; // hold — D5 enforces the new edge next tick
+      }
+      if (verdict?.verdict === "hold") continue; // soft conflict — no cooldown marker
+      // "go" → fall through to existing dispatch
+    }
     // CTL-660: record the new-work dispatch DECISION before the spawn.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -2194,6 +2219,9 @@ function runTick() {
       livenessIsFresh:
         runningOpts.livenessIsFresh ??
         (runningOpts.liveBackgroundCount !== undefined ? () => true : () => getAgentsCached().isFresh),
+      // CTL-537: production defaults to defaultCheckSequencing; tests inject via
+      // startScheduler({ checkSequencing }) or directly into schedulerTick.
+      checkSequencing: runningOpts.checkSequencing ?? defaultCheckSequencing,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -2237,6 +2265,7 @@ export function startScheduler({
   // `claude agents --json` count). Symmetric with the existing dispatch /
   // exec / writeStatus / teardownWorktree seams on schedulerTick.
   livenessIsFresh, // CTL-731: optional override; runTick defaults to getAgentsCached().isFresh.
+  checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   preflight = preflightWorkspaceLabels, // CTL-585
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
@@ -2255,6 +2284,7 @@ export function startScheduler({
     layer2Path, // CTL-678: per-tick Layer-2 re-read source (host-wide override)
     liveBackgroundCount, // CTL-676: test seam
     livenessIsFresh, // CTL-731: optional override (default getAgentsCached().isFresh)
+    checkSequencing, // CTL-537: optional override (default defaultCheckSequencing)
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels

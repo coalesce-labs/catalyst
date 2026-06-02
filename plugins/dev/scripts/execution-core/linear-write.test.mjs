@@ -7,6 +7,7 @@ import {
   applyLabel,
   applyTriageStatus,
   removeLabel,
+  applyBlockedByRelation,
   teamOf,
 } from "./linear-write.mjs";
 
@@ -336,5 +337,47 @@ describe("removeLabel (CTL-549)", () => {
     const result = await removeLabel("CTL-1", "needs-human/question", { exec });
     expect(result.removed).toBe(false);
     expect(result.reason).toBe("transient");
+  });
+});
+
+// CTL-537: applyBlockedByRelation — durable blocked-by edge write.
+describe("applyBlockedByRelation", () => {
+  test("success — exec returns code 0 → applied:true, reason:null", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: true, reason: null });
+  });
+
+  test("arg order — exact argv: issues update CTL-1 --blocked-by CTL-2", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--blocked-by", "CTL-2"]);
+  });
+
+  test("non-zero exit → applied:false, reason:transient, never throws", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "some error" });
+    expect(() => applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec })).not.toThrow();
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("exec throws → applied:false, reason:transient, never throws", () => {
+    const exec = () => { throw new Error("spawn boom"); };
+    expect(() => applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec })).not.toThrow();
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("idempotent re-apply — two successive calls both return applied:true, two update calls recorded", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r1 = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    const r2 = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r1.applied).toBe(true);
+    expect(r2.applied).toBe(true);
+    expect(calls).toHaveLength(2);
   });
 });
