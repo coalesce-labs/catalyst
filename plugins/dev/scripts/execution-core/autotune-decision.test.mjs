@@ -253,8 +253,26 @@ describe("decideMaxParallel", () => {
     expect(result.reason).toBe("trend-down");
   });
 
-  test("trend-down AND mem warn → hold (growth suppressed)", () => {
+  test("trend-down AND mem warn AND current ABOVE floor → hold (growth suppressed)", () => {
+    // current=10, minParallel=2 (well above floor) — existing behavior unchanged
     const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10); // 10% free — warn range
+    const result = decideMaxParallel({ window: w, concurrency, ...base });
+    expect(result.next).toBe(10);
+    expect(result.reason).toBe("mem-warn");
+  });
+
+  test("trend-down + mem-warn + current AT minParallel → increments by 1 (mem-warn-recovery)", () => {
+    // current=2 (minParallel), mem=10% (warn), trend=down
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10);
+    const atFloor = { maxParallel: 2, minParallel: 2, maxParallelCeiling: 20 };
+    const result = decideMaxParallel({ window: w, concurrency: atFloor, ...base });
+    expect(result.next).toBe(3);
+    expect(result.reason).toBe("mem-warn-recovery");
+  });
+
+  test("trend-down + mem-warn + current ABOVE minParallel → holds (existing mem-warn behavior)", () => {
+    // current=10, minParallel=2, mem=10% (warn) — above floor, still holds
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10);
     const result = decideMaxParallel({ window: w, concurrency, ...base });
     expect(result.next).toBe(10);
     expect(result.reason).toBe("mem-warn");

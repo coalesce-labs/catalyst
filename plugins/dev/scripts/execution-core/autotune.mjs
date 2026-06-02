@@ -141,7 +141,11 @@ export function decideMaxParallel({
   }
 
   if (trend === "down") {
-    if (mem === "warn") return { next: clamp(current), reason: "mem-warn" };
+    if (mem === "warn") {
+      // CTL-750: allow slow recovery from absolute floor even under mem-warn.
+      if (current <= minParallel) return { next: clamp(current + 1), reason: "mem-warn-recovery" };
+      return { next: clamp(current), reason: "mem-warn" };
+    }
     return { next: clamp(current + 1), reason: "trend-down" };
   }
 
