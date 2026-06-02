@@ -253,8 +253,26 @@ describe("decideMaxParallel", () => {
     expect(result.reason).toBe("trend-down");
   });
 
-  test("trend-down AND mem warn → hold (growth suppressed)", () => {
+  test("trend-down AND mem warn AND current ABOVE floor → hold (growth suppressed)", () => {
+    // current=10, minParallel=2 (well above floor) — existing behavior unchanged
     const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10); // 10% free — warn range
+    const result = decideMaxParallel({ window: w, concurrency, ...base });
+    expect(result.next).toBe(10);
+    expect(result.reason).toBe("mem-warn");
+  });
+
+  test("trend-down + mem-warn + current AT minParallel → increments by 1 (mem-warn-recovery)", () => {
+    // current=2 (minParallel), mem=10% (warn), trend=down
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10);
+    const atFloor = { maxParallel: 2, minParallel: 2, maxParallelCeiling: 20 };
+    const result = decideMaxParallel({ window: w, concurrency: atFloor, ...base });
+    expect(result.next).toBe(3);
+    expect(result.reason).toBe("mem-warn-recovery");
+  });
+
+  test("trend-down + mem-warn + current ABOVE minParallel → holds (existing mem-warn behavior)", () => {
+    // current=10, minParallel=2, mem=10% (warn) — above floor, still holds
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 10);
     const result = decideMaxParallel({ window: w, concurrency, ...base });
     expect(result.next).toBe(10);
     expect(result.reason).toBe("mem-warn");
@@ -290,6 +308,55 @@ describe("decideMaxParallel", () => {
     const result = decideMaxParallel({ window: w, concurrency, ...base });
     expect(result.next).toBe(10);
     expect(result.reason).toBe("hold");
+  });
+
+  test("trend-down + mem-ok + layer1Max provided + current BELOW layer1Max → jumps to layer1Max", () => {
+    // Simulates mem-critical recovery: current=1 (minParallel), layer1Max=4, mem=50% (ok)
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+    const result = decideMaxParallel({ window: w, concurrency: atFloor, layer1Max: 4, ...base });
+    expect(result.next).toBe(4);
+    expect(result.reason).toBe("recovery-to-layer1");
+  });
+
+  test("trend-down + mem-ok + layer1Max provided + current EQUAL TO layer1Max → standard +1", () => {
+    // Already at layer1Max — normal +1 increment applies
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const atLayer1 = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 };
+    const result = decideMaxParallel({ window: w, concurrency: atLayer1, layer1Max: 4, ...base });
+    expect(result.next).toBe(5);
+    expect(result.reason).toBe("trend-down");
+  });
+
+  test("trend-down + mem-ok + layer1Max provided + current ABOVE layer1Max → standard +1", () => {
+    // Layer-2 had written a value above Layer-1 — standard increment
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const aboveLayer1 = { maxParallel: 6, minParallel: 1, maxParallelCeiling: 20 };
+    const result = decideMaxParallel({ window: w, concurrency: aboveLayer1, layer1Max: 4, ...base });
+    expect(result.next).toBe(7);
+    expect(result.reason).toBe("trend-down");
+  });
+
+  test("trend-down + mem-ok + layer1Max=null → standard +1 (backwards compatible)", () => {
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const result = decideMaxParallel({ window: w, concurrency, layer1Max: null, ...base });
+    expect(result.next).toBe(11); // current=10, +1
+    expect(result.reason).toBe("trend-down");
+  });
+
+  test("trend-down + mem-ok + layer1Max omitted → standard +1 (default null, backwards compatible)", () => {
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const result = decideMaxParallel({ window: w, concurrency, ...base }); // no layer1Max key
+    expect(result.next).toBe(11);
+    expect(result.reason).toBe("trend-down");
+  });
+
+  test("layer1Max clamped to maxParallelCeiling even when layer1Max > ceiling", () => {
+    const w = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+    const tight = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 5 };
+    const result = decideMaxParallel({ window: w, concurrency: tight, layer1Max: 40, ...base });
+    expect(result.next).toBe(5); // ceiling clamps layer1Max=40 to 5
+    expect(result.reason).toBe("recovery-to-layer1");
   });
 
   test("trend-down growth never above maxParallelCeiling", () => {
