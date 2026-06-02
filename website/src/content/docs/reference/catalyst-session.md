@@ -96,6 +96,56 @@ export CATALYST_SESSION_ID
 Skills wrap this in an `if [[ -x "$SESSION_SCRIPT" ]]` guard so they degrade gracefully when the
 script is unavailable (e.g., in CI environments without the dev plugin installed).
 
+## Token / cost attribution join
+
+Each phase worker session stores `claude_session_id` (the Claude Code session UUID), `ticket_key`,
+`skill_name` (used as the phase label), and `workflow_id` (the orchestration-run id, typically the
+ticket key under execution-core). This makes it possible to attribute Claude Code's native OTEL
+token counters back to a Linear ticket and pipeline phase without relying on per-job
+`OTEL_RESOURCE_ATTRIBUTES` — which are dropped at the `claude --bg` daemon boundary (see CTL-635).
+
+This is the interim path that sidesteps the CTL-635 `--bg` resource-attribute drop. See also the
+[research doc](../../../../thoughts/shared/research/2026-06-02-ctl-752.md) for a full analysis.
+
+### Per-phase cost/tokens for one ticket
+
+Works today against `~/catalyst/catalyst.db`:
+
+```sql
+SELECT s.ticket_key, s.skill_name AS phase, s.claude_session_id,
+       sm.cost_usd, sm.input_tokens, sm.output_tokens, sm.cache_read_tokens
+FROM sessions s
+LEFT JOIN session_metrics sm ON sm.session_id = s.session_id
+WHERE s.ticket_key = 'CTL-752'
+ORDER BY s.started_at;
+```
+
+### All phases of one orchestration run
+
+Enabled by the `workflow_id` fix (CTL-752): phase workers now store the orchestrator id (e.g. the
+ticket key under execution-core) in `workflow_id` instead of a leaked daemon `sess_*` value.
+
+```sql
+SELECT skill_name AS phase, claude_session_id, status
+FROM sessions WHERE workflow_id = 'CTL-752' ORDER BY started_at;
+```
+
+Under execution-core `workflow_id` equals `ticket_key` for single-ticket runs. The `workflow_id`
+column becomes meaningful for multi-ticket runs where the orchestrator id differs from the ticket.
+
+### Join to Claude Code OTEL metrics
+
+When the Claude Code OTEL exporter is enabled (currently opt-in / disabled by default), native
+token counters are keyed by `session.id`:
+
+```
+claude_code_cost_usage_USD_total{session_id="<claude_session_id>"}
+```
+
+Match `claude_session_id` from the DB query above to `session_id` in the OTEL metric labels to
+correlate cost metrics with ticket + phase data. See CTL-635 and the
+[`catalyst-otel-forward`](/observability/forwarder/) docs for the current forwarding topology.
+
 ## Related
 
 - [Agent Communication (catalyst-comms)](./catalyst-comms/) — sibling CLI for cross-agent messaging
