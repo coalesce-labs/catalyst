@@ -818,19 +818,27 @@ assert_eq "no" "$SIG_REM_EXISTS" "no remediate signal written when refused"
 
 # ─── CTL-658: --resume-session (daemon resume-on-revive) ────────────────────
 # phase-agent-dispatch honors a resolved resume UUID by spawning
-# `claude --bg --resume <uuid>` instead of a fresh /catalyst-dev:phase-* prompt,
-# then classifies the resume stderr: launched / alive / failed-fallback.
+# `claude --bg --resume <uuid> "/catalyst-dev:phase-* ..."` — resuming the dead
+# session's context AND re-issuing the phase command (CTL-736) so a worker that
+# died before its first assistant turn re-executes the phase instead of idling on
+# `claude --bg --resume`'s generic "Continue from where you left off." nudge.
+# It then classifies the resume stderr: launched / alive / failed-fallback.
 # triage is used as the carrier phase because it needs no prior artifact.
 
 echo ""
-echo "Test 22 (CTL-658): --resume-session plumbs --resume <uuid>, drops the fresh prompt"
+echo "Test 22 (CTL-658/CTL-736): --resume-session plumbs --resume <uuid> AND re-issues the phase prompt"
 fresh_env t22_resume_flag
 "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
 	--resume-session abc-uuid >"${TEST_DIR}/t22.out" 2>/dev/null
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" "--resume" "resume invocation carries --resume flag"
 assert_contains "$LOG" "abc-uuid" "resume invocation carries the session uuid"
-assert_not_contains "$LOG" "/catalyst-dev:phase-" "resume invocation drops the fresh phase prompt"
+# CTL-736: the resume now ALSO carries the phase command so an early-death worker
+# (killed before its first assistant turn — nothing for the generic nudge to
+# anchor on) re-executes the phase rather than idling. Both in the SAME invocation.
+assert_contains "$LOG" "/catalyst-dev:phase-triage CTL-100" "resume invocation re-issues the phase prompt (CTL-736)"
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$ARGS_COUNT" "resume re-issues the prompt in the SAME invocation (not a resume-then-fresh double spawn)"
 
 echo ""
 echo "Test 23 (CTL-658): clean resume (empty stderr) → signal running with new bg_job_id, exit 0"
@@ -862,8 +870,11 @@ assert_eq "resume-rejected-alive" "$(jq -r '.attentionReason' "$SIGNAL")" \
 	"alive-rejected resume records attentionReason=resume-rejected-alive"
 assert_eq "resume_rejected_alive" "$(jq -r '.reason' "${TEST_DIR}/t24.out")" \
 	"alive-rejected resume stdout JSON reason=resume_rejected_alive"
-LOG=$(cat "$CLAUDE_STUB_LOG")
-assert_not_contains "$LOG" "/catalyst-dev:phase-" "alive-rejected resume does NOT fall back to a fresh spawn"
+# CTL-736: the resume attempt itself now carries the phase prompt, so prompt-
+# presence no longer distinguishes a resume from a fallback spawn. Assert no
+# FALLBACK happened by counting invocations: exactly one (the rejected resume).
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$ARGS_COUNT" "alive-rejected resume does NOT fall back to a fresh spawn (single invocation)"
 unset CLAUDE_STUB_RESUME_STDERR CLAUDE_STUB_RESUME_EXIT CATALYST_DIR
 
 echo ""
