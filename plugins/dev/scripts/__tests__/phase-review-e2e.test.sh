@@ -81,8 +81,8 @@ if [[ -f "$SKILL" ]]; then
   # CTL-632: Linear comment-mirror block must be present.
   assert_contains "$BODY" "phase-review-mirror" "body contains uniquely-named mirror fence"
   assert_contains "$BODY" ".linear-mirror-" "body references the per-phase marker file"
-  assert_contains "$BODY" "linearis issues discuss" "body calls linearis issues discuss"
-  assert_contains "$BODY" "linearis discuss failed (continuing)" "body has fail-open warning string"
+  assert_contains "$BODY" "linear-comment-post.sh" "body calls linear-comment-post.sh"
+  assert_contains "$BODY" "linear-comment-post failed (continuing)" "body has fail-open warning string"
 fi
 
 # ─── E2E: dispatcher launches phase-review when verify.json present ────────
@@ -184,10 +184,11 @@ run_review_mirror() {
   local worker_dir="${case_dir}/orch/workers/CTL-450"
   mkdir -p "$case_dir/bin" "$worker_dir"
 
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
 
   if [[ -n "$preseed_marker" ]]; then
@@ -212,11 +213,11 @@ FINDINGS_HIGH='[{"severity":"high","kind":"review","file":"a.ts","line":1,"messa
 # Case A: happy-passed.
 CASE_A="$(run_review_mirror happy_pass ok true "$FINDINGS_EMPTY" "")"
 assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror-review happy-pass: exit 0"
-LOG_A="$CASE_A/linearis-calls.log"
-if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
-  pass "mirror-review happy-pass: discuss landed"
+LOG_A="$CASE_A/comment-post-calls.log"
+if grep -q 'CTL-450' "$LOG_A" 2>/dev/null; then
+  pass "mirror-review happy-pass: comment posted"
 else
-  fail "mirror-review happy-pass: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+  fail "mirror-review happy-pass: comment post" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
 fi
 if grep -qE 'Result.*PASS' "$LOG_A" 2>/dev/null; then
   pass "mirror-review happy-pass: body shows Result: PASS"
@@ -234,7 +235,7 @@ MARKER_A="$CASE_A/orch/workers/CTL-450/.linear-mirror-review"
 # Case B: happy-failed (reviewPassed=false, 1 HIGH finding, remediation sha).
 CASE_B="$(run_review_mirror happy_fail ok false "$FINDINGS_HIGH" "abc1234")"
 assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror-review happy-fail: exit 0"
-LOG_B="$CASE_B/linearis-calls.log"
+LOG_B="$CASE_B/comment-post-calls.log"
 if grep -qE 'Result.*FAIL' "$LOG_B" 2>/dev/null; then
   pass "mirror-review happy-fail: body shows Result: FAIL"
 else
@@ -261,7 +262,7 @@ CASE_C="$(run_review_mirror failopen fail true "$FINDINGS_EMPTY" "")"
 assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror-review fail-open: exit 0"
 MARKER_C="$CASE_C/orch/workers/CTL-450/.linear-mirror-review"
 [[ ! -e "$MARKER_C" ]] && pass "mirror-review fail-open: no marker" || fail "marker should not exist"
-if grep -q 'linearis discuss failed (continuing)' "$CASE_C/stderr.log" 2>/dev/null; then
+if grep -q 'linear-comment-post failed (continuing)' "$CASE_C/stderr.log" 2>/dev/null; then
   pass "mirror-review fail-open: warning to stderr"
 else
   fail "mirror-review fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_C/stderr.log" 2>/dev/null)")"
@@ -270,11 +271,11 @@ fi
 # Case D: idempotent.
 CASE_D="$(run_review_mirror idempot ok true "$FINDINGS_EMPTY" "" seed)"
 assert_eq "0" "$(cat "$CASE_D/exit-code")" "mirror-review idempotent: exit 0"
-LOG_D="$CASE_D/linearis-calls.log"
-if [[ ! -f "$LOG_D" ]] || ! grep -q '^discuss$' "$LOG_D" 2>/dev/null; then
-  pass "mirror-review idempotent: discuss skipped"
+LOG_D="$CASE_D/comment-post-calls.log"
+if [[ ! -f "$LOG_D" ]] || ! grep -q 'CTL-450' "$LOG_D" 2>/dev/null; then
+  pass "mirror-review idempotent: comment post skipped"
 else
-  fail "mirror-review idempotent: discuss" "marker not honored"
+  fail "mirror-review idempotent: comment post" "marker not honored"
 fi
 
 echo ""

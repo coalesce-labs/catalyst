@@ -2044,6 +2044,7 @@ if (import.meta.main) {
   const fullWebhookConfig = loadWebhookConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     `${process.cwd()}/.catalyst/config.json`,
+    projectKey,
   );
   const webhookConfig =
     fullWebhookConfig &&
