@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# workflow-substep-emit — emit workflow substep events to the canonical event log (CTL-753).
+#
+# Usage:
+#   workflow-substep-emit \
+#     --ticket <id>           e.g. CTL-100
+#     --workflow-name <name>  e.g. research-fanout
+#     --step-label <label>    e.g. "Phase 1: gather"
+#     --step-index <n>        0-based integer
+#     --status started|complete|failed
+#     [--orch <id>]           catalyst.orchestrator.id
+#     [--session <id>]        catalyst.session.id
+
+set -uo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+# shellcheck source=lib/canonical-event.sh
+source "${SCRIPT_DIR}/lib/canonical-event.sh"
+
+CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
+EVENTS_DIR="${CATALYST_DIR}/events"
+
+die()  { echo "workflow-substep-emit: $*" >&2; exit 1; }
+warn() { echo "workflow-substep-emit: warn: $*" >&2; }
+
+TICKET=""; WORKFLOW_NAME=""; STEP_LABEL=""; STEP_INDEX=""; STATUS=""
+ORCH_ID="${CATALYST_ORCHESTRATOR_ID:-}"; SESSION_ID="${CATALYST_SESSION_ID:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ticket)        TICKET="$2";        shift 2 ;;
+    --workflow-name) WORKFLOW_NAME="$2"; shift 2 ;;
+    --step-label)    STEP_LABEL="$2";    shift 2 ;;
+    --step-index)    STEP_INDEX="$2";    shift 2 ;;
+    --status)        STATUS="$2";        shift 2 ;;
+    --orch)          ORCH_ID="$2";       shift 2 ;;
+    --session)       SESSION_ID="$2";    shift 2 ;;
+    *) die "unknown flag: $1" ;;
+  esac
+done
+
+[[ -n $TICKET        ]] || die "--ticket is required"
+[[ -n $WORKFLOW_NAME ]] || die "--workflow-name is required"
+[[ -n $STEP_LABEL    ]] || die "--step-label is required"
+[[ -n $STEP_INDEX    ]] || die "--step-index is required"
+[[ -n $STATUS        ]] || die "--status is required"
+
+case "$STATUS" in
+  started|complete|failed) ;;
+  *) die "--status must be 'started', 'complete', or 'failed' (got: $STATUS)" ;;
+esac
+
+if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
+  die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
+fi
+
+EVENT_NAME="workflow.substep.${STATUS}.${TICKET}"
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if [[ $STATUS == "failed" ]]; then
+  SEVERITY="WARN"
+else
+  SEVERITY="INFO"
+fi
+
+PAYLOAD=$(jq -nc \
+  --arg wn "$WORKFLOW_NAME" \
+  --arg sl "$STEP_LABEL" \
+  --argjson si "$STEP_INDEX" \
+  --arg st "$STATUS" \
+  '{workflowName: $wn, stepLabel: $sl, stepIndex: $si, status: $st}')
+
+LABEL="${WORKFLOW_NAME}:${STEP_LABEL}"
+
+LINE=$(build_canonical_line \
+  --ts "$TS" \
+  --severity "$SEVERITY" \
+  --service "catalyst.workflow" \
+  --event-name "$EVENT_NAME" \
+  --orch "${ORCH_ID:-}" \
+  --worker "$TICKET" \
+  --session "${SESSION_ID:-}" \
+  --linear-ticket "$TICKET" \
+  --label "$LABEL" \
+  --message "Workflow substep ${STATUS}: ${WORKFLOW_NAME}/${STEP_LABEL}" \
+  --payload-json "$PAYLOAD" \
+  2>/dev/null) || warn "failed to build canonical event line"
+
+if [[ -n $LINE ]]; then
+  canonical_jsonl_append "$EVENTS_DIR" "$LINE" || warn "failed to append event"
+fi
+
+exit 0
