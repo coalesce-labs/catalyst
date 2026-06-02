@@ -372,8 +372,8 @@ Inherits the contract from [[_phase-agent-template]]:
 
 | Type        | When                                                                                  |
 |-------------|--------------------------------------------------------------------------------------|
-| `info`      | At start; once after `implement-plan` returns; once on turn-cap handoff write (CTL-484). ~2-3 per session. |
-| `attention` | Missing plan, unresolved 3+ test failures, hard error. (Turn cap is NOT an attention event — see CTL-484.) |
+| `info`      | At start; once after `implement-plan` returns. ~1-2 per session. |
+| `attention` | Missing plan, unresolved 3+ test failures, hard error. (Turn caps are enforced daemon-side — CTL-748 — not self-detected by this skill.) |
 | `question`  | Plan ambiguity the agent cannot resolve unilaterally.                                 |
 | `done`      | Emitted by `phase-agent-emit-complete` on success.                                    |
 

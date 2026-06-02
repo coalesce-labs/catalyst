@@ -353,8 +353,8 @@ Inherits the contract from [[_phase-agent-template]]:
 
 | Type        | When                                                                                  |
 |-------------|--------------------------------------------------------------------------------------|
-| `info`      | At start; once after the fix pass commits; once on turn-cap handoff write (CTL-484). |
-| `attention` | Missing verify.json, unfixable findings, hard error. (Turn cap is NOT an attention event.) |
+| `info`      | At start; once after the fix pass commits. |
+| `attention` | Missing verify.json, unfixable findings, hard error. (Turn caps are enforced daemon-side — CTL-748 — not self-detected by this skill.) |
 | `question`  | A finding the agent cannot resolve unilaterally.                                      |
 | `done`      | Emitted by `phase-agent-emit-complete` on success.                                   |
 
