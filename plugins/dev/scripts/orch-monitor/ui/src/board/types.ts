@@ -52,6 +52,15 @@ export interface BoardTicket {
   phaseCosts: Record<string, BoardPhaseCost> | null;
   pr: number | null;
   updatedAt: string;
+  subSteps?: WorkflowSubStep[];
+}
+
+export interface WorkflowSubStep {
+  ts: string;
+  workflowName: string;
+  stepLabel: string;
+  stepIndex: number;
+  status: "started" | "complete" | "failed";
 }
 
 export interface BoardQueueItem {
