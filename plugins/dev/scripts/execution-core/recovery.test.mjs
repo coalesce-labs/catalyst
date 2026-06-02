@@ -1274,7 +1274,7 @@ describe("CTL-664: reclaim Linear mirror", () => {
 });
 
 // defaultPostReclaimMirror — driven through its injected existsSync / writeMarker
-// / runLinearis seams (no filesystem or `linearis` spawn in the test).
+// / runCommentPost seams (no filesystem or network I/O in the test). CTL-550.
 describe("defaultPostReclaimMirror (CTL-664)", () => {
   const base = {
     orchDir: "/orch",
@@ -1287,14 +1287,14 @@ describe("defaultPostReclaimMirror (CTL-664)", () => {
 
   test("marker absent → posts the comment and writes the marker", () => {
     const written = [];
-    const linearis = recorder({ status: 0 });
+    const post = recorder({ status: 0 });
     defaultPostReclaimMirror(base, {
       existsSync: () => false,
       writeMarker: (p) => written.push(p),
-      runLinearis: linearis,
+      runCommentPost: post,
     });
-    expect(linearis.calls.length).toBe(1);
-    const [t, body] = linearis.calls[0];
+    expect(post.calls.length).toBe(1);
+    const [t, body] = post.calls[0];
     expect(t).toBe("CTL-9");
     expect(body).toContain("**Phase Reclaim**");
     expect(body).toContain("work-done-despite-dead-bg");
@@ -1303,36 +1303,36 @@ describe("defaultPostReclaimMirror (CTL-664)", () => {
   });
 
   test("marker present → skips the post (first-writer-wins)", () => {
-    const linearis = recorder({ status: 0 });
+    const post = recorder({ status: 0 });
     const written = [];
     defaultPostReclaimMirror(base, {
       existsSync: () => true,
       writeMarker: (p) => written.push(p),
-      runLinearis: linearis,
+      runCommentPost: post,
     });
-    expect(linearis.calls.length).toBe(0);
+    expect(post.calls.length).toBe(0);
     expect(written.length).toBe(0);
   });
 
-  test("linearis non-zero → no marker written, no throw (fail-open)", () => {
+  test("runCommentPost non-zero → no marker written, no throw (fail-open)", () => {
     const written = [];
     expect(() =>
       defaultPostReclaimMirror(base, {
         existsSync: () => false,
         writeMarker: (p) => written.push(p),
-        runLinearis: () => ({ status: 1, stderr: "offline" }),
+        runCommentPost: () => ({ status: 1, stderr: "offline" }),
       }),
     ).not.toThrow();
     expect(written.length).toBe(0);
   });
 
-  test("runLinearis throws → swallowed, no marker, no throw (fail-open)", () => {
+  test("runCommentPost throws → swallowed, no marker, no throw (fail-open)", () => {
     const written = [];
     expect(() =>
       defaultPostReclaimMirror(base, {
         existsSync: () => false,
         writeMarker: (p) => written.push(p),
-        runLinearis: () => {
+        runCommentPost: () => {
           throw new Error("spawn EACCES");
         },
       }),

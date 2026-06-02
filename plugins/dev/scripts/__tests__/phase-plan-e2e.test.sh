@@ -66,8 +66,8 @@ if [[ -f "$SKILL" ]]; then
   # CTL-632: Linear comment-mirror block must be present.
   assert_contains "$BODY" "phase-plan-mirror" "body contains uniquely-named mirror fence"
   assert_contains "$BODY" ".linear-mirror-" "body references the per-phase marker file"
-  assert_contains "$BODY" "linearis issues discuss" "body calls linearis issues discuss"
-  assert_contains "$BODY" "linearis discuss failed (continuing)" "body has fail-open warning string"
+  assert_contains "$BODY" "linear-comment-post.sh" "body calls linear-comment-post.sh"
+  assert_contains "$BODY" "linear-comment-post failed (continuing)" "body has fail-open warning string"
 fi
 
 # ─── E2E: dispatcher launches phase-plan when research doc present ─────────
@@ -182,10 +182,11 @@ DOC
 # Research: CTL-450
 DOC
 
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
 
   if [[ -n "$preseed_marker" ]]; then
@@ -205,11 +206,11 @@ DOC
 
 CASE_A="$(run_mirror_case happy ok)"
 assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror happy: exit 0"
-LOG_A="$CASE_A/linearis-calls.log"
-if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
-  pass "mirror happy: discuss landed"
+LOG_A="$CASE_A/comment-post-calls.log"
+if grep -q 'CTL-450' "$LOG_A" 2>/dev/null; then
+  pass "mirror happy: comment posted (ticket arg logged)"
 else
-  fail "mirror happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+  fail "mirror happy: comment post" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
 fi
 if grep -q 'Phase Plan' "$LOG_A" 2>/dev/null; then
   pass "mirror happy: body contains 'Phase Plan' header"
@@ -233,7 +234,7 @@ CASE_B="$(run_mirror_case failopen fail)"
 assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror fail-open: exit 0 (continue past failed post)"
 MARKER_B="$CASE_B/orch/workers/CTL-450/.linear-mirror-plan"
 [[ ! -e "$MARKER_B" ]] && pass "mirror fail-open: no marker on failed post" || fail "mirror fail-open: marker" "should not exist"
-if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+if grep -q 'linear-comment-post failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
   pass "mirror fail-open: warning to stderr"
 else
   fail "mirror fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
@@ -241,11 +242,11 @@ fi
 
 CASE_C="$(run_mirror_case idempot ok seed)"
 assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror idempotent: exit 0"
-LOG_C="$CASE_C/linearis-calls.log"
-if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
-  pass "mirror idempotent: discuss skipped"
+LOG_C="$CASE_C/comment-post-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q 'CTL-450' "$LOG_C" 2>/dev/null; then
+  pass "mirror idempotent: comment post skipped"
 else
-  fail "mirror idempotent: discuss" "marker not honored"
+  fail "mirror idempotent: comment post" "marker not honored"
 fi
 
 echo ""

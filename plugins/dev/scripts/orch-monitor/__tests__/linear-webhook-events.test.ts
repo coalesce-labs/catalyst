@@ -492,3 +492,131 @@ describe("parseLinearWebhookEvent — description fields (CTL-749)", () => {
     expect(ev.descriptionChanged).toBe(false);
   });
 });
+
+describe("parseLinearWebhookEvent — AgentSessionEvent", () => {
+  it("returns kind=agent_session for AgentSessionEvent type", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "create",
+      data: { id: "sess-uuid", issueId: "issue-uuid" },
+      actor: { id: "actor-uuid", name: "Catalyst" },
+    });
+    expect(result.kind).toBe("agent_session");
+  });
+
+  it("returns kind=ignored for unknown AgentSessionEvent action", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "unknown_action",
+      data: { id: "sess-uuid" },
+    });
+    expect(result.kind).toBe("ignored");
+  });
+
+  it("returns sessionId from data.id", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "create",
+      data: { id: "sess-uuid-abc", issueId: "issue-uuid" },
+    });
+    if (result.kind !== "agent_session") throw new Error("expected agent_session");
+    expect(result.sessionId).toBe("sess-uuid-abc");
+  });
+
+  it("returns issueId from data.issueId", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "update",
+      data: { id: "sess-uuid", issueId: "issue-uuid-xyz" },
+    });
+    if (result.kind !== "agent_session") throw new Error("expected agent_session");
+    expect(result.issueId).toBe("issue-uuid-xyz");
+  });
+
+  it("returns actorId from actor.id", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "create",
+      data: { id: "sess-uuid" },
+      actor: { id: "actor-id-123", name: "Catalyst" },
+    });
+    if (result.kind !== "agent_session") throw new Error("expected agent_session");
+    expect(result.actorId).toBe("actor-id-123");
+  });
+
+  it("actorId is null when actor is absent", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "create",
+      data: { id: "sess-uuid" },
+    });
+    if (result.kind !== "agent_session") throw new Error("expected agent_session");
+    expect(result.actorId).toBeNull();
+  });
+
+  it("returns kind=ignored when data is missing", () => {
+    const result = parseLinearWebhookEvent("AgentSessionEvent", {
+      action: "create",
+    });
+    expect(result.kind).toBe("ignored");
+  });
+});
+
+describe("parseLinearWebhookEvent — issueCommentMention", () => {
+  it("returns kind=mention for issueCommentMention type", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "comment-uuid", issueId: "issue-uuid", body: "hey @catalyst", issue: { identifier: "CTL-550" } },
+      actor: { id: "author-uuid", name: "Ryan" },
+    });
+    expect(result.kind).toBe("mention");
+  });
+
+  it("extracts ticket from data.issue.identifier", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "c1", issue: { identifier: "CTL-550" } },
+    });
+    if (result.kind !== "mention") throw new Error("expected mention");
+    expect(result.ticket).toBe("CTL-550");
+  });
+
+  it("extracts body from data.body", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "c1", body: "hello @bot", issue: { identifier: "CTL-1" } },
+    });
+    if (result.kind !== "mention") throw new Error("expected mention");
+    expect(result.body).toBe("hello @bot");
+  });
+
+  it("extracts commentId from data.id", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "comment-id-abc", issue: { identifier: "CTL-1" } },
+    });
+    if (result.kind !== "mention") throw new Error("expected mention");
+    expect(result.commentId).toBe("comment-id-abc");
+  });
+
+  it("extracts authorId from actor.id", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "c1" },
+      actor: { id: "author-uuid-xyz", name: "Ryan" },
+    });
+    if (result.kind !== "mention") throw new Error("expected mention");
+    expect(result.authorId).toBe("author-uuid-xyz");
+  });
+
+  it("ticket is null when data.issue is absent", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "create",
+      data: { id: "c1" },
+    });
+    if (result.kind !== "mention") throw new Error("expected mention");
+    expect(result.ticket).toBeNull();
+  });
+
+  it("returns kind=ignored for unknown action", () => {
+    const result = parseLinearWebhookEvent("issueCommentMention", {
+      action: "bogus",
+      data: { id: "c1" },
+    });
+    expect(result.kind).toBe("ignored");
+  });
+});

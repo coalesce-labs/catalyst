@@ -243,6 +243,58 @@ export function buildLinearEventLogEnvelope(
         },
       });
     }
+    case "agent_session": {
+      const eventName = `linear.agent_session.${event.action}d`;
+      const attrs: Omit<Attributes, "event.name"> = {};
+      if (event.actorId !== null) attrs["linear.actor.id"] = event.actorId;
+      if (event.issueId !== null) attrs["linear.issue.id"] = event.issueId;
+      return canonical({
+        ts,
+        eventName,
+        entity: "agent_session",
+        action: `${event.action}d`,
+        severity: "INFO",
+        attrs,
+        message: eventName,
+        payload: {
+          action: event.action,
+          sessionId: event.sessionId,
+          issueId: event.issueId,
+          actorId: event.actorId,
+        },
+      });
+    }
+    case "mention": {
+      const eventName = `linear.mention.${event.action}d`;
+      const attrs: Omit<Attributes, "event.name"> = {};
+      if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
+      if (event.authorId !== null) attrs["linear.actor.id"] = event.authorId;
+      const derivedTeamKey = deriveTeamKey(event.ticket);
+      const repo = lookupRepo(derivedTeamKey);
+      if (repo !== undefined) {
+        attrs["vcs.repository.name"] = repo;
+        if (derivedTeamKey !== null) attrs["linear.team.key"] = derivedTeamKey;
+      }
+      return canonical({
+        ts,
+        eventName,
+        entity: "mention",
+        action: `${event.action}d`,
+        label: event.ticket ?? undefined,
+        severity: "INFO",
+        attrs,
+        message: `${eventName}${event.ticket ? ` on ${event.ticket}` : ""}`,
+        payload: {
+          action: event.action,
+          commentId: event.commentId,
+          issueId: event.issueId,
+          ticket: event.ticket,
+          body: event.body,
+          authorId: event.authorId,
+          authorName: event.authorName,
+        },
+      });
+    }
     case "ignored":
       return null;
   }

@@ -1033,3 +1033,64 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
   });
 });
+
+describe("buildLinearEventLogEnvelope — agent_session and mention", () => {
+  it("produces linear.agent_session.created for kind=agent_session action=create", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "agent_session",
+        action: "create",
+        sessionId: "sess-uuid",
+        issueId: "issue-uuid",
+        actorId: "actor-uuid",
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    expect(env!.attributes["event.name"]).toBe("linear.agent_session.created");
+    expect(env!.attributes["linear.actor.id"]).toBe("actor-uuid");
+    expect(env!.attributes["linear.issue.id"]).toBe("issue-uuid");
+  });
+
+  it("produces linear.agent_session.updated for action=update", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "agent_session",
+        action: "update",
+        sessionId: "sess-uuid",
+        issueId: null,
+        actorId: null,
+        data: {},
+      },
+      TS
+    );
+    expect(env!.attributes["event.name"]).toBe("linear.agent_session.updated");
+  });
+
+  it("produces linear.mention.created for kind=mention action=create", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "mention",
+        action: "create",
+        ticket: "CTL-550",
+        commentId: "comment-uuid",
+        issueId: "issue-uuid",
+        body: "hey @catalyst",
+        authorId: "author-uuid",
+        authorName: "Ryan",
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    expect(env!.attributes["event.name"]).toBe("linear.mention.created");
+    expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-550");
+    expect(env!.attributes["linear.actor.id"]).toBe("author-uuid");
+  });
+
+  it("returns null for kind=ignored", () => {
+    const env = buildLinearEventLogEnvelope({ kind: "ignored", reason: "test" }, TS);
+    expect(env).toBeNull();
+  });
+});

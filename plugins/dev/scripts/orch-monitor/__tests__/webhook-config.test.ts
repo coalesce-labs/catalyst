@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { loadWebhookConfig, _resetWebhookDeprecationWarning } from "../lib/webhook-config";
+import {
+  loadWebhookConfig,
+  loadLinearAgentConfig,
+  _resetWebhookDeprecationWarning,
+} from "../lib/webhook-config";
 
 let tmpDir: string;
 let homeDir: string;
@@ -69,6 +73,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -99,6 +104,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
     expect(warn).toHaveBeenCalledTimes(1);
     const msg = String(warn.mock.calls[0]?.[0] ?? "");
@@ -137,6 +143,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -169,6 +176,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
@@ -195,6 +203,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
   });
 
@@ -222,6 +231,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
   });
 
@@ -297,6 +307,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
@@ -332,6 +343,7 @@ describe("loadWebhookConfig", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
   });
 });
@@ -426,6 +438,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       linearSmeeChannel: "",
       linearBotUserId: "",
       linearTeams: [],
+      linearAgentConfig: null,
     });
   });
 
@@ -1184,5 +1197,95 @@ describe("loadWebhookConfig linearTeams (CTL-362)", () => {
     expect(cfg!.linearTeams).toEqual([{ key: "CTL", vcsRepo: "second/wins" }]);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+describe("loadLinearAgentConfig", () => {
+  it("returns null when projectKey is null", () => {
+    expect(loadLinearAgentConfig(homeDir, null)).toBeNull();
+  });
+
+  it("returns null when projectKey is empty string", () => {
+    expect(loadLinearAgentConfig(homeDir, "")).toBeNull();
+  });
+
+  it("returns null when the project-specific Layer-2 config file does not exist", () => {
+    expect(loadLinearAgentConfig(homeDir, "nonexistent")).toBeNull();
+  });
+
+  it("returns null when catalyst.linear.agent is absent in the file", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { monitor: {} },
+    }));
+    expect(loadLinearAgentConfig(homeDir, "testproj")).toBeNull();
+  });
+
+  it("returns null when clientId is missing", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientSecret: "xyz" } } },
+    }));
+    expect(loadLinearAgentConfig(homeDir, "testproj")).toBeNull();
+  });
+
+  it("returns null when clientSecret is missing", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "abc" } } },
+    }));
+    expect(loadLinearAgentConfig(homeDir, "testproj")).toBeNull();
+  });
+
+  it("returns populated LinearAgentConfig when all required fields present", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "abc", clientSecret: "xyz", webhookSecret: "whs" } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result).toEqual({ clientId: "abc", clientSecret: "xyz", webhookSecret: "whs" });
+  });
+
+  it("includes botUserId when present in config", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "abc", clientSecret: "xyz", botUserId: "bot-uuid" } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result).not.toBeNull();
+    expect(result!.botUserId).toBe("bot-uuid");
+  });
+
+  it("does not surface the accessToken", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "abc", clientSecret: "xyz", accessToken: "tok" } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result).not.toBeNull();
+    expect((result as unknown as Record<string, unknown>).accessToken).toBeUndefined();
+  });
+});
+
+describe("loadWebhookConfig — linearAgentConfig", () => {
+  it("propagates linearAgentConfig from project Layer-2 config", () => {
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "cid", clientSecret: "csec", webhookSecret: "wsec" } } },
+    }));
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath, "testproj");
+
+    expect(cfg!.linearAgentConfig).toEqual({ clientId: "cid", clientSecret: "csec", webhookSecret: "wsec" });
+    warn.mockRestore();
+  });
+
+  it("linearAgentConfig is null when projectKey not provided", () => {
+    writeHome({
+      catalyst: { monitor: { github: { smeeChannel: "https://smee.io/h" } } },
+    });
+    process.env.CATALYST_WEBHOOK_SECRET = "x";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg!.linearAgentConfig).toBeNull();
   });
 });

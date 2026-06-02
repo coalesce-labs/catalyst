@@ -348,8 +348,10 @@ export function defaultPostReclaimMirror(
   {
     existsSync: exists = existsSync,
     writeMarker = (p) => writeFileSync(p, ""),
-    runLinearis = (t, bodyText) =>
-      spawnSync("linearis", ["issues", "discuss", t, "--body", bodyText], { encoding: "utf8" }),
+    runCommentPost = (t, bodyText) => {
+      const helperPath = join(dirname(fileURLToPath(import.meta.url)), "../lib/linear-comment-post.sh");
+      return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
+    },
   } = {},
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
@@ -366,11 +368,11 @@ export function defaultPostReclaimMirror(
     "_Posted automatically by the daemon reclaim sweep (CTL-664)._",
   ].join("\n");
   try {
-    const r = runLinearis(ticket, bodyText);
+    const r = runCommentPost(ticket, bodyText);
     if (r && r.status === 0) {
       writeMarker(marker);
     } else {
-      log.warn({ ticket, phase }, "reclaim-mirror: linearis discuss failed (continuing)");
+      log.warn({ ticket, phase }, "reclaim-mirror: linear-comment-post failed (continuing)");
     }
   } catch (err) {
     log.warn({ ticket, phase, err: err?.message }, "reclaim-mirror: post threw (continuing)");
