@@ -452,3 +452,43 @@ describe("parseLinearWebhookEvent — ignored", () => {
     expect(ev.kind).toBe("issue");
   });
 });
+
+describe("parseLinearWebhookEvent — description fields (CTL-749)", () => {
+  it("extracts description from data.description", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({ data: { description: "new text" }, updatedFrom: {} })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.description).toBe("new text");
+    expect(ev.descriptionChanged).toBe(false);
+  });
+
+  it("description is null when absent from data", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload({ data: {}, updatedFrom: {} }));
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.description).toBeNull();
+  });
+
+  it("descriptionChanged: true when description in updatedFrom", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: { description: "updated text" },
+        updatedFrom: { description: "old text" },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.descriptionChanged).toBe(true);
+    expect(ev.description).toBe("updated text");
+  });
+
+  it("descriptionChanged: false when description not in updatedFrom", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({ data: {}, updatedFrom: { title: "old title" } })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.descriptionChanged).toBe(false);
+  });
+});

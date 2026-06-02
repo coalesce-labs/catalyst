@@ -27,6 +27,8 @@ import {
   handleCommentWake,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
+  createCommentInboxWriter,
+  createUpdateInboxWriter,
 } from "./daemon.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 
@@ -908,18 +910,110 @@ describe("handleCommentWake (CTL-549)", () => {
   });
 });
 
-// CTL-549: startDaemon wires onComment to handleCommentWake
-describe("startDaemon — onComment wiring (CTL-549)", () => {
-  test("passes onComment callback to startMonitor", () => {
-    let capturedOnComment;
+// CTL-749: inbox writer factory functions
+describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-comment-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("writes comment entry to inbox.jsonl when ticket is in-flight", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket, commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines[0]).toMatchObject({ kind: "comment", ticket, body: "hello" });
+    expect(lines[0].receivedAt).toBeTruthy();
+  });
+
+  test("skips write when workers/<ticket>/ does not exist (ticket not in-flight)", () => {
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket: "CTL-99", commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
+    expect(existsSync(join(tmpDir, "workers", "CTL-99", "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when authorId matches botUserId (self-echo filter)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({ ticket, commentId: "c1", body: "mirror", authorId: "bot-user-id", authorName: "Bot" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when authorId does NOT match botUserId", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({ ticket, commentId: "c2", body: "human reply", authorId: "human-user", authorName: "Alice" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+
+  test("appends multiple entries sequentially", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket, commentId: "c1", body: "first", authorId: "u1", authorName: "A" });
+    writer({ ticket, commentId: "c2", body: "second", authorId: "u2", authorName: "B" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines).toHaveLength(2);
+    expect(lines[1].body).toBe("second");
+  });
+});
+
+describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-update-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("writes description_changed entry when descriptionChanged is true and ticket is in-flight", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket, description: "new text", descriptionChanged: true, actorId: "u1", actorName: "Ryan" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines[0]).toMatchObject({ kind: "description_changed", ticket, description: "new text" });
+    expect(lines[0].receivedAt).toBeTruthy();
+  });
+
+  test("skips write when descriptionChanged is false", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket, description: null, descriptionChanged: false, actorId: "u1" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when workers/<ticket>/ does not exist (ticket not in-flight)", () => {
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket: "CTL-99", description: "x", descriptionChanged: true, actorId: "u1" });
+    expect(existsSync(join(tmpDir, "workers", "CTL-99", "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when actorId matches botUserId (self-echo filter)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "bot-id");
+    writer({ ticket, description: "bot edit", descriptionChanged: true, actorId: "bot-id", actorName: "Bot" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+});
+
+// CTL-549 + CTL-749: daemon wires onComment (handleCommentWake + inbox writer) and onUpdate
+describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)", () => {
+  test("passes onComment and onUpdate callbacks to startMonitor", () => {
+    let capturedOpts = null;
     startDaemon({
       recover: () => {},
       reconcileBoot: () => {},
-      startMonitor: (opts) => { capturedOnComment = opts.onComment; },
+      startMonitor: (opts) => { capturedOpts = opts; },
       startScheduler: () => {},
       watchRegistry: false,
     });
-    expect(typeof capturedOnComment).toBe("function");
     stopDaemon();
+    expect(typeof capturedOpts?.onComment).toBe("function");
+    expect(typeof capturedOpts?.onUpdate).toBe("function");
   });
 });

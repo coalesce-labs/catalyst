@@ -98,6 +98,10 @@ export function parseIssueUpdatedEvent(event) {
     toLabels: payload.toLabels ?? null,
     toProject: payload.toProject ?? null,
     toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
+    description: typeof payload.description === "string" ? payload.description : null, // CTL-749
+    descriptionChanged: payload.descriptionChanged === true, // CTL-749
+    actorId: payload.actorId ?? null,   // CTL-749
+    actorName: payload.actorName ?? null, // CTL-749
   };
 }
 
@@ -146,6 +150,7 @@ export function handleIssueUpdatedEvent(
   {
     cache,
     abortWorker: _abortWorker, // accepted for signature symmetry, never invoked
+    onUpdate,                  // CTL-749: optional issue-update subscriber
   } = {}
 ) {
   const parsed = parseIssueUpdatedEvent(event);
@@ -164,6 +169,10 @@ export function handleIssueUpdatedEvent(
     } else {
       removeTicket(query.team, parsed.identifier);
     }
+  }
+  if (typeof onUpdate === "function") {
+    try { onUpdate(parsed); }
+    catch (err) { log.warn({ err: err.message }, "onUpdate subscriber threw — ignored"); }
   }
 }
 
@@ -601,7 +610,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
       // the fold-only boot drain so replayed comments don't re-fire subscribers.
       handleStateChangedEvent(event, { ...tailerOpts, foldOnly });
-      handleIssueUpdatedEvent(event, tailerOpts); // CTL-681
+      handleIssueUpdatedEvent(event, foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts); // CTL-681 + CTL-749
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
@@ -641,6 +650,7 @@ export function startMonitor({
   abortWorker,
   cache, // CTL-634: shared state cache for event-driven write-through
   onComment, // CTL-681: optional comment subscriber
+  onUpdate,  // CTL-749: optional issue-update subscriber
 } = {}) {
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
@@ -648,7 +658,7 @@ export function startMonitor({
   // undefined, handleStateChangedEvent falls back to its real default.
   // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
   // populates the same instance the scheduler reads.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment };
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate };
   reconcileAll({ exec });
   sweepMissingTriage({ orchDir, dispatch }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {

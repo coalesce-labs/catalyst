@@ -165,6 +165,28 @@ If [[create-plan]] runs into a question it cannot resolve from the research
 document, post a `question` comms message to the orchestrator with `--re <msg_id>`
 correlation; do not block waiting for a reply — record the assumption and proceed.
 
+### Inbox check (CTL-749)
+
+After `/catalyst-dev:create-plan` Task returns, check for mid-flight context updates from the human:
+
+1. If `${ORCH_DIR}/workers/${TICKET}/inbox.jsonl` exists and is non-empty, read it fully.
+2. Parse each JSONL line — entries have `kind: "comment"` or `kind: "description_changed"`.
+3. For each entry, decide:
+   - **Absorb and continue**: the update is additive context (clarification, extra constraints,
+     "also handle X") — fold it into your working context and continue. Post a brief reply comment
+     acknowledging the update (one sentence).
+   - **Pause and replan**: the update fundamentally changes scope or invalidates the current
+     approach — emit `failed` with `reason: "mid_flight_replan_needed"` via
+     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a
+     comment before exiting.
+4. After reading, archive processed entries:
+   ```bash
+   [[ -f "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" ]] && \
+     mv "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" \
+        "${ORCH_DIR}/workers/${TICKET}/inbox.processed-$(date +%s).jsonl" || true
+   ```
+5. If no inbox file or it is empty, continue normally.
+
 ## End block
 
 ```bash

@@ -12,7 +12,9 @@
 
 import {
   watch,
+  readFileSync,
   writeFileSync,
+  appendFileSync,
   renameSync,
   mkdirSync,
   existsSync,
@@ -23,7 +25,6 @@ import {
   readSync,
   closeSync,
   readdirSync,
-  readFileSync,
 } from "node:fs";
 import { resolve, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
@@ -97,6 +98,67 @@ let _eventLogCursor = 0;
 // stitches the leftover onto the front so a line split across two writes (or a
 // half-written line at read time) is parsed exactly once, never truncated.
 let _eventLogLeftover = "";
+
+// readLinearBotUserId — read catalyst.monitor.linear.botUserId from Layer 1
+// config (.catalyst/config.json). Returns "" when absent/unreadable so callers
+// can treat it as "no filter". Never throws. CTL-749.
+function readLinearBotUserId(configPath) {
+  if (!configPath) return "";
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const uid = parsed?.catalyst?.monitor?.linear?.botUserId;
+    return typeof uid === "string" && uid.length > 0 ? uid : "";
+  } catch {
+    return "";
+  }
+}
+
+// createCommentInboxWriter — factory for a per-daemon onComment subscriber.
+// Appends a JSONL entry to ORCH_DIR/workers/<ticket>/inbox.jsonl when the
+// ticket is in-flight (workers/ dir exists). Filters bot self-echo via
+// botUserId. Exported for testing. CTL-749.
+export function createCommentInboxWriter(orchDir, botUserId) {
+  return function writeCommentToInbox(parsed) {
+    const ticket = parsed.ticket ?? parsed.identifier ?? null;
+    if (!ticket) return;
+    if (botUserId && parsed.authorId === botUserId) return;
+    const workerDir = join(orchDir, "workers", ticket);
+    if (!existsSync(workerDir)) return;
+    const entry = JSON.stringify({
+      kind: "comment",
+      ticket,
+      commentId: parsed.commentId,
+      body: parsed.body,
+      authorId: parsed.authorId,
+      authorName: parsed.authorName ?? null,
+      receivedAt: new Date().toISOString(),
+    });
+    appendFileSync(join(workerDir, "inbox.jsonl"), entry + "\n");
+  };
+}
+
+// createUpdateInboxWriter — factory for a per-daemon onUpdate subscriber.
+// Appends a JSONL entry only when descriptionChanged is true and the ticket is
+// in-flight. Filters bot self-echo via botUserId. Exported for testing. CTL-749.
+export function createUpdateInboxWriter(orchDir, botUserId) {
+  return function writeUpdateToInbox(parsed) {
+    if (!parsed.descriptionChanged) return;
+    const ticket = parsed.ticket ?? parsed.identifier ?? null;
+    if (!ticket) return;
+    if (botUserId && parsed.actorId === botUserId) return;
+    const workerDir = join(orchDir, "workers", ticket);
+    if (!existsSync(workerDir)) return;
+    const entry = JSON.stringify({
+      kind: "description_changed",
+      ticket,
+      description: parsed.description ?? null,
+      actorId: parsed.actorId ?? null,
+      actorName: parsed.actorName ?? null,
+      receivedAt: new Date().toISOString(),
+    });
+    appendFileSync(join(workerDir, "inbox.jsonl"), entry + "\n");
+  };
+}
 
 // ensureState — idempotently write a minimal machine-level state.json so the
 // CTL-536 scheduler has a maxParallel to read. Never overwrites an operator's
@@ -259,16 +321,19 @@ export function startDaemon({
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
+    // CTL-749: resolve the bot user ID from .catalyst/config.json so the inbox
+    // writers can filter out self-echo comments (the bot posting mirror comments).
+    const linearBotUserId = readLinearBotUserId(configPath);
+    const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserId);
     monitorFn({
       orchDir,
       cache,
-      onComment: (parsed) =>
-        handleCommentWake(parsed, {
-          orchDir,
-          dispatch: dispatchTicket,
-          removeLabel: defaultRemoveLabel,
-        }),
-    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 (onComment)
+      onComment: (parsed) => {
+        commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel }); // CTL-549: re-dispatch parked tickets
+      },
+      onUpdate: createUpdateInboxWriter(orchDir, linearBotUserId), // CTL-749
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
