@@ -4825,3 +4825,206 @@ describe("schedulerTick — predecessor reap on dispatch failure (CTL-695)", () 
     ).toBe(true);
   });
 });
+
+// ── CTL-537: sequencing seam in schedulerTick ──
+describe("CTL-537 sequencing seam (schedulerTick)", () => {
+  const eligibleTwo = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  beforeEach(() => {
+    // maxParallel:2 so a 2nd candidate can be admitted while one is in-flight
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Write an in-flight signal so listInFlightTickets returns a non-empty set
+    writeSignal("CTL-IN", "research", "running");
+  });
+
+  test("seam not consulted when nothing in-flight — checkSequencing spy never called", () => {
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // nothing in-flight
+      checkSequencing,
+    });
+    expect(spyCount).toBe(0);
+    expect(dispatch.calls).toHaveLength(1); // dispatch still proceeds
+  });
+
+  test("go verdict → dispatch proceeds", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const checkSequencing = () => ({ verdict: "go", hard_dependencies: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+    });
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-NEW" || c[1] === "CTL-NEW")).toBe(true);
+  });
+
+  test("hold verdict → dispatch suppressed, no cooldown marker written", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const checkSequencing = () => ({ verdict: "hold", hard_dependencies: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+    });
+    // Dispatch must not have been called for CTL-NEW
+    const dispatchedNew = dispatch.calls.some(
+      (c) => (c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW"))
+    );
+    expect(dispatchedNew).toBe(false);
+    // No cooldown marker must have been written (hold is transient — no marker)
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-NEW", "research"))).toBe(false);
+  });
+
+  test("hard_dependencies verdict → applyBlockedByRelation called + dispatch held", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const blockedByRelationCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => ({ applied: true, reason: null }),
+      applyBlockedByRelation: (args) => { blockedByRelationCalls.push(args); return { applied: true, reason: null }; },
+    };
+    const checkSequencing = () => ({
+      verdict: "go",
+      reason: "",
+      hard_dependencies: [{ candidate: "CTL-NEW", blocked_by: "CTL-IN", reason: "ordering" }],
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      writeStatus,
+    });
+    // applyBlockedByRelation called with the dep
+    expect(blockedByRelationCalls).toHaveLength(1);
+    expect(blockedByRelationCalls[0]).toMatchObject({ ticket: "CTL-NEW", blockedBy: "CTL-IN" });
+    // Dispatch suppressed
+    const dispatchedNew = dispatch.calls.some(
+      (c) => (c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW"))
+    );
+    expect(dispatchedNew).toBe(false);
+  });
+
+  test("untrusted dep ids dropped → no blocked-by write, falls through to verdict (phase-review hardening)", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const blockedByRelationCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => ({ applied: true, reason: null }),
+      applyBlockedByRelation: (args) => { blockedByRelationCalls.push(args); return { applied: true, reason: null }; },
+    };
+    // LLM returns deps that DON'T arbitrate the (CTL-NEW, in-flight) pair:
+    // one with a foreign candidate, one blocked_by a non-in-flight ticket.
+    const checkSequencing = () => ({
+      verdict: "go",
+      reason: "",
+      hard_dependencies: [
+        { candidate: "CTL-OTHER", blocked_by: "CTL-IN", reason: "hallucinated candidate" },
+        { candidate: "CTL-NEW", blocked_by: "CTL-NOTLIVE", reason: "blocked_by not in-flight" },
+      ],
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      writeStatus,
+    });
+    // No durable blocked-by edge written for the bogus deps
+    expect(blockedByRelationCalls).toHaveLength(0);
+    // With no VALID hard dep and a "go" verdict, dispatch proceeds
+    const dispatchedNew = dispatch.calls.some(
+      (c) => c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW")
+    );
+    expect(dispatchedNew).toBe(true);
+  });
+
+  test("seam undefined → byte-for-byte legacy: dispatch proceeds with one in-flight + free slot", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      // checkSequencing omitted → undefined default
+    });
+    // Dispatch must proceed (legacy behavior — seam absent means no gate)
+    const dispatchedNew = dispatch.calls.some(
+      (c) => c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW")
+    );
+    expect(dispatchedNew).toBe(true);
+  });
+
+  test("cooldown precedes seam — checkSequencing spy NOT called for a cooling-down candidate", () => {
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+    // Pre-seed a cooldown marker for CTL-NEW
+    recordDispatchFailure(orchDir, "CTL-NEW", "research", 1, 1_000);
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch: fakeDispatch({ code: 0 }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      now: () => 30_000, // within the 60 s window
+      checkSequencing,
+    });
+    expect(spyCount).toBe(0);
+  });
+});
+
+// ── CTL-537 Phase 5: startScheduler forwards checkSequencing to runTick ──
+describe("CTL-537 Phase 5: startScheduler forwards checkSequencing (runTick wiring)", () => {
+  afterEach(() => __resetForTests());
+
+  test("startScheduler forwards an injected checkSequencing spy — it is consulted on the initial tick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Write an in-flight signal so inFlightCount >= 1
+    writeSignal("CTL-INFLIGHT", "research", "running");
+
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+
+    const dispatch = fakeDispatch({ code: 0 });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [
+        {
+          identifier: "CTL-NEW",
+          priority: 1,
+          createdAt: "x",
+          state: "Todo",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      ],
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // The spy must have been consulted during the initial synchronous tick
+    expect(spyCount).toBeGreaterThan(0);
+  });
+});
