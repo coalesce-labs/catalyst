@@ -261,6 +261,16 @@ cmd_start() {
   # Flag wins over env (caller has direct knowledge).
   [[ -z "$claude_session_id" ]] && claude_session_id="${CLAUDE_CODE_SESSION_ID:-}"
 
+  # CTL-752: resolve the orchestration-run grouping key for workflow_id.
+  # A bg phase worker has no real parent session, but the daemon's frozen
+  # CATALYST_SESSION_ID leaks across the `claude --bg` boundary (CTL-635) and
+  # the phase preludes pass it as --workflow, polluting workflow_id with a stale
+  # sess_* daemon id. Prefer the orchestrator id (the true run id; == ticket
+  # under execution-core) when --workflow is empty or is a leaked session id.
+  if [[ -z "$workflow" || "$workflow" == sess_* ]]; then
+    workflow="${CATALYST_ORCHESTRATOR_ID:-$workflow}"
+  fi
+
   # Generate a sortable, reasonably-unique session id without forking uuidgen
   # (uuidgen fork ~10ms, which we want to keep for the callers, not ourselves).
   local stamp rand sid

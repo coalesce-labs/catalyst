@@ -33,6 +33,7 @@ const REQUIRED_EXPORTS = [
   "tryDeterministicRoute",
   "tryTicketLifecycleRoute",
   "tryPhaseLifecycleRoute",
+  "tryWorkflowSubstepRoute",
   "shouldSkipEvent",
   "buildGroqPrompt",
   "classifyBatch",
@@ -90,11 +91,11 @@ const REQUIRED_EXPORTS = [
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 67 public symbols re-export from ./index.mjs", () => {
+  test("all 68 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(67);
+    expect(REQUIRED_EXPORTS.length).toBe(68);
   });
 
   test("singleton getters return identity-stable live references", () => {

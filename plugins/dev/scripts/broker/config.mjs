@@ -92,4 +92,5 @@ export const DETERMINISTIC_INTEREST_TYPES = new Set([
   "ticket_lifecycle",
   "comms_lifecycle",
   "phase_lifecycle",
+  "workflow_substep_lifecycle",
 ]);

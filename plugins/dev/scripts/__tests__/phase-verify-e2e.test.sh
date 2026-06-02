@@ -89,8 +89,8 @@ if [[ -f "$SKILL" ]]; then
   # CTL-632: Linear comment-mirror block must be present.
   assert_contains "$BODY" "phase-verify-mirror" "body contains uniquely-named mirror fence"
   assert_contains "$BODY" ".linear-mirror-" "body references the per-phase marker file"
-  assert_contains "$BODY" "linearis issues discuss" "body calls linearis issues discuss"
-  assert_contains "$BODY" "linearis discuss failed (continuing)" "body has fail-open warning string"
+  assert_contains "$BODY" "linear-comment-post.sh" "body calls linear-comment-post.sh"
+  assert_contains "$BODY" "linear-comment-post failed (continuing)" "body has fail-open warning string"
 fi
 
 # ─── E2E: dispatcher launches phase-verify when phase-implement.json exists ─
@@ -181,10 +181,11 @@ run_verify_mirror() {
   local worker_dir="${case_dir}/orch/workers/CTL-450"
   mkdir -p "$case_dir/bin" "$worker_dir"
 
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
 
   if [[ -n "$preseed_marker" ]]; then
@@ -213,11 +214,11 @@ FINDINGS_TWO='[{"severity":"high","kind":"type","file":"a.ts","line":1,"message"
 # Case A: happy — pass gates, no findings.
 CASE_A="$(run_verify_mirror happy ok "$GATES_PASS" "$FINDINGS_EMPTY" 2 1)"
 assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror-verify happy: exit 0"
-LOG_A="$CASE_A/linearis-calls.log"
-if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
-  pass "mirror-verify happy: discuss landed"
+LOG_A="$CASE_A/comment-post-calls.log"
+if grep -q 'CTL-450' "$LOG_A" 2>/dev/null; then
+  pass "mirror-verify happy: comment posted"
 else
-  fail "mirror-verify happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+  fail "mirror-verify happy: comment post" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
 fi
 if grep -q 'Phase Verify' "$LOG_A" 2>/dev/null; then
   pass "mirror-verify happy: body has 'Phase Verify' header"
@@ -245,7 +246,7 @@ CASE_B="$(run_verify_mirror failopen fail "$GATES_PASS" "$FINDINGS_EMPTY" 0 0)"
 assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror-verify fail-open: exit 0"
 MARKER_B="$CASE_B/orch/workers/CTL-450/.linear-mirror-verify"
 [[ ! -e "$MARKER_B" ]] && pass "mirror-verify fail-open: no marker" || fail "marker should not exist"
-if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+if grep -q 'linear-comment-post failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
   pass "mirror-verify fail-open: warning"
 else
   fail "mirror-verify fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
@@ -254,17 +255,17 @@ fi
 # Case C: idempotent.
 CASE_C="$(run_verify_mirror idempot ok "$GATES_PASS" "$FINDINGS_EMPTY" 0 0 seed)"
 assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror-verify idempotent: exit 0"
-LOG_C="$CASE_C/linearis-calls.log"
-if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
-  pass "mirror-verify idempotent: discuss skipped"
+LOG_C="$CASE_C/comment-post-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q 'CTL-450' "$LOG_C" 2>/dev/null; then
+  pass "mirror-verify idempotent: comment post skipped"
 else
-  fail "mirror-verify idempotent: discuss" "marker not honored"
+  fail "mirror-verify idempotent: comment post" "marker not honored"
 fi
 
 # Case D: findings-render — 2 findings, both severities surfaced + full JSON in details.
 CASE_D="$(run_verify_mirror findings ok "$GATES_FAIL" "$FINDINGS_TWO" 8 0)"
 assert_eq "0" "$(cat "$CASE_D/exit-code")" "mirror-verify findings: exit 0"
-LOG_D="$CASE_D/linearis-calls.log"
+LOG_D="$CASE_D/comment-post-calls.log"
 if grep -q 'high' "$LOG_D" 2>/dev/null && grep -q 'low' "$LOG_D" 2>/dev/null; then
   pass "mirror-verify findings: both severity strings present"
 else

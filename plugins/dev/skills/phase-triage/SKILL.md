@@ -251,14 +251,17 @@ if [[ -n "${ORCH_DIR:-}" && -x "${__PT_FOOTER}" ]]; then
 ${MIRROR_FOOTER}"
 fi
 
-# CTL-614: the Linear comment post is best-effort. triage.json is already on
-# disk; the canonical pipeline contract is `phase.triage.complete.<TICKET>`
-# (see CTL-452). A transient `linearis issues discuss` failure (notably the
-# rolling-hour HTTP 429 rate-limit from `linearis`) must NOT escalate the
-# ticket to `needs-human`. Capture stderr and surface it so operators can
-# still diagnose 429s from `daemon.log`.
-DISCUSS_STDERR="$(linearis issues discuss "$TICKET" --body "$COMMENT_BODY" 2>&1 >/dev/null)" \
-  || echo "phase-triage: linearis issues discuss failed (continuing): ${DISCUSS_STDERR}" >&2
+# CTL-614 / CTL-550: the Linear comment post is best-effort. triage.json is
+# already on disk; the canonical pipeline contract is
+# `phase.triage.complete.<TICKET>` (see CTL-452). A comment-post failure must
+# NOT escalate the ticket to `needs-human`.
+__PT_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
+if [[ ! -x "$__PT_COMMENT_POST" ]]; then __PT_COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+if [[ -n "$__PT_COMMENT_POST" && -x "$__PT_COMMENT_POST" ]] && "$__PT_COMMENT_POST" "${TICKET}" "${COMMENT_BODY}" >/dev/null 2>&1; then
+  true
+else
+  echo "phase-triage: linear-comment-post failed (continuing)" >&2
+fi
 
 # 5. There is no `triaged` label. Triage completion is signaled by the
 #    analysis comment posted above plus the local triage.json the coordinator

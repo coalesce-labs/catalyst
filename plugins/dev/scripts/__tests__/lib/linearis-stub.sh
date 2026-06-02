@@ -161,3 +161,32 @@ EOF
 	fi
 	chmod +x "${bin_dir}/linearis"
 }
+
+# linear_comment_post_stub_install — stub for linear-comment-post.sh (CTL-550).
+# Creates a "linear-comment-post.sh" shim in bin_dir that logs args and exits 0.
+linear_comment_post_stub_install() {
+	local bin_dir="${1:?bin_dir required}"
+	local log_file="${2:?log_file required}"
+	mkdir -p "${bin_dir}"
+	cat >"${bin_dir}/linear-comment-post.sh" <<EOF
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "\$@" >> "\$LOG"
+echo '{"success":true}'
+EOF
+	chmod +x "${bin_dir}/linear-comment-post.sh"
+}
+
+linear_comment_post_stub_install_failing() {
+	local bin_dir="${1:?bin_dir required}"
+	local log_file="${2:?log_file required}"
+	mkdir -p "${bin_dir}"
+	cat >"${bin_dir}/linear-comment-post.sh" <<EOF
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "\$@" >> "\$LOG"
+echo "linear-comment-post stub: simulated failure" >&2
+exit 1
+EOF
+	chmod +x "${bin_dir}/linear-comment-post.sh"
+}

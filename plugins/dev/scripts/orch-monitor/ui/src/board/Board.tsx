@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
+import { fmtDuration } from "../lib/formatters";
 // ── types + transport (hoisted to ./types + ./board-client for CTL-733 PR-2b) ─
 import { connectBoard } from "./board-client";
 import type {
@@ -43,6 +45,12 @@ const PHASE_COLS = [
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
 ];
+// Phase statuses that mean a phase is no longer running. MUST stay in lock-step
+// with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
+// board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
+// terminal status added there cannot silently render here as a live phase
+// (CTL-754).
+const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"];
 
 type ColorBy = "phase" | "status" | "repo" | "type";
 const TYPE_C: Record<string, string> = {
@@ -114,6 +122,33 @@ function PhasePill({ phase }: { phase: string }) {
   // a wall of fully-saturated pills competing with the status signal.
   return <span style={{ fontFamily: C.mono, fontSize: 10.5, padding: "1.5px 8px", borderRadius: 6, color: c, fontWeight: 600, background: `${c}22`, whiteSpace: "nowrap" }}>{phase}</span>;
 }
+function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: string; durationMs: number | null }[] }) {
+  if (!phaseSummary.length) return null;
+  return (
+    <div style={{ display: "flex", gap: 3, marginTop: 7, flexWrap: "wrap", alignItems: "center" }}>
+      {phaseSummary.map((p) => {
+        const c = PHASE_C[p.phase] || C.blue;
+        const running = !TERMINAL_STATUSES.includes(p.status) && p.durationMs != null;
+        return (
+          <Tooltip key={p.phase}>
+            <TooltipTrigger asChild>
+              <span style={{
+                width: 16, height: 4, borderRadius: 2, background: c,
+                opacity: p.status === "failed" ? 0.4 : 1,
+                outline: running ? `1px solid ${c}` : undefined,
+                display: "inline-block", flex: "0 0 auto",
+              }} />
+            </TooltipTrigger>
+            <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>
+              {p.phase}{p.durationMs != null ? ` · ${fmtDuration(p.durationMs)}` : ""}
+              {p.status === "failed" ? " · failed" : running ? " · running" : ""}
+            </TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
 const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
 function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
   const icon = p === 1 ? (
@@ -168,17 +203,22 @@ function TitleText({ text }: { text: string }) {
 }
 
 // ── Linear-style ticket card ────────────────────────────────────────────────
-function TicketCard({ t, colorBy }: { t: Ticket; colorBy: ColorBy }) {
+function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onSelect?: (id: string) => void }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
   return (
-    <div className={live ? "catalyst-live" : undefined} style={{
-      background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-      border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`,
-      opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
-    }}>
+    <div
+      className={live ? "catalyst-live" : undefined}
+      style={{
+        background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
+        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`,
+        opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
+        cursor: onSelect ? "pointer" : undefined,
+      }}
+      onClick={onSelect ? () => onSelect(t.id) : undefined}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
         <PriorityIcon p={t.priority} />
@@ -195,6 +235,7 @@ function TicketCard({ t, colorBy }: { t: Ticket; colorBy: ColorBy }) {
         <ScopeChip scope={t.scope} estimate={t.estimate} />
         {t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
       </div>
+      <PhaseStrip phaseSummary={t.phaseSummary} />
       <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
         <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
           {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
@@ -280,7 +321,7 @@ function BoardScroll({ children, fill }: { children: React.ReactNode; fill: bool
   );
 }
 
-function TicketBoard({ tickets, lens, colorBy, fill }: { tickets: Ticket[]; lens: "linear" | "phase"; colorBy: ColorBy; fill: boolean }) {
+function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Ticket[]; lens: "linear" | "phase"; colorBy: ColorBy; fill: boolean; onSelect?: (id: string) => void }) {
   const cols = lens === "linear" ? LINEAR_COLS : PHASE_COLS;
   return (
     <BoardScroll fill={fill}>
@@ -289,7 +330,7 @@ function TicketBoard({ tickets, lens, colorBy, fill }: { tickets: Ticket[]; lens
         const live = items.filter((t) => t.activeState === "active").length;
         return (
           <Column key={c.key} label={c.label || c.key} color={c.c} count={items.length} live={live}>
-            {items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} />)}
+            {items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} onSelect={onSelect} />)}
           </Column>
         );
       })}
@@ -450,6 +491,7 @@ export function Board() {
   const [repo, setRepo] = useState<string>("all");
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
+  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
 
   // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
   // ONE EventSource (+ an IndexedDB cache) across every tab, with a direct
@@ -476,6 +518,10 @@ export function Board() {
   const ticketLanes = repos.filter((r) => fTickets.some((t) => t.repo === r));
   const workerLanes = repos.filter((r) => fWorkers.some((w) => w.repo === r));
   const combined = !swimlanes || repo !== "all";
+  const selectedTicket =
+    selectedTicketId != null
+      ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
+      : null;
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -525,13 +571,19 @@ export function Board() {
         <div style={{ flex: 1, minHeight: 0 }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {data && view === "tickets" && (combined
-            ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} /></Lane>)}</div>)}
+            ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill onSelect={(id) => setSelectedTicketId(id)} />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
             ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill />
             : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
         </div>
+        {selectedTicket && (
+          <TicketDetailDrawer
+            ticket={selectedTicket}
+            onClose={() => setSelectedTicketId(null)}
+          />
+        )}
       </div>
     </TooltipProvider>
   );

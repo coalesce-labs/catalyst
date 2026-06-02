@@ -76,6 +76,7 @@ export interface Attributes {
 
   // Linear (catalyst-defined; no OTel semconv yet)
   "linear.issue.identifier"?: string;
+  "linear.issue.id"?: string;
   "linear.team.key"?: string;
   "linear.actor.id"?: string;
 

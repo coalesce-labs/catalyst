@@ -348,6 +348,53 @@ function safeParseJson(line: string): Record<string, unknown> | null {
   }
 }
 
+// CTL-753: workflow substep event reader for /api/ticket-substeps
+interface SubStepEvent {
+  ts: string;
+  workflowName: string;
+  stepLabel: string;
+  stepIndex: number;
+  status: string;
+}
+
+function readSubStepEvents(eventsDir: string, ticket: string): SubStepEvent[] {
+  const month = new Date().toISOString().slice(0, 7);
+  const logPath = join(eventsDir, `${month}.jsonl`);
+  const escapedTicket = ticket.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
+  const pattern = new RegExp(
+    `^workflow\\.substep\\.(started|complete|failed)\\.${escapedTicket}$`,
+  );
+  try {
+    const text = readFileSync(logPath, "utf-8");
+    const results: SubStepEvent[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      const ev = safeParseJson(line);
+      if (!ev) continue;
+      const name =
+        (ev.attributes as Record<string, string> | undefined)?.["event.name"] ??
+        "";
+      if (!pattern.test(name)) continue;
+      const payload =
+        ((ev.body as Record<string, unknown>)?.payload as Record<
+          string,
+          unknown
+        >) ?? {};
+      results.push({
+        ts: (ev.ts as string) ?? "",
+        workflowName: (payload.workflowName as string) ?? "",
+        stepLabel: (payload.stepLabel as string) ?? "",
+        stepIndex: (payload.stepIndex as number) ?? 0,
+        status: (payload.status as string) ?? "",
+      });
+    }
+    results.sort((a, b) => a.ts.localeCompare(b.ts));
+    return results;
+  } catch {
+    return [];
+  }
+}
+
 const SSE_EVENTS = EVENT_TYPES;
 // `global-event` and `global-event-backlog` are produced per-client by the
 // activity tailer in the /events handler — not by the in-process bus — so they
@@ -1325,6 +1372,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ tickets });
         }
 
+        if (url.pathname === "/api/ticket-substeps") {
+          const ticketParam = url.searchParams.get("ticket");
+          if (!ticketParam) {
+            return new Response("Bad Request: missing ticket", { status: 400 });
+          }
+          if (
+            ticketParam.includes("..") ||
+            ticketParam.includes("/") ||
+            ticketParam.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const eventsDir = join(CATALYST_DIR, "events");
+          const subSteps = readSubStepEvents(eventsDir, ticketParam);
+          return Response.json({ ticket: ticketParam, subSteps });
+        }
+
         if (url.pathname === "/api/briefing") {
           if (!briefingProvider) {
             return Response.json({ enabled: false });
@@ -1980,6 +2044,7 @@ if (import.meta.main) {
   const fullWebhookConfig = loadWebhookConfig(
     process.env.CATALYST_CONFIG_DIR ?? `${process.env.HOME}/.config/catalyst`,
     `${process.cwd()}/.catalyst/config.json`,
+    projectKey,
   );
   const webhookConfig =
     fullWebhookConfig &&

@@ -34,7 +34,11 @@ export const PHASE_ORDER = [
   "triage", "research", "plan", "implement", "verify",
   "review", "pr", "monitor-merge", "monitor-deploy",
 ];
-const TERMINAL = new Set([
+// Single source of truth for which phase statuses are terminal (no longer
+// running). Exported so the UI's PhaseStrip terminal-status list can be guarded
+// against drift (board-phase-drift.test.ts) instead of carrying a silent
+// hand-copied duplicate (CTL-754).
+export const TERMINAL = new Set([
   "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
 ]);
 
@@ -153,6 +157,39 @@ function deriveCurrentPhase(phaseSigs) {
   if (lastTerminal && (lastTerminal.status === "failed" || lastTerminal.status === "stalled"))
     return lastTerminal;
   return { phase: "done", status: "done", model: lastTerminal?.model || null };
+}
+
+// CTL-754: per-phase timing for the board progression strip. Pure + exported so
+// it is unit-testable (assembleBoard itself is not — WORKERS_DIR is a homedir
+// const and it shells out to `claude agents`). `now` is passed in for the same
+// reason. Terminal phases without a completedAt yield null (unknown), not a
+// now-anchored runaway duration.
+export function buildPhaseSummary(phaseSigs, now) {
+  return phaseSigs
+    .map((sig, i) => {
+      if (!sig || !sig.startedAt) return null;
+      const start = Date.parse(sig.startedAt);
+      if (!Number.isFinite(start)) return null;
+      let end = null;
+      if (sig.completedAt) {
+        const c = Date.parse(sig.completedAt);
+        end = Number.isFinite(c) ? c : null;
+      } else if (!TERMINAL.has(sig.status)) {
+        end = now;
+      }
+      // A clock-skewed or re-walk-rewritten completedAt earlier than startedAt
+      // would yield a NEGATIVE duration, which fmtDuration renders as an empty
+      // string — visually identical to a healthy phase, laundering corrupt
+      // timing as clean. Collapse end < start to null (the existing "unknown"
+      // convention) so it is not silently swallowed (CTL-754).
+      const durationMs = end != null && end >= start ? end - start : null;
+      return {
+        phase: PHASE_ORDER[i],
+        status: sig.status,
+        durationMs,
+      };
+    })
+    .filter(Boolean);
 }
 
 function ticketUpdatedAt(phaseSigs) {
@@ -355,6 +392,7 @@ export async function assembleBoard() {
   let tickets = await Promise.all([...ticketIds].map(async (id) => {
     const { phaseSigs, triage, prSigs } = await readTicketArtifacts(id);
     const cur = deriveCurrentPhase(phaseSigs);
+    const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
     return {
       id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
@@ -372,6 +410,7 @@ export async function assembleBoard() {
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
         : null,
       phaseCosts: phaseCostsByTicket[id] ?? null,
+      phaseSummary,
       pr: prFor(prSigs),
       updatedAt: ticketUpdatedAt(phaseSigs),
     };

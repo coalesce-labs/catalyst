@@ -50,6 +50,21 @@ export interface WebhookCliConfig {
    * pre-CTL-362 behaviour). CTL-362.
    */
   linearTeams: Array<{ key: string; vcsRepo: string }>;
+  /**
+   * OAuth app-actor credentials for the Catalyst Linear identity (CTL-550).
+   * Loaded from the project-specific Layer-2 config
+   * (`~/.config/catalyst/config-{projectKey}.json`).
+   * Null when not configured — the phase agents fall back to personal-token
+   * linearis CLI.
+   */
+  linearAgentConfig: LinearAgentConfig | null;
+}
+
+export interface LinearAgentConfig {
+  clientId: string;
+  clientSecret: string;
+  webhookSecret: string;
+  botUserId?: string;
 }
 
 interface FileExtract {
@@ -298,6 +313,42 @@ function readGithubSection(filePath: string): FileExtract | null {
 }
 
 /**
+ * Load the Linear app-actor credentials from the project-specific Layer-2
+ * config file (`~/.config/catalyst/config-{projectKey}.json`). Returns null
+ * when the file is absent, the project key is missing, or the required fields
+ * `clientId` / `clientSecret` are not present. The `accessToken` field is
+ * intentionally not surfaced — callers should mint fresh tokens via
+ * `client_credentials` grant using `clientId` / `clientSecret`. CTL-550.
+ */
+export function loadLinearAgentConfig(
+  homeConfigDir: string,
+  projectKey: string | null,
+): LinearAgentConfig | null {
+  if (projectKey === null || projectKey.length === 0) return null;
+  const configPath = join(homeConfigDir, `config-${projectKey}.json`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    return null;
+  }
+  if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return null;
+  const linear = parsed.catalyst.linear;
+  if (!isRecord(linear)) return null;
+  const agent = linear.agent;
+  if (!isRecord(agent)) return null;
+  const clientId = typeof agent.clientId === "string" ? agent.clientId : "";
+  const clientSecret = typeof agent.clientSecret === "string" ? agent.clientSecret : "";
+  if (clientId.length === 0 || clientSecret.length === 0) return null;
+  const webhookSecret = typeof agent.webhookSecret === "string" ? agent.webhookSecret : "";
+  const botUserId =
+    typeof agent.botUserId === "string" && agent.botUserId.length > 0
+      ? agent.botUserId
+      : undefined;
+  return { clientId, clientSecret, webhookSecret, ...(botUserId !== undefined ? { botUserId } : {}) };
+}
+
+/**
  * Loads webhook delivery config from the two files where pieces of it live:
  *
  * - `<homeConfigDir>/config.json` (cross-project, per-machine, NOT committed) —
@@ -320,7 +371,8 @@ function readGithubSection(filePath: string): FileExtract | null {
  */
 export function loadWebhookConfig(
   homeConfigDir: string,
-  projectConfigPath: string
+  projectConfigPath: string,
+  projectKey: string | null = null,
 ): WebhookCliConfig | null {
   const projectExtract = readGithubSection(projectConfigPath);
   const homeExtract = readGithubSection(join(homeConfigDir, "config.json"));
@@ -389,6 +441,9 @@ export function loadWebhookConfig(
   // Linear team→repo map. Layer 1 only — team-shared, committed. CTL-362.
   const linearTeams = projectExtract?.linearTeams ?? [];
 
+  // Linear app-actor credentials. Project-specific Layer-2 only. CTL-550.
+  const linearAgentConfig = loadLinearAgentConfig(homeConfigDir, projectKey);
+
   // Allow Linear-only configurations: if the GitHub channel/secret are missing
   // but Linear secrets are present, return a config that disables the GitHub
   // route but enables the Linear route. CTL-210.
@@ -403,6 +458,7 @@ export function loadWebhookConfig(
       linearSmeeChannel,
       linearBotUserId,
       linearTeams,
+      linearAgentConfig,
     };
   }
 
@@ -415,5 +471,6 @@ export function loadWebhookConfig(
     linearSmeeChannel,
     linearBotUserId,
     linearTeams,
+    linearAgentConfig,
   };
 }

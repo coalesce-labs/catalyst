@@ -230,6 +230,37 @@ STORED_TURNS="$(sqlite3 "$CATALYST_DB_FILE" \
   "SELECT num_turns FROM session_metrics WHERE session_id = '${SID_TURNS}';")"
 expect_eq "metric --turns writes num_turns to DB" "12" "$STORED_TURNS"
 
+# ─── 14. CTL-752: workflow_id resolution (frozen-daemon leak guard) ──────────
+
+# (a) A leaked daemon session id passed as --workflow is overridden by ORCH_ID.
+WF_SID="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+          --skill phase-plan --ticket CTL-752 \
+          --workflow "sess_20260528T202656_16651cb1")"
+WF_DB="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID';")"
+expect_eq "leaked sess_* --workflow overridden by CATALYST_ORCHESTRATOR_ID" \
+  "CTL-752" "$WF_DB"
+
+# (b) An explicit, non-sess_* workflow id is preserved (legacy oneshot parent).
+WF_SID2="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+           --skill oneshot --ticket CTL-752 --workflow "wf-legacy-parent")"
+WF_DB2="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID2';")"
+expect_eq "explicit non-sess_* workflow id preserved" "wf-legacy-parent" "$WF_DB2"
+
+# (c) Empty --workflow with ORCH_ID set populates workflow_id from ORCH_ID.
+WF_SID3="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+           --skill phase-research --ticket CTL-752 --workflow "")"
+WF_DB3="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID3';")"
+expect_eq "empty --workflow falls back to CATALYST_ORCHESTRATOR_ID" "CTL-752" "$WF_DB3"
+
+# (d) No ORCH_ID + no --workflow → workflow_id stays empty (interactive, no regression).
+WF_SID4="$(env -u CATALYST_ORCHESTRATOR_ID bash "$SESSION_SCRIPT" start --skill manual)"
+WF_DB4="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT COALESCE(workflow_id,'') FROM sessions WHERE session_id = '$WF_SID4';")"
+expect_eq "no orch id + no workflow stays empty (no regression)" "" "$WF_DB4"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"
