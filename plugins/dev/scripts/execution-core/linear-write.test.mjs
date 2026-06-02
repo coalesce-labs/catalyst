@@ -8,6 +8,7 @@ import {
   applyTriageStatus,
   removeLabel,
   applyBlockedByRelation,
+  applyEstimate,
   teamOf,
 } from "./linear-write.mjs";
 
@@ -379,5 +380,67 @@ describe("applyBlockedByRelation", () => {
     expect(r1.applied).toBe(true);
     expect(r2.applied).toBe(true);
     expect(calls).toHaveLength(2);
+  });
+});
+
+describe("applyEstimate", () => {
+  test("valid estimate, exec returns code:0 → applied:true, correct args", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--estimate", "5"]);
+  });
+
+  test("exec returns code:1 → applied:false with non-null reason, does not throw", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "some error" });
+    expect(() => applyEstimate({ ticket: "CTL-1", estimate: 5, exec })).not.toThrow();
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).not.toBeNull();
+  });
+
+  test("exec throws → applied:false, reason non-null, swallowed", () => {
+    const exec = () => { throw new Error("spawn boom"); };
+    expect(() => applyEstimate({ ticket: "CTL-1", estimate: 5, exec })).not.toThrow();
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBeTruthy();
+  });
+
+  test("invalid estimate 4 → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("null estimate → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: null, exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("string estimate 'x' → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: "x", exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("all valid estimate values (1,3,5,8,13) are accepted", () => {
+    for (const est of [1, 3, 5, 8, 13]) {
+      const calls = [];
+      const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec });
+      expect(r.applied).toBe(true);
+      expect(calls[0].args).toContain(String(est));
+    }
   });
 });

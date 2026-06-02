@@ -5028,3 +5028,100 @@ describe("CTL-537 Phase 5: startScheduler forwards checkSequencing (runTick wiri
     expect(spyCount).toBeGreaterThan(0);
   });
 });
+
+describe("CTL-751: applyEstimate write-back on triage→research advance", () => {
+  const okDispatch = fakeDispatch();
+
+  function writeTriageJson(ticket, obj) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "triage.json"), JSON.stringify(obj));
+  }
+
+  function makeWriteStatus(estimateCalls) {
+    return {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      applyEstimate: (a) => { estimateCalls.push(a); return { applied: true, reason: null }; },
+    };
+  }
+
+  test("triage.json with estimate:5 → applyEstimate called once with {ticket, estimate:5}", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 5 });
+  });
+
+  test("triage.json with no estimate → applyEstimate not called", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("triage.json with invalid estimate:4 → applyEstimate not called by scheduler", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 4 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("advance to plan (not research) → applyEstimate not called", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeSignal("CTL-1", "research", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("applyEstimate throwing does not break the tick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      applyEstimate: () => { throw new Error("Linear exploded"); },
+    };
+    expect(() =>
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: okDispatch,
+        writeStatus,
+        verifyDispatched: verifyOk,
+      })
+    ).not.toThrow();
+  });
+});
