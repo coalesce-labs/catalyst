@@ -2232,6 +2232,16 @@ function runTick() {
         ? readExecutionCoreConcurrencyLayer2(runningOpts.layer2Path)
         : {};
       concurrency = mergeExecutionCoreConcurrency(layer1, layer2);
+      // CTL-750: surface autotune throttle — when Layer-2 suppresses Layer-1's committed value
+      // the operator otherwise sees only the resolved number with no explanation.
+      const l1Max = layer1?.maxParallel;
+      const l2Max = layer2?.maxParallel;
+      if (Number.isInteger(l1Max) && Number.isInteger(l2Max) && l2Max < l1Max) {
+        log.warn(
+          { layer1Max: l1Max, layer2Max: l2Max, effective: concurrency.maxParallel },
+          "scheduler: Layer-2 maxParallel overrides Layer-1 — autotune throttled below committed config (CTL-750)",
+        );
+      }
     } else {
       concurrency = runningOpts.concurrency;
     }
