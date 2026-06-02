@@ -40,6 +40,21 @@ test("unparseable startedAt is dropped", () => {
   expect(buildPhaseSummary(sigs, NOW)).toEqual([]);
 });
 
+test("unparseable completedAt yields null duration (not a now-anchored value)", () => {
+  const sigs: Sig[] = PHASE_ORDER.map(() => null);
+  sigs[0] = { status: "done", startedAt: "2026-06-02T09:00:00Z", completedAt: "not-a-date" };
+  expect(buildPhaseSummary(sigs, NOW)).toEqual([{ phase: "triage", status: "done", durationMs: null }]);
+});
+
+test("completedAt earlier than startedAt yields null, not a negative duration (CTL-754)", () => {
+  // Clock skew / re-walk-rewritten completedAt before startedAt must not render
+  // as a negative duration (which fmtDuration silently blanks, laundering
+  // corrupt timing as a healthy phase).
+  const sigs: Sig[] = PHASE_ORDER.map(() => null);
+  sigs[0] = { status: "done", startedAt: "2026-06-02T09:30:00Z", completedAt: "2026-06-02T09:28:00Z" };
+  expect(buildPhaseSummary(sigs, NOW)).toEqual([{ phase: "triage", status: "done", durationMs: null }]);
+});
+
 test("empty / all-null input yields empty array", () => {
   const empty: Sig[] = PHASE_ORDER.map(() => null);
   expect(buildPhaseSummary(empty, NOW)).toEqual([]);

@@ -34,7 +34,11 @@ export const PHASE_ORDER = [
   "triage", "research", "plan", "implement", "verify",
   "review", "pr", "monitor-merge", "monitor-deploy",
 ];
-const TERMINAL = new Set([
+// Single source of truth for which phase statuses are terminal (no longer
+// running). Exported so the UI's PhaseStrip terminal-status list can be guarded
+// against drift (board-phase-drift.test.ts) instead of carrying a silent
+// hand-copied duplicate (CTL-754).
+export const TERMINAL = new Set([
   "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
 ]);
 
@@ -173,10 +177,16 @@ export function buildPhaseSummary(phaseSigs, now) {
       } else if (!TERMINAL.has(sig.status)) {
         end = now;
       }
+      // A clock-skewed or re-walk-rewritten completedAt earlier than startedAt
+      // would yield a NEGATIVE duration, which fmtDuration renders as an empty
+      // string — visually identical to a healthy phase, laundering corrupt
+      // timing as clean. Collapse end < start to null (the existing "unknown"
+      // convention) so it is not silently swallowed (CTL-754).
+      const durationMs = end != null && end >= start ? end - start : null;
       return {
         phase: PHASE_ORDER[i],
         status: sig.status,
-        durationMs: end != null ? end - start : null,
+        durationMs,
       };
     })
     .filter(Boolean);

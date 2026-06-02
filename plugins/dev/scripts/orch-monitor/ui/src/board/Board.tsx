@@ -45,6 +45,12 @@ const PHASE_COLS = [
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
 ];
+// Phase statuses that mean a phase is no longer running. MUST stay in lock-step
+// with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
+// board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
+// terminal status added there cannot silently render here as a live phase
+// (CTL-754).
+const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"];
 
 type ColorBy = "phase" | "status" | "repo" | "type";
 const TYPE_C: Record<string, string> = {
@@ -122,7 +128,7 @@ function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: s
     <div style={{ display: "flex", gap: 3, marginTop: 7, flexWrap: "wrap", alignItems: "center" }}>
       {phaseSummary.map((p) => {
         const c = PHASE_C[p.phase] || C.blue;
-        const running = !["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"].includes(p.status) && p.durationMs != null;
+        const running = !TERMINAL_STATUSES.includes(p.status) && p.durationMs != null;
         return (
           <Tooltip key={p.phase}>
             <TooltipTrigger asChild>

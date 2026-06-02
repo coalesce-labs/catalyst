@@ -57,7 +57,7 @@ import { dirname, join } from "node:path";
 // Source of truth: the workflow descriptor (derived from workflow.default.json).
 import { PHASES, ANCILLARY_PHASES } from "../../lib/workflow-descriptor.mjs";
 // Data-layer copies.
-import { PHASE_ORDER, PHASE_TO_LINEAR } from "../lib/board-data.mjs";
+import { PHASE_ORDER, PHASE_TO_LINEAR, TERMINAL } from "../lib/board-data.mjs";
 
 const SOT = "workflow.default.json (via lib/workflow-descriptor.mjs PHASES)";
 
@@ -285,4 +285,34 @@ test("Board.tsx LINEAR_COLS keys equal the value-space of board-data PHASE_TO_LI
   }
   expect(uiMissing).toEqual([]);
   expect(dataMissing).toEqual([]);
+});
+
+// ── Requirement 10 (CTL-754): Board.tsx TERMINAL_STATUSES === board-data TERMINAL ─
+// PhaseStrip decides the live-outline "running" flag from a terminal-status
+// list. That list was originally a verbatim inline copy of the data-layer
+// TERMINAL set, in a separate package with no shared constant — a new terminal
+// status added to TERMINAL would silently render that finished phase as
+// "running" on the strip. We hoisted the inline copy to a named
+// `const TERMINAL_STATUSES` in Board.tsx and lock it to the data-layer source of
+// truth here (read as text — same reason as PHASE_C above). The data layer's
+// TERMINAL is an unordered Set, so compare as sorted sets.
+const terminalStatusesValues = (() => {
+  const init = extractConstInitializer(boardSrc, "TERMINAL_STATUSES");
+  return (init.match(/"([^"]+)"/g) ?? []).map((s) => s.slice(1, -1));
+})();
+test("Board.tsx TERMINAL_STATUSES equals board-data.mjs TERMINAL (terminal-boundary drift)", () => {
+  const ui = [...terminalStatusesValues].sort();
+  const data = [...TERMINAL].sort();
+  if (JSON.stringify(ui) !== JSON.stringify(data)) {
+    throw new Error(
+      `DRIFT: ui/src/board/Board.tsx TERMINAL_STATUSES diverged from the ` +
+        `data-layer source of truth (lib/board-data.mjs TERMINAL).\n` +
+        `  board-data TERMINAL:      ${JSON.stringify(data)}\n` +
+        `  Board.tsx TERMINAL_STATUSES: ${JSON.stringify(ui)}\n` +
+        `A terminal status present in one but not the other makes PhaseStrip ` +
+        `mislabel a finished phase as "running" (or vice-versa). Reconcile the ` +
+        `two lists; TERMINAL in board-data.mjs is the source of truth.`,
+    );
+  }
+  expect(ui).toEqual(data);
 });

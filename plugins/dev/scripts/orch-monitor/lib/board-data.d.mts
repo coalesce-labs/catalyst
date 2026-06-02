@@ -94,5 +94,6 @@ export interface BoardPayload {
 
 export const PHASE_ORDER: string[];
 export const PHASE_TO_LINEAR: Record<string, string>;
+export const TERMINAL: Set<string>;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
 export function assembleBoard(): Promise<BoardPayload>;
