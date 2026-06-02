@@ -167,6 +167,34 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
   }
 }
 
+// removeLabel — remove a single label from a ticket via linearis --label-mode
+// remove (CTL-549). Counterpart to applyLabel; used by handleCommentWake to
+// clear needs-human/question when re-dispatching a parked worker. No read-back
+// (remove is idempotent for absent labels). Returns { removed: true } on
+// success, { removed: false, reason } on failure. Never throws.
+export async function removeLabel(ticket, label, { exec = defaultExec } = {}) {
+  try {
+    const res = exec("linearis", [
+      "issues",
+      "update",
+      ticket,
+      "--labels",
+      label,
+      "--label-mode",
+      "remove",
+    ]);
+    if ((res.code ?? res.status ?? 0) !== 0) {
+      const reason = classifyLabelFailure(res.stderr ?? "");
+      log.warn({ ticket, label, reason }, "removeLabel: failed");
+      return { removed: false, reason };
+    }
+    return { removed: true };
+  } catch (err) {
+    log.warn({ ticket, label, reason: "transient", err: err.message }, "removeLabel: threw");
+    return { removed: false, reason: "transient" };
+  }
+}
+
 // applyTriageStatus — verified Todo→Triage write-back (CTL-704). Reads the
 // pre-transition state, shells linear-transition.sh for the triage key, then
 // re-reads to confirm the state actually landed. Returns

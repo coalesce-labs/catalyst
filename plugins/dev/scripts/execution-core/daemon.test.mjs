@@ -24,6 +24,7 @@ import {
   consumeEventTail,
   parseEventTailChunk,
   resolveBootConcurrency,
+  handleCommentWake,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
 } from "./daemon.mjs";
@@ -802,5 +803,123 @@ describe("auto-tuner wiring (CTL-684)", () => {
     } catch {}
     // PID file must be removed by stopDaemon's cleanup path
     if (pidFile) expect(existsSync(pidFile)).toBe(false);
+  });
+});
+
+// CTL-549: handleCommentWake — re-dispatch a parked (needs-input) ticket
+describe("handleCommentWake (CTL-549)", () => {
+  const tmpOrcDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl-549-orch-"));
+    return dir;
+  };
+  const writeSignal = (orch, ticket, phase, data) => {
+    const workerDir = join(orch, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...data }),
+    );
+  };
+
+  test("re-dispatches ticket whose signal has status=needs-input", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+      bg_job_id: "job123",
+    });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c1", body: "Here is the answer" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].ticket).toBe("CTL-1");
+    expect(dispatched[0].phase).toBe("implement");
+    expect(dispatched[0].opts.handoffPath).toBe("/path/handoff.md");
+  });
+
+  test("no-ops for ticket with status=running (not parked)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "running" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "reply" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("calls removeLabel before dispatch on re-dispatch", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    const dispatchOrder = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => { dispatchOrder.push("dispatch"); return { code: 0 }; },
+        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
+      },
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human/question" });
+    expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
+  });
+
+  test("no-ops when ticket has no worker dir", async () => {
+    const orch = tmpOrcDir();
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-99", body: "hello" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("no-ops when parsed event has no ticket", async () => {
+    const orch = tmpOrcDir();
+    const dispatched = [];
+    await handleCommentWake(
+      { body: "hello" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+// CTL-549: startDaemon wires onComment to handleCommentWake
+describe("startDaemon — onComment wiring (CTL-549)", () => {
+  test("passes onComment callback to startMonitor", () => {
+    let capturedOnComment;
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: (opts) => { capturedOnComment = opts.onComment; },
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    expect(typeof capturedOnComment).toBe("function");
+    stopDaemon();
   });
 });

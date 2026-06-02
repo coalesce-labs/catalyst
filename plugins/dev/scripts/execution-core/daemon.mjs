@@ -22,8 +22,10 @@ import {
   fstatSync,
   readSync,
   closeSync,
+  readdirSync,
+  readFileSync,
 } from "node:fs";
-import { resolve, dirname, basename } from "node:path";
+import { resolve, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
@@ -66,6 +68,8 @@ import {
 } from "./scheduler.mjs";
 import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
+import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
+import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -104,6 +108,53 @@ function ensureState(orchDir) {
     const tmp = `${statePath}.tmp`;
     writeFileSync(tmp, JSON.stringify({ maxParallel: DEFAULT_MAX_PARALLEL }, null, 2));
     renameSync(tmp, statePath);
+  }
+}
+
+// handleCommentWake — CTL-549 re-dispatch hook. Called on each
+// `linear.comment.created` event by the daemon's `onComment` callback wired
+// into startMonitor. Scans all phase signals for the comment's ticket; for
+// each signal with status === "needs-input", removes the needs-human/question
+// label and re-dispatches via dispatchTicket with the parked handoffPath.
+// Fail-open throughout — a bad signal file or removeLabel failure is logged
+// and skipped, never fatal.
+export async function handleCommentWake(
+  parsed,
+  { orchDir, dispatch, removeLabel },
+) {
+  const { ticket } = parsed ?? {};
+  if (!ticket) return;
+
+  const workerDir = join(orchDir, "workers", ticket);
+  let signalFiles;
+  try {
+    signalFiles = readdirSync(workerDir).filter(
+      (f) => f.startsWith("phase-") && f.endsWith(".json"),
+    );
+  } catch {
+    return;
+  }
+
+  for (const fname of signalFiles) {
+    let sig;
+    try {
+      sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8"));
+    } catch {
+      continue;
+    }
+
+    if (sig.status !== "needs-input") continue;
+
+    const parkedPhase = sig.parkedFrom ?? sig.phase;
+    const handoffPath = sig.handoffPath ?? undefined;
+
+    try {
+      await removeLabel(ticket, "needs-human/question");
+    } catch {
+      /* fail-open */
+    }
+
+    dispatch(orchDir, ticket, parkedPhase, { handoffPath });
   }
 }
 
@@ -208,7 +259,16 @@ export function startDaemon({
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
-    monitorFn({ orchDir, cache }); // CTL-535 + CTL-565 + CTL-634
+    monitorFn({
+      orchDir,
+      cache,
+      onComment: (parsed) =>
+        handleCommentWake(parsed, {
+          orchDir,
+          dispatch: dispatchTicket,
+          removeLabel: defaultRemoveLabel,
+        }),
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 (onComment)
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.

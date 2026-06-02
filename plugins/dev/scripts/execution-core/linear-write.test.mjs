@@ -6,6 +6,7 @@ import {
   applyTerminalDone,
   applyLabel,
   applyTriageStatus,
+  removeLabel,
   teamOf,
 } from "./linear-write.mjs";
 
@@ -301,5 +302,39 @@ describe("applyTriageStatus", () => {
     const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
     expect(r.applied).toBe(false);
     expect(r.verified).toBe(false);
+  });
+});
+
+// CTL-549: removeLabel — remove a single label via linearis --label-mode remove
+describe("removeLabel (CTL-549)", () => {
+  test("shells linearis issues update with --label-mode remove", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].args).toContain("--label-mode");
+    expect(cmds[0].args).toContain("remove");
+    expect(cmds[0].args).toContain("needs-human/question");
+    expect(cmds[0].args).toContain("CTL-1");
+  });
+
+  test("returns { removed: true } on exit 0", async () => {
+    const exec = () => ({ code: 0, stdout: "", stderr: "" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(true);
+  });
+
+  test("returns { removed: false, reason } on non-zero exit", async () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBeTruthy();
+  });
+
+  test("returns { removed: false, reason: 'transient' } on thrown exec", async () => {
+    const exec = () => { throw new Error("spawn failed"); };
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("transient");
   });
 });
