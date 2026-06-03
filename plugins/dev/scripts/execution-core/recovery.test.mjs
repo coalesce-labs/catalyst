@@ -3071,3 +3071,92 @@ describe("reclaimDeadWorkIfPossible — needs-input guard (CTL-549)", () => {
     expect(dispatched).toHaveLength(0);
   });
 });
+
+// CTL-755 STEP D (CORRECTED) — a dead-but-work-done `triage` worker is reclaimed
+// NORMALLY (emitComplete flips its signal to `triage:done`), exactly like any
+// other phase. The admission gate is NOT enforced inside reclaim — it lives
+// DOWNSTREAM at the scheduler's STEP-B advancement guard, which holds the
+// triage→research promotion for any `triage:done` worker not in
+// `admittedThisTick`. The earlier `reclaim-held` non-mutating outcome was a bug:
+// a dead triage worker only reaches branch B with a NON-terminal signal (a `done`
+// signal short-circuits to `noop` at the terminal gate), so holding it left the
+// signal at `running` and the scheduler's STEP-A triaged-waiting pool (which keys
+// on `triage === "done"`) skipped it FOREVER — the ticket stranded. Flipping the
+// signal to `done` lands it exactly where STEP A expects, so the gate
+// re-evaluates next tick (see scheduler.test.mjs "STEP D integration").
+describe("reclaimDeadWorkIfPossible — CTL-755 dead-triage reclaim (gate is downstream)", () => {
+  const orch = "/orch";
+
+  // A dead (job dir gone) triage signal whose triage probe passes (work done) but
+  // whose status never reached `done` (it died mid-flight as `running`). This is
+  // the exact class the reclaim branch-B path recovers — and the class the old
+  // `reclaim-held` early-return stranded.
+  function triageSignal({ ticket = "CTL-7" } = {}) {
+    return {
+      ticket,
+      phase: "triage",
+      status: "running",
+      liveness: { kind: "bg", value: "job-x" },
+      signalPath: `/x/${ticket}/phase-triage.json`,
+      raw: {
+        ticket,
+        phase: "triage",
+        orchestrator: ticket,
+        status: "running",
+        bg_job_id: "job-x",
+      },
+    };
+  }
+
+  test("dead triage + work done → 'reclaimed', emit FIRES (signal flips to done; the gate is enforced downstream in the scheduler, not here)", () => {
+    const probe = recorder(true); // triage.json present → work done
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null, // dead-gone → reclaim-eligible
+      probes: { triage: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {}, // keep hermetic
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1); // branch B was entered (probe ran)
+    // The reclaim flips the signal to done so the scheduler's STEP A picks it up —
+    // STEP B then holds the triage→research promotion until the ticket is admitted.
+    expect(emit.calls.length).toBe(1);
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("triage reclaim emits the reap-intent for the dead bg job (no longer suppressed by a hold)", () => {
+    const emitReapIntent = recorder(Promise.resolve());
+    reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null,
+      probes: { triage: recorder(true) },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      emitReapIntent,
+      postReclaimMirror: () => {},
+      now: () => 1_000,
+    });
+    // The dead worker's lingering session is reaped (the old `reclaim-held`
+    // non-mutating return skipped this, leaking the bg session).
+    expect(emitReapIntent.calls.length).toBe(1);
+  });
+
+  test("a NON-triage dead worker (implement) with work done reclaims identically (no phase special-casing)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {},
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1); // mid-pipeline reclaim proceeds
+  });
+});

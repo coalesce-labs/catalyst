@@ -7,6 +7,7 @@ import {
   runEligibleQuery,
   fetchTicketState,
   fetchTicketLabels,
+  fetchTicketRelations,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -310,5 +311,153 @@ describe("fetchTicketState — cache (CTL-634)", () => {
     fetchTicketState("CTL-1", { exec });
     fetchTicketState("CTL-1", { exec });
     expect(calls).toBe(2);
+  });
+});
+
+// CTL-755 — fetchTicketRelations is the admission gate's single-read hydration
+// of a triaged-waiting candidate: state + relations + inverseRelations +
+// priority + labels in one `linearis issues read <id>`. The descriptor it
+// returns mirrors normalizeTicket so buildDependencyEdges / computeReadySet
+// consume it unchanged. VERIFIED payload (ADV-1277): relations.nodes carry a
+// `blocks` edge, inverseRelations.nodes carry a `blocks` edge from the blocker,
+// priority is a number, labels.nodes[].name carries the label list.
+describe("fetchTicketRelations (CTL-755)", () => {
+  // The verified ADV-1277 shape: a blocks→ADV-1280 relation, an inverse
+  // blocks←ADV-1276 (i.e. ADV-1276 blocks this ticket → a blocked-by edge),
+  // priority 2, plus labels.
+  function adv1277Json() {
+    return JSON.stringify({
+      identifier: "ADV-1277",
+      state: { name: "Triage" },
+      priority: 2,
+      relations: {
+        nodes: [{ type: "blocks", relatedIssue: { identifier: "ADV-1280" } }],
+      },
+      inverseRelations: {
+        nodes: [{ type: "blocks", issue: { identifier: "ADV-1276" } }],
+      },
+      labels: { nodes: [{ name: "feature" }, { name: "orchestrator" }] },
+    });
+  }
+
+  test("runs `linearis issues read <id>` and returns the full descriptor", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 0, stdout: adv1277Json(), stderr: "" };
+    };
+    const rel = fetchTicketRelations("ADV-1277", { exec });
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "read", "ADV-1277"]);
+    expect(rel).toEqual({
+      state: "Triage",
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "ADV-1280" } }] },
+      inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "ADV-1276" } }] },
+      priority: 2,
+      labels: ["feature", "orchestrator"],
+    });
+  });
+
+  test("parses a blocked-by edge out of inverseRelations.nodes", () => {
+    const exec = () => ({ code: 0, stdout: adv1277Json(), stderr: "" });
+    const rel = fetchTicketRelations("ADV-1277", { exec });
+    // The inverse `blocks` edge means ADV-1276 blocks ADV-1277 — the blocked-by
+    // relationship the dependency graph reads from inverseRelations.
+    expect(rel.inverseRelations.nodes).toHaveLength(1);
+    expect(rel.inverseRelations.nodes[0].type).toBe("blocks");
+    expect(rel.inverseRelations.nodes[0].issue.identifier).toBe("ADV-1276");
+  });
+
+  test("defaults relations / inverseRelations to { nodes: [] } when absent", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "Triage" } }),
+      stderr: "",
+    });
+    const rel = fetchTicketRelations("CTL-9", { exec });
+    expect(rel.relations).toEqual({ nodes: [] });
+    expect(rel.inverseRelations).toEqual({ nodes: [] });
+  });
+
+  test("defaults priority to null and labels to [] when absent", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "Triage" } }),
+      stderr: "",
+    });
+    const rel = fetchTicketRelations("CTL-9", { exec });
+    expect(rel.priority).toBeNull();
+    expect(rel.labels).toEqual([]);
+  });
+
+  test("priority 0 (No priority) is preserved, not coerced to null", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: { name: "Triage" }, priority: 0 }),
+      stderr: "",
+    });
+    expect(fetchTicketRelations("CTL-9", { exec }).priority).toBe(0);
+  });
+
+  test("accepts a flat string `state` field too", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-9", state: "Done" }),
+      stderr: "",
+    });
+    expect(fetchTicketRelations("CTL-9", { exec }).state).toBe("Done");
+  });
+
+  test("returns null on a non-zero linearis exit (caller fails safe → held)", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
+    expect(fetchTicketRelations("CTL-9", { exec })).toBeNull();
+  });
+
+  test("returns null on unparseable stdout", () => {
+    const exec = () => ({ code: 0, stdout: "not json at all", stderr: "" });
+    expect(fetchTicketRelations("CTL-9", { exec })).toBeNull();
+  });
+
+  // The shared cache contract: fetchTicketRelations populates the SAME state
+  // cache fetchTicketState reads (string state keyed by identifier), so a
+  // subsequent fetchTicketState hits it without a second read. Relations /
+  // priority / labels are returned uncached (one read per call) — caching them
+  // under the same key would corrupt fetchTicketState's string-typed reads.
+  describe("shared state cache", () => {
+    test("populates the shared cache so fetchTicketState serves a hit (no second exec)", () => {
+      const cache = createTicketStateCache({ now: () => 0 });
+      let calls = 0;
+      const exec = () => {
+        calls += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "Done" } }), stderr: "" };
+      };
+      expect(fetchTicketRelations("CTL-1", { exec, cache }).state).toBe("Done");
+      // fetchTicketState now reads the state populated by fetchTicketRelations.
+      expect(fetchTicketState("CTL-1", { exec, cache })).toBe("Done");
+      expect(calls).toBe(1); // second read was a cache hit on the shared state
+    });
+
+    test("does NOT cache a failed read (null) — re-execs next call (fail-safe)", () => {
+      const cache = createTicketStateCache({ now: () => 0 });
+      let calls = 0;
+      const exec = () => {
+        calls += 1;
+        return { code: 1, stdout: "", stderr: "boom" };
+      };
+      expect(fetchTicketRelations("CTL-1", { exec, cache })).toBeNull();
+      expect(fetchTicketRelations("CTL-1", { exec, cache })).toBeNull();
+      expect(calls).toBe(2); // null never cached → both calls hit exec
+    });
+
+    test("without a cache, every call execs (relations are always read fresh)", () => {
+      let calls = 0;
+      const exec = () => {
+        calls += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "Triage" } }), stderr: "" };
+      };
+      fetchTicketRelations("CTL-1", { exec });
+      fetchTicketRelations("CTL-1", { exec });
+      expect(calls).toBe(2);
+    });
   });
 });

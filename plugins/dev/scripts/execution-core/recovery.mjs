@@ -608,6 +608,32 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
   );
 }
 
+// CTL-755: triage→research admission-hold event — phase.advance.held.<ticket>.
+// Emitted by the scheduler's STEP-A admission gate when a triage-complete ticket
+// is NOT promoted to research this tick. `reason` distinguishes the two hold
+// classes:
+//   "blocked-by-open-dependency"     — ≥1 blocked_by dependency is non-terminal
+//                                       (the candidate is not in readyIds).
+//   "awaiting-capacity-or-priority"  — deps satisfied (in readyIds) but the
+//                                       candidate lost the priority/capacity
+//                                       selection this tick.
+// `blockers` carries the unmet blocker identifiers (empty for the capacity case).
+// Best-effort, never throws — mirrors defaultAppendDispatchRequestedEvent. The
+// scheduler emits it only-on-state-change to bound log volume.
+export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blockers }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "held",
+      reason,
+      payloadExtras: { blockers: blockers ?? [] },
+    }),
+    "advance-held",
+  );
+}
+
 // CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
 // Emitted once per reaped cooldown marker so GC activity is queryable from the
 // unified event log.
@@ -1433,6 +1459,21 @@ export function reclaimDeadWorkIfPossible(
   //     can locate their artifact; implementProbe ignores the extra key.
   const probe = probes[phase];
   if (probe({ ticket, repoRoot, orchDir })) {
+    // CTL-755 STEP D (CORRECTED): a dead-but-work-done `triage` worker is
+    // reclaimed normally — emitComplete flips its signal to `triage:done`. This
+    // does NOT bypass the admission gate: the gate lives DOWNSTREAM at the
+    // scheduler's STEP-B advancement guard (scheduler.mjs:2096), which holds the
+    // triage→research promotion for ANY `triage:done` worker not in
+    // `admittedThisTick` — regardless of HOW the signal reached `done` (live
+    // complete, reclaim, or post-boot). The earlier non-mutating `reclaim-held`
+    // outcome STRANDED such a worker: a dead triage worker only reaches branch B
+    // with a NON-terminal signal (a `done` signal short-circuits to `noop` at the
+    // `klass === "terminal"` gate above), so holding it left the signal at
+    // `running`, and STEP A's `s.triage === "done"` pool requirement then skipped
+    // it forever. Flipping to `done` lands it exactly where STEP A expects it, so
+    // the gate re-evaluates deps/priority/capacity next tick (and STEP B holds the
+    // research dispatch until admitted). No phase is special-cased here.
+    //
     // CTL-661 hole #3: a worker reaching branch (B) is reclaim-eligible, so it
     // is either `absent` (nothing live to stop) or `idle`-confirmed (between
     // turns → safe to stop). Emit a fire-and-forget reap-intent BEFORE

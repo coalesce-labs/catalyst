@@ -107,6 +107,55 @@ export function fetchTicketState(identifier, { exec = defaultExec, cache } = {})
   }
 }
 
+// fetchTicketRelations — the CTL-755 admission gate's single-read hydration of
+// one triaged-waiting candidate: its live workflow state, dependency edges,
+// priority, and labels, all parsed from ONE `linearis issues read <id>`. The
+// returned descriptor mirrors normalizeTicket (above) so the same
+// buildDependencyEdges / analyzeDependencyGraph / computeReadySet consume it:
+//   { state, relations, inverseRelations, priority, labels }
+// - state: node.state.name (or a flat string `state`), or null when absent.
+// - relations / inverseRelations: default { nodes: [] } so the graph builder
+//   reads `.nodes` unconditionally. VERIFIED (ADV-1277): the single-ticket read
+//   returns populated relations.nodes (blocks→ADV-1280) and inverseRelations.nodes
+//   (blocks←ADV-1276, i.e. the blocked-by edge the dependency graph reads).
+// - priority: node.priority when numeric, else null. An explicit 0 ("No priority")
+//   is kept as 0 (fidelity to the source), NOT coerced to null. Note 0 and null
+//   rank IDENTICALLY — scheduler-rank.priorityRank floors any non-1..4 value to
+//   band 5 — so this distinction does not affect selection; it only differs from
+//   normalizeTicket's eligible-set default (missing → 0) by recording a missing
+//   priority as "unknown" (null) rather than "lowest" (0).
+// - labels: node.labels.nodes[].name (or []), so STEP A can diff the held
+//   indicator (blocked/waiting) without a second read.
+// Returns null on a non-zero exit or unparseable stdout — the STEP-A caller
+// fails SAFE (treats the candidate as held / non-terminal) just like the D5
+// fetchTicketState contract.
+//
+// CTL-634 cache sharing: the opt-in `cache` is the SAME createTicketStateCache
+// fetchTicketState uses. We populate it with the string `state` only, so a
+// subsequent fetchTicketState(id, { cache }) is a hit. relations/priority/labels
+// are returned UNCACHED (one read per call): the cache stores a single value per
+// key and is string-state-typed, so writing a relations object under the same
+// key would corrupt fetchTicketState's reads. Within a single STEP-A tick this
+// costs nothing — the relations come from the same read that populates state.
+export function fetchTicketRelations(identifier, { exec = defaultExec, cache } = {}) {
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return null; // fail-safe — not cached
+  try {
+    const node = JSON.parse(stdout);
+    const state = node?.state?.name ?? node?.state ?? null;
+    if (cache && state != null) cache.set(identifier, state); // share with fetchTicketState
+    return {
+      state,
+      relations: node?.relations ?? { nodes: [] },
+      inverseRelations: node?.inverseRelations ?? { nodes: [] },
+      priority: typeof node?.priority === "number" ? node.priority : null,
+      labels: node?.labels?.nodes?.map((n) => n.name) ?? [],
+    };
+  } catch {
+    return null; // unparseable — not cached
+  }
+}
+
 // fetchTicketLabels — current label-name list for one ticket, or null on any
 // failure. CTL-587: used by linear-write.mjs::applyLabel for the
 // verify-write-landed step that closes the silent-success gap in linearis
