@@ -182,10 +182,15 @@ function ensureState(orchDir) {
 // and skipped, never fatal.
 export async function handleCommentWake(
   parsed,
-  { orchDir, dispatch, removeLabel },
+  { orchDir, dispatch, removeLabel, botUserId },
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
+  // CTL-756: self-echo guard — never re-dispatch on the bot's own comment
+  // (e.g. the parking-question comment the parked worker just posted as the
+  // Catalyst app actor). Fail-open when botUserId is unset. Mirrors the inbox
+  // writers' guard (daemon.mjs:124 / :148).
+  if (botUserId && parsed.authorId === botUserId) return;
 
   const workerDir = join(orchDir, "workers", ticket);
   let signalFiles;
@@ -330,7 +335,7 @@ export function startDaemon({
       cache,
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel }); // CTL-549: re-dispatch parked tickets
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserId }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserId), // CTL-749
     }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749
