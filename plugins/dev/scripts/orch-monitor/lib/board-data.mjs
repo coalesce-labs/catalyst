@@ -42,6 +42,30 @@ export const TERMINAL = new Set([
   "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
 ]);
 
+// CTL-755 held-indicator labels (admission-control gate). A triaged-waiting
+// ticket the scheduler holds before the triage→research promotion carries one of
+// these Linear labels: `blocked` (≥1 non-terminal blocked_by dependency) or
+// `waiting` (deps satisfied but it lost the priority/capacity selection this
+// tick). The scheduler converges them ON A DIFF (apply/remove) and clears BOTH
+// on pickup. These two strings MUST stay in lock-step with
+// execution-core/scheduler.mjs HELD_LABEL_BLOCKED / HELD_LABEL_WAITING — the
+// board-held-indicator drift guard asserts that, so the board reads the same
+// label the daemon writes (we copy the literals rather than import the whole
+// scheduler module into the lightweight board data layer).
+export const HELD_LABEL_BLOCKED = "blocked";
+export const HELD_LABEL_WAITING = "waiting";
+
+// heldFor — classify a ticket's held state from its Linear label set. `blocked`
+// wins over `waiting` when both are somehow present (it is the more severe hold;
+// steady-state convergence only ever leaves one applied). Returns "blocked" |
+// "waiting" | null. Pure + exported so it is unit-testable.
+export function heldFor(labels) {
+  const set = new Set(Array.isArray(labels) ? labels : []);
+  if (set.has(HELD_LABEL_BLOCKED)) return HELD_LABEL_BLOCKED;
+  if (set.has(HELD_LABEL_WAITING)) return HELD_LABEL_WAITING;
+  return null;
+}
+
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
 export const PHASE_TO_LINEAR = {
   triage: "Research", research: "Research", plan: "Plan", implement: "Implement",
@@ -222,6 +246,14 @@ function ticketTitle(ticket, triage, eligibleIndex) {
   return ticket;
 }
 const ticketType = (triage) => triage?.classification || triage?.type || "task";
+// CTL-755: the scraped dependency ids triage recorded (flat string[] or rich
+// [{id}] — readTriageDependencies in the scheduler tolerates both, so we do too).
+// Surfaced as the held card's `blockers` so a `blocked` chip can name WHAT it is
+// waiting on, without the board taking on a second (event-log) data source.
+const ticketBlockers = (triage) =>
+  (Array.isArray(triage?.dependencies) ? triage.dependencies : [])
+    .map((d) => (typeof d === "string" ? d : d?.id))
+    .filter(Boolean);
 // triage's coarse size estimate (xs/small/medium/large/xl) — present once a
 // ticket has been triaged; the closest thing to a Linear estimate for CTL.
 const ticketScope = (triage) => triage?.estimated_scope || null;
@@ -252,6 +284,10 @@ async function linearInfo() {
           priority: typeof n.priority === "number" ? n.priority : 0,
           estimate: n.estimate ?? null,
           project: n.project?.name || (typeof n.project === "string" ? n.project : null),
+          // CTL-755: label names for the held indicator (blocked/waiting). The
+          // same cached list call already returns labels.nodes[].name, so this
+          // costs zero extra Linear traffic.
+          labels: (n.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean),
         };
       }
     } catch { /* linearis unavailable — leave this team unenriched */ }
@@ -420,6 +456,12 @@ export async function assembleBoard() {
       priority: linfo[id]?.priority ?? 0,
       estimate: linfo[id]?.estimate ?? null, scope: ticketScope(triage),
       project: linfo[id]?.project ?? null,
+      // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
+      // ticket's Linear labels (the scheduler's admission gate writes them).
+      // `blockers` names the dependencies a `blocked` hold is waiting on (only
+      // meaningful when held === "blocked"); empty otherwise.
+      held: heldFor(linfo[id]?.labels),
+      blockers: ticketBlockers(triage),
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
       turns: phaseCostsByTicket[id]
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)

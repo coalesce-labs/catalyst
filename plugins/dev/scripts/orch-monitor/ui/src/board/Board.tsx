@@ -51,6 +51,12 @@ const WORKER_COLS = [
 // terminal status added there cannot silently render here as a live phase
 // (CTL-754).
 const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled"];
+// CTL-755 held-indicator label names. MUST stay in lock-step with
+// execution-core/scheduler.mjs HELD_LABEL_BLOCKED / HELD_LABEL_WAITING (and the
+// board-data.mjs copies) — the board-held-indicator drift guard asserts all
+// three agree, so the badge below reads exactly the label the daemon writes.
+const HELD_LABEL_BLOCKED = "blocked";
+const HELD_LABEL_WAITING = "waiting";
 
 type ColorBy = "phase" | "status" | "repo" | "type";
 const TYPE_C: Record<string, string> = {
@@ -191,6 +197,31 @@ function StatusBadge({ status }: { status: string }) {
   if (!m) return null;
   return <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: m.fg, background: m.bg, whiteSpace: "nowrap" }}>{m.label}</span>;
 }
+// CTL-755: held indicator. A triaged-waiting ticket the admission gate is
+// holding before the triage→research promotion carries a `blocked` or `waiting`
+// Linear label. We render a distinct amber "⏸" chip so an operator sees at a
+// glance the ticket is HELD on a dependency (blocked, names the blocker ids) vs
+// merely awaiting capacity/priority (waiting) — NOT silently mid-triage.
+function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
+  if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING) return null;
+  const isBlocked = held === HELD_LABEL_BLOCKED;
+  const fg = isBlocked ? "#f4a8a8" : "#f4dc8a";
+  const bg = isBlocked ? "rgba(239,93,93,0.14)" : "rgba(234,188,59,0.14)";
+  const ids = (blockers ?? []).filter(Boolean);
+  const label = isBlocked
+    ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
+    : "⏸ waiting";
+  const tip = isBlocked
+    ? ids.length
+      ? `Held — blocked on open dependency: ${ids.join(", ")}`
+      : "Held — blocked on an open dependency"
+    : "Held — deps satisfied, awaiting capacity or priority";
+  return (
+    <Tooltip><TooltipTrigger asChild>
+      <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: fg, background: bg, whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
+    </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
+  );
+}
 function Cost({ v }: { v: number | null }) {
   return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
 }
@@ -231,6 +262,7 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
       <TitleText text={t.title} />
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
         <PhasePill phase={t.phase} />
+        <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
         <ScopeChip scope={t.scope} estimate={t.estimate} />
         {t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
