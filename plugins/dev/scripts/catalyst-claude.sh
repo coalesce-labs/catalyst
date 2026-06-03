@@ -134,6 +134,16 @@ fi
 . "${SCRIPT_DIR}/lib/task-type.sh"
 __catalyst_append_task_type "$SKILL"
 
+# CTL-760: launch-mode dimension. The phase-agent dispatcher stamps
+# catalyst.exec_context=phase-bg on bg workers; catalyst-claude.sh stamps
+# =interactive here so Grafana can split native Claude-Code cost/metrics by
+# launch mode. Append using the same OTEL_RESOURCE_ATTRIBUTES idiom as
+# task.type above; first-writer-wins so a parent shell's value is preserved.
+if [[ "${OTEL_RESOURCE_ATTRIBUTES:-}" != *"catalyst.exec_context="* ]]; then
+  OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:+${OTEL_RESOURCE_ATTRIBUTES},}catalyst.exec_context=interactive"
+  export OTEL_RESOURCE_ATTRIBUTES
+fi
+
 # ─── Start session ────────────────────────────────────────────────────────────
 
 SESSION_ARGS=(--skill "$SKILL" --cwd "$WORKTREE_PATH")

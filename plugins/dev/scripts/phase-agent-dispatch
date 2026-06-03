@@ -326,6 +326,11 @@ compose_otel_resource_attrs() {
 		attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
 	fi
 	attrs="${attrs},task.type=phase-${PHASE}"
+	# CTL-760: launch-mode dimension. Rides OTEL_RES_ATTRS → the --settings env →
+	# the worker's native Claude-Code metrics, so every bg phase metric slices by
+	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
+	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
+	attrs="${attrs},catalyst.exec_context=phase-bg"
 	printf '%s\n' "$attrs"
 }
 

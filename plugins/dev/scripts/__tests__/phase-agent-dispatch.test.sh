@@ -644,7 +644,7 @@ DRY=$(cd "${TEST_DIR}/proj" &&
 	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
 assert_eq \
-	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$OTEL_ENTRY" \
 	"dry-run JSON env array carries the composed OTEL attribute string"
 
@@ -669,6 +669,11 @@ touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",task.type=phase-implement" \
 	"task.type=phase-implement appended with projectKey present"
+
+# CTL-760: catalyst.exec_context=phase-bg rides the OTEL attrs so every bg
+# phase metric slices by launch mode (phase-bg vs interactive).
+assert_contains "$LOG" ",catalyst.exec_context=phase-bg" \
+	"catalyst.exec_context=phase-bg appended to OTEL_RESOURCE_ATTRIBUTES"
 
 # Case B: phase value flows through verbatim — monitor-deploy (the longest, hyphenated).
 fresh_env t15b
@@ -697,7 +702,7 @@ rm -rf "${CONFIG_DIR}"
 		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
+	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"task.type appended even when projectKey absent (short form)"
 
 # ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
@@ -1574,7 +1579,7 @@ assert_contains "$LOG" "--settings" "spawn argv carries --settings"
 SETTINGS_JSON="$(settings_json_from_log)"
 SET_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
 assert_eq \
-	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$SET_OTEL" \
 	".settings.env.OTEL_RESOURCE_ATTRIBUTES equals the composed attrs"
 
@@ -1665,7 +1670,7 @@ HAS_SETTINGS=$(echo "$DRY" | jq -r 'has("settings")' 2>/dev/null)
 assert_eq "true" "$HAS_SETTINGS" "dry-run JSON has a settings field"
 DRY_OTEL=$(echo "$DRY" | jq -r '.settings.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
 assert_eq \
-	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$DRY_OTEL" \
 	"dry-run JSON settings.env carries the composed OTEL attrs"
 
