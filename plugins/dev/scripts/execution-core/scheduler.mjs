@@ -99,6 +99,11 @@ import * as linearWrite from "./linear-write.mjs";
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+// CTL-642 + CTL-758: the SHARED Linear terminal-state predicate. isLinearTerminal
+// ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
+// "live state !terminal" check and the recovery short-circuit threaded into
+// reclaimOpts below.
+import { isLinearTerminal } from "./terminal-state.mjs";
 // CTL-638: labelOnce moved out of this file into a shared leaf module so the
 // recovery-sweep escalation path can use the same once-marker guard. Keeping
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
@@ -1477,6 +1482,65 @@ function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite) {
   }
 }
 
+// reconcileTerminalBackstop — CTL-758 defense-in-depth (the reconcile backstop).
+// A ticket whose pipeline already reached terminal Done (the .terminal-done.applied
+// marker exists) but whose LIVE Linear state has drifted BACK to a non-terminal
+// state — a late phase-pr/advance echo un-completing it (CTL-549/550/749) — is
+// re-Done'd here. The backward-write guard (CTL-758 in runTransition) refuses the
+// daemon's OWN backward writes; this backstop catches a drift from ANY source
+// (a webhook echo, an operator, a sibling process) and forces the forward Done
+// write (which the guard explicitly permits: key === TERMINAL_LINEAR_KEY).
+//
+// Heavily rate-limited so it is cheap on the hot loop:
+//   - GATE 1: only tickets with the .terminal-done.applied marker (pipeline
+//     provably reached terminal) are even considered.
+//   - GATE 2: the PR must be MERGED (prAdapter.prView). No prAdapter / no PR
+//     number → the backstop is inert (the cheap Linear-only path cannot prove a
+//     merge, so it stays conservative and does nothing).
+//   - GATE 3: the cached live Linear read must be NON-terminal (else there is
+//     nothing to fix — the common case is a no-op).
+// The applyTerminalDone write itself rides the shared linearBreaker (defaultExec).
+function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitStateWrite, { cache, prAdapter, fetchState = fetchTicketState } = {}) {
+  // GATE 1 — pipeline reached terminal (marker present).
+  const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
+  if (!existsSync(marker)) return;
+  // GATE 2 — PR merged. Inert without a prAdapter + PR number.
+  const pr = signal?.raw?.pr ?? signal?.pr ?? null;
+  if (!prAdapter || typeof prAdapter.prView !== "function" || !pr?.number) return;
+  let merged = false;
+  try {
+    const view = prAdapter.prView(ticket, pr);
+    merged = !!(view && (view.state === "MERGED" || view.mergedAt != null));
+  } catch {
+    return; // fail-soft — a gh error never forces a write
+  }
+  if (!merged) return;
+  // GATE 3 — live Linear state drifted back to non-terminal.
+  let state;
+  try {
+    state = fetchState(ticket, { cache });
+  } catch {
+    return; // unreadable → fail-safe, do nothing
+  }
+  if (state == null || isLinearTerminal(state)) return; // already terminal or unreadable → no-op
+  // Drift detected: force the forward Done write (the CTL-758 guard permits it).
+  try {
+    const res = writeStatus.applyTerminalDone({ ticket, cache });
+    if (typeof emitStateWrite === "function") {
+      emitStateWrite({ writerResult: res, ticket, phase: TERMINAL_PHASE, source: "reconcile-backstop", orchId: ticket });
+    }
+    log.warn(
+      { ticket, driftedState: state },
+      "ctl-758: reconcile backstop re-Done'd a merged ticket whose Linear state drifted back to non-terminal",
+    );
+  } catch (err) {
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: reconcile-backstop Done write threw — continuing tick",
+    );
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558) + worktree teardown (CTL-582). Idempotent
 // and restart-safe — derives every action from filesystem state. `exec` is the
@@ -1560,6 +1624,13 @@ export function schedulerTick(
     // parked-redispatch, preemption-resume, terminal-sweep, reconcile-backstop)
     // via the emitStateWrite helper below; NEVER fired on the triage path.
     appendStateWriteEvent = appendLinearStateWriteEvent,
+    // CTL-642: PR-merged adapter for the recovery terminal short-circuit's
+    // optional second check (merged-but-not-yet-Done zombie). Default undefined →
+    // the short-circuit degrades to the cheap Linear-terminal read ONLY (the
+    // primary path: the live CTL flow reaches Done on merge via git-automation,
+    // so the cached Linear read already proves terminal). Injectable so tests can
+    // exercise the pr-merged branch without shelling out to `gh`.
+    prAdapter = undefined,
   } = {}
 ) {
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
@@ -1669,7 +1740,13 @@ export function schedulerTick(
       const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
       // CTL-736: reclaim reads only the local state.json lifecycle — no snapshot
       // liveness binding (the death trigger never consults `claude agents`).
-      const reclaimOpts = { repoRoot };
+      // CTL-642 (LOAD-BEARING): thread the SHARED TTL state cache + fetchState +
+      // prAdapter so the recovery terminal short-circuit reuses the same cached
+      // Linear read as the rest of the tick (≤1 fetchState per ticket per TTL —
+      // NOT a new per-tick API storm). cache may be undefined (legacy tests that
+      // don't inject it); fetchTicketState handles an undefined cache by exec-ing
+      // every call exactly as before.
+      const reclaimOpts = { repoRoot, cache, fetchState: fetchTicketState, prAdapter };
       // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.
@@ -1677,6 +1754,13 @@ export function schedulerTick(
       const entry = { ticket: sig.ticket, phase: sig.phase };
       switch (r) {
         case "reclaimed":
+          reclaimed.push(entry);
+          break;
+        case "terminal-short-circuit":
+          // CTL-642: the ticket was already terminal (Linear Done/Canceled) or its
+          // PR merged; reclaimDeadWork flipped its signal to `done` and audited it
+          // (NO escalated event). Bucket with reclaimed for HUD/log visibility —
+          // the ticket drops from the in-flight attention set next tick.
           reclaimed.push(entry);
           break;
         case "revived":
@@ -2191,7 +2275,7 @@ export function schedulerTick(
             // CTL-757: capture the writer result so emitStateWrite can audit the
             // before/after pair. The write itself stays best-effort inside
             // safeWrite; the emit is a separate best-effort step.
-            const wr = writeStatus.applyPhaseStatus({ ticket, phase: next });
+            const wr = writeStatus.applyPhaseStatus({ ticket, phase: next, cache });
             emitStateWrite({ writerResult: wr, ticket, phase: next, source: "scheduler-advance", orchId: ticket });
           },
           { ticket, phase: next }
@@ -2334,7 +2418,7 @@ export function schedulerTick(
             safeWrite(
               () => {
                 // CTL-757: audit the resume-after-preemption status write.
-                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase });
+                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
                 emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
               },
               { ticket: pd.identifier, phase: parkedPhase }
@@ -2505,6 +2589,7 @@ export function schedulerTick(
             const wr = writeStatus.applyPhaseStatus({
               ticket: t.identifier,
               phase: NEW_WORK_ENTRY_PHASE,
+              cache,
             });
             emitStateWrite({ writerResult: wr, ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, source: "scheduler-advance", orchId: t.identifier });
           },
@@ -2553,6 +2638,13 @@ export function schedulerTick(
   // `stalled` (D7 — the worker keeps its phase state, it does not bounce to
   // Triage). Status writes are idempotent via linear-transition.sh; label
   // writes are guarded once-per-run by labelOnce's marker file.
+  // CTL-758: per-ticket active signal map (carries raw.pr) for the reconcile
+  // backstop's merged check. Built once from the same readWorkerSignals the
+  // reclaim sweep used. Inert when no prAdapter is wired (production default).
+  const signalByTicket = new Map();
+  for (const sig of readWorkerSignals(orchDir)) {
+    if (sig.ticket) signalByTicket.set(sig.ticket, sig);
+  }
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
     // CTL-589 (CTL-512 followup): `skipped` is the second terminal status for
@@ -2568,6 +2660,15 @@ export function schedulerTick(
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
     }
+    // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
+    // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
+    // marker + merged PR + non-terminal live state, so it is a no-op in the common
+    // case and inert without a prAdapter.
+    reconcileTerminalBackstop(orchDir, ticket, signalByTicket.get(ticket), writeStatus, emitStateWrite, {
+      cache,
+      prAdapter,
+      fetchState: fetchTicketState,
+    });
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
     }

@@ -49,7 +49,13 @@ describe("applyPhaseStatus", () => {
       resolveRepoRoot: () => "/repo",
       exec: okExec(calls),
     });
-    const args = calls[0].args;
+    // CTL-758: the backward-write guard pre-reads current state via
+    // `linearis issues read` for non-terminal keys, so the transition shell call
+    // is no longer necessarily calls[0]. Locate it explicitly by its --transition
+    // arg (the guard read has no --transition).
+    const transitionCall = calls.find((c) => c.args.includes("--transition"));
+    expect(transitionCall).toBeDefined();
+    const args = transitionCall.args;
     expect(args).toContain("--transition");
     expect(args[args.indexOf("--transition") + 1]).toBe("verifying");
     expect(args).toContain("--ticket");
@@ -97,6 +103,101 @@ describe("applyTerminalDone", () => {
     applyTerminalDone({ ticket: "CTL-1", resolveRepoRoot: () => "/repo", exec: okExec(calls) });
     const args = calls[0].args;
     expect(args[args.indexOf("--transition") + 1]).toBe("done");
+  });
+});
+
+// CTL-758: the backward-write guard in runTransition refuses to drag a ticket
+// already at a terminal Linear state (Done/Canceled) BACK to a non-terminal
+// state — EXCEPT the forward terminal write (key === "done"), which must always
+// proceed (the CRITICAL SAFETY case: a bug here strands every monitor-deploy at PR).
+describe("CTL-758: backward-write guard", () => {
+  const resolveRepoRoot = () => "/repo";
+
+  // exec that records calls AND returns the transition shell JSON. The guard's
+  // pre-read uses a SEPARATE injected fetchState, so any --transition call in
+  // `calls` proves the shell ran.
+  function recordingExec(calls) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Done" }), stderr: "" };
+    };
+  }
+  const ranShell = (calls) => calls.some((c) => c.args.includes("--transition"));
+
+  test("terminal current + NON-terminal key (verifying) ⇒ skips the shell (exec 0 --transition calls)", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify", // → key "verifying", a non-terminal key
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      // shared cache reader proves the ticket is already Done
+      cache: { get: () => "Done", set: () => {} },
+      // when a cache hit exists fetchTicketState returns it without exec; but be
+      // explicit — the guard reads via fetchState(ticket,{exec,cache}).
+    });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("terminal-no-backward");
+    expect(r.reason).toBe("skipped-terminal-no-backward");
+    expect(r.from_state).toBe("Done");
+    expect(ranShell(calls)).toBe(false); // CRITICAL: the shell never ran
+  });
+
+  test("Canceled current + non-terminal key ⇒ skips the shell", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-2",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "Canceled", set: () => {} },
+    });
+    expect(r.skipped).toBe("terminal-no-backward");
+    expect(ranShell(calls)).toBe(false);
+  });
+
+  test("NON-terminal current + non-terminal key ⇒ shell PROCEEDS (no false block)", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-3",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "PR", set: () => {} }, // non-terminal
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true);
+  });
+
+  // ── THE CRITICAL SAFETY TEST ──────────────────────────────────────────────
+  test("forward terminal write (key='done') PROCEEDS even when current state is terminal", () => {
+    // A ticket already at Done re-confirming Done via applyTerminalDone must NOT
+    // be blocked by the guard — key === TERMINAL_LINEAR_KEY is exempt, so the
+    // guard never even reads, and the idempotent shell runs.
+    const calls = [];
+    const cacheReads = [];
+    const r = applyTerminalDone({
+      ticket: "CTL-4",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: (k) => { cacheReads.push(k); return "Done"; }, set: () => {} },
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true); // the forward Done write proceeded
+    // the guard is exempt for the terminal key → it never read the cache
+    expect(cacheReads.length).toBe(0);
+  });
+
+  test("non-terminal current + key='done' ⇒ proceeds (normal monitor-deploy Done)", () => {
+    const calls = [];
+    const r = applyTerminalDone({
+      ticket: "CTL-5",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "PR", set: () => {} },
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true);
   });
 });
 
