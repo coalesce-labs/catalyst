@@ -608,6 +608,32 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
   );
 }
 
+// CTL-755: triage→research admission-hold event — phase.advance.held.<ticket>.
+// Emitted by the scheduler's STEP-A admission gate when a triage-complete ticket
+// is NOT promoted to research this tick. `reason` distinguishes the two hold
+// classes:
+//   "blocked-by-open-dependency"     — ≥1 blocked_by dependency is non-terminal
+//                                       (the candidate is not in readyIds).
+//   "awaiting-capacity-or-priority"  — deps satisfied (in readyIds) but the
+//                                       candidate lost the priority/capacity
+//                                       selection this tick.
+// `blockers` carries the unmet blocker identifiers (empty for the capacity case).
+// Best-effort, never throws — mirrors defaultAppendDispatchRequestedEvent. The
+// scheduler emits it only-on-state-change to bound log volume.
+export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blockers }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "held",
+      reason,
+      payloadExtras: { blockers: blockers ?? [] },
+    }),
+    "advance-held",
+  );
+}
+
 // CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
 // Emitted once per reaped cooldown marker so GC activity is queryable from the
 // unified event log.

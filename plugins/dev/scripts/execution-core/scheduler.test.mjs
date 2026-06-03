@@ -663,6 +663,38 @@ function fakeDispatch({ code = 0 } = {}) {
 // schedulerTick to opt out of demotion for non-CTL-611 tests.
 const verifyOk = () => ({ ok: true });
 
+// ── CTL-755: admission-gate fetchRelations stub helpers ──
+//
+// relUnblocked — a fetchTicketRelations return for a candidate with NO open
+// dependency (non-terminal "Triage" state, no relations, given priority/labels).
+// STEP A admits it whenever a promotion slot is free. relBlockedBy — adds a
+// blocked_by inverseRelations edge (type:"blocks", issue:<blocker>) so the dep
+// graph holds the candidate until the blocker hydrates terminal.
+function relUnblocked({ priority = 2, labels = [], state = "Triage" } = {}) {
+  return {
+    state,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+    priority,
+    labels,
+  };
+}
+function relBlockedBy(blockerId, { priority = 2, labels = [], state = "Triage" } = {}) {
+  return {
+    state,
+    relations: { nodes: [] },
+    // inverseRelations {type:"blocks", issue:<blocker>} means <blocker> BLOCKS this
+    // ticket — the blocked_by edge buildDependencyEdges reads (node.issue.identifier).
+    inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: blockerId } }] },
+    priority,
+    labels,
+  };
+}
+// A fetchRelations dispatcher keyed by ticket id, falling back to relUnblocked.
+function relMap(map) {
+  return (id) => map[id] ?? relUnblocked();
+}
+
 // ── CTL-624: per-(ticket,phase) dispatch cool-down helpers ──
 describe("dispatch cool-down helpers", () => {
   test("no marker → not in cool-down", () => {
@@ -1372,6 +1404,10 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+      // CTL-755: the triage→research promotion is now admission-gated. Stub
+      // fetchRelations (unblocked) + a free slot so the gate admits CTL-7.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
@@ -1417,6 +1453,10 @@ describe("schedulerTick — new-work pull", () => {
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
       liveBackgroundCount: () => 0,
+      // CTL-755: admission-gate seam — CTL-7 (triaged-waiting) is unblocked, so
+      // it is admitted and promoted; STEP C subtracts promotedCount so the new
+      // CTL-X still gets the remaining free slot (the double-fill invariant).
+      fetchRelations: () => relUnblocked(),
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
@@ -1456,9 +1496,13 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual([]);
   });
 
-  test("a stale liveness snapshot still advances in-flight phases (advancement is count-independent)", () => {
+  test("a stale liveness snapshot still advances MID-pipeline phases (advancement is count-independent)", () => {
+    // CTL-755: the triage→research edge is now capacity-gated (held under
+    // staleness — see the dedicated staleness-holds-promotion test below). But a
+    // MID-pipeline advance (research:done → plan) is still count-independent and
+    // must fire under a stale snapshot, exactly as before.
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-7", "triage", "done"); // should advance to research
+    writeSignal("CTL-7", "research", "done"); // should advance to plan
     const dispatch = fakeDispatch();
     const eligible = [
       {
@@ -1477,8 +1521,8 @@ describe("schedulerTick — new-work pull", () => {
       liveBackgroundCount: () => 0,
       livenessIsFresh: () => false, // stale → new-work held, advancement unaffected
     });
-    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
-    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "plan" }]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "plan" }]);
     expect(r.dispatched).toEqual([]); // CTL-X held by the staleness gate
   });
 
@@ -2073,6 +2117,11 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: the triage→research promotion is admission-gated. Stub
+      // fetchRelations (unblocked + non-terminal state) and provide a free slot
+      // so the gate admits CTL-1 and the advancement sweep dispatches research.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
     });
@@ -2098,6 +2147,9 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: admission-gate seam + free slot so the promotion fires.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 20,
       debounceMs: 5,
     });
@@ -2117,6 +2169,9 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: admission-gate seam + free slot so the promotion fires.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 10,
     });
@@ -5043,9 +5098,15 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       applyPhaseStatus: () => {},
       applyTerminalDone: () => {},
       applyLabel: () => {},
+      removeLabel: () => {},
       applyEstimate: (a) => { estimateCalls.push(a); return { applied: true, reason: null }; },
     };
   }
+
+  // CTL-755: the estimate write-back rides the triage→research advance, which is
+  // now admission-gated — stub fetchRelations (unblocked) + a free slot so the
+  // promotion fires and the applyEstimate code path is reached.
+  const admit = { fetchRelations: () => relUnblocked(), liveBackgroundCount: () => 0 };
 
   test("triage.json with estimate:5 → applyEstimate called once with {ticket, estimate:5}", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -5057,6 +5118,7 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       dispatch: okDispatch,
       writeStatus: makeWriteStatus(calls),
       verifyDispatched: verifyOk,
+      ...admit,
     });
     expect(calls).toHaveLength(1);
     expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 5 });
@@ -5072,6 +5134,7 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       dispatch: okDispatch,
       writeStatus: makeWriteStatus(calls),
       verifyDispatched: verifyOk,
+      ...admit,
     });
     expect(calls).toHaveLength(0);
   });
@@ -5086,6 +5149,7 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       dispatch: okDispatch,
       writeStatus: makeWriteStatus(calls),
       verifyDispatched: verifyOk,
+      ...admit,
     });
     expect(calls).toHaveLength(0);
   });
@@ -5113,6 +5177,7 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       applyPhaseStatus: () => {},
       applyTerminalDone: () => {},
       applyLabel: () => {},
+      removeLabel: () => {},
       applyEstimate: () => { throw new Error("Linear exploded"); },
     };
     expect(() =>
@@ -5121,7 +5186,338 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
         dispatch: okDispatch,
         writeStatus,
         verifyDispatched: verifyOk,
+        ...admit,
       })
     ).not.toThrow();
+  });
+});
+
+// ── CTL-755: admission-control gate (STEP A/B/C) ──
+//
+// The triage→research promotion is admission-controlled by deps + priority +
+// capacity. A triaged-waiting ticket is dispatched to research ONLY when its
+// blockers are all terminal AND it wins the priority/capacity selection this
+// tick. Held tickets carry a dynamic blocked/waiting label (cleared on pickup).
+describe("CTL-755: admission gate", () => {
+  afterEach(() => __resetForTests());
+
+  // A writeStatus spy that records label add/remove + estimate + phase-status.
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const phaseStatus = [];
+    const ws = {
+      applyPhaseStatus: (a) => phaseStatus.push(a),
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => { applied.push(a); return { applied: true, reason: null }; },
+      removeLabel: (ticket, label) => { removed.push({ ticket, label }); return { removed: true }; },
+    };
+    return { ws, applied, removed, phaseStatus };
+  }
+
+  // A held-event spy.
+  function heldSpy() {
+    const events = [];
+    return { fn: (e) => events.push(e), events };
+  }
+
+  // An exec stub that answers `linearis issues read <id>` with a state name,
+  // keyed by identifier. Used to hydrate out-of-set blocker states (the D5 path
+  // STEP A reuses). Unknown ids → code 0 with a non-terminal placeholder.
+  function execWithStates(stateById) {
+    return (_cmd, args) => {
+      const id = args?.[2];
+      const name = stateById[id] ?? "Triage";
+      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
+    };
+  }
+
+  test("dep hold: a blocked triaged ticket is NOT dispatched, no Research write, 'blocked' label applied", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed, phaseStatus } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7 is blocked by an out-of-set blocker that is still In Progress.
+      fetchRelations: () => relBlockedBy("CTL-DEP"),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    expect(dispatch.calls).toEqual([]); // no research dispatch
+    expect(r.advanced).toEqual([]);
+    // No phase-status write for research (the soft hold never reaches it).
+    expect(phaseStatus.some((p) => p.phase === "research")).toBe(false);
+    // The "blocked" held label is applied.
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(removed).toEqual([]);
+    // The held event carries the dep reason + unmet blocker id.
+    expect(held.events).toHaveLength(1);
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "blocked-by-open-dependency",
+      blockers: ["CTL-DEP"],
+    });
+  });
+
+  test("auto-promote: when the blocker flips terminal, 'blocked' is removed and research dispatches", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7's blocker carries the "blocked" label already; now it is Done.
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "Done" }),
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    // Clear-on-pickup: the stale "blocked" label is removed, none applied.
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(applied).toEqual([]);
+  });
+
+  test("capacity hold-then-promote: 'waiting' while full, promoted + label cleared when a slot frees", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // unblocked but no free slot
+
+    // Tick 1: a live worker fills the only slot → CTL-7 is ready but un-admitted.
+    const d1 = fakeDispatch();
+    const s1 = labelSpy();
+    const h1 = heldSpy();
+    const r1 = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: d1,
+      writeStatus: s1.ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // saturated
+      fetchRelations: () => relUnblocked(),
+      appendPhaseAdvanceHeldEvent: h1.fn,
+    });
+    expect(d1.calls).toEqual([]); // no promotion
+    expect(r1.advanced).toEqual([]);
+    expect(s1.applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(h1.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "awaiting-capacity-or-priority",
+      blockers: [],
+    });
+
+    // Tick 2: the slot frees → CTL-7 is admitted, promoted, and "waiting" cleared.
+    const d2 = fakeDispatch();
+    const s2 = labelSpy();
+    const r2 = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: d2,
+      writeStatus: s2.ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // slot freed
+      fetchRelations: () => relUnblocked({ labels: ["waiting"] }),
+    });
+    expect(d2.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r2.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(s2.removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("promotion clears BOTH held labels (clear-on-pickup regression anchor)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Both stale labels present (defensive — should never co-exist, but the
+      // converge must clear both on pickup).
+      fetchRelations: () => relUnblocked({ labels: ["blocked", "waiting"] }),
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(applied).toEqual([]);
+  });
+
+  test("steady-state held tick makes ZERO applyLabel/removeLabel calls (idempotent)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Already correctly labeled "blocked" (blocker still open) → no diff.
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(applied).toEqual([]); // already labeled → no apply
+    expect(removed).toEqual([]); // nothing to remove
+  });
+
+  test("steady-state held tick re-emits NO held event (only-on-state-change)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const held = heldSpy();
+    const common = {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    };
+    schedulerTick(orchDir, common);
+    schedulerTick(orchDir, common);
+    // Two held ticks, but the held class did not change → exactly one emit.
+    expect(held.events).toHaveLength(1);
+  });
+
+  test("circular dep among triaged tickets → labelOnce(needs-human), no throw, no deadlock", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-A", "triage", "done");
+    writeSignal("CTL-B", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    // CTL-A blocked_by CTL-B and CTL-B blocked_by CTL-A → 2-node cycle.
+    const fr = relMap({
+      "CTL-A": relBlockedBy("CTL-B"),
+      "CTL-B": relBlockedBy("CTL-A"),
+    });
+    let r;
+    expect(() => {
+      r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchRelations: fr,
+      });
+    }).not.toThrow();
+    expect(dispatch.calls).toEqual([]); // neither member promotes
+    expect(r.advanced).toEqual([]);
+    // Both cycle members are flagged needs-human (labelOnce).
+    expect(applied).toContainEqual({ ticket: "CTL-A", label: "needs-human" });
+    expect(applied).toContainEqual({ ticket: "CTL-B", label: "needs-human" });
+  });
+
+  test("double-fill guard: maxParallel 2, one triaged + one new-work → exactly 2 dispatches (not 3)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done"); // triaged-waiting, promotes to research
+    const dispatch = fakeDispatch();
+    const eligible = [
+      { identifier: "CTL-X", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+    });
+    // STEP B promotes CTL-7 (+promotedCount); STEP C subtracts it so sweep 2 has
+    // exactly 1 remaining slot for CTL-X — 2 total dispatches, not 3.
+    expect(dispatch.calls).toHaveLength(2);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(r.dispatched).toEqual(["CTL-X"]);
+  });
+
+  test("double-fill guard, 1 slot: a higher-priority NEW ticket wins over a lower-priority triaged candidate", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // priority 3 (lower)
+    const dispatch = fakeDispatch();
+    // CTL-X is brand-new ready work at priority 1 (more urgent).
+    const eligible = [
+      { identifier: "CTL-X", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const { ws, applied } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked({ priority: 3 }),
+    });
+    // The single slot goes to the higher-priority new work; CTL-7 is held
+    // "waiting" (ready, lost the selection), not promoted.
+    expect(r.advanced).toEqual([]);
+    expect(r.dispatched).toEqual(["CTL-X"]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-X", phase: "research" }]);
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("staleness gate (livenessIsFresh=false) holds the triage→research promotion", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    writeSignal("CTL-7", "triage", "done"); // unblocked, slots available on paper
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // would show 3 free slots
+      livenessIsFresh: () => false, // but the snapshot is stale → hold
+      fetchRelations: () => relUnblocked(),
+    });
+    expect(dispatch.calls).toEqual([]); // promotion held
+    expect(r.advanced).toEqual([]);
+    // Deps are satisfied (in readyIds) but the promotion budget is 0 → "waiting".
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("early-exit: zero triaged-waiting tickets → fetchRelations never called (zero Linear cost)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "research", "running"); // in-flight but NOT triaged-waiting
+    let fetchCalls = 0;
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => { fetchCalls++; return relUnblocked(); },
+    });
+    expect(fetchCalls).toBe(0); // STEP A early-exited
+  });
+
+  test("read-failure (fetchRelations → null) fails SAFE: the candidate is held", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => null, // read failed → non-terminal sentinel → held
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(r.advanced).toEqual([]);
   });
 });
