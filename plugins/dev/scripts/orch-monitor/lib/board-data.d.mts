@@ -33,6 +33,14 @@ export interface BoardPhaseTiming {
   durationMs: number | null;
 }
 
+export interface BoardCurrentPhase {
+  phase: string;
+  status: string;
+  model: string | null;
+  startedAt?: string;
+  updatedAt?: string;
+}
+
 export interface BoardTicket {
   id: string;
   title: string;
@@ -96,4 +104,5 @@ export const PHASE_ORDER: string[];
 export const PHASE_TO_LINEAR: Record<string, string>;
 export const TERMINAL: Set<string>;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
+export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
 export function assembleBoard(): Promise<BoardPayload>;
