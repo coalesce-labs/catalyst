@@ -207,6 +207,88 @@ if [[ -n $CONFIG_PATH ]]; then
 		if [[ $execution_core_gaps -gt 0 ]]; then
 			warnings+=("  Run setup-catalyst or plugins/dev/scripts/setup-execution-core-states.sh to fix the contract")
 		fi
+
+		# Linear git-automation drift check (CTL-759). The execution-core pipeline
+		# is the authority on Linear state; a `review` git automation, or a
+		# `start`/`merge` automation pointed somewhere other than PR/Done, is the
+		# CTL-758 backward-write footgun. This is a hot-path check, so the live
+		# gitAutomationStates query is TTL-gated behind a per-team cache; a fresh
+		# cache short-circuits the API call entirely. No per-project token → SOFT
+		# skip (no warning) — a token is required to query, and its absence is
+		# already surfaced elsewhere.
+		GIT_AUTO_TOKEN=""
+		if [[ -n $PROJECT_KEY ]]; then
+			GIT_AUTO_SECRETS="${CATALYST_CONFIG}/config-${PROJECT_KEY}.json"
+			if [[ -f $GIT_AUTO_SECRETS ]]; then
+				GIT_AUTO_TOKEN=$(jq -r '.catalyst.linear.apiToken // .linear.apiToken // empty' \
+					"$GIT_AUTO_SECRETS" 2>/dev/null)
+			fi
+		fi
+		if [[ -n $GIT_AUTO_TOKEN && -n $TEAM_KEY ]]; then
+			GIT_AUTO_CACHE="${CATALYST_CONFIG}/linear-git-automation-cache.json"
+			GIT_AUTO_TTL=$((6 * 60 * 60)) # 6h — automations rarely change
+			git_auto_nodes=""
+			git_auto_fresh=""
+			if [[ -f $GIT_AUTO_CACHE ]]; then
+				cache_ts=$(jq -r --arg k "$TEAM_KEY" '.[$k].fetchedAt // empty' \
+					"$GIT_AUTO_CACHE" 2>/dev/null)
+				if [[ -n $cache_ts ]]; then
+					now_ts=$(date +%s)
+					age=$((now_ts - cache_ts))
+					if [[ $age -ge 0 && $age -lt $GIT_AUTO_TTL ]]; then
+						git_auto_fresh="yes"
+						git_auto_nodes=$(jq -c --arg k "$TEAM_KEY" '.[$k].nodes // []' \
+							"$GIT_AUTO_CACHE" 2>/dev/null)
+					fi
+				fi
+			fi
+
+			if [[ -z $git_auto_fresh ]] && command -v curl &>/dev/null; then
+				# Cache miss/stale → one live query, then persist keyed by teamKey.
+				ga_query='query($teamKey: String!) { teams(filter: { key: { eq: $teamKey } }) { nodes { gitAutomationStates { nodes { id event state { id name } } } } } }'
+				ga_payload=$(jq -nc --arg q "$ga_query" --arg k "$TEAM_KEY" \
+					'{query: $q, variables: {teamKey: $k}}')
+				ga_resp=$(curl -s --max-time 5 -X POST https://api.linear.app/graphql \
+					-H "Content-Type: application/json" \
+					-H "Authorization: ${GIT_AUTO_TOKEN}" \
+					-d "$ga_payload" 2>/dev/null || true)
+				if [[ -n $ga_resp ]] && ! echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					git_auto_nodes=$(echo "$ga_resp" \
+						| jq -c '.data.teams.nodes[0].gitAutomationStates.nodes // []' 2>/dev/null)
+					if [[ -n $git_auto_nodes && $git_auto_nodes != "null" ]]; then
+						mkdir -p "$CATALYST_CONFIG"
+						tmp_cache="$(mktemp)"
+						existing_cache='{}'
+						[[ -f $GIT_AUTO_CACHE ]] && existing_cache="$(cat "$GIT_AUTO_CACHE" 2>/dev/null || echo '{}')"
+						echo "$existing_cache" | jq \
+							--arg k "$TEAM_KEY" \
+							--argjson nodes "$git_auto_nodes" \
+							--argjson ts "$(date +%s)" \
+							'.[$k] = { fetchedAt: $ts, nodes: $nodes }' \
+							> "$tmp_cache" 2>/dev/null \
+							&& mv "$tmp_cache" "$GIT_AUTO_CACHE" \
+							|| rm -f "$tmp_cache"
+					fi
+				fi
+			fi
+
+			# Evaluate whatever nodes we have (cached or freshly fetched).
+			if [[ -n $git_auto_nodes && $git_auto_nodes != "null" && $git_auto_nodes != "[]" ]]; then
+				review_count=$(echo "$git_auto_nodes" | jq -r '[.[] | select(.event == "review")] | length' 2>/dev/null || echo 0)
+				start_state=$(echo "$git_auto_nodes" | jq -r '[.[] | select(.event == "start")][0].state.name // empty' 2>/dev/null)
+				merge_state=$(echo "$git_auto_nodes" | jq -r '[.[] | select(.event == "merge")][0].state.name // empty' 2>/dev/null)
+				if [[ ${review_count:-0} -gt 0 ]]; then
+					warnings+=("Linear 'review' git automation is set for team '$TEAM_KEY' — it conflicts with execution-core state authority (CTL-758)")
+					warnings+=("  Run plugins/dev/scripts/setup-execution-core-states.sh to remove it")
+				fi
+				if [[ -n $start_state && $start_state != "PR" ]]; then
+					warnings+=("Linear 'start' git automation for team '$TEAM_KEY' points at '$start_state' (expected 'PR')")
+				fi
+				if [[ -n $merge_state && $merge_state != "Done" ]]; then
+					warnings+=("Linear 'merge' git automation for team '$TEAM_KEY' points at '$merge_state' (expected 'Done')")
+				fi
+			fi
+		fi
 	fi
 
 	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log.

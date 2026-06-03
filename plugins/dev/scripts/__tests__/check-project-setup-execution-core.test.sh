@@ -172,6 +172,105 @@ else
   fail "phase-agents missing registry stays exit 0 (got rc=$RC8)"
 fi
 
+# ─── CTL-759: Linear git-automation drift check (hot-path, TTL-cached) ───────
+#
+# These tests exercise the execution-core git-automation block. They need:
+#   - a per-project secrets file holding an apiToken (else SOFT skip)
+#   - a fake `curl` on PATH returning canned gitAutomationStates
+#   - a per-test XDG dir so the cache + secrets are hermetic
+#
+# ga_curl_log records bodies so we can assert the live query was / was not issued.
+
+# build_ga_secrets <xdg-dir> — write config-test-project.json with a token.
+build_ga_secrets() {
+  local xdg="$1"
+  mkdir -p "${xdg}/catalyst"
+  cat > "${xdg}/catalyst/config-test-project.json" <<'EOF'
+{ "catalyst": { "linear": { "apiToken": "lin_api_fake_ga_token" } } }
+EOF
+}
+
+# install_ga_curl <bin> <log> <nodes-json> — fake curl returning the team's
+# gitAutomationStates nodes; logs every request body to <log>.
+install_ga_curl() {
+  local bin="$1" log="$2" nodes="$3"
+  mkdir -p "$bin"
+  cat > "${bin}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+echo "live-query-issued" >> "${log}"
+echo '{"data":{"teams":{"nodes":[{"gitAutomationStates":{"nodes":${nodes}}}]}}}'
+exit 0
+SCRIPT
+  chmod +x "${bin}/curl"
+}
+
+# run_check_ga <cwd> <catalyst-dir> <xdg> <bin> — like run_check but threads a
+# custom XDG_CONFIG_HOME and prepends a fake-curl bin dir to PATH.
+run_check_ga() {
+  local cwd="$1" catalyst_dir="$2" xdg="$3" bin="$4"
+  ( cd "$cwd" \
+    && env -i HOME="$HOME" PATH="${bin}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin" \
+       CATALYST_AUTONOMOUS=1 CATALYST_DIR="$catalyst_dir" \
+       XDG_CONFIG_HOME="$xdg" \
+       bash "$SCRIPT" 2>&1 )
+}
+
+# ─── Test 9: review node + start!=PR + merge!=Done → three warnings ──────────
+P9="${SCRATCH}/p9"
+CD9="$(build_project "$P9" "execution-core" 1 1)"
+XDG9="${SCRATCH}/p9-xdg"; BIN9="${SCRATCH}/p9-bin"; LOG9="${SCRATCH}/p9-curl.log"
+build_ga_secrets "$XDG9"
+install_ga_curl "$BIN9" "$LOG9" \
+  '[{"id":"ga-s","event":"start","state":{"id":"x","name":"Triage"}},{"id":"ga-m","event":"merge","state":{"id":"y","name":"Validate"}},{"id":"ga-r","event":"review","state":{"id":"z","name":"Validate"}}]'
+OUT9="$(run_check_ga "$P9" "$CD9" "$XDG9" "$BIN9" || true)"
+if grep -qi "review" <<<"$OUT9" \
+   && grep -qiE "start.*Triage|points at 'Triage'" <<<"$OUT9" \
+   && grep -qiE "merge.*Validate|points at 'Validate'" <<<"$OUT9"; then
+  pass "git-automation drift warns on review + start!=PR + merge!=Done"
+else
+  fail "git-automation drift warns on review + start!=PR + merge!=Done"
+  echo "$OUT9" | sed 's/^/    /'
+fi
+
+# ─── Test 10: no per-project token → SOFT skip (no git-automation warning) ───
+P10="${SCRATCH}/p10"
+CD10="$(build_project "$P10" "execution-core" 1 1)"
+XDG10="${SCRATCH}/p10-xdg"; BIN10="${SCRATCH}/p10-bin"; LOG10="${SCRATCH}/p10-curl.log"
+mkdir -p "${XDG10}/catalyst"   # XDG dir exists but NO secrets file → no token
+install_ga_curl "$BIN10" "$LOG10" '[]'
+OUT10="$(run_check_ga "$P10" "$CD10" "$XDG10" "$BIN10" || true)"
+if ! grep -qiE "git automation" <<<"$OUT10" && [[ ! -f "$LOG10" ]]; then
+  pass "no token → SOFT skip (no warning, no live query)"
+else
+  fail "no token → SOFT skip (no warning, no live query)"
+  echo "$OUT10" | sed 's/^/    /'
+fi
+
+# ─── Test 11: fresh cache → live query NOT re-issued ─────────────────────────
+P11="${SCRATCH}/p11"
+CD11="$(build_project "$P11" "execution-core" 1 1)"
+XDG11="${SCRATCH}/p11-xdg"; BIN11="${SCRATCH}/p11-bin"; LOG11="${SCRATCH}/p11-curl.log"
+build_ga_secrets "$XDG11"
+install_ga_curl "$BIN11" "$LOG11" '[]'
+# Seed a fresh cache (fetchedAt = now) for team CTL with clean (no-drift) nodes.
+NOW_TS="$(date +%s)"
+cat > "${XDG11}/catalyst/linear-git-automation-cache.json" <<EOF
+{ "CTL": { "fetchedAt": ${NOW_TS}, "nodes": [
+  {"id":"ga-s","event":"start","state":{"id":"x","name":"PR"}},
+  {"id":"ga-m","event":"merge","state":{"id":"y","name":"Done"}}
+] } }
+EOF
+OUT11="$(run_check_ga "$P11" "$CD11" "$XDG11" "$BIN11" || true)"
+if [[ ! -f "$LOG11" ]] && ! grep -qiE "git automation" <<<"$OUT11"; then
+  pass "fresh cache → live query not re-issued, no drift warning"
+else
+  fail "fresh cache → live query not re-issued, no drift warning"
+  [[ -f "$LOG11" ]] && echo "    (live query was issued — cache not honored)"
+  echo "$OUT11" | sed 's/^/    /'
+fi
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]

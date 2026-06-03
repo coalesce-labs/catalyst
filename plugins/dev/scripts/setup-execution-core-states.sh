@@ -77,6 +77,22 @@ missing_contract_states() {
   done
 }
 
+# The desired Linear git-automation contract (CTL-759). Linear can auto-move a
+# ticket on git events (PR opened / under review / merged). The execution-core
+# pipeline is the authority on Linear state, so we pin exactly two automations —
+# `start`→PR and `merge`→Done — and DELETE any `review` node. Linear's UI-only
+# "magic words" toggle (move on branch-name match) must stay OFF; that path is
+# the CTL-758 backward-write footgun and is not represented here.
+#
+# Keep in sync with contract_states() above (Done is a workflow `completed`
+# state Linear ships by default; PR is one of our contract states).
+desired_git_automations() {
+  jq -nc '[
+    { event: "start", state: "PR"   },
+    { event: "merge", state: "Done" }
+  ]'
+}
+
 # build_workflow_state_create_mutation <teamId> <name> <type> <color> —
 # the raw GraphQL mutation string that creates one workflow state. `color` is
 # cosmetic; see CONTRACT_STATE_COLOR.
@@ -131,6 +147,117 @@ linear_graphql_post() {
     -H "Content-Type: application/json" \
     -H "Authorization: ${token}" \
     -d "$payload" 2>&1
+}
+
+# --- Linear git-automation reconcile (CTL-759) ------------------------------
+# reconcile_git_automation_states <team_id> <token> <fetched_states_json>
+#
+# Drives the team's git automations to the desired_git_automations() contract:
+#   start → PR    (create or update the existing node's stateId)
+#   merge → Done  (create or update)
+#   review        → delete every existing node (we never auto-move on review)
+#
+# Reuses linear_graphql_post. State-ids are resolved from the already-fetched
+# workflow states (no extra round-trip). Tolerant: every Linear failure prints a
+# WARNING and continues — this is a best-effort hardening step, NOT a gate, so it
+# never alters the exit codes (3/4) the caller depends on. A target state that
+# does not exist in the team's workflow → WARN and skip that automation; we never
+# issue a create/update with a null stateId.
+#
+# Idempotent: the live CTL team is already start→PR / merge→Done (review cleared),
+# so this is a no-op there; value is durability at install + drift correction +
+# coverage for ADV / future teams.
+reconcile_git_automation_states() {
+  local team_id="$1" token="$2" fetched_states="$3"
+
+  # Resolve target state-ids from the fetched workflow states (by name).
+  local pr_state_id done_state_id
+  pr_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "PR")) | .[0].id // empty')
+  done_state_id=$(echo "$fetched_states" | jq -r 'map(select(.name == "Done")) | .[0].id // empty')
+
+  # Fetch existing git automations for the team (id + event + target state id).
+  local ga_query ga_payload ga_resp existing
+  # shellcheck disable=SC2016
+  ga_query='query($teamId: String!) { team(id: $teamId) { gitAutomationStates { nodes { id event state { id name } } } } }'
+  ga_payload=$(jq -nc --arg q "$ga_query" --arg t "$team_id" '{query: $q, variables: {teamId: $t}}')
+  ga_resp=$(linear_graphql_post "$token" "$ga_payload")
+  if echo "$ga_resp" | jq -e '.errors' >/dev/null 2>&1; then
+    local ga_err
+    ga_err=$(echo "$ga_resp" | jq -r '.errors[0].message // "unknown error"')
+    echo "WARNING: could not read git automations for team — skipping reconcile: $ga_err" >&2
+    return 0
+  fi
+  existing=$(echo "$ga_resp" | jq -c '.data.team.gitAutomationStates.nodes // []' 2>/dev/null)
+  if [[ -z $existing || $existing == "null" ]]; then
+    existing='[]'
+  fi
+
+  # upsert <event> <target_state_id> — create the node if absent, else update
+  # its stateId. Never called with an empty target id (caller guards).
+  _ga_upsert() {
+    local event="$1" state_id="$2"
+    local node_id mutation payload resp
+    node_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].id // empty')
+    if [[ -n $node_id ]]; then
+      # No change needed if the node already points at the desired state.
+      local cur_state_id
+      cur_state_id=$(echo "$existing" | jq -r --arg e "$event" 'map(select(.event == $e)) | .[0].state.id // empty')
+      if [[ $cur_state_id == "$state_id" ]]; then
+        echo "Git automation '${event}' already correct"
+        return 0
+      fi
+      # shellcheck disable=SC2016
+      mutation='mutation($id: String!, $input: GitAutomationStateUpdateInput!) { gitAutomationStateUpdate(id: $id, input: $input) { success } }'
+      payload=$(jq -nc --arg q "$mutation" --arg id "$node_id" --arg s "$state_id" \
+        '{query: $q, variables: {id: $id, input: {stateId: $s}}}')
+    else
+      # shellcheck disable=SC2016
+      mutation='mutation($input: GitAutomationStateCreateInput!) { gitAutomationStateCreate(input: $input) { success } }'
+      payload=$(jq -nc --arg q "$mutation" --arg t "$team_id" --arg e "$event" --arg s "$state_id" \
+        '{query: $q, variables: {input: {teamId: $t, event: $e, stateId: $s}}}')
+    fi
+    resp=$(linear_graphql_post "$token" "$payload")
+    if echo "$resp" | jq -e '.errors' >/dev/null 2>&1 \
+      || [[ "$(echo "$resp" | jq -r '.data.gitAutomationStateCreate.success // .data.gitAutomationStateUpdate.success // false')" != "true" ]]; then
+      echo "WARNING: failed to set git automation '${event}' → state ${state_id}" >&2
+    else
+      echo "Set git automation '${event}' → desired state"
+    fi
+  }
+
+  # START → PR
+  if [[ -z $pr_state_id ]]; then
+    echo "WARNING: target state 'PR' not found in team workflow — skipping 'start' git automation (no null stateId issued)" >&2
+  else
+    _ga_upsert "start" "$pr_state_id"
+  fi
+
+  # MERGE → Done
+  if [[ -z $done_state_id ]]; then
+    echo "WARNING: target state 'Done' not found in team workflow — skipping 'merge' git automation (no null stateId issued)" >&2
+  else
+    _ga_upsert "merge" "$done_state_id"
+  fi
+
+  # REVIEW → delete each existing review node (we never auto-move on review).
+  local review_id review_ids del_mutation del_payload del_resp
+  review_ids=$(echo "$existing" | jq -r 'map(select(.event == "review")) | .[].id')
+  for review_id in $review_ids; do
+    [[ -z $review_id ]] && continue
+    # shellcheck disable=SC2016
+    del_mutation='mutation($id: String!) { gitAutomationStateDelete(id: $id) { success } }'
+    del_payload=$(jq -nc --arg q "$del_mutation" --arg id "$review_id" '{query: $q, variables: {id: $id}}')
+    del_resp=$(linear_graphql_post "$token" "$del_payload")
+    if echo "$del_resp" | jq -e '.errors' >/dev/null 2>&1 \
+      || [[ "$(echo "$del_resp" | jq -r '.data.gitAutomationStateDelete.success // false')" != "true" ]]; then
+      echo "WARNING: failed to delete 'review' git automation node ${review_id}" >&2
+    else
+      echo "Deleted 'review' git automation node"
+    fi
+  done
+
+  unset -f _ga_upsert
+  return 0
 }
 
 # --- main -------------------------------------------------------------------
@@ -377,6 +504,13 @@ main() {
     fi
     rm -f "$upsert_err"
   fi
+
+  # --- reconcile Linear git automations (CTL-759) — the LAST Linear step ---
+  # Best-effort hardening: pins start→PR / merge→Done and removes any review
+  # automation, the install-time complement to the daemon's CTL-758 backward-
+  # write guard. Tolerant by design — it prints WARNINGs and continues, and
+  # never touches the 3/4 exit codes the caller (setup-catalyst.sh) consumes.
+  reconcile_git_automation_states "$team_id" "$token" "$fetched_states" || true
 
   # --- summary ---
   if [[ $json_out -eq 1 ]]; then

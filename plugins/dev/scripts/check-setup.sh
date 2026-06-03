@@ -303,6 +303,21 @@ if [[ -f "$HOME_CONFIG_PATH" ]]; then
     fi
 fi
 
+# ─── Linear Git Automation (CTL-759) ───────────────────────────────────────
+
+header "Linear Git Automation"
+
+# The execution-core pipeline is the single authority on Linear ticket state.
+# Linear's branch-name "magic words" toggle (Settings → Team → Workflow → Git)
+# auto-moves a ticket when a branch/PR name matches the ticket id — which races
+# the daemon and produces the CTL-758 backward-write footgun. This is a UI-only
+# setting with no API surface, so we cannot read or fix it from here; surface a
+# static reminder. The git-automation STATE moves (start→PR, merge→Done) are
+# managed for you by setup-execution-core-states.sh.
+warn "Linear 'magic words' auto-move must be OFF (Settings → Team → Workflow → Git)"
+info "It races the execution-core daemon (CTL-758 backward-write). Disable it in the Linear UI."
+info "Git-automation state moves (start→PR, merge→Done) are reconciled by setup-execution-core-states.sh."
+
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
 
 header "Observability Stack (optional)"
