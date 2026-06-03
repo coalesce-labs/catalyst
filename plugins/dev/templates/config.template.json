@@ -45,6 +45,12 @@
       "_comment": "Semantic event routing via Groq. Set GROQ_API_KEY env var to enable.",
       "groqModel": "llama-3.1-8b-instant"
     },
+    "monitor": {
+      "linear": {
+        "_comment": "Linear app-actor identity for loop prevention (CTL-550/549/749). botUserId is the Linear user UUID of the installed Catalyst Linear app — it is the self-echo guard that keeps the agent's own mirror comments/issue events out of the worker inbox and event log. Required for the Linear app-actor comms channel — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749). Not secret, but workspace-specific — keep null in committed templates and set it in your local .catalyst/config.json. Obtain via: TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-{projectKey}.json) && curl -s -X POST https://api.linear.app/graphql -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"query\":\"query{viewer{id}}\"}' | jq -r .data.viewer.id — then restart the monitor and execution-core (both read it only at startup).",
+        "botUserId": null
+      }
+    },
     "orchestration": {
       "_comment": "Worker dispatch mode. 'phase-agents' (default) dispatches the 9-phase pipeline on claude --bg; 'oneshot-legacy' keeps the pre-CTL-452 single-shot oneshot worker on claude -p.",
       "dispatchMode": "phase-agents",

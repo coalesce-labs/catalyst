@@ -90,6 +90,56 @@ cp plugins/dev/templates/config.template.json .catalyst/config.json
 All `stateMap` values must exactly match the state names in your Linear team. The daemon uses
 these to transition tickets as phases complete.
 
+#### Linear Webhook Bot Identity
+
+```jsonc
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "botUserId": null               // Linear user UUID of the Catalyst app-actor
+      }
+    }
+  }
+}
+```
+
+`monitor.linear.botUserId` is the Linear user UUID of the Catalyst app-actor — the "Linear for
+Agents" app user that posts comments **as the app**. It is the self-echo / loop-prevention guard
+for the whole Linear app-actor comms channel:
+
+- The orch-monitor server uses it to suppress bot-authored issue events so the app's own writes
+  don't feed back into the event log as write loops.
+- The execution-core daemon uses it to filter the agent's own mirror comments and
+  description-updates out of each worker's `inbox.jsonl`, so a human reply on a ticket is the
+  only thing that wakes a parked worker (not the agent's own echo).
+
+**When to set it:** required for the Linear app-actor comms channel — i.e. when the execution-core
+daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 /
+CTL-749). Without it, the system cannot tell the agent's own comments apart from a human's. The
+value is not secret (it appears on every comment the app posts) but it **is workspace-specific**,
+so the committed config ships `null` and each operator fills in their own.
+
+**How to obtain it:** query `viewer.id` with the app-actor token. The app OAuth credentials live
+in the per-project Layer-2 file (`~/.config/catalyst/config-<projectKey>.json` →
+`catalyst.linear.agent.{clientId,clientSecret,accessToken}`). Using the stored access token:
+
+```bash
+TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-<projectKey>.json)
+BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
+```
+
+Write `$BOT_ID` into `.catalyst/config.json` → `catalyst.monitor.linear.botUserId`, then restart
+both readers (they read `botUserId` only at startup):
+
+```bash
+catalyst-monitor stop && catalyst-monitor start
+catalyst-execution-core restart
+```
+
 #### Orchestration
 
 ```jsonc

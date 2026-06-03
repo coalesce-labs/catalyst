@@ -438,6 +438,22 @@ main() {
     echo "Missing states: $missing" >&2
   fi
 
+  # --- check the Linear app-actor identity (CTL-749) ---
+  # The execution-core daemon reads catalyst.monitor.linear.botUserId at startup
+  # to filter the agent's OWN mirror comments/description-updates out of each
+  # worker's inbox.jsonl (self-echo / write-loop guard). Without it set, the
+  # agent's comments are written back as if a human replied, and bot-authored
+  # issue events feed back into the event log as loops. This is a prerequisite,
+  # not a hard failure here — warn and continue.
+  local bot_id
+  bot_id=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
+  if [[ -z $bot_id ]]; then
+    echo "WARNING: catalyst.monitor.linear.botUserId not set in $config" >&2
+    echo "  execution-core needs it for CTL-749 self-echo filtering of the agent's own" >&2
+    echo "  Linear comments/updates. Obtain it by querying viewer.id with the app-actor" >&2
+    echo "  token from ~/.config/catalyst/config-${project_key}.json, then set it here." >&2
+  fi
+
   # --- write the execution-core stateMap (atomic tmp + mv) ---
   jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
     "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
