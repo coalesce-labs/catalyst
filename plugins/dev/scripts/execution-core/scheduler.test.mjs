@@ -5421,6 +5421,107 @@ describe("CTL-755: admission gate", () => {
     expect(applied).toContainEqual({ ticket: "CTL-B", label: "needs-human" });
   });
 
+  test("triaged-blocks-triaged chain: the unblocked foundation promotes; the dependent is held 'blocked'", () => {
+    // CTL-A (foundation, no blocker) blocks CTL-B (dependent). Both are
+    // triaged-waiting in the SAME tick, so both land in admissionPool. The dep
+    // graph sees A→B with A non-terminal ("Triage") → B is NOT ready, A IS.
+    // Per design open-question #5: the chain must promote A and HOLD B, never
+    // promote B while its sibling blocker is still non-terminal.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    writeSignal("CTL-A", "triage", "done");
+    writeSignal("CTL-B", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const held = heldSpy();
+    // CTL-B is blocked_by CTL-A; CTL-A has no blocker. Both resolve in-set
+    // (they ARE the admissionPool descriptors), so no exec hydration needed.
+    const fr = relMap({
+      "CTL-A": relUnblocked(),
+      "CTL-B": relBlockedBy("CTL-A"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // 3 free slots — capacity is NOT the gate here
+      fetchRelations: fr,
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    // Only the foundation promotes; the dependent never reaches research.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-A", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-A", phase: "research" }]);
+    // CTL-B is held "blocked" (its in-set blocker CTL-A is still non-terminal),
+    // and the held event names CTL-A as the unmet blocker.
+    expect(applied).toContainEqual({ ticket: "CTL-B", label: "blocked" });
+    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "blocked" });
+    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "waiting" });
+    const bHeld = held.events.find((e) => e.ticket === "CTL-B");
+    expect(bHeld).toMatchObject({ reason: "blocked-by-open-dependency", blockers: ["CTL-A"] });
+  });
+
+  test("epic fan-out: while the foundation is non-terminal NO dependent leaves triage→research", () => {
+    // FOUND blocks three leaves L1/L2/L3 (the classic epic shape: one foundation
+    // ticket, three dependent features). All four are triaged-waiting this tick.
+    // FOUND is non-terminal → every leaf is held "blocked", none promotes; only
+    // FOUND (the root, ready) advances even though there are slots for all four.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 6 }));
+    for (const t of ["CTL-FOUND", "CTL-L1", "CTL-L2", "CTL-L3"]) writeSignal(t, "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const fr = relMap({
+      "CTL-FOUND": relUnblocked(),
+      "CTL-L1": relBlockedBy("CTL-FOUND"),
+      "CTL-L2": relBlockedBy("CTL-FOUND"),
+      "CTL-L3": relBlockedBy("CTL-FOUND"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // 6 free slots — capacity is NOT the gate
+      fetchRelations: fr,
+    });
+    // Exactly one promotion: the foundation. No leaf reaches research while its
+    // blocker is non-terminal — even with ample capacity.
+    expect(r.advanced).toEqual([{ ticket: "CTL-FOUND", phase: "research" }]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-FOUND", phase: "research" }]);
+    for (const leaf of ["CTL-L1", "CTL-L2", "CTL-L3"]) {
+      expect(applied).toContainEqual({ ticket: leaf, label: "blocked" });
+    }
+  });
+
+  test("epic fan-out: once the foundation is terminal (out-of-set Done) the leaves become ready", () => {
+    // Same fan-out, but the foundation has already finished — it is NOT in the
+    // triaged-waiting pool (no worker dir), so it is an OUT-OF-SET blocker
+    // hydrated via exec. A terminal (Done) out-of-set blocker no longer blocks →
+    // all three leaves are ready and (with capacity) promote.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 6 }));
+    for (const t of ["CTL-L1", "CTL-L2", "CTL-L3"]) writeSignal(t, "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const fr = relMap({
+      "CTL-L1": relBlockedBy("CTL-FOUND"),
+      "CTL-L2": relBlockedBy("CTL-FOUND"),
+      "CTL-L3": relBlockedBy("CTL-FOUND"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: fr,
+      // CTL-FOUND is out-of-set; hydrate it Done so it no longer blocks.
+      exec: execWithStates({ "CTL-FOUND": "Done" }),
+    });
+    const promoted = r.advanced.map((a) => a.ticket).sort();
+    expect(promoted).toEqual(["CTL-L1", "CTL-L2", "CTL-L3"]);
+    // None held "blocked" once the foundation is terminal.
+    expect(applied.filter((a) => a.label === "blocked")).toEqual([]);
+  });
+
   test("double-fill guard: maxParallel 2, one triaged + one new-work → exactly 2 dispatches (not 3)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-7", "triage", "done"); // triaged-waiting, promotes to research
