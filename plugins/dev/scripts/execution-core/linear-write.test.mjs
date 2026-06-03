@@ -212,7 +212,7 @@ describe("CTL-758: backward-write guard", () => {
     // One exec serves BOTH the guard's cached `linearis issues read` AND any
     // `linear-transition.sh --transition` shell. Only the read path increments
     // `reads`; a non-terminal state means the guard proceeds to the shell.
-    const exec = (cmd, args) => {
+    const exec = (_cmd, args) => {
       if (args[0] === "issues" && args[1] === "read") {
         reads += 1;
         return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };
@@ -228,7 +228,7 @@ describe("CTL-758: backward-write guard", () => {
 
   test("WITHOUT a shared cache the guard re-reads each write (proves the cache is what dedups)", () => {
     let reads = 0;
-    const exec = (cmd, args) => {
+    const exec = (_cmd, args) => {
       if (args[0] === "issues" && args[1] === "read") {
         reads += 1;
         return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };

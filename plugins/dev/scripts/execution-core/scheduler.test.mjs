@@ -51,6 +51,7 @@ import {
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
   __resetForTests,
+  __getRunningOpts,
   // CTL-705: Phase 2 helpers
   STAGE_RANK,
   stageRankForTicket,
@@ -1423,7 +1424,7 @@ describe("schedulerTick — new-work pull", () => {
     writeSignal("CTL-7", "triage", "done"); // research is owed
     const stateWrites = [];
     const writeStatus = {
-      applyPhaseStatus: ({ phase }) => ({
+      applyPhaseStatus: () => ({
         applied: true,
         reason: null,
         action: "transitioned",
@@ -2358,6 +2359,32 @@ describe("startScheduler / stopScheduler", () => {
       debounceMs: 5,
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-1", phase: "research" }]);
+  });
+
+  // CTL-642/758 REGRESSION: the production startScheduler path MUST construct +
+  // thread a live prAdapter whose `.prView` is a function. The original bug was
+  // that schedulerTick's `prAdapter` defaulted to undefined and the daemon call
+  // site (runTick) never passed one — so the CTL-642 recovery short-circuit's
+  // pr-merged branch AND the CTL-758 reconcile backstop were BOTH inert in
+  // production (gate-2 returns early on `!prAdapter`). Tests injected a fake
+  // prAdapter so they stayed green while prod never exercised it. This locks the
+  // wiring: with NO prAdapter override, startScheduler must build the real one.
+  test("CTL-642/758: production path threads a live prAdapter with a prView function", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+      // NB: no prAdapter override — assert the default-constructed one.
+    });
+    const opts = __getRunningOpts();
+    expect(opts).not.toBeNull();
+    expect(opts.prAdapter).toBeDefined();
+    expect(typeof opts.prAdapter.prView).toBe("function");
   });
 
   // CTL-665: startScheduler's forward of the threaded `concurrency` into the

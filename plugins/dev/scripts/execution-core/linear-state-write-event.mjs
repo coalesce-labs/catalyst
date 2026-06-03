@@ -9,8 +9,9 @@
 // injectable append seam, same swallow-on-error contract. Kept a separate module
 // because it is a DIFFERENT event family: triage's auto Todo→Triage transition
 // keeps its own phase.triage.linear-transition.<T> event (CTL-704); this one
-// covers the FIVE scheduler write sites (scheduler-advance, parked-redispatch,
-// preemption-resume, terminal-sweep, reconcile-backstop — CTL-758).
+// covers the FOUR scheduler write sites (scheduler-advance, preemption-resume,
+// terminal-sweep, reconcile-backstop — CTL-758). (`parked-redispatch` is not a
+// distinct source tag — it reuses the advance / preemption-resume write sites.)
 //
 // CALLER-EMITS: the helper is invoked from each scheduler write site (where the
 // source/phase/reason are known), NOT from inside runTransition — emitting inside

@@ -37,6 +37,48 @@ function repoSlug(worktree) {
   return m ? m[1] : null;
 }
 
+// makePrView — the single source of truth for the gh PR-view adapter method.
+// Both the scan CLI (makeScanAdapters) and the execution-core daemon scheduler
+// (CTL-642 recovery short-circuit + CTL-758 reconcile backstop) need the exact
+// same `gh -R <slug> pr view <n> --json state,mergeStateStatus,mergedAt,mergeCommit`
+// call with identical normalization; factoring it here keeps that one gh
+// invocation DRY rather than copy-pasted into two consumers that could drift.
+//
+// `worktreeFor(ticket)` resolves the worktree used to derive the repo slug when
+// the caller's `pr` object carries no `.repo` (the execution-core signal `pr` is
+// `{number, url}` — no repo — so the daemon path always resolves via the
+// worktree's `origin` remote). Fail-soft: an unresolvable slug / missing PR
+// number yields an UNKNOWN view rather than throwing.
+export function makePrView(worktreeFor) {
+  return (ticket, pr) => {
+    const slug = pr?.repo ?? repoSlug(worktreeFor(ticket));
+    if (!slug || !pr?.number) {
+      return {
+        state: "UNKNOWN",
+        mergeStateStatus: "UNKNOWN",
+        mergedAt: null,
+        mergeCommitSha: null,
+      };
+    }
+    const json = run("gh", [
+      "-R",
+      slug,
+      "pr",
+      "view",
+      String(pr.number),
+      "--json",
+      "state,mergeStateStatus,mergedAt,mergeCommit",
+    ]);
+    const v = parseJson(json, {});
+    return {
+      state: v.state ?? "UNKNOWN",
+      mergeStateStatus: v.mergeStateStatus ?? "UNKNOWN",
+      mergedAt: v.mergedAt ?? null,
+      mergeCommitSha: v.mergeCommit?.oid ?? null,
+    };
+  };
+}
+
 // makeScanAdapters — build the adapter bundle for runScan.
 //
 // `worktreeFor(ticket)` resolves a worker's worktree path. The orchestrator
@@ -102,33 +144,7 @@ export function makeScanAdapters({
       if (!Array.isArray(arr) || arr.length === 0) return null;
       return { ...arr[0], repo: slug };
     },
-    prView: (ticket, pr) => {
-      const slug = pr?.repo ?? repoSlug(worktreeFor(ticket));
-      if (!slug || !pr?.number) {
-        return {
-          state: "UNKNOWN",
-          mergeStateStatus: "UNKNOWN",
-          mergedAt: null,
-          mergeCommitSha: null,
-        };
-      }
-      const json = run("gh", [
-        "-R",
-        slug,
-        "pr",
-        "view",
-        String(pr.number),
-        "--json",
-        "state,mergeStateStatus,mergedAt,mergeCommit",
-      ]);
-      const v = parseJson(json, {});
-      return {
-        state: v.state ?? "UNKNOWN",
-        mergeStateStatus: v.mergeStateStatus ?? "UNKNOWN",
-        mergedAt: v.mergedAt ?? null,
-        mergeCommitSha: v.mergeCommit?.oid ?? null,
-      };
-    },
+    prView: makePrView(worktreeFor),
   };
 
   const deploy = {
