@@ -1532,6 +1532,143 @@ else
 	pass "un-pointed verify: no --effort flag"
 fi
 
+# ─── CTL-760: per-worker --settings env injection ───────────────────────────
+# `claude --bg` is an RPC to the per-user daemon, so the worker inherits the
+# daemon's FROZEN env and per-worker OTEL_RESOURCE_ATTRIBUTES is lost. The only
+# lever that crosses the RPC is `claude --bg --settings '{"env":{...}}'`, which
+# MERGES with ~/.claude/settings.json. The dispatcher composes that settings
+# JSON (telemetry toggles + per-worker OTEL_RESOURCE_ATTRIBUTES + a statusLine
+# command) and threads it into every spawn.
+#
+# The stub claude logs all argv under --ARGS-- (one token per line), so we can
+# grep the line after `--settings` to recover the composed JSON and assert on it
+# with jq. Telemetry toggles are re-asserted from the dispatcher's inherited env,
+# so the tests export them before invoking.
+
+# settings_json_from_log → echoes the JSON token logged right after `--settings`
+# in $CLAUDE_STUB_LOG (the argv section logs one token per line).
+settings_json_from_log() {
+	grep -A1 -- '^--settings$' "$CLAUDE_STUB_LOG" | sed -n '2p'
+}
+
+echo ""
+echo "Test 48 (CTL-760): spawn carries --settings with per-worker OTEL_RESOURCE_ATTRIBUTES in .env"
+fresh_env t48
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel.example:4317"
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--settings" "spawn argv carries --settings"
+SETTINGS_JSON="$(settings_json_from_log)"
+SET_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_eq \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"$SET_OTEL" \
+	".settings.env.OTEL_RESOURCE_ATTRIBUTES equals the composed attrs"
+
+echo ""
+echo "Test 49 (CTL-760): .settings.env carries the telemetry toggles from the dispatcher env"
+# Reuse the exports from Test 48 (still in the environment).
+SET_TELEMETRY=$(echo "$SETTINGS_JSON" | jq -r '.env["CLAUDE_CODE_ENABLE_TELEMETRY"] // empty' 2>/dev/null)
+SET_METRICS=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_METRICS_EXPORTER"] // empty' 2>/dev/null)
+SET_LOGS=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_LOGS_EXPORTER"] // empty' 2>/dev/null)
+SET_ENDPOINT=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_EXPORTER_OTLP_ENDPOINT"] // empty' 2>/dev/null)
+SET_PROTOCOL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_EXPORTER_OTLP_PROTOCOL"] // empty' 2>/dev/null)
+assert_eq "1" "$SET_TELEMETRY" ".settings.env.CLAUDE_CODE_ENABLE_TELEMETRY = 1"
+assert_eq "otlp" "$SET_METRICS" ".settings.env.OTEL_METRICS_EXPORTER = otlp"
+assert_eq "otlp" "$SET_LOGS" ".settings.env.OTEL_LOGS_EXPORTER = otlp"
+assert_eq "http://otel.example:4317" "$SET_ENDPOINT" ".settings.env.OTEL_EXPORTER_OTLP_ENDPOINT carried when set"
+assert_eq "grpc" "$SET_PROTOCOL" ".settings.env.OTEL_EXPORTER_OTLP_PROTOCOL carried when set"
+unset CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+	OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL
+
+echo ""
+echo "Test 50 (CTL-760): unset optional endpoint/protocol are OMITTED from .settings.env (no null keys)"
+fresh_env t50
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# Explicitly clear the optional OTLP keys so the dispatcher must omit them.
+unset OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+HAS_ENDPOINT=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_EXPORTER_OTLP_ENDPOINT")' 2>/dev/null)
+HAS_PROTOCOL=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_EXPORTER_OTLP_PROTOCOL")' 2>/dev/null)
+assert_eq "false" "$HAS_ENDPOINT" "unset OTEL_EXPORTER_OTLP_ENDPOINT omitted from .settings.env"
+assert_eq "false" "$HAS_PROTOCOL" "unset OTEL_EXPORTER_OTLP_PROTOCOL omitted from .settings.env"
+# Settings is still valid JSON even with the optional keys absent.
+IS_VALID=$(echo "$SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "yes" "$IS_VALID" "settings JSON remains valid with optional keys omitted"
+
+echo ""
+echo "Test 51 (CTL-760): --settings COEXISTS with --effort / --append-system-prompt (levers branch)"
+fresh_env t51
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
+printf '%s\n' '{"estimated_scope":"large","classification":"feature"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase plan --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--settings" "levers branch: --settings present"
+assert_contains "$LOG" "--effort" "levers branch: --effort present"
+assert_contains "$LOG" "--append-system-prompt" "levers branch: --append-system-prompt present"
+SETTINGS_JSON="$(settings_json_from_log)"
+LEVERS_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_contains "$LEVERS_OTEL" "task.type=phase-plan" "levers branch: settings still carries the composed OTEL attrs"
+
+echo ""
+echo "Test 52 (CTL-760): .settings.statusLine.command ends with catalyst-statusline.sh when present"
+fresh_env t52
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+SL_CMD=$(echo "$SETTINGS_JSON" | jq -r '.statusLine.command // empty' 2>/dev/null)
+SL_TYPE=$(echo "$SETTINGS_JSON" | jq -r '.statusLine.type // empty' 2>/dev/null)
+case "$SL_CMD" in
+*/catalyst-statusline.sh) pass ".settings.statusLine.command ends with catalyst-statusline.sh" ;;
+*) fail ".settings.statusLine.command ends with catalyst-statusline.sh — got '$SL_CMD'" ;;
+esac
+assert_eq "command" "$SL_TYPE" ".settings.statusLine.type = command"
+
+echo ""
+echo "Test 53 (CTL-760): --dry-run JSON includes the composed settings field"
+fresh_env t53
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+DRY=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+HAS_SETTINGS=$(echo "$DRY" | jq -r 'has("settings")' 2>/dev/null)
+assert_eq "true" "$HAS_SETTINGS" "dry-run JSON has a settings field"
+DRY_OTEL=$(echo "$DRY" | jq -r '.settings.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_eq \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"$DRY_OTEL" \
+	"dry-run JSON settings.env carries the composed OTEL attrs"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
