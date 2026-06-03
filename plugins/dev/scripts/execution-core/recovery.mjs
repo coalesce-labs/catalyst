@@ -1186,11 +1186,6 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 //                         flipped the signal, session ended.
 //   'reclaim-failed'      reclaim-eligible + work IS done BUT emit-complete exited
 //                         non-zero. Signal NOT mutated (atomic rename); retries.
-//   'reclaim-held'        CTL-755 — a dead `triage` worker whose work IS done but
-//                         whose ticket is NOT admitted by the gate (deps/priority/
-//                         capacity). Non-mutating: triage.json preserved, signal
-//                         NOT flipped, no reap-intent, no emitComplete. Next tick's
-//                         STEP A re-evaluates. ONLY `phase === "triage"`.
 //   'revived'             reclaim-eligible + probe says work NOT done + progress
 //                         ADVANCED since the last attempt. Signal reset to
 //                         'stalled', defaultDispatch invoked (bumps the fencing
@@ -1303,17 +1298,6 @@ export function reclaimDeadWorkIfPossible(
     // never treated as a human-intervention condition (and never adds to the
     // write storm). Injected for tests; defaults to the shared singleton.
     breaker = linearBreaker,
-    // CTL-755 STEP D — admission predicate for a dead-but-work-done `triage`
-    // worker. The reclaim sweep runs ABOVE the schedulerTick admission compute
-    // (it cannot see `admittedThisTick`), so the default is hold-safe: never
-    // bypass the gate. A dead triage worker whose work IS done is only reclaimed
-    // (branch B → emitComplete flips the signal to research-owed) when the
-    // ticket has been ADMITTED; otherwise it stays at triage:done with its
-    // signal un-flipped so next tick's STEP A re-evaluates deps/priority/
-    // capacity. Mid-pipeline reclaims are NEVER gated (they hold a live slot and
-    // must complete). Production wires the real predicate; with the default
-    // false a triage reclaim always holds.
-    isAdmitted = () => false,
     now = Date.now,
   } = {},
 ) {
@@ -1475,19 +1459,21 @@ export function reclaimDeadWorkIfPossible(
   //     can locate their artifact; implementProbe ignores the extra key.
   const probe = probes[phase];
   if (probe({ ticket, repoRoot, orchDir })) {
-    // CTL-755 STEP D — admission gate for a dead-but-work-done `triage` worker.
-    // Reclaiming a triage worker via emitComplete flips its signal to
-    // research-owed, which the advancement sweep would then free-promote —
-    // bypassing the admission gate (deps/priority/capacity) the live promotion
-    // path enforces. Hold instead: leave triage.json on disk and the signal
-    // UN-flipped (return BEFORE the reap-intent / appendEvent / emitComplete so
-    // nothing mutates), so next tick's STEP A re-evaluates the gate for this
-    // ticket. Only `triage` is gated — a mid-pipeline dead worker holds a live
-    // slot and must be reclaimed to free it.
-    if (phase === "triage" && !isAdmitted({ ticket })) {
-      log.debug({ ticket, phase }, "reclaim-dead-work: triage held by admission gate (un-admitted)");
-      return "reclaim-held";
-    }
+    // CTL-755 STEP D (CORRECTED): a dead-but-work-done `triage` worker is
+    // reclaimed normally — emitComplete flips its signal to `triage:done`. This
+    // does NOT bypass the admission gate: the gate lives DOWNSTREAM at the
+    // scheduler's STEP-B advancement guard (scheduler.mjs:2096), which holds the
+    // triage→research promotion for ANY `triage:done` worker not in
+    // `admittedThisTick` — regardless of HOW the signal reached `done` (live
+    // complete, reclaim, or post-boot). The earlier non-mutating `reclaim-held`
+    // outcome STRANDED such a worker: a dead triage worker only reaches branch B
+    // with a NON-terminal signal (a `done` signal short-circuits to `noop` at the
+    // `klass === "terminal"` gate above), so holding it left the signal at
+    // `running`, and STEP A's `s.triage === "done"` pool requirement then skipped
+    // it forever. Flipping to `done` lands it exactly where STEP A expects it, so
+    // the gate re-evaluates deps/priority/capacity next tick (and STEP B holds the
+    // research dispatch until admitted). No phase is special-cased here.
+    //
     // CTL-661 hole #3: a worker reaching branch (B) is reclaim-eligible, so it
     // is either `absent` (nothing live to stop) or `idle`-confirmed (between
     // turns → safe to stop). Emit a fire-and-forget reap-intent BEFORE

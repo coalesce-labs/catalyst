@@ -1662,14 +1662,6 @@ export function schedulerTick(
           // (rather than silently invisible in `default`).
           noProgressStopped.push(entry);
           break;
-        case "reclaim-held":
-          // CTL-755 STEP D: a dead-but-work-done `triage` worker held by the
-          // admission gate (un-admitted). Non-mutating — triage.json + signal are
-          // untouched, so next tick's STEP A re-evaluates the gate. Invisible by
-          // design (it is a steady-state hold, not a failure), bucketed like
-          // reclaim-failed; no log line so a long-held blocked ticket does not
-          // re-emit per-tick reclaim noise.
-          break;
         default:
           // noop | reclaim-failed → invisible.
           // CTL-606: superseded-noop also buckets here — a dead predecessor signal

@@ -59,6 +59,7 @@ import {
   buildGlobalRanking,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
+import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
@@ -5757,5 +5758,110 @@ describe("CTL-755: admission gate", () => {
       exec: execStates({ "CTL-100": "In Progress" }),
     });
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  // ── STEP D integration: dead-triage reclaim → STEP A re-eval → promotion ──
+  //
+  // The isolated recovery tests pin reclaim behaviour but never prove a reclaimed
+  // triage worker later ADVANCES. This integration test drives a real
+  // reclaimDeadWorkIfPossible (production wiring — scheduler.mjs:1624 passes only
+  // { repoRoot }) through a single schedulerTick and asserts the worker does NOT
+  // strand: the reclaim sweep flips the dead triage worker's signal to `done`,
+  // STEP A re-evaluates it as a triaged-waiting candidate, and STEP B promotes it
+  // (unblocked + free slot). The gate is enforced DOWNSTREAM at STEP B (which holds
+  // any triage:done worker not admitted), so flipping the signal to `done` never
+  // bypasses admission control. (Regression anchor for the CTL-755 strand bug where
+  // the now-removed `reclaim-held` early-return left the signal at `running`, which
+  // STEP A's `triage === "done"` pool then skipped forever.)
+
+  // A production-faithful reclaimDeadWork: the real reclaimDeadWorkIfPossible with
+  // the triage probe forced true (triage.json present → work done), a dead-gone
+  // statJob, and an emitComplete that flips the ON-DISK signal to `done` (what the
+  // real phase-agent-emit-complete --status complete does). The options bag matches
+  // production (no special-casing) — there is no admission predicate inside reclaim.
+  function prodTriageReclaim(orchDirArg) {
+    return (od, sig) =>
+      reclaimDeadWorkIfPossible(od, sig, {
+        statJob: () => null, // dead-gone → reclaim-eligible
+        probes: { triage: () => true, ...EMPTY_NONTRIAGE_PROBES },
+        emitComplete: ({ orchDir: o, signal }) => {
+          // Mirror the real closer: flip phase-<phase>.json.status → done.
+          const p = join(o ?? orchDirArg, "workers", signal.ticket, `phase-${signal.phase}.json`);
+          const cur = JSON.parse(readFileSync(p, "utf8"));
+          writeFileSync(p, JSON.stringify({ ...cur, status: "done" }));
+          return { code: 0 };
+        },
+        appendEvent: () => {},
+        postReclaimMirror: () => {},
+      });
+  }
+  // Probes for the non-triage phases the reclaim sweep may also see — never true
+  // here (no other dead workers), but keeps the probe bag total.
+  const EMPTY_NONTRIAGE_PROBES = { implement: () => false, research: () => false, plan: () => false };
+
+  test("STEP D integration: a dead triage:running worker (work done) is NOT stranded — reclaim flips it to done, STEP A re-evals, STEP B promotes (unblocked + free slot)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // A dead triage worker whose signal never reached `done` (it died mid-flight
+    // with status running) but whose triage.json IS on disk (probe passes). This
+    // is the exact class the reclaim branch-B path exists to recover.
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "running",
+      bg_job_id: "job-dead-7",
+      liveness: { kind: "bg", value: "job-dead-7" },
+    });
+    const dispatch = fakeDispatch();
+    const { ws, removed } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // a free slot
+      reclaimDeadWork: prodTriageReclaim(orchDir),
+      fetchRelations: () => relUnblocked(), // deps satisfied
+    });
+    // The reclaim sweep flipped the signal to done (no longer stranded at running).
+    expect(readPhaseSignals(orchDir, "CTL-7").triage).toBe("done");
+    // STEP A re-evaluated it as triaged-waiting and STEP B promoted it to research.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  test("STEP D integration: a dead triage:running worker held by deps does NOT strand — reclaim flips to done, STEP A holds it 'blocked' (gate enforced downstream)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "running",
+      bg_job_id: "job-dead-7",
+      liveness: { kind: "bg", value: "job-dead-7" },
+    });
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      reclaimDeadWork: prodTriageReclaim(orchDir),
+      // CTL-7 is blocked by an out-of-set blocker still In Progress.
+      fetchRelations: () => relBlockedBy("CTL-DEP"),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    // Signal still flipped to done (reclaim ran) — but research is HELD by the gate.
+    expect(readPhaseSignals(orchDir, "CTL-7").triage).toBe("done");
+    expect(dispatch.calls).toEqual([]); // STEP B held the research promotion
+    expect(r.advanced).toEqual([]);
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "blocked-by-open-dependency",
+      blockers: ["CTL-DEP"],
+    });
   });
 });
