@@ -68,6 +68,16 @@ fi
   MODEL="$(printf '%s' "$INPUT" | jq -r '.model.id // .model // empty' 2>/dev/null)"
   EFFORT="$(printf '%s' "$INPUT" | jq -r '.effort.level // empty' 2>/dev/null)"
 
+  # CTL-760: Claude Code's statusLine payload carries a rate_limits block. The
+  # five_hour/seven_day used_percentage are the "5h: 26%" / "7d: 15%" the user
+  # sees; the resets_at timestamps are informational. Flowing them through
+  # emit-context adds fields to the EXISTING session.context event (no new
+  # event count).
+  RL5H="$(printf '%s' "$INPUT" | jq -r '.rate_limits.five_hour.used_percentage // empty' 2>/dev/null)"
+  RL7D="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.used_percentage // empty' 2>/dev/null)"
+  RL5H_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null)"
+  RL7D_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.resets_at // empty' 2>/dev/null)"
+
   # Without a percentage there's nothing meaningful to emit — bail.
   [[ -n "$PCT" ]] || exit 0
 
@@ -78,6 +88,10 @@ fi
   [[ -n "$MODEL" ]]  && ARGS+=(--model "$MODEL")
   [[ -n "$COST" ]]   && ARGS+=(--cost-usd "$COST")
   [[ -n "$EFFORT" ]] && ARGS+=(--effort "$EFFORT")
+  [[ -n "$RL5H" ]]       && ARGS+=(--ratelimit-5h-pct "$RL5H")
+  [[ -n "$RL7D" ]]       && ARGS+=(--ratelimit-7d-pct "$RL7D")
+  [[ -n "$RL5H_RESET" ]] && ARGS+=(--ratelimit-5h-reset "$RL5H_RESET")
+  [[ -n "$RL7D_RESET" ]] && ARGS+=(--ratelimit-7d-reset "$RL7D_RESET")
 
   bash "$SESSION_BIN" "${ARGS[@]}" >/dev/null 2>&1 || true
 ) </dev/null >/dev/null 2>&1 &
