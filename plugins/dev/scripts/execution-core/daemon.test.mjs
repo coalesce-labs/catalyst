@@ -908,6 +908,50 @@ describe("handleCommentWake (CTL-549)", () => {
     );
     expect(dispatched).toHaveLength(0);
   });
+
+  test("no-ops (self-echo) when comment authorId matches botUserId", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+    });
+    const dispatched = [];
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c1", body: "I am the bot", authorId: "bot-user-id" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async (t, l) => { removed.push({ ticket: t, label: l }); },
+        botUserId: "bot-user-id",
+      },
+    );
+    expect(dispatched).toHaveLength(0); // self-echo suppressed: no re-dispatch
+    expect(removed).toHaveLength(0);    // and the human-attention label is preserved
+  });
+
+  test("re-dispatches when comment authorId does NOT match botUserId (human reply)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+    });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c2", body: "Here is the answer", authorId: "human-user-id" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async () => {},
+        botUserId: "bot-user-id",
+      },
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].ticket).toBe("CTL-1");
+    expect(dispatched[0].phase).toBe("implement");
+  });
 });
 
 // CTL-749: inbox writer factory functions
