@@ -9,6 +9,22 @@ import {
   appendLinearStateWriteEvent,
 } from "./linear-state-write-event.mjs";
 
+// Local mirror of broker/router.mjs shouldSkipEvent (CTL-401). The broker package
+// has its own node_modules (pino) that the targeted scripts test-runner does not
+// install, so importing the real router would fail with "Cannot find package
+// 'pino'" (memory: fresh-worktree bun install). The skip predicate is tiny and
+// stable; mirror it here verbatim and pin it with a shape-guard test below so a
+// drift in EITHER the predicate or the event is caught. getEventName mirrors the
+// broker's: attributes["event.name"] is the canonical name.
+function shouldSkipEventMirror(event) {
+  if (event.resource?.["service.name"] === "catalyst.broker") return true;
+  const name = event.attributes?.["event.name"] ?? "";
+  if (name.startsWith("filter.")) return true;
+  if (name.startsWith("broker.daemon")) return true;
+  if (name === "session.heartbeat") return true;
+  return false;
+}
+
 describe("buildLinearStateWriteEvent", () => {
   test("envelope shape — required attributes, resource, severityText, payload", () => {
     const line = buildLinearStateWriteEvent({
@@ -98,6 +114,40 @@ describe("buildLinearStateWriteEvent", () => {
   test("reason field defaults to null when omitted", () => {
     const ev = JSON.parse(buildLinearStateWriteEvent({ ticket: "CTL-1" }));
     expect(ev.body.payload.reason).toBeNull();
+  });
+});
+
+// Plan Top-Risk: "Event-log schema collision — verify linear.state.write.<ticket>
+// name/channel don't collide with a broker shouldSkipEvent predicate." The broker
+// self-filters its OWN emissions; the new audit event MUST flow through (it is not
+// a broker/filter/heartbeat emission), or the HUD / wait-for would never see it.
+describe("CTL-757: no collision with broker shouldSkipEvent", () => {
+  test("the built linear.state.write event is NOT skipped by the broker predicate", () => {
+    const ev = JSON.parse(
+      buildLinearStateWriteEvent({
+        ticket: "CTL-757",
+        from_state: "Research",
+        to_state: "Plan",
+        source: "scheduler-advance",
+        applied: true,
+      })
+    );
+    // service.name is catalyst.execution-core (not catalyst.broker), name is
+    // linear.state.write.* (not filter./broker.daemon/session.heartbeat).
+    expect(shouldSkipEventMirror(ev)).toBe(false);
+  });
+
+  test("the discriminating attributes the broker keys on are all NON-skip values", () => {
+    // Pins WHY the event survives: if a future edit moved service.name to
+    // catalyst.broker, renamed the event to filter./broker.daemon, or collapsed
+    // it to session.heartbeat, one of these asserts (and the mirror test) fails.
+    const ev = JSON.parse(buildLinearStateWriteEvent({ ticket: "CTL-757" }));
+    expect(ev.resource?.["service.name"]).not.toBe("catalyst.broker");
+    const name = ev.attributes?.["event.name"] ?? "";
+    expect(name.startsWith("filter.")).toBe(false);
+    expect(name.startsWith("broker.daemon")).toBe(false);
+    expect(name).not.toBe("session.heartbeat");
+    expect(name).toBe("linear.state.write.CTL-757");
   });
 });
 

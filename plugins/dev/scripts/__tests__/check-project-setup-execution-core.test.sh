@@ -224,7 +224,7 @@ XDG9="${SCRATCH}/p9-xdg"; BIN9="${SCRATCH}/p9-bin"; LOG9="${SCRATCH}/p9-curl.log
 build_ga_secrets "$XDG9"
 install_ga_curl "$BIN9" "$LOG9" \
   '[{"id":"ga-s","event":"start","state":{"id":"x","name":"Triage"}},{"id":"ga-m","event":"merge","state":{"id":"y","name":"Validate"}},{"id":"ga-r","event":"review","state":{"id":"z","name":"Validate"}}]'
-OUT9="$(run_check_ga "$P9" "$CD9" "$XDG9" "$BIN9" || true)"
+OUT9="$(run_check_ga "$P9" "$CD9" "$XDG9" "$BIN9")"; RC9=$?
 if grep -qi "review" <<<"$OUT9" \
    && grep -qiE "start.*Triage|points at 'Triage'" <<<"$OUT9" \
    && grep -qiE "merge.*Validate|points at 'Validate'" <<<"$OUT9"; then
@@ -232,6 +232,16 @@ if grep -qi "review" <<<"$OUT9" \
 else
   fail "git-automation drift warns on review + start!=PR + merge!=Done"
   echo "$OUT9" | sed 's/^/    /'
+fi
+
+# CTL-759 Top-Risk: the git-automation drift is a WARN ONLY — it must NOT alter
+# the exit code. This repo is fully-configured (full contract + registry entry,
+# i.e. the exit-0 case from test 7), so a drift warning must keep exit 0.
+if [[ "$RC9" -eq 0 ]]; then
+  pass "git-automation drift is WARN-only — exit code unchanged (0)"
+else
+  fail "git-automation drift is WARN-only — exit code unchanged (0)"
+  echo "    (drift warning changed exit code to $RC9)"
 fi
 
 # ─── Test 10: no per-project token → SOFT skip (no git-automation warning) ───

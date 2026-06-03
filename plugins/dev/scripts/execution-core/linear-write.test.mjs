@@ -11,6 +11,7 @@ import {
   applyEstimate,
   teamOf,
 } from "./linear-write.mjs";
+import { createTicketStateCache } from "./linear-cache.mjs";
 
 const okExec = (calls) => (cmd, args) => {
   calls.push({ cmd, args });
@@ -198,6 +199,45 @@ describe("CTL-758: backward-write guard", () => {
     });
     expect(r.applied).toBe(true);
     expect(ranShell(calls)).toBe(true);
+  });
+
+  // ── API-STORM REGRESSION (plan Top-Risk: "Cache not threaded = single most
+  // likely regression"). Wire the REAL fetchTicketState through the guard with a
+  // shared TTL cache (the scheduler's threading) and assert the guard issues
+  // ≤1 underlying `linearis issues read` across TWO guarded writes within TTL.
+  // The guard read MUST flow through the injected `cache`, not re-exec per write.
+  test("guard read goes through the shared cache — ≤1 `issues read` exec per ticket per TTL", () => {
+    const cache = createTicketStateCache({ now: () => 0 }); // TTL never expires within the test
+    let reads = 0;
+    // One exec serves BOTH the guard's cached `linearis issues read` AND any
+    // `linear-transition.sh --transition` shell. Only the read path increments
+    // `reads`; a non-terminal state means the guard proceeds to the shell.
+    const exec = (cmd, args) => {
+      if (args[0] === "issues" && args[1] === "read") {
+        reads += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };
+      }
+      // the transition shell
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Validate" }), stderr: "" };
+    };
+    // Two successive guarded writes (non-terminal key) for the SAME ticket.
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec, cache });
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec, cache });
+    expect(reads).toBe(1); // second guard read was a cache hit — no API storm
+  });
+
+  test("WITHOUT a shared cache the guard re-reads each write (proves the cache is what dedups)", () => {
+    let reads = 0;
+    const exec = (cmd, args) => {
+      if (args[0] === "issues" && args[1] === "read") {
+        reads += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };
+      }
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Validate" }), stderr: "" };
+    };
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec }); // no cache
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec });
+    expect(reads).toBe(2); // no cache → one read per write (contrast to the dedup above)
   });
 });
 
