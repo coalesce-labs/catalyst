@@ -94,6 +94,11 @@ import {
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
 import * as linearWrite from "./linear-write.mjs";
+// CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
+// scheduler write site (source/phase/reason known only here) — NEVER inside
+// runTransition (would double-audit the triage path, which keeps its own
+// phase.triage.linear-transition event). Best-effort: swallow-on-error.
+import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
 // CTL-638: labelOnce moved out of this file into a shared leaf module so the
 // recovery-sweep escalation path can use the same once-marker guard. Keeping
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
@@ -1442,11 +1447,20 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
 // workers/<T>/.terminal-done.applied (restart-safe — persists with the worker
 // dir) records a confirmed apply, mirroring labelOnce / teardownWorktreeOnce.
 // Best-effort: any throw is logged and swallowed, never aborting the tick.
-function terminalDoneOnce(orchDir, ticket, writeStatus) {
+// CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
+// injected emitter) audits the terminal-sweep Done write. Optional so the
+// once-semantics tests that call terminalDoneOnce directly need not supply it.
+function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
   try {
     const res = writeStatus.applyTerminalDone({ ticket });
+    // CTL-757: audit the terminal Done write (source=terminal-sweep). Emit even
+    // when res is undefined (test stub) is skipped — emitStateWrite no-ops on a
+    // falsy writerResult, so a stub-undefined result simply emits nothing.
+    if (typeof emitStateWrite === "function") {
+      emitStateWrite({ writerResult: res, ticket, phase: TERMINAL_PHASE, source: "terminal-sweep", orchId: ticket });
+    }
     // Write the marker only on a confirmed apply — a failed write is retried
     // next tick. Note applyTerminalDone returns applied:true even for the
     // already-Done `action:"skipped"` outcome, so the marker lands on the first
@@ -1541,8 +1555,40 @@ export function schedulerTick(
     // CTL-755: held-indicator audit emitter — phase.advance.held.<ticket>.
     // Best-effort, only-on-state-change. Mirrors appendDispatchRequestedEvent.
     appendPhaseAdvanceHeldEvent = defaultAppendPhaseAdvanceHeldEvent,
+    // CTL-757: canonical linear.state.write audit emitter, injectable for tests.
+    // Caller-emitted at the 5 scheduler write sites (scheduler-advance,
+    // parked-redispatch, preemption-resume, terminal-sweep, reconcile-backstop)
+    // via the emitStateWrite helper below; NEVER fired on the triage path.
+    appendStateWriteEvent = appendLinearStateWriteEvent,
   } = {}
 ) {
+  // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
+  // event for ONE scheduler write site. `writerResult` is the runTransition return
+  // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
+  // applyTerminalDone; null (a no-status-key/short-circuited write) emits nothing.
+  // `source` tags WHICH site fired (scheduler-advance | parked-redispatch |
+  // preemption-resume | terminal-sweep | reconcile-backstop). Wrapped in safeEmit
+  // so an emitter throw never aborts the tick. NEVER call this on the triage path.
+  function emitStateWrite({ writerResult, ticket, phase, source, orchId }) {
+    if (!writerResult) return;
+    safeEmit(
+      appendStateWriteEvent,
+      {
+        ticket,
+        orchId: orchId ?? ticket,
+        phase,
+        source,
+        from_state: writerResult.from_state ?? null,
+        to_state: writerResult.to_state ?? null,
+        transition_key: writerResult.action ?? null,
+        applied: writerResult.applied ?? false,
+        verified: writerResult.verified ?? false,
+        reason: writerResult.reason ?? null,
+      },
+      { ticket, phase, source }
+    );
+  }
+
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the
   // advancement sweep so a reclaimed phase advances the same tick. Iterates
@@ -2140,10 +2186,16 @@ export function schedulerTick(
         emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
         // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
         // (linear-transition.sh read-compares first); never aborts the tick.
-        safeWrite(() => writeStatus.applyPhaseStatus({ ticket, phase: next }), {
-          ticket,
-          phase: next,
-        });
+        safeWrite(
+          () => {
+            // CTL-757: capture the writer result so emitStateWrite can audit the
+            // before/after pair. The write itself stays best-effort inside
+            // safeWrite; the emit is a separate best-effort step.
+            const wr = writeStatus.applyPhaseStatus({ ticket, phase: next });
+            emitStateWrite({ writerResult: wr, ticket, phase: next, source: "scheduler-advance", orchId: ticket });
+          },
+          { ticket, phase: next }
+        );
         // CTL-751: on triage→research advance, write the reference-class
         // estimate to Linear if triage.json carries a valid numeric `.estimate`.
         if (next === "research") {
@@ -2280,7 +2332,11 @@ export function schedulerTick(
               { ticket: pd.identifier, phase: parkedPhase }
             );
             safeWrite(
-              () => writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase }),
+              () => {
+                // CTL-757: audit the resume-after-preemption status write.
+                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase });
+                emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
+              },
               { ticket: pd.identifier, phase: parkedPhase }
             );
             resumeSlots--;
@@ -2442,12 +2498,16 @@ export function schedulerTick(
           createdAt: t.createdAt ?? null,
         });
         // CTL-558: write the entry-phase (`research`) status for the new ticket.
+        // CTL-757: audit it as a scheduler-advance state write (new work entering
+        // the pipeline is the entry-phase forward advance).
         safeWrite(
-          () =>
-            writeStatus.applyPhaseStatus({
+          () => {
+            const wr = writeStatus.applyPhaseStatus({
               ticket: t.identifier,
               phase: NEW_WORK_ENTRY_PHASE,
-            }),
+            });
+            emitStateWrite({ writerResult: wr, ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, source: "scheduler-advance", orchId: t.identifier });
+          },
           { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
         );
       } else {
@@ -2503,7 +2563,8 @@ export function schedulerTick(
     // at `PR` in Linear and the worktree leaks on disk indefinitely.
     if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
       // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
-      terminalDoneOnce(orchDir, ticket, writeStatus);
+      // CTL-757: thread emitStateWrite so the terminal Done write is audited.
+      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
     }

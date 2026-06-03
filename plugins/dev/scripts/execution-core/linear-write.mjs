@@ -45,8 +45,17 @@ function defaultResolveRepoRoot(ticket) {
 }
 
 // runTransition — shell linear-transition.sh for one logical key. Best-effort:
-// returns { applied, reason } and never throws. Parses the --json result and
-// treats a zero exit (with no "update-failed" action) as applied.
+// returns { applied, reason, action, from_state, to_state } and never throws.
+// Parses the --json result and treats a zero exit (with no "update-failed"
+// action) as applied.
+//
+// CTL-757: the shell already computes `.currentState` (the pre-transition state
+// it read for its idempotency check) and `.targetState` (the resolved target).
+// Surfacing them as from_state/to_state is FREE — no extra Linear read — and
+// gives the caller-emitted linear.state.write audit event its before/after pair.
+// The SAME current-state read also serves the CTL-758 backward-write guard.
+// from_state/to_state default to null when the shell emits non-JSON (no-linearis,
+// spawn error) or omits the fields (older stub).
 function runTransition({
   ticket,
   key,
@@ -57,7 +66,7 @@ function runTransition({
     const repoRoot = resolveRepoRoot(ticket);
     if (!repoRoot) {
       log.warn({ ticket, key }, "linear-write: no repoRoot — skipping status write");
-      return { applied: false, reason: "no-repo-root" };
+      return { applied: false, reason: "no-repo-root", from_state: null, to_state: null };
     }
     const config = `${repoRoot}/.catalyst/config.json`;
     const { code, stdout } = exec(LINEAR_TRANSITION_BIN, [
@@ -70,22 +79,29 @@ function runTransition({
       "--json",
     ]);
     let action = null;
+    let from_state = null;
+    let to_state = null;
     try {
-      action = JSON.parse(stdout)?.action ?? null;
+      const parsed = JSON.parse(stdout) ?? {};
+      action = parsed.action ?? null;
+      // currentState/targetState are empty strings when unresolved — normalise
+      // to null so the audit payload never carries a misleading "".
+      from_state = parsed.currentState || null;
+      to_state = parsed.targetState || null;
     } catch {
-      /* non-JSON stdout — leave action null */
+      /* non-JSON stdout — leave action/from_state/to_state null */
     }
     const applied = code === 0 && action !== "update-failed";
     if (!applied) {
       log.warn({ ticket, key, code, action }, "linear-write: status write not applied");
     }
-    return { applied, reason: applied ? null : `exit-${code}`, action };
+    return { applied, reason: applied ? null : `exit-${code}`, action, from_state, to_state };
   } catch (err) {
     log.warn(
       { ticket, key, err: err.message },
       "linear-write: status write threw — swallowed"
     );
-    return { applied: false, reason: "threw" };
+    return { applied: false, reason: "threw", from_state: null, to_state: null };
   }
 }
 

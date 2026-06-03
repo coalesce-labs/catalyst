@@ -100,6 +100,105 @@ describe("applyTerminalDone", () => {
   });
 });
 
+// CTL-757: runTransition (via applyPhaseStatus/applyTerminalDone) returns
+// from_state/to_state parsed from linear-transition.sh's --json currentState/
+// targetState — FREE (no extra read), feeds the caller-emitted state.write event.
+describe("CTL-757: runTransition from_state/to_state propagation", () => {
+  const resolveRepoRoot = () => "/repo";
+
+  // A transition exec that mirrors linear-transition.sh's emit() JSON shape.
+  function transitionExec({ action = "transitioned", currentState = "", targetState = "", code = 0 } = {}) {
+    return () => ({
+      code,
+      stdout: JSON.stringify({ ticket: "CTL-1", currentState, targetState, action }),
+      stderr: "",
+    });
+  }
+
+  test("applyPhaseStatus surfaces from_state/to_state from the shell JSON", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "Research", targetState: "Plan" }),
+    });
+    expect(r.applied).toBe(true);
+    expect(r.from_state).toBe("Research");
+    expect(r.to_state).toBe("Plan");
+  });
+
+  test("applyTerminalDone surfaces from_state/to_state", () => {
+    const r = applyTerminalDone({
+      ticket: "CTL-1",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "PR", targetState: "Done" }),
+    });
+    expect(r.from_state).toBe("PR");
+    expect(r.to_state).toBe("Done");
+  });
+
+  test("idempotent skip (from==to, action:skipped) — applied:true, from_state==to_state", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "skipped", currentState: "Validate", targetState: "Validate" }),
+    });
+    expect(r.applied).toBe(true);
+    expect(r.from_state).toBe("Validate");
+    expect(r.to_state).toBe("Validate");
+    expect(r.from_state).toBe(r.to_state);
+  });
+
+  test("failure path (exit non-zero, update-failed) still returns from_state + reason", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "update-failed", currentState: "Research", targetState: "Plan", code: 1 }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("exit-1");
+    expect(r.from_state).toBe("Research");
+    expect(r.to_state).toBe("Plan");
+  });
+
+  test("empty currentState/targetState normalise to null (not empty string)", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "", targetState: "" }),
+    });
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
+  });
+
+  test("non-JSON stdout (no-linearis / spawn) → from_state/to_state null, applied stays false", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: () => ({ code: 1, stdout: "not json", stderr: "boom" }),
+    });
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
+    expect(r.applied).toBe(false);
+  });
+
+  test("no-repo-root path returns from_state/to_state null", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot: () => null,
+      exec: transitionExec(),
+    });
+    expect(r.reason).toBe("no-repo-root");
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
+  });
+});
+
 describe("applyLabel", () => {
   // okExec returns exit-0 for BOTH the update call AND the CTL-587 read-back —
   // the read-back returns labels.nodes containing the requested label so the

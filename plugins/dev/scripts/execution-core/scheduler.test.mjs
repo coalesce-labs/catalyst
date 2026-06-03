@@ -1414,6 +1414,73 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
   });
 
+  // CTL-757: the canonical linear.state.write audit fires from the scheduler
+  // advance site (caller-emits), tagged source=scheduler-advance, phase=next.
+  // It must NOT fire on the triage path (the scheduler never writes triage; that
+  // stays on monitor.mjs's phase.triage.linear-transition event).
+  test("CTL-757: emitStateWrite fires once on advance with source=scheduler-advance + phase=next", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // research is owed
+    const stateWrites = [];
+    const writeStatus = {
+      applyPhaseStatus: ({ phase }) => ({
+        applied: true,
+        reason: null,
+        action: "transitioned",
+        from_state: "Triage",
+        to_state: "Research",
+      }),
+      applyTerminalDone: () => ({ applied: true }),
+      applyEstimate: () => ({ applied: true }),
+    };
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      writeStatus,
+      appendStateWriteEvent: (ev) => stateWrites.push(ev),
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    // Exactly one state-write audit for the advance, tagged correctly.
+    const advanceWrites = stateWrites.filter((e) => e.source === "scheduler-advance");
+    expect(advanceWrites).toHaveLength(1);
+    expect(advanceWrites[0]).toMatchObject({
+      ticket: "CTL-7",
+      phase: "research", // == next, NOT triage
+      source: "scheduler-advance",
+      from_state: "Triage",
+      to_state: "Research",
+      applied: true,
+    });
+    // No emit is tagged with the triage phase — the scheduler never writes triage.
+    expect(stateWrites.some((e) => e.phase === "triage")).toBe(false);
+  });
+
+  // CTL-757: an emit-seam THROW must never abort the tick (safeEmit-wrapped) and
+  // the phase advance must still be recorded.
+  test("CTL-757: a throwing appendStateWriteEvent is swallowed — advance still recorded", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      writeStatus: {
+        applyPhaseStatus: () => ({ applied: true, from_state: "Triage", to_state: "Research" }),
+        applyTerminalDone: () => ({ applied: true }),
+        applyEstimate: () => ({ applied: true }),
+      },
+      appendStateWriteEvent: () => {
+        throw new Error("emit boom");
+      },
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
   test("a failed-dispatch (non-zero exit) is a soft skip, not a throw", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 1 });
@@ -2745,6 +2812,33 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
     expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
+  });
+
+  // CTL-757: the terminal Done write is audited with source=terminal-sweep.
+  test("CTL-757: terminal Done write emits source=terminal-sweep state.write", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const stateWrites = [];
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => ({ applied: true, from_state: "PR", to_state: "Done", action: "transitioned" }),
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus,
+      appendStateWriteEvent: (ev) => stateWrites.push(ev),
+    });
+    const sweep = stateWrites.filter((e) => e.source === "terminal-sweep");
+    expect(sweep).toHaveLength(1);
+    expect(sweep[0]).toMatchObject({
+      ticket: "CTL-4",
+      source: "terminal-sweep",
+      from_state: "PR",
+      to_state: "Done",
+      applied: true,
+    });
   });
 
   test("writes terminal Done when a ticket's monitor-deploy signal is skipped (CTL-589)", () => {
