@@ -666,6 +666,10 @@ cmd_emit_context() {
   shift
 
   local pct="" tokens="" ctx_max="" turn="" model="" cost="" effort=""
+  # CTL-760: Claude Code's statusLine payload carries a rate_limits block. The
+  # 5h/7d used-percentages are the "5h: 26%" / "7d: 15%" the user sees; the
+  # resets_at timestamps are informational (body-only, no label cardinality).
+  local rl5h="" rl7d="" rl5h_reset="" rl7d_reset=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --context-pct)    pct="$2"; shift 2 ;;
@@ -675,6 +679,10 @@ cmd_emit_context() {
       --model)          model="$2"; shift 2 ;;
       --cost-usd)       cost="$2"; shift 2 ;;
       --effort)         effort="$2"; shift 2 ;;
+      --ratelimit-5h-pct)    rl5h="$2"; shift 2 ;;
+      --ratelimit-7d-pct)    rl7d="$2"; shift 2 ;;
+      --ratelimit-5h-reset)  rl5h_reset="$2"; shift 2 ;;
+      --ratelimit-7d-reset)  rl7d_reset="$2"; shift 2 ;;
       *) echo "error: unknown flag for emit-context: $1" >&2; return 1 ;;
     esac
   done
@@ -706,13 +714,21 @@ cmd_emit_context() {
     --argjson cost "${cost:-null}" \
     --arg model "$model" \
     --arg effort "$effort" \
+    --argjson rl5h "${rl5h:-null}" \
+    --argjson rl7d "${rl7d:-null}" \
+    --arg rl5h_reset "$rl5h_reset" \
+    --arg rl7d_reset "$rl7d_reset" \
     '{context_pct: $pct,
       context_tokens: (if $tokens == null then null else $tokens end),
       context_max: (if $context_max == null then null else $context_max end),
       turn: (if $turn == null then null else $turn end),
       model: (if $model == "" then null else $model end),
       cost_usd: (if $cost == null then null else $cost end),
-      effort: (if $effort == "" then null else $effort end)}')
+      effort: (if $effort == "" then null else $effort end),
+      ratelimit_5h_pct: (if $rl5h == null then null else $rl5h end),
+      ratelimit_7d_pct: (if $rl7d == null then null else $rl7d end),
+      ratelimit_5h_reset: (if $rl5h_reset == "" then null else $rl5h_reset end),
+      ratelimit_7d_reset: (if $rl7d_reset == "" then null else $rl7d_reset end)}')
 
   # Build claude.* extra args for typed attributes
   local extra_args=()
@@ -721,6 +737,9 @@ cmd_emit_context() {
   [[ -n "$pct" ]] && extra_args+=(--claude-context-used-pct "$pct")
   [[ -n "$tokens" ]] && extra_args+=(--claude-context-tokens "$tokens")
   [[ -n "$turn" ]] && extra_args+=(--claude-turn "$turn")
+  # CTL-760: rate-limit % as typed attributes (numeric). Resets stay body-only.
+  [[ -n "$rl5h" ]] && extra_args+=(--claude-ratelimit-5h-pct "$rl5h")
+  [[ -n "$rl7d" ]] && extra_args+=(--claude-ratelimit-7d-pct "$rl7d")
 
   # Workflow/ticket lookup for trace/span derivation.
   local trow workflow ticket
@@ -745,6 +764,7 @@ cmd_emit_context() {
     --trace-id "$trace_id" \
     --span-id "$span_id" \
     --session "$sid" \
+    ${ticket:+--linear-key "$ticket"} \
     "${extra_args[@]}" \
     --payload-json "$payload" 2>/dev/null)" || return 1
   canonical_jsonl_append "$EVENTS_DIR" "$ctx_line"
@@ -771,6 +791,7 @@ cmd_emit_context() {
         --trace-id "$trace_id" \
         --span-id "$span_id" \
         --session "$sid" \
+        ${ticket:+--linear-key "$ticket"} \
         "${extra_args[@]}" \
         --message "context crossed ${CATALYST_CTX_THRESHOLD}%: ${prev_pct} → ${pct}" \
         --payload-json "$att_payload" 2>/dev/null)" || true

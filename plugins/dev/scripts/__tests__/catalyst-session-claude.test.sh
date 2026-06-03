@@ -124,6 +124,48 @@ expect_eq "cost is NOT a typed attribute" "false" "$CTX_COST_ATTR_PRESENT"
 CTX_MAX_PAYLOAD="$(printf '%s' "$CTX_LINE" | jq -r '.body.payload.context_max')"
 expect_eq "context_max lives in body.payload" "1000000" "$CTX_MAX_PAYLOAD"
 
+# ─── 5b. CTL-760: rate-limit 5h/7d percentages + resets + resource.linear.key ─
+# Start a session bound to a ticket so the session.context resource block
+# carries linear.key (the per-worker join key for Grafana panels).
+SID_RL="$(bash "$SESSION_SCRIPT" start --skill phase-implement \
+            --ticket CTL-760 --claude-session-id "uuid-rl-1")"
+
+bash "$SESSION_SCRIPT" emit-context "$SID_RL" \
+  --context-pct 30 --turn 7 --model "claude-opus-4-7" \
+  --ratelimit-5h-pct 26 --ratelimit-7d-pct 15 \
+  --ratelimit-5h-reset "2026-06-03T05:00:00Z" \
+  --ratelimit-7d-reset "2026-06-10T00:00:00Z" >/dev/null
+
+RL_LINE="$(grep '"session.context"' "$EF" | grep "$SID_RL" | tail -n 1)"
+expect_not_empty "session.context event recorded for rate-limit test" "$RL_LINE"
+
+RL_5H="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct"')"
+expect_eq "session.context claude.ratelimit.five_hour_pct" "26" "$RL_5H"
+
+RL_5H_TYPE="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct" | type')"
+expect_eq "five_hour_pct is a number" "number" "$RL_5H_TYPE"
+
+RL_7D="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct"')"
+expect_eq "session.context claude.ratelimit.seven_day_pct" "15" "$RL_7D"
+
+RL_7D_TYPE="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct" | type')"
+expect_eq "seven_day_pct is a number" "number" "$RL_7D_TYPE"
+
+# Reset timestamps travel in body.payload only (informational, no label cardinality).
+RL_5H_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_5h_reset')"
+expect_eq "5h reset in body.payload" "2026-06-03T05:00:00Z" "$RL_5H_RESET"
+
+RL_7D_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_reset')"
+expect_eq "7d reset in body.payload" "2026-06-10T00:00:00Z" "$RL_7D_RESET"
+
+# Resets MUST NOT be typed attributes (avoid label cardinality explosion).
+RL_5H_RESET_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes | has("claude.ratelimit.five_hour_reset")')"
+expect_eq "5h reset is NOT a typed attribute" "false" "$RL_5H_RESET_ATTR"
+
+# CTL-760: per-worker linear.key lands in the resource block.
+RL_LINEAR_KEY="$(printf '%s' "$RL_LINE" | jq -r '.resource."linear.key" // ""')"
+expect_eq "session.context resource.linear.key populated from ticket" "CTL-760" "$RL_LINEAR_KEY"
+
 # ─── 6. No threshold crossing below 70 — only session.context emitted ──────
 SID_BELOW="$(bash "$SESSION_SCRIPT" start --skill below70 \
               --claude-session-id "uuid-below")"

@@ -149,6 +149,30 @@ if [[ $PHASE == *.* ]]; then
 	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
 fi
 
+# ─── CTL-760: resolve the project key for the canonical resource block ───────
+#
+# build_canonical_line (lib/canonical-event.sh) supports a resource block with
+# project / linear.key / catalyst.orchestration, but the emit call below only
+# passed --linear-ticket — leaving project / linear.key / catalyst.orchestration
+# unset on the worker's terminal phase event (the metrics carry them via the
+# worker's OTEL_RESOURCE_ATTRIBUTES, but the event log did not). Resolve the
+# project key from the nearest-ancestor .catalyst/config.json so the completion
+# event mirrors that context. Fail-open to empty — the resource keys are each
+# omitted when their resolved value is empty (canonical-event.sh:274-276).
+resolve_project_key() {
+	command -v jq >/dev/null 2>&1 || return 0
+	local dir
+	dir="$(pwd)"
+	while [[ $dir != "/" ]]; do
+		if [[ -f "${dir}/.catalyst/config.json" ]]; then
+			jq -r '.catalyst.projectKey // empty' "${dir}/.catalyst/config.json" 2>/dev/null || true
+			return 0
+		fi
+		dir="$(dirname "$dir")"
+	done
+}
+PROJECT_KEY="$(resolve_project_key)"
+
 # ─── 0. CTL-736 Phase 1: fencing check (stale generation bows out) ───────────
 #
 # A worker carries its dispatch generation in CATALYST_GENERATION. If the phase
@@ -186,19 +210,47 @@ SEVERITY=$([[ $STATUS == "complete" || $STATUS == "skipped" ]] && echo INFO || e
 TRACE_ID=$(derive_trace_id "$ORCH_ID" "$SESSION_ID")
 SPAN_ID=$(derive_span_id "$TICKET" "$SESSION_ID")
 
+# CTL-760: compute duration_seconds (integer) from the signal file's startedAt /
+# completedAt when BOTH are present. Body-payload field, NOT a resource attr.
+# completedAt is written by this script's signal mutation below; on a fresh
+# `complete` it isn't on disk yet, so we derive "now" as the completion instant
+# and measure against the existing startedAt. If startedAt is absent, omit it.
+DURATION_SECONDS=""
+if [[ -n $ORCH_DIR ]]; then
+	_DUR_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	if [[ -f $_DUR_SIGNAL ]] && command -v jq >/dev/null 2>&1; then
+		_STARTED_AT=$(jq -r '.startedAt // empty' "$_DUR_SIGNAL" 2>/dev/null || echo "")
+		_COMPLETED_AT=$(jq -r '.completedAt // empty' "$_DUR_SIGNAL" 2>/dev/null || echo "")
+		# Fall back to this emit's TS as the completion instant when the signal
+		# has a startedAt but not yet a completedAt (the common success path).
+		[[ -z $_COMPLETED_AT ]] && _COMPLETED_AT="$TS"
+		if [[ -n $_STARTED_AT && -n $_COMPLETED_AT ]]; then
+			_S_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_STARTED_AT" +%s 2>/dev/null ||
+				date -u -d "$_STARTED_AT" +%s 2>/dev/null || echo "")
+			_C_EPOCH=$(date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$_COMPLETED_AT" +%s 2>/dev/null ||
+				date -u -d "$_COMPLETED_AT" +%s 2>/dev/null || echo "")
+			if [[ $_S_EPOCH =~ ^[0-9]+$ && $_C_EPOCH =~ ^[0-9]+$ && $_C_EPOCH -ge $_S_EPOCH ]]; then
+				DURATION_SECONDS=$((_C_EPOCH - _S_EPOCH))
+			fi
+		fi
+	fi
+fi
+
 # Payload mirrors what orchestrator monitors expect: phase, ticket, status,
-# optional failure_reason, optional handoff_path (CTL-484 turn-cap-exhausted).
-# The broker's tryPhaseLifecycleRoute parser reads only event.name + ticket,
-# so payload extras don't change routing.
+# optional failure_reason, optional handoff_path (CTL-484 turn-cap-exhausted),
+# optional duration_seconds (CTL-760). The broker's tryPhaseLifecycleRoute parser
+# reads only event.name + ticket, so payload extras don't change routing.
 PAYLOAD=$(jq -nc \
 	--arg phase "$PHASE" \
 	--arg ticket "$TICKET" \
 	--arg status "$STATUS" \
 	--arg reason "$REASON" \
 	--arg handoff "$HANDOFF_PATH" \
+	--arg duration "$DURATION_SECONDS" \
 	'{phase: $phase, ticket: $ticket, status: $status}
    + (if $reason == "" then {} else {failure_reason: $reason} end)
-   + (if $handoff == "" then {} else {handoff_path: $handoff} end)')
+   + (if $handoff == "" then {} else {handoff_path: $handoff} end)
+   + (if $duration == "" then {} else {duration_seconds: ($duration | tonumber)} end)')
 
 LINE=$(build_canonical_line \
 	--ts "$TS" \
@@ -213,6 +265,9 @@ LINE=$(build_canonical_line \
 	--worker "$TICKET" \
 	--session "$SESSION_ID" \
 	--linear-ticket "$TICKET" \
+	--project "$PROJECT_KEY" \
+	--linear-key "$TICKET" \
+	--catalyst-orchestration "$ORCH_ID" \
 	--message "Phase ${PHASE} ${STATUS} on ${TICKET}" \
 	--payload-json "$PAYLOAD" \
 	2>/dev/null) || warn "failed to build canonical event line"

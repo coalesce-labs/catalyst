@@ -324,6 +324,27 @@ expect_eq "build_canonical_line claude.turn" "126" "$CLAUDE_TURN"
 CLAUDE_TURN_TYPE="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.turn" | type')"
 expect_eq "build_canonical_line claude.turn is number" "number" "$CLAUDE_TURN_TYPE"
 
+# CTL-760: rate-limit 5h/7d used-percentages emitted as NUMERIC typed attributes.
+RL_LINE="$(build_canonical_line \
+  --ts "2026-06-03T00:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.context" \
+  --claude-ratelimit-5h-pct 26 \
+  --claude-ratelimit-7d-pct 15)"
+
+RL_5H="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.five_hour_pct" "26" "$RL_5H"
+
+RL_5H_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct" | type')"
+expect_eq "build_canonical_line claude.ratelimit.five_hour_pct is number" "number" "$RL_5H_TYPE"
+
+RL_7D="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_pct" "15" "$RL_7D"
+
+RL_7D_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct" | type')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_pct is number" "number" "$RL_7D_TYPE"
+
 # When claude.* flags are NOT passed, the attribute keys must be absent.
 BARE_LINE="$(build_canonical_line \
   --ts "2026-05-13T00:00:00.000Z" \
@@ -345,6 +366,13 @@ expect_eq "no --claude-context-tokens → key absent" "false" "$HAS_TOKENS"
 
 HAS_TURN="$(echo "$BARE_LINE" | jq '.attributes | has("claude.turn")')"
 expect_eq "no --claude-turn → key absent" "false" "$HAS_TURN"
+
+# CTL-760: rate-limit attrs absent when flags not passed.
+HAS_RL5H="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.five_hour_pct")')"
+expect_eq "no --claude-ratelimit-5h-pct → key absent" "false" "$HAS_RL5H"
+
+HAS_RL7D="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_pct")')"
+expect_eq "no --claude-ratelimit-7d-pct → key absent" "false" "$HAS_RL7D"
 
 # Cost MUST NOT be a typed attribute (PII gate — OTLP forwarder strips body.payload only).
 HAS_COST_ATTR="$(echo "$CLAUDE_LINE" | jq '.attributes | has("claude.cost.usd")')"

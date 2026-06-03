@@ -128,6 +128,48 @@ if [[ -n "$CTX_LINE" ]]; then
   expect_eq "wrapper-emitted cost in body.payload" "23.02" "$COST"
 fi
 
+# ─── 3b. CTL-760: rate-limit 5h/7d % forwarded to catalyst-session.sh ───────
+# Stub catalyst-session.sh via CATALYST_SESSION_BIN to capture the argv the
+# wrapper forwards. The stub records its args and exits 0 so the foreground
+# render path is unaffected.
+RL_CAPTURE="$SCRATCH/rl-emit-args.log"
+RL_SESSION_STUB="$MOCK_BIN_DIR/mock-session-rl.sh"
+cat > "$RL_SESSION_STUB" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$RL_CAPTURE"
+exit 0
+STUB
+chmod +x "$RL_SESSION_STUB"
+
+# Build an input that carries the rate_limits block Claude Code's statusLine
+# payload provides (proven from ccstatusline's input schema).
+RL_STATUS_JSON='{
+  "session_id": "claude-uuid-aaaa",
+  "model": {"id": "claude-opus-4-7"},
+  "context_window": {"used_percentage": 24, "current_usage": 245000},
+  "rate_limits": {
+    "five_hour":  {"used_percentage": 26, "resets_at": "2026-06-03T05:00:00Z"},
+    "seven_day":  {"used_percentage": 15, "resets_at": "2026-06-10T00:00:00Z"}
+  }
+}'
+
+CATALYST_SESSION_BIN="$RL_SESSION_STUB" \
+  bash "$WRAPPER" >/dev/null 2>&1 <<<"$RL_STATUS_JSON"
+
+# Wait for the background emit to land.
+RL_WAITED=0
+while (( RL_WAITED < 20 )); do
+  [[ -f "$RL_CAPTURE" ]] && break
+  sleep 0.25
+  RL_WAITED=$((RL_WAITED + 1))
+done
+
+RL_ARGS="$(cat "$RL_CAPTURE" 2>/dev/null | tr '\n' ' ')"
+expect_contains "wrapper forwards --ratelimit-5h-pct 26 to catalyst-session.sh" "$RL_ARGS" "--ratelimit-5h-pct 26"
+expect_contains "wrapper forwards --ratelimit-7d-pct 15 to catalyst-session.sh" "$RL_ARGS" "--ratelimit-7d-pct 15"
+expect_contains "wrapper forwards --ratelimit-5h-reset to catalyst-session.sh" "$RL_ARGS" "--ratelimit-5h-reset 2026-06-03T05:00:00Z"
+expect_contains "wrapper forwards --ratelimit-7d-reset to catalyst-session.sh" "$RL_ARGS" "--ratelimit-7d-reset 2026-06-10T00:00:00Z"
+
 # ─── 4. Resilience: even if emit fails, wrapper still renders ───────────────
 # Point the session script at a bogus path so emit silently fails.
 export CATALYST_SESSION_BIN="/does/not/exist-$$"

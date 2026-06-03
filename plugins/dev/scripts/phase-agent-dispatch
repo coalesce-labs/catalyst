@@ -326,6 +326,11 @@ compose_otel_resource_attrs() {
 		attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
 	fi
 	attrs="${attrs},task.type=phase-${PHASE}"
+	# CTL-760: launch-mode dimension. Rides OTEL_RES_ATTRS → the --settings env →
+	# the worker's native Claude-Code metrics, so every bg phase metric slices by
+	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
+	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
+	attrs="${attrs},catalyst.exec_context=phase-bg"
 	printf '%s\n' "$attrs"
 }
 
@@ -669,6 +674,71 @@ PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
 # direnv produces for the interactive orchestrator.
 OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
 
+# ─── CTL-760: per-worker --settings env injection ───────────────────────────
+#
+# `claude --bg` is an RPC to the per-user daemon, so the spawned worker inherits
+# the DAEMON's frozen env — the per-worker OTEL_RESOURCE_ATTRIBUTES we set in
+# DISPATCH_ENV below never reaches it, and the worker emits Claude-Code
+# metrics/logs with empty linear_key / branch / project labels. The only lever
+# that crosses the RPC is `claude --bg --settings '{"env":{...}}'`, which MERGES
+# with ~/.claude/settings.json (it does not replace it) — verified empirically.
+#
+# compose_worker_settings_json builds that settings object with `jq -nc` (never
+# hand-built JSON):
+#   { "env": { <telemetry toggles>, "OTEL_RESOURCE_ATTRIBUTES": "<attrs>" },
+#     "statusLine": { "type": "command", "command": "<SCRIPT_DIR>/catalyst-statusline.sh" } }
+#
+# Telemetry toggles are re-asserted from the dispatcher's own inherited env (the
+# same keys that enable telemetry in ~/.claude/settings.json's .env block),
+# defaulting CLAUDE_CODE_ENABLE_TELEMETRY=1 / OTEL_METRICS_EXPORTER=otlp /
+# OTEL_LOGS_EXPORTER=otlp. OTEL_EXPORTER_OTLP_ENDPOINT and
+# OTEL_EXPORTER_OTLP_PROTOCOL are included ONLY when non-empty (absent optionals
+# are omitted, never written as null/empty keys).
+#
+# statusLine.command points at this repo's catalyst-statusline.sh — the entire
+# statusLine key is OMITTED (fail-open) when that file is absent. Always emits a
+# valid settings object; an empty OTEL_RES_ATTRS still yields valid JSON.
+compose_worker_settings_json() {
+	local enable_telemetry metrics_exporter logs_exporter otlp_endpoint otlp_protocol
+	enable_telemetry="${CLAUDE_CODE_ENABLE_TELEMETRY:-1}"
+	metrics_exporter="${OTEL_METRICS_EXPORTER:-otlp}"
+	logs_exporter="${OTEL_LOGS_EXPORTER:-otlp}"
+	otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+	otlp_protocol="${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
+
+	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
+
+	jq -nc \
+		--arg enable_telemetry "$enable_telemetry" \
+		--arg metrics_exporter "$metrics_exporter" \
+		--arg logs_exporter "$logs_exporter" \
+		--arg otlp_endpoint "$otlp_endpoint" \
+		--arg otlp_protocol "$otlp_protocol" \
+		--arg otel_attrs "$OTEL_RES_ATTRS" \
+		--arg statusline_cmd "$statusline_script" \
+		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
+		'{
+       env: (
+         {
+           "CLAUDE_CODE_ENABLE_TELEMETRY": $enable_telemetry,
+           "OTEL_METRICS_EXPORTER": $metrics_exporter,
+           "OTEL_LOGS_EXPORTER": $logs_exporter
+         }
+         + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
+         + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
+         + (if $otel_attrs == "" then {} else { "OTEL_RESOURCE_ATTRIBUTES": $otel_attrs } end)
+       )
+     }
+     + (if $have_statusline
+        then { statusLine: { type: "command", command: $statusline_cmd } }
+        else {} end)'
+}
+WORKER_SETTINGS_JSON="$(compose_worker_settings_json)"
+# Fail-open: never let a malformed settings string reach the spawn or dry-run.
+if ! printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1; then
+	WORKER_SETTINGS_JSON='{}'
+fi
+
 DISPATCH_ENV=(
 	"CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}"
 	"CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
@@ -707,11 +777,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
+		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,
       resumeSession: (if $resumeSession == "" then null else $resumeSession end),
-      env: $env, status: "dispatched", dryRun: true}'
+      env: $env, settings: $settings, status: "dispatched", dryRun: true}'
 	exit 0
 fi
 
@@ -837,18 +908,23 @@ spawn_claude_bg() {
 	# CTL descriptor v1.1: thread the resolved per-step levers. ADDITIVE +
 	# fail-open — when WORKER_EFFORT and APPEND_SYSTEM_PROMPT are both empty the
 	# launch is byte-identical to today (no --effort / --append-system-prompt).
+	# CTL-760: --settings carries the per-worker telemetry env + statusLine across
+	# the `claude --bg` daemon RPC (the DISPATCH_ENV prefix is kept belt-and-braces
+	# but is lost to the frozen daemon env on the far side). Threaded immediately
+	# after --model in BOTH branches so every spawn site (fresh, resume,
+	# resume-fallback) inherits it.
 	if [[ -n "$WORKER_EFFORT" || -n "$APPEND_SYSTEM_PROMPT" ]]; then
 		local _levers=()
 		[[ -n "$WORKER_EFFORT" ]] && _levers+=(--effort "$WORKER_EFFORT")
 		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" "${_levers[@]}" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "${_levers[@]}" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	else
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	fi
 }
