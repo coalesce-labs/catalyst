@@ -49,6 +49,11 @@ import {
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
+// CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
+// the scheduler's fetchTicketState + cache (threaded via reclaimOpts) so a
+// terminal/merged ticket adds ≤1 cached read; it is INERT when no reader is
+// threaded (the default for every legacy unit test).
+import { isTicketTerminalOrMerged } from "./terminal-state.mjs";
 // CTL-638: pull the once-marker + per-(ticket, phase) cool-down primitives
 // from the shared leaf module. labelOnce is the same guard CTL-585 introduced
 // for scheduler.mjs's `needs-human` path — pre-CTL-638 the recovery sweep's
@@ -1298,6 +1303,17 @@ export function reclaimDeadWorkIfPossible(
     // never treated as a human-intervention condition (and never adds to the
     // write storm). Injected for tests; defaults to the shared singleton.
     breaker = linearBreaker,
+    // CTL-642: the SHARED TTL state cache + fetchState + prAdapter for the
+    // terminal short-circuit (below). fetchState defaults to UNDEFINED (not the
+    // real linear-query helper) so the short-circuit is INERT unless a caller
+    // explicitly threads a reader: production wires fetchState: fetchTicketState +
+    // cache via the scheduler's reclaimOpts (scheduler.mjs:~1672), while every
+    // legacy unit test that omits it is byte-for-byte unchanged (no surprise
+    // network read, no false short-circuit). isTicketTerminalOrMerged no-ops when
+    // fetchState is not a function.
+    fetchState,
+    cache,
+    prAdapter,
     now = Date.now,
   } = {},
 ) {
@@ -1359,6 +1375,61 @@ export function reclaimDeadWorkIfPossible(
     recordEscalationFn(orchDir, ticket, phase, reason, now());
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
+  }
+
+  // CTL-642 — TERMINAL SHORT-CIRCUIT. Placed BEFORE the lifecycle/alive branch so
+  // it DOMINATES all three escalateOnce sites (alive busy-ceiling, no-probe,
+  // no-progress): a ticket the pipeline (or a human) has already finished
+  // (Linear state Done/Canceled) or whose PR already merged must NEVER be
+  // escalated to needs-human nor revived — those are the CTL-624/625
+  // merged-but-running-zombie and CTL-549/550 false-escalation storms. Runs for
+  // BOTH alive (the merged-but-still-running zombie) AND dead workers (a
+  // crashed-after-merge worker). On terminal/merged: flip the signal to `done`
+  // via emitComplete (so the scheduler drops it from the attention set next tick),
+  // audit it (completion_origin:"terminal-short-circuit"), and return the new
+  // outcome `terminal-short-circuit` (the scheduler treats it like reclaimed/noop
+  // — NO escalated event). Best-effort: a non-zero emitComplete falls through to
+  // the normal lifecycle path (re-evaluated next tick), never strands the ticket.
+  //
+  // The check is cheap-first (terminal-state.isTicketTerminalOrMerged): the cached
+  // Linear read runs first; the `gh` PR view runs ONLY when non-terminal AND a PR
+  // number exists. A null/unreadable read fails safe to NOT-terminal (D5), so a
+  // transient linearis outage never manufactures a false completion.
+  const terminalCheck = isTicketTerminalOrMerged({
+    ticket,
+    signal,
+    fetchState,
+    cache,
+    prAdapter,
+  });
+  if (terminalCheck.terminal) {
+    appendEvent({
+      phase,
+      ticket,
+      orchId,
+      death_signal: "terminal-short-circuit",
+      prev_state_json_mtime: prevStateJsonMtime,
+      probe_passed: false,
+      probe_checked: terminalCheck.reason,
+      completion_origin: "terminal-short-circuit",
+      reclaimed_bg_job_id: prevBgJobId,
+      stopped_bg_job_ids: [],
+      title: `phase ${phase} short-circuited (ticket already terminal)`,
+      body: `Daemon short-circuited ${ticket} ${phase}: ${terminalCheck.reason} (state=${terminalCheck.state ?? "?"}). Flipping signal to done; no escalation.`,
+    });
+    const sc = emitComplete({ orchDir, signal });
+    if (sc.code !== 0) {
+      log.warn(
+        { ticket, phase, code: sc.code, stderr: sc.stderr, reason: terminalCheck.reason },
+        "ctl-642: terminal short-circuit emit-complete failed; falling through to lifecycle path (retry next tick)",
+      );
+    } else {
+      log.info(
+        { ticket, phase, reason: terminalCheck.reason },
+        "ctl-642: terminal short-circuit — ticket already terminal/merged, signal flipped to done (no escalation)",
+      );
+      return "terminal-short-circuit";
+    }
   }
 
   // CTL-736 — THE DEATH TRIGGER. The authoritative LOCAL state.json lifecycle

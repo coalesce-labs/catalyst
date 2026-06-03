@@ -1148,6 +1148,193 @@ describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () =>
   });
 });
 
+// --- CTL-642: TERMINAL SHORT-CIRCUIT ---------------------------------------
+//
+// Placed BEFORE the lifecycle/alive branch so it DOMINATES all three escalateOnce
+// sites (alive busy-ceiling, no-probe, no-progress). A ticket already terminal
+// (Linear Done/Canceled) or whose PR merged must NEVER escalate to needs-human
+// nor revive — it flips its signal to done (emitComplete), audits with
+// completion_origin:"terminal-short-circuit", and returns the new outcome.
+describe("reclaimDeadWorkIfPossible — CTL-642 terminal short-circuit", () => {
+  const orch = "/orch";
+
+  // Deterministic seam set with the short-circuit ENABLED (fetchState threaded).
+  // Every escalateOnce-feeding gate is reachable; the short-circuit must win.
+  function seams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      probes: { implement: () => false },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(true),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  // ── PATH 1: alive busy-ceiling. An alive worker past BUSY_CEILING_MS with no
+  // committed work would escalate "busy-ceiling-exceeded" — UNLESS terminal.
+  test("alive busy-ceiling path: terminal Linear state ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "Done",
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0); // never escalated
+  });
+
+  // ── PATH 2: no-probe-for-phase. A dead worker on a probe-less phase escalates
+  // "no-probe-for-phase" — UNLESS terminal.
+  test("no-probe path: merged PR ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const sig = { ...implementSignal({ status: "running" }), phase: "research" };
+    sig.raw.phase = "research";
+    sig.raw.pr = { number: 7, repo: "o/r" };
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      sig,
+      seams({
+        jobLifecycle: () => "dead-gone",
+        // research has a probe by default; force the no-probe branch with empty probes
+        probes: {},
+        listTicketPhases: () => ["research"],
+        fetchState: () => "PR", // non-terminal Linear → falls to PR check
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-06-04T00:00:00Z" }) },
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  // ── PATH 3: no-progress. A dead worker with zero forward progress would be
+  // stopped + escalated "no-progress" — UNLESS terminal.
+  test("no-progress path: terminal Linear state ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running" }),
+      seams({
+        jobLifecycle: () => "dead-gone",
+        probes: { implement: () => false }, // work not done → would head to no-progress
+        progressMark: () => 0,
+        readProgressMark: () => 0, // 0 <= 0 → no-progress STOP
+        fetchState: () => "Canceled",
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  test("audit event carries completion_origin:'terminal-short-circuit'", () => {
+    const appendEvent = recorder(undefined);
+    reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running" }),
+      seams({ jobLifecycle: () => "dead-gone", fetchState: () => "Done", appendEvent }),
+    );
+    expect(appendEvent.calls.length).toBe(1);
+    expect(appendEvent.calls[0][0].completion_origin).toBe("terminal-short-circuit");
+  });
+
+  test("NON-terminal + open PR ⇒ does NOT short-circuit (normal path runs)", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const sig = implementSignal({ status: "running", startedAt: new Date(0).toISOString() });
+    sig.raw.pr = { number: 7, repo: "o/r" };
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      sig,
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "PR",
+        prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).not.toBe("terminal-short-circuit");
+    expect(r).toBe("escalated"); // the busy-ceiling escalation runs as before
+    expect(appendEscalatedEvent.calls.length).toBe(1);
+  });
+
+  test("INERT when no fetchState threaded (legacy callers unchanged)", () => {
+    // No fetchState/prAdapter → isTicketTerminalOrMerged no-ops → normal escalate.
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+        // no fetchState
+      }),
+    );
+    expect(r).toBe("escalated");
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("busy-ceiling-exceeded");
+  });
+
+  test("a failed emitComplete falls through to the normal lifecycle path (never strands)", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "Done",
+        emitComplete: recorder({ code: 1, stderr: "emit boom" }),
+        appendEscalatedEvent,
+      }),
+    );
+    // emitComplete failed → did NOT return terminal-short-circuit; the alive
+    // busy-ceiling escalation ran as the fallthrough.
+    expect(r).toBe("escalated");
+  });
+});
+
 // --- CTL-661 Phase 2: reap-intent on the reclaim happy path (B) -------------
 //
 // When a stale-by-mtime worker reaches branch (B) (probe says work IS done) it
