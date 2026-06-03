@@ -5520,4 +5520,141 @@ describe("CTL-755: admission gate", () => {
     expect(dispatch.calls).toEqual([]);
     expect(r.advanced).toEqual([]);
   });
+
+  // ── STEP E: dep persistence (scheduler-side) ──
+  //
+  // A writeStatus spy that ALSO records applyBlockedByRelation (the durable
+  // blocked_by write STEP E issues). Mirrors labelSpy but exposes `relations`.
+  function depSpy() {
+    const relations = [];
+    const applied = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => { applied.push(a); return { applied: true, reason: null }; },
+      removeLabel: () => ({ removed: true }),
+      applyBlockedByRelation: (a) => { relations.push(a); return { applied: true, reason: null }; },
+    };
+    return { ws, relations, applied };
+  }
+
+  // Write workers/<T>/triage.json with a `.dependencies` array (the flat-string
+  // shape the phase-triage skill scrapes). The worker dir already exists from
+  // writeSignal.
+  function writeTriageDeps(ticket, dependencies) {
+    writeFileSync(
+      join(orchDir, "workers", ticket, "triage.json"),
+      JSON.stringify({ ticket, classification: "feature", dependencies }),
+    );
+  }
+
+  // An exec stub: `linearis issues read <id>` → keyed state, or code!==0 for
+  // ids in `unresolvable` (so fetchTicketState returns null and STEP E drops it).
+  function execStates(stateById, unresolvable = new Set()) {
+    return (_cmd, args) => {
+      const id = args?.[2];
+      if (unresolvable.has(id)) return { code: 1, stdout: "", stderr: "not found" };
+      const name = stateById[id] ?? "Triage";
+      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
+    };
+  }
+
+  test("dep persistence: a resolvable non-terminal dep is written, a prose-only/unresolvable token is dropped", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-100 resolves (non-terminal); PROSE-1 is a TEAM-NNN-shaped token that
+    // does not resolve to a real ticket → dropped.
+    writeTriageDeps("CTL-7", ["CTL-100", "PROSE-1"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7 has NO existing relations (so the dep write is not idempotently
+      // skipped); the dep states are resolved via exec below.
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }, new Set(["PROSE-1"])),
+    });
+    // Exactly one durable edge: CTL-7 blocked_by CTL-100. PROSE-1 dropped.
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  test("dep persistence is idempotent: a dep already in the candidate's relations → zero writes", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7's FRESH relations already carry blocked_by CTL-100 (durable edge
+      // exists) → STEP E must NOT re-write it. (CTL-100 In Progress also holds
+      // the gate, but the persistence path is what we pin here.)
+      fetchRelations: () => relBlockedBy("CTL-100"),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([]); // idempotent — nothing written
+  });
+
+  test("dep persistence: a TERMINAL dep is NOT written (no durable edge for a Done blocker)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "Done" }), // terminal → no durable edge
+    });
+    expect(relations).toEqual([]);
+  });
+
+  test("dep persistence: a self-ref dependency token is dropped", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-7", "CTL-100"]); // CTL-7 is self → dropped
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  test("dep persistence tolerates the rich {id} descriptor shape (forward-compat)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", [{ id: "CTL-100", exists: true, blockerState: "In Progress" }]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
 });

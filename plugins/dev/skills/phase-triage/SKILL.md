@@ -302,6 +302,37 @@ then skips the Linear estimate write for this ticket (Q4 design decision: no SCO
 fallback for the Linear estimate field). The bash body intentionally does **not** write `estimate`
 (CTL-558 guard).
 
+**2c. Validate the scraped dependencies — READ-ONLY (CTL-755).** The bash body's `2d` step scrapes
+every `TEAM-NNN` token from the body into a flat `dependencies` array but does NOT verify any of them
+resolve to a real ticket. When running in Opus mode, enrich each scraped id using **read-only**
+`linearis issues read <id>` so the richer shape carries existence + the blocker's current state:
+
+```jsonc
+"dependencies": [
+  { "id": "CTL-447", "exists": true,  "blockerState": "In Progress" },
+  { "id": "CTL-9999", "exists": false, "blockerState": null }
+]
+```
+
+For each id, run `linearis issues read <id>` (the same read the bash body already uses for the
+ticket itself). On a successful read, set `exists: true` and `blockerState` to the ticket's
+`state.name`; on a non-zero exit / unparseable output (a prose token that merely matched the
+`TEAM-NNN` regex but is not a real ticket), set `exists: false`, `blockerState: null`. Re-write
+`triage.json` with the enriched `dependencies`. This is purely advisory metadata — the durable
+ordering edge is written **scheduler-side** (see the hard constraint below), so a missing/extra
+entry here can never deadlock the pipeline.
+
+**Hard constraint — the skill makes ZERO Linear writes for dependencies.** Do NOT call
+`linearis issues update ... --blocked-by` (or any `linearis issues update`) from this skill. The
+admission gate's durable `blocked_by` persistence lives in the execution-core scheduler (CTL-755
+STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates each token via
+`fetchTicketState`, drops unresolvable/terminal/cycle-closing tokens, and writes the durable edge
+with `applyBlockedByRelation`). Keeping the write scheduler-side preserves the CTL-497/CTL-558
+contract — the phase-triage e2e negative guard (`phase-triage-e2e.test.sh:172`) fails the build if
+this skill ever emits a `linearis issues update` call. `linearis issues read` is read-only and is
+fine. Because STEP E tolerates BOTH the flat-string and the rich `{id}` shapes, emitting the rich
+shape here is forward-compatible and changes nothing scheduler-side.
+
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.
 

@@ -165,6 +165,44 @@ function readTriageEstimate(orchDir, ticket) {
   }
 }
 
+// CTL-755 STEP E — a TEAM-NNN identifier (the shape phase-triage scrapes from
+// the ticket body). Used to drop prose-only tokens before resolving a dependency
+// against Linear. Mirrors the skill's scrape regex (phase-triage/SKILL.md:167).
+const TICKET_REF_RE = /^[A-Z][A-Z0-9_]*-[0-9]+$/;
+
+// readTriageDependencies — read workers/<T>/triage.json `.dependencies` and
+// return the candidate dependency IDENTIFIERS (TEAM-NNN strings) the scheduler
+// should validate + persist as durable blocked_by edges. The skill stays
+// read-only (CTL-497/CTL-558): it scrapes the ids; the scheduler resolves +
+// writes. Tolerant of BOTH shapes so a future skill enrichment is forward-
+// compatible without a scheduler change:
+//   - flat strings:        ["CTL-100", "PROSE-1"]            (current skill)
+//   - rich descriptors:    [{ id: "CTL-100", exists: true }] (richer shape)
+// Tokens that are not a valid TEAM-NNN identifier, the candidate itself
+// (self-ref), or empty are dropped here; the per-blocker Linear-state validation
+// (resolvable + non-terminal) + cycle-check happen at the STEP-E call site.
+// Returns a de-duplicated array; never throws.
+function readTriageDependencies(orchDir, ticket) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(join(orchDir, "workers", ticket, "triage.json"), "utf8"));
+  } catch {
+    return [];
+  }
+  const deps = Array.isArray(raw?.dependencies) ? raw.dependencies : [];
+  const out = [];
+  const seen = new Set();
+  for (const d of deps) {
+    const id = typeof d === "string" ? d : typeof d?.id === "string" ? d.id : null;
+    if (!id || !TICKET_REF_RE.test(id)) continue; // prose-only / malformed → drop
+    if (id === ticket) continue; // self-ref → drop
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 // Missing or unreadable → {priority: 5, createdAt: null} (safe lowest-band
 // default). Never throws.
 export function readWorkerPriority(orchDir, ticket) {
@@ -1624,6 +1662,14 @@ export function schedulerTick(
           // (rather than silently invisible in `default`).
           noProgressStopped.push(entry);
           break;
+        case "reclaim-held":
+          // CTL-755 STEP D: a dead-but-work-done `triage` worker held by the
+          // admission gate (un-admitted). Non-mutating — triage.json + signal are
+          // untouched, so next tick's STEP A re-evaluates the gate. Invisible by
+          // design (it is a steady-state hold, not a failure), bucketed like
+          // reclaim-failed; no log line so a long-held blocked ticket does not
+          // re-emit per-tick reclaim noise.
+          break;
         default:
           // noop | reclaim-failed → invisible.
           // CTL-606: superseded-noop also buckets here — a dead predecessor signal
@@ -1813,6 +1859,78 @@ export function schedulerTick(
         } else {
           // Admitted (or no longer held) → reset so a future re-hold re-emits.
           lastHeldEmitState.delete(ticket);
+        }
+      }
+
+      // (STEP E) CTL-755 dep PERSISTENCE — scheduler-side (CTL-497/CTL-558: the
+      // phase-triage skill stays READ-ONLY; the durable `blocked_by` write lives
+      // here, never in the skill). For each triaged-waiting candidate, read its
+      // triage.json `.dependencies`, VALIDATE each scraped TEAM-NNN token like
+      // the CTL-537 sequencing block (resolve via fetchTicketState — drop
+      // unresolvable / prose-only / self-refs; keep only real NON-TERMINAL
+      // blockers; skip a token that would close a cycle with the candidate), and
+      // for each surviving (candidate, blocker) NOT already in the candidate's
+      // FRESH relations (idempotent — a steady-state tick writes nothing), write
+      // the durable edge via the same applyBlockedByRelation seam CTL-537 uses.
+      // This is what makes the admission gate (STEP A) durable: the next tick's
+      // analyzeDependencyGraph reads the persisted edge from Linear.
+      const descriptorByTicket = new Map(
+        waitingDescriptors.map((d) => [d.identifier, d]),
+      );
+      for (const candidate of triagedWaiting) {
+        // Cycle members are owned by needs-human; do not also write deps for them.
+        if (cycleMembers.has(candidate)) continue;
+        const depIds = readTriageDependencies(orchDir, candidate);
+        if (depIds.length === 0) continue;
+
+        const desc = descriptorByTicket.get(candidate);
+        // Already-durable blocked_by blockers for THIS candidate, read from its
+        // FRESH inverseRelations ({type:"blocks", issue:<blocker>} ⇒ blocker
+        // blocks candidate). The idempotency guard: skip writing an edge we can
+        // already see on Linear.
+        const existingBlockers = new Set();
+        for (const node of desc?.inverseRelations?.nodes ?? []) {
+          if (node?.type === "blocks" && node?.issue?.identifier) {
+            existingBlockers.add(node.issue.identifier);
+          }
+        }
+        // CTL-537 cycle guard (Open-Q4 lightweight form): the candidate's own
+        // OUTGOING `blocks` edges name tickets it already blocks. A new
+        // blocked_by edge naming one of those would close a 2-node cycle, so
+        // skip it. (The broader admission graph's detectCycles already escalated
+        // any in-set cycle to needs-human above; this catches the candidate→dep
+        // back-edge for an out-of-set dep before we persist it.)
+        const candidateBlocks = new Set();
+        for (const node of desc?.relations?.nodes ?? []) {
+          if (node?.type === "blocks" && node?.relatedIssue?.identifier) {
+            candidateBlocks.add(node.relatedIssue.identifier);
+          }
+        }
+
+        for (const dep of depIds) {
+          if (existingBlockers.has(dep)) continue; // idempotent — edge already durable
+          if (candidateBlocks.has(dep)) {
+            // Persisting blocked_by(candidate ← dep) while candidate already
+            // blocks dep would close a cycle. Drop it (do not deadlock).
+            log.warn(
+              { candidate, dep },
+              "ctl-755 step-e: skipping dependency that would close a cycle",
+            );
+            continue;
+          }
+          // Resolve the dep's live Linear state. A null read (404 / unparseable /
+          // prose-only token that is not a real ticket) is dropped — we never
+          // persist an edge to a ticket we cannot resolve. A TERMINAL dep
+          // (Done/Canceled) is a no-op blocker, so do not write a durable edge
+          // for it (it would never hold the gate and only adds Linear noise).
+          const depState = fetchTicketState(dep, { exec, cache });
+          if (depState == null) continue; // unresolvable → drop
+          if (ADMISSION_TERMINAL_STATES.has(depState)) continue; // terminal → no durable edge
+
+          safeWrite(
+            () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
+            { ticket: candidate, phase: "triage-deps" },
+          );
         }
       }
     }

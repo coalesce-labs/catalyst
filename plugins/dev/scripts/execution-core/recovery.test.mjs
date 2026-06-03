@@ -3071,3 +3071,106 @@ describe("reclaimDeadWorkIfPossible — needs-input guard (CTL-549)", () => {
     expect(dispatched).toHaveLength(0);
   });
 });
+
+// CTL-755 STEP D — reclaim hold-safe. A dead-but-work-done `triage` worker must
+// NOT be reclaimed (which would flip its signal to research-owed and bypass the
+// admission gate) unless the ticket has been admitted. The reclaim sweep cannot
+// see `admittedThisTick`, so isAdmitted defaults to () => false (hold-safe).
+// Only `triage` is gated — a mid-pipeline dead worker holds a live slot and must
+// be reclaimed.
+describe("reclaimDeadWorkIfPossible — CTL-755 reclaim-held (admission gate)", () => {
+  const orch = "/orch";
+
+  // A dead (job dir gone) triage signal whose triage probe passes (work done).
+  function triageSignal({ ticket = "CTL-7" } = {}) {
+    return {
+      ticket,
+      phase: "triage",
+      status: "running",
+      liveness: { kind: "bg", value: "job-x" },
+      signalPath: `/x/${ticket}/phase-triage.json`,
+      raw: {
+        ticket,
+        phase: "triage",
+        orchestrator: ticket,
+        status: "running",
+        bg_job_id: "job-x",
+      },
+    };
+  }
+
+  test("dead triage + work done + un-admitted (default isAdmitted=false) → 'reclaim-held', NO emit, NO append, NO reap", () => {
+    const probe = recorder(true); // triage.json present → work done
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const emitReapIntent = recorder(Promise.resolve());
+    const postReclaimMirror = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null, // dead-gone → reclaim-eligible
+      probes: { triage: probe },
+      emitComplete: emit,
+      appendEvent,
+      emitReapIntent,
+      postReclaimMirror,
+      // isAdmitted omitted → defaults to () => false (hold-safe).
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaim-held");
+    expect(probe.calls.length).toBe(1); // branch B was entered (probe ran)
+    // Non-mutating: the guard returns BEFORE emit / append / reap.
+    expect(emit.calls.length).toBe(0);
+    expect(appendEvent.calls.length).toBe(0);
+    expect(emitReapIntent.calls.length).toBe(0);
+    expect(postReclaimMirror.calls.length).toBe(0);
+  });
+
+  test("dead triage + work done + ADMITTED (isAdmitted=()=>true) → 'reclaimed', emit fires (branch B proceeds)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null,
+      probes: { triage: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {}, // keep hermetic
+      isAdmitted: () => true,
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("isAdmitted receives the ticket so the predicate can decide per-ticket", () => {
+    const seen = [];
+    reclaimDeadWorkIfPossible(orch, triageSignal({ ticket: "CTL-42" }), {
+      statJob: () => null,
+      probes: { triage: recorder(true) },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      isAdmitted: (arg) => { seen.push(arg); return false; },
+      now: () => 1_000,
+    });
+    expect(seen).toEqual([{ ticket: "CTL-42" }]);
+  });
+
+  test("a NON-triage dead worker (implement) with work done still reclaims (branch B), gate not applied", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const isAdmitted = recorder(false); // would HOLD if consulted — must NOT be
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {},
+      isAdmitted,
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1); // mid-pipeline reclaim proceeds
+    expect(isAdmitted.calls.length).toBe(0); // gate only consulted for triage
+  });
+});
