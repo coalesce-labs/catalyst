@@ -141,8 +141,10 @@ async function deriveActiveState(ticket, phase, ageMs) {
 
 // ── derive a ticket's current phase + status from its signal files ──────────
 // Takes the pre-read phase signals (PHASE_ORDER-aligned) to avoid re-reading.
-function deriveCurrentPhase(phaseSigs) {
+// Exported (like buildPhaseSummary) so it is unit-testable (CTL-745).
+export function deriveCurrentPhase(phaseSigs) {
   let lastTerminal = null;
+  let lastTerminalIndex = -1;
   for (let i = 0; i < PHASE_ORDER.length; i++) {
     const sig = phaseSigs[i];
     if (!sig) continue;
@@ -152,11 +154,24 @@ function deriveCurrentPhase(phaseSigs) {
       return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
     }
     lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+    lastTerminalIndex = i;
   }
-  // all phases terminal → if the last one failed/stalled surface that, else done
-  if (lastTerminal && (lastTerminal.status === "failed" || lastTerminal.status === "stalled"))
-    return lastTerminal;
-  return { phase: "done", status: "done", model: lastTerminal?.model || null };
+  // No phase has written a signal file yet → pre-pipeline. Surface the first
+  // column (Research), never Done (CTL-745).
+  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null };
+  // A failed/stalled phase always surfaces at its own column, wherever it sits.
+  if (lastTerminal.status === "failed" || lastTerminal.status === "stalled") return lastTerminal;
+  // CTL-745: the pipeline is genuinely "done" ONLY when its FINAL phase
+  // (monitor-deploy) has reached a terminal status. The loop skips absent signal
+  // files (`if (!sig) continue`), so reaching the end with a terminal mid-pipeline
+  // phase (e.g. verify.done) does NOT mean the pipeline finished — the next
+  // phase's signal file simply hasn't been written yet. Synthesizing "done" here
+  // jumped the card to the Done column while the ticket was still at Validate.
+  // Surface the real last phase instead so the column matches true progress.
+  if (lastTerminalIndex === PHASE_ORDER.length - 1) {
+    return { phase: "done", status: "done", model: lastTerminal.model };
+  }
+  return lastTerminal;
 }
 
 // CTL-754: per-phase timing for the board progression strip. Pure + exported so
