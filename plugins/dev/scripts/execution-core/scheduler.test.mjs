@@ -5501,7 +5501,7 @@ describe("CTL-755: admission gate", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 6 }));
     for (const t of ["CTL-L1", "CTL-L2", "CTL-L3"]) writeSignal(t, "triage", "done");
     const dispatch = fakeDispatch();
-    const { ws, applied, removed } = labelSpy();
+    const { ws, applied } = labelSpy();
     const fr = relMap({
       "CTL-L1": relBlockedBy("CTL-FOUND"),
       "CTL-L2": relBlockedBy("CTL-FOUND"),
@@ -5543,6 +5543,80 @@ describe("CTL-755: admission gate", () => {
     expect(dispatch.calls).toHaveLength(2);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
+  });
+
+  test("double-fill guard, promotion↔resume: one free slot is claimed by the triage→research promotion OR the resume sweep, never both (CTL-755 fix #1)", () => {
+    // ONE tick, ONE free global slot, contended by TWO sweeps:
+    //  - STEP B: a triaged-waiting candidate (CTL-7) eligible for triage→research.
+    //  - sweep 1.5: a parked/preempted ticket (CTL-Park) eligible for resume.
+    // maxParallel 2 with liveBackgroundCount 1 → computeFreeSlots == 1 (the live
+    // count models the one running sibling that holds the second slot; the parked
+    // ticket's bg worker was killed at preemption, so it is NOT live-counted).
+    //
+    // Fix #1 subtracts promotedCount from the resume sweep's slot budget:
+    //   resumeSlots = max(0, computeFreeSlots(2, 1) - promotedCount) = max(0, 1 - 1) = 0
+    // so once STEP B promotes CTL-7 the resume sweep sees ZERO slots and bows out.
+    // WITHOUT fix #1 the resume sweep would read resumeSlots = computeFreeSlots(2,1)
+    // = 1 and ALSO dispatch CTL-Park into the same single slot — two NEW dispatches
+    // into one free slot (over-admission past maxParallel). This test would then
+    // see dispatch.calls length 2 and fail the single-slot assertion below.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Triaged-waiting candidate — promotes via STEP B (unblocked, free slot).
+    writeSignal("CTL-7", "triage", "done");
+    // Parked/preempted candidate — a phase-research signal in the "preempted"
+    // status on its parkedFrom phase, with a (killed) bg_job_id, plus a persisted
+    // priority so the resume sweep's rankTickets has a descriptor to rank. This is
+    // the exact shape seedPreempted writes for the resume-after-preemption tests.
+    writeSignalRaw("CTL-Park", "research", {
+      ticket: "CTL-Park",
+      phase: "research",
+      status: "preempted",
+      parkedFrom: "research",
+      bg_job_id: "dead-bg-from-preemption",
+      attentionReason: "preempted-by-priority",
+    });
+    writeWorkerPriority(orchDir, "CTL-Park", { priority: 2, createdAt: "2026-05-01T00:00:00Z" });
+
+    // A dispatch that writes a runnable "dispatched" signal so BOTH the promotion's
+    // and (were it to fire) the resume sweep's verifyDispatched + signal reset would
+    // succeed — i.e. nothing other than fix #1 suppresses a second dispatch.
+    const calls = [];
+    const dispatch = (args) => {
+      calls.push(args);
+      const dir = join(orchDir, "workers", args.ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${args.phase}.json`),
+        JSON.stringify({ ticket: args.ticket, phase: args.phase, status: "dispatched", bg_job_id: "new-bg" }),
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    dispatch.calls = calls;
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [], // no brand-new work — isolate promotion vs resume
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // 1 live sibling → computeFreeSlots(2,1) == 1
+      reclaimDeadWork: () => "noop", // CTL-690: never revive the parked signal
+      resolveSession: () => "uuid-park", // the resume sweep would resume-with-session
+      appendResumedAfterPreemptionEvent: () => {}, // capture-free; presence proves reachability
+      fetchRelations: () => relUnblocked(), // CTL-7's deps are satisfied → admitted
+    });
+
+    // Exactly ONE new dispatch consumed the single free slot. Fix #1 makes the
+    // promotion win and the resume sweep stand down (promotedCount drained the
+    // resume budget to zero); the parked ticket is NOT re-dispatched this tick.
+    expect(dispatch.calls).toHaveLength(1);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-7", phase: "research" });
+    expect(dispatch.calls.find((c) => c.ticket === "CTL-Park")).toBeUndefined();
+    // The parked signal stays parked (the resume sweep never reset it to "stalled").
+    const parkSig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-Park", "phase-research.json"), "utf8"),
+    );
+    expect(parkSig.status).toBe("preempted");
   });
 
   test("double-fill guard, 1 slot: a higher-priority NEW ticket wins over a lower-priority triaged candidate", () => {
@@ -5621,6 +5695,44 @@ describe("CTL-755: admission gate", () => {
     });
     expect(dispatch.calls).toEqual([]);
     expect(r.advanced).toEqual([]);
+  });
+
+  test("read-failure held event carries the DISTINCT 'dependency-state-unknown' reason with empty blockers (CTL-755 fix #2)", () => {
+    // Same fail-safe path as above, but pinning the held-event CLASSIFICATION. A
+    // null relations read forces CTL-7 out of readyIds (A.4), so STEP A.7 classifies
+    // it as "blocked". Fix #2: because readFailedTickets.has(CTL-7), the emitted
+    // phase.advance.held reason is "dependency-state-unknown" (a hydration failure,
+    // NOT a confirmed open dependency) and blockers is []. WITHOUT fix #2 the same
+    // branch would fall through to reason "blocked-by-open-dependency" with blockers
+    // = unmetBlockersFor(...) — which, on a null read with no edges, is [] but with
+    // the WRONG reason, conflating a read failure with a genuine dependency hold.
+    // The reason assertion below would then fail.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => null, // read failed → fail-safe hold
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(r.advanced).toEqual([]);
+    expect(held.events).toHaveLength(1);
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "dependency-state-unknown",
+    });
+    // blockers must be EXACTLY [] (deep-equal), distinguishing a read-failure hold
+    // from a genuine open-dependency hold that names its unmet blocker ids.
+    expect(held.events[0].blockers).toEqual([]);
+    // And it must NOT carry the genuine-open-dependency reason.
+    expect(held.events[0].reason).not.toBe("blocked-by-open-dependency");
   });
 
   // ── STEP E: dep persistence (scheduler-side) ──
@@ -5812,7 +5924,7 @@ describe("CTL-755: admission gate", () => {
       liveness: { kind: "bg", value: "job-dead-7" },
     });
     const dispatch = fakeDispatch();
-    const { ws, removed } = labelSpy();
+    const { ws } = labelSpy();
     const r = schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch,

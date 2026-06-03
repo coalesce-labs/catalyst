@@ -30,6 +30,7 @@ import {
   analyzeDependencyGraph,
   referencedBlockerIds,
   buildDependencyEdges,
+  DEFAULT_TERMINAL_STATUSES,
 } from "../lib/dependency-graph.mjs";
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
 // ("triage") is intentionally NO LONGER the new-work entry phase — new work
@@ -1090,9 +1091,10 @@ export const HELD_LABEL_WAITING = "waiting";
 const HELD_LABELS = [HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
 
 // Terminal Linear states a blocker can be in (a blocker in one of these does NOT
-// hold its dependent). Mirrors lib/dependency-graph.mjs DEFAULT_TERMINAL_STATUSES
-// (not exported there); admissionPool uses the default terminal set.
-const ADMISSION_TERMINAL_STATES = new Set(["Done", "Canceled"]);
+// hold its dependent). Single source of truth: lib/dependency-graph.mjs
+// DEFAULT_TERMINAL_STATUSES (the same set computeReadySet applies to admissionPool),
+// imported so the held-classification + the readiness partition cannot drift apart.
+const ADMISSION_TERMINAL_STATES = new Set(DEFAULT_TERMINAL_STATUSES);
 
 // unmetBlockersFor — the non-terminal blocked_by blocker identifiers for ONE
 // candidate, over the combined admission edge set. An in-set blocker is unmet
@@ -1827,8 +1829,17 @@ export function schedulerTick(
         let blockers = [];
         if (!readyIds.has(ticket)) {
           desired = HELD_LABEL_BLOCKED;
-          reason = "blocked-by-open-dependency";
-          blockers = unmetBlockersFor(ticket, edges, poolById, admissionBlockerStates);
+          if (readFailedTickets.has(ticket)) {
+            // A null relations read forced this ticket out of readyIds (fail-safe
+            // hold). The dependency picture is UNKNOWN, not a confirmed open dep —
+            // emit a distinct reason so the audit log can't conflate a hydration
+            // failure with a genuine zero-or-more open-dependency hold.
+            reason = "dependency-state-unknown";
+            blockers = [];
+          } else {
+            reason = "blocked-by-open-dependency";
+            blockers = unmetBlockersFor(ticket, edges, poolById, admissionBlockerStates);
+          }
         } else if (!admittedThisTick.has(ticket)) {
           desired = HELD_LABEL_WAITING;
           reason = "awaiting-capacity-or-priority";
@@ -2197,7 +2208,11 @@ export function schedulerTick(
   // pull (so a preempted ticket reclaims its slot ahead of brand-new work).
   let resumedCount = 0;
   {
-    let resumeSlots = computeFreeSlots(maxParallel, liveCount);
+    // CTL-755: subtract promotedCount so a triage→research promotion (STEP B, this
+    // tick, before this sweep) and a resume cannot both claim the same free slot.
+    // Symmetric to STEP C's sweep-2 subtraction — the same double-fill class CTL-705
+    // closed for resume-vs-new-work, now also closed for promotion-vs-resume.
+    let resumeSlots = Math.max(0, computeFreeSlots(maxParallel, liveCount) - promotedCount);
     if (resumeSlots > 0) {
       // Collect parked tickets: in-flight tickets with status === PREEMPTED_STATUS.
       const parkedDescriptors = [];

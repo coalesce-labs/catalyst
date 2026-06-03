@@ -118,9 +118,12 @@ export function fetchTicketState(identifier, { exec = defaultExec, cache } = {})
 //   reads `.nodes` unconditionally. VERIFIED (ADV-1277): the single-ticket read
 //   returns populated relations.nodes (blocks→ADV-1280) and inverseRelations.nodes
 //   (blocks←ADV-1276, i.e. the blocked-by edge the dependency graph reads).
-// - priority: node.priority ?? null (0 "No priority" is preserved, NOT coerced
-//   to null — distinct from normalizeTicket's eligible-set 0 default, because
-//   the admission ranking treats an explicit 0 differently from "unknown").
+// - priority: node.priority when numeric, else null. An explicit 0 ("No priority")
+//   is kept as 0 (fidelity to the source), NOT coerced to null. Note 0 and null
+//   rank IDENTICALLY — scheduler-rank.priorityRank floors any non-1..4 value to
+//   band 5 — so this distinction does not affect selection; it only differs from
+//   normalizeTicket's eligible-set default (missing → 0) by recording a missing
+//   priority as "unknown" (null) rather than "lowest" (0).
 // - labels: node.labels.nodes[].name (or []), so STEP A can diff the held
 //   indicator (blocked/waiting) without a second read.
 // Returns null on a non-zero exit or unparseable stdout — the STEP-A caller
