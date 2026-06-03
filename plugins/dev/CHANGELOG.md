@@ -1,5 +1,20 @@
 # Changelog
 
+## [10.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.4.0...catalyst-dev-v10.5.0) (2026-06-03)
+
+
+### Features
+
+* **dev:** CTL-747 per-phase effort + dynamic-workflow execution driven by ticket points ([#1262](https://github.com/coalesce-labs/catalyst/issues/1262)) ([0b7bbe0](https://github.com/coalesce-labs/catalyst/commit/0b7bbe0773be9657da1d149628f039bb0420b40c))
+
+
+### Bug Fixes
+
+* **dev:** CTL-736 revive re-issues the phase command so a pre-first-turn death self-heals ([#1263](https://github.com/coalesce-labs/catalyst/issues/1263)) ([084a522](https://github.com/coalesce-labs/catalyst/commit/084a522209ece59f25a51b71adea499b25e796e2))
+* **dev:** CTL-745 gate synthetic done on terminal pipeline state ([#1287](https://github.com/coalesce-labs/catalyst/issues/1287)) ([b65bc27](https://github.com/coalesce-labs/catalyst/commit/b65bc27277a72d88b1b019224ead66421a5365c2))
+* **dev:** CTL-752 neutralize frozen-daemon workflow_id leak + doc join queries ([#1274](https://github.com/coalesce-labs/catalyst/issues/1274)) ([d499be9](https://github.com/coalesce-labs/catalyst/commit/d499be98adb60214b4f2537336c14b83d5337df3))
+* **dev:** CTL-756 self-echo guard for handleCommentWake ([#1283](https://github.com/coalesce-labs/catalyst/issues/1283)) ([7319d7c](https://github.com/coalesce-labs/catalyst/commit/7319d7cc4432983863cb8ae1717dba0f70447a94))
+
 ## [10.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.3.0...catalyst-dev-v10.4.0) (2026-05-31)
 
 
