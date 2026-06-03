@@ -42,6 +42,10 @@
           {
             "key": "ADV",
             "vcsRepo": "coalesce-labs/adva"
+          },
+          {
+            "key": "OTL",
+            "vcsRepo": "coalesce-labs/catalyst-otel"
           }
         ]
       }
