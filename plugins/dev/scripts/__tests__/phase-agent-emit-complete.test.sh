@@ -375,6 +375,67 @@ fresh_env t21
 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status parked 2>/dev/null
 assert_eq "1" "$?" "invalid status parked: exits 1"
 
+# ─── CTL-760: canonical resource block (project / linear.key / catalyst.orchestration)
+# build_canonical_line supports a resource block (lib/canonical-event.sh) but the
+# emit call previously only passed --linear-ticket, leaving the resource block's
+# project / linear.key / catalyst.orchestration unset on the worker's terminal
+# event. CTL-760 threads --project / --linear-key / --catalyst-orchestration so the
+# completion event carries the same orchestration context the worker's metrics do,
+# plus a duration_seconds payload field when the signal has both startedAt and
+# completedAt.
+
+echo ""
+echo "Test 22 (CTL-760): completion event carries the resource block (project / linear.key / catalyst.orchestration)"
+fresh_env t22
+# Provide a .catalyst/config.json with a projectKey the script can resolve, and
+# run from that directory so the ancestor-config lookup finds it.
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/.catalyst"
+cat >"${PROJ_DIR}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-triage.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"triage"}' >"$SIGNAL"
+(cd "$PROJ_DIR" &&
+	CATALYST_ORCHESTRATOR_ID=CTL-100 "$EMIT_SCRIPT" --phase triage --ticket CTL-100 \
+		--status complete --orch-id CTL-100 >/dev/null 2>&1)
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 22: no event line emitted"
+else
+	RES_PROJECT=$(echo "$LINE" | jq -r '.resource["project"] // empty')
+	RES_LINEAR=$(echo "$LINE" | jq -r '.resource["linear.key"] // empty')
+	RES_ORCH=$(echo "$LINE" | jq -r '.resource["catalyst.orchestration"] // empty')
+	assert_eq "test-proj" "$RES_PROJECT" "resource.project resolved from config projectKey"
+	assert_eq "CTL-100" "$RES_LINEAR" "resource[\"linear.key\"] = ticket"
+	assert_eq "CTL-100" "$RES_ORCH" "resource[\"catalyst.orchestration\"] = orch id"
+fi
+
+echo ""
+echo "Test 23 (CTL-760): duration_seconds payload computed from startedAt/completedAt"
+fresh_env t23
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+# startedAt 90s before completedAt → duration_seconds should be 90.
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","startedAt":"2026-06-04T00:00:00Z","completedAt":"2026-06-04T00:01:30Z"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+DURATION=$(echo "$LINE" | jq -r '.body.payload.duration_seconds // empty')
+assert_eq "90" "$DURATION" "body.payload.duration_seconds = 90 (completedAt - startedAt)"
+
+echo ""
+echo "Test 24 (CTL-760): duration_seconds omitted when signal lacks timestamps"
+fresh_env t24
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+HAS_DURATION=$(echo "$LINE" | jq -r '.body.payload | has("duration_seconds")')
+assert_eq "false" "$HAS_DURATION" "duration_seconds omitted when startedAt/completedAt absent"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
