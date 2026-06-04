@@ -373,10 +373,111 @@ describe("decideMaxParallel", () => {
       { w: makeWindow([[10, 8, 6], [12, 9, 7], [15, 11, 8]]), label: "trend-up" },
       { w: makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50), label: "trend-down" },
     ];
-    for (const { w, label } of cases) {
+    for (const { w } of cases) {
       const { next } = decideMaxParallel({ window: w, concurrency, ...base });
       expect(next).toBeGreaterThanOrEqual(concurrency.minParallel);
       expect(next).toBeLessThanOrEqual(concurrency.maxParallelCeiling);
     }
+  });
+
+  // --- CTL-770: setpoint-seeking convergence ---------------------------------
+
+  describe("setpoint convergence (CTL-770)", () => {
+    // A flat-idle window: trend==="none" (no strict up/down), load well below
+    // the cores×factor safe line. coreCount=4, loadSafeFactor=2 → threshold=8.
+    const flatIdle = makeWindow([[1.2, 1.2, 1.3], [1.2, 1.3, 1.2], [1.3, 1.2, 1.2]], 50);
+
+    test("flat-idle + mem-ok + setpoint + current<setpoint → converge-to-setpoint", () => {
+      // current=1 below setpoint=6. This is exactly the case that returns 'hold'
+      // today when setpoint is omitted.
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: flatIdle, concurrency: atFloor, setpoint: 6, ...base });
+      expect(result.next).toBe(6);
+      expect(result.reason).toBe("converge-to-setpoint");
+    });
+
+    test("without setpoint, the same flat-idle window still holds (no regression)", () => {
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: flatIdle, concurrency: atFloor, ...base });
+      expect(result.next).toBe(1);
+      expect(result.reason).toBe("hold");
+    });
+
+    test("cold-start seed: window < minSamples + mem-ok + setpoint + current<setpoint", () => {
+      // Only 1 flat-low sample → fewer than minSamples=3. Seeds to the target.
+      const oneSample = makeWindow([[1.2, 1.2, 1.3]], 50);
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: oneSample, concurrency: atFloor, setpoint: 6, ...base });
+      expect(result.next).toBe(6);
+      expect(result.reason).toBe("cold-start-seed");
+    });
+
+    test("cold-start seed does NOT fire when current already >= setpoint", () => {
+      const oneSample = makeWindow([[1.2, 1.2, 1.3]], 50);
+      const atTarget = { maxParallel: 6, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: oneSample, concurrency: atTarget, setpoint: 6, ...base });
+      expect(result.next).toBe(6);
+      expect(result.reason).toBe("insufficient-samples");
+    });
+
+    test("empty window keeps insufficient-samples even with a setpoint (one tick delay)", () => {
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: [], concurrency: atFloor, setpoint: 6, ...base });
+      expect(result.next).toBe(1);
+      expect(result.reason).toBe("insufficient-samples");
+    });
+
+    test("deadband: current === setpoint, flat-idle → at-setpoint, no change, stable across ticks", () => {
+      const atTarget = { maxParallel: 6, minParallel: 1, maxParallelCeiling: 20 };
+      const r1 = decideMaxParallel({ window: flatIdle, concurrency: atTarget, setpoint: 6, ...base });
+      expect(r1.next).toBe(6);
+      expect(r1.reason).toBe("at-setpoint");
+      // Re-decide with the same inputs → identical, no ±1 oscillation.
+      const r2 = decideMaxParallel({ window: flatIdle, concurrency: atTarget, setpoint: 6, ...base });
+      expect(r2.next).toBe(6);
+      expect(r2.reason).toBe("at-setpoint");
+    });
+
+    test("never overshoots: setpoint=6, current=5 converge → next<=6 (never 7)", () => {
+      const justBelow = { maxParallel: 5, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: flatIdle, concurrency: justBelow, setpoint: 6, ...base });
+      expect(result.next).toBe(6);
+      expect(result.next).toBeLessThanOrEqual(6);
+      expect(result.reason).toBe("converge-to-setpoint");
+    });
+
+    test("converge clamped to ceiling when setpoint exceeds it", () => {
+      const tight = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 4 };
+      const result = decideMaxParallel({ window: flatIdle, concurrency: tight, setpoint: 6, ...base });
+      expect(result.next).toBe(4); // ceiling clamps the jump
+      expect(result.reason).toBe("converge-to-setpoint");
+    });
+
+    test("no convergence when load is NOT safe (load1 >= cores×factor) even below setpoint", () => {
+      // cores=4, factor=2 → threshold=8; load1=9 not safe. Flat-high pattern.
+      const flatHigh = makeWindow([[9, 9, 7], [9, 9, 11], [9, 10, 8]], 50);
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: flatHigh, concurrency: atFloor, setpoint: 6, ...base });
+      // flat-high fires (both load1,load5 > threshold) → hold, NOT converge.
+      expect(result.reason).toBe("flat-high");
+      expect(result.next).toBe(1);
+    });
+
+    test("no-regression: trend-up still sheds even below the setpoint", () => {
+      // current=10 above-floor, strict up-trend, setpoint=6 → must still shed,
+      // never converge upward toward the setpoint.
+      const up = makeWindow([[10, 8, 6], [12, 9, 7], [15, 11, 8]], 50);
+      const result = decideMaxParallel({ window: up, concurrency, setpoint: 6, ...base });
+      expect(result.next).toBe(Math.floor(10 * 0.75)); // 7
+      expect(result.reason).toBe("trend-up");
+    });
+
+    test("no-regression: mem-critical still clamps to minParallel even with a setpoint", () => {
+      const w = makeWindow([[1, 2, 4]], 2); // 2% free < critical
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: w, concurrency: atFloor, setpoint: 6, ...base });
+      expect(result.next).toBe(1);
+      expect(result.reason).toBe("mem-critical");
+    });
   });
 });
