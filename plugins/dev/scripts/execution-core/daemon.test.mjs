@@ -27,9 +27,11 @@ import {
   handleCommentWake,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
+  __getEventPollTimerForTest,
   createCommentInboxWriter,
   createUpdateInboxWriter,
 } from "./daemon.mjs";
+import { getEventLogPath } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
@@ -720,6 +722,118 @@ describe("consumeEventTail (byte-offset + partial-line tail)", () => {
       consumeEventTail({ path: join(dir, "does-not-exist.jsonl"), reaper })
     ).not.toThrow();
     expect(handled).toHaveLength(0);
+  });
+});
+
+// CTL-769: the reaper must drain reap-intents via a setInterval POLL fallback,
+// not solely via fs.watch + debounce. On the continuously-appended unified
+// event log the debounce is perpetually reset, so consumeEventTail only ever
+// fired during >5s idle gaps and the reaper starved exactly when workers were
+// busy (~101k reap-requested vs ~216 reap-complete live). Mirrors the sibling
+// new-work tailer's poll fallback (monitor.mjs:684-685 / TAILER_POLL_INTERVAL_MS).
+describe("startReaperAndTimer — poll fallback drains reap-intents (CTL-769)", () => {
+  test("a reap-requested line appended after boot is drained by the poll, NOT fs.watch", async () => {
+    const handled = [];
+    // Fake reaper: record every dispatched event. .handle returns a resolved
+    // promise so the production .catch(...) chain is exercised without throwing
+    // and without any `claude` shell-out.
+    const fakeReaper = {
+      handle: (event) => {
+        handled.push(event);
+        return Promise.resolve();
+      },
+      // bootReplay runs once at startReaperAndTimer; no-op for the test.
+      bootReplay: () => Promise.resolve(),
+    };
+
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      // No registry watcher — isolate the reaper event-log path.
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: () => fakeReaper,
+      // Tiny poll so the drain is fast and deterministic.
+      pollMs: 10,
+      // A huge debounce makes the fs.watch path (if it ever fires) schedule a
+      // consumeEventTail far beyond this test's deadline — so any drain we
+      // observe within ~2s must have come from the poll interval, not fs.watch.
+      debounceMs: 600_000,
+    });
+
+    // Append a reap-requested line to the REAL event log path the daemon polls.
+    // startReaperAndTimer set the cursor to the current tail (0 here, since the
+    // file does not exist yet), so this newly-appended line is "new" bytes.
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    const reapLine =
+      JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "poll-abc" }) + "\n";
+    appendFileSync(logPath, reapLine);
+
+    // Poll-wait (deadline loop) until the reaper handles it — proving the
+    // setInterval drained the tail without any fs.watch event.
+    const deadline = Date.now() + 3000;
+    while (handled.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const reaps = handled.filter((e) => e.event === "phase.yield.reap-requested");
+    expect(reaps).toHaveLength(1);
+    expect(reaps[0].bg_job_id).toBe("poll-abc");
+  });
+
+  test("stopDaemon clears the poll interval — no further drains after stop", async () => {
+    const handled = [];
+    const fakeReaper = {
+      handle: (event) => {
+        handled.push(event);
+        return Promise.resolve();
+      },
+      bootReplay: () => Promise.resolve(),
+    };
+
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: () => fakeReaper,
+      pollMs: 10,
+      debounceMs: 600_000,
+    });
+
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+
+    // The poll interval is live after boot. Assert the handle DIRECTLY so this
+    // test pins stopDaemon's clearInterval — a behavioral "0 drains after stop"
+    // check alone is masked by stopDaemon also nulling _reaper (consumeEventTail
+    // short-circuits on a null reaper), so a leaked, un-cleared interval would
+    // no-op and the behavioral assertion would still pass. Removing the
+    // clearInterval block from stopDaemon must make THIS test red.
+    expect(__getEventPollTimerForTest()).not.toBeNull();
+
+    // Stop the daemon BEFORE appending — the interval must be cleared so the
+    // newly-appended line is never drained.
+    stopDaemon();
+
+    // The handle is cleared (the real teardown pin, independent of the reaper).
+    expect(__getEventPollTimerForTest()).toBeNull();
+
+    appendFileSync(
+      logPath,
+      JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "after-stop" }) + "\n"
+    );
+
+    // Belt-and-suspenders: give the (now-cleared) interval ample wall-clock time
+    // to misfire and confirm no drain occurs.
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(handled.filter((e) => e.event === "phase.yield.reap-requested")).toHaveLength(0);
   });
 });
 
