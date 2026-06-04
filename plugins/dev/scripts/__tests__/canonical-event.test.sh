@@ -464,6 +464,24 @@ BAD_MATCH="$(printf '%s' "$BAD_PHASE_NAME" \
   | grep -cE '^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$' || true)"
 expect_eq "malformed phase event name does NOT match broker regex" "0" "$BAD_MATCH"
 
+# CTL-761: phase.attempt / phase.revive_count are typed int attributes
+LINE_ATT="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-761" \
+  --phase-attempt 2 --phase-revive-count 1)"
+ATT=$(echo "$LINE_ATT" | jq -r '.attributes["phase.attempt"]')
+RC=$(echo "$LINE_ATT" | jq -r '.attributes["phase.revive_count"]')
+expect_eq "build_canonical_line phase.attempt typed int" "2" "$ATT"
+expect_eq "build_canonical_line phase.revive_count typed int" "1" "$RC"
+TYPE=$(echo "$LINE_ATT" | jq -r '.attributes["phase.attempt"] | type')
+expect_eq "phase.attempt is a JSON number" "number" "$TYPE"
+
+LINE_BARE="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-761")"
+HAS=$(echo "$LINE_BARE" | jq -r '.attributes | has("phase.attempt")')
+expect_eq "phase.attempt omitted when flag absent" "false" "$HAS"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

@@ -781,7 +781,7 @@ export function defaultAppendAutotuneGaugeEvent({
 // outer `reviveDispatch` would otherwise leave the signal-reset logic — the
 // load-bearing half — uncovered).
 export function defaultReviveDispatch(
-  { orchDir, ticket, phase, resumeSession },
+  { orchDir, ticket, phase, resumeSession, attempt },
   {
     dispatch = defaultDispatch,
     // CTL-660: success-path lifecycle emitters, injectable for tests. Default
@@ -834,6 +834,7 @@ export function defaultReviveDispatch(
   // spawns `claude --bg --resume <uuid>`. Only present on the resume path; a
   // cold/unresumable revive omits it and falls through to a fresh dispatch.
   if (resumeSession) dispatchArgs.resumeSession = resumeSession;
+  if (attempt != null) dispatchArgs.attempt = attempt; // CTL-761
   // CTL-660: record the revive DECISION before the spawn (reason="revive"),
   // then the verified launch after a clean dispatch. Both best-effort — the
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
@@ -1823,7 +1824,10 @@ export function reclaimDeadWorkIfPossible(
     });
     return "revive-suppressed";
   }
-  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession });
+  // CTL-761: forward the DISPATCH ordinal (= revive ordinal + 1; cold=1, first
+  // revive=2) so the revived worker's terminal event carries phase.attempt /
+  // phase.revive_count. `attempt` here is the revive ordinal (priorRevives+1).
+  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession, attempt: attempt + 1 });
   if (dispatchRes.code === 0) {
     writeReviveMarker({ orchDir, ticket, attempt });
     log.info({ ticket, phase, attempt }, "ctl-587: revived");

@@ -1814,6 +1814,23 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     // resumeSession is null on the dispatch (the fresh-start path).
     expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBeNull();
   });
+
+  // CTL-761: attempt is the DISPATCH ordinal (revive ordinal + 1), so the
+  // revived worker's signal.attempt carries a value > 1 → revive_count > 0.
+  test("CTL-761: first revive (priorRevives=0) forwards attempt=2 (dispatch ordinal) to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    // revive ordinal = 0+1=1; dispatch ordinal = 1+1=2
+    expect(s.opts.reviveDispatch.calls[0][0].attempt).toBe(2);
+  });
+
+  test("CTL-761: second revive (priorRevives=1) forwards attempt=3 to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 1 });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    // revive ordinal = 1+1=2; dispatch ordinal = 2+1=3
+    expect(s.opts.reviveDispatch.calls[0][0].attempt).toBe(3);
+  });
 });
 
 // --- CTL-736 Phase 3: the progress gate (revive-while-progressing vs stop) -----
@@ -3374,5 +3391,48 @@ describe("reclaimDeadWorkIfPossible — CTL-755 dead-triage reclaim (gate is dow
     });
     expect(r).toBe("reclaimed");
     expect(emit.calls.length).toBe(1); // mid-pipeline reclaim proceeds
+  });
+});
+
+
+describe("defaultReviveDispatch — CTL-761 attempt passthrough", () => {
+  let orchDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl761-revdisp-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = orchDir;
+    mkdirSync(join(orchDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function seed(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  test("attempt is forwarded to dispatch when set", () => {
+    seed("CTL-761A", "implement", { status: "running", bg_job_id: "bg-a" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-761A", phase: "implement", attempt: 2 },
+      { dispatch },
+    );
+    expect(dispatch.calls[0][0].attempt).toBe(2);
+  });
+
+  test("attempt absent → dispatch called without the key", () => {
+    seed("CTL-761B", "implement", { status: "running", bg_job_id: "bg-b" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-761B", phase: "implement" },
+      { dispatch },
+    );
+    expect("attempt" in dispatch.calls[0][0]).toBe(false);
   });
 });
