@@ -1698,6 +1698,63 @@ SIGNAL_T55="${WORKER_DIR}/phase-triage.json"
 ATT_T55=$(jq -r '.attempt // empty' "$SIGNAL_T55" 2>/dev/null)
 assert_eq "1" "$ATT_T55" "signal file defaults attempt=1"
 
+# ─── CTL-777: settings.env also carries the 5 CATALYST_* context vars ────────
+# `claude --bg` drops the plain env prefix (DISPATCH_ENV), so the worker's
+# CATALYST_ORCHESTRATOR_DIR was empty and phase-agent-emit-complete's step-2
+# signal flip silently skipped — wedging the pipeline. The fix threads the same
+# 5 context vars into the surviving --settings.env channel.
+
+echo ""
+echo "Test 56 (CTL-777): .settings.env carries the 5 CATALYST_* context vars"
+fresh_env t56
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+SET_ODIR=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_ORCHESTRATOR_DIR"] // empty' 2>/dev/null)
+SET_OID=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_ORCHESTRATOR_ID"] // empty' 2>/dev/null)
+SET_PHASE=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_PHASE"] // empty' 2>/dev/null)
+SET_TICKET=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_TICKET"] // empty' 2>/dev/null)
+HAS_GEN=$(echo "$SETTINGS_JSON" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+assert_eq "$ORCH_DIR" "$SET_ODIR" ".settings.env.CATALYST_ORCHESTRATOR_DIR equals --orch-dir"
+assert_eq "orch-test" "$SET_OID" ".settings.env.CATALYST_ORCHESTRATOR_ID equals --orch-id"
+assert_eq "triage" "$SET_PHASE" ".settings.env.CATALYST_PHASE equals the phase"
+assert_eq "CTL-100" "$SET_TICKET" ".settings.env.CATALYST_TICKET equals the ticket"
+assert_eq "true" "$HAS_GEN" ".settings.env carries CATALYST_GENERATION"
+
+echo ""
+echo "Test 57 (CTL-777): CTL-760 telemetry keys are unchanged and fail-open intact"
+# Reuse Test 56's SETTINGS_JSON.
+T57_TEL=$(echo "$SETTINGS_JSON" | jq -r '.env["CLAUDE_CODE_ENABLE_TELEMETRY"] // empty' 2>/dev/null)
+T57_MET=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_METRICS_EXPORTER"] // empty' 2>/dev/null)
+T57_LOG=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_LOGS_EXPORTER"] // empty' 2>/dev/null)
+T57_ATTR=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_RESOURCE_ATTRIBUTES")' 2>/dev/null)
+assert_eq "1" "$T57_TEL" "CLAUDE_CODE_ENABLE_TELEMETRY still present and unchanged"
+assert_eq "otlp" "$T57_MET" "OTEL_METRICS_EXPORTER still present and unchanged"
+assert_eq "otlp" "$T57_LOG" "OTEL_LOGS_EXPORTER still present and unchanged"
+assert_eq "true" "$T57_ATTR" "OTEL_RESOURCE_ATTRIBUTES still composed alongside the context vars"
+T57_VALID=$(echo "$SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "yes" "$T57_VALID" "settings JSON remains valid with context vars added (fail-open intact)"
+
+echo ""
+echo "Test 58 (CTL-777): empty context var is OMITTED (no null key) while others stay"
+fresh_env t58
+# Run the composer directly with GENERATION empty but ORCH_DIR present so we can
+# assert the ==\"\" omission pattern holds for the new keys too.
+SETTINGS_T58=$(
+	ORCH_DIR="${ORCH_DIR}" ORCH_ID="orch-test" PHASE="triage" TICKET="CTL-100" \
+		GENERATION="" SCRIPT_DIR="${TEST_DIR}/bin" OTEL_RES_ATTRS="" \
+		bash -c '
+      source <(sed -n "/^compose_worker_settings_json()/,/^}/p" "'"$DISPATCH"'")
+      compose_worker_settings_json'
+)
+T58_HAS_GEN=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T58_HAS_ODIR=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_ORCHESTRATOR_DIR")' 2>/dev/null)
+T58_VALID=$(echo "$SETTINGS_T58" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T58_HAS_GEN" "empty CATALYST_GENERATION omitted (no null key)"
+assert_eq "true" "$T58_HAS_ODIR" "CATALYST_ORCHESTRATOR_DIR still present when set"
+assert_eq "yes" "$T58_VALID" "settings JSON valid with a context var omitted"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
