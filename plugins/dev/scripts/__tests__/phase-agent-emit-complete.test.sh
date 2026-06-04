@@ -437,6 +437,48 @@ HAS_DURATION=$(echo "$LINE" | jq -r '.body.payload | has("duration_seconds")')
 assert_eq "false" "$HAS_DURATION" "duration_seconds omitted when startedAt/completedAt absent"
 
 echo ""
+echo "Test 25 (CTL-761): phase.attempt / phase.revive_count attributes from signal"
+fresh_env t25
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","attempt":3}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+ATT=$(echo "$LINE" | jq -r '.attributes["phase.attempt"] // empty')
+RC=$(echo "$LINE" | jq -r '.attributes["phase.revive_count"] // empty')
+assert_eq "3" "$ATT" "attributes[\"phase.attempt\"] = 3 from signal"
+assert_eq "2" "$RC" "attributes[\"phase.revive_count\"] = attempt-1 = 2"
+
+echo ""
+echo "Test 26 (CTL-761): cold dispatch attempt=1 → revive_count=0"
+fresh_env t26
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-triage.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"triage","attempt":1}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "1" "$(echo "$LINE" | jq -r '.attributes["phase.attempt"]')" "attempt=1"
+assert_eq "0" "$(echo "$LINE" | jq -r '.attributes["phase.revive_count"]')" "revive_count clamped to 0"
+
+echo ""
+echo "Test 27 (CTL-761): attributes omitted when signal lacks attempt"
+fresh_env t27
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "false" "$(echo "$LINE" | jq -r '.attributes | has("phase.attempt")')" "phase.attempt omitted"
+assert_eq "false" "$(echo "$LINE" | jq -r '.attributes | has("phase.revive_count")')" "phase.revive_count omitted"
+
+echo ""
+echo "Test 28 (CTL-761): failed status also carries attempt/revive_count"
+fresh_env t28
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","attempt":2}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status failed --reason "test_reason" >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "2" "$(echo "$LINE" | jq -r '.attributes["phase.attempt"]')" "failed path: phase.attempt=2"
+assert_eq "1" "$(echo "$LINE" | jq -r '.attributes["phase.revive_count"]')" "failed path: revive_count=1"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

@@ -159,6 +159,8 @@ synthesize_event_id() {
 #   --claude-ratelimit-7d-pct N    claude.ratelimit.seven_day_pct (integer, CTL-760)
 #   --claude-ratelimit-7d-opus-pct N    claude.ratelimit.seven_day_opus_pct (integer, CTL-763)
 #   --claude-ratelimit-7d-sonnet-pct N  claude.ratelimit.seven_day_sonnet_pct (integer, CTL-763)
+#   --phase-attempt N        phase.attempt (integer, CTL-761)
+#   --phase-revive-count N   phase.revive_count (integer, CTL-761)
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -175,6 +177,8 @@ build_canonical_line() {
   local claude_rl_5h="" claude_rl_7d=""
   # CTL-763: per-model 7d split.
   local claude_rl_7d_opus="" claude_rl_7d_sonnet=""
+  # CTL-761: dispatch attempt + revive count (typed int attributes).
+  local phase_attempt="" phase_revive_count=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -211,6 +215,8 @@ build_canonical_line() {
       --claude-ratelimit-7d-pct)        claude_rl_7d="$2"; shift 2 ;;
       --claude-ratelimit-7d-opus-pct)   claude_rl_7d_opus="$2"; shift 2 ;;
       --claude-ratelimit-7d-sonnet-pct) claude_rl_7d_sonnet="$2"; shift 2 ;;
+      --phase-attempt)       phase_attempt="$2"; shift 2 ;;
+      --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -273,6 +279,8 @@ build_canonical_line() {
     --arg claude_rl_7d "$claude_rl_7d" \
     --arg claude_rl_7d_opus "$claude_rl_7d_opus" \
     --arg claude_rl_7d_sonnet "$claude_rl_7d_sonnet" \
+    --arg phase_attempt "$phase_attempt" \
+    --arg phase_revive_count "$phase_revive_count" \
     '{
       ts: $ts,
       id: $id,
@@ -314,6 +322,8 @@ build_canonical_line() {
         + (if $claude_rl_7d == "" then {} else { "claude.ratelimit.seven_day_pct": ($claude_rl_7d | tonumber) } end)
         + (if $claude_rl_7d_opus   == "" then {} else { "claude.ratelimit.seven_day_opus_pct":   ($claude_rl_7d_opus   | tonumber) } end)
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
+        + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
+        + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
       ),
       body: (
         (if $message == "" then {} else { message: $message } end)

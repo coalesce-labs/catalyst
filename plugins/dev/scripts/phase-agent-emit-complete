@@ -236,6 +236,24 @@ if [[ -n $ORCH_DIR ]]; then
 	fi
 fi
 
+# CTL-761: read the dispatch attempt from the signal file and derive
+# revive_count = attempt - 1. Emitted as typed canonical attributes (not
+# body.payload, which otel-forward strips — otlp.ts:33) so Grafana/Loki can
+# query "what attempt completed this phase, and how many revives?"
+PHASE_ATTEMPT=""
+PHASE_REVIVE_COUNT=""
+if [[ -n $ORCH_DIR ]]; then
+	_ATT_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+	if [[ -f $_ATT_SIGNAL ]] && command -v jq >/dev/null 2>&1; then
+		_ATTEMPT=$(jq -r '.attempt // empty' "$_ATT_SIGNAL" 2>/dev/null || echo "")
+		if [[ $_ATTEMPT =~ ^[0-9]+$ ]]; then
+			PHASE_ATTEMPT="$_ATTEMPT"
+			_RC=$((_ATTEMPT - 1)); [[ $_RC -lt 0 ]] && _RC=0
+			PHASE_REVIVE_COUNT="$_RC"
+		fi
+	fi
+fi
+
 # Payload mirrors what orchestrator monitors expect: phase, ticket, status,
 # optional failure_reason, optional handoff_path (CTL-484 turn-cap-exhausted),
 # optional duration_seconds (CTL-760). The broker's tryPhaseLifecycleRoute parser
@@ -270,6 +288,8 @@ LINE=$(build_canonical_line \
 	--catalyst-orchestration "$ORCH_ID" \
 	--message "Phase ${PHASE} ${STATUS} on ${TICKET}" \
 	--payload-json "$PAYLOAD" \
+	--phase-attempt "$PHASE_ATTEMPT" \
+	--phase-revive-count "$PHASE_REVIVE_COUNT" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
 if [[ -n $LINE ]]; then

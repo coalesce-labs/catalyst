@@ -1675,6 +1675,30 @@ assert_eq \
 	"dry-run JSON settings.env carries the composed OTEL attrs"
 
 echo ""
+echo "Test 54 (CTL-761): --attempt is persisted to signal file"
+fresh_env t54
+rm -f "${WORKER_DIR}/phase-implement.json"
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+echo "# plan" >"${TEST_DIR}/proj/thoughts/shared/plans/2026-01-01-ctl-100.md"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		--attempt 4 >/dev/null 2>&1)
+SIGNAL_T54="${WORKER_DIR}/phase-implement.json"
+ATT_T54=$(jq -r '.attempt // empty' "$SIGNAL_T54" 2>/dev/null)
+assert_eq "4" "$ATT_T54" "signal file carries attempt=4"
+
+echo ""
+echo "Test 55 (CTL-761): default (no --attempt) → attempt=1 in signal file"
+fresh_env t55
+rm -f "${WORKER_DIR}/phase-triage.json"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SIGNAL_T55="${WORKER_DIR}/phase-triage.json"
+ATT_T55=$(jq -r '.attempt // empty' "$SIGNAL_T55" 2>/dev/null)
+assert_eq "1" "$ATT_T55" "signal file defaults attempt=1"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then
