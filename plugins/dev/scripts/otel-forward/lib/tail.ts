@@ -21,6 +21,7 @@ export interface Tailer {
   drain: () => Promise<void>;
   run: () => Promise<void>;
   currentPath: () => string;
+  currentOffset: () => number;
 }
 
 export function createTailer(opts: TailerOpts): Tailer {
@@ -68,5 +69,5 @@ export function createTailer(opts: TailerOpts): Tailer {
     }
   }
 
-  return { drain, run, currentPath: () => currentPath };
+  return { drain, run, currentPath: () => currentPath, currentOffset: () => offset };
 }
