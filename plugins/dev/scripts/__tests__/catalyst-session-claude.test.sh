@@ -134,7 +134,10 @@ bash "$SESSION_SCRIPT" emit-context "$SID_RL" \
   --context-pct 30 --turn 7 --model "claude-opus-4-7" \
   --ratelimit-5h-pct 26 --ratelimit-7d-pct 15 \
   --ratelimit-5h-reset "2026-06-03T05:00:00Z" \
-  --ratelimit-7d-reset "2026-06-10T00:00:00Z" >/dev/null
+  --ratelimit-7d-reset "2026-06-10T00:00:00Z" \
+  --ratelimit-7d-opus-pct 12 --ratelimit-7d-sonnet-pct 9 \
+  --ratelimit-7d-opus-reset "2026-06-10T00:00:00Z" \
+  --ratelimit-7d-sonnet-reset "2026-06-10T00:00:00Z" >/dev/null
 
 RL_LINE="$(grep '"session.context"' "$EF" | grep "$SID_RL" | tail -n 1)"
 expect_not_empty "session.context event recorded for rate-limit test" "$RL_LINE"
@@ -161,6 +164,24 @@ expect_eq "7d reset in body.payload" "2026-06-10T00:00:00Z" "$RL_7D_RESET"
 # Resets MUST NOT be typed attributes (avoid label cardinality explosion).
 RL_5H_RESET_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes | has("claude.ratelimit.five_hour_reset")')"
 expect_eq "5h reset is NOT a typed attribute" "false" "$RL_5H_RESET_ATTR"
+
+# CTL-763: per-model 7d split.
+OPUS_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct"')"
+expect_eq "emit-context seven_day_opus_pct typed attr" "12" "$OPUS_ATTR"
+SONNET_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct"')"
+expect_eq "emit-context seven_day_sonnet_pct typed attr" "9" "$SONNET_ATTR"
+
+OPUS_BODY="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_opus_pct')"
+expect_eq "emit-context ratelimit_7d_opus_pct in body" "12" "$OPUS_BODY"
+OPUS_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_opus_reset')"
+expect_eq "emit-context ratelimit_7d_opus_reset in body" "2026-06-10T00:00:00Z" "$OPUS_RESET"
+SONNET_BODY="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_sonnet_pct')"
+expect_eq "emit-context ratelimit_7d_sonnet_pct in body" "9" "$SONNET_BODY"
+SONNET_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_sonnet_reset')"
+expect_eq "emit-context ratelimit_7d_sonnet_reset in body" "2026-06-10T00:00:00Z" "$SONNET_RESET"
+
+HAS_OPUS_RESET_ATTR="$(printf '%s' "$RL_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_opus_reset")')"
+expect_eq "opus reset is body-only, not a typed attr" "false" "$HAS_OPUS_RESET_ATTR"
 
 # CTL-760: per-worker linear.key lands in the resource block.
 RL_LINEAR_KEY="$(printf '%s' "$RL_LINE" | jq -r '.resource."linear.key" // ""')"
