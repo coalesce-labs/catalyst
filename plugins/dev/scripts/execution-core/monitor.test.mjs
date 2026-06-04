@@ -864,6 +864,8 @@ describe("sweepMissingTriage (CTL-711)", () => {
       dispatch,
       applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
       appendEvent: () => {},
+      readMaxParallelFn: () => 6, // CTL-716: explicit ceiling for determinism
+      liveBackgroundCount: () => 0,
     });
     const dispatched = dispatch.mock.calls.map((c) => c[0].ticket);
     expect(dispatched).toEqual(["ENG-2"]);
@@ -890,6 +892,8 @@ describe("sweepMissingTriage (CTL-711)", () => {
         dispatch,
         applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
         appendEvent: () => {},
+        readMaxParallelFn: () => 6, // CTL-716: ceiling high enough for both tickets
+        liveBackgroundCount: () => 0,
       })
     ).not.toThrow();
     // both tickets attempted despite the first failing
@@ -933,6 +937,8 @@ describe("sweepMissingTriage (CTL-711)", () => {
       dispatch,
       reconcileIntervalMs: 30, // fast periodic tick for the test
       resumeFromCursor: false,
+      readMaxParallelFn: () => 6, // CTL-716: inject seam so async liveness refresh doesn't block the triage sweep
+      liveBackgroundCount: () => 0,
     });
     // Startup sweep saw an empty eligible set → no dispatch yet.
     expect(dispatch).not.toHaveBeenCalled();
@@ -943,6 +949,239 @@ describe("sweepMissingTriage (CTL-711)", () => {
       phase: "triage",
     });
     stopMonitor();
+  });
+});
+
+// --- CTL-716: slot-gate triage dispatch against maxParallel -----------------
+
+describe("handleStateChangedEvent — CTL-716 slot gate", () => {
+  const orchDir = "/orch";
+
+  test("→Triage when slots are FULL → does NOT dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      { event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" } },
+      { dispatch, orchDir,
+        applyTriageStatus: () => ({ applied: false, verified: false }),
+        appendEvent: () => {},
+        readMaxParallelFn: () => 3,
+        liveBackgroundCount: () => 3 }, // ceiling 3, live 3 ⇒ 0 free
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("→Triage when a slot is FREE → dispatches exactly once", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      { event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" } },
+      { dispatch, orchDir,
+        applyTriageStatus: () => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }),
+        appendEvent: () => {},
+        readMaxParallelFn: () => 3,
+        liveBackgroundCount: () => 2 }, // 1 free
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test("→Todo (no triage.json) when slots FULL → does NOT dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core"); // NO triage.json
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      { event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Ready" } },
+      { dispatch, orchDir: realOrchDir,
+        applyTriageStatus: () => ({ applied: false, verified: false }),
+        appendEvent: () => {},
+        readMaxParallelFn: () => 1,
+        liveBackgroundCount: () => 1 }, // 0 free
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("a deferred dispatch leaves the eligible projection intact (→Todo fold still happens)", () => {
+    enroll("ENG", { status: "Todo" });
+    const realOrchDir = join(catalystDir, "execution-core"); // NO triage.json
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(
+      { event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Todo" } },
+      { dispatch, orchDir: realOrchDir,
+        applyTriageStatus: () => ({ applied: false, verified: false }),
+        appendEvent: () => {},
+        readMaxParallelFn: () => 1,
+        liveBackgroundCount: () => 1 }, // 0 free slots
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+    // upsertTicket ran before the gate — ticket is in the eligible set for sweepMissingTriage.
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toContain("ENG-1");
+  });
+
+  test("default liveness source is countBackgroundAgents (no throw, dispatches when fleet empty)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    // no readMaxParallelFn / liveBackgroundCount injected → real defaults.
+    // In the unit env getAgentsCached() is cold ⇒ [] ⇒ count 0 ⇒ free > 0.
+    handleStateChangedEvent(
+      { event: "linear.issue.state_changed",
+        detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" } },
+      { dispatch, orchDir,
+        applyTriageStatus: () => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }),
+        appendEvent: () => {} },
+    );
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("readNewEvents — CTL-716 burst budget", () => {
+  test("7 →Triage events drained in ONE pass with 6 free slots → exactly 6 triage dispatches", () => {
+    enroll("ENG", { status: "Ready" }); // triageStatus defaults to "Triage"
+    const realOrchDir = join(catalystDir, "execution-core"); // no triage.json for any ticket
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec: execReturning({}),
+      reconcileIntervalMs: 60_000,
+      resumeFromCursor: false,
+      orchDir: realOrchDir,
+      dispatch,
+      readMaxParallelFn: () => 6,
+      liveBackgroundCount: () => 0, // 6 free slots
+    });
+    // Startup saw no eligible tickets → 0 dispatches so far.
+    expect(dispatch.mock.calls.length).toBe(0);
+    // Append 7 distinct →Triage events.
+    for (let i = 1; i <= 7; i++) {
+      appendEventLog(JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: `ENG-${i}`, teamKey: "ENG", toState: "Triage" },
+      }) + "\n");
+    }
+    readNewEvents();
+    // Budget: 6 free slots → exactly 6 dispatches, 7th dropped (retry on next sweep).
+    expect(dispatch.mock.calls.length).toBe(6);
+    stopMonitor();
+  });
+
+  test("burst with 0 free slots → 0 dispatches in the drain", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec: execReturning({}),
+      reconcileIntervalMs: 60_000,
+      resumeFromCursor: false,
+      orchDir: realOrchDir,
+      dispatch,
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 1, // 0 free
+    });
+    for (let i = 1; i <= 5; i++) {
+      appendEventLog(JSON.stringify({
+        event: "linear.issue.state_changed",
+        detail: { ticket: `ENG-${i}`, teamKey: "ENG", toState: "Triage" },
+      }) + "\n");
+    }
+    readNewEvents();
+    expect(dispatch).not.toHaveBeenCalled();
+    stopMonitor();
+  });
+
+  test("foldOnly drain dispatches nothing regardless of budget", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const dispatch = mock(() => ({ code: 0 }));
+    startMonitor({
+      exec: execReturning({}),
+      reconcileIntervalMs: 60_000,
+      resumeFromCursor: false,
+      orchDir: realOrchDir,
+      dispatch,
+      readMaxParallelFn: () => 10,
+      liveBackgroundCount: () => 0, // plenty of free slots
+    });
+    appendEventLog(JSON.stringify({
+      event: "linear.issue.state_changed",
+      detail: { ticket: "ENG-1", teamKey: "ENG", toState: "Triage" },
+    }) + "\n");
+    readNewEvents({ foldOnly: true }); // fold-only: no dispatch side-effects
+    expect(dispatch).not.toHaveBeenCalled();
+    stopMonitor();
+  });
+});
+
+describe("sweepMissingTriage — CTL-716 slot gate", () => {
+  test("CTL-716: dispatches at most freeSlots tickets per sweep", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 2,
+      liveBackgroundCount: () => 0, // 2 free
+    });
+    // 2 of the 3 tickets dispatched; ENG-3 deferred to the next sweep.
+    expect(dispatch.mock.calls.length).toBe(2);
+  });
+
+  test("CTL-716: a second sweep with freed slots dispatches the remainder (idempotent retry)", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2"), node("ENG-3")] });
+    reconcileAll({ exec });
+
+    // First sweep: 2 free slots → dispatch ENG-1 + ENG-2, write their triage artifacts.
+    const dispatchFirstSweep = (args) => {
+      writeTriageArtifact(args.orchDir, args.ticket);
+      return { code: 0 };
+    };
+    const dispatch1 = mock(dispatchFirstSweep);
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch: dispatch1,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 2,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch1.mock.calls.length).toBe(2);
+
+    // Second sweep: slots free again → only ENG-3 remains un-triaged.
+    const dispatch2 = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch: dispatch2,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 2,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch2.mock.calls.map((c) => c[0].ticket)).toEqual(["ENG-3"]);
+  });
+
+  test("CTL-716: zero free slots → no dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    const realOrchDir = join(catalystDir, "execution-core");
+    const exec = execReturning({ ENG: [node("ENG-1"), node("ENG-2")] });
+    reconcileAll({ exec });
+    const dispatch = mock(() => ({ code: 0 }));
+    sweepMissingTriage({
+      orchDir: realOrchDir,
+      dispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 1,
+      liveBackgroundCount: () => 1, // 0 free
+    });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });
 

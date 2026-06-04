@@ -333,12 +333,13 @@ export function startDaemon({
     monitorFn({
       orchDir,
       cache,
+      concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
         handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserId }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserId), // CTL-749
-    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
