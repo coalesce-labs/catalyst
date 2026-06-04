@@ -724,6 +724,46 @@ export function defaultAppendParallelismAdjustedEvent({
   );
 }
 
+// CTL-770/CTL-771: auto-tuner setpoint gauge event —
+// phase.scheduler.autotune-gauge.<label>. Emitted UNCONDITIONALLY once per tick
+// (unlike parallelism-adjusted, which is write-on-change) so the OTel dashboard
+// renders the effective/target/load/mem gauges every sample interval. Mirrors
+// defaultAppendParallelismSampledEvent's transport: a CanonicalEvent envelope
+// appended best-effort to the unified event log, which otel-forward tails and
+// translates to OTLP. The metric VALUES live as flat scalars inside body.payload
+// (via the payloadExtras seam), exactly as the parallelism-sampled precedent
+// does. Best-effort — never throws (appendEnvelopeBestEffort).
+export function defaultAppendAutotuneGaugeEvent({
+  label = "execution-core",
+  maxParallelEffective,
+  maxParallelTarget,
+  runningWorkers,
+  load1,
+  loadPerCore,
+  memFreePct,
+  reason,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket: label,
+      orchId: label,
+      action: "autotune-gauge",
+      reason,
+      payloadExtras: {
+        max_parallel_effective: maxParallelEffective,
+        max_parallel_target: maxParallelTarget,
+        running_workers: runningWorkers,
+        load1,
+        load_per_core: loadPerCore,
+        mem_free_pct: memFreePct,
+        decision_reason: reason,
+      },
+    }),
+    "autotune-gauge",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass

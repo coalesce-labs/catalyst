@@ -26,6 +26,7 @@ import {
   defaultAppendYieldFileSkipEvent,
   defaultAppendParallelismSampledEvent,
   defaultAppendParallelismAdjustedEvent,
+  defaultAppendAutotuneGaugeEvent,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   readBootEpoch,
@@ -2508,6 +2509,34 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
         worktree_path: "/x",
       }),
     ).toBe(false);
+  });
+
+  // CTL-771: autotune-gauge envelope round-trip. The metric values live as flat
+  // scalars in body.payload so otel-forward processLine keeps the line (it has
+  // truthy .attributes) and toAttrArray maps the numbers as the OTLP precedent.
+  test("defaultAppendAutotuneGaugeEvent writes a gauge envelope", () => {
+    const ok = defaultAppendAutotuneGaugeEvent({
+      label: "execution-core",
+      maxParallelEffective: 4,
+      maxParallelTarget: 6,
+      runningWorkers: 3,
+      load1: 2.4,
+      loadPerCore: 0.3,
+      memFreePct: 42.5,
+      reason: "converge-to-setpoint",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.autotune-gauge.execution-core");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("autotune-gauge");
+    expect(env.body.payload.max_parallel_effective).toBe(4);
+    expect(env.body.payload.max_parallel_target).toBe(6);
+    expect(env.body.payload.running_workers).toBe(3);
+    expect(env.body.payload.load1).toBe(2.4);
+    expect(env.body.payload.load_per_core).toBe(0.3);
+    expect(env.body.payload.mem_free_pct).toBe(42.5);
+    expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
   });
 });
 

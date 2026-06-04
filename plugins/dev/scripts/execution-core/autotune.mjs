@@ -18,11 +18,13 @@ import {
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
+  resolveTargetSetpoint,
 } from "./scheduler.mjs";
 import { countBackgroundAgents } from "./claude-agents.mjs";
 import {
   defaultAppendParallelismSampledEvent,
   defaultAppendParallelismAdjustedEvent,
+  defaultAppendAutotuneGaugeEvent,
 } from "./recovery.mjs";
 import {
   AUTOTUNE_SAMPLE_INTERVAL_MS,
@@ -103,6 +105,12 @@ export function memGuard(memFreePct, { criticalPct, warnPct }) {
 
 // decideMaxParallel — apply the decision matrix and return {next, reason}.
 // Every result is clamped to [minParallel, maxParallelCeiling].
+// CTL-770: hysteresis band around the setpoint. With 0 the at-setpoint hold
+// fires only on exact equality; the converge branch (current < setpoint) and
+// shed branches still bound oscillation. Kept a named constant so the deadband
+// is one obvious knob.
+const SETPOINT_DEADBAND = 0;
+
 export function decideMaxParallel({
   window,
   concurrency,
@@ -111,11 +119,15 @@ export function decideMaxParallel({
   criticalPct,
   warnPct,
   layer1Max = null,   // CTL-750: Layer-1 committed maxParallel for fast recovery target
+  setpoint = null,    // CTL-770: core-bounded seek-to target (host-over-repo); null → convergence no-ops
 }) {
   const { maxParallel: current, minParallel, maxParallelCeiling } = concurrency;
   const clamp = (v) => clampToBounds(v, { minParallel, maxParallelCeiling });
 
   if (window.length === 0) {
+    // CTL-770: truly-empty window has no sample to judge mem/load — keep the
+    // conservative insufficient-samples hold (one tick of delay before the
+    // cold-start seed can fire on the first tick with a sample).
     return { next: clamp(current), reason: "insufficient-samples" };
   }
 
@@ -128,6 +140,13 @@ export function decideMaxParallel({
   }
 
   if (window.length < minSamples) {
+    // CTL-770 cold-start seed: a short window plus a mem-ok sample and a
+    // setpoint above the current floor → jump straight to the (core-bounded)
+    // target instead of idling at the persisted floor. mem-critical already
+    // won above; we only seed when mem is not critical (ok or warn).
+    if (setpoint !== null && current < setpoint) {
+      return { next: clamp(setpoint), reason: "cold-start-seed" };
+    }
     return { next: clamp(current), reason: "insufficient-samples" };
   }
 
@@ -137,6 +156,7 @@ export function decideMaxParallel({
     loadSafeFactor,
   });
 
+  // trend-up shed and mem-critical (above) always win over the setpoint logic.
   if (trend === "up") {
     return { next: clamp(Math.max(minParallel, Math.floor(current * 0.75))), reason: "trend-up" };
   }
@@ -156,6 +176,28 @@ export function decideMaxParallel({
 
   if (trend === "flat-high") {
     return { next: clamp(current), reason: "flat-high" };
+  }
+
+  // CTL-770 idle/headroom convergence — generalizes CTL-750's recovery (which
+  // only fired for trend==="down") to the flat-idle trend==="none" case. When
+  // there is real headroom (mem ok + load below the ~75% safe line) and the
+  // current value is below the setpoint, ramp toward the (already core-bounded)
+  // target so a stuck-at-floor host converges in a bounded number of ticks.
+  if (setpoint !== null && mem === "ok") {
+    const threshold = latest.coreCount * loadSafeFactor;
+    const loadSafe = latest.load1 < threshold;
+    if (loadSafe) {
+      // Hold within the deadband first so a value already at/near the setpoint
+      // does not ping-pong (BEFORE the converge-up branch).
+      if (Math.abs(current - setpoint) <= SETPOINT_DEADBAND) {
+        return { next: clamp(current), reason: "at-setpoint" };
+      }
+      if (current < setpoint - SETPOINT_DEADBAND) {
+        // Direct jump (mirrors CTL-750's recovery-to-layer1 semantics); clamp
+        // guarantees no overshoot past the ceiling or the setpoint.
+        return { next: clamp(Math.min(setpoint, maxParallelCeiling)), reason: "converge-to-setpoint" };
+      }
+    }
   }
 
   return { next: clamp(current), reason: "hold" };
@@ -215,9 +257,11 @@ export function autoTuneTick(state, seams) {
     cpus,
     readConcurrency,
     readLayer1Concurrency,  // CTL-750: optional seam for Layer-1 committed maxParallel
+    readLayer2Concurrency,  // CTL-770: optional seam for Layer-2 host targetParallel
     writeLayer2,
     appendSampledEvent,
     appendAdjustedEvent,
+    appendGaugeEvent,       // CTL-771: per-tick setpoint gauge emitter
   } = seams;
 
   try {
@@ -239,6 +283,29 @@ export function autoTuneTick(state, seams) {
       ? layer1.maxParallel
       : null;
 
+    // CTL-770: resolve the seek-to setpoint with host-over-repo layering, then
+    // core-bound it. Fail-safe: a missing/throwing Layer-2 seam → setpoint
+    // resolves from Layer-1 maxParallel; neither set → resolveTargetSetpoint
+    // returns undefined → setpoint=null → convergence/seed branches no-op.
+    let layer2 = {};
+    try {
+      layer2 = readLayer2Concurrency?.() ?? {};
+    } catch {
+      layer2 = {};
+    }
+    const rawTarget = resolveTargetSetpoint(layer1 ?? {}, layer2 ?? {});
+    const coreCount = sample.coreCount;
+    const setpoint =
+      rawTarget == null
+        ? null
+        : clampToBounds(
+            Math.min(rawTarget, Math.max(concurrency.minParallel ?? 1, coreCount - 2)),
+            {
+              minParallel: concurrency.minParallel ?? 1,
+              maxParallelCeiling: concurrency.maxParallelCeiling ?? rawTarget,
+            },
+          );
+
     try {
       appendSampledEvent({
         label: "execution-core",
@@ -259,7 +326,26 @@ export function autoTuneTick(state, seams) {
       criticalPct: state.criticalPct,
       warnPct: state.warnPct,
       layer1Max,  // CTL-750
+      setpoint,   // CTL-770
     });
+
+    // CTL-771: emit the setpoint gauge EVERY tick (unconditional, unlike the
+    // change-gated parallelism-adjusted event) so the OTel dashboard renders
+    // effective/target/load/mem continuously. Best-effort; mirrors the
+    // appendSampledEvent try/catch above. running_workers reuses bgCount — no
+    // extra `claude agents` shell-out.
+    try {
+      appendGaugeEvent?.({
+        label: "execution-core",
+        maxParallelEffective: current,
+        maxParallelTarget: setpoint,
+        runningWorkers: bgCount,
+        load1: sample.load1,
+        loadPerCore: coreCount ? sample.load1 / coreCount : sample.load1,
+        memFreePct: sample.memFreePct,
+        reason,
+      });
+    } catch {}
 
     if (next !== current) {
       try {
@@ -298,6 +384,7 @@ export function startAutoTuner({
   cpus = osCpus,
   appendSampledEvent = defaultAppendParallelismSampledEvent,
   appendAdjustedEvent = defaultAppendParallelismAdjustedEvent,
+  appendGaugeEvent = defaultAppendAutotuneGaugeEvent,  // CTL-771
 } = {}) {
   if (!enabled) return () => {};
 
@@ -323,9 +410,13 @@ export function startAutoTuner({
       ),
     // CTL-750: Layer-1 only (no Layer-2 merge) — the committed operator target.
     readLayer1Concurrency: () => readExecutionCoreConcurrency(configPath),
+    // CTL-770: Layer-2 host file — carries the NEW targetParallel key (the
+    // autotuner's seek-to setpoint), separate from maxParallel.
+    readLayer2Concurrency: () => readExecutionCoreConcurrencyLayer2(layer2Path),
     writeLayer2: (next) => writeLayer2MaxParallel(layer2Path, next),
     appendSampledEvent,
     appendAdjustedEvent,
+    appendGaugeEvent,  // CTL-771
   };
 
   _timer = setIntervalFn(() => autoTuneTick(_state, seams), sampleIntervalMs);

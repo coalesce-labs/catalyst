@@ -23,6 +23,7 @@ import {
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
+  resolveTargetSetpoint,
   DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
@@ -384,6 +385,29 @@ describe("mergeExecutionCoreConcurrency (CTL-678)", () => {
       maxParallelCeiling: 10,
       eligibleQuery: { status: "Ready" },
     });
+  });
+});
+
+describe("resolveTargetSetpoint (CTL-770)", () => {
+  test("host targetParallel present (positive int) → returns it", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 6 })).toBe(6);
+  });
+  test("host absent → falls back to repo maxParallel", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, {})).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 })).toBe(4);
+  });
+  test("both absent → undefined (caller no-ops convergence)", () => {
+    expect(resolveTargetSetpoint({}, {})).toBeUndefined();
+    expect(resolveTargetSetpoint()).toBeUndefined();
+  });
+  test("non-positive / non-integer host targetParallel falls back to repo maxParallel", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 0 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: -1 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 2.5 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: "6" })).toBe(4);
+  });
+  test("host targetParallel wins even when repo maxParallel also set", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 8 })).toBe(8);
   });
 });
 
