@@ -107,10 +107,10 @@ No `--radius-*` or `--shadow-*` custom properties exist yet. Radii are Tailwind 
 
 | Primitive | Use-case in the monitor |
 |---|---|
-| `Sheet` | Replace the hand-rolled drawers in [`session-detail-drawer.tsx`](src/components/session-detail-drawer.tsx) and [`worker-detail-drawer.tsx`](src/components/worker-detail-drawer.tsx) when we next touch them. |
+| `Sheet` | [`ticket-detail-drawer.tsx`](src/components/ticket-detail-drawer.tsx) uses `Sheet` (right, 680px) with shadcn `Tabs` (Gantt / Cost / Comms). Replace the hand-rolled drawers in [`session-detail-drawer.tsx`](src/components/session-detail-drawer.tsx) and [`worker-detail-drawer.tsx`](src/components/worker-detail-drawer.tsx) when we next touch them. |
 | `Dialog` | Any modal — confirm actions, larger forms. |
 | `Tooltip` | Hover-text on dense cells (token counts, cost, status abbreviations). |
-| `Tabs` | The `Overview / Workers / Timeline / Events` pattern in [`orchestrator-view.tsx`](src/components/orchestrator-view.tsx) is a hand-rolled tab set — move to shadcn `Tabs` when we extend it. |
+| `Tabs` | Used in [`ticket-detail-drawer.tsx`](src/components/ticket-detail-drawer.tsx) for the Gantt/Cost/Comms views. The `Overview / Workers / Timeline / Events` pattern in [`orchestrator-view.tsx`](src/components/orchestrator-view.tsx) is a hand-rolled tab set — move to shadcn `Tabs` when we extend it. |
 | `DropdownMenu` | Per-row action menus. |
 | `ContextMenu` | Right-click on a worker / event / orchestrator. |
 | `Command` | Command palette (cmd-K) for switching orchestrators, jumping to tickets. |
@@ -127,6 +127,7 @@ No `--radius-*` or `--shadow-*` custom properties exist yet. Radii are Tailwind 
 | `ProgressBar` | Gradient-fill progress driven by a `pct`, with explicit surface-4 track. | [`components/ui/progress-bar.tsx`](src/components/ui/progress-bar.tsx) |
 | `Skeleton`, `SkeletonDashboard` | Page-shape-specific shimmer placeholders. | [`components/ui/skeleton.tsx`](src/components/ui/skeleton.tsx) |
 | `GanttChart` | Custom SVG timeline of worker phase spans — nothing generic would fit. | [`components/gantt-chart.tsx`](src/components/gantt-chart.tsx) |
+| `TicketGantt` | Per-phase timing bars for a single ticket lifetime (minute-level precision). Uses CSS `%`-offset bar track; kibo-ui/gantt (installed, vendored) targets day/month/quarter ranges and does not fit sub-hour spans. `phaseColor()` is the single source of truth for colors. | [`components/ticket-gantt.tsx`](src/components/ticket-gantt.tsx) |
 | `WorkerTable`, `EventLog`, `WaveCards`, `KpiStrip`, `OrchestratorView`, `Dashboard`, `AttentionBar`, `CostCard` | Feature-level domain views. | [`components/`](src/components/) |
 | `NavItem`, `SidebarGroup`, `Sidebar`, `SearchInput`, `SortHeader`, `ExternalLink`, `EmptyState`, `ConnectionBanner` | Tight integration with the monitor's sidebar / table conventions. | [`components/ui/`](src/components/ui/), [`components/layout/`](src/components/layout/) |
 
