@@ -1,5 +1,19 @@
 # Changelog
 
+## [10.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.5.0...catalyst-dev-v10.6.0) (2026-06-04)
+
+
+### Features
+
+* **dev:** CTL-760 per-worker OpenTelemetry for the background-worker execution model ([#1294](https://github.com/coalesce-labs/catalyst/issues/1294)) ([5399a29](https://github.com/coalesce-labs/catalyst/commit/5399a29624f40ac19ecd398798b549ad9fb4aefe))
+* **dev:** CTL-770 setpoint-seeking autotuner + CTL-771 autotune OTel gauges ([#1307](https://github.com/coalesce-labs/catalyst/issues/1307)) ([6f4cfd9](https://github.com/coalesce-labs/catalyst/commit/6f4cfd9bf1af2dcaf37664ef9bfad57530d19bbd))
+
+
+### Bug Fixes
+
+* **dev:** CTL-769 give the execution-core reaper a poll-fallback drain ([#1304](https://github.com/coalesce-labs/catalyst/issues/1304)) ([068795d](https://github.com/coalesce-labs/catalyst/commit/068795d5af789effaad22bc041fca4d57d617c93))
+* **dev:** CTL-770 reach idle convergence — autotuner no longer bails at bgCount===0 ([#1308](https://github.com/coalesce-labs/catalyst/issues/1308)) ([3cc5c99](https://github.com/coalesce-labs/catalyst/commit/3cc5c99211f583d73fd2aade90fb9323f56a722a))
+
 ## [10.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.4.0...catalyst-dev-v10.5.0) (2026-06-03)
 
 
