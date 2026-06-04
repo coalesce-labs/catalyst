@@ -331,7 +331,9 @@ RL_LINE="$(build_canonical_line \
   --service "catalyst.session" \
   --event-name "session.context" \
   --claude-ratelimit-5h-pct 26 \
-  --claude-ratelimit-7d-pct 15)"
+  --claude-ratelimit-7d-pct 15 \
+  --claude-ratelimit-7d-opus-pct 12 \
+  --claude-ratelimit-7d-sonnet-pct 9)"
 
 RL_5H="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct"')"
 expect_eq "build_canonical_line claude.ratelimit.five_hour_pct" "26" "$RL_5H"
@@ -344,6 +346,17 @@ expect_eq "build_canonical_line claude.ratelimit.seven_day_pct" "15" "$RL_7D"
 
 RL_7D_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct" | type')"
 expect_eq "build_canonical_line claude.ratelimit.seven_day_pct is number" "number" "$RL_7D_TYPE"
+
+# CTL-763: per-model 7d split — opus + sonnet typed numeric attributes.
+RL_OPUS="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_opus_pct" "12" "$RL_OPUS"
+RL_OPUS_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct" | type')"
+expect_eq "build_canonical_line seven_day_opus_pct is number" "number" "$RL_OPUS_TYPE"
+
+RL_SONNET="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_sonnet_pct" "9" "$RL_SONNET"
+RL_SONNET_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct" | type')"
+expect_eq "build_canonical_line seven_day_sonnet_pct is number" "number" "$RL_SONNET_TYPE"
 
 # When claude.* flags are NOT passed, the attribute keys must be absent.
 BARE_LINE="$(build_canonical_line \
@@ -373,6 +386,12 @@ expect_eq "no --claude-ratelimit-5h-pct → key absent" "false" "$HAS_RL5H"
 
 HAS_RL7D="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_pct")')"
 expect_eq "no --claude-ratelimit-7d-pct → key absent" "false" "$HAS_RL7D"
+
+# CTL-763: per-model attrs absent when flags not passed.
+HAS_RL_OPUS="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_opus_pct")')"
+expect_eq "no --claude-ratelimit-7d-opus-pct → key absent" "false" "$HAS_RL_OPUS"
+HAS_RL_SONNET="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_sonnet_pct")')"
+expect_eq "no --claude-ratelimit-7d-sonnet-pct → key absent" "false" "$HAS_RL_SONNET"
 
 # Cost MUST NOT be a typed attribute (PII gate — OTLP forwarder strips body.payload only).
 HAS_COST_ATTR="$(echo "$CLAUDE_LINE" | jq '.attributes | has("claude.cost.usd")')"
