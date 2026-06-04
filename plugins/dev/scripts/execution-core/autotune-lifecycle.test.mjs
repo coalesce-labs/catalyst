@@ -350,6 +350,112 @@ describe("autoTuneTick", () => {
     });
     expect(() => autoTuneTick(state, seams)).not.toThrow();
   });
+
+  // --- CTL-775: attribution seam wiring + the live 16-with-2 fix --------------
+
+  // A flat-idle 2-sample window the seam's 3rd flat sample completes; loadSafe.
+  function flatIdleWindow() {
+    return [
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 8 },
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 8 },
+    ];
+  }
+
+  test("attribution seams present → claudeCpuPct/memPct computed and threaded into the gauge", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 68.7e9,
+      cpus: () => Array(16),
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 1, maxParallelCeiling: 20 }),
+      listAgents: () => [
+        { kind: "background", pid: 100, sessionId: "a" },
+        { kind: "background", pid: 200, sessionId: "b" },
+      ],
+      psLinesWithCpu: () => [
+        "100 1 80.0 400000",
+        "101 100 40.0 173440",
+        "200 1 90.0 400000",
+        "201 200 30.0 173440",
+      ],
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(gaugeCalls).toHaveLength(1);
+    expect(typeof gaugeCalls[0].claudeCpuPct).toBe("number");
+    expect(typeof gaugeCalls[0].claudeMemPct).toBe("number");
+    expect(gaugeCalls[0].claudeCpuPct).toBeGreaterThan(0);
+    expect(gaugeCalls[0].claudeMemPct).toBeGreaterThan(0);
+  });
+
+  test("attribution seams ABSENT → claudeCpuPct/memPct null, no throw, degrades to setpoint behavior", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 1, maxParallelCeiling: 20 }),
+      // no listAgents / psLinesWithCpu
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(gaugeCalls[0].claudeCpuPct).toBeNull();
+    expect(gaugeCalls[0].claudeMemPct).toBeNull();
+  });
+
+  test("LIVE 16-with-2 integration: current=16, running=2, setpoint=6 → writeLayer2(15) drift", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9, // 50% ok
+      cpus: () => Array(8), // core-bound setpoint: min(6, 8-2)=6
+      readConcurrency: () => ({ maxParallel: 16, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      listAgents: () => [
+        { kind: "background", pid: 100, sessionId: "a" },
+        { kind: "background", pid: 200, sessionId: "b" },
+      ],
+      psLinesWithCpu: () => [
+        "100 1 10.0 100000",
+        "200 1 10.0 100000",
+      ],
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(writes).toEqual([15]); // 16 → 15 drift-to-setpoint
+  });
+
+  test("a throwing psLinesWithCpu seam does not propagate; attribution falls back to null", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const writes = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 16, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      listAgents: () => [{ kind: "background", pid: 100, sessionId: "a" }],
+      psLinesWithCpu: () => { throw new Error("ps timed out"); },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(gaugeCalls[0].claudeCpuPct).toBeNull();
+    // Drift/setpoint path still runs (running=2, setpoint=6, current=16) → 15.
+    expect(writes).toEqual([15]);
+  });
 });
 
 // --- startAutoTuner / stopAutoTuner lifecycle --------------------------------

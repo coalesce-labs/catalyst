@@ -13,7 +13,9 @@ import {
   classifyRow,
   applyDuplicates,
   parsePsSnapshot,
+  parsePsSnapshotWithCpu,
   rssTotalForPid,
+  cpuTotalForPid,
   parseSessionName,
   buildRows,
   buildLiveSessionsByWorktree,
@@ -126,6 +128,54 @@ describe("RSS attribution (single ps snapshot, ancestor walk)", () => {
   it("tolerates blank/malformed lines", () => {
     const s = parsePsSnapshot(["", "  ", "100 1 1000", "garbage line here"]);
     expect(rssTotalForPid(s, 100)).toBe(1000);
+  });
+});
+
+// CTL-775: 4-column attribution snapshot (pid ppid pcpu rss). MUST be a sibling
+// of parsePsSnapshot so the 3-column callers never mis-read rss.
+describe("CPU+RSS attribution (parsePsSnapshotWithCpu / cpuTotalForPid) — CTL-775", () => {
+  const withCpu = parsePsSnapshotWithCpu([
+    "100   1 50.0 102400", // PID PPID PCPU RSS-KB  (root)
+    "200 100 30.0  51200", // child of 100
+    "300 200 10.0  30720", // grandchild via 200
+    "201 100  5.0  20480", // child of 100
+  ]);
+
+  it("reads pcpu from col 3 and rss from col 4 (NOT mis-read)", () => {
+    expect(withCpu.selfCpu.get(100)).toBe(50.0);
+    expect(withCpu.selfRss.get(100)).toBe(102400); // rss is the 4th column
+    expect(withCpu.selfCpu.get(200)).toBe(30.0);
+    expect(withCpu.selfRss.get(200)).toBe(51200);
+  });
+
+  it("skips lines with fewer than 4 parts", () => {
+    const s = parsePsSnapshotWithCpu(["100 1 50.0", "200 100 30.0 51200"]);
+    expect(s.selfRss.has(100)).toBe(false); // only 3 parts → skipped
+    expect(s.selfRss.get(200)).toBe(51200);
+  });
+
+  it("skips non-finite values", () => {
+    const s = parsePsSnapshotWithCpu(["abc 1 50.0 1000", "200 100 xx 51200", "300 200 10.0 yy"]);
+    expect(s.selfRss.size).toBe(0);
+  });
+
+  it("cpuTotalForPid sums self + all descendants (DFS)", () => {
+    expect(cpuTotalForPid(withCpu, 100)).toBeCloseTo(50 + 30 + 10 + 5, 5);
+  });
+
+  it("cpuTotalForPid sums a subtree from a non-root pid", () => {
+    expect(cpuTotalForPid(withCpu, 200)).toBeCloseTo(30 + 10, 5);
+  });
+
+  it("cpuTotalForPid returns 0 for an unknown pid", () => {
+    expect(cpuTotalForPid(withCpu, 999)).toBe(0);
+  });
+
+  it("rssTotalForPid still correct on a 4-column snapshot (one snapshot drives BOTH totals)", () => {
+    // Guards against a future column-order regression: the WithCpu snapshot's
+    // {selfRss, children} must remain a valid input to rssTotalForPid.
+    expect(rssTotalForPid(withCpu, 100)).toBe(102400 + 51200 + 30720 + 20480);
+    expect(rssTotalForPid(withCpu, 200)).toBe(51200 + 30720);
   });
 });
 
