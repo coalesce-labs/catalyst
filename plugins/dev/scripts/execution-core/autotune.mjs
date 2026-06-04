@@ -267,8 +267,16 @@ export function autoTuneTick(state, seams) {
   try {
     const bgCount = liveBackgroundCount();
     if (bgCount === 0) {
+      // CTL-770 fix-up: idle (zero live workers) is exactly when capacity should
+      // sit AT the setpoint so the scheduler can dispatch a full wave the moment
+      // work arrives. The original `return` here left the autotuner inert at
+      // idle — effective maxParallel stayed pinned at whatever floor it was last
+      // shed to (the stuck-at-1 observed live) and the CTL-771 gauges went dark.
+      // Reset the trend window (no workers ⇒ no meaningful load trend) but fall
+      // through so the sample → gauge → cold-start-seed/hold-at-setpoint path
+      // still runs (decideMaxParallel's <minSamples seed handles the fresh
+      // single-sample window).
       state.window = [];
-      return;
     }
 
     const sample = sampleSystem({ loadavg, freemem, totalmem, cpus });
