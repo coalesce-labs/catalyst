@@ -34,6 +34,7 @@ import {
   getEventLogPath,
   log,
   EVENT_DEBOUNCE_MS,
+  TAILER_POLL_INTERVAL_MS,
   readWaitWatcherConfig,
   readMemorySamplerConfig,
 } from "./config.mjs";
@@ -92,6 +93,7 @@ let _memorySampler = null;
 let _stopAutoTuner = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
+let _eventPollTimer = null; // CTL-769: poll-fallback drain (fs.watch debounce never fires on the continuously-appended log)
 let _eventLogCursor = 0;
 // CTL-649: the trailing partial line carried across reads. _eventLogCursor is a
 // BYTE offset; consumeEventTail reads only NEW bytes via a file descriptor and
@@ -240,10 +242,16 @@ export function startDaemon({
   reconcile = reconcileAll,
   watchRegistry = true,
   debounceMs = EVENT_DEBOUNCE_MS,
+  // CTL-769: reaper poll-fallback interval. Injectable so tests can drive the
+  // reap-intent drain deterministically; defaults to TAILER_POLL_INTERVAL_MS.
+  pollMs = TAILER_POLL_INTERVAL_MS,
   pidFile = null,
   // CTL-649: reaper + orphan-sweep timer. Disable via env knob for tests
   // that only exercise monitor + scheduler.
   enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
+  // CTL-769: reaper factory seam — defaults to the real Reaper; injectable so
+  // tests can spy on reap dispatch driven by the poll fallback.
+  makeReaper = (opts) => new Reaper(opts),
   orphanReaperConfig = null,
   // CTL-707: worktree refresh timer config (catalyst.orchestration.worktreeRefresh).
   worktreeRefreshConfig = null,
@@ -379,7 +387,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, pollMs, orchDir, makeReaper });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -409,7 +417,20 @@ export function startDaemon({
 //
 // Boot replay is best-effort: if it throws, log and continue with live
 // consumption only.
-function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir }) {
+function startReaperAndTimer({
+  orphanReaperConfig,
+  worktreeRefreshConfig,
+  debounceMs,
+  orchDir,
+  // CTL-769: poll-fallback interval. Defaults to TAILER_POLL_INTERVAL_MS
+  // (env-tunable via EXECUTION_CORE_TAILER_POLL_MS); injectable so tests can
+  // drive the drain on a tiny interval deterministically.
+  pollMs = TAILER_POLL_INTERVAL_MS,
+  // CTL-769: reaper factory seam. Defaults to the real Reaper; injectable so a
+  // test can observe that the poll-fallback timer (not an fs.watch event)
+  // dispatched a reap-requested line into reaper.handle().
+  makeReaper = (opts) => new Reaper(opts),
+}) {
   const eventLogPath = getEventLogPath();
   // CTL-649: the periodic sweep honors the configured recency floor
   // (minIdleSeconds, default 900s). includeInteractive stays at its safe
@@ -417,7 +438,7 @@ function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, deboun
   // CTL-661: bind the per-ticket reconciler's canonical-owner reader to this
   // daemon's orchDir so the sweep resolves the authoritative active-phase
   // bg_job_id (falling back to newest-by-last_seen when no signal is found).
-  _reaper = new Reaper({
+  _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
   });
@@ -450,6 +471,16 @@ function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, deboun
     });
   } catch (err) {
     log.error({ err }, "reaper: event-log watch failed — relying on boot replay only");
+  }
+
+  // CTL-769: fs.watch + debounce is perpetually reset by the continuously-
+  // appended unified event log, so consumeEventTail only fires during >5s idle
+  // gaps — the reaper starves exactly when workers are busy and predecessors
+  // accumulate. Mirror the new-work tailer's poll fallback (monitor.mjs:684-685,
+  // CTL-711): a cheap, idempotent, cursor-based poll drains reap-intents in ~2s
+  // instead of waiting up to the 600s reconcile sweep.
+  if (pollMs > 0) {
+    _eventPollTimer = setInterval(() => consumeEventTail(), pollMs);
   }
 
   const cfg = orphanReaperConfig ?? {};
@@ -488,6 +519,14 @@ export function __resetEventTailCursorForTest(cursor = 0, leftover = "") {
 // __getEventTailLeftoverForTest — inspect the carried partial line. Test-only.
 export function __getEventTailLeftoverForTest() {
   return _eventLogLeftover;
+}
+
+// __getEventPollTimerForTest — inspect the CTL-769 poll-fallback interval handle
+// so a test can pin its teardown directly (non-null while running, null after
+// stopDaemon) instead of inferring it from drain side-effects, which the
+// `_reaper = null` guard in stopDaemon would otherwise mask. Test-only.
+export function __getEventPollTimerForTest() {
+  return _eventPollTimer;
 }
 
 // consumeEventTail — read the NEW BYTES appended to the event log since the
@@ -595,6 +634,10 @@ export function stopDaemon() {
   if (_eventDebounceTimer) {
     clearTimeout(_eventDebounceTimer);
     _eventDebounceTimer = null;
+  }
+  if (_eventPollTimer) {
+    clearInterval(_eventPollTimer);
+    _eventPollTimer = null;
   }
   if (_orphanTimer) {
     try {
