@@ -148,8 +148,10 @@ RL_STATUS_JSON='{
   "model": {"id": "claude-opus-4-7"},
   "context_window": {"used_percentage": 24, "current_usage": 245000},
   "rate_limits": {
-    "five_hour":  {"used_percentage": 26, "resets_at": "2026-06-03T05:00:00Z"},
-    "seven_day":  {"used_percentage": 15, "resets_at": "2026-06-10T00:00:00Z"}
+    "five_hour":    {"used_percentage": 26, "resets_at": "2026-06-03T05:00:00Z"},
+    "seven_day":    {"used_percentage": 15, "resets_at": "2026-06-10T00:00:00Z"},
+    "seven_day_opus":   {"used_percentage": 12, "resets_at": "2026-06-10T00:00:00Z"},
+    "seven_day_sonnet": {"used_percentage": 9,  "resets_at": "2026-06-10T00:00:00Z"}
   }
 }'
 
@@ -169,6 +171,43 @@ expect_contains "wrapper forwards --ratelimit-5h-pct 26 to catalyst-session.sh" 
 expect_contains "wrapper forwards --ratelimit-7d-pct 15 to catalyst-session.sh" "$RL_ARGS" "--ratelimit-7d-pct 15"
 expect_contains "wrapper forwards --ratelimit-5h-reset to catalyst-session.sh" "$RL_ARGS" "--ratelimit-5h-reset 2026-06-03T05:00:00Z"
 expect_contains "wrapper forwards --ratelimit-7d-reset to catalyst-session.sh" "$RL_ARGS" "--ratelimit-7d-reset 2026-06-10T00:00:00Z"
+# CTL-763: per-model 7d split forwarded flags.
+expect_contains "wrapper forwards --ratelimit-7d-opus-pct 12" "$RL_ARGS" "--ratelimit-7d-opus-pct 12"
+expect_contains "wrapper forwards --ratelimit-7d-sonnet-pct 9" "$RL_ARGS" "--ratelimit-7d-sonnet-pct 9"
+expect_contains "wrapper forwards --ratelimit-7d-opus-reset" "$RL_ARGS" "--ratelimit-7d-opus-reset 2026-06-10T00:00:00Z"
+expect_contains "wrapper forwards --ratelimit-7d-sonnet-reset" "$RL_ARGS" "--ratelimit-7d-sonnet-reset 2026-06-10T00:00:00Z"
+
+# CTL-763: negative path — when per-model fields are absent, no per-model flags emitted.
+RL_CAPTURE_BASELINE="$TMPDIR/rl-capture-baseline-$$"
+RL_SESSION_STUB_BASELINE="$TMPDIR/rl-stub-baseline-$$.sh"
+cat >"$RL_SESSION_STUB_BASELINE" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$RL_CAPTURE_BASELINE"
+exit 0
+STUB
+chmod +x "$RL_SESSION_STUB_BASELINE"
+RL_STATUS_BASELINE='{
+  "session_id": "claude-uuid-baseline",
+  "model": {"id": "claude-opus-4-7"},
+  "context_window": {"used_percentage": 24, "current_usage": 245000},
+  "rate_limits": {
+    "five_hour": {"used_percentage": 26, "resets_at": "2026-06-03T05:00:00Z"},
+    "seven_day": {"used_percentage": 15, "resets_at": "2026-06-10T00:00:00Z"}
+  }
+}'
+CATALYST_SESSION_BIN="$RL_SESSION_STUB_BASELINE" \
+  bash "$WRAPPER" >/dev/null 2>&1 <<<"$RL_STATUS_BASELINE"
+RL_WAITED_B=0
+while (( RL_WAITED_B < 20 )); do
+  [[ -f "$RL_CAPTURE_BASELINE" ]] && break
+  sleep 0.25
+  RL_WAITED_B=$((RL_WAITED_B + 1))
+done
+RL_ARGS_BASELINE="$(cat "$RL_CAPTURE_BASELINE" 2>/dev/null | tr '\n' ' ')"
+case "$RL_ARGS_BASELINE" in
+  *--ratelimit-7d-opus-pct*) fail "no per-model field → no opus flag" "flag present unexpectedly" ;;
+  *) ok "no per-model field → no opus flag" ;;
+esac
 
 # ─── 4. Resilience: even if emit fails, wrapper still renders ───────────────
 # Point the session script at a bogus path so emit silently fails.
