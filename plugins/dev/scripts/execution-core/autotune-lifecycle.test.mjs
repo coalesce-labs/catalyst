@@ -38,19 +38,53 @@ describe("autoTuneTick", () => {
     };
   }
 
-  test("when liveBackgroundCount() === 0 → no sampled event, no write, window reset", () => {
-    const state = makeState({ window: [{ load1: 1, load5: 2, load15: 3, memFreePct: 50, coreCount: 4 }] });
+  // CTL-770 fix-up: idle (bgCount===0) no longer bails. The trend window is
+  // reset (no workers ⇒ no meaningful trend) but the tick falls through to
+  // sample → gauge → setpoint seed/hold. With NO setpoint configured it still
+  // makes no write (insufficient-samples hold), but it DOES sample + can emit a
+  // gauge — observability no longer goes dark at idle.
+  test("when liveBackgroundCount() === 0 with no setpoint → samples + gauge but no write (window holds one fresh sample)", () => {
+    const state = makeState({ window: [{ load1: 9, load5: 9, load15: 9, memFreePct: 50, coreCount: 4 }] });
     const sampledCalls = [];
     const writeCalls = [];
+    const gaugeCalls = [];
     const seams = makeSeams({
       liveBackgroundCount: () => 0,
       appendSampledEvent: (args) => { sampledCalls.push(args); return true; },
       writeLayer2: (v) => { writeCalls.push(v); return true; },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
     });
     autoTuneTick(state, seams);
-    expect(sampledCalls).toHaveLength(0);
-    expect(writeCalls).toHaveLength(0);
-    expect(state.window).toHaveLength(0); // reset
+    expect(sampledCalls).toHaveLength(1);        // samples even at idle now
+    expect(gaugeCalls).toHaveLength(1);          // gauge emits at idle now
+    expect(gaugeCalls[0].runningWorkers).toBe(0);
+    expect(writeCalls).toHaveLength(0);          // no setpoint → no change
+    expect(state.window).toHaveLength(1);        // reset, then one fresh sample
+  });
+
+  // CTL-770 fix-up regression pin: idle + a host setpoint above the current
+  // floor MUST seed to the setpoint. With the pre-fix early `return` this wrote
+  // nothing and the autotuner stayed stuck at the floor at idle (the live bug).
+  test("when liveBackgroundCount() === 0 AND setpoint > current → seeds to setpoint + emits gauge", () => {
+    const state = makeState({ window: [] });
+    const writeCalls = [];
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 0,
+      loadavg: () => [1, 1, 1],                  // safe/idle load
+      freemem: () => 8e9,
+      totalmem: () => 10e9,                       // 80% free → mem ok
+      cpus: () => Array(8),                       // coreCount 8 → core-bound min(6, 6) = 6
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 40 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }), // host override setpoint
+      writeLayer2: (v) => { writeCalls.push(v); return true; },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(writeCalls).toEqual([6]);             // seeded to the setpoint
+    expect(gaugeCalls).toHaveLength(1);
+    expect(gaugeCalls[0].maxParallelTarget).toBe(6);
+    expect(gaugeCalls[0].runningWorkers).toBe(0);
   });
 
   test("when active → exactly one appendSampledEvent with correct fields", () => {
