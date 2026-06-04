@@ -77,6 +77,11 @@ fi
   RL7D="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.used_percentage // empty' 2>/dev/null)"
   RL5H_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.five_hour.resets_at // empty' 2>/dev/null)"
   RL7D_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day.resets_at // empty' 2>/dev/null)"
+  # CTL-763: per-model 7d split (seven_day_opus / seven_day_sonnet).
+  RL7D_OPUS="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day_opus.used_percentage // empty' 2>/dev/null)"
+  RL7D_SONNET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day_sonnet.used_percentage // empty' 2>/dev/null)"
+  RL7D_OPUS_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day_opus.resets_at // empty' 2>/dev/null)"
+  RL7D_SONNET_RESET="$(printf '%s' "$INPUT" | jq -r '.rate_limits.seven_day_sonnet.resets_at // empty' 2>/dev/null)"
 
   # Without a percentage there's nothing meaningful to emit — bail.
   [[ -n "$PCT" ]] || exit 0
@@ -92,6 +97,11 @@ fi
   [[ -n "$RL7D" ]]       && ARGS+=(--ratelimit-7d-pct "$RL7D")
   [[ -n "$RL5H_RESET" ]] && ARGS+=(--ratelimit-5h-reset "$RL5H_RESET")
   [[ -n "$RL7D_RESET" ]] && ARGS+=(--ratelimit-7d-reset "$RL7D_RESET")
+  # CTL-763: per-model 7d split.
+  [[ -n "$RL7D_OPUS" ]]        && ARGS+=(--ratelimit-7d-opus-pct "$RL7D_OPUS")
+  [[ -n "$RL7D_SONNET" ]]      && ARGS+=(--ratelimit-7d-sonnet-pct "$RL7D_SONNET")
+  [[ -n "$RL7D_OPUS_RESET" ]]  && ARGS+=(--ratelimit-7d-opus-reset "$RL7D_OPUS_RESET")
+  [[ -n "$RL7D_SONNET_RESET" ]] && ARGS+=(--ratelimit-7d-sonnet-reset "$RL7D_SONNET_RESET")
 
   bash "$SESSION_BIN" "${ARGS[@]}" >/dev/null 2>&1 || true
 ) </dev/null >/dev/null 2>&1 &

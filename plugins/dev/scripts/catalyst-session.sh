@@ -670,6 +670,8 @@ cmd_emit_context() {
   # 5h/7d used-percentages are the "5h: 26%" / "7d: 15%" the user sees; the
   # resets_at timestamps are informational (body-only, no label cardinality).
   local rl5h="" rl7d="" rl5h_reset="" rl7d_reset=""
+  # CTL-763: per-model 7d split.
+  local rl7d_opus="" rl7d_sonnet="" rl7d_opus_reset="" rl7d_sonnet_reset=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --context-pct)    pct="$2"; shift 2 ;;
@@ -679,10 +681,14 @@ cmd_emit_context() {
       --model)          model="$2"; shift 2 ;;
       --cost-usd)       cost="$2"; shift 2 ;;
       --effort)         effort="$2"; shift 2 ;;
-      --ratelimit-5h-pct)    rl5h="$2"; shift 2 ;;
-      --ratelimit-7d-pct)    rl7d="$2"; shift 2 ;;
-      --ratelimit-5h-reset)  rl5h_reset="$2"; shift 2 ;;
-      --ratelimit-7d-reset)  rl7d_reset="$2"; shift 2 ;;
+      --ratelimit-5h-pct)        rl5h="$2"; shift 2 ;;
+      --ratelimit-7d-pct)        rl7d="$2"; shift 2 ;;
+      --ratelimit-5h-reset)      rl5h_reset="$2"; shift 2 ;;
+      --ratelimit-7d-reset)      rl7d_reset="$2"; shift 2 ;;
+      --ratelimit-7d-opus-pct)   rl7d_opus="$2"; shift 2 ;;
+      --ratelimit-7d-sonnet-pct) rl7d_sonnet="$2"; shift 2 ;;
+      --ratelimit-7d-opus-reset) rl7d_opus_reset="$2"; shift 2 ;;
+      --ratelimit-7d-sonnet-reset) rl7d_sonnet_reset="$2"; shift 2 ;;
       *) echo "error: unknown flag for emit-context: $1" >&2; return 1 ;;
     esac
   done
@@ -718,6 +724,10 @@ cmd_emit_context() {
     --argjson rl7d "${rl7d:-null}" \
     --arg rl5h_reset "$rl5h_reset" \
     --arg rl7d_reset "$rl7d_reset" \
+    --argjson rl7d_opus "${rl7d_opus:-null}" \
+    --argjson rl7d_sonnet "${rl7d_sonnet:-null}" \
+    --arg rl7d_opus_reset "$rl7d_opus_reset" \
+    --arg rl7d_sonnet_reset "$rl7d_sonnet_reset" \
     '{context_pct: $pct,
       context_tokens: (if $tokens == null then null else $tokens end),
       context_max: (if $context_max == null then null else $context_max end),
@@ -728,7 +738,11 @@ cmd_emit_context() {
       ratelimit_5h_pct: (if $rl5h == null then null else $rl5h end),
       ratelimit_7d_pct: (if $rl7d == null then null else $rl7d end),
       ratelimit_5h_reset: (if $rl5h_reset == "" then null else $rl5h_reset end),
-      ratelimit_7d_reset: (if $rl7d_reset == "" then null else $rl7d_reset end)}')
+      ratelimit_7d_reset: (if $rl7d_reset == "" then null else $rl7d_reset end),
+      ratelimit_7d_opus_pct: (if $rl7d_opus == null then null else $rl7d_opus end),
+      ratelimit_7d_sonnet_pct: (if $rl7d_sonnet == null then null else $rl7d_sonnet end),
+      ratelimit_7d_opus_reset: (if $rl7d_opus_reset == "" then null else $rl7d_opus_reset end),
+      ratelimit_7d_sonnet_reset: (if $rl7d_sonnet_reset == "" then null else $rl7d_sonnet_reset end)}')
 
   # Build claude.* extra args for typed attributes
   local extra_args=()
@@ -740,6 +754,9 @@ cmd_emit_context() {
   # CTL-760: rate-limit % as typed attributes (numeric). Resets stay body-only.
   [[ -n "$rl5h" ]] && extra_args+=(--claude-ratelimit-5h-pct "$rl5h")
   [[ -n "$rl7d" ]] && extra_args+=(--claude-ratelimit-7d-pct "$rl7d")
+  # CTL-763: per-model 7d split. Resets stay body-only.
+  [[ -n "$rl7d_opus" ]]   && extra_args+=(--claude-ratelimit-7d-opus-pct "$rl7d_opus")
+  [[ -n "$rl7d_sonnet" ]] && extra_args+=(--claude-ratelimit-7d-sonnet-pct "$rl7d_sonnet")
 
   # Workflow/ticket lookup for trace/span derivation.
   local trow workflow ticket
