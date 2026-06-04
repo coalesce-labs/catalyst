@@ -11,8 +11,10 @@ import {
   freemem as osFreemem,
   totalmem as osTotalmem,
   cpus as osCpus,
+  platform as osPlatform,
 } from "node:os";
 import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { clampToBounds } from "./scheduler.mjs";
 import {
   readExecutionCoreConcurrency,
@@ -39,18 +41,81 @@ import {
 
 // --- Pure decision helpers --------------------------------------------------
 
+// defaultVmStatExec — production seam for the darwin `vm_stat` shell-out. Uses
+// execFileSync (the established child-process primitive in this dir:
+// memory-sampler.mjs / claude-agents.mjs) so there is no shell parsing.
+const defaultVmStatExec = () => execFileSync("vm_stat", [], { encoding: "utf8" });
+
+// availableMemPct — CTL-772: platform-aware "available memory" percentage.
+//
+// The bug: on darwin os.freemem() reports only the truly-free page count and
+// EXCLUDES inactive/speculative/purgeable pages that the kernel reclaims on
+// demand. That made memFreePct read ~0.5% on a host with tens of GB actually
+// available, tripping mem-critical and pinning maxParallel at the floor.
+//
+// Fix: on darwin parse `vm_stat` and sum free + inactive + speculative +
+// purgeable pages × page-size, divided by totalmem(). On any platform other
+// than darwin — or on ANY parse/exec error — fall back to the original
+// freemem()/totalmem() formula (byte-identical to the old sampleSystem code),
+// so a parse failure is strictly no-worse than today and the seam-injected
+// freemem/totalmem still drive the value everywhere except real darwin.
+//
+// Pure + total: never rethrows. All OS access is via the injected seams.
+export function availableMemPct({
+  freemem = osFreemem,
+  totalmem = osTotalmem,
+  platform = "linux",
+  execSync = defaultVmStatExec,
+} = {}) {
+  const fallback = () => Math.round((freemem() / totalmem()) * 1000) / 10;
+
+  if (platform !== "darwin") return fallback();
+
+  try {
+    const out = execSync("vm_stat");
+    const ps = Number(out.match(/page size of (\d+) bytes/)?.[1]);
+    if (!Number.isFinite(ps) || ps <= 0) throw new Error("vm_stat: bad page size");
+
+    // vm_stat values carry a TRAILING PERIOD ("Pages free:   17612."), so the
+    // regex captures the digits then a literal `.`. A missing line → 0
+    // (defensive, not an error).
+    const pages = (label) => {
+      const m = out.match(new RegExp("Pages " + label + ":\\s+(\\d+)\\."));
+      return m ? Number(m[1]) : 0;
+    };
+    const free = pages("free");
+    const inactive = pages("inactive");
+    const speculative = pages("speculative");
+    const purgeable = pages("purgeable");
+
+    const total = totalmem();
+    const availBytes = (free + inactive + speculative + purgeable) * ps;
+    const pct = Math.round((availBytes / total) * 1000) / 10;
+    if (!Number.isFinite(pct)) throw new Error("vm_stat: non-finite pct");
+    return pct;
+  } catch {
+    return fallback();
+  }
+}
+
 // sampleSystem — capture current load + memory snapshot from seam-injected OS
 // functions. Returns {load1, load5, load15, memFreePct, coreCount}.
+//
+// CTL-772: memFreePct now delegates to availableMemPct so darwin reports
+// reclaimable memory. `platform`/`execSync` are seams; platform defaults to
+// "linux" (the freemem path) so callers/tests that inject only freemem/totalmem
+// keep the original behavior even when bun test runs on a darwin host. Only
+// startAutoTuner injects the real process.platform + real vm_stat.
 export function sampleSystem({
   loadavg = osLoadavg,
   freemem = osFreemem,
   totalmem = osTotalmem,
   cpus = osCpus,
+  platform = "linux",
+  execSync = defaultVmStatExec,
 } = {}) {
   const [load1, load5, load15] = loadavg();
-  const free = freemem();
-  const total = totalmem();
-  const memFreePct = Math.round((free / total) * 1000) / 10;
+  const memFreePct = availableMemPct({ freemem, totalmem, platform, execSync });
   const coreCount = cpus().length;
   return { load1, load5, load15, memFreePct, coreCount };
 }
@@ -255,6 +320,12 @@ export function autoTuneTick(state, seams) {
     freemem,
     totalmem,
     cpus,
+    // CTL-772: platform defaults to "linux" at this seam boundary so existing
+    // tests that build seams by hand (injecting only freemem/totalmem) take the
+    // freemem path and stay green even on a darwin CI/dev host. Only
+    // startAutoTuner's real wiring passes process.platform + real vm_stat.
+    platform = "linux",
+    execSync,
     readConcurrency,
     readLayer1Concurrency,  // CTL-750: optional seam for Layer-1 committed maxParallel
     readLayer2Concurrency,  // CTL-770: optional seam for Layer-2 host targetParallel
@@ -279,7 +350,7 @@ export function autoTuneTick(state, seams) {
       state.window = [];
     }
 
-    const sample = sampleSystem({ loadavg, freemem, totalmem, cpus });
+    const sample = sampleSystem({ loadavg, freemem, totalmem, cpus, platform, execSync });
     state.window = pushSample(state.window, sample, state.windowSamples);
 
     const concurrency = readConcurrency();
@@ -390,6 +461,10 @@ export function startAutoTuner({
   freemem = osFreemem,
   totalmem = osTotalmem,
   cpus = osCpus,
+  // CTL-772: the REAL daemon path uses the host platform + real vm_stat so
+  // darwin reports reclaimable (available) memory instead of os.freemem().
+  platform = osPlatform(),
+  execSync = defaultVmStatExec,
   appendSampledEvent = defaultAppendParallelismSampledEvent,
   appendAdjustedEvent = defaultAppendParallelismAdjustedEvent,
   appendGaugeEvent = defaultAppendAutotuneGaugeEvent,  // CTL-771
@@ -411,6 +486,8 @@ export function startAutoTuner({
     freemem,
     totalmem,
     cpus,
+    platform,   // CTL-772: host platform (process.platform via os.platform())
+    execSync,   // CTL-772: real vm_stat shell-out
     readConcurrency: () =>
       mergeExecutionCoreConcurrency(
         readExecutionCoreConcurrency(configPath),

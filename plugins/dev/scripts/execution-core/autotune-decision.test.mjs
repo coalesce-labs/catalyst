@@ -5,12 +5,167 @@
 
 import { describe, test, expect } from "bun:test";
 import {
+  availableMemPct,
   sampleSystem,
   pushSample,
   detectTrend,
   memGuard,
   decideMaxParallel,
 } from "./autotune.mjs";
+
+// A realistic darwin vm_stat body — header carries the page size, every data
+// line carries a TRAILING PERIOD (verified live). The label spellings match the
+// macOS output exactly: "Pages free/inactive/speculative/purgeable".
+function makeVmStat({ pageSize = 16384, free = 100, inactive = 200, speculative = 50, purgeable = 150 } = {}) {
+  return [
+    `Mach Virtual Memory Statistics: (page size of ${pageSize} bytes)`,
+    `Pages free:                               ${free}.`,
+    `Pages active:                           1509896.`,
+    `Pages inactive:                         ${inactive}.`,
+    `Pages speculative:                         ${speculative}.`,
+    `Pages throttled:                              0.`,
+    `Pages wired down:                        431514.`,
+    `Pages purgeable:                          ${purgeable}.`,
+  ].join("\n");
+}
+
+// --- availableMemPct (CTL-772) ----------------------------------------------
+
+describe("availableMemPct", () => {
+  test("darwin: sums free+inactive+speculative+purgeable pages × pageSize / total", () => {
+    const total = 10e9;
+    const pct = availableMemPct({
+      freemem: () => 1, // must be IGNORED on the darwin parse path
+      totalmem: () => total,
+      platform: "darwin",
+      execSync: () => makeVmStat({ pageSize: 16384, free: 100, inactive: 200, speculative: 50, purgeable: 150 }),
+    });
+    const expected = Math.round(((100 + 200 + 50 + 150) * 16384 / total) * 1000) / 10;
+    expect(pct).toBe(expected);
+  });
+
+  test("non-darwin: returns freemem/totalmem pct identical to the old formula", () => {
+    const pct = availableMemPct({
+      freemem: () => 2e9,
+      totalmem: () => 10e9,
+      platform: "linux",
+      execSync: () => { throw new Error("should not be called on linux"); },
+    });
+    expect(pct).toBe(20);
+  });
+
+  test("darwin + execSync throws → falls back to freemem pct, no throw", () => {
+    let pct;
+    expect(() => {
+      pct = availableMemPct({
+        freemem: () => 2e9,
+        totalmem: () => 10e9,
+        platform: "darwin",
+        execSync: () => { throw new Error("spawn EAGAIN"); },
+      });
+    }).not.toThrow();
+    expect(pct).toBe(20);
+  });
+
+  test("darwin + unparseable output (no page size / no Pages lines) → fallback to freemem pct, no throw", () => {
+    let pct;
+    expect(() => {
+      pct = availableMemPct({
+        freemem: () => 3e9,
+        totalmem: () => 10e9,
+        platform: "darwin",
+        execSync: () => "garbage output with no recognizable fields",
+      });
+    }).not.toThrow();
+    expect(pct).toBe(30);
+  });
+
+  test("darwin: tolerates trailing periods (parses the digits, not the period)", () => {
+    const total = 16384 * 1000; // makes the math clean: 400 pages → 40%
+    const pct = availableMemPct({
+      freemem: () => 1,
+      totalmem: () => total,
+      platform: "darwin",
+      execSync: () => makeVmStat({ pageSize: 16384, free: 100, inactive: 100, speculative: 100, purgeable: 100 }),
+    });
+    expect(pct).toBe(40);
+  });
+
+  test("darwin: missing Pages line counts as 0 (defensive, not an error)", () => {
+    const out = [
+      "Mach Virtual Memory Statistics: (page size of 16384 bytes)",
+      "Pages free:                               100.",
+      // no inactive/speculative/purgeable lines
+    ].join("\n");
+    const total = 16384 * 1000;
+    const pct = availableMemPct({
+      freemem: () => 999,
+      totalmem: () => total,
+      platform: "darwin",
+      execSync: () => out,
+    });
+    // only free=100 counts → 100/1000 = 10%
+    expect(pct).toBe(10);
+  });
+});
+
+// --- sampleSystem darwin integration (CTL-772) ------------------------------
+
+describe("sampleSystem (darwin vm_stat seam)", () => {
+  test("platform:darwin + stubbed execSync → memFreePct from availableMemPct, load/core from their seams", () => {
+    const total = 10e9;
+    const s = sampleSystem({
+      loadavg: () => [2.5, 3.0, 3.5],
+      freemem: () => 1, // ignored on darwin parse path
+      totalmem: () => total,
+      cpus: () => Array(12),
+      platform: "darwin",
+      execSync: () => makeVmStat({ pageSize: 16384, free: 100, inactive: 200, speculative: 50, purgeable: 150 }),
+    });
+    const expectedMem = Math.round(((100 + 200 + 50 + 150) * 16384 / total) * 1000) / 10;
+    expect(s.memFreePct).toBe(expectedMem);
+    expect(s.load1).toBe(2.5);
+    expect(s.load5).toBe(3.0);
+    expect(s.load15).toBe(3.5);
+    expect(s.coreCount).toBe(12);
+  });
+
+  test("keep-green default: NO platform/execSync seam + injected freemem/totalmem → freemem-derived memFreePct (holds even on a darwin host)", () => {
+    const s = sampleSystem({
+      loadavg: () => [0, 0, 0],
+      freemem: () => 2e9,
+      totalmem: () => 10e9,
+      cpus: () => Array(4),
+    });
+    expect(s.memFreePct).toBe(20);
+  });
+
+  test("mem-critical still fires under genuine darwin pressure (tiny available pages)", () => {
+    const total = 10e9;
+    // tiny page counts → availBytes ≪ total → availableMemPct < criticalPct (5)
+    const s = sampleSystem({
+      loadavg: () => [1, 1, 1],
+      freemem: () => total, // freemem would say "100% free" — proves the darwin path overrides it
+      totalmem: () => total,
+      cpus: () => Array(8),
+      platform: "darwin",
+      execSync: () => makeVmStat({ pageSize: 16384, free: 1, inactive: 1, speculative: 1, purgeable: 1 }),
+    });
+    expect(s.memFreePct).toBeLessThan(5);
+
+    const window = [s, s, s];
+    const { next, reason } = decideMaxParallel({
+      window,
+      concurrency: { maxParallel: 10, minParallel: 2, maxParallelCeiling: 20 },
+      minSamples: 3,
+      loadSafeFactor: 4,
+      criticalPct: 5,
+      warnPct: 20,
+    });
+    expect(reason).toBe("mem-critical");
+    expect(next).toBe(2); // minParallel
+  });
+});
 
 // --- sampleSystem -----------------------------------------------------------
 
