@@ -148,6 +148,23 @@ describe("startDaemon", () => {
     expect(schedulerConcurrency).toEqual(concurrency);
   });
 
+  // CTL-716: the daemon also forwards concurrency into startMonitor so the
+  // monitor's triage slot gate uses the same ceiling as the scheduler.
+  test("CTL-716: threads concurrency into startMonitor", () => {
+    const concurrency = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    let monitorConcurrency = "unset";
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      startMonitor: (o) => {
+        monitorConcurrency = o.concurrency;
+      },
+      startScheduler: () => {},
+      watchRegistry: false,
+      concurrency,
+    });
+    expect(monitorConcurrency).toEqual(concurrency);
+  });
+
   // CTL-665: default concurrency is {} when not passed (main() supplies it from
   // config; the no-arg test path must keep the legacy state.json ceiling).
   test("defaults concurrency to {} when not passed (CTL-665)", () => {

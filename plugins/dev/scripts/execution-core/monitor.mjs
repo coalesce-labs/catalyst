@@ -42,6 +42,8 @@ import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
 import { applyTriageStatus as defaultApplyTriageStatus } from "./linear-write.mjs";
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
+import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
+import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
@@ -297,6 +299,13 @@ export function handleStateChangedEvent(
     // bursts) and double-dispatches triage. Live side-effects fire only on the
     // steady-state poll/watch path (foldOnly defaults to false).
     foldOnly = false,
+    // CTL-716: slot-gate seams. concurrency/readMaxParallelFn/liveBackgroundCount
+    // resolve the ceiling; triageBudget is a shared per-drain budget from
+    // readNewEvents (undefined → compute one for this single call).
+    concurrency = {},
+    readMaxParallelFn = readMaxParallel,
+    liveBackgroundCount = () => countBackgroundAgents(),
+    triageBudget,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -307,6 +316,11 @@ export function handleStateChangedEvent(
   // no-op. Runs before the project loop because the cache is keyed by ticket
   // identifier, independent of which project's eligible set the event touches.
   if (cache) cache.set(parsed.identifier, parsed.toState);
+  // CTL-716: compute budget once per call (not per project-loop iteration) so
+  // multiple matching projects share the same slot budget. When a shared per-drain
+  // triageBudget is provided by readNewEvents, use it; otherwise build one for this
+  // single call. Either way, the budget gates all dispatchTriage calls below.
+  const budget = triageBudget ?? computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -324,6 +338,7 @@ export function handleStateChangedEvent(
           applyTriageStatus,
           appendEvent,
           orchId: parsed.identifier,
+          budget, // CTL-716
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -369,6 +384,7 @@ export function handleStateChangedEvent(
           applyTriageStatus,
           appendEvent,
           orchId: parsed.identifier,
+          budget, // CTL-716
         });
       } else {
         log.debug(
@@ -410,26 +426,53 @@ export function handleStateChangedEvent(
   }
 }
 
+// computeTriageBudget — read the slot ceiling + live bg count ONCE and return
+// a mutable budget the caller spends across a single event-drain or sweep.
+// Mirrors schedulerTick's per-tick single read (CTL-716). Defaults source the
+// same primitives the scheduler uses; tests inject both to stay deterministic.
+function computeTriageBudget({
+  orchDir,
+  concurrency = {},
+  readMaxParallelFn = readMaxParallel,
+  liveBackgroundCount = () => countBackgroundAgents(),
+} = {}) {
+  const maxParallel = readMaxParallelFn(orchDir, concurrency);
+  const live = liveBackgroundCount();
+  return { remaining: computeFreeSlots(maxParallel, live) };
+}
+
 // dispatchTriage — fire the triage phase agent for a →Triage transition. Guards
 // a missing orchDir (a standalone monitor with no daemon wiring) and logs —
 // never throws — a non-zero dispatch. CTL-704: after a successful dispatch,
 // writes Linear Todo→Triage (verified) and emits a canonical observability event.
+// CTL-716: budget param — a mutable { remaining } object; when provided and
+// remaining <= 0, the dispatch is deferred (dropped; sweepMissingTriage retries).
+// Only decrements on a successful (code === 0) dispatch. Returns true on success.
 function dispatchTriage(identifier, {
   dispatch,
   orchDir,
   applyTriageStatus = defaultApplyTriageStatus,
   appendEvent = defaultAppendEvent,
   orchId,
+  budget,
 }) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
-    return;
+    return false;
+  }
+  if (budget && budget.remaining <= 0) {
+    log.info(
+      { identifier },
+      "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
+    );
+    return false;
   }
   const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
-    return;
+    return false;
   }
+  if (budget) budget.remaining -= 1;
   // CTL-704: write Linear Todo→Triage (verified) + emit observability event.
   let res = { applied: false, verified: false, from_state: null, to_state: null, reason: null };
   try {
@@ -446,6 +489,7 @@ function dispatchTriage(identifier, {
     applied: res.applied,
     reason: res.reason,
   });
+  return true;
 }
 
 // hasTriageArtifact — does a triage.json exist for this ticket's worker dir?
@@ -475,13 +519,20 @@ export function sweepMissingTriage({
   dispatch,
   applyTriageStatus = defaultApplyTriageStatus,
   appendEvent = defaultAppendEvent,
+  // CTL-716: slot-gate seams — same primitives as handleStateChangedEvent.
+  concurrency = {},
+  readMaxParallelFn = readMaxParallel,
+  liveBackgroundCount = () => countBackgroundAgents(),
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
     return;
   }
+  // CTL-716: read liveness once per sweep (mirrors schedulerTick's once-per-tick read).
+  const budget = computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
+      if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
       if (hasTriageArtifact(orchDir, t.identifier)) continue;
       dispatchTriage(t.identifier, {
         dispatch,
@@ -489,6 +540,7 @@ export function sweepMissingTriage({
         applyTriageStatus,
         appendEvent,
         orchId: t.identifier,
+        budget,
       });
     }
   }
@@ -597,6 +649,17 @@ export function readNewEvents({ foldOnly = false } = {}) {
     const text = leftoverBuf + buf.toString("utf8");
     const lines = text.split("\n");
     leftoverBuf = lines.pop() ?? "";
+    // CTL-716: compute one triage budget per non-fold drain — a single liveness
+    // read shared across all events in this pass (mirrors schedulerTick's once-
+    // per-tick read). foldOnly drains have no dispatch side-effects, so no budget.
+    const triageBudget = foldOnly
+      ? undefined
+      : computeTriageBudget({
+          orchDir: tailerOpts.orchDir,
+          concurrency: tailerOpts.concurrency,
+          readMaxParallelFn: tailerOpts.readMaxParallelFn,
+          liveBackgroundCount: tailerOpts.liveBackgroundCount,
+        });
     for (const line of lines) {
       if (!line.trim()) continue;
       let event;
@@ -609,7 +672,7 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // foldOnly; handleIssueUpdatedEvent is a pure projection fold (always safe);
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
       // the fold-only boot drain so replayed comments don't re-fire subscribers.
-      handleStateChangedEvent(event, { ...tailerOpts, foldOnly });
+      handleStateChangedEvent(event, { ...tailerOpts, foldOnly, triageBudget });
       handleIssueUpdatedEvent(event, foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts); // CTL-681 + CTL-749
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
@@ -651,6 +714,11 @@ export function startMonitor({
   cache, // CTL-634: shared state cache for event-driven write-through
   onComment, // CTL-681: optional comment subscriber
   onUpdate,  // CTL-749: optional issue-update subscriber
+  // CTL-716: slot-gate seams — threaded into tailerOpts so readNewEvents and
+  // sweepMissingTriage use the same ceiling as the scheduler (CTL-665).
+  concurrency = {},
+  readMaxParallelFn,
+  liveBackgroundCount,
 } = {}) {
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
@@ -658,9 +726,9 @@ export function startMonitor({
   // undefined, handleStateChangedEvent falls back to its real default.
   // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
   // populates the same instance the scheduler reads.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate };
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate, concurrency, readMaxParallelFn, liveBackgroundCount };
   reconcileAll({ exec });
-  sweepMissingTriage({ orchDir, dispatch }); // CTL-711: triage pre-existing eligible tickets
+  sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
     // CTL-731 Phase 00: drain the cursor→EOF downtime gap FOLD-ONLY. Pre-CTL-731
@@ -686,7 +754,7 @@ export function startMonitor({
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
-    sweepMissingTriage({ orchDir, dispatch }); // CTL-711: catch tickets that appeared between webhooks
+    sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
   }, reconcileIntervalMs);
 }
 
@@ -714,6 +782,9 @@ export function __tailerOffset() {
 
 // __resetForTests — clear all module-level state between unit tests. Not part
 // of the public monitor contract; index.mjs does not re-export it.
+// CTL-716: also resets the liveness cache so tests that use the real default
+// countBackgroundAgents() start from a cold (agents=[]) state, not from a
+// warm snapshot that may reflect the current bg-job environment.
 export function __resetForTests() {
   stopMonitor();
   knownProjects.clear();
@@ -721,4 +792,5 @@ export function __resetForTests() {
   lastLogPath = "";
   leftoverBuf = "";
   tailerOpts = {};
+  resetLivenessCache();
 }
