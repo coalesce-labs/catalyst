@@ -11,7 +11,9 @@ import {
   detectTrend,
   memGuard,
   decideMaxParallel,
+  claudeResourceShare,
 } from "./autotune.mjs";
+import { parsePsSnapshotWithCpu } from "./cli/sessions.mjs";
 
 // A realistic darwin vm_stat body — header carries the page size, every data
 // line carries a TRAILING PERIOD (verified live). The label spellings match the
@@ -358,6 +360,101 @@ describe("memGuard", () => {
   });
 });
 
+// --- claudeResourceShare (CTL-775) ------------------------------------------
+
+describe("claudeResourceShare", () => {
+  // A two-worker fleet. Each worker tree: root + one child. Tree RSS ~560MB,
+  // tree pcpu ~120% (over one core, decaying-average semantics).
+  function makeSnapshot() {
+    // 560MB ≈ 573440 KB per tree → split root 400000 / child 173440.
+    return parsePsSnapshotWithCpu([
+      "100 1 80.0 400000", // worker A root
+      "101 100 40.0 173440", // worker A child
+      "200 1 90.0 400000", // worker B root
+      "201 200 30.0 173440", // worker B child
+    ]);
+  }
+  const agents = [
+    { kind: "background", pid: 100, sessionId: "a" },
+    { kind: "background", pid: 200, sessionId: "b" },
+  ];
+  const totalmem = 68.7e9; // ~68.7 GB host
+  const coreCount = 16;
+
+  test("sums two background worker trees into whole-host cpu/mem percent", () => {
+    const { claudeCpuPct, claudeMemPct } = claudeResourceShare({
+      listAgents: () => agents,
+      psSnapshot: makeSnapshot(),
+      totalmem,
+      coreCount,
+    });
+    const rssKbSum = (400000 + 173440) * 2;
+    const cpuSum = 120 + 120;
+    expect(claudeMemPct).toBe(Math.round(((rssKbSum * 1024) / totalmem) * 100 * 10) / 10);
+    expect(claudeCpuPct).toBe(Math.round((cpuSum / (coreCount * 100)) * 100 * 10) / 10);
+  });
+
+  test("filters out non-background agents and pid-less agents", () => {
+    const mixed = [
+      { kind: "background", pid: 100, sessionId: "a" },
+      { kind: "interactive", pid: 200, sessionId: "human" }, // excluded
+      { kind: "background", sessionId: "nopid" }, // excluded (no pid)
+    ];
+    const { claudeCpuPct, claudeMemPct } = claudeResourceShare({
+      listAgents: () => mixed,
+      psSnapshot: makeSnapshot(),
+      totalmem,
+      coreCount,
+    });
+    // Only worker A counted: tree rss 573440 KB, tree cpu 120%.
+    expect(claudeMemPct).toBe(Math.round(((573440 * 1024) / totalmem) * 100 * 10) / 10);
+    expect(claudeCpuPct).toBe(Math.round((120 / (coreCount * 100)) * 100 * 10) / 10);
+  });
+
+  test("no live agents → {0,0} (full headroom)", () => {
+    const r = claudeResourceShare({
+      listAgents: () => [],
+      psSnapshot: makeSnapshot(),
+      totalmem,
+      coreCount,
+    });
+    expect(r).toEqual({ claudeCpuPct: 0, claudeMemPct: 0 });
+  });
+
+  test("totalmem=0 → memPct 0 (no divide-by-zero)", () => {
+    const r = claudeResourceShare({
+      listAgents: () => agents,
+      psSnapshot: makeSnapshot(),
+      totalmem: 0,
+      coreCount,
+    });
+    expect(r.claudeMemPct).toBe(0);
+  });
+
+  test("coreCount=0 → cpuPct 0 (no divide-by-zero)", () => {
+    const r = claudeResourceShare({
+      listAgents: () => agents,
+      psSnapshot: makeSnapshot(),
+      totalmem,
+      coreCount: 0,
+    });
+    expect(r.claudeCpuPct).toBe(0);
+  });
+
+  test("a throwing listAgents → {0,0}, never throws (fail-low)", () => {
+    let r;
+    expect(() => {
+      r = claudeResourceShare({
+        listAgents: () => { throw new Error("claude agents failed"); },
+        psSnapshot: makeSnapshot(),
+        totalmem,
+        coreCount,
+      });
+    }).not.toThrow();
+    expect(r).toEqual({ claudeCpuPct: 0, claudeMemPct: 0 });
+  });
+});
+
 // --- decideMaxParallel ------------------------------------------------------
 
 describe("decideMaxParallel", () => {
@@ -633,6 +730,246 @@ describe("decideMaxParallel", () => {
       const result = decideMaxParallel({ window: w, concurrency: atFloor, setpoint: 6, ...base });
       expect(result.next).toBe(1);
       expect(result.reason).toBe("mem-critical");
+    });
+  });
+
+  // --- CTL-775: Claude-attributable resource control law ---------------------
+
+  describe("Claude-attribution control law (CTL-775)", () => {
+    // Flat-idle window: trend==="none", load well below the safe line.
+    // coreCount=4, loadSafeFactor=2 → threshold=8.
+    const flatIdle = makeWindow([[1.2, 1.2, 1.3], [1.2, 1.3, 1.2], [1.3, 1.2, 1.2]], 50);
+
+    test("law rule 1: SCALE-UP when saturated + our-headroom + mem ok + below ceiling", () => {
+      // current=10, running=10 (no free slots), claude share low → +1.
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency,
+        runningWorkers: 10,
+        claudeCpuPct: 30,
+        claudeMemPct: 20,
+        ...base,
+      });
+      expect(result.next).toBe(11);
+      expect(result.reason).toBe("saturated-scale-up");
+    });
+
+    test("law rule 1: scale-up bounded at the ceiling (current=ceiling → no growth)", () => {
+      const atCeiling = { maxParallel: 20, minParallel: 2, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency: atCeiling,
+        runningWorkers: 20,
+        claudeCpuPct: 30,
+        claudeMemPct: 20,
+        ...base,
+      });
+      expect(result.next).toBe(20); // current<ceiling false → not scale-up; holds
+      expect(result.reason).not.toBe("saturated-scale-up");
+    });
+
+    test("ROOT CAUSE PIN: NOT saturated + full headroom → never +1 above current", () => {
+      // current=10, running=2 (free slots) → must NOT grow. With setpoint absent
+      // it falls through to hold; with setpoint it would drift down — either way
+      // never +1.
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency,
+        runningWorkers: 2,
+        claudeCpuPct: 10,
+        claudeMemPct: 10,
+        ...base,
+      });
+      expect(result.next).toBeLessThanOrEqual(10);
+      expect(result.reason).not.toBe("saturated-scale-up");
+    });
+
+    test("law rule 2: claudeCpuPct >= high-water → claude-resource-shed (×0.75)", () => {
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency,
+        runningWorkers: 10,
+        claudeCpuPct: 80, // >= 75 high-water
+        claudeMemPct: 20,
+        ...base,
+      });
+      expect(result.next).toBe(Math.floor(10 * 0.75)); // 7
+      expect(result.reason).toBe("claude-resource-shed");
+    });
+
+    test("law rule 2: claudeMemPct >= high-water → shed; floored at minParallel", () => {
+      const tight = { maxParallel: 2, minParallel: 2, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency: tight,
+        runningWorkers: 2,
+        claudeCpuPct: 10,
+        claudeMemPct: 90, // mem at limit
+        ...base,
+      });
+      expect(result.next).toBe(2); // floor(2*0.75)=1 → clamped up to minParallel
+      expect(result.reason).toBe("claude-resource-shed");
+    });
+
+    test("law rule 3: host warn (sub-critical) + LOW claude share → host-pressure-not-ours-hold", () => {
+      // mem 10% → warn (critical=5, warn=20). Claude share low → another process.
+      const w = makeWindow([[1.2, 1.2, 1.3], [1.2, 1.3, 1.2], [1.3, 1.2, 1.2]], 10);
+      const result = decideMaxParallel({
+        window: w,
+        concurrency,
+        runningWorkers: 5,
+        claudeCpuPct: 15,
+        claudeMemPct: 12,
+        ...base,
+      });
+      expect(result.next).toBe(10); // HOLD, does not shed
+      expect(result.reason).toBe("host-pressure-not-ours-hold");
+    });
+
+    test("law rule 3 (CPU axis): host load UP-trend + LOW claude share → hold, NOT trend-up shed", () => {
+      // Strictly-increasing host load (trend "up"), mem healthy, but Claude's
+      // attributable share is low → a non-Claude CPU spike. Must HOLD, not shed
+      // our workers to make room for the other process (the gap the CTL-775
+      // review caught: trend-up shed previously fired above attribution).
+      const up = makeWindow([[10, 8, 6], [12, 9, 7], [15, 11, 8]], 50);
+      const result = decideMaxParallel({
+        window: up,
+        concurrency,
+        runningWorkers: 5,
+        claudeCpuPct: 12,
+        claudeMemPct: 10,
+        ...base,
+      });
+      expect(result.next).toBe(10); // HOLD, not floor(10*0.75)
+      expect(result.reason).toBe("host-pressure-not-ours-hold");
+    });
+
+    test("law rule 3 (CPU axis): host UP-trend with attribution UNKNOWN still sheds (back-compat)", () => {
+      const up = makeWindow([[10, 8, 6], [12, 9, 7], [15, 11, 8]], 50);
+      const result = decideMaxParallel({
+        window: up,
+        concurrency,
+        runningWorkers: 5,
+        // no claudeCpuPct/claudeMemPct → attribution unknown → coarse safety shed
+        ...base,
+      });
+      expect(result.next).toBe(Math.floor(10 * 0.75)); // 7
+      expect(result.reason).toBe("trend-up");
+    });
+
+    test("law rule 4: mem-critical still wins even with LOW claude share (OOM safety)", () => {
+      const w = makeWindow([[1, 2, 4]], 2); // 2% < critical
+      const result = decideMaxParallel({
+        window: w,
+        concurrency,
+        runningWorkers: 5,
+        claudeCpuPct: 1,
+        claudeMemPct: 1,
+        ...base,
+      });
+      expect(result.next).toBe(2); // minParallel — attribution does NOT rescue
+      expect(result.reason).toBe("mem-critical");
+    });
+
+    test("law rule 5: DRIFT-DOWN — the live 16-with-2 case → -1/tick, floors at setpoint", () => {
+      let cur = 16;
+      const reasons = [];
+      for (let i = 0; i < 15; i++) {
+        const r = decideMaxParallel({
+          window: flatIdle,
+          concurrency: { maxParallel: cur, minParallel: 1, maxParallelCeiling: 20 },
+          runningWorkers: 2, // not saturated (2 < cur)
+          setpoint: 6,
+          claudeCpuPct: 20,
+          claudeMemPct: 20,
+          ...base,
+        });
+        reasons.push(r.reason);
+        cur = r.next;
+      }
+      // First step: 16 → 15 with drift reason.
+      expect(reasons[0]).toBe("drift-to-setpoint");
+      // Floors at the setpoint, then holds (no undershoot, no thrash).
+      expect(cur).toBe(6);
+      expect(reasons[reasons.length - 1]).toBe("at-setpoint");
+    });
+
+    test("law rule 5: converge-UP still wins below setpoint regardless of saturation (9b > 9c)", () => {
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency: atFloor,
+        runningWorkers: 0, // not saturated, but current < setpoint
+        setpoint: 6,
+        claudeCpuPct: 10,
+        claudeMemPct: 10,
+        ...base,
+      });
+      expect(result.next).toBe(6);
+      expect(result.reason).toBe("converge-to-setpoint");
+    });
+
+    test("deadband: current === setpoint holds at-setpoint, no -1 oscillation across two decides", () => {
+      const atTarget = { maxParallel: 6, minParallel: 1, maxParallelCeiling: 20 };
+      const args = {
+        window: flatIdle,
+        concurrency: atTarget,
+        runningWorkers: 2,
+        setpoint: 6,
+        claudeCpuPct: 20,
+        claudeMemPct: 20,
+        ...base,
+      };
+      const r1 = decideMaxParallel(args);
+      const r2 = decideMaxParallel(args);
+      expect(r1.next).toBe(6);
+      expect(r1.reason).toBe("at-setpoint");
+      expect(r2.next).toBe(6);
+      expect(r2.reason).toBe("at-setpoint");
+    });
+
+    test("drift never drops the ceiling below running workers", () => {
+      // current=10, runningWorkers=8, setpoint=6 → drift floors at 8, not 6/9.
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency: { maxParallel: 10, minParallel: 1, maxParallelCeiling: 20 },
+        runningWorkers: 8,
+        setpoint: 6,
+        claudeCpuPct: 20,
+        claudeMemPct: 20,
+        ...base,
+      });
+      expect(result.next).toBe(9); // current-1=9, still >= running 8
+      expect(result.reason).toBe("drift-to-setpoint");
+    });
+
+    test("back-compat: runningWorkers null/omitted ⇒ saturated → legacy trend-down growth still fires", () => {
+      const down = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+      const result = decideMaxParallel({ window: down, concurrency, ...base }); // no runningWorkers
+      expect(result.next).toBe(11);
+      expect(result.reason).toBe("trend-down");
+    });
+
+    test("back-compat: runningWorkers null ⇒ recovery-to-layer1 still fires", () => {
+      const down = makeWindow([[2, 4, 6], [1, 3, 5], [1, 2, 4]], 50);
+      const atFloor = { maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 };
+      const result = decideMaxParallel({ window: down, concurrency: atFloor, layer1Max: 4, ...base });
+      expect(result.next).toBe(4);
+      expect(result.reason).toBe("recovery-to-layer1");
+    });
+
+    test("attribution unavailable (pcts null) degrades to CTL-770 setpoint behavior", () => {
+      // current=16, running=2, setpoint=6, NO attribution → still drifts down
+      // (drift needs only setpoint + not-saturated, both supplied by runningWorkers).
+      const result = decideMaxParallel({
+        window: flatIdle,
+        concurrency: { maxParallel: 16, minParallel: 1, maxParallelCeiling: 20 },
+        runningWorkers: 2,
+        setpoint: 6,
+        ...base,
+      });
+      expect(result.next).toBe(15);
+      expect(result.reason).toBe("drift-to-setpoint");
     });
   });
 });

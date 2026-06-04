@@ -131,6 +131,68 @@ export function rssTotalForPid(snapshot, pid) {
   return total;
 }
 
+/**
+ * parsePsSnapshotWithCpu — CTL-775 sibling of parsePsSnapshot for the 4-column
+ * `ps -axo pid=,ppid=,pcpu=,rss=` snapshot. It MUST be a separate function:
+ * parsePsSnapshot reads parts[2]=rss from the 3-column layout, and its two live
+ * callers (memory-sampler.mjs, sessions.mjs buildRows) still feed it 3 columns —
+ * extending it in place would shift rss to parts[3] and silently mis-read RSS.
+ *
+ * Returns `{ selfRss, selfCpu, children }` where:
+ *   selfRss[pid] = Number(parts[3])   — RSS in KB (4th column)
+ *   selfCpu[pid] = Number(parts[2])   — pcpu, percent-of-one-core (can exceed 100)
+ * The `{selfRss, children}` shape is a superset of what rssTotalForPid needs, so
+ * this one 4-column snapshot drives BOTH rssTotalForPid and cpuTotalForPid.
+ */
+export function parsePsSnapshotWithCpu(lines) {
+  const selfRss = new Map();
+  const selfCpu = new Map();
+  const children = new Map();
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length < 4) continue;
+    const pid = Number(parts[0]);
+    const ppid = Number(parts[1]);
+    const pcpu = Number(parts[2]);
+    const rss = Number(parts[3]);
+    if (
+      !Number.isFinite(pid) ||
+      !Number.isFinite(ppid) ||
+      !Number.isFinite(pcpu) ||
+      !Number.isFinite(rss)
+    )
+      continue;
+    selfRss.set(pid, rss);
+    selfCpu.set(pid, pcpu);
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  return { selfRss, selfCpu, children };
+}
+
+/**
+ * cpuTotalForPid — self pcpu plus the pcpu of every descendant (DFS). Mirrors
+ * rssTotalForPid's tree-walk but sums selfCpu. The snapshot MUST be a
+ * parsePsSnapshotWithCpu result (carries selfCpu). Returns 0 for an unknown pid.
+ */
+export function cpuTotalForPid(snapshot, pid) {
+  const { selfCpu, children } = snapshot;
+  if (!selfCpu || !selfCpu.has(pid)) return 0;
+  let total = 0;
+  const stack = [pid];
+  const seen = new Set();
+  while (stack.length) {
+    const p = stack.pop();
+    if (seen.has(p)) continue;
+    seen.add(p);
+    total += selfCpu.get(p) ?? 0;
+    for (const c of children.get(p) ?? []) stack.push(c);
+  }
+  return total;
+}
+
 // ─── Pure: name parsing ──────────────────────────────────────────────────────
 
 /**
