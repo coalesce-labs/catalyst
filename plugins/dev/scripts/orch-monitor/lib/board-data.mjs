@@ -222,10 +222,19 @@ export function buildPhaseSummary(phaseSigs, now) {
       // timing as clean. Collapse end < start to null (the existing "unknown"
       // convention) so it is not silently swallowed (CTL-754).
       const durationMs = end != null && end >= start ? end - start : null;
+      // Surface raw timestamps; normalize absent/unparseable completedAt to null
+      // so consumers get a clean string-or-null signal (CTL-734).
+      const rawCompleted = sig.completedAt ?? null;
+      const completedAt =
+        rawCompleted != null && Number.isFinite(Date.parse(rawCompleted))
+          ? rawCompleted
+          : null;
       return {
         phase: PHASE_ORDER[i],
         status: sig.status,
         durationMs,
+        startedAt: sig.startedAt ?? null,
+        completedAt,
       };
     })
     .filter(Boolean);

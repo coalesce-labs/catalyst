@@ -32,6 +32,8 @@ export interface BoardPhaseTiming {
   phase: string;
   status: string;
   durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
 }
 
 export interface BoardTicket {
