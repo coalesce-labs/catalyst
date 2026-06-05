@@ -686,8 +686,16 @@ OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
 #
 # compose_worker_settings_json builds that settings object with `jq -nc` (never
 # hand-built JSON):
-#   { "env": { <telemetry toggles>, "OTEL_RESOURCE_ATTRIBUTES": "<attrs>" },
+#   { "env": { <telemetry toggles>, "OTEL_RESOURCE_ATTRIBUTES": "<attrs>",
+#              <CTL-777 context vars> },
 #     "statusLine": { "type": "command", "command": "<SCRIPT_DIR>/catalyst-statusline.sh" } }
+#
+# CTL-777: settings.env now ALSO carries the 5 CATALYST_* context vars
+# (CATALYST_ORCHESTRATOR_DIR / _ID / PHASE / TICKET / GENERATION) over this same
+# surviving --settings channel — DISPATCH_ENV below carries them too but on the
+# DROPPED plain env prefix, so without this the worker's CATALYST_ORCHESTRATOR_DIR
+# was empty and phase-agent-emit-complete's step-2 signal flip silently skipped,
+# wedging the pipeline. Riding settings.env makes it non-empty so the flip fires.
 #
 # Telemetry toggles are re-asserted from the dispatcher's own inherited env (the
 # same keys that enable telemetry in ~/.claude/settings.json's .env block),
@@ -699,6 +707,19 @@ OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
 # statusLine.command points at this repo's catalyst-statusline.sh — the entire
 # statusLine key is OMITTED (fail-open) when that file is absent. Always emits a
 # valid settings object; an empty OTEL_RES_ATTRS still yields valid JSON.
+#
+# ─── CTL-777: thread the 5 CATALYST_* context vars through settings.env ──────
+# The same --settings channel that carries the CTL-760 telemetry keys is the ONLY
+# lever that survives the `claude --bg` RPC (the plain env prefix in DISPATCH_ENV
+# below is DROPPED by the daemon). Previously CATALYST_ORCHESTRATOR_DIR rode only
+# that dropped prefix, so the worker saw it empty and phase-agent-emit-complete's
+# step-2 signal flip (hard-gated on CATALYST_ORCHESTRATOR_DIR) silently skipped →
+# the pipeline wedged on an idle zombie. We now also emit the 5 context vars
+# (CATALYST_ORCHESTRATOR_DIR / _ID / PHASE / TICKET / GENERATION) into settings.env
+# so they reach the worker via the surviving channel and the signal flip fires.
+# Telemetry keys stay first/unchanged; each context var is omitted when empty
+# (mirroring the optional-OTLP pattern) so the post-call `jq -e .` fail-open guard
+# still validates and an empty optional never becomes a null key.
 compose_worker_settings_json() {
 	local enable_telemetry metrics_exporter logs_exporter otlp_endpoint otlp_protocol
 	enable_telemetry="${CLAUDE_CODE_ENABLE_TELEMETRY:-1}"
@@ -706,6 +727,14 @@ compose_worker_settings_json() {
 	logs_exporter="${OTEL_LOGS_EXPORTER:-otlp}"
 	otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
 	otlp_protocol="${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
+
+	# CTL-777: the same context values DISPATCH_ENV carries on the dropped env
+	# prefix — sourced from the dispatcher's own resolved vars.
+	local orch_dir="${ORCH_DIR:-}"
+	local orch_id="${ORCH_ID:-}"
+	local phase_val="${PHASE:-}"
+	local ticket_val="${TICKET:-}"
+	local generation_val="${GENERATION:-}"
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -716,6 +745,11 @@ compose_worker_settings_json() {
 		--arg otlp_endpoint "$otlp_endpoint" \
 		--arg otlp_protocol "$otlp_protocol" \
 		--arg otel_attrs "$OTEL_RES_ATTRS" \
+		--arg orch_dir "$orch_dir" \
+		--arg orch_id "$orch_id" \
+		--arg phase "$phase_val" \
+		--arg ticket "$ticket_val" \
+		--arg generation "$generation_val" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -728,6 +762,11 @@ compose_worker_settings_json() {
          + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
          + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
          + (if $otel_attrs == "" then {} else { "OTEL_RESOURCE_ATTRIBUTES": $otel_attrs } end)
+         + (if $orch_dir == "" then {} else { "CATALYST_ORCHESTRATOR_DIR": $orch_dir } end)
+         + (if $orch_id == "" then {} else { "CATALYST_ORCHESTRATOR_ID": $orch_id } end)
+         + (if $phase == "" then {} else { "CATALYST_PHASE": $phase } end)
+         + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
+         + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
        )
      }
      + (if $have_statusline
