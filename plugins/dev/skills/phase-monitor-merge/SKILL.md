@@ -133,7 +133,7 @@ Key elements that MUST be preserved:
    |----------|--------|
    | clean    | proceed to merge step |
    | blocked  | resolve via `/catalyst-dev:review-comments` (bot threads) or run an inline CI fix-up commit (up to 3 attempts); 4th attempt → `stalled` |
-   | behind   | `git fetch && git rebase origin/<base> && git push --force-with-lease` |
+   | behind   | `git fetch && git rebase origin/<base> && git -c core.hooksPath=/dev/null push --force-with-lease` |
    | dirty    | merge conflicts — emit `failed` with reason "merge conflicts (DIRTY)" |
    | unknown/unstable | continue waiting for the next event |
 

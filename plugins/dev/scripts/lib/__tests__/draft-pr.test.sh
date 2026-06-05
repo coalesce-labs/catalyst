@@ -226,10 +226,28 @@ install_git_stub_push_fail() {
   cat > "${bin_dir}/git" <<STUB
 #!/usr/bin/env bash
 LOG="${log_file}"
-printf '%s\n' "git \$@" >> "\$LOG"
-if [[ "\$1" == "push" ]]; then
-  echo "git push failed (stub)" >&2; exit 1
-fi
+printf '%s\n' "git \$*" >> "\$LOG"
+for arg in "\$@"; do
+  if [[ "\$arg" == "push" ]]; then
+    echo "git push failed (stub)" >&2; exit 1
+  fi
+done
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# install_git_stub_logging <bin_dir> <log_file>
+# Logs every git invocation as `git $*` (one line), then exec's real git.
+install_git_stub_logging() {
+  local bin_dir="$1" log_file="$2"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "git \$*" >> "\$LOG"
 exec "${real_git}" "\$@"
 STUB
   chmod +x "${bin_dir}/git"
@@ -315,6 +333,57 @@ if grep -q "push.*failed\|failed.*continuing" "${P1C_LOG}.stderr" 2>/dev/null; t
 else
   fail "1c: warning to stderr — got: $(cat "${P1C_LOG}.stderr" 2>/dev/null)"
 fi
+
+# 1d: no-upstream push carries core.hooksPath=/dev/null
+echo "1d: no-upstream push carries core.hooksPath=/dev/null"
+new_fixture p1d
+P1D_BIN="${SCRATCH}/p1d-bin"; P1D_LOG="${SCRATCH}/p1d.log"
+install_git_stub_logging "$P1D_BIN" "$P1D_LOG"
+(
+  cd "$WORK"
+  PATH="${P1D_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  draft_pr_push >/dev/null 2>&1
+) || true
+if grep -E 'push .*-u origin HEAD' "$P1D_LOG" 2>/dev/null | grep -q 'core\.hooksPath=/dev/null'; then
+  pass "1d: no-upstream push suppresses local pre-push hooks"
+else
+  fail "1d: no-upstream push must include core.hooksPath=/dev/null — log: $(cat "$P1D_LOG" 2>/dev/null)"
+fi
+
+# 1e: upstream-set push carries core.hooksPath=/dev/null
+echo "1e: upstream-set push carries core.hooksPath=/dev/null"
+new_fixture p1e
+(cd "$WORK" && git push -u origin HEAD --quiet)
+P1E_BIN="${SCRATCH}/p1e-bin"; P1E_LOG="${SCRATCH}/p1e.log"
+install_git_stub_logging "$P1E_BIN" "$P1E_LOG"
+(
+  cd "$WORK"
+  PATH="${P1E_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  draft_pr_push >/dev/null 2>&1
+) || true
+if grep -q 'core\.hooksPath=/dev/null' "$P1E_LOG" 2>/dev/null; then
+  pass "1e: upstream push suppresses local pre-push hooks"
+else
+  fail "1e: upstream push must include core.hooksPath=/dev/null — log: $(cat "$P1E_LOG" 2>/dev/null)"
+fi
+
+# 1f: blocking pre-push hook → draft_pr_push still returns 0
+echo "1f: blocking pre-push hook → draft_pr_push still returns 0"
+new_fixture p1f
+mkdir -p "${WORK}/.localhooks"
+printf '#!/usr/bin/env bash\nexit 1\n' > "${WORK}/.localhooks/pre-push"
+chmod +x "${WORK}/.localhooks/pre-push"
+git -C "$WORK" config core.hooksPath "${WORK}/.localhooks"
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push >/dev/null 2>&1
+  echo "$?" > "${SCRATCH}/p1f.exit"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p1f.exit" 2>/dev/null)" "1f: draft_pr_push succeeds despite blocking pre-push hook"
 
 # ─── Suite 2: draft_pr_ensure ─────────────────────────────────────────────────
 echo ""
