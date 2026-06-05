@@ -1,0 +1,20 @@
+{
+  "name": "catalyst-foundry",
+  "version": "1.0.0",
+  "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
+  "author": {
+    "name": "Coalesce Labs",
+    "email": "hello@coalesce-labs.com",
+    "url": "https://github.com/coalesce-labs"
+  },
+  "homepage": "https://github.com/coalesce-labs/catalyst",
+  "repository": "https://github.com/coalesce-labs/catalyst.git",
+  "keywords": [
+    "setup",
+    "maintenance",
+    "thoughts",
+    "curation",
+    "diagnostics"
+  ],
+  "license": "MIT"
+}

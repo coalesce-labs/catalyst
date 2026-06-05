@@ -6,5 +6,7 @@
   "plugins/meta": "4.0.1",
   "plugins/pm-ops": "2.0.0",
   "plugins/meeting-hygiene": "2.0.0",
-  "plugins/discovery": "2.0.0"
+  "plugins/discovery": "2.0.0",
+  "plugins/legacy": "1.0.0",
+  "plugins/foundry": "1.0.0"
 }
