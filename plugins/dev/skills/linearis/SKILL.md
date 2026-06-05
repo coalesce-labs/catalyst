@@ -8,9 +8,12 @@ description:
 
 # Linearis CLI Reference
 
-> Verified against Linearis v2026.4.4 on 2026-04-12.
+> Verified against Linearis v2026.4.9 on 2026-05-31.
 
 **CRITICAL: Always use these exact patterns. Do NOT guess or improvise syntax.**
+
+> ⚠️ **Read the [Gotchas & Traps](#gotchas--traps) section before scripting** — `issues list` silently
+> hides Done tickets, `linearis` eats stdin in loops, and there is no `--json` flag. These bite hard.
 
 ## Looking Up Syntax
 
@@ -23,6 +26,50 @@ linearis issues usage         # Just issue operations
 linearis milestones usage     # Just milestone operations
 linearis cycles usage         # Just cycle operations
 ```
+
+## Gotchas & Traps
+
+These are non-obvious behaviors that silently produce wrong results. Verified empirically against
+v2026.4.9.
+
+1. **`issues list` HIDES Done tickets by default.** A default `issues list` returns every active state
+   **plus Canceled**, but **silently omits completed/Done** tickets. So a ticket *absent* from the list
+   is usually Done, not gone. For ground-truth state of a specific ticket, use **`issues read <ID>`**.
+   To surface completed work, pass **`--status "Done"`** explicitly (`--completed-after` alone does NOT
+   override the exclusion). The asymmetry is real: Canceled shows, Done doesn't.
+
+2. **`linearis` consumes stdin** — in a `for`/`while` loop or heredoc it eats the loop's input and every
+   iteration after the first misbehaves (often looking like a hang or empty result). **Append `</dev/null`
+   to every linearis call in scripts and agent loops.**
+
+3. **There is no `--json` flag.** JSON is the default output (`{ "nodes": [...] }`); passing `--json`
+   errors with `unknown option '--json'`. Just pipe the bare command to `jq`.
+
+4. **`--status` is a real server-side filter** — a misspelled/unknown value returns an **empty set**
+   (`jq` will throw "Cannot iterate over null"), it does NOT fall back to all issues. Validate status
+   spelling against the team's real workflow states (e.g. CTL uses Research/Plan/Implement/Validate/
+   PR/Remediate/Triage/Done, not the generic "In Progress").
+
+5. **Filter→scope coupling:** `--status` and `--cycle` on `issues list`/`search` **require `--team`**;
+   `--milestone` **requires `--project`**. Omitting the scope errors. `projects list` has **no `--team`
+   filter at all** (only `--limit`/`--after`) — list all and filter with `jq`, or pivot via
+   `issues list --team ENG | jq '.nodes[].project'`.
+
+6. **`--query` on `issues list` is deprecated** (still works) — use **`issues search "<query>"`** instead.
+
+7. **Milestone/cycle name resolution isn't globally unique.** Milestone names can collide across
+   projects — pass `--project` (or a UUID) on `milestones read/update`. `cycles list --active` and
+   `--window <n>` are team-scoped — always pair with `--team` or you may grab another team's cycle.
+
+8. **`project-milestones` (old name) fails SILENTLY** — it doesn't error, it falls through to the generic
+   top-level `--help` dump (looks like success). The domain is `milestones`.
+
+9. **Shell note (Bash tool runs zsh):** `status` and `state` are reserved/read-only var names —
+   `status=$(linearis ...)` throws "read-only variable". Use `st`/`s`/`lstate`.
+
+10. **`auth status` is the diagnostic entry point** — if calls silently return nothing, run
+    `linearis auth status` (read-only) to confirm the token before debugging anything else;
+    `linearis auth login` refreshes it.
 
 ## Core Operations
 
@@ -46,6 +93,10 @@ linearis issues create "Title" --team ENG
 linearis issues create "Title" --team ENG --description "Details" --priority 2 --project "Project"
 ```
 
+`create` also accepts `--status`, `--cycle`, `--estimate`, `--parent-ticket`, `--due-date`, and the
+relation flags (`--blocks`/`--blocked-by`/`--relates-to`/`--duplicate-of`) — set them at creation time
+instead of a wasteful second `update`. Run `linearis issues usage` for the full list.
+
 ### Update a ticket
 
 ```bash
@@ -56,18 +107,45 @@ linearis issues update ENG-123 --project "Project Name"
 linearis issues update ENG-123 --project-milestone "Milestone Name"
 ```
 
+`update` also supports relation flags (`--blocks`/`--blocked-by`/`--relates-to`/`--duplicate-of`/
+`--remove-relation`) and clearers (`--clear-parent-ticket`/`--clear-cycle`/`--clear-estimate`/
+`--clear-due-date`/`--clear-project-milestone`/`--clear-labels`). See `linearis issues usage`.
+
 ### Comment on a ticket
 
+Commenting is a **thread model** under `issues` (the old flat `comments` domain is a deprecated
+compatibility facade as of v2026.4.x — `linearis comments --help` itself says "prefer the `issues`
+discussion commands").
+
 ```bash
-linearis comments create ENG-123 --body "Starting work on this"
+# Start a comment / discussion thread (this is the one to use)
+linearis issues discuss ENG-123 --body "Starting work on this"
+
+# List root threads on a ticket (use BEFORE re-posting a mirror comment, to avoid dups)
+linearis issues discussions ENG-123
+
+# Reply to a thread — <thread> MUST be a root thread ID (from discuss/discussions), NOT ENG-123
+linearis issues reply <thread-id> --body "follow-up"
+linearis issues replies <thread-id>                # list replies in a thread
+
+# Edit / delete (split verbs in the modern path)
+linearis issues edit <comment-id> --body "..."     # edit a root or reply comment
+linearis issues edit-reply <reply-id> --body "..."
+linearis issues delete-comment <comment-id>
+linearis issues delete-reply <reply-id>
 ```
+
+Both `issues discuss` and `issues discussions` accept either a UUID or an `ABC-123` identifier — no
+UUID-resolution dance needed for commenting. `comments create` still works but is deprecated and loses
+nested-reply support — don't teach it as canonical.
 
 **Common mistakes:**
 
 ```bash
 linearis issues get ENG-123             # ❌ no 'get' — use 'read'
 linearis issue view ENG-123             # ❌ no 'view' — use 'read'
-linearis issues comment ENG-123 "text"  # ❌ use 'comments create', not 'issues comment'
+linearis issues comment ENG-123 "text"  # ❌ no 'comment' subcommand — use 'issues discuss <id> --body'
+linearis comments create ENG-123 ...     # ⚠️ deprecated facade — prefer 'issues discuss'
 linearis issues update ENG-123 --state  # ❌ use --status, not --state
 linearis project-milestones list        # ❌ renamed to 'milestones' in v2026.4
 ```
@@ -243,7 +321,7 @@ linearis issues update ENG-123 --status "Done"
 
 # With comment
 linearis issues update ENG-123 --status "Done"
-linearis comments create ENG-123 --body "Merged: PR #456"
+linearis issues discuss ENG-123 --body "Merged: PR #456"
 ```
 
 ### UUID-based calls (CTL-207)
@@ -282,11 +360,34 @@ refresh is wired in.
 
 ## Important Rules
 
-1. **--status NOT --state**: Always `--status` for issue updates (`--state` was removed in v2025.12.2)
-2. **comments create**: The command is `linearis comments create`, not `issues comment`
-3. **milestones NOT project-milestones**: The command was renamed in v2026.4
-4. **--status requires --team**: On `issues list` and `issues search`, `--status` only works when `--team` is also provided
-5. **--team accepts keys, names, and UUIDs on most commands** (e.g., `--team ENG`), but `issues create` and `issues search` require a UUID — keys/names silently fall back to the workspace default team (upstream bug: czottmann/linearis#56)
+1. **--status NOT --state**: Always `--status` for issue updates (`--state` is not a valid flag)
+2. **Commenting = `issues discuss`**: Create a comment with `linearis issues discuss <id> --body`; list
+   threads with `issues discussions <id>`. The old `comments create` still works but is a **deprecated
+   compatibility facade** — don't use it. There is no `issues comment` subcommand.
+3. **milestones NOT project-milestones**: The command was renamed in v2026.4 (old name fails silently)
+4. **--status requires --team**: On `issues list`/`search`, `--status` (and `--cycle`) only work with
+   `--team`; `--milestone` requires `--project`
+5. **--team accepts keys, names, and UUIDs on most commands** (e.g., `--team ENG`). Historically
+   `issues create`/`search` required a UUID and keys silently fell back to the default team
+   (czottmann/linearis#56) — this could not be reproduced on v2026.4.9 in a single-team workspace, so
+   **verify scope** by checking returned identifiers' team prefix when using key-based `--team` on
+   create/search in a multi-team workspace.
 6. **Quotes for spaces**: `--status "In Progress"` not `--status In Progress`
-7. **JSON output**: All commands return JSON — use jq for parsing
+7. **JSON is the default — no `--json` flag**: every command emits JSON; passing `--json` errors. Pipe
+   the bare command to jq. (And append `</dev/null` in loops — see Gotchas.)
 8. **Use `linearis <domain> usage`**: When unsure about flags, check usage instead of guessing
+
+## Other domains (not detailed above)
+
+v2026.4.9 also exposes these. **Read-only** subcommands (`list`/`read`/`status`/`download`) are safe;
+`create`/`update`/`delete`/`archive`/`upload` **mutate** — don't run them in audits.
+
+- `linearis users list [--active]` — workspace members (id/name/email); resolve assignee/owner UUIDs.
+  Note service/OAuth accounts have synthetic emails (`*@oauthapp.linear.app`).
+- `linearis attachments list <issue> [--source-type github]` — PR/Slack/link attachments on a ticket.
+- `linearis documents list [--project X | --issue ENG-123]` + `documents read <doc>` — project/issue docs
+  (`delete` trashes, not hard-delete).
+- `linearis initiatives list [--status active] [--with-projects]` + `initiatives read <init>` —
+  roadmap grouping above projects (defaults to excluding archived; pass `--include-archived`).
+- `linearis files download <url> --output <path>` — fetch an asset from Linear storage.
+- `linearis auth status` / `auth login` — verify/refresh the API token (see Gotchas #10).
