@@ -3,7 +3,7 @@
 // CTL-419: filter.wake wake-event rendering with recipient-short suffix
 
 import { describe, test, expect } from "bun:test";
-import { formatDetails, formatRef, shouldSkipEvent, formatStatus } from "./format";
+import { formatDetails, formatRef, shouldSkipEvent, formatStatus, fmtDuration } from "./format";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 
 function makeEvent(
@@ -266,5 +266,26 @@ describe("formatRef — filter.wake (CTL-419 — unchanged)", () => {
   test("still returns stripped session id", () => {
     const event = makeWakeEvent("sess_20260511T203845_16d33281", {});
     expect(formatRef(event)).toBe("sess_20260511T203845_16d33281");
+  });
+});
+
+describe("fmtDuration (CTL-700)", () => {
+  test("sub-second: renders as Nms", () => {
+    expect(fmtDuration(420)).toBe("420ms");
+  });
+  test("seconds range: renders as N.Ns", () => {
+    expect(fmtDuration(2345)).toBe("2.3s");
+  });
+  test("upper seconds boundary: 59s", () => {
+    expect(fmtDuration(59000)).toBe("59.0s");
+  });
+  test("minutes range: renders as NmNNs with zero-padded seconds", () => {
+    expect(fmtDuration(842000)).toBe("14m02s");
+  });
+  test("hours range: renders as NhNNm with zero-padded minutes", () => {
+    expect(fmtDuration(3900000)).toBe("1h05m");
+  });
+  test("zero: returns 0ms", () => {
+    expect(fmtDuration(0)).toBe("0ms");
   });
 });

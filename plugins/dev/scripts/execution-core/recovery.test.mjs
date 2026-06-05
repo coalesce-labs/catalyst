@@ -2483,6 +2483,9 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.reason).toBe("advance");
     expect(env.body.payload.target_phase).toBe("implement");
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-rq");
+    // CTL-700 (Item B): healthy lifecycle events must emit INFO, not WARN
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
   });
 
   test("defaultAppendDispatchLaunchedEvent writes a launched envelope", () => {
@@ -2501,6 +2504,9 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.target_phase).toBe("research");
     expect(env.body.payload.bg_job_id).toBe("deadbeef");
     expect(env.body.payload.worktree_path).toBe("/wt/CTL/CTL-LC-1");
+    // CTL-700 (Item B): healthy lifecycle events must emit INFO, not WARN
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
   });
 
   test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
@@ -2518,6 +2524,8 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.reason).toBe("event-rate-domination");
     expect(env.body.payload.count).toBe(312);
     expect(env.body.payload.window_ms).toBe(600_000);
+    // CTL-700 (Item B): regression-lock — abnormal events keep WARN
+    expect(env.severityText).toBe("WARN");
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
   });
 

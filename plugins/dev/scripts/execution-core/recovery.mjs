@@ -246,15 +246,15 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // revive, escalated, and revive-suppressed audit events (CTL-574 + CTL-587).
 // Shape mirrors lib/canonical-event.sh. Centralizing it here keeps the four
 // per-action helpers tiny and prevents shape drift between actions.
-function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {} }) {
+function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13 }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
       ts,
       id: randomBytes(8).toString("hex"),
       observedTs: ts,
-      severityText: "WARN",
-      severityNumber: 13,
+      severityText,
+      severityNumber,
       traceId: randomBytes(16).toString("hex"),
       spanId: randomBytes(8).toString("hex"),
       resource: {
@@ -571,6 +571,8 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
       action: "requested",
       reason,
       payloadExtras: { target_phase },
+      severityText: "INFO",
+      severityNumber: 9,
     }),
     "dispatch-requested",
   );
@@ -594,6 +596,8 @@ export function defaultAppendDispatchLaunchedEvent({
       orchId,
       action: "launched",
       payloadExtras: { target_phase, bg_job_id, worktree_path },
+      severityText: "INFO",
+      severityNumber: 9,
     }),
     "dispatch-launched",
   );
