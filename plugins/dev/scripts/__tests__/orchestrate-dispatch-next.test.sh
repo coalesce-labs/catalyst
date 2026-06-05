@@ -369,9 +369,9 @@ RC=$?
 echo "$OUT" | grep -q "plugin-namespaced" &&
 	pass "stderr mentions plugin-namespaced" ||
 	fail "stderr mentions plugin-namespaced" "got: $OUT"
-echo "$OUT" | grep -q "/catalyst-dev:oneshot" &&
-	pass "stderr suggests /catalyst-dev:oneshot" ||
-	fail "stderr suggests /catalyst-dev:oneshot"
+echo "$OUT" | grep -q "/catalyst-legacy:oneshot" &&
+	pass "stderr suggests /catalyst-legacy:oneshot" ||
+	fail "stderr suggests /catalyst-legacy:oneshot"
 [ ! -f "${ORCH_DIR}/workers/T-1.json" ] && pass "no signal created when rejected" || fail "no signal created"
 [ ! -s "$CLAUDE_LOG" ] && pass "claude not invoked when rejected" || fail "claude not invoked"
 scratch_teardown

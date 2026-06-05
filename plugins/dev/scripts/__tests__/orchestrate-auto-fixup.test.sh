@@ -7,7 +7,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 AUTO_FIXUP="${REPO_ROOT}/plugins/dev/scripts/orchestrate-auto-fixup"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 
 FAILURES=0
 PASSES=0

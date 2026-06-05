@@ -10,7 +10,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 BF_DIR="${REPO_ROOT}/plugins/dev/scripts/briefing-followup"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/briefing-followup/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/briefing-followup/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -257,7 +257,7 @@ test_action_orchestrate() {
   log_content=$(cat "$log" 2>/dev/null || echo "")
   assert_grep "claude invoked with -p flag" "-p" "$log_content"
   assert_grep "claude invoked with orchestrate command" \
-    "/catalyst-dev:orchestrate CTL-999" "$log_content"
+    "/catalyst-legacy:orchestrate CTL-999" "$log_content"
   # CTL-495: claude inherits OTEL with task.type=briefing-followup.
   assert_grep "claude inherits OTEL with task.type=briefing-followup" \
     "task.type=briefing-followup" "$log_content"

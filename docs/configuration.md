@@ -135,7 +135,7 @@ these to transition tickets as phases complete.
 
 - `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase
   (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy).
-- `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-dev:oneshot` job per ticket.
+- `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket.
   Preserved as a fallback; not recommended for new setups.
 
 **`executionCore.eligibleQuery`** is **deprecated** — this field is ignored by the daemon. Use

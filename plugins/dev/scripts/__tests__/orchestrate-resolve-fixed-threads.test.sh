@@ -17,7 +17,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 RESOLVE="${REPO_ROOT}/plugins/dev/scripts/orchestrate-resolve-fixed-threads"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 
 FAILURES=0
 PASSES=0
@@ -437,7 +437,9 @@ grep -q "resolvedThreadCount" "$SKILL_MD" \
 echo "test: the new step is documented BEFORE orchestrate-auto-fixup"
 # `|| true` keeps a no-match (grep rc=1) from aborting under the active `set -e`.
 RESOLVE_LINE=$(grep -n "orchestrate-resolve-fixed-threads" "$SKILL_MD" | head -1 | cut -d: -f1 || true)
-FIXUP_LINE=$(grep -n '"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrate-auto-fixup"' "$SKILL_MD" | head -1 | cut -d: -f1 || true)
+# CTL-726: invocation is now `"${CATALYST_DEV_SCRIPTS}/orchestrate-auto-fixup"`
+# (was `"${CLAUDE_PLUGIN_ROOT}/scripts/..."`); match the resolver-agnostic tail.
+FIXUP_LINE=$(grep -n '/orchestrate-auto-fixup"' "$SKILL_MD" | head -1 | cut -d: -f1 || true)
 if [ -n "$RESOLVE_LINE" ] && [ -n "$FIXUP_LINE" ] && [ "$RESOLVE_LINE" -lt "$FIXUP_LINE" ]; then
   pass "resolve-fixed-threads step precedes auto-fixup (resolve@${RESOLVE_LINE} < fixup@${FIXUP_LINE})"
 else

@@ -38,10 +38,14 @@ log — is in service of these:
 
 ## TL;DR
 
-A single operator command (`/catalyst-dev:orchestrate …`) launches an interactive
+A single operator command (`/catalyst-legacy:orchestrate …`) launches an interactive
 Claude Code session that schedules tickets into waves and dispatches **phase-agent
 workers** (or legacy `oneshot` workers, depending on `dispatchMode`) into one git
-worktree per ticket. Phase-agent workers run as `claude --bg` jobs and walk a
+worktree per ticket.
+
+> **Note (v11.0.0, CTL-726):** The wave-based orchestration skills (`orchestrate`, `oneshot`, etc.)
+> moved to the `catalyst-legacy` plugin. The *current* multi-ticket model is the execution-core
+> daemon — see [architecture.md](architecture.md) for the end-to-end phase-agent pipeline. Phase-agent workers run as `claude --bg` jobs and walk a
 **9-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>`
 events the orchestrator wakes on via the broker. The orchestrator advances each
 ticket through the pipeline, opens a PR, waits for CI and merge, and archives the
@@ -51,7 +55,7 @@ run.
 
 ```mermaid
 flowchart TD
-  A[Operator runs<br/>/catalyst-dev:orchestrate …] --> B[Phase 1: Intake<br/>resolve tickets + read details]
+  A[Operator runs<br/>/catalyst-legacy:orchestrate …] --> B[Phase 1: Intake<br/>resolve tickets + read details]
   B --> C[Phase 2: Plan waves<br/>build DAG → topo sort → wave queue]
   C --> D{Operator<br/>approves<br/>plan?}
   D -- no --> Z[exit]
@@ -75,7 +79,7 @@ Selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`:
 | Value | Worker spawn | Notes |
 |---|---|---|
 | `"phase-agents"` | `claude --bg --resume /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` via `phase-agent-dispatch` | Template default. One `--bg` job per phase. State at `~/.claude/jobs/<bg_job_id>/state.json`. |
-| `"oneshot-legacy"` | `claude -p /catalyst-dev:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | Runtime default when key missing. Pre-CTL-452 model. |
+| `"oneshot-legacy"` | `claude -p /catalyst-legacy:oneshot <TICKET> --auto-merge` (long-lived, streaming JSON) | Runtime default when key missing. Pre-CTL-452 model. |
 
 Dispatch-mode resolution lives in `plugins/dev/scripts/orchestrate-dispatch-next`.
 Without `--config <path>`, the dispatcher always uses `oneshot-legacy`; the

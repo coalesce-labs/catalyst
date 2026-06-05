@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# action-orchestrate.sh — Dispatch a /catalyst-dev:orchestrate run for a ticket.
+# action-orchestrate.sh — Dispatch a /catalyst-legacy:orchestrate run for a ticket.
 #
 # Usage:
 #   action-orchestrate.sh --ticket TICKET-ID [--bg] [--worker-args ARGS]
 #
 # Modes:
-#   default — synchronous: invoke `claude -p /catalyst-dev:orchestrate TICKET`,
+#   default — synchronous: invoke `claude -p /catalyst-legacy:orchestrate TICKET`,
 #             parse stdout for an orch_<...> identifier.
 #   --bg    — background: nohup ... & with stdout redirected to a log file
 #             we tail briefly for the orch_id.
@@ -51,7 +51,7 @@ fi
 . "$(dirname "$0")/../lib/task-type.sh"
 __catalyst_append_task_type "briefing-followup"
 
-COMMAND="/catalyst-dev:orchestrate $TICKET"
+COMMAND="/catalyst-legacy:orchestrate $TICKET"
 [[ -n "$WORKER_ARGS" ]] && COMMAND="$COMMAND $WORKER_ARGS"
 
 extract_orch_id() {

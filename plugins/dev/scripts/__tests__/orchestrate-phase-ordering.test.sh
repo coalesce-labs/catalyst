@@ -11,7 +11,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 
 FAILURES=0
 PASSES=0

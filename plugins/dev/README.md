@@ -1,24 +1,25 @@
 # Catalyst Dev Plugin
 
-Complete development workflow: research → plan → implement → validate → ship. 25 skills and 9 research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack, plus Level 3 orchestration.
+Complete development workflow: research → plan → implement → validate → ship. 19 skills and 9 research agents covering the full Level 1 (single-skill) and Level 2 (guided-workflow) stack. Phase-agent / execution-core pipeline for Level 3 multi-ticket orchestration.
+
+> **v11.0.0 (CTL-726):** Six wave-based orchestration skills (`oneshot`, `orchestrate`, `god`,
+> `setup-orchestrate`, `briefing-followup`, `iterate-plan`) moved to the **[catalyst-legacy](../legacy/README.md)**
+> plugin. Redirect stubs remain here for backwards compatibility. Use `/catalyst-legacy:<skill>` for
+> those workflows.
 
 See the [Skills Reference](https://catalyst.coalescelabs.ai/reference/skills/) and [Agents Reference](https://catalyst.coalescelabs.ai/reference/agents/) for detailed per-skill documentation. The list below is the current inventory only.
 
-## Skills (25)
+## Skills (19)
 
 ### Research & Planning
 
 - `/catalyst-dev:research-codebase` — Parallel codebase research with specialized agents
 - `/catalyst-dev:create-plan` — Interactive TDD implementation planning
-- `/catalyst-dev:iterate-plan` — Revise existing plans after feedback
 
 ### Implementation
 
 - `/catalyst-dev:implement-plan` — Execute plans phase by phase using TDD (supports `--team`)
 - `/catalyst-dev:validate-plan` — Verify implementation against plan success criteria
-- `/catalyst-dev:oneshot` — End-to-end autonomous Level 2 workflow (supports `--team`, `--auto-merge`)
-- `/catalyst-dev:orchestrate` — Level 3 multi-ticket coordinator (wave-based parallelism + adversarial verification)
-- `/catalyst-dev:setup-orchestrate` — Bootstrap an orchestrator worktree and print the launch command
 - `/catalyst-dev:code-first-draft` — Initial feature implementation from a PRD
 - `/catalyst-dev:fix-typescript` — Fix TypeScript errors with strict anti-reward-hacking rules
 - `/catalyst-dev:scan-reward-hacking` — Scan for forbidden patterns (`as any`, `@ts-ignore`, etc.)

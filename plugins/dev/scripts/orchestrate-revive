@@ -12,7 +12,7 @@
 #   orchestrate-revive --orch-dir <path> --orch-id <id>
 #                      [--max-revives <n>]               # default 10
 #                      [--stale-heartbeat-seconds <n>]   # default 900 (15 min)
-#                      [--worker-command <cmd>]          # default /catalyst-dev:oneshot
+#                      [--worker-command <cmd>]          # default /catalyst-legacy:oneshot
 #                      [--model <name>]                  # default opus
 #                      [--dry-run]
 #
@@ -50,7 +50,7 @@ MAX_CONTINUATIONS=3
 # track how many times each phase has been re-dispatched.
 MAX_PHASE_REVIVES=3
 STALE_HEARTBEAT_SECONDS=900
-WORKER_COMMAND="/catalyst-dev:oneshot"
+WORKER_COMMAND="/catalyst-legacy:oneshot"
 MODEL="opus"
 DRY_RUN=0
 # CTL-613: --probe-helper invokes one helper function from the test harness
