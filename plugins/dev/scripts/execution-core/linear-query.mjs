@@ -5,11 +5,34 @@
 // post-filter that linearis cannot express server-side.
 
 import { spawnSync } from "node:child_process";
-import { withBreaker } from "./linear-breaker.mjs";
+import { existsSync } from "node:fs";
+import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
 const DEFAULT_LIMIT = 200;
+
+// CTL-784: batched multi-issue read. The Linear GraphQL endpoint, the named
+// operation (so the proxy audit can tell a batch read apart from the per-ticket
+// `GetIssueByIdentifier` storm), and the chunk ceiling (Linear caps a page at
+// 250; one identifier yields ≤1 issue so 250 ids fit one page). The projection
+// is a structural match for normalizeRelations / the dependency-graph consumers:
+// state{name}, labels{nodes{name}}, relations{nodes{type relatedIssue{identifier}}},
+// inverseRelations{nodes{type issue{identifier}}}.
+const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
+const BATCH_CHUNK_SIZE = 250;
+const BATCH_QUERY = `query CtlBatchTickets($ids: [ID!]) {
+  issues(filter: { id: { in: $ids } }, first: ${BATCH_CHUNK_SIZE}) {
+    nodes {
+      identifier
+      priority
+      state { name }
+      labels(first: 50) { nodes { name } }
+      relations(first: 100) { nodes { type relatedIssue { identifier } } }
+      inverseRelations(first: 100) { nodes { type issue { identifier } } }
+    }
+  }
+}`;
 
 // buildLinearisArgs — argv for `linearis issues list`. `--status` requires
 // `--team` (linearis/SKILL.md), so a null team is unsatisfiable and throws.
@@ -130,30 +153,171 @@ export function fetchTicketState(identifier, { exec = defaultExec, cache } = {})
 // fails SAFE (treats the candidate as held / non-terminal) just like the D5
 // fetchTicketState contract.
 //
-// CTL-634 cache sharing: the opt-in `cache` is the SAME createTicketStateCache
-// fetchTicketState uses. We populate it with the string `state` only, so a
-// subsequent fetchTicketState(id, { cache }) is a hit. relations/priority/labels
-// are returned UNCACHED (one read per call): the cache stores a single value per
-// key and is string-state-typed, so writing a relations object under the same
-// key would corrupt fetchTicketState's reads. Within a single STEP-A tick this
-// costs nothing — the relations come from the same read that populates state.
+// CTL-784 read-through: the opt-in `cache` is the SAME createTicketStateCache
+// fetchTicketState uses, now with a relations store (getRelations/setRelations).
+// fetchTicketRelations READS that store first (the gap the CTL-784 handoff
+// identified: the old code WROTE the state cache but never read relations, so
+// the admission pool re-read every tick regardless of TTL). A relations hit
+// returns the cached descriptor (state overlaid fresh from the monitor
+// write-through) with NO exec. The miss path is the live `linearis issues read`,
+// which then populates BOTH the relations store and (via setRelations priming)
+// the string-state store, so a subsequent fetchTicketState(id, { cache }) hits.
 export function fetchTicketRelations(identifier, { exec = defaultExec, cache } = {}) {
+  if (cache) {
+    const hit = cache.getRelations?.(identifier);
+    if (hit !== undefined) return hit; // read-through hit — no exec
+  }
   const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
   if (code !== 0) return null; // fail-safe — not cached
   try {
-    const node = JSON.parse(stdout);
-    const state = node?.state?.name ?? node?.state ?? null;
-    if (cache && state != null) cache.set(identifier, state); // share with fetchTicketState
-    return {
-      state,
-      relations: node?.relations ?? { nodes: [] },
-      inverseRelations: node?.inverseRelations ?? { nodes: [] },
-      priority: typeof node?.priority === "number" ? node.priority : null,
-      labels: node?.labels?.nodes?.map((n) => n.name) ?? [],
-    };
+    const desc = normalizeRelations(JSON.parse(stdout));
+    if (cache && desc.state != null) cache.setRelations?.(identifier, desc); // read-through + prime state
+    return desc;
   } catch {
     return null; // unparseable — not cached
   }
+}
+
+// normalizeRelations — flatten one issue node (from `linearis issues read` OR
+// the batched GraphQL query — both return the same nested shape) into the
+// descriptor the admission gate consumes: { state, relations, inverseRelations,
+// priority, labels }. NOTE: deliberately does NOT include `identifier` so the
+// shape stays byte-identical to the legacy fetchTicketRelations return (callers
+// and tests rely on it); fetchTicketsBatch keys its Map on node.identifier
+// separately. A missing priority normalizes to null ("unknown"), matching
+// fetchTicketRelations (NOT normalizeTicket's eligible-set default of 0).
+function normalizeRelations(node) {
+  return {
+    state: node?.state?.name ?? node?.state ?? null,
+    relations: node?.relations ?? { nodes: [] },
+    inverseRelations: node?.inverseRelations ?? { nodes: [] },
+    priority: typeof node?.priority === "number" ? node.priority : null,
+    labels: node?.labels?.nodes?.map((n) => n.name) ?? [],
+  };
+}
+
+// authHeader — CTL-784. Linear's documented contract: an OAuth access token
+// (the daemon's app-actor token, minted client_credentials, prefix `lin_oauth_`)
+// is sent `Authorization: Bearer <token>` — matching lib/linear-comment-post.sh
+// which posts as the SAME app-actor; a personal API key (`lin_api_`) is sent raw.
+// (Empirically Linear accepts an OAuth token both ways, but Bearer is the
+// contract + future-proof, and personal keys must stay raw — Bearer may be
+// rejected for them.) Exported for unit coverage of the otherwise prod-only path.
+export function authHeader(token = "") {
+  return /^lin_oauth/i.test(token) ? `Bearer ${token}` : token;
+}
+
+// isBatchRateLimited — a GraphQL errors[] signals a rate/complexity limit either
+// via extensions.code === "RATELIMITED" (Linear's complexity/soft limit, served
+// HTTP 400 not 429) OR a rate-limit message. Either must open the CTL-679 breaker
+// so the larger batch payload backs off instead of re-firing every tick.
+// Exported for unit coverage.
+export function isBatchRateLimited(errors) {
+  return (errors ?? []).some(
+    (e) => e?.extensions?.code === "RATELIMITED" || isRateLimitError(e?.message),
+  );
+}
+
+// buildBatchCurlArgs — CTL-784. The curl argv + stdin payload for ONE batched
+// GraphQL POST. Exported so the auth scheme, `--cacert` gating, and projection
+// are unit-tested (the live spawn path is otherwise prod-only). `--cacert` is
+// added only when NODE_EXTRA_CA_CERTS points at a real file (the mitmproxy audit:
+// curl then trusts the MITM CA and the inherited HTTPS_PROXY routes the call so
+// it is captured as `query CtlBatchTickets`); production (no proxy) goes direct.
+export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
+  const payload = JSON.stringify({ query: BATCH_QUERY, variables: { ids } });
+  const caArgs = ca && existsSync(ca) ? ["--cacert", ca] : [];
+  const args = [
+    "-sS",
+    "--max-time",
+    "30",
+    ...caArgs,
+    "-X",
+    "POST",
+    LINEAR_GRAPHQL_ENDPOINT,
+    "-H",
+    `Authorization: ${authHeader(token)}`,
+    "-H",
+    "Content-Type: application/json",
+    "-w",
+    "\n%{http_code}",
+    "--data",
+    "@-", // read the payload from stdin (no argv length limit / shell escaping)
+  ];
+  return { args, payload };
+}
+
+// defaultBatchExec — CTL-784. ONE synchronous GraphQL POST (via curl, to keep
+// the scheduler tick synchronous — making the tick async would break the
+// no-overlapping-tick invariant) returning the issues nodes array, or null on
+// any failure (caller fails safe). Integrated with the SAME process-wide circuit
+// breaker as the per-ticket reads: an open breaker short-circuits without
+// spawning; a 429 (HTTP) or a RATELIMITED GraphQL error body opens it; a clean
+// response closes it. Auth uses LINEAR_API_TOKEN/LINEAR_API_KEY (the daemon
+// exports the orchestrator app-actor token, CTL-785).
+function defaultBatchExec(ids) {
+  if (linearBreaker.isOpen()) return null; // circuit-open → skip, no spawn
+  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
+  const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (res.status !== 0) return null; // curl/network failure — fail-safe, no breaker change
+  const out = res.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const httpCode = Number(out.slice(nl + 1).trim());
+  const body = out.slice(0, Math.max(0, nl));
+  if (httpCode === 429) {
+    linearBreaker.recordRateLimited();
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null; // unparseable — fail-safe
+  }
+  if (parsed?.errors) {
+    if (isBatchRateLimited(parsed.errors)) linearBreaker.recordRateLimited();
+    return null; // GraphQL-level error (incl. auth / RATELIMITED) — fail-safe
+  }
+  linearBreaker.recordSuccess();
+  return parsed?.data?.issues?.nodes ?? [];
+}
+
+// fetchTicketsBatch — CTL-784 THE root fix. Resolve the relation descriptors for
+// a SET of identifiers in ONE request instead of N per-ticket reads. Returns a
+// Map<identifier, descriptor> (descriptor = normalizeRelations shape). Cache-
+// first: identifiers already in the relations read-through store are served from
+// cache; only the MISSES are fetched, chunked at ≤250. An identifier that the
+// query does not return (not-found / dropped) is ABSENT from the Map so the
+// caller fails safe (treats it as held / unfetched), exactly like a null
+// fetchTicketRelations. `exec` is the injection seam (defaults to the curl
+// batch exec); tests inject a fake `(ids) => nodes[]` so no test shells out.
+export function fetchTicketsBatch(identifiers, { exec = defaultBatchExec, cache } = {}) {
+  const ids = [...new Set((identifiers ?? []).filter(Boolean))];
+  const result = new Map();
+  if (ids.length === 0) return result;
+
+  const misses = [];
+  for (const id of ids) {
+    const hit = cache?.getRelations?.(id);
+    if (hit !== undefined) result.set(id, hit);
+    else misses.push(id);
+  }
+
+  for (let i = 0; i < misses.length; i += BATCH_CHUNK_SIZE) {
+    const chunk = misses.slice(i, i + BATCH_CHUNK_SIZE);
+    const nodes = exec(chunk);
+    if (nodes == null) continue; // batch failed → those ids stay absent (fail-safe)
+    for (const node of nodes) {
+      const id = node?.identifier;
+      if (!id) continue;
+      const desc = normalizeRelations(node);
+      result.set(id, desc);
+      if (cache && desc.state != null) cache.setRelations?.(id, desc);
+    }
+    // ids in the chunk not returned by the query stay absent → fail-safe hold.
+  }
+  return result;
 }
 
 // fetchTicketLabels — current label-name list for one ticket, or null on any

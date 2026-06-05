@@ -8,6 +8,10 @@ import {
   fetchTicketState,
   fetchTicketLabels,
   fetchTicketRelations,
+  fetchTicketsBatch,
+  authHeader,
+  buildBatchCurlArgs,
+  isBatchRateLimited,
   classifyTicketResolution,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -460,6 +464,209 @@ describe("fetchTicketRelations (CTL-755)", () => {
       fetchTicketRelations("CTL-1", { exec });
       expect(calls).toBe(2);
     });
+
+    // CTL-784: read-through. A second fetchTicketRelations WITH a cache hits the
+    // relations store and does NOT exec again (the gap the handoff fixed).
+    test("with a cache, a second call is a read-through hit (no second exec)", () => {
+      const cache = createTicketStateCache({ now: () => 0 });
+      let calls = 0;
+      const exec = () => {
+        calls += 1;
+        return {
+          code: 0,
+          stdout: JSON.stringify({ state: { name: "Triage" }, priority: 2 }),
+          stderr: "",
+        };
+      };
+      expect(fetchTicketRelations("CTL-1", { exec, cache }).state).toBe("Triage");
+      expect(fetchTicketRelations("CTL-1", { exec, cache }).state).toBe("Triage");
+      expect(calls).toBe(1); // second call served from the relations read-through store
+    });
+  });
+});
+
+// CTL-784 — fetchTicketsBatch collapses N per-ticket reads into ONE request. The
+// `exec` seam is injected as `(ids) => nodes[]` so no test shells out to curl.
+describe("fetchTicketsBatch (CTL-784)", () => {
+  // A node in the batched GraphQL shape (same nested shape `linearis issues read`
+  // returns): state{name}, labels{nodes{name}}, relations{nodes{...}}.
+  const node = (identifier, { state = "Triage", priority = 2, labels = [], blockedBy } = {}) => ({
+    identifier,
+    priority,
+    state: { name: state },
+    labels: { nodes: labels.map((name) => ({ name })) },
+    relations: { nodes: [] },
+    inverseRelations: blockedBy
+      ? { nodes: [{ type: "blocks", issue: { identifier: blockedBy } }] }
+      : { nodes: [] },
+  });
+
+  test("resolves a set of identifiers in ONE exec call, keyed by identifier", () => {
+    let calls = 0;
+    const exec = (ids) => {
+      calls += 1;
+      return ids.map((id) => node(id, { state: "Done" }));
+    };
+    const map = fetchTicketsBatch(["CTL-1", "CTL-2", "CTL-3"], { exec });
+    expect(calls).toBe(1); // ONE request for all three
+    expect([...map.keys()].sort()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+    expect(map.get("CTL-2").state).toBe("Done");
+  });
+
+  test("normalizes each node to the fetchTicketRelations shape (no identifier key)", () => {
+    const exec = (ids) =>
+      ids.map((id) => node(id, { state: "In Progress", priority: 1, labels: ["blocked"], blockedBy: "CTL-9" }));
+    const desc = fetchTicketsBatch(["CTL-1"], { exec }).get("CTL-1");
+    expect(desc).toEqual({
+      state: "In Progress",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-9" } }] },
+      priority: 1,
+      labels: ["blocked"],
+    });
+    expect("identifier" in desc).toBe(false); // shape parity with fetchTicketRelations
+  });
+
+  test("dedupes identifiers before the exec", () => {
+    let received = null;
+    const exec = (ids) => {
+      received = ids;
+      return ids.map((id) => node(id));
+    };
+    fetchTicketsBatch(["CTL-1", "CTL-1", "CTL-2"], { exec });
+    expect(received.sort()).toEqual(["CTL-1", "CTL-2"]); // deduped
+  });
+
+  test("chunks >250 identifiers into multiple exec calls", () => {
+    const ids = Array.from({ length: 600 }, (_, i) => `CTL-${i + 1}`);
+    const chunkSizes = [];
+    const exec = (chunk) => {
+      chunkSizes.push(chunk.length);
+      return chunk.map((id) => node(id));
+    };
+    const map = fetchTicketsBatch(ids, { exec });
+    expect(chunkSizes).toEqual([250, 250, 100]);
+    expect(map.size).toBe(600);
+  });
+
+  test("an identifier the query does not return is ABSENT (fail-safe hold)", () => {
+    // exec returns only CTL-1; CTL-MISSING (not-found) is dropped by the query.
+    const exec = () => [node("CTL-1")];
+    const map = fetchTicketsBatch(["CTL-1", "CTL-MISSING"], { exec });
+    expect(map.has("CTL-1")).toBe(true);
+    expect(map.has("CTL-MISSING")).toBe(false); // absent → caller fails safe
+  });
+
+  test("a failed batch (exec returns null) leaves all ids absent (fail-safe)", () => {
+    const exec = () => null; // breaker open / network / 429
+    const map = fetchTicketsBatch(["CTL-1", "CTL-2"], { exec });
+    expect(map.size).toBe(0);
+  });
+
+  test("cache-first: cached ids are served from cache, only misses are fetched", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    cache.setRelations("CTL-CACHED", {
+      state: "Backlog",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+      priority: 2,
+      labels: [],
+    });
+    let received = null;
+    const exec = (ids) => {
+      received = ids;
+      return ids.map((id) => node(id, { state: "Done" }));
+    };
+    const map = fetchTicketsBatch(["CTL-CACHED", "CTL-FRESH"], { exec, cache });
+    expect(received).toEqual(["CTL-FRESH"]); // only the miss was fetched
+    expect(map.get("CTL-CACHED").state).toBe("Backlog"); // served from cache
+    expect(map.get("CTL-FRESH").state).toBe("Done");
+  });
+
+  test("populates the cache (relations + primed state) on a fetched miss", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = (ids) => ids.map((id) => node(id, { state: "Done" }));
+    fetchTicketsBatch(["CTL-1"], { exec, cache });
+    expect(fetchTicketState("CTL-1", { cache, exec: () => ({ code: 1, stdout: "", stderr: "" }) })).toBe(
+      "Done",
+    ); // state primed → hit, never reaches the failing exec
+    expect(cache.getRelations("CTL-1").state).toBe("Done"); // relations cached
+  });
+
+  test("no exec for an empty / all-cached id set", () => {
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return [];
+    };
+    expect(fetchTicketsBatch([], { exec }).size).toBe(0);
+    expect(fetchTicketsBatch(null, { exec }).size).toBe(0);
+    expect(calls).toBe(0);
+  });
+});
+
+// CTL-784 — the curl-path internals (auth scheme, --cacert gating, RATELIMITED
+// detection) are otherwise only exercised in production (every fetchTicketsBatch
+// test injects a fake exec). These pin them deterministically.
+describe("authHeader (CTL-784)", () => {
+  test("OAuth access token (lin_oauth_) → Bearer scheme", () => {
+    expect(authHeader("lin_oauth_abc123")).toBe("Bearer lin_oauth_abc123");
+  });
+  test("personal API key (lin_api_) → raw (no Bearer)", () => {
+    expect(authHeader("lin_api_xyz")).toBe("lin_api_xyz");
+  });
+  test("empty token → raw empty (no crash)", () => {
+    expect(authHeader("")).toBe("");
+    expect(authHeader()).toBe("");
+  });
+});
+
+describe("buildBatchCurlArgs (CTL-784)", () => {
+  const argFor = (args, flag) => args[args.indexOf(flag) + 1];
+
+  test("posts the named CtlBatchTickets query with the ids as variables, via stdin", () => {
+    const { args, payload } = buildBatchCurlArgs(["CTL-1", "CTL-2"], { token: "lin_api_x" });
+    expect(args).toContain("--data");
+    expect(argFor(args, "--data")).toBe("@-"); // payload via stdin, not argv
+    expect(args[args.indexOf("-X") + 1]).toBe("POST");
+    expect(args).toContain("https://api.linear.app/graphql");
+    const body = JSON.parse(payload);
+    expect(body.query).toContain("query CtlBatchTickets");
+    expect(body.variables).toEqual({ ids: ["CTL-1", "CTL-2"] });
+  });
+
+  test("an OAuth token is sent as Bearer in the Authorization header", () => {
+    const { args } = buildBatchCurlArgs(["CTL-1"], { token: "lin_oauth_tok" });
+    expect(argFor(args, "-H")).toBe("Authorization: Bearer lin_oauth_tok");
+  });
+
+  test("a personal token is sent raw in the Authorization header", () => {
+    const { args } = buildBatchCurlArgs(["CTL-1"], { token: "lin_api_tok" });
+    expect(argFor(args, "-H")).toBe("Authorization: lin_api_tok");
+  });
+
+  test("--cacert is added only when the CA file exists (audit proxy), else omitted", () => {
+    const withCa = buildBatchCurlArgs(["CTL-1"], { token: "t", ca: "/etc/hosts" }).args; // exists
+    expect(withCa).toContain("--cacert");
+    expect(argFor(withCa, "--cacert")).toBe("/etc/hosts");
+    const noCa = buildBatchCurlArgs(["CTL-1"], { token: "t", ca: "/no/such/ca.pem" }).args;
+    expect(noCa).not.toContain("--cacert");
+    const undef = buildBatchCurlArgs(["CTL-1"], { token: "t" }).args;
+    expect(undef).not.toContain("--cacert");
+  });
+});
+
+describe("isBatchRateLimited (CTL-784)", () => {
+  test("detects extensions.code === RATELIMITED (Linear soft/complexity limit, HTTP 400)", () => {
+    expect(isBatchRateLimited([{ message: "Something", extensions: { code: "RATELIMITED" } }])).toBe(true);
+  });
+  test("detects a 'rate limit exceeded' message", () => {
+    expect(isBatchRateLimited([{ message: "Rate limit exceeded. Only 5000 requests…" }])).toBe(true);
+  });
+  test("a non-rate-limit GraphQL error is NOT treated as rate-limited", () => {
+    expect(isBatchRateLimited([{ message: "Authentication required", extensions: { code: "AUTHENTICATION_ERROR" } }])).toBe(false);
+    expect(isBatchRateLimited([])).toBe(false);
+    expect(isBatchRateLimited(undefined)).toBe(false);
   });
 });
 

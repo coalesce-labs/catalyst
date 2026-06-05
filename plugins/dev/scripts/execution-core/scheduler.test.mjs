@@ -67,6 +67,7 @@ import {
   readDispatchFailureReason,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
+import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
@@ -722,9 +723,46 @@ function relBlockedBy(blockerId, { priority = 2, labels = [], state = "Triage" }
     labels,
   };
 }
-// A fetchRelations dispatcher keyed by ticket id, falling back to relUnblocked.
+// A per-id descriptor dispatcher keyed by ticket id, falling back to relUnblocked.
 function relMap(map) {
   return (id) => map[id] ?? relUnblocked();
+}
+
+// CTL-784: the admission gate now hydrates via a single batched seam
+// (fetchBatch: (ids) => Map<id, descriptor>) instead of per-ticket fetchRelations
+// / per-blocker fetchTicketState. These helpers build that seam from the same
+// per-id descriptor fakes (relUnblocked / relBlockedBy / relMap).
+
+// mkBatch — wrap a per-id descriptor source (a function or an {id: desc} object)
+// into a fetchBatch. A source returning null/undefined for an id OMITS it from
+// the Map, mirroring fetchTicketsBatch dropping a failed/not-found id (the
+// admission gate then fails safe — treats it as held / unfetched).
+function mkBatch(source) {
+  const fn = typeof source === "function" ? source : (id) => source[id];
+  return (ids) => {
+    const m = new Map();
+    for (const id of ids) {
+      const d = fn(id);
+      if (d != null) m.set(id, d);
+    }
+    return m;
+  };
+}
+
+// descOf — a state-only descriptor (the hydrate / STEP-E shape: blocker/dep
+// lookups only consult .state). Replaces the old execWithStates/execStates
+// linearis-exec stubs that returned `{ state: { name } }` per `issues read`.
+function descOf(state) {
+  return { state, relations: { nodes: [] }, inverseRelations: { nodes: [] }, priority: null, labels: [] };
+}
+
+// batchWith — a fetchBatch that returns `candidateDesc` for the triaged-waiting
+// candidate(s) and a state-only descriptor for each out-of-set blocker / dep in
+// `stateById`. Replaces the old paired injection
+// `fetchRelations: () => <candidateDesc>` + `exec: execWithStates(stateById)`.
+function batchWith(candidateSource, stateById = {}) {
+  const candFn = typeof candidateSource === "function" ? candidateSource : () => candidateSource;
+  return mkBatch((id) => (id in stateById ? descOf(stateById[id]) : candFn(id)));
 }
 
 // ── CTL-624: per-(ticket,phase) dispatch cool-down helpers ──
@@ -1759,7 +1797,7 @@ describe("schedulerTick — new-work pull", () => {
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
       // CTL-755: the triage→research promotion is now admission-gated. Stub
       // fetchRelations (unblocked) + a free slot so the gate admits CTL-7.
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
@@ -1789,7 +1827,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       verifyDispatched: verifyOk,
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       writeStatus,
       appendStateWriteEvent: (ev) => stateWrites.push(ev),
@@ -1819,7 +1857,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       verifyDispatched: verifyOk,
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       writeStatus: {
         applyPhaseStatus: () => ({ applied: true, from_state: "Triage", to_state: "Research" }),
@@ -2040,7 +2078,7 @@ describe("schedulerTick — new-work pull", () => {
       // CTL-755: admission-gate seam — CTL-7 (triaged-waiting) is unblocked, so
       // it is admitted and promoted; STEP C subtracts promotedCount so the new
       // CTL-X still gets the remaining free slot (the double-fill invariant).
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
@@ -2540,43 +2578,38 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
     inverseRelations: { nodes: [] },
   });
 
-  test("fetches each unique out-of-set blocker once (deduped)", () => {
-    const fetched = [];
-    const exec = (_cmd, args) => {
-      fetched.push(args[2]);
-      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+  test("batches the unique out-of-set blockers in one fetchBatch call (deduped)", () => {
+    const fetchedChunks = [];
+    const fetchBatch = (ids) => {
+      fetchedChunks.push(ids);
+      return new Map(ids.map((id) => [id, descOf("Backlog")]));
     };
     const map = hydrateOutOfSetBlockers(
       [blkTk("CTL-1", { blockedBy: "CTL-99" }), blkTk("CTL-2", { blockedBy: "CTL-99" })],
-      { exec }
+      { fetchBatch }
     );
-    expect(fetched).toEqual(["CTL-99"]); // deduped — one fetch
+    expect(fetchedChunks).toEqual([["CTL-99"]]); // deduped — one batched fetch
     expect(map).toEqual({ "CTL-99": "Backlog" });
   });
 
   test("an in-set blocker is not fetched (only out-of-set blockers hydrate)", () => {
-    const fetched = [];
-    const exec = (_cmd, args) => {
-      fetched.push(args[2]);
-      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+    let called = false;
+    const fetchBatch = (ids) => {
+      called = true;
+      return new Map(ids.map((id) => [id, descOf("Backlog")]));
     };
     // CTL-2 is in the eligible set, so the CTL-1→CTL-2 edge is in-set.
-    hydrateOutOfSetBlockers([blkTk("CTL-1", { blockedBy: "CTL-2" }), blkTk("CTL-2")], { exec });
-    expect(fetched).toEqual([]);
+    hydrateOutOfSetBlockers([blkTk("CTL-1", { blockedBy: "CTL-2" }), blkTk("CTL-2")], { fetchBatch });
+    expect(called).toBe(false); // no external blockers → no batch
   });
 
   test("a Ready ticket blocked by a Backlog out-of-set blocker is not dispatched", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0 });
-    const exec = () => ({
-      code: 0,
-      stdout: JSON.stringify({ state: { name: "Backlog" } }),
-      stderr: "",
-    });
     schedulerTick(orchDir, {
       readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
       dispatch,
-      exec,
+      fetchBatch: mkBatch({ "CTL-99": descOf("Backlog") }),
     });
     expect(dispatch.calls).toHaveLength(0);
   });
@@ -2584,15 +2617,10 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
   test("a Ready ticket blocked by a Done out-of-set blocker IS dispatched", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0 });
-    const exec = () => ({
-      code: 0,
-      stdout: JSON.stringify({ state: { name: "Done" } }),
-      stderr: "",
-    });
     schedulerTick(orchDir, {
       readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
       dispatch,
-      exec,
+      fetchBatch: mkBatch({ "CTL-99": descOf("Done") }),
       liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-1"]);
@@ -2601,11 +2629,10 @@ describe("hydrateOutOfSetBlockers / D5 readiness", () => {
   test("a failed blocker fetch fails safe — the dependent is held back, not dispatched", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0 });
-    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
     schedulerTick(orchDir, {
       readEligible: () => [blkTk("CTL-1", { blockedBy: "CTL-99" })],
       dispatch,
-      exec,
+      fetchBatch: () => new Map(), // batch failure → CTL-99 absent → UNFETCHED → held
     });
     expect(dispatch.calls).toHaveLength(0);
   });
@@ -2625,29 +2652,33 @@ describe("hydrateOutOfSetBlockers — cache reuse (CTL-634)", () => {
     inverseRelations: { nodes: [] },
   });
 
+  // These drive the REAL fetchTicketsBatch (so the read-through cache is exercised)
+  // with an injected BATCH exec `(ids) => nodes[]`.
   test("reads an out-of-set blocker once across two hydrations within TTL", () => {
     const cache = createTicketStateCache({ now: () => 0, ttlMs: 60_000 });
     const fetched = [];
-    const exec = (_cmd, args) => {
-      fetched.push(args[2]);
-      return { code: 0, stdout: JSON.stringify({ state: { name: "Backlog" } }), stderr: "" };
+    const batchExec = (ids) => {
+      fetched.push(...ids);
+      return ids.map((id) => ({ identifier: id, state: { name: "Backlog" } }));
     };
+    const fetchBatch = (ids, opts) => fetchTicketsBatch(ids, { ...opts, exec: batchExec });
     const eligible = [blkTk("CTL-1", "CTL-99")];
-    hydrateOutOfSetBlockers(eligible, { exec, cache });
-    hydrateOutOfSetBlockers(eligible, { exec, cache });
-    expect(fetched).toEqual(["CTL-99"]); // one read, second hydration is a hit
+    hydrateOutOfSetBlockers(eligible, { fetchBatch, cache });
+    hydrateOutOfSetBlockers(eligible, { fetchBatch, cache });
+    expect(fetched).toEqual(["CTL-99"]); // one read, second hydration is a cache hit
   });
 
   test("preserves the fail-safe: a failed fetch is the sentinel AND is not cached", () => {
     const cache = createTicketStateCache({ now: () => 0 });
     let calls = 0;
-    const exec = () => {
+    const batchExec = () => {
       calls += 1;
-      return { code: 1, stdout: "", stderr: "" };
+      return null; // batch failure
     };
+    const fetchBatch = (ids, opts) => fetchTicketsBatch(ids, { ...opts, exec: batchExec });
     const eligible = [blkTk("CTL-1", "CTL-99")];
-    const a = hydrateOutOfSetBlockers(eligible, { exec, cache });
-    const b = hydrateOutOfSetBlockers(eligible, { exec, cache });
+    const a = hydrateOutOfSetBlockers(eligible, { fetchBatch, cache });
+    const b = hydrateOutOfSetBlockers(eligible, { fetchBatch, cache });
     expect(a["CTL-99"]).toBe("__unfetched__");
     expect(b["CTL-99"]).toBe("__unfetched__");
     expect(calls).toBe(2); // never cached the failure
@@ -2672,19 +2703,21 @@ describe("schedulerTick — cache stats (CTL-634)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const cache = createTicketStateCache({ now: () => 0 });
     const dispatch = fakeDispatch({ code: 0 });
-    const exec = () => ({
-      code: 0,
-      stdout: JSON.stringify({ state: { name: "Backlog" } }),
-      stderr: "",
-    });
+    // CTL-784: hydrate now reads through the RELATIONS store, so the activity
+    // shows up in relationsStats() (the per-tick metric the scheduler also logs).
+    const fetchBatch = (ids, opts) =>
+      fetchTicketsBatch(ids, {
+        ...opts,
+        exec: (cs) => cs.map((id) => ({ identifier: id, state: { name: "Backlog" } })),
+      });
     schedulerTick(orchDir, {
       readEligible: () => [blkTk("CTL-1", "CTL-99")],
       dispatch,
-      exec,
+      fetchBatch,
       cache,
     });
-    const s = cache.stats();
-    expect(s.misses + s.hits).toBeGreaterThan(0); // the hydrate read went through the cache
+    const s = cache.relationsStats();
+    expect(s.misses + s.hits).toBeGreaterThan(0); // the hydrate read went through the relations cache
   });
 });
 
@@ -2704,7 +2737,7 @@ describe("startScheduler / stopScheduler", () => {
       // CTL-755: the triage→research promotion is admission-gated. Stub
       // fetchRelations (unblocked + non-terminal state) and provide a free slot
       // so the gate admits CTL-1 and the advancement sweep dispatches research.
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
@@ -2726,7 +2759,7 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch: fakeDispatch(),
       readEligible: () => [],
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
@@ -2758,7 +2791,7 @@ describe("startScheduler / stopScheduler", () => {
       dispatch,
       readEligible: () => [],
       // CTL-755: admission-gate seam + free slot so the promotion fires.
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       tickIntervalMs: 20,
       debounceMs: 5,
@@ -2780,7 +2813,7 @@ describe("startScheduler / stopScheduler", () => {
       dispatch,
       readEligible: () => [],
       // CTL-755: admission-gate seam + free slot so the promotion fires.
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 10,
@@ -5743,7 +5776,7 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
   // CTL-755: the estimate write-back rides the triage→research advance, which is
   // now admission-gated — stub fetchRelations (unblocked) + a free slot so the
   // promotion fires and the applyEstimate code path is reached.
-  const admit = { fetchRelations: () => relUnblocked(), liveBackgroundCount: () => 0 };
+  const admit = { fetchBatch: mkBatch(() => relUnblocked()), liveBackgroundCount: () => 0 };
 
   test("triage.json with estimate:5 → applyEstimate called once with {ticket, estimate:5}", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
@@ -5859,17 +5892,6 @@ describe("CTL-755: admission gate", () => {
     return { fn: (e) => events.push(e), events };
   }
 
-  // An exec stub that answers `linearis issues read <id>` with a state name,
-  // keyed by identifier. Used to hydrate out-of-set blocker states (the D5 path
-  // STEP A reuses). Unknown ids → code 0 with a non-terminal placeholder.
-  function execWithStates(stateById) {
-    return (_cmd, args) => {
-      const id = args?.[2];
-      const name = stateById[id] ?? "Triage";
-      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
-    };
-  }
-
   test("dep hold: a blocked triaged ticket is NOT dispatched, no Research write, 'blocked' label applied", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-7", "triage", "done");
@@ -5883,8 +5905,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       // CTL-7 is blocked by an out-of-set blocker that is still In Progress.
-      fetchRelations: () => relBlockedBy("CTL-DEP"),
-      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP"), { "CTL-DEP": "In Progress" }),
       appendPhaseAdvanceHeldEvent: held.fn,
     });
     expect(dispatch.calls).toEqual([]); // no research dispatch
@@ -5915,8 +5936,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       // CTL-7's blocker carries the "blocked" label already; now it is Done.
-      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
-      exec: execWithStates({ "CTL-DEP": "Done" }),
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { labels: ["blocked"] }), { "CTL-DEP": "Done" }),
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
@@ -5939,7 +5959,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: s1.ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 1, // saturated
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
       appendPhaseAdvanceHeldEvent: h1.fn,
     });
     expect(d1.calls).toEqual([]); // no promotion
@@ -5960,7 +5980,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: s2.ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // slot freed
-      fetchRelations: () => relUnblocked({ labels: ["waiting"] }),
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["waiting"] })),
     });
     expect(d2.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r2.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
@@ -5980,7 +6000,7 @@ describe("CTL-755: admission gate", () => {
       liveBackgroundCount: () => 0,
       // Both stale labels present (defensive — should never co-exist, but the
       // converge must clear both on pickup).
-      fetchRelations: () => relUnblocked({ labels: ["blocked", "waiting"] }),
+      fetchBatch: mkBatch(() => relUnblocked({ labels: ["blocked", "waiting"] })),
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
@@ -6000,8 +6020,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
       // Already correctly labeled "blocked" (blocker still open) → no diff.
-      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
-      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { labels: ["blocked"] }), { "CTL-DEP": "In Progress" }),
     });
     expect(dispatch.calls).toEqual([]);
     expect(applied).toEqual([]); // already labeled → no apply
@@ -6019,8 +6038,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: labelSpy().ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
-      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP", { labels: ["blocked"] }), { "CTL-DEP": "In Progress" }),
       appendPhaseAdvanceHeldEvent: held.fn,
     };
     schedulerTick(orchDir, common);
@@ -6048,7 +6066,7 @@ describe("CTL-755: admission gate", () => {
         writeStatus: ws,
         verifyDispatched: verifyOk,
         liveBackgroundCount: () => 0,
-        fetchRelations: fr,
+        fetchBatch: mkBatch(fr),
       });
     }).not.toThrow();
     expect(dispatch.calls).toEqual([]); // neither member promotes
@@ -6082,7 +6100,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // 3 free slots — capacity is NOT the gate here
-      fetchRelations: fr,
+      fetchBatch: mkBatch(fr),
       appendPhaseAdvanceHeldEvent: held.fn,
     });
     // Only the foundation promotes; the dependent never reaches research.
@@ -6118,7 +6136,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // 6 free slots — capacity is NOT the gate
-      fetchRelations: fr,
+      fetchBatch: mkBatch(fr),
     });
     // Exactly one promotion: the foundation. No leaf reaches research while its
     // blocker is non-terminal — even with ample capacity.
@@ -6149,9 +6167,8 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: fr,
       // CTL-FOUND is out-of-set; hydrate it Done so it no longer blocks.
-      exec: execWithStates({ "CTL-FOUND": "Done" }),
+      fetchBatch: batchWith(fr, { "CTL-FOUND": "Done" }),
     });
     const promoted = r.advanced.map((a) => a.ticket).sort();
     expect(promoted).toEqual(["CTL-L1", "CTL-L2", "CTL-L3"]);
@@ -6172,7 +6189,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: labelSpy().ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
     });
     // STEP B promotes CTL-7 (+promotedCount); STEP C subtracts it so sweep 2 has
     // exactly 1 remaining slot for CTL-X — 2 total dispatches, not 3.
@@ -6238,7 +6255,7 @@ describe("CTL-755: admission gate", () => {
       reclaimDeadWork: () => "noop", // CTL-690: never revive the parked signal
       resolveSession: () => "uuid-park", // the resume sweep would resume-with-session
       appendResumedAfterPreemptionEvent: () => {}, // capture-free; presence proves reachability
-      fetchRelations: () => relUnblocked(), // CTL-7's deps are satisfied → admitted
+      fetchBatch: mkBatch(() => relUnblocked()), // CTL-7's deps are satisfied → admitted
     });
 
     // Exactly ONE new dispatch consumed the single free slot. Fix #1 makes the
@@ -6270,7 +6287,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relUnblocked({ priority: 3 }),
+      fetchBatch: mkBatch(() => relUnblocked({ priority: 3 })),
     });
     // The single slot goes to the higher-priority new work; CTL-7 is held
     // "waiting" (ready, lost the selection), not promoted.
@@ -6292,7 +6309,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // would show 3 free slots
       livenessIsFresh: () => false, // but the snapshot is stale → hold
-      fetchRelations: () => relUnblocked(),
+      fetchBatch: mkBatch(() => relUnblocked()),
     });
     expect(dispatch.calls).toEqual([]); // promotion held
     expect(r.advanced).toEqual([]);
@@ -6300,7 +6317,7 @@ describe("CTL-755: admission gate", () => {
     expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
   });
 
-  test("early-exit: zero triaged-waiting tickets → fetchRelations never called (zero Linear cost)", () => {
+  test("early-exit: zero triaged-waiting tickets → fetchBatch never called (zero Linear cost)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-7", "research", "running"); // in-flight but NOT triaged-waiting
     let fetchCalls = 0;
@@ -6311,9 +6328,9 @@ describe("CTL-755: admission gate", () => {
       writeStatus: labelSpy().ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => { fetchCalls++; return relUnblocked(); },
+      fetchBatch: (ids) => { fetchCalls++; return mkBatch(() => relUnblocked())(ids); },
     });
-    expect(fetchCalls).toBe(0); // STEP A early-exited
+    expect(fetchCalls).toBe(0); // STEP A early-exited (and no eligible out-of-set blockers)
   });
 
   test("read-failure (fetchRelations → null) fails SAFE: the candidate is held", () => {
@@ -6327,7 +6344,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => null, // read failed → non-terminal sentinel → held
+      fetchBatch: mkBatch(() => null), // read failed → non-terminal sentinel → held
     });
     expect(dispatch.calls).toEqual([]);
     expect(r.advanced).toEqual([]);
@@ -6354,7 +6371,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => null, // read failed → fail-safe hold
+      fetchBatch: mkBatch(() => null), // read failed → fail-safe hold
       appendPhaseAdvanceHeldEvent: held.fn,
     });
     expect(dispatch.calls).toEqual([]);
@@ -6399,17 +6416,6 @@ describe("CTL-755: admission gate", () => {
     );
   }
 
-  // An exec stub: `linearis issues read <id>` → keyed state, or code!==0 for
-  // ids in `unresolvable` (so fetchTicketState returns null and STEP E drops it).
-  function execStates(stateById, unresolvable = new Set()) {
-    return (_cmd, args) => {
-      const id = args?.[2];
-      if (unresolvable.has(id)) return { code: 1, stdout: "", stderr: "not found" };
-      const name = stateById[id] ?? "Triage";
-      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
-    };
-  }
-
   test("dep persistence: a resolvable non-terminal dep is written, a prose-only/unresolvable token is dropped", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
     writeSignal("CTL-7", "triage", "done");
@@ -6426,8 +6432,7 @@ describe("CTL-755: admission gate", () => {
       liveBackgroundCount: () => 0,
       // CTL-7 has NO existing relations (so the dep write is not idempotently
       // skipped); the dep states are resolved via exec below.
-      fetchRelations: () => relUnblocked(),
-      exec: execStates({ "CTL-100": "In Progress" }, new Set(["PROSE-1"])),
+      fetchBatch: mkBatch({ "CTL-7": relUnblocked(), "CTL-100": descOf("In Progress") }),
     });
     // Exactly one durable edge: CTL-7 blocked_by CTL-100. PROSE-1 dropped.
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
@@ -6448,8 +6453,7 @@ describe("CTL-755: admission gate", () => {
       // CTL-7's FRESH relations already carry blocked_by CTL-100 (durable edge
       // exists) → STEP E must NOT re-write it. (CTL-100 In Progress also holds
       // the gate, but the persistence path is what we pin here.)
-      fetchRelations: () => relBlockedBy("CTL-100"),
-      exec: execStates({ "CTL-100": "In Progress" }),
+      fetchBatch: mkBatch({ "CTL-7": relBlockedBy("CTL-100"), "CTL-100": descOf("In Progress") }),
     });
     expect(relations).toEqual([]); // idempotent — nothing written
   });
@@ -6466,8 +6470,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relUnblocked(),
-      exec: execStates({ "CTL-100": "Done" }), // terminal → no durable edge
+      fetchBatch: mkBatch({ "CTL-7": relUnblocked(), "CTL-100": descOf("Done") }), // terminal → no durable edge
     });
     expect(relations).toEqual([]);
   });
@@ -6484,8 +6487,7 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relUnblocked(),
-      exec: execStates({ "CTL-100": "In Progress" }),
+      fetchBatch: mkBatch({ "CTL-7": relUnblocked(), "CTL-100": descOf("In Progress") }),
     });
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
   });
@@ -6502,10 +6504,42 @@ describe("CTL-755: admission gate", () => {
       writeStatus: ws,
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0,
-      fetchRelations: () => relUnblocked(),
-      exec: execStates({ "CTL-100": "In Progress" }),
+      fetchBatch: mkBatch({ "CTL-7": relUnblocked(), "CTL-100": descOf("In Progress") }),
     });
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  test("CTL-784: writing a durable edge INVALIDATES the candidate's relations cache (no ≤TTL over-promotion)", () => {
+    // After STEP E writes a new blocked_by edge, the candidate's relations
+    // descriptor cached THIS tick (by A.3) is stale (no edge). Invalidating it
+    // forces the next tick to re-read fresh and surface the blocker — closing the
+    // over-promotion window the old fresh-every-tick read never had.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    const invalidated = [];
+    const cache = {
+      get: () => undefined,
+      set: () => {},
+      getRelations: () => undefined,
+      setRelations: () => {},
+      invalidate: (id) => invalidated.push(id),
+      stats: () => ({}),
+      relationsStats: () => ({}),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      cache,
+      fetchBatch: mkBatch({ "CTL-7": relUnblocked(), "CTL-100": descOf("In Progress") }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]); // edge written
+    expect(invalidated).toContain("CTL-7"); // candidate cache dropped → next tick re-reads fresh
   });
 
   // ── STEP D integration: dead-triage reclaim → STEP A re-eval → promotion ──
@@ -6568,7 +6602,7 @@ describe("CTL-755: admission gate", () => {
       verifyDispatched: verifyOk,
       liveBackgroundCount: () => 0, // a free slot
       reclaimDeadWork: prodTriageReclaim(orchDir),
-      fetchRelations: () => relUnblocked(), // deps satisfied
+      fetchBatch: mkBatch(() => relUnblocked()), // deps satisfied
     });
     // The reclaim sweep flipped the signal to done (no longer stranded at running).
     expect(readPhaseSignals(orchDir, "CTL-7").triage).toBe("done");
@@ -6597,8 +6631,7 @@ describe("CTL-755: admission gate", () => {
       liveBackgroundCount: () => 0,
       reclaimDeadWork: prodTriageReclaim(orchDir),
       // CTL-7 is blocked by an out-of-set blocker still In Progress.
-      fetchRelations: () => relBlockedBy("CTL-DEP"),
-      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      fetchBatch: batchWith(() => relBlockedBy("CTL-DEP"), { "CTL-DEP": "In Progress" }),
       appendPhaseAdvanceHeldEvent: held.fn,
     });
     // Signal still flipped to done (reclaim ran) — but research is HELD by the gate.

@@ -61,7 +61,7 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
-import { fetchTicketState, fetchTicketRelations, classifyTicketResolution } from "./linear-query.mjs";
+import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
@@ -753,20 +753,29 @@ const UNFETCHED_BLOCKER_STATE = "__unfetched__";
 // live Linear state once, and return a { identifier: stateName } map. A failed
 // fetch yields the non-terminal UNFETCHED_BLOCKER_STATE sentinel so the
 // dependent is held back — failing safe. CTL-565 D5.
-// CTL-634: the opt-in `cache` is threaded into each fetchState call so the
-// same out-of-set blocker is read at most once per TTL window across ticks.
-// Absent the cache, every tick re-reads (the pre-CTL-634 behavior).
+// CTL-634: the opt-in `cache` is threaded so the same out-of-set blocker is read
+// at most once per TTL window across ticks. CTL-784: the per-blocker reads are
+// now collapsed into ONE batched query (fetchBatch, the SAME cache-first
+// fetchTicketsBatch the admission gate uses) — externalBlockers resolve in a
+// single request, cache-first, instead of one `linearis issues read` each. A
+// blocker the batch does not return (read failure / not-found) is ABSENT from
+// the map → the UNFETCHED_BLOCKER_STATE sentinel, failing safe exactly as the
+// per-id null read did. Absent a cache, each tick re-batches (one request).
 export function hydrateOutOfSetBlockers(
   eligibleTickets,
-  { exec, fetchState = fetchTicketState, cache } = {}
+  { fetchBatch = fetchTicketsBatch, cache } = {}
 ) {
   const list = eligibleTickets ?? [];
   const inSet = new Set(list.map((t) => t?.identifier).filter(Boolean));
   const externalBlockers = referencedBlockerIds(list).filter((id) => !inSet.has(id));
   const blockerStates = {};
+  if (externalBlockers.length === 0) return blockerStates;
+  // fetchBatch (production: fetchTicketsBatch) owns its own batch exec (the curl
+  // GraphQL POST) — do NOT thread the scheduler's linearis `exec` here (wrong shape).
+  const batch = fetchBatch(externalBlockers, { cache });
   for (const id of externalBlockers) {
-    const state = fetchState(id, { exec, cache });
-    blockerStates[id] = state ?? UNFETCHED_BLOCKER_STATE; // non-terminal → fails safe
+    const desc = batch.get(id);
+    blockerStates[id] = desc?.state ?? UNFETCHED_BLOCKER_STATE; // miss → non-terminal, fails safe
   }
   return blockerStates;
 }
@@ -1768,11 +1777,13 @@ export function schedulerTick(
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
     checkSequencing = undefined,
-    // CTL-755: admission-gate hydration seam — fetches one triaged-waiting
-    // candidate's live state + relations + priority + labels in a single
-    // `linearis issues read`. Defaults to the real linear-query helper; tests
-    // inject a stub keyed by identifier so a STEP-A tick never shells out.
-    fetchRelations = fetchTicketRelations,
+    // CTL-755/784: admission-gate hydration seam — resolves the live state +
+    // relations + priority + labels for a SET of tickets in ONE batched,
+    // cache-first request (fetchTicketsBatch → Map<id, descriptor>). Used by
+    // STEP A.3 (triaged-waiting candidates), STEP E (deps), and threaded into
+    // both hydrateOutOfSetBlockers calls. Defaults to the real batch helper;
+    // tests inject a stub `(ids) => Map<id, descriptor>` so a tick never shells out.
+    fetchBatch = fetchTicketsBatch,
     // CTL-755: held-indicator audit emitter — phase.advance.held.<ticket>.
     // Best-effort, only-on-state-change. Mirrors appendDispatchRequestedEvent.
     appendPhaseAdvanceHeldEvent = defaultAppendPhaseAdvanceHeldEvent,
@@ -2082,23 +2093,25 @@ export function schedulerTick(
     }
 
     // A.2 — early-exit when nothing is waiting. Zero Linear cost in the common
-    // path (no fetchRelations, no hydration, no label diff).
+    // path (no fetch, no hydration, no label diff).
     if (triagedWaiting.length > 0) {
-      // A.3 — hydrate each candidate's live state + relations + priority + labels
-      // FRESH via one `linearis issues read` (fetchRelations, shared cache). A
-      // read failure (rel === null) is tracked so the candidate fails SAFE —
-      // it is forced out of readyIds below (A.4), never silently promoted on an
-      // unknown dependency picture. Build pseudo-issue descriptors in the
-      // buildDependencyEdges shape (state re-nested into {name} — fetchRelations
-      // returns a flat string).
+      // A.3 — hydrate every candidate's live state + relations + priority +
+      // labels FRESH in ONE batched, cache-first request (CTL-784 — was one
+      // `linearis issues read` per candidate every tick). A candidate the batch
+      // does not return (read failure / not-found) is ABSENT from the map → it
+      // fails SAFE: tracked in readFailedTickets and forced out of readyIds below
+      // (A.4), never silently promoted on an unknown dependency picture. Build
+      // pseudo-issue descriptors in the buildDependencyEdges shape (state
+      // re-nested into {name} — the descriptor carries a flat string state).
+      const relByTicket = fetchBatch(triagedWaiting, { cache });
       const waitingDescriptors = [];
       const labelsByTicket = new Map(); // ticket → current Linear label set
-      const readFailedTickets = new Set(); // fail-safe: null read → held
+      const readFailedTickets = new Set(); // fail-safe: missing read → held
       for (const ticket of triagedWaiting) {
-        const rel = fetchRelations(ticket, { exec, cache });
+        const rel = relByTicket.get(ticket) ?? null;
         const { priority, createdAt } = readWorkerPriority(orchDir, ticket);
         if (rel === null) readFailedTickets.add(ticket);
-        // null rel → fail-safe: non-terminal sentinel state, no edges, no labels.
+        // missing rel → fail-safe: non-terminal sentinel state, no edges, no labels.
         const stateName = rel?.state ?? UNFETCHED_BLOCKER_STATE;
         labelsByTicket.set(ticket, rel?.labels ?? []);
         waitingDescriptors.push({
@@ -2114,11 +2127,11 @@ export function schedulerTick(
       }
 
       // A.4 — combined dep analysis over candidates + eligible new work. Hydrates
-      // BOTH pools' out-of-set blockers once (closes the D5 fail-open gap). The
-      // candidates are not in `eligible`, so they cannot leak into sweep-2
-      // selection — sweep 2 keeps its own computation over `eligible` unchanged.
+      // BOTH pools' out-of-set blockers in one batched request (closes the D5
+      // fail-open gap). The candidates are not in `eligible`, so they cannot leak
+      // into sweep-2 selection — sweep 2 keeps its own computation over `eligible`.
       const admissionPool = [...eligible, ...waitingDescriptors];
-      const admissionBlockerStates = hydrateOutOfSetBlockers(admissionPool, { exec, cache });
+      const admissionBlockerStates = hydrateOutOfSetBlockers(admissionPool, { cache, fetchBatch });
       const graph = analyzeDependencyGraph(admissionPool, {
         blockerStates: admissionBlockerStates,
       });
@@ -2238,11 +2251,25 @@ export function schedulerTick(
       const descriptorByTicket = new Map(
         waitingDescriptors.map((d) => [d.identifier, d]),
       );
+      // CTL-784: pre-collect every (non-cycle) candidate's triage.json deps and
+      // resolve their live Linear states in ONE batched, cache-first request —
+      // was one fetchTicketState per dep per candidate. The per-dep loop below
+      // reads state from this map; a dep the batch does not return (404 /
+      // unresolvable / prose-only token) is ABSENT → dropped, exactly like the
+      // prior null fetchTicketState. Most deps are already warm from A.3/A.4.
+      const depIdsByCandidate = new Map();
+      const allDepIds = new Set();
       for (const candidate of triagedWaiting) {
-        // Cycle members are owned by needs-human; do not also write deps for them.
-        if (cycleMembers.has(candidate)) continue;
+        if (cycleMembers.has(candidate)) continue; // owned by needs-human
         const depIds = readTriageDependencies(orchDir, candidate);
         if (depIds.length === 0) continue;
+        depIdsByCandidate.set(candidate, depIds);
+        for (const dep of depIds) allDepIds.add(dep);
+      }
+      const depBatch = fetchBatch([...allDepIds], { cache });
+      for (const candidate of triagedWaiting) {
+        const depIds = depIdsByCandidate.get(candidate);
+        if (!depIds) continue; // cycle member or no deps
 
         const desc = descriptorByTicket.get(candidate);
         // Already-durable blocked_by blockers for THIS candidate, read from its
@@ -2279,12 +2306,13 @@ export function schedulerTick(
             );
             continue;
           }
-          // Resolve the dep's live Linear state. A null read (404 / unparseable /
-          // prose-only token that is not a real ticket) is dropped — we never
-          // persist an edge to a ticket we cannot resolve. A TERMINAL dep
-          // (Done/Canceled) is a no-op blocker, so do not write a durable edge
-          // for it (it would never hold the gate and only adds Linear noise).
-          const depState = fetchTicketState(dep, { exec, cache });
+          // Resolve the dep's live Linear state from the batch (CTL-784). An
+          // absent dep (404 / unparseable / prose-only token that is not a real
+          // ticket) is dropped — we never persist an edge to a ticket we cannot
+          // resolve. A TERMINAL dep (Done/Canceled) is a no-op blocker, so do
+          // not write a durable edge for it (it would never hold the gate and
+          // only adds Linear noise).
+          const depState = depBatch.get(dep)?.state ?? null;
           if (depState == null) continue; // unresolvable → drop
           if (ADMISSION_TERMINAL_STATES.has(depState)) continue; // terminal → no durable edge
 
@@ -2292,6 +2320,14 @@ export function schedulerTick(
             () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
             { ticket: candidate, phase: "triage-deps" },
           );
+          // CTL-784: we just wrote a NEW durable blocked_by edge for this
+          // candidate. Its cached relations descriptor (read this tick by A.3)
+          // does NOT carry the edge, so without invalidation a freed-slot tick
+          // within the TTL window would serve the stale no-edge descriptor and
+          // OVER-PROMOTE the candidate past its open blocker. Drop the cache
+          // entry so the next tick re-reads fresh and the gate holds. (The OLD
+          // per-tick fresh read had no such window.)
+          cache?.invalidate?.(candidate);
         }
       }
     }
@@ -2681,11 +2717,15 @@ export function schedulerTick(
   // blocked by a non-terminal out-of-set ticket is held back. `eligible` was
   // computed once at the top of the tick (CTL-671) and is reused here.
   // CTL-705: `eligible` is hoisted above sweep 0.5 — used by buildGlobalRanking there.
-  const blockerStates = hydrateOutOfSetBlockers(eligible, { exec, cache });
+  const blockerStates = hydrateOutOfSetBlockers(eligible, { cache, fetchBatch });
   // CTL-634: surface the cache hit-rate once per tick. Log-line-only matches
   // the daemon's pino-only observability convention (schedulerTick's return
   // object is discarded by runTick, so a metric must be logged, not returned).
-  if (cache) log.info(cache.stats(), "scheduler: cache stats");
+  if (cache) {
+    log.info(cache.stats(), "scheduler: cache stats");
+    // CTL-784: surface the relation read-through hit-rate too (separate store).
+    if (cache.relationsStats) log.info(cache.relationsStats(), "scheduler: relations cache stats");
+  }
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
@@ -3082,10 +3122,10 @@ function runTick() {
       // CTL-537: production defaults to defaultCheckSequencing; tests inject via
       // startScheduler({ checkSequencing }) or directly into schedulerTick.
       checkSequencing: runningOpts.checkSequencing ?? defaultCheckSequencing,
-      // CTL-755: admission-gate seams. Undefined here keeps schedulerTick's
-      // production defaults (fetchTicketRelations / defaultAppendPhaseAdvanceHeldEvent);
+      // CTL-755/784: admission-gate seams. Undefined here keeps schedulerTick's
+      // production defaults (fetchTicketsBatch / defaultAppendPhaseAdvanceHeldEvent);
       // tests inject a stub through startScheduler so a daemon tick never shells out.
-      fetchRelations: runningOpts.fetchRelations,
+      fetchBatch: runningOpts.fetchBatch,
       appendPhaseAdvanceHeldEvent: runningOpts.appendPhaseAdvanceHeldEvent,
       // CTL-642/758: the LIVE PR-merged adapter. Without this the recovery
       // short-circuit's pr-merged branch (terminal-state.mjs) AND the reconcile
@@ -3146,7 +3186,7 @@ export function startScheduler({
   // exec / writeStatus / teardownWorktree seams on schedulerTick.
   livenessIsFresh, // CTL-731: optional override; runTick defaults to getAgentsCached().isFresh.
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
-  fetchRelations, // CTL-755: optional override; schedulerTick defaults to fetchTicketRelations.
+  fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
   appendPhaseAdvanceHeldEvent, // CTL-755: optional override; defaults to defaultAppendPhaseAdvanceHeldEvent.
   // CTL-642/758: the LIVE PR-merged adapter, wired into the production daemon
   // path so the recovery short-circuit's pr-merged branch + the reconcile
@@ -3190,7 +3230,7 @@ export function startScheduler({
     liveBackgroundCount, // CTL-676: test seam
     livenessIsFresh, // CTL-731: optional override (default getAgentsCached().isFresh)
     checkSequencing, // CTL-537: optional override (default defaultCheckSequencing)
-    fetchRelations, // CTL-755: optional admission-gate hydration seam
+    fetchBatch, // CTL-755/784: optional admission-gate batch hydration seam
     appendPhaseAdvanceHeldEvent, // CTL-755: optional held-indicator emit seam
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam

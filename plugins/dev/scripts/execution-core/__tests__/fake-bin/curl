@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Fake `curl` for hermetic execution-core tests (CTL-784). The ONLY production
+# curl in this package is linear-query.mjs defaultBatchExec (the batched
+# GraphQL read). This records the invocation and returns a benign, shape-valid
+# EMPTY result in the exact form `curl -w "\n%{http_code}"` produces: the
+# response body, a newline, then the HTTP status with NO trailing newline. So a
+# test that reaches the default batch exec (a missed fetchBatch injection) gets
+# an empty node set → every id is absent → the admission gate fails SAFE (holds)
+# and the assertion fails loudly, instead of hitting api.linear.app. A non-empty
+# `curl ...` line in .fake-bin-invocations.log is the leak surface.
+printf 'curl %s\n' "$*" >>"${CATALYST_FAKE_BIN_LOG:-/dev/null}" 2>/dev/null
+printf '%s\n200' '{"data":{"issues":{"nodes":[]}}}'
+exit 0
