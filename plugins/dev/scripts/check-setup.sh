@@ -318,17 +318,26 @@ warn "Linear 'magic words' auto-move must be OFF (Settings → Team → Workflow
 info "It races the execution-core daemon (CTL-758 backward-write). Disable it in the Linear UI."
 info "Git-automation state moves (start→PR, merge→Done) are reconciled by setup-execution-core-states.sh."
 
-# botUserId (CTL-749) is the Linear app-actor user UUID. It is read from the
-# project's Layer-1 .catalyst/config.json ($CONFIG_PATH) — the SAME place the
-# execution-core daemon and orch-monitor read it — NOT the Layer-2 home config.
+# botUserId (CTL-749) — the execution-core daemon now reads a SET from two sources:
+#   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.{worker,orchestrator}.botUserId
+#   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
+# Check both; pass if either is set.
+_GLOBAL_WORKER_BOT=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_GLOBAL_ORCH_BOT=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_LAYER1_BOT=""
 if [[ -n "$CONFIG_PATH" && -f "$CONFIG_PATH" ]]; then
-    bot_id=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$CONFIG_PATH" 2>/dev/null)
-    if [[ -z "$bot_id" ]]; then
-        warn "catalyst.monitor.linear.botUserId missing in $CONFIG_PATH — execution-core comms won't filter bot self-echo (the agent's own Linear comments look like human replies)"
-        info "Set it: query the Catalyst app-actor viewer.id (app token in ~/.config/catalyst/config-\${projectKey}.json → catalyst.linear.agent.accessToken) and write catalyst.monitor.linear.botUserId; see /catalyst-dev:setup-catalyst"
-    else
-        pass "Linear app-actor identity: ${bot_id:0:8}…"
-    fi
+    _LAYER1_BOT=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+if [[ -n "$_GLOBAL_WORKER_BOT" || -n "$_GLOBAL_ORCH_BOT" || -n "$_LAYER1_BOT" ]]; then
+    _bot_ids=""
+    [[ -n "$_GLOBAL_WORKER_BOT" ]] && _bot_ids="${_GLOBAL_WORKER_BOT:0:8}… (worker)"
+    [[ -n "$_GLOBAL_ORCH_BOT" ]] && _bot_ids="${_bot_ids:+$_bot_ids, }${_GLOBAL_ORCH_BOT:0:8}… (orchestrator)"
+    [[ -n "$_LAYER1_BOT" ]] && _bot_ids="${_bot_ids:+$_bot_ids, }${_LAYER1_BOT:0:8}… (layer-1 legacy)"
+    pass "Linear app-actor identity: $_bot_ids"
+else
+    warn "No Linear bot user IDs configured — execution-core comms won't filter bot self-echo"
+    info "NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json"
+    info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-dev:setup-catalyst"
 fi
 
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────

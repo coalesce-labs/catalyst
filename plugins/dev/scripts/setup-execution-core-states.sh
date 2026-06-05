@@ -439,19 +439,22 @@ main() {
   fi
 
   # --- check the Linear app-actor identity (CTL-749) ---
-  # The execution-core daemon reads catalyst.monitor.linear.botUserId at startup
-  # to filter the agent's OWN mirror comments/description-updates out of each
-  # worker's inbox.jsonl (self-echo / write-loop guard). Without it set, the
-  # agent's comments are written back as if a human replied, and bot-authored
-  # issue events feed back into the event log as loops. This is a prerequisite,
-  # not a hard failure here — warn and continue.
-  local bot_id
-  bot_id=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
-  if [[ -z $bot_id ]]; then
-    echo "WARNING: catalyst.monitor.linear.botUserId not set in $config" >&2
-    echo "  execution-core needs it for CTL-749 self-echo filtering of the agent's own" >&2
-    echo "  Linear comments/updates. Obtain it by querying viewer.id with the app-actor" >&2
-    echo "  token from ~/.config/catalyst/config-${project_key}.json, then set it here." >&2
+  # The execution-core daemon reads a SET of bot user UUIDs at startup:
+  #   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+  #        ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+  #   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
+  # Without at least one set, the agent's OWN comments/updates are not filtered
+  # out of inbox.jsonl and are treated as human input (false "human replied").
+  # This is a prerequisite, not a hard failure here — warn and continue.
+  local _global_cfg="$HOME/.config/catalyst/config.json"
+  local _bot_worker _bot_orch _bot_layer1
+  _bot_worker=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "$_global_cfg" 2>/dev/null)
+  _bot_orch=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "$_global_cfg" 2>/dev/null)
+  _bot_layer1=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
+  if [[ -z $_bot_worker && -z $_bot_orch && -z $_bot_layer1 ]]; then
+    echo "WARNING: No Linear bot user IDs configured — CTL-749 self-echo guard is inactive" >&2
+    echo "  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json" >&2
+    echo "  OLD fallback: set catalyst.monitor.linear.botUserId in $config" >&2
   fi
 
   # --- write the execution-core stateMap (atomic tmp + mv) ---

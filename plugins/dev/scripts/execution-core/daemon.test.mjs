@@ -30,6 +30,8 @@ import {
   __getEventPollTimerForTest,
   createCommentInboxWriter,
   createUpdateInboxWriter,
+  readLinearBotUserIds,
+  _isBotId,
 } from "./daemon.mjs";
 import { getEventLogPath } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
@@ -1173,6 +1175,178 @@ describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
     const writer = createUpdateInboxWriter(tmpDir, "bot-id");
     writer({ ticket, description: "bot edit", descriptionChanged: true, actorId: "bot-id", actorName: "Bot" });
     expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+});
+
+// readLinearBotUserIds — collects bot UUIDs from Layer-2 new path + Layer-1 back-compat
+describe("readLinearBotUserIds", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-ids-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("returns empty set when both paths are absent", () => {
+    const ids = readLinearBotUserIds("/nonexistent/layer1.json", "/nonexistent/layer2.json");
+    expect(ids.size).toBe(0);
+  });
+
+  test("reads worker botUserId from Layer-2 new global path", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { worker: { botUserId: "worker-uuid-1" } } } }
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid-1")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("reads orchestrator botUserId from Layer-2 new global path", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("orch-uuid-1")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("reads both worker and orchestrator botUserIds from Layer-2", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "worker-uuid" },
+            orchestrator: { botUserId: "orch-uuid" },
+          },
+        },
+      },
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.size).toBe(2);
+  });
+
+  test("reads Layer-1 back-compat path (catalyst.monitor.linear.botUserId)", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "legacy-uuid" } } }
+    }));
+    const ids = readLinearBotUserIds(layer1, null);
+    expect(ids.has("legacy-uuid")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("merges IDs from both layers; deduplicates when same UUID appears in both", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "shared-uuid" } } }
+    }));
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "shared-uuid" },  // same as layer-1 — should dedup
+            orchestrator: { botUserId: "orch-uuid" },
+          },
+        },
+      },
+    }));
+    const ids = readLinearBotUserIds(layer1, layer2);
+    expect(ids.has("shared-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.size).toBe(2); // not 3 — deduped
+  });
+
+  test("returns empty set when layer2 has no bot section", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({ catalyst: { linear: {} } }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.size).toBe(0);
+  });
+});
+
+// _isBotId — normalises string vs Set so guard callers are consistent
+describe("_isBotId", () => {
+  test("returns false when botUserId is empty string", () => {
+    expect(_isBotId("", "some-id")).toBe(false);
+  });
+  test("returns false when actorId is absent", () => {
+    expect(_isBotId("bot-id", null)).toBe(false);
+    expect(_isBotId("bot-id", undefined)).toBe(false);
+    expect(_isBotId("bot-id", "")).toBe(false);
+  });
+  test("matches a plain string botUserId", () => {
+    expect(_isBotId("bot-id", "bot-id")).toBe(true);
+    expect(_isBotId("bot-id", "human-id")).toBe(false);
+  });
+  test("matches any member of a Set botUserId", () => {
+    const ids = new Set(["worker-id", "orch-id"]);
+    expect(_isBotId(ids, "worker-id")).toBe(true);
+    expect(_isBotId(ids, "orch-id")).toBe(true);
+    expect(_isBotId(ids, "human-id")).toBe(false);
+  });
+  test("returns false for an empty Set", () => {
+    expect(_isBotId(new Set(), "some-id")).toBe(false);
+  });
+});
+
+// inbox writers with Set botUserId
+describe("createCommentInboxWriter — Set<string> botUserId", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-set-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("skips write when authorId is in the bot Set (worker id)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c1", body: "bot mirror", authorId: "worker-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when authorId is in the bot Set (orchestrator id)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c2", body: "orch comment", authorId: "orch-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when authorId is NOT in the bot Set (human reply)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c3", body: "human reply", authorId: "human-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+});
+
+describe("createUpdateInboxWriter — Set<string> botUserId", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "update-set-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("skips write when actorId is in the bot Set", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createUpdateInboxWriter(tmpDir, ids);
+    writer({ ticket, description: "updated", descriptionChanged: true, actorId: "orch-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when actorId is NOT in the bot Set", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createUpdateInboxWriter(tmpDir, ids);
+    writer({ ticket, description: "updated", descriptionChanged: true, actorId: "human-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
   });
 });
 

@@ -15,13 +15,18 @@ BODY="${2:?comment body required}"
 
 LINEAR_API="https://api.linear.app"
 
+# _find_layer2_config — resolve the OLD per-team Layer-2 file
+# (~/.config/catalyst/config-<key>.json) by walking up for .catalyst/config.json
+# and reading the project key. The key lives at `.catalyst.projectKey` (nested);
+# a bare top-level `.projectKey` is also honored for any legacy layout. Falls
+# back to the GLOBAL ~/.config/catalyst/config.json when no key is found.
 _find_layer2_config() {
   local dir="$PWD"
   while [[ "$dir" != "/" ]]; do
     local cfg="$dir/.catalyst/config.json"
     if [[ -f "$cfg" ]]; then
       local key
-      key=$(jq -r '.projectKey // empty' "$cfg" 2>/dev/null) || true
+      key=$(jq -r '.catalyst.projectKey // .projectKey // empty' "$cfg" 2>/dev/null) || true
       if [[ -n "$key" ]]; then
         echo "$HOME/.config/catalyst/config-${key}.json"
         return 0
@@ -36,15 +41,34 @@ CLIENT_ID="${CATALYST_LINEAR_AGENT_CLIENT_ID:-}"
 CLIENT_SECRET="${CATALYST_LINEAR_AGENT_CLIENT_SECRET:-}"
 
 if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
+  GLOBAL_CONFIG="$HOME/.config/catalyst/config.json"
   LAYER2_CONFIG="$(_find_layer2_config)"
-  if [[ ! -f "$LAYER2_CONFIG" ]]; then
-    echo "linear-comment-post: Layer-2 config not found at $LAYER2_CONFIG" >&2
-    exit 1
+
+  # 1. NEW global path (~/.config/catalyst/config.json):
+  #    catalyst.linear.bot.worker.{clientId,clientSecret}
+  if [[ -f "$GLOBAL_CONFIG" ]]; then
+    CLIENT_ID=$(jq -r '.catalyst.linear.bot.worker.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+    CLIENT_SECRET=$(jq -r '.catalyst.linear.bot.worker.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
   fi
-  CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$LAYER2_CONFIG" 2>/dev/null)
-  CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$LAYER2_CONFIG" 2>/dev/null)
+
+  # 2. OLD per-team path fallback (config-<key>.json, resolved above):
+  #    catalyst.linear.agent.{clientId,clientSecret}. During the transition the
+  #    worker creds may still live in the per-team file under the legacy key.
+  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$LAYER2_CONFIG" ]]; then
+    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$LAYER2_CONFIG" 2>/dev/null)
+    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$LAYER2_CONFIG" 2>/dev/null)
+  fi
+
+  # 3. OLD global path fallback: legacy catalyst.linear.agent.* in the global
+  #    config.json (covers a global-only legacy layout when no per-team file
+  #    exists or the resolver already pointed at config.json).
+  if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]] && [[ -f "$GLOBAL_CONFIG" ]]; then
+    CLIENT_ID=$(jq -r '.catalyst.linear.agent.clientId // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+    CLIENT_SECRET=$(jq -r '.catalyst.linear.agent.clientSecret // empty' "$GLOBAL_CONFIG" 2>/dev/null)
+  fi
+
   if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
-    echo "linear-comment-post: catalyst.linear.agent.{clientId,clientSecret} not found in $LAYER2_CONFIG" >&2
+    echo "linear-comment-post: catalyst.linear.bot.worker.{clientId,clientSecret} (global) or legacy catalyst.linear.agent.* (per-team $LAYER2_CONFIG / global $GLOBAL_CONFIG) not found" >&2
     exit 1
   fi
 fi
