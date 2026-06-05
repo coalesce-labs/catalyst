@@ -323,6 +323,34 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# 4c. Execution-core daemon env proxy sanity (CTL proxy-audit automation).
+#     The daemon sources a machine-local env file on start (catalyst-execution-core
+#     cmd_start). It is OPT-IN; an absent file is a no-op and the common case. The
+#     ONE silent-failure we surface in this hot path is: a proxy is configured but
+#     NODE_USE_ENV_PROXY=1 is missing — Node fetch then IGNORES the proxy, so the
+#     daemon's Linear/gh calls bypass the audit with nothing visibly broken. Full
+#     port/CA diagnostics live in check-setup.sh; here we keep it cheap (read the
+#     file in a subshell, no network) and warn only.
+DAEMON_ENV_FILE="${CATALYST_EXECUTION_CORE_ENV:-$CATALYST_CONFIG/execution-core.env}"
+if [[ -f "$DAEMON_ENV_FILE" ]]; then
+	daemon_env_vals=$(
+		set +euo pipefail
+		set -a
+		# shellcheck disable=SC1090
+		. "$DAEMON_ENV_FILE" 2>/dev/null
+		set +a
+		printf 'PROXY=%s\nUSE_ENV_PROXY=%s\n' \
+			"${HTTPS_PROXY:-${HTTP_PROXY:-}}" "${NODE_USE_ENV_PROXY:-}"
+	)
+	de_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^PROXY=//p')
+	de_use_env_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^USE_ENV_PROXY=//p')
+	if [[ -n $de_proxy && $de_use_env_proxy != "1" ]]; then
+		warnings+=("Proxy vars set in $DAEMON_ENV_FILE but NODE_USE_ENV_PROXY=1 missing — Node fetch IGNORES the proxy (daemon Linear/gh calls bypass the audit silently)")
+		warnings+=("  Add to $DAEMON_ENV_FILE: export NODE_USE_ENV_PROXY=1 — then: catalyst-execution-core restart")
+		warnings+=("  Full proxy health (port listening, CA cert): bash plugins/dev/scripts/check-setup.sh")
+	fi
+fi
+
 # 5. Check orch-monitor daemon liveness
 #    Event-driven skills (orchestrate Phase 4, oneshot Phase 5, merge-pr Phase 6) depend on
 #    the daemon to surface webhook events. Without it, catalyst-events wait-for falls back

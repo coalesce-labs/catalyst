@@ -465,6 +465,114 @@ else
     fi
 fi
 
+# ─── 7c. Execution-core Daemon Env / Proxy Audit (optional) ────────────────
+
+header "Execution-core Daemon Env / Proxy Audit (optional)"
+
+# The execution-core daemon sources a machine-local env file on `start`/`restart`
+# (catalyst-execution-core cmd_start). It is OPT-IN: an absent file is a no-op,
+# and is the common case. When it IS present and configures a proxy (routing the
+# daemon's Linear/gh fetch traffic through a local mitmproxy audit), a broken
+# proxy silently breaks the daemon's Linear connectivity on a fresh/changed
+# machine — hard to debug. So: surface the file, and when a proxy is configured,
+# verify it actually works.
+DAEMON_ENV_FILE="${CATALYST_EXECUTION_CORE_ENV:-$CATALYST_CONFIG/execution-core.env}"
+DAEMON_ENV_EXAMPLE="plugins/dev/templates/execution-core.env.example"
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/templates/execution-core.env.example" ]]; then
+    DAEMON_ENV_EXAMPLE="${CLAUDE_PLUGIN_ROOT}/templates/execution-core.env.example"
+fi
+
+if [[ ! -f "$DAEMON_ENV_FILE" ]]; then
+    # Absent file = intended default; not a problem. Surface it for discoverability.
+    info "No daemon env at $DAEMON_ENV_FILE (optional) — used for proxy/CA tuning"
+    info "To enable: copy $DAEMON_ENV_EXAMPLE there, uncomment what you need, then catalyst-execution-core restart"
+else
+    pass "Daemon env present: $DAEMON_ENV_FILE"
+
+    # Read the file's exports in an isolated subshell so we don't pollute this
+    # script's own environment, then pipe the values back as a single line.
+    # (set -a exports everything the file assigns; the subshell is discarded.)
+    daemon_env_vals=$(
+        set +euo pipefail
+        set -a
+        # shellcheck disable=SC1090
+        . "$DAEMON_ENV_FILE" 2>/dev/null
+        set +a
+        printf 'HTTPS_PROXY=%s\nHTTP_PROXY=%s\nNODE_USE_ENV_PROXY=%s\nNODE_EXTRA_CA_CERTS=%s\n' \
+            "${HTTPS_PROXY:-}" "${HTTP_PROXY:-}" "${NODE_USE_ENV_PROXY:-}" "${NODE_EXTRA_CA_CERTS:-}"
+    )
+    de_https_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^HTTPS_PROXY=//p')
+    de_http_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^HTTP_PROXY=//p')
+    de_use_env_proxy=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^NODE_USE_ENV_PROXY=//p')
+    de_ca_certs=$(printf '%s\n' "$daemon_env_vals" | sed -n 's/^NODE_EXTRA_CA_CERTS=//p')
+
+    de_proxy="$de_https_proxy"
+    [[ -z "$de_proxy" ]] && de_proxy="$de_http_proxy"
+
+    if [[ -z "$de_proxy" ]]; then
+        # File exists but configures no proxy — nothing to verify. Still report the
+        # CA-cert path if one is set on its own (rare, but check it anyway).
+        info "No proxy configured in $DAEMON_ENV_FILE — skipping proxy health check"
+        if [[ -n "$de_ca_certs" && ! -f "$de_ca_certs" ]]; then
+            warn "NODE_EXTRA_CA_CERTS in $DAEMON_ENV_FILE points at a missing file: $de_ca_certs"
+            info "Fix the path or re-run mitmproxy to regenerate its CA at \$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+        fi
+    else
+        # Parse host:port from the proxy URL with pure parameter expansion:
+        # strip scheme, strip optional userinfo, strip any path/query.
+        de_hostport="${de_proxy#*://}"   # drop scheme://
+        de_hostport="${de_hostport##*@}" # drop user:pass@
+        de_hostport="${de_hostport%%/*}" # drop /path
+        de_proxy_host="${de_hostport%:*}"
+        de_proxy_port="${de_hostport##*:}"
+        [[ "$de_proxy_host" == "$de_hostport" ]] && de_proxy_host="127.0.0.1" # no colon → default host
+        [[ "$de_proxy_port" == "$de_hostport" ]] && de_proxy_port="" # no colon → no port
+
+        # (a) Is the proxy port actually listening? Probe with bash /dev/tcp (same
+        #     idiom as the OTel/monitor checks above); fall back to `nc -z` if a
+        #     port couldn't be parsed or /dev/tcp is unavailable.
+        if [[ -z "$de_proxy_port" ]]; then
+            warn "Could not parse a port from proxy '$de_proxy' in $DAEMON_ENV_FILE — cannot probe liveness"
+        else
+            proxy_listening=""
+            if (echo >/dev/tcp/"$de_proxy_host"/"$de_proxy_port") 2>/dev/null; then
+                proxy_listening="yes"
+            elif command -v nc &>/dev/null && nc -z -w 1 "$de_proxy_host" "$de_proxy_port" 2>/dev/null; then
+                proxy_listening="yes"
+            fi
+            if [[ -n "$proxy_listening" ]]; then
+                pass "Proxy reachable ($de_proxy_host:$de_proxy_port)"
+            else
+                warn "Daemon is set to route Linear/gh through $de_proxy_host:$de_proxy_port but nothing is LISTENING there"
+                info "Start the proxy: mitmdump -s \"\$HOME/catalyst/mitm_linear_addon.py\" --listen-port $de_proxy_port"
+                info "…or unset HTTPS_PROXY/HTTP_PROXY in $DAEMON_ENV_FILE to go direct"
+            fi
+        fi
+
+        # (b) NODE_EXTRA_CA_CERTS must point at an existing file or MITM'd Linear
+        #     TLS will fail cert validation.
+        if [[ -z "$de_ca_certs" ]]; then
+            warn "Proxy is set in $DAEMON_ENV_FILE but NODE_EXTRA_CA_CERTS is not — MITM'd Linear TLS will fail cert validation"
+            info "Add: export NODE_EXTRA_CA_CERTS=\$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+        elif [[ ! -f "$de_ca_certs" ]]; then
+            warn "MITM CA cert not found at $de_ca_certs — Linear TLS will fail"
+            info "Fix the path in $DAEMON_ENV_FILE, or re-run mitmproxy to regenerate its CA"
+        else
+            pass "MITM CA cert present ($de_ca_certs)"
+        fi
+
+        # (c) *_PROXY set but NODE_USE_ENV_PROXY unset → Node fetch SILENTLY ignores
+        #     the proxy. This is the highest-value catch: calls bypass the audit and
+        #     nothing visibly breaks.
+        if [[ "$de_use_env_proxy" != "1" ]]; then
+            warn "Proxy vars are set but NODE_USE_ENV_PROXY=1 is missing from $DAEMON_ENV_FILE — Node fetch will IGNORE the proxy (Linear calls bypass the audit silently)"
+            info "Add: export NODE_USE_ENV_PROXY=1"
+        else
+            pass "NODE_USE_ENV_PROXY=1 (Node fetch will honor the proxy)"
+        fi
+    fi
+fi
+
 # ─── 8. direnv ──────────────────────────────────────────────────────────────
 
 header "direnv"
