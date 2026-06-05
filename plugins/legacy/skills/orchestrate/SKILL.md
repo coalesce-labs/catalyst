@@ -257,6 +257,26 @@ ALLOW_SELF_REPORTED=$(jq -r '.catalyst.orchestration.allowSelfReportedCompletion
 DISPATCH_MODE=$(jq -r '.catalyst.orchestration.dispatchMode // "oneshot-legacy"' "$CONFIG_FILE" 2>/dev/null)
 ```
 
+**Linear App-Actor Identity (CTL-550, CTL-749)**
+
+`catalyst.monitor.linear.botUserId` is **required for the Linear app-actor comms channel — i.e.
+when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies
+(CTL-550 / CTL-549 / CTL-749)**. It must be set **before** the daemon starts. The daemon reads it
+from the project's Layer-1 committed config at the flat path
+`<project>/.catalyst/config.json` → `catalyst.monitor.linear.botUserId` (not the Layer-2 home
+config, not a team-keyed sub-object). This is the Linear user UUID of the Catalyst app-actor (the
+"Linear for Agents" app user) — workspace-specific, and `null` in the committed config template.
+See `/catalyst-dev:setup-catalyst` for how to obtain it (query `viewer.id` with the app-actor
+token). (The execution-core daemon is the pull-based runner of the phase-agent pipeline; it is not
+a `dispatchMode` enum value — those are `phase-agents` and `oneshot-legacy`.)
+
+The daemon reads `botUserId` only at startup and uses it to filter the agent's own mirror activity
+out of the bidirectional Linear comms channel (CTL-749/CTL-549): it suppresses bot-authored comments
+and description updates so they are not written into `workers/<ticket>/inbox.jsonl` as input. Without
+it, the daemon cannot tell the agent's own comments/updates apart from a human's, so every mirror
+comment lands in the worker inbox as a false "human replied" signal (noise / write loops). It is
+the self-echo / loop-prevention guard.
+
 **Create ALL worktrees using `create-worktree.sh`** — both orchestrator and workers go through the
 same script so they all get `.claude/`, `.catalyst/`, dependency install, thoughts init, and custom
 hooks:

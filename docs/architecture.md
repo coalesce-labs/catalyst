@@ -347,6 +347,19 @@ plus an `fs.watch` byte-cursor to drive `claude stop` / `git worktree remove` / 
 and broker registry) without coordinating with one another. The broker and the reaper are each
 both a reader and a writer of the same file.
 
+### Linear app-actor self-echo guard (`botUserId`)
+
+When the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies,
+it must tell its **own** Linear comments and updates (posted as the Catalyst app-actor) apart
+from a human's. `catalyst.monitor.linear.botUserId` — the app-actor user UUID, read from the
+project's Layer-1 `.catalyst/config.json` at the flat path `catalyst.monitor.linear.botUserId`
+— is that discriminator. The daemon's `createCommentInboxWriter` / `createUpdateInboxWriter`
+(`daemon.mjs`) and orch-monitor's Linear webhook handler both skip events authored by
+`botUserId`, so the agent's mirror comments don't land in the worker `inbox.jsonl` as a false
+"human replied" signal and bot-authored issue events don't feed back as write loops. Without it
+the system can't distinguish the two, so it is the self-echo / loop-prevention guard for the
+Linear channel. See `docs/configuration.md` for how to obtain and set the value.
+
 ### `shouldSkipEvent` self-filter
 
 Because the broker both **reads** and **writes** the same JSONL log, it would otherwise re-ingest

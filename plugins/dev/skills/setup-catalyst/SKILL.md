@@ -81,6 +81,44 @@ a unified diff and asks for confirmation before merging. Concretely:
 6. If the user declines, leave `.catalyst/config.json` untouched. The drift warning continues to
    appear on subsequent workflow invocations, providing passive nagging until resolved.
 
+**Linear bot user ID (CTL-550 / CTL-749 / CTL-549).** `catalyst.monitor.linear.botUserId` is the
+Linear user UUID of the Catalyst app-actor — the "Linear for Agents" app identity that posts
+comments *as the app* (installed by CTL-550). It is **required for the Linear app-actor comms
+channel** — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on
+human replies (CTL-550 / CTL-549 / CTL-749). It is the self-echo / loop-prevention guard for the
+whole bidirectional channel. CTL-749 / CTL-549 built a channel where a human reply on a ticket
+wakes a parked worker; without `botUserId` loaded, the system cannot tell the agent's *own*
+comments and description-updates apart from a human's, so (a) the agent's own mirror comments get
+written into the worker `inbox.jsonl` as if they were human input (noise / false "human replied"
+signals), and (b) bot-authored issue events feed back into the event log as write loops. The
+orch-monitor's Linear webhook handler suppresses bot-authored issue events using this value, and
+the execution-core daemon uses it to filter the agent's self-echo from each worker's inbox.
+
+This value is **workspace-specific** and is NOT shipped in the committed template
+(`config.template.json` keeps it `null`). It is not secret — it appears on every comment the app
+posts — but it must be obtained per workspace and written into Layer 1
+`.catalyst/config.json → catalyst.monitor.linear.botUserId` (alongside the other `monitor.linear`
+keys such as `teams` and `webhookSecretEnv`). To obtain it, query `viewer.id` with the app-actor
+token (the app OAuth credentials live in Layer 2
+`~/.config/catalyst/config-<projectKey>.json → catalyst.linear.agent.{clientId,clientSecret,accessToken}`):
+
+```bash
+TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-<projectKey>.json)
+BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
+```
+
+(Alternatively, mint a fresh app token via `grant_type=client_credentials` with `actor=app` and
+`scope="app:mentionable,app:assignable"` at `POST https://api.linear.app/oauth/token`, then run the
+same `viewer{id}` query.) Write `$BOT_ID` into
+`.catalyst/config.json → catalyst.monitor.linear.botUserId`. Both the monitor and the daemon read
+`botUserId` **only at startup**, so after setting it you must restart them:
+`catalyst-monitor stop && catalyst-monitor start`, then `catalyst-execution-core restart`. This is
+a needs-user-input step (it requires the app-actor credentials), not an auto-fix — never write the
+value for the user without confirming it came from their own app-actor token.
+
 **Execution-core state contract (CTL-564).** When a repo's
 `catalyst.orchestration.dispatchMode` is `execution-core`, `setup-catalyst.sh`
 runs an extra step — `setup_execution_core_states` — right after the Linear

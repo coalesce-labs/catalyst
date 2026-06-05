@@ -120,6 +120,15 @@ completion advances the ticket to `research` normally. This makes "Ready" a
 valid manual entry point: the system transparently runs the missing triage
 instead of dead-locking the research prior-artifact gate. (CTL-625)
 
+**Linear app-actor self-echo guard.** `catalyst.monitor.linear.botUserId` (Layer-1
+`.catalyst/config.json`, the Linear user UUID of the Catalyst app-actor) is the
+self-echo guard the daemon uses to tell the agent's *own* mirror comments from a
+human reply, so bot-authored issue events don't feed back as a false "human
+replied" signal or a write loop. Required for the Linear app-actor comms channel —
+i.e. when the daemon mirrors phase-agent output to Linear and wakes on human
+replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-dev:setup-catalyst`;
+distributed templates ship `null`.
+
 ## The 9-phase pipeline (phase-agents mode)
 
 Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`
