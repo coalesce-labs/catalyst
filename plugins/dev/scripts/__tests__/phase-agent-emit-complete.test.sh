@@ -478,6 +478,39 @@ LINE=$(read_event_line)
 assert_eq "2" "$(echo "$LINE" | jq -r '.attributes["phase.attempt"]')" "failed path: phase.attempt=2"
 assert_eq "1" "$(echo "$LINE" | jq -r '.attributes["phase.revive_count"]')" "failed path: revive_count=1"
 
+# ─── CTL-777: signal flip fires from --orch-dir even when the env var is dropped ─
+# `claude --bg` drops the plain env prefix, so a worker can run with
+# CATALYST_ORCHESTRATOR_DIR unset. The dispatch-side fix re-supplies ORCH_DIR via
+# settings.env, but emit-complete also already prefers an explicit --orch-dir over
+# the env var (belt-and-braces). These tests pin both halves: --orch-dir alone
+# flips the signal, and the unfixed failure mode (no env AND no --orch-dir) leaves
+# the signal untouched.
+
+echo ""
+echo "Test 29 (CTL-777): --orch-dir flips the signal to done even with env var unset"
+fresh_env t29
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+# Drop the env var to reproduce the dropped-prefix bg worker; supply --orch-dir.
+env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
+	--phase research --ticket CTL-100 --status complete \
+	--orch-dir "${TEST_DIR}/orch" >/dev/null 2>&1
+NEW_STATUS=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
+HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL" 2>/dev/null)
+assert_eq "done" "$NEW_STATUS" "--orch-dir flips signal to done with env unset"
+assert_eq "true" "$HAS_COMPLETED" "--orch-dir path still stamps completedAt"
+
+echo ""
+echo "Test 30 (CTL-777): documents the fixed failure mode — no env AND no --orch-dir leaves signal running"
+fresh_env t30
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+# Neither the env var nor --orch-dir → ORCH_DIR empty → step-2 gate skips (the bug).
+env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
+	--phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+STILL_RUNNING=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
+assert_eq "running" "$STILL_RUNNING" "no env + no --orch-dir → signal NOT flipped (the wedge this fix avoids)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
