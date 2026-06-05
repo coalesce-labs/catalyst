@@ -1,5 +1,12 @@
 # Changelog
 
+## [11.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.0...catalyst-dev-v11.0.1) (2026-06-05)
+
+
+### Bug Fixes
+
+* **dev:** CTL-693 suppress pre-push hooks on automated phase-agent pushes ([#1328](https://github.com/coalesce-labs/catalyst/issues/1328)) ([c831e58](https://github.com/coalesce-labs/catalyst/commit/c831e58001a79eb127c213f3bb31e998c725305b))
+
 ## [11.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.6.0...catalyst-dev-v11.0.0) (2026-06-05)
 
 
