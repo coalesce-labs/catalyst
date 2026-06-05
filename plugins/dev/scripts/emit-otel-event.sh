@@ -11,8 +11,11 @@
 # Usage:
 #   emit-otel-event.sh --event <name> --outcome <enum> --session-id <id>
 #                      [--reason <text>] [--linear-key <key>] [--attr k=v ...]
+#                      [--resource-attr k=v ...]
 #
 # --outcome must be one of: success, fail, timeout, abandoned.
+# --resource-attr appends into the OTLP resource attributes array. Integer
+# values (^-?[0-9]+$) are emitted as intValue; all others as stringValue.
 #
 # Transport: OTLP/HTTP (port 4318) to OTEL_EXPORTER_OTLP_ENDPOINT. When that
 # env var is unset or the POST fails, we exit 0 silently — the caller is a
@@ -32,6 +35,17 @@ is_valid_outcome() {
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# Append one k=v into a JSON attr array on stdin, choosing intValue for
+# integer-looking values (matches otel-forward otlp.ts), stringValue otherwise.
+append_attr_json() {  # args: <key> <val>; reads array on stdin, writes on stdout
+  local k="$1" v="$2"
+  if [[ "$v" =~ ^-?[0-9]+$ ]]; then
+    jq -c --arg k "$k" --argjson n "$v" '. + [{key:$k,value:{intValue:$n}}]'
+  else
+    jq -c --arg k "$k" --arg v "$v" '. + [{key:$k,value:{stringValue:$v}}]'
+  fi
+}
+
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
 EVENT=""
@@ -41,18 +55,20 @@ REASON=""
 LINEAR_KEY=""
 PHASE=""
 EXTRA_ATTRS=()
+RES_EXTRA_ATTRS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --event)       EVENT="$2"; shift 2 ;;
-    --outcome)     OUTCOME="$2"; shift 2 ;;
-    --session-id)  SESSION_ID="$2"; shift 2 ;;
-    --reason)      REASON="$2"; shift 2 ;;
-    --linear-key)  LINEAR_KEY="$2"; shift 2 ;;
-    --phase)       PHASE="$2"; shift 2 ;;
-    --attr)        EXTRA_ATTRS+=("$2"); shift 2 ;;
-    -h|--help)     grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *)             die "unknown flag: $1" ;;
+    --event)          EVENT="$2"; shift 2 ;;
+    --outcome)        OUTCOME="$2"; shift 2 ;;
+    --session-id)     SESSION_ID="$2"; shift 2 ;;
+    --reason)         REASON="$2"; shift 2 ;;
+    --linear-key)     LINEAR_KEY="$2"; shift 2 ;;
+    --phase)          PHASE="$2"; shift 2 ;;
+    --attr)           EXTRA_ATTRS+=("$2"); shift 2 ;;
+    --resource-attr)  RES_EXTRA_ATTRS+=("$2"); shift 2 ;;
+    -h|--help)        grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)                die "unknown flag: $1" ;;
   esac
 done
 
@@ -98,6 +114,12 @@ if [[ -n "$LINEAR_KEY" ]]; then
   RES_ATTRS_JSON=$(echo "$RES_ATTRS_JSON" \
     | jq -c --arg k "$LINEAR_KEY" '. + [{key:"linear.key",value:{stringValue:$k}}]')
 fi
+for kv in "${RES_EXTRA_ATTRS[@]:-}"; do
+  [[ -n "$kv" ]] || continue
+  key="${kv%%=*}"; val="${kv#*=}"
+  [[ -n "$key" && "$key" != "$kv" ]] || continue
+  RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" | append_attr_json "$key" "$val")
+done
 
 # Build log record attributes.
 LOG_ATTRS_JSON=$(jq -nc \
@@ -118,12 +140,11 @@ if [[ -n "$PHASE" ]]; then
     | jq -c --arg p "$PHASE" '. + [{key:"phase",value:{stringValue:$p}}]')
 fi
 
-for kv in "${EXTRA_ATTRS[@]}"; do
-  key="${kv%%=*}"
-  val="${kv#*=}"
+for kv in "${EXTRA_ATTRS[@]:-}"; do
+  [[ -n "$kv" ]] || continue
+  key="${kv%%=*}"; val="${kv#*=}"
   [[ -n "$key" && "$key" != "$kv" ]] || continue
-  LOG_ATTRS_JSON=$(echo "$LOG_ATTRS_JSON" \
-    | jq -c --arg k "$key" --arg v "$val" '. + [{key:$k,value:{stringValue:$v}}]')
+  LOG_ATTRS_JSON=$(printf '%s' "$LOG_ATTRS_JSON" | append_attr_json "$key" "$val")
 done
 
 PAYLOAD=$(jq -nc \

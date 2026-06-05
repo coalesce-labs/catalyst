@@ -311,6 +311,145 @@ PHASE_ATTR=$(echo "$BODY_11" | jq -r '
   | select(.key == "phase") | .value.stringValue // ""')
 assert_eq "research" "$PHASE_ATTR" "--phase adds phase attribute to log record"
 
+# ─── Test 12: --resource-attr string lands in resource attrs ────────────────
+echo ""
+echo "--- Test 12: --resource-attr string lands in resource attributes ---"
+STUB_DIR_12="$SCRATCH/stub12"
+setup_curl_stub "$STUB_DIR_12"
+export PATH="$STUB_DIR_12:$PATH"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://x:4317"
+export CURL_STUB_ARGS="$SCRATCH/args12"
+export CURL_STUB_BODY="$SCRATCH/body12"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  --resource-attr "project=catalyst" \
+  >/dev/null 2>&1
+
+BODY_12=$(cat "$SCRATCH/body12" 2>/dev/null || echo "{}")
+assert_eq "catalyst" \
+  "$(echo "$BODY_12" | jq -r '.resourceLogs[0].resource.attributes[] | select(.key=="project") | .value.stringValue')" \
+  "--resource-attr project=catalyst in resource attributes"
+
+# ─── Test 13: multiple --resource-attr repeats ──────────────────────────────
+echo ""
+echo "--- Test 13: multiple --resource-attr repeats ---"
+STUB_DIR_13="$SCRATCH/stub13"
+setup_curl_stub "$STUB_DIR_13"
+export PATH="$STUB_DIR_13:$PATH"
+export CURL_STUB_ARGS="$SCRATCH/args13"
+export CURL_STUB_BODY="$SCRATCH/body13"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  --resource-attr "project=catalyst" \
+  --resource-attr "env=staging" \
+  >/dev/null 2>&1
+
+BODY_13=$(cat "$SCRATCH/body13" 2>/dev/null || echo "{}")
+assert_eq "catalyst" \
+  "$(echo "$BODY_13" | jq -r '.resourceLogs[0].resource.attributes[] | select(.key=="project") | .value.stringValue')" \
+  "multiple --resource-attr: project=catalyst present"
+assert_eq "staging" \
+  "$(echo "$BODY_13" | jq -r '.resourceLogs[0].resource.attributes[] | select(.key=="env") | .value.stringValue')" \
+  "multiple --resource-attr: env=staging present"
+
+# ─── Test 14: integer --resource-attr → intValue ────────────────────────────
+echo ""
+echo "--- Test 14: integer --resource-attr emits intValue ---"
+STUB_DIR_14="$SCRATCH/stub14"
+setup_curl_stub "$STUB_DIR_14"
+export PATH="$STUB_DIR_14:$PATH"
+export CURL_STUB_ARGS="$SCRATCH/args14"
+export CURL_STUB_BODY="$SCRATCH/body14"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  --resource-attr "revive_count=3" \
+  >/dev/null 2>&1
+
+BODY_14=$(cat "$SCRATCH/body14" 2>/dev/null || echo "{}")
+assert_eq "3" \
+  "$(echo "$BODY_14" | jq -r '.resourceLogs[0].resource.attributes[] | select(.key=="revive_count") | .value.intValue')" \
+  "integer --resource-attr: intValue==3"
+assert_eq "null" \
+  "$(echo "$BODY_14" | jq -r '.resourceLogs[0].resource.attributes[] | select(.key=="revive_count") | .value.stringValue // "null"')" \
+  "integer --resource-attr: stringValue is absent"
+
+# ─── Test 15: integer --attr → intValue (shared helper) ─────────────────────
+echo ""
+echo "--- Test 15: integer --attr emits intValue via shared helper ---"
+STUB_DIR_15="$SCRATCH/stub15"
+setup_curl_stub "$STUB_DIR_15"
+export PATH="$STUB_DIR_15:$PATH"
+export CURL_STUB_ARGS="$SCRATCH/args15"
+export CURL_STUB_BODY="$SCRATCH/body15"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  --attr "attempt=2" \
+  >/dev/null 2>&1
+
+BODY_15=$(cat "$SCRATCH/body15" 2>/dev/null || echo "{}")
+assert_eq "2" \
+  "$(echo "$BODY_15" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[] | select(.key=="attempt") | .value.intValue')" \
+  "integer --attr: intValue==2"
+
+# ─── Test 16: omitting --resource-attr leaves resource array byte-identical ──
+echo ""
+echo "--- Test 16: omitting --resource-attr yields byte-identical resource array ---"
+STUB_DIR_16="$SCRATCH/stub16"
+setup_curl_stub "$STUB_DIR_16"
+export PATH="$STUB_DIR_16:$PATH"
+export CURL_STUB_ARGS="$SCRATCH/args16"
+export CURL_STUB_BODY="$SCRATCH/body16"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  >/dev/null 2>&1
+
+BODY_16=$(cat "$SCRATCH/body16" 2>/dev/null || echo "{}")
+EXPECTED_RES='[{"key":"service.name","value":{"stringValue":"claude-code"}}]'
+ACTUAL_RES="$(echo "$BODY_16" | jq -c '.resourceLogs[0].resource.attributes')"
+assert_eq "$EXPECTED_RES" "$ACTUAL_RES" "omitting --resource-attr: resource array is byte-identical"
+
+# ─── Test 17: malformed --resource-attr (no =) is skipped ───────────────────
+echo ""
+echo "--- Test 17: malformed --resource-attr (no =) is skipped ---"
+STUB_DIR_17="$SCRATCH/stub17"
+setup_curl_stub "$STUB_DIR_17"
+export PATH="$STUB_DIR_17:$PATH"
+export CURL_STUB_ARGS="$SCRATCH/args17"
+export CURL_STUB_BODY="$SCRATCH/body17"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id s1 \
+  --resource-attr "bogus" \
+  >/dev/null 2>&1
+EXIT_CODE_17=$?
+assert_eq "0" "$EXIT_CODE_17" "malformed --resource-attr: exit 0"
+BODY_17=$(cat "$SCRATCH/body17" 2>/dev/null || echo "{}")
+BOGUS_CNT="$(echo "$BODY_17" | jq -r '[.resourceLogs[0].resource.attributes[]? | select(.key=="bogus")] | length')"
+assert_eq "0" "$BOGUS_CNT" "malformed --resource-attr: bogus key not present"
+
+# ─── Test 18: --help output includes --resource-attr ────────────────────────
+echo ""
+echo "--- Test 18: --help output documents --resource-attr ---"
+HELP_OUT=$("$EMIT_SCRIPT" --help 2>&1 || true)
+assert_contains "$HELP_OUT" "--resource-attr" "--help output includes --resource-attr"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────"
