@@ -16,5 +16,8 @@
     "curation",
     "diagnostics"
   ],
+  "dependencies": [
+    "catalyst-dev"
+  ],
   "license": "MIT"
 }
