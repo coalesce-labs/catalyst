@@ -13,9 +13,15 @@ allowed-tools: Bash, Read, Write, Glob, AskUserQuestion
 
 Configure Warp terminal to work as a Catalyst launcher. Scan the user's machine for projects,
 interview them, and generate `~/.warp/tab_configs/*.toml` files following the "catalyst quartet"
-pattern (main + PM + new-worktree + worktree + orchestrator), with colors, emoji, and session-name
+pattern (main + PM + new-worktree + worktree), with colors, emoji, and session-name
 wiring so Claude's in-UI session name, terminal title, and remote-control name all match the Warp
 tab.
+
+> **Execution-core note.** This skill configures *manual development* tabs only. The legacy
+> wave-orchestration tabs ("New Worktree One-Shot" → `/catalyst-legacy:oneshot`, and "Orchestrator"
+> → `/catalyst-legacy:orchestrate`) were removed: the execution-core model runs a long-lived daemon
+> (`catalyst-execution-core start`), not per-ticket Warp tabs. Monitor it via `catalyst-hud` or the
+> orch-monitor dashboard rather than a launcher tab.
 
 ## Known limitations (tell the user up front)
 
@@ -47,17 +53,19 @@ If missing, use `AskUserQuestion` to ask:
 > Warp is not installed. Install via Homebrew (`brew install --cask warp`)?
 
 - Yes → run `brew install --cask warp`, wait for success
-- No → tell user: "Install manually from https://www.warp.dev/ then re-run `/catalyst-dev:setup-warp`." Exit cleanly.
+- No → tell user: "Install manually from https://www.warp.dev/ then re-run `/catalyst-foundry:setup-warp`." Exit cleanly.
 
 ### 0.2 — Locate the catalyst clone
 
-Generated TOMLs need absolute paths to `launch-worktree-tab.sh` and `launch-orchestrator-tab.sh`.
+Generated TOMLs embed an absolute path to `launch-worktree-tab.sh`, so this must resolve to a
+**stable git clone** (not the versioned plugin cache, which changes on every update). The launcher
+scripts live in `catalyst-dev` (the shared framework core) under `plugins/dev/scripts/`.
 
 ```bash
 CATALYST_ROOT=""
 if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-  # When skill runs from the installed plugin, CLAUDE_PLUGIN_ROOT points to plugins/dev/.
-  # Walk up to the repo root.
+  # When this skill runs from the installed plugin, CLAUDE_PLUGIN_ROOT points to plugins/foundry/
+  # (in a source checkout) — walk up to the repo root and confirm the dev launcher exists there.
   CANDIDATE="$(cd "${CLAUDE_PLUGIN_ROOT}/../.." 2>/dev/null && pwd || true)"
   [[ -f "${CANDIDATE}/plugins/dev/scripts/launch-worktree-tab.sh" ]] && CATALYST_ROOT="$CANDIDATE"
 fi
@@ -146,10 +154,7 @@ possible, or sequential questions):
   - Main (always recommended)
   - PM worktree (only for Catalyst-managed projects)
   - New worktree (prompts for branch + optional description)
-  - New worktree one-shot (prompts for ticket, creates worktree, launches Claude
-    with `/catalyst-dev:oneshot {{ticket}}` already queued)
   - Existing worktree (branch picker)
-  - Orchestrator (for projects using `/catalyst-dev:orchestrate`)
 - **Setup command** — optional init for the main tab (e.g., `bun install && scripts/setup-env.sh`).
   Leave blank if none.
 - **Worktree base dir** — where this project's worktrees live, if worktree variants selected.
@@ -179,15 +184,14 @@ rm -f ~/.warp/tab_configs/*.toml
 ### 4.2 — Write each TOML
 
 Compute prefix counter starting at 01. For each project in the Phase 3 order, emit each enabled
-variant in this order: Main, PM, New Worktree, New Worktree One-Shot, Worktree, Orchestrator.
+variant in this order: Main, PM, New Worktree, Worktree.
 
 **Naming conventions**:
-- Emoji per variant: Main `📦`, PM `📋`, New Worktree `🆕`, New Worktree One-Shot `🎯`,
-  Worktree `🔀`, Orchestrator `🚀`
-- Color per variant: Main/New/One-Shot/Worktree/Orchestrator → project color. PM → always `blue`
+- Emoji per variant: Main `📦`, PM `📋`, New Worktree `🆕`, Worktree `🔀`
+- Color per variant: Main/New/Worktree → project color. PM → always `blue`
   (cross-project convention for PM/backlog work).
 - Session name per variant: `<slug>` (main), `<slug>_pm`, `<slug>_<branch>[_<desc>]`,
-  `<slug>_<ticket>` (one-shot), `<slug>_<worktree>`, `<slug>_<tickets>`.
+  `<slug>_<worktree>`.
 
 ### 4.3 — Templates
 
@@ -254,34 +258,6 @@ description = "Optional short description. Leave blank for none."
 `{TICKET_EXAMPLE}` — use a sensible example like `CTL-72` for catalyst, `ADV-230` for Adva, or
 `NEW-1` as fallback.
 
-#### New worktree one-shot tab (prompts for ticket, fires `/catalyst-dev:oneshot`)
-
-Creates the worktree AND launches Claude with the oneshot invocation pre-filled. Intended for
-the walk-away workflow: user types a ticket, hits enter, Claude runs the full research →
-plan → implement → ship pipeline autonomously.
-
-The `--prompt` flag passes a literal string that Warp has already substituted (`{{ticket}}`).
-The worktree name equals the ticket, so `create-worktree.sh` makes a branch matching the
-ticket ID.
-
-```toml
-name = "{DISPLAY} 🎯 New Worktree One-Shot"
-title = "{DISPLAY}: oneshot {{ticket}}"
-color = "{COLOR}"
-
-[[panes]]
-id = "main"
-type = "terminal"
-directory = "{PROJECT_PATH}"
-commands = [
-  "{CATALYST_ROOT}/plugins/dev/scripts/launch-worktree-tab.sh --project {SLUG} --prompt '/catalyst-dev:oneshot {{ticket}}' '{{ticket}}' main",
-]
-
-[params.ticket]
-type = "text"
-description = "Ticket ID (e.g. {TICKET_EXAMPLE}). Worktree/branch = this value; Claude auto-runs /catalyst-dev:oneshot with it."
-```
-
 #### Existing worktree picker tab
 
 ```toml
@@ -300,26 +276,6 @@ commands = [
 [params.worktree]
 type = "branch"
 description = "Pick the branch whose worktree you want to open"
-```
-
-#### Orchestrator tab
-
-```toml
-name = "{DISPLAY} 🚀 Orchestrator"
-title = "{DISPLAY}: orchestrate"
-color = "{COLOR}"
-
-[[panes]]
-id = "main"
-type = "terminal"
-directory = "{PROJECT_PATH}"
-commands = [
-  "{CATALYST_ROOT}/plugins/dev/scripts/launch-orchestrator-tab.sh --project {SLUG} '{{tickets}}'",
-]
-
-[params.tickets]
-type = "text"
-description = "Use + for spaces: {TICKET_EXAMPLE}+{TICKET_EXAMPLE_2}, --cycle+current, --project+Project+Name, --auto+5"
 ```
 
 ## Phase 5: Verify & hand off

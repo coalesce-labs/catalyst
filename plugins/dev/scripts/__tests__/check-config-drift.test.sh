@@ -100,7 +100,7 @@ run "missing leaf → exit 1" expect_exit 1 bash "$DRIFT" --template "$TPL2" --c
 bash "$DRIFT" --template "$TPL2" --config "$CFG2" > "${SCRATCH}/out2" 2>/dev/null || true
 run "missing dispatchMode mentioned" expect_contains "${SCRATCH}/out2" "Missing catalyst.orchestration.dispatchMode"
 run "template default quoted" expect_contains "${SCRATCH}/out2" 'template suggests "phase-agents"'
-run "hint mentions setup-catalyst" expect_contains "${SCRATCH}/out2" "/catalyst-dev:setup-catalyst"
+run "hint mentions setup-catalyst" expect_contains "${SCRATCH}/out2" "/catalyst-foundry:setup-catalyst"
 
 # ── Test 3: nested object exists but leaf inside is missing ──────────────────
 TPL3="${SCRATCH}/tpl3.json"
@@ -284,7 +284,7 @@ run "--merge-into '' → exit 2" bash -c "bash '$DRIFT' --template '$TPL1' --con
 # The catalyst repo's own .catalyst/config.json has known drift (repository.org,
 # project.name, filter.groqModel — plan's "clean" claim was overstated). The script
 # must exit non-2 (no setup error) and emit warnings; cleaning the actual config
-# is the manual acceptance test for /catalyst-dev:setup-catalyst, not this script.
+# is the manual acceptance test for /catalyst-foundry:setup-catalyst, not this script.
 REAL_TPL="${REPO_ROOT}/plugins/dev/templates/config.template.json"
 REAL_CFG="${REPO_ROOT}/.catalyst/config.json"
 if [ -f "$REAL_TPL" ] && [ -f "$REAL_CFG" ]; then

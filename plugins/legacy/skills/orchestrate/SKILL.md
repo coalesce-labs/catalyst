@@ -266,7 +266,7 @@ from the project's Layer-1 committed config at the flat path
 `<project>/.catalyst/config.json` → `catalyst.monitor.linear.botUserId` (not the Layer-2 home
 config, not a team-keyed sub-object). This is the Linear user UUID of the Catalyst app-actor (the
 "Linear for Agents" app user) — workspace-specific, and `null` in the committed config template.
-See `/catalyst-dev:setup-catalyst` for how to obtain it (query `viewer.id` with the app-actor
+See `/catalyst-foundry:setup-catalyst` for how to obtain it (query `viewer.id` with the app-actor
 token). (The execution-core daemon is the pull-based runner of the phase-agent pipeline; it is not
 a `dispatchMode` enum value — those are `phase-agents` and `oneshot-legacy`.)
 

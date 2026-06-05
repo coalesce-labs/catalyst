@@ -312,7 +312,7 @@ if [[ -n $CONFIG_PATH ]]; then
 	if [[ -z $BOT_WORKER_ID && -z $BOT_ORCH_ID && -z $BOT_USER_ID ]]; then
 		warnings+=("No Linear bot user IDs configured — execution-core comms won't filter bot self-echo (the agent's own Linear comments look like human replies)")
 		warnings+=("  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json")
-		warnings+=("  OLD fallback: set catalyst.monitor.linear.botUserId in $CONFIG_PATH; see /catalyst-dev:setup-catalyst")
+		warnings+=("  OLD fallback: set catalyst.monitor.linear.botUserId in $CONFIG_PATH; see /catalyst-foundry:setup-catalyst")
 	fi
 
 	# Warn if config is still only in .claude/ (deprecated location)
@@ -417,7 +417,7 @@ fi
 # 7. Check template drift (CTL-489) — keys in plugins/dev/templates/config.template.json
 #    but missing from .catalyst/config.json. Non-fatal; surfaces silent fallbacks
 #    (CTL-487 spent two months in legacy mode because dispatchMode was absent)
-#    at workflow-invocation time. Resolved via /catalyst-dev:setup-catalyst.
+#    at workflow-invocation time. Resolved via /catalyst-foundry:setup-catalyst.
 if [[ -n $CONFIG_PATH ]]; then
 	DRIFT_SCRIPT="${SCRIPT_DIR}/check-config-drift.sh"
 	TEMPLATE_PATH=""

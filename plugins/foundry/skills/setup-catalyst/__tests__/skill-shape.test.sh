@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke test: setup-catalyst SKILL.md mentions the config-drift merge (CTL-489)
 # and the execution-core state-contract step (CTL-564).
-# Run: bash plugins/dev/skills/setup-catalyst/__tests__/skill-shape.test.sh
+# Run: bash plugins/foundry/skills/setup-catalyst/__tests__/skill-shape.test.sh
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL="${SCRIPT_DIR}/../SKILL.md"

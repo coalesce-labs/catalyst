@@ -17,12 +17,11 @@ Diagnose the full Catalyst environment, fix everything fixable, and verify the f
 Locate and run the health check script:
 
 ```bash
-SCRIPT=""
-if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -f "${CLAUDE_PLUGIN_ROOT}/scripts/check-setup.sh" ]]; then
-    SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/check-setup.sh"
-elif [[ -f "plugins/dev/scripts/check-setup.sh" ]]; then
-    SCRIPT="plugins/dev/scripts/check-setup.sh"
-fi
+# Backing scripts live in catalyst-dev (the shared framework core). Resolve them
+# (and fail fast with a clear message if catalyst-dev is not installed).
+source "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}/scripts/require-catalyst-dev.sh" \
+    "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}" || exit 1
+SCRIPT="${CATALYST_DEV_SCRIPTS}/check-setup.sh"
 
 bash "$SCRIPT" 2>&1 || true
 ```
@@ -190,10 +189,13 @@ https://github.com/ryanrozich/claude-code-otel if they want to set it up.
 
 ## Phase 3: Verify
 
-After fixing, run the health check script again:
+After fixing, run the health check script again (re-resolve, since each bash block
+runs in a fresh shell):
 
 ```bash
-bash "$SCRIPT" 2>&1 || true
+source "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}/scripts/require-catalyst-dev.sh" \
+    "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}" || exit 1
+bash "${CATALYST_DEV_SCRIPTS}/check-setup.sh" 2>&1 || true
 ```
 
 Re-run the drift check independently to confirm zero remaining drift (CTL-489):

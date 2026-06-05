@@ -43,7 +43,7 @@ __cd_resolve() {
   return 1
 }
 
-CATALYST_DEV_SCRIPTS="$( __cd_resolve )"
+CATALYST_DEV_SCRIPTS="$( __cd_resolve || true )"   # || true: survive caller's set -e on miss
 if [ -z "$CATALYST_DEV_SCRIPTS" ]; then
   echo "ERROR: this skill requires the 'catalyst-dev' plugin (the shared framework core)." >&2
   echo "       catalyst-dev provides the backing scripts this skill calls; it was not found." >&2

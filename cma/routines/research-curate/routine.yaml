@@ -2,8 +2,8 @@
 # Research-Curate — CMA Routine wiring (CTL-469)
 #
 # Phase 3 of Initiative 4 (Weekly thoughts curation Routine). Wraps the
-# /catalyst-dev:research-curate skill on a weekly Sunday-evening schedule.
-# The skill itself is committed at plugins/dev/skills/research-curate/SKILL.md
+# /catalyst-foundry:research-curate skill on a weekly Sunday-evening schedule.
+# The skill itself is committed at plugins/foundry/skills/research-curate/SKILL.md
 # (CTL-467 inventory + INDEX.md, CTL-468 CONTRADICTIONS.md).
 #
 # Register with:
@@ -45,7 +45,7 @@ schedule:
 # self-contained.
 prompt: |
   You are the Research-Curate routine. Run the committed Catalyst skill at
-  `plugins/dev/skills/research-curate/SKILL.md` against the writable thoughts
+  `plugins/foundry/skills/research-curate/SKILL.md` against the writable thoughts
   clone for `thoughts/shared/research/` and `thoughts/shared/plans/`.
 
   Steps the skill performs (see SKILL.md for the authoritative version):

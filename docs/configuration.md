@@ -361,7 +361,7 @@ nothing.
 ### Health check
 
 A misconfigured proxy silently breaks the daemon's Linear connectivity on a fresh or changed
-machine, which is otherwise hard to debug. `check-setup.sh` (and `/catalyst-dev:setup-catalyst`)
+machine, which is otherwise hard to debug. `check-setup.sh` (and `/catalyst-foundry:setup-catalyst`)
 therefore verify the setup whenever the env file configures a proxy, and warn loudly + actionably on
 each failure mode:
 

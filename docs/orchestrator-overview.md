@@ -95,7 +95,7 @@ ran in `oneshot-legacy` mode for two months because the new key was absent),
 `plugins/dev/scripts/check-config-drift.sh` walks the template and emits one warning per missing
 leaf key. The drift script is wired into `check-project-setup.sh`, so every workflow that runs
 the prereq check (`/orchestrate`, `/oneshot`, `/research-codebase`, etc.) prints drift warnings
-until the user runs `/catalyst-dev:setup-catalyst`, which offers a `jq` deep-merge that adds the
+until the user runs `/catalyst-foundry:setup-catalyst`, which offers a `jq` deep-merge that adds the
 missing keys while preserving every existing user value (jq's `*` recursive merge with project
 on the right). Allow-listed roots (`projectKey`, `project.ticketPrefix`, `linear.teamKey`,
 `linear.stateMap`, `linear.stateIds`) are suppressed to avoid double-warning — those are already
@@ -126,7 +126,7 @@ self-echo guard the daemon uses to tell the agent's *own* mirror comments from a
 human reply, so bot-authored issue events don't feed back as a false "human
 replied" signal or a write loop. Required for the Linear app-actor comms channel —
 i.e. when the daemon mirrors phase-agent output to Linear and wakes on human
-replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-dev:setup-catalyst`;
+replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-foundry:setup-catalyst`;
 distributed templates ship `null`.
 
 ## The 9-phase pipeline (phase-agents mode)

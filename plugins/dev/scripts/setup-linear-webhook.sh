@@ -550,8 +550,8 @@ write_linear_record "$REGISTER_KEY" "$WEBHOOK_ID" "$WEBHOOK_URL" "$RESOURCE_TYPE
 # Obtain it with the app-actor token (Layer-2 catalyst.linear.agent.accessToken)
 # via `query{viewer{id}}`, write it to .catalyst/config.json ->
 # catalyst.monitor.linear.botUserId, then restart the monitor + daemon. See
-# /catalyst-dev:setup-catalyst or docs/configuration.md "Linear Webhook Bot Identity".
-echo "NOTE: set catalyst.monitor.linear.botUserId (the app-actor viewer.id, NOT this admin token's) in .catalyst/config.json — see /catalyst-dev:setup-catalyst. Not written here." >&2
+# /catalyst-foundry:setup-catalyst or docs/configuration.md "Linear Webhook Bot Identity".
+echo "NOTE: set catalyst.monitor.linear.botUserId (the app-actor viewer.id, NOT this admin token's) in .catalyst/config.json — see /catalyst-foundry:setup-catalyst. Not written here." >&2
 
 cat <<EOF
 Created Linear webhook $WEBHOOK_ID for $WEBHOOK_URL

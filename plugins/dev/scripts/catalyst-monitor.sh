@@ -162,11 +162,11 @@ bootstrap() {
   fi
 
   if [[ ! -d "$CATALYST_DIR" ]]; then
-    errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-dev:setup-catalyst first")
+    errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-foundry:setup-catalyst first")
   fi
 
   if [[ ! -d "$CATALYST_DIR/wt" ]]; then
-    errors+=("Worktree directory missing: $CATALYST_DIR/wt/ — run /catalyst-dev:setup-catalyst first")
+    errors+=("Worktree directory missing: $CATALYST_DIR/wt/ — run /catalyst-foundry:setup-catalyst first")
   fi
 
   if [[ ${#errors[@]} -gt 0 ]]; then
@@ -180,7 +180,7 @@ bootstrap() {
   local db_file="${CATALYST_DB_FILE:-$CATALYST_DIR/catalyst.db}"
   if [[ ! -f "$db_file" ]]; then
     echo "Warning: Session database not found ($db_file) — session history will be empty"
-    echo "  Run /catalyst-dev:setup-catalyst to initialize"
+    echo "  Run /catalyst-foundry:setup-catalyst to initialize"
   fi
 
   if [[ -d "$MONITOR_DIR" ]]; then
