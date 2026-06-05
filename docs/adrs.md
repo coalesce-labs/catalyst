@@ -567,7 +567,7 @@ status bar.
 **Status**: Accepted, 2026-05-17.
 
 **Context**: Pre-CTL-452 orchestrators dispatched one long-lived
-`claude -p /catalyst-dev:oneshot <TICKET> --auto-merge` per ticket. That worker
+`claude -p /catalyst-legacy:oneshot <TICKET> --auto-merge` per ticket. That worker
 streamed JSON for the full lifecycle — research → plan → implement → verify →
 review → PR → merge → deploy — across hundreds of turns in a single context
 window. Three problems compounded:

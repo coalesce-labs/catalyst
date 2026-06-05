@@ -103,7 +103,7 @@ JSON
 
 ## Step 5: Suggest orchestrator runs
 
-Query Linear for tickets that look ready for `/catalyst-dev:orchestrate`:
+Query Linear for tickets that look ready for `/catalyst-legacy:orchestrate`:
 
 ```bash
 linearis issues list \
