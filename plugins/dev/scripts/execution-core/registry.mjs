@@ -64,12 +64,13 @@ export function getProjectConfig(team) {
 // monitor + linear-query layer needs. The entry's `team` lives at the top level
 // (the eligibleQuery object never carries it); this is the single place it is
 // merged in and the per-field defaults are applied. `status` defaults to the
-// execution-core contract state "Ready"; `triageStatus` to "Triage" (CTL-565).
+// start state "Todo" (CTL-731: "Ready" was removed from Linear 2026-06-02, so
+// the old "Ready" default was a latent trap); `triageStatus` to "Triage" (CTL-565).
 export function resolveEligibleQuery(entry) {
   const eq = entry?.eligibleQuery ?? {};
   return {
     team: entry?.team ?? null,
-    status: eq.status ?? "Ready",
+    status: eq.status ?? "Todo",
     triageStatus: eq.triageStatus ?? "Triage",
     project: eq.project ?? null,
     label: eq.label ?? null,
