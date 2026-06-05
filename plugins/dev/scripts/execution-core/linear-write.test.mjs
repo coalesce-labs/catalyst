@@ -547,35 +547,83 @@ describe("applyTriageStatus", () => {
   });
 });
 
-// CTL-549: removeLabel — remove a single label via linearis --label-mode remove
+// CTL-549: removeLabel — remove a single label without clobbering the others.
+// linearis 2026.4.9 has no single-label-remove primitive (`--label-mode` only
+// accepts add|overwrite; `remove` is REJECTED), so removeLabel read-modify-writes:
+// fetch the current label set, filter out the target, overwrite with the
+// remainder (or --clear-labels when the remainder is empty).
 describe("removeLabel (CTL-549)", () => {
-  test("shells linearis issues update with --label-mode remove", async () => {
+  test("reads current labels then overwrites with the remainder (preserves others)", async () => {
     const cmds = [];
     const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    await removeLabel("CTL-1", "needs-human/question", { exec });
-    expect(cmds).toHaveLength(1);
-    expect(cmds[0].args).toContain("--label-mode");
-    expect(cmds[0].args).toContain("remove");
-    expect(cmds[0].args).toContain("needs-human/question");
-    expect(cmds[0].args).toContain("CTL-1");
-  });
-
-  test("returns { removed: true } on exit 0", async () => {
-    const exec = () => ({ code: 0, stdout: "", stderr: "" });
-    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    // ticket has ['blocked','orchestrator']; remove 'blocked' → overwrite with 'orchestrator'
+    const fetchLabels = () => ["blocked", "orchestrator"];
+    const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
     expect(result.removed).toBe(true);
+    expect(cmds).toHaveLength(1);
+    const args = cmds[0].args;
+    expect(args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
+    expect(args).toContain("--labels");
+    expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator");
+    expect(args).toContain("--label-mode");
+    expect(args[args.indexOf("--label-mode") + 1]).toBe("overwrite");
+    // the rejected `remove` value must never be emitted anymore
+    expect(args).not.toContain("remove");
   });
 
-  test("returns { removed: false, reason } on non-zero exit", async () => {
+  test("multiple remaining labels are joined into a single --labels arg", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const fetchLabels = () => ["needs-human/question", "orchestrator", "bug"];
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
+    expect(result.removed).toBe(true);
+    const args = cmds[0].args;
+    expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator,bug");
+    expect(args[args.indexOf("--label-mode") + 1]).toBe("overwrite");
+  });
+
+  test("idempotent — label already absent: returns removed:true with NO write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const fetchLabels = () => ["orchestrator", "bug"]; // target 'blocked' not present
+    const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
+    expect(result.removed).toBe(true);
+    expect(cmds).toHaveLength(0); // no overwrite issued
+  });
+
+  test("empty remaining set → --clear-labels (not an empty --labels overwrite)", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const fetchLabels = () => ["needs-human/question"]; // the only label is the one removed
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
+    expect(result.removed).toBe(true);
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].args).toEqual(["issues", "update", "CTL-1", "--clear-labels"]);
+    expect(cmds[0].args).not.toContain("--labels");
+  });
+
+  test("read failure (fetchLabels returns null) → removed:false, reason:transient, no write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const fetchLabels = () => null; // linearis read failed
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("transient");
+    expect(cmds).toHaveLength(0);
+  });
+
+  test("returns { removed: false, reason } on non-zero overwrite exit", async () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
-    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    const fetchLabels = () => ["needs-human/question", "orchestrator"];
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(false);
     expect(result.reason).toBeTruthy();
   });
 
   test("returns { removed: false, reason: 'transient' } on thrown exec", async () => {
     const exec = () => { throw new Error("spawn failed"); };
-    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    const fetchLabels = () => ["needs-human/question", "orchestrator"];
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(false);
     expect(result.reason).toBe("transient");
   });
