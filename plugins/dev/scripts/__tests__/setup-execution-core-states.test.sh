@@ -139,6 +139,94 @@ run "mutation contains the state name" \
 run "mutation contains the type" \
   bash -c "echo '$MUTATION' | grep -q 'started'"
 
+# desired_git_automations — exactly start→PR, merge→Done, no review (CTL-759).
+DESIRED_GA="$(desired_git_automations)"
+
+run "desired_git_automations is valid JSON" \
+  bash -c "echo '$DESIRED_GA' | jq -e ."
+
+run "desired_git_automations has exactly 2 entries" \
+  bash -c "echo '$DESIRED_GA' | jq -e 'length == 2'"
+
+run "desired_git_automations start -> PR" \
+  bash -c "echo '$DESIRED_GA' | jq -e '.[] | select(.event==\"start\") | .state == \"PR\"'"
+
+run "desired_git_automations merge -> Done" \
+  bash -c "echo '$DESIRED_GA' | jq -e '.[] | select(.event==\"merge\") | .state == \"Done\"'"
+
+run "desired_git_automations has no review automation" \
+  bash -c "! echo '$DESIRED_GA' | jq -e '.[] | select(.event==\"review\")'"
+
+# reconcile_git_automation_states — drive the team to the contract. The function
+# is best-effort and tolerant; we assert it issues the right mutations and never
+# emits a null stateId. Fetched states carry PR (s-pr) and Done (s-done).
+FETCHED_GA='[{"id":"s-pr","name":"PR","type":"started"},{"id":"s-done","name":"Done","type":"completed"},{"id":"s-triage","name":"Triage","type":"started"}]'
+
+# A fake curl that logs every request body, branches on git-automation ops, and
+# returns a team whose automations are: start→Triage (WRONG), merge→Done (right),
+# plus a review node (must be deleted).
+make_ga_curl() {
+  local bin_dir="$1" log="$2"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body="\$(cat 2>/dev/null)"
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+echo "\$body" >> "${log}"
+case "\$body" in
+  *gitAutomationStateCreate*) echo '{"data":{"gitAutomationStateCreate":{"success":true}}}' ;;
+  *gitAutomationStateUpdate*) echo '{"data":{"gitAutomationStateUpdate":{"success":true}}}' ;;
+  *gitAutomationStateDelete*) echo '{"data":{"gitAutomationStateDelete":{"success":true}}}' ;;
+  *gitAutomationStates*) echo '{"data":{"team":{"gitAutomationStates":{"nodes":[{"id":"ga-start","event":"start","state":{"id":"s-triage","name":"Triage"}},{"id":"ga-merge","event":"merge","state":{"id":"s-done","name":"Done"}},{"id":"ga-review","event":"review","state":{"id":"s-val","name":"Validate"}}]}}}}' ;;
+  *) echo '{"data":{}}' ;;
+esac
+exit 0
+SCRIPT
+  chmod +x "${bin_dir}/curl"
+}
+
+GA_BIN="${SCRATCH}/ga/bin"
+GA_LOG="${SCRATCH}/ga/req.log"
+mkdir -p "${SCRATCH}/ga"
+: > "$GA_LOG"
+make_ga_curl "$GA_BIN" "$GA_LOG"
+
+PATH="$GA_BIN:$PATH" reconcile_git_automation_states "team-xyz" "fake-token" "$FETCHED_GA" \
+  > "${SCRATCH}/ga-out" 2>&1
+
+run "reconcile updates the wrong 'start' automation (Triage -> PR)" \
+  bash -c "grep -q 'gitAutomationStateUpdate' '$GA_LOG' && grep -q 's-pr' '$GA_LOG'"
+
+run "reconcile deletes the 'review' automation node" \
+  bash -c "grep -q 'gitAutomationStateDelete' '$GA_LOG' && grep -q 'ga-review' '$GA_LOG'"
+
+run "reconcile no-ops the already-correct 'merge' automation (no update for merge)" \
+  bash -c "! grep -q 's-done' '$GA_LOG' || grep -q 'already correct' '${SCRATCH}/ga-out'"
+
+run "reconcile never issues a create with a missing target state" \
+  bash -c "echo '$FETCHED_GA' | jq -e 'map(.name) | index(\"PR\") and index(\"Done\")'"
+
+# Missing target state => WARN, never a null stateId, exit stays 0.
+FETCHED_NO_PR='[{"id":"s-done","name":"Done","type":"completed"},{"id":"s-triage","name":"Triage","type":"started"}]'
+GA_BIN2="${SCRATCH}/ga2/bin"
+GA_LOG2="${SCRATCH}/ga2/req.log"
+mkdir -p "${SCRATCH}/ga2"
+: > "$GA_LOG2"
+make_ga_curl "$GA_BIN2" "$GA_LOG2"
+
+PATH="$GA_BIN2:$PATH" reconcile_git_automation_states "team-xyz" "fake-token" "$FETCHED_NO_PR" \
+  > "${SCRATCH}/ga2-out" 2>&1
+GA2_RC=$?
+
+run "missing target 'PR' => WARN about skipping start" \
+  bash -c "grep -qi 'PR' '${SCRATCH}/ga2-out' && grep -qi 'skipping' '${SCRATCH}/ga2-out'"
+
+run "missing target state => no null stateId issued in any request" \
+  bash -c "! grep -qE 'stateId\":null|stateId\": *null' '$GA_LOG2'"
+
+run "reconcile tolerant — returns 0 even with a missing target state" \
+  bash -c "[ '$GA2_RC' = '0' ]"
+
 # ─── Layer 2: E2E with a stubbed curl ────────────────────────────────────────
 
 # Build a fixture repo with .catalyst/config.json + a git repo + secrets.

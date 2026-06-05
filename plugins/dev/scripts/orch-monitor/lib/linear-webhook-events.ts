@@ -61,6 +61,10 @@ export type LinearWebhookEvent =
        * without re-parsing the raw webhook payload.
        */
       previousFromValues: Record<string, unknown>;
+      /** Current description text from data.description; null when absent. CTL-749. */
+      description: string | null;
+      /** True when "description" key appears in updatedFrom (description was edited). CTL-749. */
+      descriptionChanged: boolean;
     }
   | {
       kind: "comment";
@@ -90,6 +94,25 @@ export type LinearWebhookEvent =
       kind: "issue_label";
       action: "create" | "update" | "remove";
       labelId: string | null;
+      data: Record<string, unknown>;
+    }
+  | {
+      kind: "agent_session";
+      action: "create" | "update" | "remove";
+      sessionId: string | null;
+      issueId: string | null;
+      actorId: string | null;
+      data: Record<string, unknown>;
+    }
+  | {
+      kind: "mention";
+      action: "create" | "update" | "remove";
+      ticket: string | null;
+      commentId: string | null;
+      issueId: string | null;
+      body: string | null;
+      authorId: string | null;
+      authorName: string | null;
       data: Record<string, unknown>;
     }
   | { kind: "ignored"; reason: string };
@@ -165,6 +188,8 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const toProject = projectObj !== null ? getOptStr(projectObj, "name") : null;
   const toProjectId =
     projectObj !== null ? getOptStr(projectObj, "id") : getOptStr(data, "projectId");
+  const description = getOptStr(data, "description") ?? null; // CTL-749
+  const descriptionChanged = updatedFromKeys.includes("description"); // CTL-749
   return {
     kind: "issue",
     action,
@@ -183,6 +208,8 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     toProject,
     toProjectId,
     previousFromValues: updatedFrom,
+    description,
+    descriptionChanged,
   };
 }
 
@@ -277,6 +304,53 @@ function parseIssueLabel(payload: Record<string, unknown>): LinearWebhookEvent {
   };
 }
 
+function parseAgentSessionEvent(payload: Record<string, unknown>): LinearWebhookEvent {
+  const action = normalizeAction(payload.action);
+  if (action === null) return ignored(`AgentSessionEvent: unknown action ${actionLabel(payload.action)}`);
+  const data = isObject(payload.data) ? payload.data : null;
+  if (data === null) return ignored("AgentSessionEvent: missing data");
+  const actor = isObject(payload.actor) ? payload.actor : null;
+  return {
+    kind: "agent_session",
+    action,
+    sessionId: getOptStr(data, "id"),
+    issueId: getOptStr(data, "issueId"),
+    actorId: actor !== null ? getOptStr(actor, "id") : null,
+    data,
+  };
+}
+
+function parseMentionEvent(payload: Record<string, unknown>): LinearWebhookEvent {
+  const action = normalizeAction(payload.action);
+  if (action === null) return ignored(`issueCommentMention: unknown action ${actionLabel(payload.action)}`);
+  const data = isObject(payload.data) ? payload.data : null;
+  if (data === null) return ignored("issueCommentMention: missing data");
+  let ticket: string | null = null;
+  if (isObject(data.issue)) {
+    ticket = getOptStr(data.issue, "identifier");
+  }
+  const actor = isObject(payload.actor) ? payload.actor : null;
+  const userObj = isObject(data.user) ? data.user : null;
+  const authorId =
+    (actor !== null ? getOptStr(actor, "id") : null) ??
+    (userObj !== null ? getOptStr(userObj, "id") : null) ??
+    getOptStr(data, "userId");
+  const authorName =
+    (actor !== null ? getOptStr(actor, "name") : null) ??
+    (userObj !== null ? getOptStr(userObj, "name") : null);
+  return {
+    kind: "mention",
+    action,
+    ticket,
+    commentId: getOptStr(data, "id"),
+    issueId: getOptStr(data, "issueId"),
+    body: getOptStr(data, "body"),
+    authorId,
+    authorName,
+    data,
+  };
+}
+
 /**
  * Parse a Linear webhook payload by `type` (read from the `Linear-Event`
  * header; passed in by the handler). The payload's own `type` field should
@@ -297,6 +371,10 @@ export function parseLinearWebhookEvent(eventName: string, payload: unknown): Li
       return parseReaction(payload);
     case "IssueLabel":
       return parseIssueLabel(payload);
+    case "AgentSessionEvent":
+      return parseAgentSessionEvent(payload);
+    case "issueCommentMention":
+      return parseMentionEvent(payload);
     default:
       return ignored(`unhandled type: ${eventType}`);
   }

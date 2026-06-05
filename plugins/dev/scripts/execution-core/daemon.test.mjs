@@ -24,9 +24,14 @@ import {
   consumeEventTail,
   parseEventTailChunk,
   resolveBootConcurrency,
+  handleCommentWake,
   __resetEventTailCursorForTest,
   __getEventTailLeftoverForTest,
+  __getEventPollTimerForTest,
+  createCommentInboxWriter,
+  createUpdateInboxWriter,
 } from "./daemon.mjs";
+import { getEventLogPath } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
@@ -143,6 +148,23 @@ describe("startDaemon", () => {
     });
     expect(bootConcurrency).toEqual(concurrency);
     expect(schedulerConcurrency).toEqual(concurrency);
+  });
+
+  // CTL-716: the daemon also forwards concurrency into startMonitor so the
+  // monitor's triage slot gate uses the same ceiling as the scheduler.
+  test("CTL-716: threads concurrency into startMonitor", () => {
+    const concurrency = { maxParallel: 4, minParallel: 1, maxParallelCeiling: 10 };
+    let monitorConcurrency = "unset";
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      startMonitor: (o) => {
+        monitorConcurrency = o.concurrency;
+      },
+      startScheduler: () => {},
+      watchRegistry: false,
+      concurrency,
+    });
+    expect(monitorConcurrency).toEqual(concurrency);
   });
 
   // CTL-665: default concurrency is {} when not passed (main() supplies it from
@@ -703,6 +725,118 @@ describe("consumeEventTail (byte-offset + partial-line tail)", () => {
   });
 });
 
+// CTL-769: the reaper must drain reap-intents via a setInterval POLL fallback,
+// not solely via fs.watch + debounce. On the continuously-appended unified
+// event log the debounce is perpetually reset, so consumeEventTail only ever
+// fired during >5s idle gaps and the reaper starved exactly when workers were
+// busy (~101k reap-requested vs ~216 reap-complete live). Mirrors the sibling
+// new-work tailer's poll fallback (monitor.mjs:684-685 / TAILER_POLL_INTERVAL_MS).
+describe("startReaperAndTimer — poll fallback drains reap-intents (CTL-769)", () => {
+  test("a reap-requested line appended after boot is drained by the poll, NOT fs.watch", async () => {
+    const handled = [];
+    // Fake reaper: record every dispatched event. .handle returns a resolved
+    // promise so the production .catch(...) chain is exercised without throwing
+    // and without any `claude` shell-out.
+    const fakeReaper = {
+      handle: (event) => {
+        handled.push(event);
+        return Promise.resolve();
+      },
+      // bootReplay runs once at startReaperAndTimer; no-op for the test.
+      bootReplay: () => Promise.resolve(),
+    };
+
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      // No registry watcher — isolate the reaper event-log path.
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: () => fakeReaper,
+      // Tiny poll so the drain is fast and deterministic.
+      pollMs: 10,
+      // A huge debounce makes the fs.watch path (if it ever fires) schedule a
+      // consumeEventTail far beyond this test's deadline — so any drain we
+      // observe within ~2s must have come from the poll interval, not fs.watch.
+      debounceMs: 600_000,
+    });
+
+    // Append a reap-requested line to the REAL event log path the daemon polls.
+    // startReaperAndTimer set the cursor to the current tail (0 here, since the
+    // file does not exist yet), so this newly-appended line is "new" bytes.
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+    const reapLine =
+      JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "poll-abc" }) + "\n";
+    appendFileSync(logPath, reapLine);
+
+    // Poll-wait (deadline loop) until the reaper handles it — proving the
+    // setInterval drained the tail without any fs.watch event.
+    const deadline = Date.now() + 3000;
+    while (handled.length === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+
+    const reaps = handled.filter((e) => e.event === "phase.yield.reap-requested");
+    expect(reaps).toHaveLength(1);
+    expect(reaps[0].bg_job_id).toBe("poll-abc");
+  });
+
+  test("stopDaemon clears the poll interval — no further drains after stop", async () => {
+    const handled = [];
+    const fakeReaper = {
+      handle: (event) => {
+        handled.push(event);
+        return Promise.resolve();
+      },
+      bootReplay: () => Promise.resolve(),
+    };
+
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      enableReaper: true,
+      makeReaper: () => fakeReaper,
+      pollMs: 10,
+      debounceMs: 600_000,
+    });
+
+    const logPath = getEventLogPath();
+    mkdirSync(dirname(logPath), { recursive: true });
+
+    // The poll interval is live after boot. Assert the handle DIRECTLY so this
+    // test pins stopDaemon's clearInterval — a behavioral "0 drains after stop"
+    // check alone is masked by stopDaemon also nulling _reaper (consumeEventTail
+    // short-circuits on a null reaper), so a leaked, un-cleared interval would
+    // no-op and the behavioral assertion would still pass. Removing the
+    // clearInterval block from stopDaemon must make THIS test red.
+    expect(__getEventPollTimerForTest()).not.toBeNull();
+
+    // Stop the daemon BEFORE appending — the interval must be cleared so the
+    // newly-appended line is never drained.
+    stopDaemon();
+
+    // The handle is cleared (the real teardown pin, independent of the reaper).
+    expect(__getEventPollTimerForTest()).toBeNull();
+
+    appendFileSync(
+      logPath,
+      JSON.stringify({ event: "phase.yield.reap-requested", bg_job_id: "after-stop" }) + "\n"
+    );
+
+    // Belt-and-suspenders: give the (now-cleared) interval ample wall-clock time
+    // to misfire and confirm no drain occurs.
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(handled.filter((e) => e.event === "phase.yield.reap-requested")).toHaveLength(0);
+  });
+});
+
 // CTL-701 Phase 3: boot marker exists when recover() (detectColdStart) reads it
 describe("startDaemon — writeBootMarker ordering (CTL-701)", () => {
   test("daemon-boot.json written BEFORE recover() runs", () => {
@@ -802,5 +936,259 @@ describe("auto-tuner wiring (CTL-684)", () => {
     } catch {}
     // PID file must be removed by stopDaemon's cleanup path
     if (pidFile) expect(existsSync(pidFile)).toBe(false);
+  });
+});
+
+// CTL-549: handleCommentWake — re-dispatch a parked (needs-input) ticket
+describe("handleCommentWake (CTL-549)", () => {
+  const tmpOrcDir = () => {
+    const dir = mkdtempSync(join(tmpdir(), "ctl-549-orch-"));
+    return dir;
+  };
+  const writeSignal = (orch, ticket, phase, data) => {
+    const workerDir = join(orch, "workers", ticket);
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, ...data }),
+    );
+  };
+
+  test("re-dispatches ticket whose signal has status=needs-input", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+      bg_job_id: "job123",
+    });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c1", body: "Here is the answer" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].ticket).toBe("CTL-1");
+    expect(dispatched[0].phase).toBe("implement");
+    expect(dispatched[0].opts.handoffPath).toBe("/path/handoff.md");
+  });
+
+  test("no-ops for ticket with status=running (not parked)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "running" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "reply" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("calls removeLabel before dispatch on re-dispatch", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+    });
+    const removed = [];
+    const dispatchOrder = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", body: "answer" },
+      {
+        orchDir: orch,
+        dispatch: () => { dispatchOrder.push("dispatch"); return { code: 0 }; },
+        removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
+      },
+    );
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human/question" });
+    expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
+  });
+
+  test("no-ops when ticket has no worker dir", async () => {
+    const orch = tmpOrcDir();
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-99", body: "hello" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("no-ops when parsed event has no ticket", async () => {
+    const orch = tmpOrcDir();
+    const dispatched = [];
+    await handleCommentWake(
+      { body: "hello" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+        removeLabel: async () => {},
+      },
+    );
+    expect(dispatched).toHaveLength(0);
+  });
+
+  test("no-ops (self-echo) when comment authorId matches botUserId", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+    });
+    const dispatched = [];
+    const removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c1", body: "I am the bot", authorId: "bot-user-id" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async (t, l) => { removed.push({ ticket: t, label: l }); },
+        botUserId: "bot-user-id",
+      },
+    );
+    expect(dispatched).toHaveLength(0); // self-echo suppressed: no re-dispatch
+    expect(removed).toHaveLength(0);    // and the human-attention label is preserved
+  });
+
+  test("re-dispatches when comment authorId does NOT match botUserId (human reply)", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", {
+      status: "needs-input",
+      parkedFrom: "implement",
+      handoffPath: "/path/handoff.md",
+    });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1", commentId: "c2", body: "Here is the answer", authorId: "human-user-id" },
+      {
+        orchDir: orch,
+        dispatch: (dir, ticket, phase, opts) => { dispatched.push({ ticket, phase, opts }); return { code: 0 }; },
+        removeLabel: async () => {},
+        botUserId: "bot-user-id",
+      },
+    );
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0].ticket).toBe("CTL-1");
+    expect(dispatched[0].phase).toBe("implement");
+  });
+});
+
+// CTL-749: inbox writer factory functions
+describe("inbox writer — createCommentInboxWriter (CTL-749)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-comment-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("writes comment entry to inbox.jsonl when ticket is in-flight", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket, commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines[0]).toMatchObject({ kind: "comment", ticket, body: "hello" });
+    expect(lines[0].receivedAt).toBeTruthy();
+  });
+
+  test("skips write when workers/<ticket>/ does not exist (ticket not in-flight)", () => {
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket: "CTL-99", commentId: "c1", body: "hello", authorId: "u1", authorName: "Ryan" });
+    expect(existsSync(join(tmpDir, "workers", "CTL-99", "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when authorId matches botUserId (self-echo filter)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({ ticket, commentId: "c1", body: "mirror", authorId: "bot-user-id", authorName: "Bot" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when authorId does NOT match botUserId", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "bot-user-id");
+    writer({ ticket, commentId: "c2", body: "human reply", authorId: "human-user", authorName: "Alice" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+
+  test("appends multiple entries sequentially", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createCommentInboxWriter(tmpDir, "");
+    writer({ ticket, commentId: "c1", body: "first", authorId: "u1", authorName: "A" });
+    writer({ ticket, commentId: "c2", body: "second", authorId: "u2", authorName: "B" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines).toHaveLength(2);
+    expect(lines[1].body).toBe("second");
+  });
+});
+
+describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-update-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("writes description_changed entry when descriptionChanged is true and ticket is in-flight", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket, description: "new text", descriptionChanged: true, actorId: "u1", actorName: "Ryan" });
+    const lines = readFileSync(join(tmpDir, "workers", ticket, "inbox.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    expect(lines[0]).toMatchObject({ kind: "description_changed", ticket, description: "new text" });
+    expect(lines[0].receivedAt).toBeTruthy();
+  });
+
+  test("skips write when descriptionChanged is false", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket, description: null, descriptionChanged: false, actorId: "u1" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when workers/<ticket>/ does not exist (ticket not in-flight)", () => {
+    const writer = createUpdateInboxWriter(tmpDir, "");
+    writer({ ticket: "CTL-99", description: "x", descriptionChanged: true, actorId: "u1" });
+    expect(existsSync(join(tmpDir, "workers", "CTL-99", "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when actorId matches botUserId (self-echo filter)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const writer = createUpdateInboxWriter(tmpDir, "bot-id");
+    writer({ ticket, description: "bot edit", descriptionChanged: true, actorId: "bot-id", actorName: "Bot" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+});
+
+// CTL-549 + CTL-749: daemon wires onComment (handleCommentWake + inbox writer) and onUpdate
+describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)", () => {
+  test("passes onComment and onUpdate callbacks to startMonitor", () => {
+    let capturedOpts = null;
+    startDaemon({
+      recover: () => {},
+      reconcileBoot: () => {},
+      startMonitor: (opts) => { capturedOpts = opts; },
+      startScheduler: () => {},
+      watchRegistry: false,
+    });
+    stopDaemon();
+    expect(typeof capturedOpts?.onComment).toBe("function");
+    expect(typeof capturedOpts?.onUpdate).toBe("function");
   });
 });

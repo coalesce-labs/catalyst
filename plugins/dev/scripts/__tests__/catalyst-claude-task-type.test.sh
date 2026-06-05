@@ -99,6 +99,16 @@ else
   fail "task.type=interactive" "OUT: $OUT"
 fi
 
+# ─── Test 2b (CTL-760): catalyst.exec_context=interactive in OTEL attrs
+echo ""
+echo "Test 2b: catalyst.exec_context=interactive appended to OTEL attrs"
+OUT=$(run_wrapper t2b "/catalyst-dev:create-plan")
+if [[ "$OUT" == *"catalyst.exec_context=interactive"* ]]; then
+  pass "catalyst.exec_context=interactive present in OTEL_RESOURCE_ATTRIBUTES"
+else
+  fail "catalyst.exec_context=interactive" "OUT: $OUT"
+fi
+
 # ─── Test 3: --skill flag wins over leading slash
 echo ""
 echo "Test 3: --skill flag is the SKILL source"
@@ -120,8 +130,12 @@ OUT=$(
 )
 # Extract just the OTEL line (between --OTEL-- and --END-- markers).
 OTEL_LINE=$(printf '%s\n' "$OUT" | awk '/^--OTEL--$/{flag=1; next} /^--END--$/{flag=0} flag')
-if [[ "$OTEL_LINE" == "task.type=preset" ]]; then
-  pass "parent shell's task.type=preset preserved exactly"
+# CTL-760: the parent's task.type value must still win (first-writer-wins), and
+# task.type must appear exactly once. The exec_context append is additive and
+# orthogonal, so the line may now also carry catalyst.exec_context=interactive.
+TASK_TYPE_COUNT=$(printf '%s' "$OTEL_LINE" | grep -oE 'task\.type=' | wc -l | tr -d ' ')
+if [[ "$OTEL_LINE" == *"task.type=preset"* && "$TASK_TYPE_COUNT" == "1" ]]; then
+  pass "parent shell's task.type=preset preserved (task.type appears once)"
 else
   fail "parent shell's task.type=preset preserved" "OTEL line: '$OTEL_LINE'"
 fi

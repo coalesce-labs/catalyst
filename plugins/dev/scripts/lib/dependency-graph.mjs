@@ -10,7 +10,7 @@
 
 // Statuses treated as finished. A finished issue never blocks a dependent and
 // never appears in the ready/blocked sets. Override via options.terminalStatuses.
-const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
+export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 
 // buildDependencyEdges — normalize Linear relations into canonical directed
 // edges (CTL-530). An edge is kept when both endpoints are in-set, OR (CTL-565

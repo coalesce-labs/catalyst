@@ -17,6 +17,9 @@ function loadMigrations(): string[] {
     "001_initial_schema.sql",
     "002_session_context.sql",
     "003_archives.sql",
+    "004_iteration_counts.sql",
+    "005_claude_session_metadata.sql",
+    "006_num_turns.sql",
   ].map((f) => readFileSync(join(migDir, f), "utf8"));
 }
 

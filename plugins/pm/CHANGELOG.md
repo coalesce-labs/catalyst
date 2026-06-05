@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.0.0...catalyst-pm-v7.1.0) (2026-06-03)
+
+
+### Features
+
+* **pm:** AI-native estimation tooling — corpus extractor, calibrated scorer, reference-class lookup (CTL-746) ([#1265](https://github.com/coalesce-labs/catalyst/issues/1265)) ([4f56000](https://github.com/coalesce-labs/catalyst/commit/4f5600069d1b6d7ed277b7fa6f689b85851529f3))
+
 ## [7.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v6.1.0...catalyst-pm-v7.0.0)
 
 May 11, 2026

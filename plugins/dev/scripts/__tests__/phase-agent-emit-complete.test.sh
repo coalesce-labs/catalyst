@@ -320,6 +320,197 @@ echo '{"ticket":"CTL-100","phase":"implement","status":"running"}' >"$SIGNAL"
 CATALYST_GENERATION=2 "$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
 assert_eq "done" "$(jq -r '.status' "$SIGNAL")" "signal without generation field still emits (no fence data)"
 
+# ─── CTL-549: park status ───────────────────────────────────────────────────
+
+echo ""
+echo "Test 17 (CTL-549): --status park is accepted (exit 0)"
+fresh_env t17
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 \
+	--status park --handoff-path /tmp/handoff.md \
+	>/dev/null 2>&1
+assert_eq "0" "$?" "park: script exits 0"
+
+echo ""
+echo "Test 18 (CTL-549): signal file gets status=needs-input and parkedFrom=implement"
+fresh_env t18
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' \
+	>"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 \
+	--status park --handoff-path /tmp/handoff.md >/dev/null 2>&1
+SIG="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+STATUS=$(jq -r '.status' "$SIG")
+PARKED_FROM=$(jq -r '.parkedFrom' "$SIG")
+HANDOFF=$(jq -r '.handoffPath' "$SIG")
+assert_eq "needs-input" "$STATUS" "park: signal status=needs-input"
+assert_eq "implement" "$PARKED_FROM" "park: signal parkedFrom=implement"
+assert_eq "/tmp/handoff.md" "$HANDOFF" "park: signal handoffPath set"
+
+echo ""
+echo "Test 19 (CTL-549): completedAt is NOT set on park (non-terminal)"
+fresh_env t19
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' \
+	>"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status park >/dev/null 2>&1
+SIG="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+COMPLETED_AT=$(jq -r '.completedAt // "absent"' "$SIG")
+assert_eq "absent" "$COMPLETED_AT" "park: completedAt not set"
+
+echo ""
+echo "Test 20 (CTL-549): event name is phase.implement.park.CTL-100"
+fresh_env t20
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status park >/dev/null 2>&1
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 20: no event line emitted for park"
+else
+	EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"')
+	assert_eq "phase.implement.park.CTL-100" "$EVENT_NAME" "park: event name is phase.implement.park.CTL-100"
+fi
+
+echo ""
+echo "Test 21 (CTL-549): unknown status 'parked' still rejected (exit 1)"
+fresh_env t21
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status parked 2>/dev/null
+assert_eq "1" "$?" "invalid status parked: exits 1"
+
+# ─── CTL-760: canonical resource block (project / linear.key / catalyst.orchestration)
+# build_canonical_line supports a resource block (lib/canonical-event.sh) but the
+# emit call previously only passed --linear-ticket, leaving the resource block's
+# project / linear.key / catalyst.orchestration unset on the worker's terminal
+# event. CTL-760 threads --project / --linear-key / --catalyst-orchestration so the
+# completion event carries the same orchestration context the worker's metrics do,
+# plus a duration_seconds payload field when the signal has both startedAt and
+# completedAt.
+
+echo ""
+echo "Test 22 (CTL-760): completion event carries the resource block (project / linear.key / catalyst.orchestration)"
+fresh_env t22
+# Provide a .catalyst/config.json with a projectKey the script can resolve, and
+# run from that directory so the ancestor-config lookup finds it.
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/.catalyst"
+cat >"${PROJ_DIR}/.catalyst/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-triage.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"triage"}' >"$SIGNAL"
+(cd "$PROJ_DIR" &&
+	CATALYST_ORCHESTRATOR_ID=CTL-100 "$EMIT_SCRIPT" --phase triage --ticket CTL-100 \
+		--status complete --orch-id CTL-100 >/dev/null 2>&1)
+LINE=$(read_event_line)
+if [[ -z $LINE ]]; then
+	fail "Test 22: no event line emitted"
+else
+	RES_PROJECT=$(echo "$LINE" | jq -r '.resource["project"] // empty')
+	RES_LINEAR=$(echo "$LINE" | jq -r '.resource["linear.key"] // empty')
+	RES_ORCH=$(echo "$LINE" | jq -r '.resource["catalyst.orchestration"] // empty')
+	assert_eq "test-proj" "$RES_PROJECT" "resource.project resolved from config projectKey"
+	assert_eq "CTL-100" "$RES_LINEAR" "resource[\"linear.key\"] = ticket"
+	assert_eq "CTL-100" "$RES_ORCH" "resource[\"catalyst.orchestration\"] = orch id"
+fi
+
+echo ""
+echo "Test 23 (CTL-760): duration_seconds payload computed from startedAt/completedAt"
+fresh_env t23
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+# startedAt 90s before completedAt → duration_seconds should be 90.
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","startedAt":"2026-06-04T00:00:00Z","completedAt":"2026-06-04T00:01:30Z"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+DURATION=$(echo "$LINE" | jq -r '.body.payload.duration_seconds // empty')
+assert_eq "90" "$DURATION" "body.payload.duration_seconds = 90 (completedAt - startedAt)"
+
+echo ""
+echo "Test 24 (CTL-760): duration_seconds omitted when signal lacks timestamps"
+fresh_env t24
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+HAS_DURATION=$(echo "$LINE" | jq -r '.body.payload | has("duration_seconds")')
+assert_eq "false" "$HAS_DURATION" "duration_seconds omitted when startedAt/completedAt absent"
+
+echo ""
+echo "Test 25 (CTL-761): phase.attempt / phase.revive_count attributes from signal"
+fresh_env t25
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","attempt":3}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+ATT=$(echo "$LINE" | jq -r '.attributes["phase.attempt"] // empty')
+RC=$(echo "$LINE" | jq -r '.attributes["phase.revive_count"] // empty')
+assert_eq "3" "$ATT" "attributes[\"phase.attempt\"] = 3 from signal"
+assert_eq "2" "$RC" "attributes[\"phase.revive_count\"] = attempt-1 = 2"
+
+echo ""
+echo "Test 26 (CTL-761): cold dispatch attempt=1 → revive_count=0"
+fresh_env t26
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-triage.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"triage","attempt":1}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "1" "$(echo "$LINE" | jq -r '.attributes["phase.attempt"]')" "attempt=1"
+assert_eq "0" "$(echo "$LINE" | jq -r '.attributes["phase.revive_count"]')" "revive_count clamped to 0"
+
+echo ""
+echo "Test 27 (CTL-761): attributes omitted when signal lacks attempt"
+fresh_env t27
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "false" "$(echo "$LINE" | jq -r '.attributes | has("phase.attempt")')" "phase.attempt omitted"
+assert_eq "false" "$(echo "$LINE" | jq -r '.attributes | has("phase.revive_count")')" "phase.revive_count omitted"
+
+echo ""
+echo "Test 28 (CTL-761): failed status also carries attempt/revive_count"
+fresh_env t28
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement","attempt":2}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status failed --reason "test_reason" >/dev/null 2>&1
+LINE=$(read_event_line)
+assert_eq "2" "$(echo "$LINE" | jq -r '.attributes["phase.attempt"]')" "failed path: phase.attempt=2"
+assert_eq "1" "$(echo "$LINE" | jq -r '.attributes["phase.revive_count"]')" "failed path: revive_count=1"
+
+# ─── CTL-777: signal flip fires from --orch-dir even when the env var is dropped ─
+# `claude --bg` drops the plain env prefix, so a worker can run with
+# CATALYST_ORCHESTRATOR_DIR unset. The dispatch-side fix re-supplies ORCH_DIR via
+# settings.env, but emit-complete also already prefers an explicit --orch-dir over
+# the env var (belt-and-braces). These tests pin both halves: --orch-dir alone
+# flips the signal, and the unfixed failure mode (no env AND no --orch-dir) leaves
+# the signal untouched.
+
+echo ""
+echo "Test 29 (CTL-777): --orch-dir flips the signal to done even with env var unset"
+fresh_env t29
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+# Drop the env var to reproduce the dropped-prefix bg worker; supply --orch-dir.
+env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
+	--phase research --ticket CTL-100 --status complete \
+	--orch-dir "${TEST_DIR}/orch" >/dev/null 2>&1
+NEW_STATUS=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
+HAS_COMPLETED=$(jq -r 'has("completedAt")' "$SIGNAL" 2>/dev/null)
+assert_eq "done" "$NEW_STATUS" "--orch-dir flips signal to done with env unset"
+assert_eq "true" "$HAS_COMPLETED" "--orch-dir path still stamps completedAt"
+
+echo ""
+echo "Test 30 (CTL-777): documents the fixed failure mode — no env AND no --orch-dir leaves signal running"
+fresh_env t30
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+# Neither the env var nor --orch-dir → ORCH_DIR empty → step-2 gate skips (the bug).
+env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
+	--phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+STILL_RUNNING=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
+assert_eq "running" "$STILL_RUNNING" "no env + no --orch-dir → signal NOT flipped (the wedge this fix avoids)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

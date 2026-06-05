@@ -324,6 +324,40 @@ expect_eq "build_canonical_line claude.turn" "126" "$CLAUDE_TURN"
 CLAUDE_TURN_TYPE="$(echo "$CLAUDE_LINE" | jq -r '.attributes."claude.turn" | type')"
 expect_eq "build_canonical_line claude.turn is number" "number" "$CLAUDE_TURN_TYPE"
 
+# CTL-760: rate-limit 5h/7d used-percentages emitted as NUMERIC typed attributes.
+RL_LINE="$(build_canonical_line \
+  --ts "2026-06-03T00:00:00.000Z" \
+  --severity INFO \
+  --service "catalyst.session" \
+  --event-name "session.context" \
+  --claude-ratelimit-5h-pct 26 \
+  --claude-ratelimit-7d-pct 15 \
+  --claude-ratelimit-7d-opus-pct 12 \
+  --claude-ratelimit-7d-sonnet-pct 9)"
+
+RL_5H="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.five_hour_pct" "26" "$RL_5H"
+
+RL_5H_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct" | type')"
+expect_eq "build_canonical_line claude.ratelimit.five_hour_pct is number" "number" "$RL_5H_TYPE"
+
+RL_7D="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_pct" "15" "$RL_7D"
+
+RL_7D_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct" | type')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_pct is number" "number" "$RL_7D_TYPE"
+
+# CTL-763: per-model 7d split — opus + sonnet typed numeric attributes.
+RL_OPUS="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_opus_pct" "12" "$RL_OPUS"
+RL_OPUS_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct" | type')"
+expect_eq "build_canonical_line seven_day_opus_pct is number" "number" "$RL_OPUS_TYPE"
+
+RL_SONNET="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct"')"
+expect_eq "build_canonical_line claude.ratelimit.seven_day_sonnet_pct" "9" "$RL_SONNET"
+RL_SONNET_TYPE="$(echo "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct" | type')"
+expect_eq "build_canonical_line seven_day_sonnet_pct is number" "number" "$RL_SONNET_TYPE"
+
 # When claude.* flags are NOT passed, the attribute keys must be absent.
 BARE_LINE="$(build_canonical_line \
   --ts "2026-05-13T00:00:00.000Z" \
@@ -345,6 +379,19 @@ expect_eq "no --claude-context-tokens → key absent" "false" "$HAS_TOKENS"
 
 HAS_TURN="$(echo "$BARE_LINE" | jq '.attributes | has("claude.turn")')"
 expect_eq "no --claude-turn → key absent" "false" "$HAS_TURN"
+
+# CTL-760: rate-limit attrs absent when flags not passed.
+HAS_RL5H="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.five_hour_pct")')"
+expect_eq "no --claude-ratelimit-5h-pct → key absent" "false" "$HAS_RL5H"
+
+HAS_RL7D="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_pct")')"
+expect_eq "no --claude-ratelimit-7d-pct → key absent" "false" "$HAS_RL7D"
+
+# CTL-763: per-model attrs absent when flags not passed.
+HAS_RL_OPUS="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_opus_pct")')"
+expect_eq "no --claude-ratelimit-7d-opus-pct → key absent" "false" "$HAS_RL_OPUS"
+HAS_RL_SONNET="$(echo "$BARE_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_sonnet_pct")')"
+expect_eq "no --claude-ratelimit-7d-sonnet-pct → key absent" "false" "$HAS_RL_SONNET"
 
 # Cost MUST NOT be a typed attribute (PII gate — OTLP forwarder strips body.payload only).
 HAS_COST_ATTR="$(echo "$CLAUDE_LINE" | jq '.attributes | has("claude.cost.usd")')"
@@ -416,6 +463,24 @@ BAD_PHASE_NAME="phase.research.complete"
 BAD_MATCH="$(printf '%s' "$BAD_PHASE_NAME" \
   | grep -cE '^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-[0-9]+)$' || true)"
 expect_eq "malformed phase event name does NOT match broker regex" "0" "$BAD_MATCH"
+
+# CTL-761: phase.attempt / phase.revive_count are typed int attributes
+LINE_ATT="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-761" \
+  --phase-attempt 2 --phase-revive-count 1)"
+ATT=$(echo "$LINE_ATT" | jq -r '.attributes["phase.attempt"]')
+RC=$(echo "$LINE_ATT" | jq -r '.attributes["phase.revive_count"]')
+expect_eq "build_canonical_line phase.attempt typed int" "2" "$ATT"
+expect_eq "build_canonical_line phase.revive_count typed int" "1" "$RC"
+TYPE=$(echo "$LINE_ATT" | jq -r '.attributes["phase.attempt"] | type')
+expect_eq "phase.attempt is a JSON number" "number" "$TYPE"
+
+LINE_BARE="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-761")"
+HAS=$(echo "$LINE_BARE" | jq -r '.attributes | has("phase.attempt")')
+expect_eq "phase.attempt omitted when flag absent" "false" "$HAS"
 
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"

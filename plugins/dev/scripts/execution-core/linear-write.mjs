@@ -11,6 +11,10 @@ import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
 import { fetchTicketLabels, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
+// CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
+// set, NOT TERMINAL_LINEAR_KEY which is the transition KEY "done"). Gates the
+// backward-write guard below.
+import { isLinearTerminal } from "./terminal-state.mjs";
 
 // linear-transition.sh sits one directory up from execution-core/ — mirrors the
 // sibling-bin spawnSync pattern dispatch.mjs uses for orchestrate-dispatch-next.
@@ -45,20 +49,72 @@ function defaultResolveRepoRoot(ticket) {
 }
 
 // runTransition — shell linear-transition.sh for one logical key. Best-effort:
-// returns { applied, reason } and never throws. Parses the --json result and
-// treats a zero exit (with no "update-failed" action) as applied.
+// returns { applied, reason, action, from_state, to_state } and never throws.
+// Parses the --json result and treats a zero exit (with no "update-failed"
+// action) as applied.
+//
+// CTL-757: the shell already computes `.currentState` (the pre-transition state
+// it read for its idempotency check) and `.targetState` (the resolved target).
+// Surfacing them as from_state/to_state is FREE — no extra Linear read — and
+// gives the caller-emitted linear.state.write audit event its before/after pair.
+// The SAME current-state read also serves the CTL-758 backward-write guard.
+// from_state/to_state default to null when the shell emits non-JSON (no-linearis,
+// spawn error) or omits the fields (older stub).
 function runTransition({
   ticket,
   key,
   resolveRepoRoot = defaultResolveRepoRoot,
   exec = defaultExec,
+  // CTL-758: the SHARED TTL state cache + fetchState seam for the backward-write
+  // guard. fetchState defaults to the real linear-query helper; cache defaults
+  // undefined (the guard then does ONE cheap read per non-terminal-key write —
+  // and callers that thread the scheduler's shared cache pay ≤1 read per ticket
+  // per TTL). Both injectable so tests never shell out.
+  fetchState = fetchTicketState,
+  cache,
+  // CTL-758: a caller that ALREADY read the pre-transition state (applyTriageStatus
+  // reads from_state before this call) passes it here so the guard reuses it
+  // instead of issuing a second read. undefined → the guard reads for itself.
+  knownCurrentState,
 }) {
   try {
     const repoRoot = resolveRepoRoot(ticket);
     if (!repoRoot) {
       log.warn({ ticket, key }, "linear-write: no repoRoot — skipping status write");
-      return { applied: false, reason: "no-repo-root" };
+      return { applied: false, reason: "no-repo-root", from_state: null, to_state: null };
     }
+
+    // CTL-758 — BACKWARD-WRITE GUARD. linear-transition.sh only guards
+    // CURRENT==TARGET; it does NOT refuse a backward move. A daemon write that
+    // would drag a ticket already at a terminal Linear state (Done/Canceled) BACK
+    // to a non-terminal state (PR, Research, …) is the CTL-549/550/749 regression
+    // — a late phase-pr/advance echo un-completing a finished ticket. So for a
+    // NON-terminal target key we pre-read the current state (cheap, cached) and,
+    // if it is already terminal, SKIP the shell entirely.
+    //
+    // CRITICAL SAFETY: the forward terminal write (key === TERMINAL_LINEAR_KEY,
+    // i.e. "done" — applyTerminalDone + the reconcile backstop) is EXPLICITLY
+    // EXEMPT from this guard. It must always proceed, or every monitor-deploy Done
+    // write is blocked and tickets strand at PR. We only read+guard for
+    // key !== TERMINAL_LINEAR_KEY, so the forward Done path never even reads here.
+    if (key !== TERMINAL_LINEAR_KEY) {
+      const current =
+        knownCurrentState !== undefined ? knownCurrentState : fetchState(ticket, { exec, cache });
+      if (isLinearTerminal(current)) {
+        log.warn(
+          { ticket, key, current },
+          "ctl-758: refusing backward write — ticket already at terminal Linear state, skipping shell",
+        );
+        return {
+          applied: false,
+          skipped: "terminal-no-backward",
+          reason: "skipped-terminal-no-backward",
+          from_state: current,
+          to_state: null,
+        };
+      }
+    }
+
     const config = `${repoRoot}/.catalyst/config.json`;
     const { code, stdout } = exec(LINEAR_TRANSITION_BIN, [
       "--ticket",
@@ -70,36 +126,49 @@ function runTransition({
       "--json",
     ]);
     let action = null;
+    let from_state = null;
+    let to_state = null;
     try {
-      action = JSON.parse(stdout)?.action ?? null;
+      const parsed = JSON.parse(stdout) ?? {};
+      action = parsed.action ?? null;
+      // currentState/targetState are empty strings when unresolved — normalise
+      // to null so the audit payload never carries a misleading "".
+      from_state = parsed.currentState || null;
+      to_state = parsed.targetState || null;
     } catch {
-      /* non-JSON stdout — leave action null */
+      /* non-JSON stdout — leave action/from_state/to_state null */
     }
     const applied = code === 0 && action !== "update-failed";
     if (!applied) {
       log.warn({ ticket, key, code, action }, "linear-write: status write not applied");
     }
-    return { applied, reason: applied ? null : `exit-${code}`, action };
+    return { applied, reason: applied ? null : `exit-${code}`, action, from_state, to_state };
   } catch (err) {
     log.warn(
       { ticket, key, err: err.message },
       "linear-write: status write threw — swallowed"
     );
-    return { applied: false, reason: "threw" };
+    return { applied: false, reason: "threw", from_state: null, to_state: null };
   }
 }
 
 // applyPhaseStatus — write the Linear state mapped to `phase`. Idempotent
 // (linear-transition.sh read-compares first). triage → no-op (no status key).
-export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec }) {
+// CTL-758: `cache` is threaded through to runTransition's backward-write guard
+// so the per-tick shared TTL cache (createTicketStateCache) serves the guard's
+// pre-write read — ≤1 fetchTicketState per ticket per TTL, not a new API storm.
+export function applyPhaseStatus({ ticket, phase, resolveRepoRoot, exec, cache }) {
   const key = linearKeyForPhase(phase); // throws PhaseFsmError on an unknown phase
   if (key === null) return { applied: false, skipped: "no-status-key" };
-  return runTransition({ ticket, key, resolveRepoRoot, exec });
+  return runTransition({ ticket, key, resolveRepoRoot, exec, cache });
 }
 
 // applyTerminalDone — write the terminal Done state on monitor-deploy completion.
-export function applyTerminalDone({ ticket, resolveRepoRoot, exec }) {
-  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec });
+// CTL-758: this is the FORWARD terminal write (key === TERMINAL_LINEAR_KEY) — it
+// is EXEMPT from the backward-write guard, so runTransition does not read state
+// here. `cache` is forwarded for symmetry (unused by the exempt path).
+export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
+  return runTransition({ ticket, key: TERMINAL_LINEAR_KEY, resolveRepoRoot, exec, cache });
 }
 
 // applyLabel — additively apply a Linear label (needs-human), classify
@@ -167,6 +236,34 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
   }
 }
 
+// removeLabel — remove a single label from a ticket via linearis --label-mode
+// remove (CTL-549). Counterpart to applyLabel; used by handleCommentWake to
+// clear needs-human/question when re-dispatching a parked worker. No read-back
+// (remove is idempotent for absent labels). Returns { removed: true } on
+// success, { removed: false, reason } on failure. Never throws.
+export async function removeLabel(ticket, label, { exec = defaultExec } = {}) {
+  try {
+    const res = exec("linearis", [
+      "issues",
+      "update",
+      ticket,
+      "--labels",
+      label,
+      "--label-mode",
+      "remove",
+    ]);
+    if ((res.code ?? res.status ?? 0) !== 0) {
+      const reason = classifyLabelFailure(res.stderr ?? "");
+      log.warn({ ticket, label, reason }, "removeLabel: failed");
+      return { removed: false, reason };
+    }
+    return { removed: true };
+  } catch (err) {
+    log.warn({ ticket, label, reason: "transient", err: err.message }, "removeLabel: threw");
+    return { removed: false, reason: "transient" };
+  }
+}
+
 // applyTriageStatus — verified Todo→Triage write-back (CTL-704). Reads the
 // pre-transition state, shells linear-transition.sh for the triage key, then
 // re-reads to confirm the state actually landed. Returns
@@ -186,8 +283,18 @@ export function applyTriageStatus({
     // 1. Capture pre-transition state (best-effort — null is acceptable).
     from_state = fetchState(ticket, { exec });
 
-    // 2. Shell the transition.
-    const t = runTransition({ ticket, key: "triage", resolveRepoRoot, exec });
+    // 2. Shell the transition. CTL-758: pass the from_state we just read as
+    //    knownCurrentState so the backward-write guard reuses it (no second read).
+    //    A Todo→Triage move is forward, but the guard still correctly refuses it
+    //    if the ticket is somehow already terminal (Done/Canceled) — without an
+    //    extra linearis call.
+    const t = runTransition({
+      ticket,
+      key: "triage",
+      resolveRepoRoot,
+      exec,
+      knownCurrentState: from_state,
+    });
     if (!t.applied) {
       return { applied: false, verified: false, from_state, to_state: null, reason: t.reason };
     }
@@ -214,6 +321,62 @@ export function applyTriageStatus({
   } catch (err) {
     log.warn({ ticket, err: err.message }, "linear-write: applyTriageStatus threw — swallowed");
     return { applied: false, verified: false, from_state, to_state: null, reason: "threw" };
+  }
+}
+
+// ALLOWED_ESTIMATE_POINTS — the Fibonacci-derived points scale used by the
+// reference-class lookup tool (CTL-751). Only these values are accepted by
+// applyEstimate; anything else is rejected without calling linearis.
+const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
+
+// applyEstimate — write a numeric estimate to a ticket's Linear estimate field
+// (CTL-751). Best-effort, never throws; mirrors applyLabel shape (try/catch,
+// log.warn, tagged return). No read-back (the estimate field is not subject to
+// the label silent-success gap; a verifying read-back can be added as follow-up).
+export function applyEstimate({ ticket, estimate, exec = defaultExec }) {
+  if (!ALLOWED_ESTIMATE_POINTS.has(estimate)) {
+    return { applied: false, reason: "invalid-estimate" };
+  }
+  try {
+    const res = exec("linearis", ["issues", "update", ticket, "--estimate", String(estimate)]);
+    if (res.code !== 0) {
+      log.warn(
+        { ticket, estimate, code: res.code, stderr: res.stderr },
+        "linear-write: estimate write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, estimate, reason: "transient", err: err.message },
+      "linear-write: estimate write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
+  }
+}
+
+// applyBlockedByRelation — additively write a durable blocked-by edge
+// (CTL-537). Best-effort, never throws; mirrors applyLabel but without a
+// read-back: a blocked-by relation is durable (research:140) and the seam
+// re-evaluates next tick if the write fails.
+export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }) {
+  try {
+    const res = exec("linearis", ["issues", "update", ticket, "--blocked-by", blockedBy]);
+    if (res.code !== 0) {
+      log.warn(
+        { ticket, blockedBy, code: res.code, stderr: res.stderr },
+        "linear-write: blocked-by write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, blockedBy, reason: "transient", err: err.message },
+      "linear-write: blocked-by write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
   }
 }
 

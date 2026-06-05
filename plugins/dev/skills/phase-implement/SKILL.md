@@ -158,30 +158,8 @@ Plan §"Per-phase /goal conditions":
 /goal "I have run /catalyst-dev:implement-plan on ${PLAN_PATH} to completion
        AND `git diff <base>..HEAD` on this branch is non-empty AND the targeted
        tests pass (I have printed the test command + `exit 0` to my transcript);
-       (Linear status is written by the coordinator — CTL-558 — not this agent.)
-       OR I am within ~5 turns of the 75-turn cap, in which case I have
-       (a) written a structured handoff to
-           thoughts/shared/handoffs/${TICKET}/<ts>_turn-cap-continuation.md
-           using the bash template in the 'Failure handling' section,
-       (b) called phase-agent-emit-complete --status turn-cap-exhausted
-           --handoff-path <the file> --reason 'turn cap hit (N)', and
-       (c) exited 0 (cleanly — this is NOT a failure; the orchestrator
-           dispatches a continuation worker on a separate budget)."
+       (Linear status is written by the coordinator — CTL-558 — not this agent.)"
 ```
-
-Turn cap defaults to 75 (from `phase-agent-dispatch:phase_default_turn_cap`)
-and is overridable via `.catalyst/config.json:catalyst.orchestration.phaseAgents.turnCaps.implement`.
-
-**CTL-484:** when the agent self-detects impending cap exhaustion (typically
-~5 turns remaining), it takes the second `/goal` branch: writes a structured
-handoff, emits `phase.implement.turn-cap-exhausted.<TICKET>`, and exits 0.
-`orchestrate-revive`'s continuation branch reads the handoff path from the
-per-phase signal file, dispatches a fresh `claude --bg --resume` session with
-`CATALYST_IS_CONTINUATION=true` + `CATALYST_HANDOFF_PATH=<path>` +
-`CATALYST_CONTINUATION_COUNT=<n>`, and the resumed session enters this skill
-again — the Prelude check above orients it from the handoff instead of
-re-walking the plan. Default budget: 3 continuations per ticket per phase
-before `stalled` + `attentionReason=continuation-budget-exhausted`.
 
 ## Phase-specific work
 
@@ -217,6 +195,28 @@ before `stalled` + `attentionReason=continuation-budget-exhausted`.
    MVP this skill runs the gates inline via implement-plan because no
    phase-verify exists yet — the cutover is a one-line change to the Task
    invocation when that phase lands.
+
+### Inbox check (CTL-749)
+
+Before continuing to the End block, check for mid-flight context updates from the human:
+
+1. If `${ORCH_DIR}/workers/${TICKET}/inbox.jsonl` exists and is non-empty, read it fully.
+2. Parse each JSONL line — entries have `kind: "comment"` or `kind: "description_changed"`.
+3. For each entry, decide:
+   - **Absorb and continue**: the update is additive context (clarification, extra constraints,
+     "also handle X") — fold it into your working context and continue. Post a brief reply comment
+     acknowledging the update (one sentence).
+   - **Pause and replan**: the update fundamentally changes scope or invalidates the current
+     approach — emit `failed` with `reason: "mid_flight_replan_needed"` via
+     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a
+     comment before exiting.
+4. After reading, archive processed entries:
+   ```bash
+   [[ -f "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" ]] && \
+     mv "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" \
+        "${ORCH_DIR}/workers/${TICKET}/inbox.processed-$(date +%s).jsonl" || true
+   ```
+5. If no inbox file or it is empty, continue normally.
 
 ## End block (terminal emit — copy verbatim)
 
@@ -288,10 +288,12 @@ ${MIRROR_FOOTER}"
 
 _... (truncated)_"
   fi
-  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+  if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
-    echo "phase-implement: linearis discuss failed (continuing)" >&2
+    echo "phase-implement: linear-comment-post failed (continuing)" >&2
   fi
 fi
 ```
@@ -372,93 +374,11 @@ fi
 
 ## Failure handling
 
-Two failure modes — turn-cap exhaustion (recoverable via continuation) and
-hard error (caller-supplied reason). The branch is determined by the reason
-string: anything starting with `turn cap hit` takes the CTL-484 continuation
-path; everything else takes the legacy hard-error path.
+One failure mode — hard error (caller-supplied reason).
 
 ```bash
 REASON="${1:-implement-plan exited non-zero}"  # caller-supplied short string
 
-# ── CTL-484: turn-cap branch — write handoff, emit turn-cap-exhausted,
-#    exit 0. Orchestrator dispatches a continuation worker on a separate
-#    budget; this is NOT a failure from the orchestrator's perspective.
-if [[ "$REASON" =~ ^turn\ cap\ hit ]]; then
-  TS_HO=$(date -u +%Y-%m-%d_%H-%M-%S)
-  HANDOFF_DIR="thoughts/shared/handoffs/${TICKET}"
-  HANDOFF_FILE="${HANDOFF_DIR}/${TS_HO}_turn-cap-continuation.md"
-  mkdir -p "$HANDOFF_DIR"
-
-  GIT_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
-  BRANCH=$(git branch --show-current 2>/dev/null || echo "")
-  BASE_REF=$(git merge-base HEAD main 2>/dev/null || echo HEAD)
-  DIFF_STAT=$(git diff --stat "${BASE_REF}..HEAD" 2>/dev/null || echo "")
-  CONT_N="${CATALYST_CONTINUATION_COUNT:-1}"
-
-  cat > "$HANDOFF_FILE" <<EOF
----
-date: $(date -u +%Y-%m-%d)
-researcher: phase-implement
-git_commit: ${GIT_COMMIT}
-branch: ${BRANCH}
-topic: "Continuation handoff for ${TICKET} (turn cap hit)"
-status: in-progress
-type: handoff
-source_ticket: ${TICKET}
-source_plan: ${PLAN_PATH:-unknown}
----
-
-# ${TICKET} — turn-cap continuation handoff
-
-## Task(s)
-
-Implement plan at \`${PLAN_PATH:-unknown}\`. The previous session reached
-its 75-turn cap before completing all phases. The continuation worker
-should resume from the last committed phase and complete the remaining
-ones.
-
-## Recent changes (this session)
-
-\`\`\`
-${DIFF_STAT}
-\`\`\`
-
-Last commit: \`${GIT_COMMIT}\`
-Branch: \`${BRANCH}\`
-
-## Action Items & Next Steps
-
-1. You are reading this handoff via \`CATALYST_HANDOFF_PATH\` — the
-   Prelude block has already cat'd it to the transcript.
-2. Read \`${PLAN_PATH:-the plan in thoughts/shared/plans/}\` only if you
-   need detail beyond what \`git log --oneline ${BASE_REF}..HEAD\` shows.
-   **Do NOT redo committed work** — trust the commit log.
-3. Resume from the first uncommitted plan phase. Continue TDD rhythm.
-4. On success, call \`phase-agent-emit-complete --status complete\`
-   (terminal).
-5. If you also hit the cap, write a fresh continuation handoff in this
-   same directory and emit \`--status turn-cap-exhausted\` again. Budget
-   is 3 continuations per ticket per phase before stall.
-
-## Other Notes
-
-- Catalyst session: ${CATALYST_SESSION_ID:-unknown}
-- Continuation count: ${CONT_N}
-- Plan path: ${PLAN_PATH:-unknown}
-EOF
-
-  "$EMIT" --phase "$PHASE" --ticket "$TICKET" \
-    --status turn-cap-exhausted \
-    --reason "$REASON" \
-    --handoff-path "$HANDOFF_FILE"
-
-  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
-    "phase-implement turn-cap-exhausted; handoff: ${HANDOFF_FILE}" \
-    --as "$TICKET" --type info --orch "$ORCH_ID" >/dev/null 2>&1 || true
-  exit 0
-fi
-
-# ── Hard-error branch (existing): emit failed + attention, exit non-zero.
 "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status failed --reason "$REASON"
 [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
   "phase-implement failed: ${REASON}" \
@@ -470,20 +390,14 @@ The orchestrator's Phase 4 monitor receives `phase.implement.failed.${TICKET}`
 via the broker `phase_lifecycle` route (CTL-447) and dispatches one fix-up
 phase agent. A second failure escalates to the user via the `attention` post.
 
-For the turn-cap branch, the orchestrator instead receives
-`phase.implement.turn-cap-exhausted.${TICKET}` and runs `orchestrate-revive`,
-which detects the new status + handoff path on the per-phase signal and
-dispatches a continuation worker on a budget separate from the error-revive
-budget (CTL-484).
-
 ## Comms discipline
 
 Inherits the contract from [[_phase-agent-template]]:
 
 | Type        | When                                                                                  |
 |-------------|--------------------------------------------------------------------------------------|
-| `info`      | At start; once after `implement-plan` returns; once on turn-cap handoff write (CTL-484). ~2-3 per session. |
-| `attention` | Missing plan, unresolved 3+ test failures, hard error. (Turn cap is NOT an attention event — see CTL-484.) |
+| `info`      | At start; once after `implement-plan` returns. ~1-2 per session. |
+| `attention` | Missing plan, unresolved 3+ test failures, hard error. (Turn caps are enforced daemon-side — CTL-748 — not self-detected by this skill.) |
 | `question`  | Plan ambiguity the agent cannot resolve unilaterally.                                 |
 | `done`      | Emitted by `phase-agent-emit-complete` on success.                                    |
 

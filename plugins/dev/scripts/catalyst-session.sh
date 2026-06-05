@@ -261,6 +261,16 @@ cmd_start() {
   # Flag wins over env (caller has direct knowledge).
   [[ -z "$claude_session_id" ]] && claude_session_id="${CLAUDE_CODE_SESSION_ID:-}"
 
+  # CTL-752: resolve the orchestration-run grouping key for workflow_id.
+  # A bg phase worker has no real parent session, but the daemon's frozen
+  # CATALYST_SESSION_ID leaks across the `claude --bg` boundary (CTL-635) and
+  # the phase preludes pass it as --workflow, polluting workflow_id with a stale
+  # sess_* daemon id. Prefer the orchestrator id (the true run id; == ticket
+  # under execution-core) when --workflow is empty or is a leaked session id.
+  if [[ -z "$workflow" || "$workflow" == sess_* ]]; then
+    workflow="${CATALYST_ORCHESTRATOR_ID:-$workflow}"
+  fi
+
   # Generate a sortable, reasonably-unique session id without forking uuidgen
   # (uuidgen fork ~10ms, which we want to keep for the callers, not ourselves).
   local stamp rand sid
@@ -362,8 +372,8 @@ cmd_phase() {
 
 # Metric keys expose a stable CLI surface; internal column names live in METRIC_MAP.
 # declare -A is bash 4+; macOS still ships bash 3.2, so use parallel arrays instead.
-METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms)
-METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms)
+METRIC_FLAGS=(--cost --input --output --cache-read --cache-creation --duration-ms --turns)
+METRIC_COLS=(cost_usd input_tokens output_tokens cache_read_tokens cache_creation_tokens duration_ms num_turns)
 
 metric_col_for_flag() {
   local flag="$1" i
@@ -573,12 +583,16 @@ cmd_end() {
       done)   outcome="success" ;;
       failed) outcome="fail" ;;
     esac
+    local skill_name phase_name=""
+    skill_name=$(db_exec "SELECT COALESCE(skill_name,'') FROM sessions WHERE session_id = $(sql_quote "$sid");")
+    [[ "$skill_name" == phase-* ]] && phase_name="${skill_name#phase-}"
     local args=(
       --event "claude_code.session.outcome"
       --outcome "$outcome"
       --session-id "$sid"
     )
-    [[ -n "$reason" ]] && args+=(--reason "$reason")
+    [[ -n "$reason" ]]     && args+=(--reason "$reason")
+    [[ -n "$phase_name" ]] && args+=(--phase "$phase_name")
     "$emit_bin" "${args[@]}" >/dev/null 2>&1 || true
   fi
 
@@ -591,14 +605,18 @@ emit_iteration_metric() {
   local emit="${CATALYST_EMIT_METRIC:-$SCRIPT_DIR/emit-otel-metric.sh}"
   [[ -x "$emit" ]] || return 0
 
-  local plan_count fix_count ticket started_at
+  local plan_count fix_count ticket started_at skill_name
   plan_count=$(db_exec "SELECT COALESCE(plan_iterations,0) FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
   fix_count=$( db_exec "SELECT COALESCE(fix_iterations,0)  FROM session_metrics WHERE session_id = $(sql_quote "$sid");")
   ticket=$(    db_exec "SELECT COALESCE(ticket_key,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
   started_at=$(db_exec "SELECT started_at                  FROM sessions        WHERE session_id = $(sql_quote "$sid");")
+  skill_name=$(db_exec "SELECT COALESCE(skill_name,'')     FROM sessions        WHERE session_id = $(sql_quote "$sid");")
 
   plan_count="${plan_count:-0}"
   fix_count="${fix_count:-0}"
+
+  local phase_name=""
+  [[ "$skill_name" == phase-* ]] && phase_name="${skill_name#phase-}"
 
   local start_s=""
   if [[ -n "$started_at" ]]; then
@@ -609,8 +627,10 @@ emit_iteration_metric() {
   local start_ns=""
   [[ -n "$start_s" ]] && start_ns="${start_s}000000000"
 
-  "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
-  "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" ${start_ns:+--start-ns "$start_ns"} 2>/dev/null || true
+  "$emit" iteration_count --kind plan --count "$plan_count" --linear-key "$ticket" \
+    ${start_ns:+--start-ns "$start_ns"} ${phase_name:+--phase "$phase_name"} 2>/dev/null || true
+  "$emit" iteration_count --kind fix  --count "$fix_count"  --linear-key "$ticket" \
+    ${start_ns:+--start-ns "$start_ns"} ${phase_name:+--phase "$phase_name"} 2>/dev/null || true
 }
 
 cmd_heartbeat() {
@@ -646,6 +666,12 @@ cmd_emit_context() {
   shift
 
   local pct="" tokens="" ctx_max="" turn="" model="" cost="" effort=""
+  # CTL-760: Claude Code's statusLine payload carries a rate_limits block. The
+  # 5h/7d used-percentages are the "5h: 26%" / "7d: 15%" the user sees; the
+  # resets_at timestamps are informational (body-only, no label cardinality).
+  local rl5h="" rl7d="" rl5h_reset="" rl7d_reset=""
+  # CTL-763: per-model 7d split.
+  local rl7d_opus="" rl7d_sonnet="" rl7d_opus_reset="" rl7d_sonnet_reset=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --context-pct)    pct="$2"; shift 2 ;;
@@ -655,6 +681,14 @@ cmd_emit_context() {
       --model)          model="$2"; shift 2 ;;
       --cost-usd)       cost="$2"; shift 2 ;;
       --effort)         effort="$2"; shift 2 ;;
+      --ratelimit-5h-pct)        rl5h="$2"; shift 2 ;;
+      --ratelimit-7d-pct)        rl7d="$2"; shift 2 ;;
+      --ratelimit-5h-reset)      rl5h_reset="$2"; shift 2 ;;
+      --ratelimit-7d-reset)      rl7d_reset="$2"; shift 2 ;;
+      --ratelimit-7d-opus-pct)   rl7d_opus="$2"; shift 2 ;;
+      --ratelimit-7d-sonnet-pct) rl7d_sonnet="$2"; shift 2 ;;
+      --ratelimit-7d-opus-reset) rl7d_opus_reset="$2"; shift 2 ;;
+      --ratelimit-7d-sonnet-reset) rl7d_sonnet_reset="$2"; shift 2 ;;
       *) echo "error: unknown flag for emit-context: $1" >&2; return 1 ;;
     esac
   done
@@ -686,13 +720,29 @@ cmd_emit_context() {
     --argjson cost "${cost:-null}" \
     --arg model "$model" \
     --arg effort "$effort" \
+    --argjson rl5h "${rl5h:-null}" \
+    --argjson rl7d "${rl7d:-null}" \
+    --arg rl5h_reset "$rl5h_reset" \
+    --arg rl7d_reset "$rl7d_reset" \
+    --argjson rl7d_opus "${rl7d_opus:-null}" \
+    --argjson rl7d_sonnet "${rl7d_sonnet:-null}" \
+    --arg rl7d_opus_reset "$rl7d_opus_reset" \
+    --arg rl7d_sonnet_reset "$rl7d_sonnet_reset" \
     '{context_pct: $pct,
       context_tokens: (if $tokens == null then null else $tokens end),
       context_max: (if $context_max == null then null else $context_max end),
       turn: (if $turn == null then null else $turn end),
       model: (if $model == "" then null else $model end),
       cost_usd: (if $cost == null then null else $cost end),
-      effort: (if $effort == "" then null else $effort end)}')
+      effort: (if $effort == "" then null else $effort end),
+      ratelimit_5h_pct: (if $rl5h == null then null else $rl5h end),
+      ratelimit_7d_pct: (if $rl7d == null then null else $rl7d end),
+      ratelimit_5h_reset: (if $rl5h_reset == "" then null else $rl5h_reset end),
+      ratelimit_7d_reset: (if $rl7d_reset == "" then null else $rl7d_reset end),
+      ratelimit_7d_opus_pct: (if $rl7d_opus == null then null else $rl7d_opus end),
+      ratelimit_7d_sonnet_pct: (if $rl7d_sonnet == null then null else $rl7d_sonnet end),
+      ratelimit_7d_opus_reset: (if $rl7d_opus_reset == "" then null else $rl7d_opus_reset end),
+      ratelimit_7d_sonnet_reset: (if $rl7d_sonnet_reset == "" then null else $rl7d_sonnet_reset end)}')
 
   # Build claude.* extra args for typed attributes
   local extra_args=()
@@ -701,6 +751,12 @@ cmd_emit_context() {
   [[ -n "$pct" ]] && extra_args+=(--claude-context-used-pct "$pct")
   [[ -n "$tokens" ]] && extra_args+=(--claude-context-tokens "$tokens")
   [[ -n "$turn" ]] && extra_args+=(--claude-turn "$turn")
+  # CTL-760: rate-limit % as typed attributes (numeric). Resets stay body-only.
+  [[ -n "$rl5h" ]] && extra_args+=(--claude-ratelimit-5h-pct "$rl5h")
+  [[ -n "$rl7d" ]] && extra_args+=(--claude-ratelimit-7d-pct "$rl7d")
+  # CTL-763: per-model 7d split. Resets stay body-only.
+  [[ -n "$rl7d_opus" ]]   && extra_args+=(--claude-ratelimit-7d-opus-pct "$rl7d_opus")
+  [[ -n "$rl7d_sonnet" ]] && extra_args+=(--claude-ratelimit-7d-sonnet-pct "$rl7d_sonnet")
 
   # Workflow/ticket lookup for trace/span derivation.
   local trow workflow ticket
@@ -725,6 +781,7 @@ cmd_emit_context() {
     --trace-id "$trace_id" \
     --span-id "$span_id" \
     --session "$sid" \
+    ${ticket:+--linear-key "$ticket"} \
     "${extra_args[@]}" \
     --payload-json "$payload" 2>/dev/null)" || return 1
   canonical_jsonl_append "$EVENTS_DIR" "$ctx_line"
@@ -751,6 +808,7 @@ cmd_emit_context() {
         --trace-id "$trace_id" \
         --span-id "$span_id" \
         --session "$sid" \
+        ${ticket:+--linear-key "$ticket"} \
         "${extra_args[@]}" \
         --message "context crossed ${CATALYST_CTX_THRESHOLD}%: ${prev_pct} → ${pct}" \
         --payload-json "$att_payload" 2>/dev/null)" || true

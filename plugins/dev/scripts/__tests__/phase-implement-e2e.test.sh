@@ -393,21 +393,24 @@ else
   fail "claude stub captured no invocation"
 fi
 
-# ─── Test 9 (CTL-484): phase-implement turn-cap handoff write + new emit shape
+# ─── Test 9 (CTL-748): phase-implement keeps daemon-resume orientation but
+#     no longer self-writes a turn-cap handoff or self-emits turn-cap-exhausted.
 echo ""
-echo "Test 9 (CTL-484): phase-implement SKILL.md has continuation preamble + handoff write block"
+echo "Test 9 (CTL-748): phase-implement SKILL.md keeps continuation Prelude, drops self-stop handoff write"
 if [[ -f "$SKILL_IMPLEMENT" ]]; then
-  # Prelude check for CATALYST_IS_CONTINUATION — the resumed worker reads
-  # CATALYST_HANDOFF_PATH and orients without re-walking the plan.
+  # Prelude still orients a daemon-resumed continuation worker: it reads
+  # CATALYST_IS_CONTINUATION / CATALYST_HANDOFF_PATH so a --resume session
+  # picks up where the previous one left off (CTL-613 daemon-side resume).
   assert_grep 'CATALYST_IS_CONTINUATION' "$SKILL_IMPLEMENT" "Prelude checks CATALYST_IS_CONTINUATION env var"
   assert_grep 'CATALYST_HANDOFF_PATH'    "$SKILL_IMPLEMENT" "Prelude reads CATALYST_HANDOFF_PATH"
-  # Failure block has a turn-cap branch that writes a handoff and emits
-  # --status turn-cap-exhausted --handoff-path <path>.
-  assert_grep 'turn-cap-exhausted' "$SKILL_IMPLEMENT" "skill body references turn-cap-exhausted status"
-  assert_grep 'turn-cap-continuation\.md|turn-cap-continuation' "$SKILL_IMPLEMENT" "writes handoff named turn-cap-continuation.md"
-  assert_grep '\-\-handoff-path' "$SKILL_IMPLEMENT" "passes --handoff-path to phase-agent-emit-complete"
-  # /goal block updated to describe the new cap-exit behavior.
-  assert_grep 'turn-cap-exhausted|continuation' "$SKILL_IMPLEMENT" "/goal block references turn-cap-exhausted or continuation"
+  # CTL-748 removed the skill-side self-stop machinery: the failure block no
+  # longer writes a turn-cap-continuation handoff or self-emits
+  # turn-cap-exhausted. The turn cap is now enforced daemon-side.
+  assert_not_grep 'turn-cap-exhausted' "$SKILL_IMPLEMENT" "skill body no longer self-emits turn-cap-exhausted"
+  assert_not_grep 'turn-cap-continuation' "$SKILL_IMPLEMENT" "skill body no longer writes a turn-cap-continuation handoff"
+  assert_not_grep '[-][-]handoff-path' "$SKILL_IMPLEMENT" "skill body no longer passes --handoff-path"
+  # /goal block no longer carries turn-cap self-stop language (CTL-748).
+  assert_not_grep 'OR I have stopped after .*turn' "$SKILL_IMPLEMENT" "/goal block has no turn-cap self-stop clause"
 fi
 
 # Test 10 (CTL-484): the new emitter status round-trips through the canonical
@@ -440,8 +443,8 @@ echo "Test 11 (CTL-632): phase-implement contract — mirror block present"
 if [[ -f "$SKILL_IMPLEMENT" ]]; then
   assert_grep 'phase-implement-mirror' "$SKILL_IMPLEMENT" "body contains uniquely-named mirror fence"
   assert_grep '\.linear-mirror-' "$SKILL_IMPLEMENT" "body references the per-phase marker file"
-  assert_grep 'linearis issues discuss' "$SKILL_IMPLEMENT" "body calls linearis issues discuss"
-  assert_grep 'linearis discuss failed \(continuing\)' "$SKILL_IMPLEMENT" "body has fail-open warning string"
+  assert_grep 'linear-comment-post.sh' "$SKILL_IMPLEMENT" "body calls linear-comment-post.sh"
+  assert_grep 'linear-comment-post failed \(continuing\)' "$SKILL_IMPLEMENT" "body has fail-open warning string"
 fi
 
 # ─── Test 12 (CTL-632): runtime mirror exercises ──────────────────────────
@@ -499,10 +502,11 @@ run_implement_mirror() {
 
   build_git_fixture "$repo_dir" "$git_base"
 
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
 
   if [[ -n "$preseed_marker" ]]; then
@@ -524,11 +528,11 @@ run_implement_mirror() {
 # Case A: happy — git fixture has origin/main, two commits on feature.
 CASE_A="$(run_implement_mirror happy ok '' yes)"
 assert_eq "0" "$(cat "$CASE_A/exit-code")" "mirror-implement happy: exit 0"
-LOG_A="$CASE_A/linearis-calls.log"
-if grep -q '^discuss$' "$LOG_A" 2>/dev/null; then
-  pass "mirror-implement happy: discuss landed"
+LOG_A="$CASE_A/comment-post-calls.log"
+if grep -q 'CTL-449' "$LOG_A" 2>/dev/null; then
+  pass "mirror-implement happy: comment posted"
 else
-  fail "mirror-implement happy: discuss" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
+  fail "mirror-implement happy: comment post" "log:$(printf '\n%s' "$(cat "$LOG_A" 2>/dev/null)")"
 fi
 if grep -q 'Phase Implement' "$LOG_A" 2>/dev/null; then
   pass "mirror-implement happy: body contains 'Phase Implement' header"
@@ -565,7 +569,7 @@ CASE_B="$(run_implement_mirror failopen fail '' yes)"
 assert_eq "0" "$(cat "$CASE_B/exit-code")" "mirror-implement fail-open: exit 0"
 MARKER_B="$CASE_B/orch/workers/CTL-449/.linear-mirror-implement"
 [[ ! -e "$MARKER_B" ]] && pass "mirror-implement fail-open: no marker" || fail "marker should not exist"
-if grep -q 'linearis discuss failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
+if grep -q 'linear-comment-post failed (continuing)' "$CASE_B/stderr.log" 2>/dev/null; then
   pass "mirror-implement fail-open: warning to stderr"
 else
   fail "mirror-implement fail-open: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_B/stderr.log" 2>/dev/null)")"
@@ -574,11 +578,11 @@ fi
 # Case C: idempotent.
 CASE_C="$(run_implement_mirror idempot ok seed yes)"
 assert_eq "0" "$(cat "$CASE_C/exit-code")" "mirror-implement idempotent: exit 0"
-LOG_C="$CASE_C/linearis-calls.log"
-if [[ ! -f "$LOG_C" ]] || ! grep -q '^discuss$' "$LOG_C" 2>/dev/null; then
-  pass "mirror-implement idempotent: discuss skipped"
+LOG_C="$CASE_C/comment-post-calls.log"
+if [[ ! -f "$LOG_C" ]] || ! grep -q 'CTL-449' "$LOG_C" 2>/dev/null; then
+  pass "mirror-implement idempotent: comment post skipped"
 else
-  fail "mirror-implement idempotent: discuss" "marker not honored"
+  fail "mirror-implement idempotent: comment post" "marker not honored"
 fi
 
 # Case D: no-base-branch — fixture omits origin/main; delete main too so the
@@ -605,6 +609,7 @@ REPO_D="${CASE_D_DIR}/repo"
 mkdir -p "$CASE_D_DIR/bin" "$WORKER_D"
 build_git_fixture_no_base "$REPO_D"
 linearis_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/linearis-calls.log"
+linear_comment_post_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/comment-post-calls.log"
 
 (
   cd "$REPO_D" || exit 1
@@ -617,11 +622,11 @@ linearis_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/linearis-calls.log"
 )
 
 assert_eq "0" "$(cat "$CASE_D_DIR/exit-code")" "mirror-implement no-base: exit 0"
-LOG_D="$CASE_D_DIR/linearis-calls.log"
-if grep -q '^discuss$' "$LOG_D" 2>/dev/null; then
+LOG_D="$CASE_D_DIR/comment-post-calls.log"
+if grep -q 'CTL-449' "$LOG_D" 2>/dev/null; then
   pass "mirror-implement no-base: still posts (the chosen arm)"
 else
-  fail "mirror-implement no-base: discuss" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
+  fail "mirror-implement no-base: comment post" "log:$(printf '\n%s' "$(cat "$LOG_D" 2>/dev/null)")"
 fi
 if grep -q '_base branch unknown_' "$LOG_D" 2>/dev/null; then
   pass "mirror-implement no-base: body renders fallback marker"
@@ -758,15 +763,15 @@ echo "Test 15 (CTL-632): phase-pr + phase-monitor-merge contract — mirror bloc
 if [[ -f "$SKILL_PR" ]]; then
   assert_grep 'phase-pr-mirror' "$SKILL_PR" "phase-pr: body contains uniquely-named mirror fence"
   assert_grep '\.linear-mirror-' "$SKILL_PR" "phase-pr: references the per-phase marker file"
-  assert_grep 'linearis issues discuss' "$SKILL_PR" "phase-pr: calls linearis issues discuss"
-  assert_grep 'phase-pr: linearis discuss failed \(continuing\)' "$SKILL_PR" "phase-pr: fail-open warning string"
+  assert_grep 'linear-comment-post.sh' "$SKILL_PR" "phase-pr: calls linear-comment-post.sh"
+  assert_grep 'phase-pr: linear-comment-post failed \(continuing\)' "$SKILL_PR" "phase-pr: fail-open warning string"
   assert_grep 'verify\.json' "$SKILL_PR" "phase-pr: surfaces verify.json pre-merge verification"
 fi
 if [[ -f "$SKILL_MONITOR_MERGE" ]]; then
   assert_grep 'phase-monitor-merge-mirror' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: body contains uniquely-named mirror fence"
   assert_grep '\.linear-mirror-' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: references the per-phase marker file"
-  assert_grep 'linearis issues discuss' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: calls linearis issues discuss"
-  assert_grep 'phase-monitor-merge: linearis discuss failed \(continuing\)' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: fail-open warning string"
+  assert_grep 'linear-comment-post.sh' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: calls linear-comment-post.sh"
+  assert_grep 'phase-monitor-merge: linear-comment-post failed \(continuing\)' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: fail-open warning string"
   assert_grep 'statusCheckRollup' "$SKILL_MONITOR_MERGE" "phase-monitor-merge: summarizes CI check rollup"
 fi
 
@@ -843,10 +848,11 @@ run_pr_mirror() {
   mkdir -p "$case_dir/bin"
   seed_pr_worker "$worker_dir" "$with_verify"
   install_gh_stub "$case_dir/bin"
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
   [[ -n "$preseed_marker" ]] && : > "$worker_dir/.linear-mirror-pr"
   (
@@ -863,33 +869,33 @@ run_pr_mirror() {
 # Case PR-A: happy — gh returns PR metadata, verify.json present.
 CASE_PRA="$(run_pr_mirror happy ok '' yes)"
 assert_eq "0" "$(cat "$CASE_PRA/exit-code")" "mirror-pr happy: exit 0"
-LOG_PRA="$CASE_PRA/linearis-calls.log"
-assert_grep '^discuss$' "$LOG_PRA" "mirror-pr happy: discuss landed"
+LOG_PRA="$CASE_PRA/comment-post-calls.log"
+assert_grep 'CTL-449' "$LOG_PRA" "mirror-pr happy: comment posted"
 assert_grep 'Phase PR' "$LOG_PRA" "mirror-pr happy: body has 'Phase PR' header"
 assert_grep 'Files changed.*3' "$LOG_PRA" "mirror-pr happy: renders changed-file count"
 assert_grep 'Regression risk.*3' "$LOG_PRA" "mirror-pr happy: surfaces verify.json regression risk"
 [[ -e "$CASE_PRA/orch/workers/CTL-449/.linear-mirror-pr" ]] && pass "mirror-pr happy: marker written" || fail "mirror-pr happy: marker missing"
 
-# Case PR-B: fail-open — linearis discuss fails, no marker, warning on stderr.
+# Case PR-B: fail-open — linear-comment-post fails, no marker, warning on stderr.
 CASE_PRB="$(run_pr_mirror failopen fail '' yes)"
 assert_eq "0" "$(cat "$CASE_PRB/exit-code")" "mirror-pr fail-open: exit 0"
 [[ ! -e "$CASE_PRB/orch/workers/CTL-449/.linear-mirror-pr" ]] && pass "mirror-pr fail-open: no marker" || fail "mirror-pr fail-open: marker should not exist"
-assert_grep 'phase-pr: linearis discuss failed \(continuing\)' "$CASE_PRB/stderr.log" "mirror-pr fail-open: warning to stderr"
+assert_grep 'phase-pr: linear-comment-post failed \(continuing\)' "$CASE_PRB/stderr.log" "mirror-pr fail-open: warning to stderr"
 
-# Case PR-C: idempotent — marker preseeded, discuss skipped.
+# Case PR-C: idempotent — marker preseeded, comment post skipped.
 CASE_PRC="$(run_pr_mirror idempot ok seed yes)"
 assert_eq "0" "$(cat "$CASE_PRC/exit-code")" "mirror-pr idempotent: exit 0"
-if [[ ! -f "$CASE_PRC/linearis-calls.log" ]] || ! grep -q '^discuss$' "$CASE_PRC/linearis-calls.log" 2>/dev/null; then
-  pass "mirror-pr idempotent: discuss skipped"
+if [[ ! -f "$CASE_PRC/comment-post-calls.log" ]] || ! grep -q 'CTL-449' "$CASE_PRC/comment-post-calls.log" 2>/dev/null; then
+  pass "mirror-pr idempotent: comment post skipped"
 else
-  fail "mirror-pr idempotent: discuss should have been skipped (marker not honored)"
+  fail "mirror-pr idempotent: comment post should have been skipped (marker not honored)"
 fi
 
 # Case PR-D: no verify.json — still posts, renders the fail-soft fallback line.
 CASE_PRD="$(run_pr_mirror noverify ok '' no)"
 assert_eq "0" "$(cat "$CASE_PRD/exit-code")" "mirror-pr no-verify: exit 0"
-assert_grep '^discuss$' "$CASE_PRD/linearis-calls.log" "mirror-pr no-verify: still posts"
-assert_grep 'no verify.json found' "$CASE_PRD/linearis-calls.log" "mirror-pr no-verify: renders fallback line"
+assert_grep 'CTL-449' "$CASE_PRD/comment-post-calls.log" "mirror-pr no-verify: still posts"
+assert_grep 'no verify.json found' "$CASE_PRD/comment-post-calls.log" "mirror-pr no-verify: renders fallback line"
 
 # ─── Test 17 (CTL-632): phase-monitor-merge mirror runtime ────────────────────
 echo ""
@@ -922,10 +928,11 @@ run_mm_mirror() {
   mkdir -p "$case_dir/bin"
   seed_mm_worker "$worker_dir"
   install_gh_stub "$case_dir/bin"
+  linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
   if [[ "$stub_kind" == "ok" ]]; then
-    linearis_stub_install "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install "$case_dir/bin" "$case_dir/comment-post-calls.log"
   else
-    linearis_stub_install_failing "$case_dir/bin" "$case_dir/linearis-calls.log"
+    linear_comment_post_stub_install_failing "$case_dir/bin" "$case_dir/comment-post-calls.log"
   fi
   [[ -n "$preseed_marker" ]] && : > "$worker_dir/.linear-mirror-monitor-merge"
   (
@@ -942,8 +949,8 @@ run_mm_mirror() {
 # Case MM-A: happy — gh returns CI rollup (3 SUCCESS) + 1 bot review.
 CASE_MMA="$(run_mm_mirror happy ok '')"
 assert_eq "0" "$(cat "$CASE_MMA/exit-code")" "mirror-monitor-merge happy: exit 0"
-LOG_MMA="$CASE_MMA/linearis-calls.log"
-assert_grep '^discuss$' "$LOG_MMA" "mirror-monitor-merge happy: discuss landed"
+LOG_MMA="$CASE_MMA/comment-post-calls.log"
+assert_grep 'CTL-449' "$LOG_MMA" "mirror-monitor-merge happy: comment posted"
 assert_grep 'Phase Monitor-Merge' "$LOG_MMA" "mirror-monitor-merge happy: body has header"
 assert_grep '3/3 checks passed' "$LOG_MMA" "mirror-monitor-merge happy: renders CI rollup"
 assert_grep 'deadbeef1234' "$LOG_MMA" "mirror-monitor-merge happy: renders merge commit SHA"
@@ -955,15 +962,15 @@ assert_grep 'Bot reviews handled.*1' "$LOG_MMA" "mirror-monitor-merge happy: cou
 CASE_MMB="$(run_mm_mirror failopen fail '')"
 assert_eq "0" "$(cat "$CASE_MMB/exit-code")" "mirror-monitor-merge fail-open: exit 0"
 [[ ! -e "$CASE_MMB/orch/workers/CTL-449/.linear-mirror-monitor-merge" ]] && pass "mirror-monitor-merge fail-open: no marker" || fail "mirror-monitor-merge fail-open: marker should not exist"
-assert_grep 'phase-monitor-merge: linearis discuss failed \(continuing\)' "$CASE_MMB/stderr.log" "mirror-monitor-merge fail-open: warning to stderr"
+assert_grep 'phase-monitor-merge: linear-comment-post failed \(continuing\)' "$CASE_MMB/stderr.log" "mirror-monitor-merge fail-open: warning to stderr"
 
 # Case MM-C: idempotent.
 CASE_MMC="$(run_mm_mirror idempot ok seed)"
 assert_eq "0" "$(cat "$CASE_MMC/exit-code")" "mirror-monitor-merge idempotent: exit 0"
-if [[ ! -f "$CASE_MMC/linearis-calls.log" ]] || ! grep -q '^discuss$' "$CASE_MMC/linearis-calls.log" 2>/dev/null; then
-  pass "mirror-monitor-merge idempotent: discuss skipped"
+if [[ ! -f "$CASE_MMC/comment-post-calls.log" ]] || ! grep -q 'CTL-449' "$CASE_MMC/comment-post-calls.log" 2>/dev/null; then
+  pass "mirror-monitor-merge idempotent: comment post skipped"
 else
-  fail "mirror-monitor-merge idempotent: discuss should have been skipped (marker not honored)"
+  fail "mirror-monitor-merge idempotent: comment post should have been skipped (marker not honored)"
 fi
 
 # ─── Test 18 (CTL-632 footer): mirror appends the metadata footer ─────────────
@@ -983,6 +990,7 @@ FOOT_JOBS="${FOOT_DIR}/jobs"
 mkdir -p "$FOOT_DIR/bin" "$FOOT_WORKER" "${FOOT_JOBS}/abcd1234"
 build_git_fixture "$FOOT_REPO" yes
 linearis_stub_install "$FOOT_DIR/bin" "$FOOT_DIR/linearis-calls.log"
+linear_comment_post_stub_install "$FOOT_DIR/bin" "$FOOT_DIR/comment-post-calls.log"
 cat > "${FOOT_WORKER}/phase-implement.json" <<'JSON'
 {"status":"running","ticket":"CTL-449","phase":"implement","bg_job_id":"abcd1234","catalystSessionId":"sess_FOOTERTEST","model":"opus"}
 JSON
@@ -1003,11 +1011,12 @@ JSON
     PHASE="implement" \
     PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
     CATALYST_BG_JOBS_DIR="${FOOT_JOBS}" \
+    CATALYST_COMMENT_POST_HELPER="${FOOT_DIR}/bin/linear-comment-post.sh" \
     bash "$MIRROR_BODY_FILE" >"$FOOT_DIR/stdout.log" 2>"$FOOT_DIR/stderr.log"
   echo "$?" > "$FOOT_DIR/exit-code"
 )
 assert_eq "0" "$(cat "$FOOT_DIR/exit-code")" "mirror-footer: exit 0"
-LOG_FOOT="$FOOT_DIR/linearis-calls.log"
+LOG_FOOT="$FOOT_DIR/comment-post-calls.log"
 assert_grep '^---$' "$LOG_FOOT" "mirror-footer: footer separator present in body"
 assert_grep 'model `claude-opus-4-7`' "$LOG_FOOT" "mirror-footer: footer renders model from JSONL"
 assert_grep '1 sub-agent\(s\) launched' "$LOG_FOOT" "mirror-footer: footer counts sub-agents"

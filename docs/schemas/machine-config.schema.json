@@ -86,6 +86,41 @@
             }
           }
         },
+        "linear": {
+          "type": "object",
+          "description": "Linear app-actor credentials for the Catalyst agent identity.",
+          "additionalProperties": false,
+          "properties": {
+            "agent": {
+              "type": "object",
+              "description": "OAuth app-actor credentials. Never commit. Set up by setup-catalyst.sh.",
+              "additionalProperties": false,
+              "required": ["clientId", "clientSecret"],
+              "properties": {
+                "clientId": {
+                  "type": "string",
+                  "description": "Linear OAuth app client ID."
+                },
+                "clientSecret": {
+                  "type": "string",
+                  "description": "Linear OAuth app client secret. Used to mint client_credentials tokens."
+                },
+                "accessToken": {
+                  "type": "string",
+                  "description": "Pre-minted app-actor access token (lin_oauth_*). May be stale; prefer minting fresh via clientId/clientSecret."
+                },
+                "webhookSecret": {
+                  "type": "string",
+                  "description": "HMAC webhook signing secret for the Linear app webhook."
+                },
+                "botUserId": {
+                  "type": "string",
+                  "description": "Linear user UUID of the app actor. Used for loop prevention (suppresses events authored by the agent)."
+                }
+              }
+            }
+          }
+        },
         "orchestration": {
           "type": "object",
           "description": "Orchestration overrides. Concurrency fields here win per-field over Layer-1 values. Use this to tune concurrency per machine without modifying committed config.",

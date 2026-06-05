@@ -644,7 +644,7 @@ DRY=$(cd "${TEST_DIR}/proj" &&
 	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL_ENTRY=$(echo "$DRY" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')
 assert_eq \
-	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage" \
+	"OTEL_RESOURCE_ATTRIBUTES=project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"$OTEL_ENTRY" \
 	"dry-run JSON env array carries the composed OTEL attribute string"
 
@@ -669,6 +669,11 @@ touch "${TEST_DIR}/proj/thoughts/shared/plans/2026-05-18-ctl-100.md"
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" ",task.type=phase-implement" \
 	"task.type=phase-implement appended with projectKey present"
+
+# CTL-760: catalyst.exec_context=phase-bg rides the OTEL attrs so every bg
+# phase metric slices by launch mode (phase-bg vs interactive).
+assert_contains "$LOG" ",catalyst.exec_context=phase-bg" \
+	"catalyst.exec_context=phase-bg appended to OTEL_RESOURCE_ATTRIBUTES"
 
 # Case B: phase value flows through verbatim — monitor-deploy (the longest, hyphenated).
 fresh_env t15b
@@ -697,7 +702,7 @@ rm -rf "${CONFIG_DIR}"
 		>/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
-	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage" \
+	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"task.type appended even when projectKey absent (short form)"
 
 # ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
@@ -818,19 +823,27 @@ assert_eq "no" "$SIG_REM_EXISTS" "no remediate signal written when refused"
 
 # ─── CTL-658: --resume-session (daemon resume-on-revive) ────────────────────
 # phase-agent-dispatch honors a resolved resume UUID by spawning
-# `claude --bg --resume <uuid>` instead of a fresh /catalyst-dev:phase-* prompt,
-# then classifies the resume stderr: launched / alive / failed-fallback.
+# `claude --bg --resume <uuid> "/catalyst-dev:phase-* ..."` — resuming the dead
+# session's context AND re-issuing the phase command (CTL-736) so a worker that
+# died before its first assistant turn re-executes the phase instead of idling on
+# `claude --bg --resume`'s generic "Continue from where you left off." nudge.
+# It then classifies the resume stderr: launched / alive / failed-fallback.
 # triage is used as the carrier phase because it needs no prior artifact.
 
 echo ""
-echo "Test 22 (CTL-658): --resume-session plumbs --resume <uuid>, drops the fresh prompt"
+echo "Test 22 (CTL-658/CTL-736): --resume-session plumbs --resume <uuid> AND re-issues the phase prompt"
 fresh_env t22_resume_flag
 "$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
 	--resume-session abc-uuid >"${TEST_DIR}/t22.out" 2>/dev/null
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" "--resume" "resume invocation carries --resume flag"
 assert_contains "$LOG" "abc-uuid" "resume invocation carries the session uuid"
-assert_not_contains "$LOG" "/catalyst-dev:phase-" "resume invocation drops the fresh phase prompt"
+# CTL-736: the resume now ALSO carries the phase command so an early-death worker
+# (killed before its first assistant turn — nothing for the generic nudge to
+# anchor on) re-executes the phase rather than idling. Both in the SAME invocation.
+assert_contains "$LOG" "/catalyst-dev:phase-triage CTL-100" "resume invocation re-issues the phase prompt (CTL-736)"
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$ARGS_COUNT" "resume re-issues the prompt in the SAME invocation (not a resume-then-fresh double spawn)"
 
 echo ""
 echo "Test 23 (CTL-658): clean resume (empty stderr) → signal running with new bg_job_id, exit 0"
@@ -862,8 +875,11 @@ assert_eq "resume-rejected-alive" "$(jq -r '.attentionReason' "$SIGNAL")" \
 	"alive-rejected resume records attentionReason=resume-rejected-alive"
 assert_eq "resume_rejected_alive" "$(jq -r '.reason' "${TEST_DIR}/t24.out")" \
 	"alive-rejected resume stdout JSON reason=resume_rejected_alive"
-LOG=$(cat "$CLAUDE_STUB_LOG")
-assert_not_contains "$LOG" "/catalyst-dev:phase-" "alive-rejected resume does NOT fall back to a fresh spawn"
+# CTL-736: the resume attempt itself now carries the phase prompt, so prompt-
+# presence no longer distinguishes a resume from a fallback spawn. Assert no
+# FALLBACK happened by counting invocations: exactly one (the rejected resume).
+ARGS_COUNT=$(grep -c -- '--ARGS--' "$CLAUDE_STUB_LOG")
+assert_eq "1" "$ARGS_COUNT" "alive-rejected resume does NOT fall back to a fresh spawn (single invocation)"
 unset CLAUDE_STUB_RESUME_STDERR CLAUDE_STUB_RESUME_EXIT CATALYST_DIR
 
 echo ""
@@ -1448,11 +1464,9 @@ assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo
 	"loser writes no signal file (bows out before the signal write)"
 assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
 
-# ─── Test 44 (CTL descriptor v1.1): plan dispatch threads per-step launch levers ───
-# A large-scope ticket fires the plan step's rule: --effort max + an
-# --append-system-prompt carrying the /workflows directive + --model opusplan.
+# ─── Test 44 (CTL-747): 8-pt ticket → plan launches with effort:xhigh + /workflows, no opusplan ───
 echo ""
-echo "Test 44 (descriptor v1.1): large ticket → plan launches with effort:max + /workflows postamble + model:opusplan"
+echo "Test 44 (CTL-747): 8-pt ticket → plan launches with effort:xhigh + /workflows postamble, no opusplan"
 fresh_env t44
 mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
 touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
@@ -1462,14 +1476,18 @@ printf '%s\n' '{"estimated_scope":"large","classification":"feature"}' >"${WORKE
 LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" "--effort" "large plan: claude invoked with --effort"
 T44_EFFORT=$(grep -A1 '^--effort$' "$CLAUDE_STUB_LOG" | sed -n '2p')
-assert_eq "max" "$T44_EFFORT" "large plan: --effort value is max"
+assert_eq "xhigh" "$T44_EFFORT" "large plan: --effort value is xhigh"
 assert_contains "$LOG" "--append-system-prompt" "large plan: claude invoked with --append-system-prompt"
 assert_contains "$LOG" "/workflows" "large plan: append-system-prompt carries the /workflows directive"
-assert_contains "$LOG" "opusplan" "large plan: rule overrides model to opusplan"
+if echo "$LOG" | grep -q "opusplan"; then
+	fail "large plan: rule must NOT override model to opusplan (CTL-747 dropped it)"
+else
+	pass "large plan: model not escalated to opusplan"
+fi
 
-# ─── Test 45 (CTL descriptor v1.1): small ticket keeps base levers, no escalation ───
+# ─── Test 45 (CTL-747): 1-pt ticket → plan de-escalates to effort:medium, no /workflows ───
 echo ""
-echo "Test 45 (descriptor v1.1): small ticket → plan launches with effort:high, no /workflows, no opusplan"
+echo "Test 45 (CTL-747): 1-pt ticket → plan launches with effort:medium, no /workflows, no opusplan"
 fresh_env t45
 mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
 touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
@@ -1478,7 +1496,7 @@ printf '%s\n' '{"estimated_scope":"small","classification":"feature"}' >"${WORKE
 	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
 LOG=$(cat "$CLAUDE_STUB_LOG")
 T45_EFFORT=$(grep -A1 '^--effort$' "$CLAUDE_STUB_LOG" | sed -n '2p')
-assert_eq "high" "$T45_EFFORT" "small plan: --effort value is high (step base, no rule)"
+assert_eq "medium" "$T45_EFFORT" "small plan: --effort value is medium (1-pt → lt 3 rule)"
 if echo "$LOG" | grep -q "/workflows"; then
 	fail "small plan: must NOT carry the /workflows escalation"
 else
@@ -1489,6 +1507,253 @@ if echo "$LOG" | grep -q "opusplan"; then
 else
 	pass "small plan: model not escalated to opusplan"
 fi
+
+# ─── Test 46 (CTL-747): numeric estimate:8 in triage.json → xhigh + /workflows (CTL-746 forward-compat) ───
+echo ""
+echo "Test 46 (CTL-747): numeric estimate:8 in triage.json → plan escalates to xhigh + /workflows (CTL-746 forward-compat)"
+fresh_env t46
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
+printf '%s\n' '{"estimate":8,"classification":"feature"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase plan --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+T46_EFFORT=$(grep -A1 '^--effort$' "$CLAUDE_STUB_LOG" | sed -n '2p')
+assert_eq "xhigh" "$T46_EFFORT" "numeric estimate:8 → --effort xhigh"
+assert_contains "$LOG" "/workflows" "numeric estimate:8 → /workflows postamble"
+
+# ─── Test 47 (CTL-747): un-pointed verify dispatch → NO --effort flag (fail-open, no base) ───
+echo ""
+echo "Test 47 (CTL-747): un-pointed verify dispatch → NO --effort flag (fail-open, no base)"
+fresh_env t47
+printf '%s\n' '{"classification":"feature"}' >"${WORKER_DIR}/triage.json"
+printf '%s\n' '{"status":"done"}' >"${WORKER_DIR}/phase-implement.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase verify --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+if echo "$LOG" | grep -q -- "--effort"; then
+	fail "un-pointed verify: must NOT pass --effort (no base, fail-open)"
+else
+	pass "un-pointed verify: no --effort flag"
+fi
+
+# ─── CTL-760: per-worker --settings env injection ───────────────────────────
+# `claude --bg` is an RPC to the per-user daemon, so the worker inherits the
+# daemon's FROZEN env and per-worker OTEL_RESOURCE_ATTRIBUTES is lost. The only
+# lever that crosses the RPC is `claude --bg --settings '{"env":{...}}'`, which
+# MERGES with ~/.claude/settings.json. The dispatcher composes that settings
+# JSON (telemetry toggles + per-worker OTEL_RESOURCE_ATTRIBUTES + a statusLine
+# command) and threads it into every spawn.
+#
+# The stub claude logs all argv under --ARGS-- (one token per line), so we can
+# grep the line after `--settings` to recover the composed JSON and assert on it
+# with jq. Telemetry toggles are re-asserted from the dispatcher's inherited env,
+# so the tests export them before invoking.
+
+# settings_json_from_log → echoes the JSON token logged right after `--settings`
+# in $CLAUDE_STUB_LOG (the argv section logs one token per line).
+settings_json_from_log() {
+	grep -A1 -- '^--settings$' "$CLAUDE_STUB_LOG" | sed -n '2p'
+}
+
+echo ""
+echo "Test 48 (CTL-760): spawn carries --settings with per-worker OTEL_RESOURCE_ATTRIBUTES in .env"
+fresh_env t48
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://otel.example:4317"
+export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--settings" "spawn argv carries --settings"
+SETTINGS_JSON="$(settings_json_from_log)"
+SET_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_eq \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"$SET_OTEL" \
+	".settings.env.OTEL_RESOURCE_ATTRIBUTES equals the composed attrs"
+
+echo ""
+echo "Test 49 (CTL-760): .settings.env carries the telemetry toggles from the dispatcher env"
+# Reuse the exports from Test 48 (still in the environment).
+SET_TELEMETRY=$(echo "$SETTINGS_JSON" | jq -r '.env["CLAUDE_CODE_ENABLE_TELEMETRY"] // empty' 2>/dev/null)
+SET_METRICS=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_METRICS_EXPORTER"] // empty' 2>/dev/null)
+SET_LOGS=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_LOGS_EXPORTER"] // empty' 2>/dev/null)
+SET_ENDPOINT=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_EXPORTER_OTLP_ENDPOINT"] // empty' 2>/dev/null)
+SET_PROTOCOL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_EXPORTER_OTLP_PROTOCOL"] // empty' 2>/dev/null)
+assert_eq "1" "$SET_TELEMETRY" ".settings.env.CLAUDE_CODE_ENABLE_TELEMETRY = 1"
+assert_eq "otlp" "$SET_METRICS" ".settings.env.OTEL_METRICS_EXPORTER = otlp"
+assert_eq "otlp" "$SET_LOGS" ".settings.env.OTEL_LOGS_EXPORTER = otlp"
+assert_eq "http://otel.example:4317" "$SET_ENDPOINT" ".settings.env.OTEL_EXPORTER_OTLP_ENDPOINT carried when set"
+assert_eq "grpc" "$SET_PROTOCOL" ".settings.env.OTEL_EXPORTER_OTLP_PROTOCOL carried when set"
+unset CLAUDE_CODE_ENABLE_TELEMETRY OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER \
+	OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL
+
+echo ""
+echo "Test 50 (CTL-760): unset optional endpoint/protocol are OMITTED from .settings.env (no null keys)"
+fresh_env t50
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+# Explicitly clear the optional OTLP keys so the dispatcher must omit them.
+unset OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_PROTOCOL
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+HAS_ENDPOINT=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_EXPORTER_OTLP_ENDPOINT")' 2>/dev/null)
+HAS_PROTOCOL=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_EXPORTER_OTLP_PROTOCOL")' 2>/dev/null)
+assert_eq "false" "$HAS_ENDPOINT" "unset OTEL_EXPORTER_OTLP_ENDPOINT omitted from .settings.env"
+assert_eq "false" "$HAS_PROTOCOL" "unset OTEL_EXPORTER_OTLP_PROTOCOL omitted from .settings.env"
+# Settings is still valid JSON even with the optional keys absent.
+IS_VALID=$(echo "$SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "yes" "$IS_VALID" "settings JSON remains valid with optional keys omitted"
+
+echo ""
+echo "Test 51 (CTL-760): --settings COEXISTS with --effort / --append-system-prompt (levers branch)"
+fresh_env t51
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+touch "${TEST_DIR}/proj/thoughts/shared/research/2026-05-30-ctl-100.md"
+printf '%s\n' '{"estimated_scope":"large","classification":"feature"}' >"${WORKER_DIR}/triage.json"
+(cd "${TEST_DIR}/proj" && "$DISPATCH" --phase plan --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" "--settings" "levers branch: --settings present"
+assert_contains "$LOG" "--effort" "levers branch: --effort present"
+assert_contains "$LOG" "--append-system-prompt" "levers branch: --append-system-prompt present"
+SETTINGS_JSON="$(settings_json_from_log)"
+LEVERS_OTEL=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_contains "$LEVERS_OTEL" "task.type=phase-plan" "levers branch: settings still carries the composed OTEL attrs"
+
+echo ""
+echo "Test 52 (CTL-760): .settings.statusLine.command ends with catalyst-statusline.sh when present"
+fresh_env t52
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+SL_CMD=$(echo "$SETTINGS_JSON" | jq -r '.statusLine.command // empty' 2>/dev/null)
+SL_TYPE=$(echo "$SETTINGS_JSON" | jq -r '.statusLine.type // empty' 2>/dev/null)
+case "$SL_CMD" in
+*/catalyst-statusline.sh) pass ".settings.statusLine.command ends with catalyst-statusline.sh" ;;
+*) fail ".settings.statusLine.command ends with catalyst-statusline.sh — got '$SL_CMD'" ;;
+esac
+assert_eq "command" "$SL_TYPE" ".settings.statusLine.type = command"
+
+echo ""
+echo "Test 53 (CTL-760): --dry-run JSON includes the composed settings field"
+fresh_env t53
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+DRY=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+HAS_SETTINGS=$(echo "$DRY" | jq -r 'has("settings")' 2>/dev/null)
+assert_eq "true" "$HAS_SETTINGS" "dry-run JSON has a settings field"
+DRY_OTEL=$(echo "$DRY" | jq -r '.settings.env["OTEL_RESOURCE_ATTRIBUTES"] // empty' 2>/dev/null)
+assert_eq \
+	"project=test-proj,linear.key=CTL-100,catalyst.orchestration=orch-test,branch=orch-test-CTL-100,task.type=phase-triage,catalyst.exec_context=phase-bg" \
+	"$DRY_OTEL" \
+	"dry-run JSON settings.env carries the composed OTEL attrs"
+
+echo ""
+echo "Test 54 (CTL-761): --attempt is persisted to signal file"
+fresh_env t54
+rm -f "${WORKER_DIR}/phase-implement.json"
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+echo "# plan" >"${TEST_DIR}/proj/thoughts/shared/plans/2026-01-01-ctl-100.md"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase implement --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		--attempt 4 >/dev/null 2>&1)
+SIGNAL_T54="${WORKER_DIR}/phase-implement.json"
+ATT_T54=$(jq -r '.attempt // empty' "$SIGNAL_T54" 2>/dev/null)
+assert_eq "4" "$ATT_T54" "signal file carries attempt=4"
+
+echo ""
+echo "Test 55 (CTL-761): default (no --attempt) → attempt=1 in signal file"
+fresh_env t55
+rm -f "${WORKER_DIR}/phase-triage.json"
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SIGNAL_T55="${WORKER_DIR}/phase-triage.json"
+ATT_T55=$(jq -r '.attempt // empty' "$SIGNAL_T55" 2>/dev/null)
+assert_eq "1" "$ATT_T55" "signal file defaults attempt=1"
+
+# ─── CTL-777: settings.env also carries the 5 CATALYST_* context vars ────────
+# `claude --bg` drops the plain env prefix (DISPATCH_ENV), so the worker's
+# CATALYST_ORCHESTRATOR_DIR was empty and phase-agent-emit-complete's step-2
+# signal flip silently skipped — wedging the pipeline. The fix threads the same
+# 5 context vars into the surviving --settings.env channel.
+
+echo ""
+echo "Test 56 (CTL-777): .settings.env carries the 5 CATALYST_* context vars"
+fresh_env t56
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_JSON="$(settings_json_from_log)"
+SET_ODIR=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_ORCHESTRATOR_DIR"] // empty' 2>/dev/null)
+SET_OID=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_ORCHESTRATOR_ID"] // empty' 2>/dev/null)
+SET_PHASE=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_PHASE"] // empty' 2>/dev/null)
+SET_TICKET=$(echo "$SETTINGS_JSON" | jq -r '.env["CATALYST_TICKET"] // empty' 2>/dev/null)
+HAS_GEN=$(echo "$SETTINGS_JSON" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+assert_eq "$ORCH_DIR" "$SET_ODIR" ".settings.env.CATALYST_ORCHESTRATOR_DIR equals --orch-dir"
+assert_eq "orch-test" "$SET_OID" ".settings.env.CATALYST_ORCHESTRATOR_ID equals --orch-id"
+assert_eq "triage" "$SET_PHASE" ".settings.env.CATALYST_PHASE equals the phase"
+assert_eq "CTL-100" "$SET_TICKET" ".settings.env.CATALYST_TICKET equals the ticket"
+assert_eq "true" "$HAS_GEN" ".settings.env carries CATALYST_GENERATION"
+
+echo ""
+echo "Test 57 (CTL-777): CTL-760 telemetry keys are unchanged and fail-open intact"
+# Reuse Test 56's SETTINGS_JSON.
+T57_TEL=$(echo "$SETTINGS_JSON" | jq -r '.env["CLAUDE_CODE_ENABLE_TELEMETRY"] // empty' 2>/dev/null)
+T57_MET=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_METRICS_EXPORTER"] // empty' 2>/dev/null)
+T57_LOG=$(echo "$SETTINGS_JSON" | jq -r '.env["OTEL_LOGS_EXPORTER"] // empty' 2>/dev/null)
+T57_ATTR=$(echo "$SETTINGS_JSON" | jq -r '.env | has("OTEL_RESOURCE_ATTRIBUTES")' 2>/dev/null)
+assert_eq "1" "$T57_TEL" "CLAUDE_CODE_ENABLE_TELEMETRY still present and unchanged"
+assert_eq "otlp" "$T57_MET" "OTEL_METRICS_EXPORTER still present and unchanged"
+assert_eq "otlp" "$T57_LOG" "OTEL_LOGS_EXPORTER still present and unchanged"
+assert_eq "true" "$T57_ATTR" "OTEL_RESOURCE_ATTRIBUTES still composed alongside the context vars"
+T57_VALID=$(echo "$SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "yes" "$T57_VALID" "settings JSON remains valid with context vars added (fail-open intact)"
+
+echo ""
+echo "Test 58 (CTL-777): empty context var is OMITTED (no null key) while others stay"
+fresh_env t58
+# Run the composer directly with GENERATION empty but ORCH_DIR present so we can
+# assert the ==\"\" omission pattern holds for the new keys too.
+SETTINGS_T58=$(
+	ORCH_DIR="${ORCH_DIR}" ORCH_ID="orch-test" PHASE="triage" TICKET="CTL-100" \
+		GENERATION="" SCRIPT_DIR="${TEST_DIR}/bin" OTEL_RES_ATTRS="" \
+		bash -c '
+      source <(sed -n "/^compose_worker_settings_json()/,/^}/p" "'"$DISPATCH"'")
+      compose_worker_settings_json'
+)
+T58_HAS_GEN=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T58_HAS_ODIR=$(echo "$SETTINGS_T58" | jq -r '.env | has("CATALYST_ORCHESTRATOR_DIR")' 2>/dev/null)
+T58_VALID=$(echo "$SETTINGS_T58" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T58_HAS_GEN" "empty CATALYST_GENERATION omitted (no null key)"
+assert_eq "true" "$T58_HAS_ODIR" "CATALYST_ORCHESTRATOR_DIR still present when set"
+assert_eq "yes" "$T58_VALID" "settings JSON valid with a context var omitted"
 
 echo ""
 echo "─────────────────────────────────────────────"

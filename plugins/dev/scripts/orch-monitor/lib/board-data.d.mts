@@ -21,6 +21,28 @@ export interface BoardWorker {
   sessionId: string;
 }
 
+export interface BoardPhaseCost {
+  costUSD: number;
+  tokens: number;
+  turns: number;
+}
+
+export interface BoardPhaseTiming {
+  phase: string;
+  status: string;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface BoardCurrentPhase {
+  phase: string;
+  status: string;
+  model: string | null;
+  startedAt?: string;
+  updatedAt?: string;
+}
+
 export interface BoardTicket {
   id: string;
   title: string;
@@ -41,8 +63,15 @@ export interface BoardTicket {
   project: string | null;
   costUSD: number | null;
   tokens: number | null;
+  turns: number | null;
+  phaseCosts: Record<string, BoardPhaseCost> | null;
+  phaseSummary: BoardPhaseTiming[];
   pr: number | null;
   updatedAt: string;
+  /** CTL-755 held indicator from the ticket's Linear labels. */
+  held: "blocked" | "waiting" | null;
+  /** Dependency ids a `blocked` hold is waiting on (from triage.json). */
+  blockers: string[];
 }
 
 export interface BoardQueueItem {
@@ -79,4 +108,10 @@ export interface BoardPayload {
 
 export const PHASE_ORDER: string[];
 export const PHASE_TO_LINEAR: Record<string, string>;
+export const TERMINAL: Set<string>;
+export const HELD_LABEL_BLOCKED: string;
+export const HELD_LABEL_WAITING: string;
+export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
+export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
 export function assembleBoard(): Promise<BoardPayload>;

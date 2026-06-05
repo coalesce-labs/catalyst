@@ -176,3 +176,42 @@ export function countDistinctRevivingTickets({
 export function __resetEventScanIndexForTest() {
   _index.clear();
 }
+
+// countTicketEventsInWindow — CTL-671. Total phase.*.<ticket> envelopes within
+// `windowMs` of now(). The runaway-loop signal: a healthy ticket emits a
+// handful of events per phase; a phantom probe-storm emits hundreds. Counts ALL
+// actions (the CTL-9 storm was 92% non-failed work-done probes), unlike a
+// dispatch-failure-only counter which would have missed it. Matches on the
+// canonical event name `phase.<phase>.<action>.<ticket>` via a leading-dot
+// suffix so "CTL-9" never matches "CTL-90". now: () => number matches the
+// recovery.mjs clock-injection convention.
+export function countTicketEventsInWindow({
+  ticket,
+  windowMs,
+  now = Date.now,
+  path = getEventLogPath(),
+} = {}) {
+  if (!ticket) throw new Error("countTicketEventsInWindow: ticket required");
+  if (!windowMs) throw new Error("countTicketEventsInWindow: windowMs required");
+  const cutoff = now() - windowMs;
+  const suffix = `.${ticket}`;
+  let n = 0;
+  // CTL-671 (rebased onto CTL-673): the runaway counter must see ALL
+  // `phase.*.<ticket>` envelopes, not just the revive/remediate families the
+  // retained `_index` keeps — so it cannot reuse refreshIndex. Use the same
+  // bounded `scanEventsChunked` primitive directly (fixed-size chunks, never the
+  // pre-CTL-673 whole-file readFileSync) for a memory-safe full scan.
+  scanEventsChunked({
+    path,
+    fromOffset: 0,
+    leftover: "",
+    onEvent: (ev) => {
+      const name = ev?.attributes?.["event.name"];
+      if (typeof name !== "string" || !name.startsWith("phase.") || !name.endsWith(suffix)) return;
+      const tsMs = Date.parse(ev?.ts || "");
+      if (!Number.isFinite(tsMs) || tsMs < cutoff) return;
+      n++;
+    },
+  });
+  return n;
+}

@@ -22,6 +22,20 @@ export interface BoardWorker {
   sessionId?: string;
 }
 
+export interface BoardPhaseCost {
+  costUSD: number;
+  tokens: number;
+  turns: number;
+}
+
+export interface BoardPhaseTiming {
+  phase: string;
+  status: string;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
 export interface BoardTicket {
   id: string;
   title: string;
@@ -42,8 +56,25 @@ export interface BoardTicket {
   project: string | null;
   costUSD: number | null;
   tokens: number | null;
+  turns: number | null;
+  phaseCosts: Record<string, BoardPhaseCost> | null;
+  phaseSummary: BoardPhaseTiming[];
   pr: number | null;
   updatedAt: string;
+  subSteps?: WorkflowSubStep[];
+  /** CTL-755 held indicator from the ticket's Linear labels: the admission gate
+   *  holds a triaged-waiting ticket before the triage→research promotion. */
+  held?: "blocked" | "waiting" | null;
+  /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
+  blockers?: string[];
+}
+
+export interface WorkflowSubStep {
+  ts: string;
+  workflowName: string;
+  stepLabel: string;
+  stepIndex: number;
+  status: "started" | "complete" | "failed";
 }
 
 export interface BoardQueueItem {

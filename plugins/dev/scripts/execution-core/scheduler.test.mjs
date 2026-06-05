@@ -23,6 +23,7 @@ import {
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
+  resolveTargetSetpoint,
   DEFAULT_MAX_PARALLEL,
   computeFreeSlots,
   predecessorPhaseOf,
@@ -47,10 +48,15 @@ import {
   clearDispatchCooldown,
   dispatchCooldownPath,
   escalateDispatchExhausted,
+  maybeTripCircuitBreaker,
+  CIRCUIT_BREAKER_THRESHOLD,
+  RUNAWAY_THRESHOLD,
+  RUNAWAY_WINDOW_MS,
   verifyDispatchedSignal,
   gcDispatchCooldowns,
   maybeEscalateDispatchFailures,
   __resetForTests,
+  __getRunningOpts,
   // CTL-705: Phase 2 helpers
   STAGE_RANK,
   stageRankForTicket,
@@ -59,6 +65,7 @@ import {
   buildGlobalRanking,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
+import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
@@ -385,6 +392,29 @@ describe("mergeExecutionCoreConcurrency (CTL-678)", () => {
   });
 });
 
+describe("resolveTargetSetpoint (CTL-770)", () => {
+  test("host targetParallel present (positive int) → returns it", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 6 })).toBe(6);
+  });
+  test("host absent → falls back to repo maxParallel", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, {})).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 })).toBe(4);
+  });
+  test("both absent → undefined (caller no-ops convergence)", () => {
+    expect(resolveTargetSetpoint({}, {})).toBeUndefined();
+    expect(resolveTargetSetpoint()).toBeUndefined();
+  });
+  test("non-positive / non-integer host targetParallel falls back to repo maxParallel", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 0 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: -1 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 2.5 })).toBe(4);
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: "6" })).toBe(4);
+  });
+  test("host targetParallel wins even when repo maxParallel also set", () => {
+    expect(resolveTargetSetpoint({ maxParallel: 4 }, { targetParallel: 8 })).toBe(8);
+  });
+});
+
 describe("mergeExecutionCoreConcurrency — perProject (CTL-706)", () => {
   test("layer-1-only perProject passes through", () => {
     const l1 = { maxParallel: 6, perProject: { CTL: { maxParallel: 3, reserve: 1 } } };
@@ -662,6 +692,38 @@ function fakeDispatch({ code = 0 } = {}) {
 // signal file and is `false` for tests that don't write one — pass this to
 // schedulerTick to opt out of demotion for non-CTL-611 tests.
 const verifyOk = () => ({ ok: true });
+
+// ── CTL-755: admission-gate fetchRelations stub helpers ──
+//
+// relUnblocked — a fetchTicketRelations return for a candidate with NO open
+// dependency (non-terminal "Triage" state, no relations, given priority/labels).
+// STEP A admits it whenever a promotion slot is free. relBlockedBy — adds a
+// blocked_by inverseRelations edge (type:"blocks", issue:<blocker>) so the dep
+// graph holds the candidate until the blocker hydrates terminal.
+function relUnblocked({ priority = 2, labels = [], state = "Triage" } = {}) {
+  return {
+    state,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+    priority,
+    labels,
+  };
+}
+function relBlockedBy(blockerId, { priority = 2, labels = [], state = "Triage" } = {}) {
+  return {
+    state,
+    relations: { nodes: [] },
+    // inverseRelations {type:"blocks", issue:<blocker>} means <blocker> BLOCKS this
+    // ticket — the blocked_by edge buildDependencyEdges reads (node.issue.identifier).
+    inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: blockerId } }] },
+    priority,
+    labels,
+  };
+}
+// A fetchRelations dispatcher keyed by ticket id, falling back to relUnblocked.
+function relMap(map) {
+  return (id) => map[id] ?? relUnblocked();
+}
 
 // ── CTL-624: per-(ticket,phase) dispatch cool-down helpers ──
 describe("dispatch cool-down helpers", () => {
@@ -951,6 +1013,327 @@ describe("dispatch cool-down escalation", () => {
       });
     }
     expect(applied).toContainEqual({ ticket: "CTL-7", label: "needs-human" });
+  });
+});
+
+// ── CTL-671 Phase 1: per-ticket dispatch-failure circuit breaker ──
+describe("dispatch circuit breaker (CTL-671)", () => {
+  test("recordDispatchFailure increments consecutiveFailures and preserves CTL-624 fields", () => {
+    const t = "CTL-9",
+      phase = "research";
+    recordDispatchFailure(orchDir, t, phase, 1, 1000);
+    recordDispatchFailure(orchDir, t, phase, 1, 2000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, t, phase), "utf8"));
+    expect(m.failedAt).toBe(2000); // CTL-624 field preserved (latest)
+    expect(m.phase).toBe(phase); // CTL-624 field preserved
+    expect(m.code).toBe(1); // CTL-624 field preserved
+    expect(m.consecutiveFailures).toBe(2); // new counter
+  });
+
+  test("clearDispatchCooldown resets the counter (success heals)", () => {
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 1000);
+    clearDispatchCooldown(orchDir, "CTL-9", "research");
+    // marker gone → fresh failure starts at 1
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 3000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("a pre-CTL-671 marker without consecutiveFailures self-upgrades from 0", () => {
+    // A legacy CTL-624 marker (no counter field) reads as 0, so the first new
+    // failure writes consecutiveFailures: 1 (the `?? 0` default — Migration Notes).
+    mkdirSync(join(orchDir, ".dispatch-cooldowns"), { recursive: true });
+    writeFileSync(
+      dispatchCooldownPath(orchDir, "CTL-9", "research"),
+      JSON.stringify({ phase: "research", code: 2, failedAt: 500 })
+    );
+    recordDispatchFailure(orchDir, "CTL-9", "research", 2, 1000);
+    const m = JSON.parse(readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "research"), "utf8"));
+    expect(m.consecutiveFailures).toBe(1);
+  });
+
+  test("maybeTripCircuitBreaker writes terminal stalled at threshold, idempotently", () => {
+    const t = "CTL-9",
+      phase = "research";
+    writeSignal(t, phase, "running");
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("dispatch-circuit-breaker");
+    expect(sig.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true); // idempotent (already stalled)
+  });
+
+  test("below threshold does NOT trip", () => {
+    writeSignal("CTL-9", "research", "running");
+    recordDispatchFailure(orchDir, "CTL-9", "research", 1, 1000);
+    expect(maybeTripCircuitBreaker(orchDir, "CTL-9", "research")).toBe(false);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-research.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+  });
+
+  test("no marker → does NOT trip (absent counter)", () => {
+    expect(maybeTripCircuitBreaker(orchDir, "CTL-9", "research")).toBe(false);
+  });
+
+  test("at threshold with no signal still reports tripped so the caller skips dispatch", () => {
+    // Refused-dispatch case: the target phase signal was never written. The
+    // breaker has nothing to stall but must still return true so the caller
+    // stops re-dispatching.
+    const t = "CTL-9",
+      phase = "plan";
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 2, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    expect(existsSync(join(orchDir, "workers", t, `phase-${phase}.json`))).toBe(false);
+  });
+
+  test("schedulerTick stops dispatching after THRESHOLD consecutive failures", () => {
+    // Rebase note (CTL-671 onto CTL-712/CTL-713): two sibling mechanisms now
+    // co-exist on the advancement path — the CTL-712 max-dispatch-retries
+    // terminal stop (escalateDispatchExhausted at getMaxDispatchRetries()=5) and
+    // CTL-671's own circuit breaker (CIRCUIT_BREAKER_THRESHOLD=8). To isolate the
+    // CTL-671 breaker (the subject under test) we lift the CTL-712 ceiling above
+    // the breaker threshold so the breaker is the gate that fires. We also use a
+    // TRANSIENT failure code (1): CTL-712 classifies code 2 as a PERMANENT failure
+    // (PERMANENT_FAILURE_CODES) with a 30-min cooldown, which would suppress the
+    // re-dispatch retries this test relies on.
+    const prevMax = process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+    process.env.SCHEDULER_MAX_DISPATCH_RETRIES = String(CIRCUIT_BREAKER_THRESHOLD + 5);
+    try {
+      writeSignal("CTL-9", "research", "done"); // in-flight; advancement → plan
+      const dispatch = fakeDispatch({ code: 1 }); // every dispatch refused (transient)
+      // Each tick is past the 60 s cool-down window so a fresh failure records.
+      for (let i = 0; i < CIRCUIT_BREAKER_THRESHOLD; i++) {
+        schedulerTick(orchDir, {
+          readEligible: () => [],
+          dispatch,
+          now: () => (i + 1) * 70_000,
+          liveBackgroundCount: () => 0,
+        });
+      }
+      expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD);
+      const m = JSON.parse(
+        readFileSync(dispatchCooldownPath(orchDir, "CTL-9", "plan"), "utf8")
+      );
+      expect(m.consecutiveFailures).toBe(CIRCUIT_BREAKER_THRESHOLD);
+      // One more tick past the window: the top-of-loop breaker guard suppresses it.
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        now: () => (CIRCUIT_BREAKER_THRESHOLD + 2) * 70_000,
+        liveBackgroundCount: () => 0,
+      });
+      expect(dispatch.calls).toHaveLength(CIRCUIT_BREAKER_THRESHOLD); // no growth — breaker held
+    } finally {
+      if (prevMax === undefined) delete process.env.SCHEDULER_MAX_DISPATCH_RETRIES;
+      else process.env.SCHEDULER_MAX_DISPATCH_RETRIES = prevMax;
+    }
+  });
+});
+
+// ── CTL-671 Phase 3: phantom/orphan worker-dir validity sweep ──
+describe("phantom worker-dir validity sweep (CTL-671)", () => {
+  // The sweep's seams are injected directly (classifyResolution returns the
+  // 3-valued result; classifyTicketResolution's parsing is covered in
+  // linear-query.test.mjs). schedulerTick's defaults are safe no-ops, so the
+  // sweep only acts here because we arm it.
+  const resolveTo = (verdict) => () => verdict;
+  const eligibleFull = (id) => ({
+    identifier: id,
+    priority: 1,
+    state: "Todo",
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+  });
+
+  test("quarantines a not-found + not-eligible + dead worker dir", () => {
+    writeSignal("CTL-9", "implement", "running");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("phantom-ticket");
+  });
+
+  test("does NOT quarantine when Linear resolution is unknown (outage safety)", () => {
+    writeSignal("CTL-100", "implement", "running");
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("unknown"), // transient outage
+      isBgJobAlive: () => false,
+    });
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-100", "phase-implement.json"), "utf8")
+    );
+    expect(sig.status).toBe("running"); // untouched
+  });
+
+  test("does NOT quarantine a ticket present in the eligible set", () => {
+    writeSignal("CTL-100", "implement", "running");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [eligibleFull("CTL-100")], // eligible → real ticket
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(
+      JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-100", "phase-implement.json"), "utf8")
+      ).status
+    ).toBe("running");
+    expect(classifyCalls).toBe(0); // eligible short-circuits before the Linear probe
+  });
+
+  test("does NOT quarantine a not-found ticket whose bg job is still alive", () => {
+    writeSignal("CTL-9", "implement", "running");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => true, // live worker → never touched
+    });
+    expect(
+      JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-9", "phase-implement.json"), "utf8")
+      ).status
+    ).toBe("running");
+    expect(classifyCalls).toBe(0); // bg-liveness short-circuits before the Linear probe
+  });
+
+  test("skips already-terminal signals (idempotent / no rework, never probes Linear)", () => {
+    writeSignal("CTL-9", "implement", "stalled");
+    let classifyCalls = 0;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: () => {
+        classifyCalls++;
+        return "not-found";
+      },
+      isBgJobAlive: () => false,
+    });
+    expect(classifyCalls).toBe(0); // never probes a terminal ticket
+  });
+
+  test("returns the quarantined phantoms list for the daemon log / HUD", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      classifyResolution: resolveTo("not-found"),
+      isBgJobAlive: () => false,
+    });
+    expect(result.quarantinedPhantoms).toEqual([{ ticket: "CTL-9", phase: "implement" }]);
+  });
+});
+
+// ── CTL-671 Phase 4: runaway event-rate domination alert ──
+describe("runaway event-rate alert (CTL-671)", () => {
+  test("emits exactly one runaway event per window when a ticket dominates", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const runawayCalls = [];
+    const opts = {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true, // isolate the alert from phantom quarantine
+      countTicketEvents: () => RUNAWAY_THRESHOLD, // at threshold → fires
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 1_000_000,
+    };
+    schedulerTick(orchDir, opts);
+    expect(runawayCalls).toHaveLength(1);
+    expect(runawayCalls[0]).toMatchObject({
+      ticket: "CTL-9",
+      count: RUNAWAY_THRESHOLD,
+      window_ms: RUNAWAY_WINDOW_MS,
+    });
+
+    // Second tick within the same window → suppressed by the once-per-window marker.
+    schedulerTick(orchDir, opts);
+    expect(runawayCalls).toHaveLength(1);
+
+    // A tick past the window → fires again.
+    schedulerTick(orchDir, { ...opts, now: () => 1_000_000 + RUNAWAY_WINDOW_MS + 1 });
+    expect(runawayCalls).toHaveLength(2);
+  });
+
+  test("does NOT emit below threshold", () => {
+    writeSignal("CTL-9", "implement", "running");
+    const runawayCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true,
+      countTicketEvents: () => RUNAWAY_THRESHOLD - 1, // below threshold
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 1_000_000,
+    });
+    expect(runawayCalls).toHaveLength(0);
+  });
+
+  test("alerts a noisy ticket even when it is eligible (real but runaway)", () => {
+    // The alert is observability, not enforcement — it must fire before the
+    // eligible short-circuit so a real, eligible, noisy ticket is still surfaced.
+    writeSignal("CTL-100", "implement", "running");
+    const runawayCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [
+        {
+          identifier: "CTL-100",
+          priority: 1,
+          state: "Todo",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      ],
+      dispatch: () => ({ code: 0 }),
+      liveBackgroundCount: () => 0,
+      isBgJobAlive: () => true,
+      countTicketEvents: () => RUNAWAY_THRESHOLD + 5,
+      appendRunawayEvent: (arg) => {
+        runawayCalls.push(arg);
+        return true;
+      },
+      now: () => 2_000_000,
+    });
+    expect(runawayCalls).toHaveLength(1);
+    expect(runawayCalls[0].ticket).toBe("CTL-100");
   });
 });
 
@@ -1372,9 +1755,244 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
+      // CTL-755: the triage→research promotion is now admission-gated. Stub
+      // fetchRelations (unblocked) + a free slot so the gate admits CTL-7.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  // CTL-757: the canonical linear.state.write audit fires from the scheduler
+  // advance site (caller-emits), tagged source=scheduler-advance, phase=next.
+  // It must NOT fire on the triage path (the scheduler never writes triage; that
+  // stays on monitor.mjs's phase.triage.linear-transition event).
+  test("CTL-757: emitStateWrite fires once on advance with source=scheduler-advance + phase=next", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // research is owed
+    const stateWrites = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({
+        applied: true,
+        reason: null,
+        action: "transitioned",
+        from_state: "Triage",
+        to_state: "Research",
+      }),
+      applyTerminalDone: () => ({ applied: true }),
+      applyEstimate: () => ({ applied: true }),
+    };
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      writeStatus,
+      appendStateWriteEvent: (ev) => stateWrites.push(ev),
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    // Exactly one state-write audit for the advance, tagged correctly.
+    const advanceWrites = stateWrites.filter((e) => e.source === "scheduler-advance");
+    expect(advanceWrites).toHaveLength(1);
+    expect(advanceWrites[0]).toMatchObject({
+      ticket: "CTL-7",
+      phase: "research", // == next, NOT triage
+      source: "scheduler-advance",
+      from_state: "Triage",
+      to_state: "Research",
+      applied: true,
+    });
+    // No emit is tagged with the triage phase — the scheduler never writes triage.
+    expect(stateWrites.some((e) => e.phase === "triage")).toBe(false);
+  });
+
+  // CTL-757: an emit-seam THROW must never abort the tick (safeEmit-wrapped) and
+  // the phase advance must still be recorded.
+  test("CTL-757: a throwing appendStateWriteEvent is swallowed — advance still recorded", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done");
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      verifyDispatched: verifyOk,
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      writeStatus: {
+        applyPhaseStatus: () => ({ applied: true, from_state: "Triage", to_state: "Research" }),
+        applyTerminalDone: () => ({ applied: true }),
+        applyEstimate: () => ({ applied: true }),
+      },
+      appendStateWriteEvent: () => {
+        throw new Error("emit boom");
+      },
+    });
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  // CTL-642: the reclaim sweep must thread the SHARED cache + fetchTicketState +
+  // prAdapter into reclaimOpts (load-bearing — else the short-circuit re-storms
+  // the Linear API). Assert by inspecting the opts a fake reclaimDeadWork sees.
+  test("CTL-642: reclaimOpts carries cache + fetchState + prAdapter", () => {
+    writeSignalRaw("CTL-7", "implement", {
+      ticket: "CTL-7",
+      phase: "implement",
+      status: "running",
+      bg_job_id: "bg-7",
+    });
+    const sharedCache = { get: () => undefined, set: () => {}, stats: () => ({}) };
+    const fakePr = { prView: () => null };
+    let seenOpts = null;
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => ({ applied: true }) },
+      teardownWorktree: () => true,
+      cache: sharedCache,
+      prAdapter: fakePr,
+      reclaimDeadWork: (_orch, _sig, opts) => {
+        seenOpts = opts;
+        return "noop";
+      },
+    });
+    expect(seenOpts).not.toBeNull();
+    expect(seenOpts.cache).toBe(sharedCache);
+    expect(typeof seenOpts.fetchState).toBe("function");
+    expect(seenOpts.prAdapter).toBe(fakePr);
+  });
+
+  // CTL-642: the new 'terminal-short-circuit' reclaim outcome buckets into the
+  // result.reclaimed array (HUD/log visibility) — the ticket drops next tick.
+  test("CTL-642: 'terminal-short-circuit' result buckets into result.reclaimed", () => {
+    writeSignalRaw("CTL-8", "implement", {
+      ticket: "CTL-8",
+      phase: "implement",
+      status: "running",
+      bg_job_id: "bg-8",
+    });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => ({ applied: true }) },
+      teardownWorktree: () => true,
+      reclaimDeadWork: () => "terminal-short-circuit",
+    });
+    expect(result.reclaimed).toEqual([{ ticket: "CTL-8", phase: "implement" }]);
+    expect(result.escalated).toEqual([]);
+  });
+
+  // CTL-758: reconcile backstop — fires ONLY with .terminal-done.applied + merged
+  // PR + non-terminal live state; idempotent (no write) when already Done.
+  describe("CTL-758: reconcile backstop", () => {
+    function mdDoneWithPr(ticket, prNumber) {
+      // monitor-deploy done so the terminal sweep visits the ticket, and the PR
+      // is carried on the signal raw for the merged check.
+      writeSignalRaw(ticket, "monitor-deploy", {
+        ticket,
+        phase: "monitor-deploy",
+        status: "done",
+        pr: { number: prNumber, repo: "o/r" },
+      });
+    }
+    function markerPath(ticket) {
+      return join(orchDir, "workers", ticket, ".terminal-done.applied");
+    }
+
+    test("merged PR + .terminal-done.applied + drifted (non-terminal) state ⇒ re-Done via reconcile-backstop", () => {
+      mdDoneWithPr("CTL-30", 30);
+      writeFileSync(markerPath("CTL-30"), ""); // pipeline reached terminal
+      const stateWrites = [];
+      const doneCalls = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        teardownWorktree: () => true,
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: ({ ticket }) => { doneCalls.push(ticket); return { applied: true, from_state: "PR", to_state: "Done" }; },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-06-04T00:00:00Z" }) },
+        cache: { get: () => "PR", set: () => {}, stats: () => ({}) }, // live state drifted back to non-terminal
+        appendStateWriteEvent: (ev) => stateWrites.push(ev),
+      });
+      expect(doneCalls).toContain("CTL-30");
+      const backstop = stateWrites.filter((e) => e.source === "reconcile-backstop");
+      expect(backstop).toHaveLength(1);
+    });
+
+    test("idempotent: already-Done live state ⇒ NO reconcile write", () => {
+      mdDoneWithPr("CTL-31", 31);
+      writeFileSync(markerPath("CTL-31"), "");
+      const doneCalls = [];
+      const stateWrites = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        teardownWorktree: () => true,
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          // terminalDoneOnce already wrote the marker, so it won't call again;
+          // the backstop must also NOT call because the live state IS terminal.
+          applyTerminalDone: ({ ticket }) => { doneCalls.push(ticket); return { applied: true }; },
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "x" }) },
+        cache: { get: () => "Done", set: () => {}, stats: () => ({}) }, // already terminal
+        appendStateWriteEvent: (ev) => stateWrites.push(ev),
+      });
+      expect(stateWrites.filter((e) => e.source === "reconcile-backstop")).toHaveLength(0);
+      expect(doneCalls).toEqual([]); // marker present + state terminal → no Done write at all
+    });
+
+    test("no .terminal-done.applied marker ⇒ backstop does NOT fire (gate 1)", () => {
+      mdDoneWithPr("CTL-32", 32);
+      // NO marker written: but monitor-deploy done means terminalDoneOnce will
+      // write it this tick. Use a prAdapter that would say merged + drifted state;
+      // the backstop runs AFTER terminalDoneOnce in the loop, so to isolate gate 1
+      // we assert no SECOND (reconcile) write beyond terminalDoneOnce's own.
+      const stateWrites = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        teardownWorktree: () => true,
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => ({ applied: true, from_state: "PR", to_state: "Done" }),
+          applyLabel: () => ({ applied: true }),
+        },
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "x" }) },
+        cache: { get: () => "PR", set: () => {}, stats: () => ({}) },
+        appendStateWriteEvent: (ev) => stateWrites.push(ev),
+      });
+      // terminalDoneOnce emits source=terminal-sweep; the backstop ran in the same
+      // tick but only AFTER terminalDoneOnce wrote the marker. Since the marker
+      // now exists, the backstop's gates 2/3 also pass — so a reconcile write IS
+      // expected here. The point of gate 1 is the NEXT tick (marker present) only.
+      // Assert the terminal-sweep write happened (terminalDoneOnce fired).
+      expect(stateWrites.some((e) => e.source === "terminal-sweep")).toBe(true);
+    });
+
+    test("merged PR but NO prAdapter ⇒ inert (no reconcile write)", () => {
+      mdDoneWithPr("CTL-33", 33);
+      writeFileSync(markerPath("CTL-33"), "");
+      const stateWrites = [];
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: fakeDispatch(),
+        teardownWorktree: () => true,
+        writeStatus: {
+          applyPhaseStatus: () => {},
+          applyTerminalDone: () => ({ applied: true }),
+          applyLabel: () => ({ applied: true }),
+        },
+        // no prAdapter → backstop gate 2 inert
+        cache: { get: () => "PR", set: () => {}, stats: () => ({}) },
+        appendStateWriteEvent: (ev) => stateWrites.push(ev),
+      });
+      expect(stateWrites.filter((e) => e.source === "reconcile-backstop")).toHaveLength(0);
+    });
   });
 
   test("a failed-dispatch (non-zero exit) is a soft skip, not a throw", () => {
@@ -1417,6 +2035,10 @@ describe("schedulerTick — new-work pull", () => {
       dispatch,
       verifyDispatched: verifyOk, // CTL-611: bypass dispatch verifier
       liveBackgroundCount: () => 0,
+      // CTL-755: admission-gate seam — CTL-7 (triaged-waiting) is unblocked, so
+      // it is admitted and promoted; STEP C subtracts promotedCount so the new
+      // CTL-X still gets the remaining free slot (the double-fill invariant).
+      fetchRelations: () => relUnblocked(),
     });
     expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
     expect(r.dispatched).toEqual(["CTL-X"]);
@@ -1456,9 +2078,13 @@ describe("schedulerTick — new-work pull", () => {
     expect(r.dispatched).toEqual([]);
   });
 
-  test("a stale liveness snapshot still advances in-flight phases (advancement is count-independent)", () => {
+  test("a stale liveness snapshot still advances MID-pipeline phases (advancement is count-independent)", () => {
+    // CTL-755: the triage→research edge is now capacity-gated (held under
+    // staleness — see the dedicated staleness-holds-promotion test below). But a
+    // MID-pipeline advance (research:done → plan) is still count-independent and
+    // must fire under a stale snapshot, exactly as before.
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
-    writeSignal("CTL-7", "triage", "done"); // should advance to research
+    writeSignal("CTL-7", "research", "done"); // should advance to plan
     const dispatch = fakeDispatch();
     const eligible = [
       {
@@ -1477,8 +2103,8 @@ describe("schedulerTick — new-work pull", () => {
       liveBackgroundCount: () => 0,
       livenessIsFresh: () => false, // stale → new-work held, advancement unaffected
     });
-    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
-    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "plan" }]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "plan" }]);
     expect(r.dispatched).toEqual([]); // CTL-X held by the staleness gate
   });
 
@@ -2073,10 +2699,41 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: the triage→research promotion is admission-gated. Stub
+      // fetchRelations (unblocked + non-terminal state) and provide a free slot
+      // so the gate admits CTL-1 and the advancement sweep dispatches research.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 5,
     });
     expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-1", phase: "research" }]);
+  });
+
+  // CTL-642/758 REGRESSION: the production startScheduler path MUST construct +
+  // thread a live prAdapter whose `.prView` is a function. The original bug was
+  // that schedulerTick's `prAdapter` defaulted to undefined and the daemon call
+  // site (runTick) never passed one — so the CTL-642 recovery short-circuit's
+  // pr-merged branch AND the CTL-758 reconcile backstop were BOTH inert in
+  // production (gate-2 returns early on `!prAdapter`). Tests injected a fake
+  // prAdapter so they stayed green while prod never exercised it. This locks the
+  // wiring: with NO prAdapter override, startScheduler must build the real one.
+  test("CTL-642/758: production path threads a live prAdapter with a prView function", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch(),
+      readEligible: () => [],
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+      // NB: no prAdapter override — assert the default-constructed one.
+    });
+    const opts = __getRunningOpts();
+    expect(opts).not.toBeNull();
+    expect(opts.prAdapter).toBeDefined();
+    expect(typeof opts.prAdapter.prView).toBe("function");
   });
 
   // CTL-665: startScheduler's forward of the threaded `concurrency` into the
@@ -2098,6 +2755,9 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: admission-gate seam + free slot so the promotion fires.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 20,
       debounceMs: 5,
     });
@@ -2117,6 +2777,9 @@ describe("startScheduler / stopScheduler", () => {
       orchDir,
       dispatch,
       readEligible: () => [],
+      // CTL-755: admission-gate seam + free slot so the promotion fires.
+      fetchRelations: () => relUnblocked(),
+      liveBackgroundCount: () => 0,
       tickIntervalMs: 60_000,
       debounceMs: 10,
     });
@@ -2689,6 +3352,33 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
     expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
+  });
+
+  // CTL-757: the terminal Done write is audited with source=terminal-sweep.
+  test("CTL-757: terminal Done write emits source=terminal-sweep state.write", () => {
+    writeSignal("CTL-4", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const stateWrites = [];
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => ({ applied: true, from_state: "PR", to_state: "Done", action: "transitioned" }),
+      applyLabel: () => {},
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus,
+      appendStateWriteEvent: (ev) => stateWrites.push(ev),
+    });
+    const sweep = stateWrites.filter((e) => e.source === "terminal-sweep");
+    expect(sweep).toHaveLength(1);
+    expect(sweep[0]).toMatchObject({
+      ticket: "CTL-4",
+      source: "terminal-sweep",
+      from_state: "PR",
+      to_state: "Done",
+      applied: true,
+    });
   });
 
   test("writes terminal Done when a ticket's monitor-deploy signal is skipped (CTL-589)", () => {
@@ -4823,5 +5513,1101 @@ describe("schedulerTick — predecessor reap on dispatch failure (CTL-695)", () 
         (e) => e.event === "phase.predecessor.reap-requested" && e.bg_job_id === "pre67890"
       )
     ).toBe(true);
+  });
+});
+
+// ── CTL-537: sequencing seam in schedulerTick ──
+describe("CTL-537 sequencing seam (schedulerTick)", () => {
+  const eligibleTwo = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  beforeEach(() => {
+    // maxParallel:2 so a 2nd candidate can be admitted while one is in-flight
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Write an in-flight signal so listInFlightTickets returns a non-empty set
+    writeSignal("CTL-IN", "research", "running");
+  });
+
+  test("seam not consulted when nothing in-flight — checkSequencing spy never called", () => {
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // nothing in-flight
+      checkSequencing,
+    });
+    expect(spyCount).toBe(0);
+    expect(dispatch.calls).toHaveLength(1); // dispatch still proceeds
+  });
+
+  test("go verdict → dispatch proceeds", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const checkSequencing = () => ({ verdict: "go", hard_dependencies: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+    });
+    expect(dispatch.calls.some((c) => c.ticket === "CTL-NEW" || c[1] === "CTL-NEW")).toBe(true);
+  });
+
+  test("hold verdict → dispatch suppressed, no cooldown marker written", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const checkSequencing = () => ({ verdict: "hold", hard_dependencies: [] });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+    });
+    // Dispatch must not have been called for CTL-NEW
+    const dispatchedNew = dispatch.calls.some(
+      (c) => (c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW"))
+    );
+    expect(dispatchedNew).toBe(false);
+    // No cooldown marker must have been written (hold is transient — no marker)
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-NEW", "research"))).toBe(false);
+  });
+
+  test("hard_dependencies verdict → applyBlockedByRelation called + dispatch held", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const blockedByRelationCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => ({ applied: true, reason: null }),
+      applyBlockedByRelation: (args) => { blockedByRelationCalls.push(args); return { applied: true, reason: null }; },
+    };
+    const checkSequencing = () => ({
+      verdict: "go",
+      reason: "",
+      hard_dependencies: [{ candidate: "CTL-NEW", blocked_by: "CTL-IN", reason: "ordering" }],
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      writeStatus,
+    });
+    // applyBlockedByRelation called with the dep
+    expect(blockedByRelationCalls).toHaveLength(1);
+    expect(blockedByRelationCalls[0]).toMatchObject({ ticket: "CTL-NEW", blockedBy: "CTL-IN" });
+    // Dispatch suppressed
+    const dispatchedNew = dispatch.calls.some(
+      (c) => (c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW"))
+    );
+    expect(dispatchedNew).toBe(false);
+  });
+
+  test("untrusted dep ids dropped → no blocked-by write, falls through to verdict (phase-review hardening)", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    const blockedByRelationCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => ({ applied: true, reason: null }),
+      applyBlockedByRelation: (args) => { blockedByRelationCalls.push(args); return { applied: true, reason: null }; },
+    };
+    // LLM returns deps that DON'T arbitrate the (CTL-NEW, in-flight) pair:
+    // one with a foreign candidate, one blocked_by a non-in-flight ticket.
+    const checkSequencing = () => ({
+      verdict: "go",
+      reason: "",
+      hard_dependencies: [
+        { candidate: "CTL-OTHER", blocked_by: "CTL-IN", reason: "hallucinated candidate" },
+        { candidate: "CTL-NEW", blocked_by: "CTL-NOTLIVE", reason: "blocked_by not in-flight" },
+      ],
+    });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      writeStatus,
+    });
+    // No durable blocked-by edge written for the bogus deps
+    expect(blockedByRelationCalls).toHaveLength(0);
+    // With no VALID hard dep and a "go" verdict, dispatch proceeds
+    const dispatchedNew = dispatch.calls.some(
+      (c) => c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW")
+    );
+    expect(dispatchedNew).toBe(true);
+  });
+
+  test("seam undefined → byte-for-byte legacy: dispatch proceeds with one in-flight + free slot", () => {
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      // checkSequencing omitted → undefined default
+    });
+    // Dispatch must proceed (legacy behavior — seam absent means no gate)
+    const dispatchedNew = dispatch.calls.some(
+      (c) => c.ticket === "CTL-NEW" || (Array.isArray(c) && c[1] === "CTL-NEW")
+    );
+    expect(dispatchedNew).toBe(true);
+  });
+
+  test("cooldown precedes seam — checkSequencing spy NOT called for a cooling-down candidate", () => {
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+    // Pre-seed a cooldown marker for CTL-NEW
+    recordDispatchFailure(orchDir, "CTL-NEW", "research", 1, 1_000);
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleTwo("CTL-NEW"),
+      dispatch: fakeDispatch({ code: 0 }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      now: () => 30_000, // within the 60 s window
+      checkSequencing,
+    });
+    expect(spyCount).toBe(0);
+  });
+});
+
+// ── CTL-537 Phase 5: startScheduler forwards checkSequencing to runTick ──
+describe("CTL-537 Phase 5: startScheduler forwards checkSequencing (runTick wiring)", () => {
+  afterEach(() => __resetForTests());
+
+  test("startScheduler forwards an injected checkSequencing spy — it is consulted on the initial tick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Write an in-flight signal so inFlightCount >= 1
+    writeSignal("CTL-INFLIGHT", "research", "running");
+
+    let spyCount = 0;
+    const checkSequencing = () => { spyCount++; return { verdict: "go", hard_dependencies: [] }; };
+
+    const dispatch = fakeDispatch({ code: 0 });
+    startScheduler({
+      orchDir,
+      dispatch,
+      readEligible: () => [
+        {
+          identifier: "CTL-NEW",
+          priority: 1,
+          createdAt: "x",
+          state: "Todo",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [] },
+        },
+      ],
+      liveBackgroundCount: () => 1,
+      checkSequencing,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    // The spy must have been consulted during the initial synchronous tick
+    expect(spyCount).toBeGreaterThan(0);
+  });
+});
+
+describe("CTL-751: applyEstimate write-back on triage→research advance", () => {
+  const okDispatch = fakeDispatch();
+
+  function writeTriageJson(ticket, obj) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "triage.json"), JSON.stringify(obj));
+  }
+
+  function makeWriteStatus(estimateCalls) {
+    return {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      removeLabel: () => {},
+      applyEstimate: (a) => { estimateCalls.push(a); return { applied: true, reason: null }; },
+    };
+  }
+
+  // CTL-755: the estimate write-back rides the triage→research advance, which is
+  // now admission-gated — stub fetchRelations (unblocked) + a free slot so the
+  // promotion fires and the applyEstimate code path is reached.
+  const admit = { fetchRelations: () => relUnblocked(), liveBackgroundCount: () => 0 };
+
+  test("triage.json with estimate:5 → applyEstimate called once with {ticket, estimate:5}", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 5 });
+  });
+
+  test("triage.json with no estimate → applyEstimate not called", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("triage.json with invalid estimate:4 → applyEstimate not called by scheduler", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 4 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("advance to plan (not research) → applyEstimate not called", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeSignal("CTL-1", "research", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("applyEstimate throwing does not break the tick", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const writeStatus = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      removeLabel: () => {},
+      applyEstimate: () => { throw new Error("Linear exploded"); },
+    };
+    expect(() =>
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch: okDispatch,
+        writeStatus,
+        verifyDispatched: verifyOk,
+        ...admit,
+      })
+    ).not.toThrow();
+  });
+});
+
+// ── CTL-755: admission-control gate (STEP A/B/C) ──
+//
+// The triage→research promotion is admission-controlled by deps + priority +
+// capacity. A triaged-waiting ticket is dispatched to research ONLY when its
+// blockers are all terminal AND it wins the priority/capacity selection this
+// tick. Held tickets carry a dynamic blocked/waiting label (cleared on pickup).
+describe("CTL-755: admission gate", () => {
+  afterEach(() => __resetForTests());
+
+  // A writeStatus spy that records label add/remove + estimate + phase-status.
+  function labelSpy() {
+    const applied = [];
+    const removed = [];
+    const phaseStatus = [];
+    const ws = {
+      applyPhaseStatus: (a) => phaseStatus.push(a),
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => { applied.push(a); return { applied: true, reason: null }; },
+      removeLabel: (ticket, label) => { removed.push({ ticket, label }); return { removed: true }; },
+    };
+    return { ws, applied, removed, phaseStatus };
+  }
+
+  // A held-event spy.
+  function heldSpy() {
+    const events = [];
+    return { fn: (e) => events.push(e), events };
+  }
+
+  // An exec stub that answers `linearis issues read <id>` with a state name,
+  // keyed by identifier. Used to hydrate out-of-set blocker states (the D5 path
+  // STEP A reuses). Unknown ids → code 0 with a non-terminal placeholder.
+  function execWithStates(stateById) {
+    return (_cmd, args) => {
+      const id = args?.[2];
+      const name = stateById[id] ?? "Triage";
+      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
+    };
+  }
+
+  test("dep hold: a blocked triaged ticket is NOT dispatched, no Research write, 'blocked' label applied", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed, phaseStatus } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7 is blocked by an out-of-set blocker that is still In Progress.
+      fetchRelations: () => relBlockedBy("CTL-DEP"),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    expect(dispatch.calls).toEqual([]); // no research dispatch
+    expect(r.advanced).toEqual([]);
+    // No phase-status write for research (the soft hold never reaches it).
+    expect(phaseStatus.some((p) => p.phase === "research")).toBe(false);
+    // The "blocked" held label is applied.
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(removed).toEqual([]);
+    // The held event carries the dep reason + unmet blocker id.
+    expect(held.events).toHaveLength(1);
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "blocked-by-open-dependency",
+      blockers: ["CTL-DEP"],
+    });
+  });
+
+  test("auto-promote: when the blocker flips terminal, 'blocked' is removed and research dispatches", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7's blocker carries the "blocked" label already; now it is Done.
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "Done" }),
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    // Clear-on-pickup: the stale "blocked" label is removed, none applied.
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(applied).toEqual([]);
+  });
+
+  test("capacity hold-then-promote: 'waiting' while full, promoted + label cleared when a slot frees", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // unblocked but no free slot
+
+    // Tick 1: a live worker fills the only slot → CTL-7 is ready but un-admitted.
+    const d1 = fakeDispatch();
+    const s1 = labelSpy();
+    const h1 = heldSpy();
+    const r1 = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: d1,
+      writeStatus: s1.ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // saturated
+      fetchRelations: () => relUnblocked(),
+      appendPhaseAdvanceHeldEvent: h1.fn,
+    });
+    expect(d1.calls).toEqual([]); // no promotion
+    expect(r1.advanced).toEqual([]);
+    expect(s1.applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(h1.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "awaiting-capacity-or-priority",
+      blockers: [],
+    });
+
+    // Tick 2: the slot frees → CTL-7 is admitted, promoted, and "waiting" cleared.
+    const d2 = fakeDispatch();
+    const s2 = labelSpy();
+    const r2 = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: d2,
+      writeStatus: s2.ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // slot freed
+      fetchRelations: () => relUnblocked({ labels: ["waiting"] }),
+    });
+    expect(d2.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r2.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(s2.removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("promotion clears BOTH held labels (clear-on-pickup regression anchor)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Both stale labels present (defensive — should never co-exist, but the
+      // converge must clear both on pickup).
+      fetchRelations: () => relUnblocked({ labels: ["blocked", "waiting"] }),
+    });
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(removed).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+    expect(applied).toEqual([]);
+  });
+
+  test("steady-state held tick makes ZERO applyLabel/removeLabel calls (idempotent)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied, removed } = labelSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // Already correctly labeled "blocked" (blocker still open) → no diff.
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(applied).toEqual([]); // already labeled → no apply
+    expect(removed).toEqual([]); // nothing to remove
+  });
+
+  test("steady-state held tick re-emits NO held event (only-on-state-change)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const held = heldSpy();
+    const common = {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relBlockedBy("CTL-DEP", { labels: ["blocked"] }),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    };
+    schedulerTick(orchDir, common);
+    schedulerTick(orchDir, common);
+    // Two held ticks, but the held class did not change → exactly one emit.
+    expect(held.events).toHaveLength(1);
+  });
+
+  test("circular dep among triaged tickets → labelOnce(needs-human), no throw, no deadlock", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-A", "triage", "done");
+    writeSignal("CTL-B", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    // CTL-A blocked_by CTL-B and CTL-B blocked_by CTL-A → 2-node cycle.
+    const fr = relMap({
+      "CTL-A": relBlockedBy("CTL-B"),
+      "CTL-B": relBlockedBy("CTL-A"),
+    });
+    let r;
+    expect(() => {
+      r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchRelations: fr,
+      });
+    }).not.toThrow();
+    expect(dispatch.calls).toEqual([]); // neither member promotes
+    expect(r.advanced).toEqual([]);
+    // Both cycle members are flagged needs-human (labelOnce).
+    expect(applied).toContainEqual({ ticket: "CTL-A", label: "needs-human" });
+    expect(applied).toContainEqual({ ticket: "CTL-B", label: "needs-human" });
+  });
+
+  test("triaged-blocks-triaged chain: the unblocked foundation promotes; the dependent is held 'blocked'", () => {
+    // CTL-A (foundation, no blocker) blocks CTL-B (dependent). Both are
+    // triaged-waiting in the SAME tick, so both land in admissionPool. The dep
+    // graph sees A→B with A non-terminal ("Triage") → B is NOT ready, A IS.
+    // Per design open-question #5: the chain must promote A and HOLD B, never
+    // promote B while its sibling blocker is still non-terminal.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    writeSignal("CTL-A", "triage", "done");
+    writeSignal("CTL-B", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const held = heldSpy();
+    // CTL-B is blocked_by CTL-A; CTL-A has no blocker. Both resolve in-set
+    // (they ARE the admissionPool descriptors), so no exec hydration needed.
+    const fr = relMap({
+      "CTL-A": relUnblocked(),
+      "CTL-B": relBlockedBy("CTL-A"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // 3 free slots — capacity is NOT the gate here
+      fetchRelations: fr,
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    // Only the foundation promotes; the dependent never reaches research.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-A", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-A", phase: "research" }]);
+    // CTL-B is held "blocked" (its in-set blocker CTL-A is still non-terminal),
+    // and the held event names CTL-A as the unmet blocker.
+    expect(applied).toContainEqual({ ticket: "CTL-B", label: "blocked" });
+    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "blocked" });
+    expect(applied).not.toContainEqual({ ticket: "CTL-A", label: "waiting" });
+    const bHeld = held.events.find((e) => e.ticket === "CTL-B");
+    expect(bHeld).toMatchObject({ reason: "blocked-by-open-dependency", blockers: ["CTL-A"] });
+  });
+
+  test("epic fan-out: while the foundation is non-terminal NO dependent leaves triage→research", () => {
+    // FOUND blocks three leaves L1/L2/L3 (the classic epic shape: one foundation
+    // ticket, three dependent features). All four are triaged-waiting this tick.
+    // FOUND is non-terminal → every leaf is held "blocked", none promotes; only
+    // FOUND (the root, ready) advances even though there are slots for all four.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 6 }));
+    for (const t of ["CTL-FOUND", "CTL-L1", "CTL-L2", "CTL-L3"]) writeSignal(t, "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const fr = relMap({
+      "CTL-FOUND": relUnblocked(),
+      "CTL-L1": relBlockedBy("CTL-FOUND"),
+      "CTL-L2": relBlockedBy("CTL-FOUND"),
+      "CTL-L3": relBlockedBy("CTL-FOUND"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // 6 free slots — capacity is NOT the gate
+      fetchRelations: fr,
+    });
+    // Exactly one promotion: the foundation. No leaf reaches research while its
+    // blocker is non-terminal — even with ample capacity.
+    expect(r.advanced).toEqual([{ ticket: "CTL-FOUND", phase: "research" }]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-FOUND", phase: "research" }]);
+    for (const leaf of ["CTL-L1", "CTL-L2", "CTL-L3"]) {
+      expect(applied).toContainEqual({ ticket: leaf, label: "blocked" });
+    }
+  });
+
+  test("epic fan-out: once the foundation is terminal (out-of-set Done) the leaves become ready", () => {
+    // Same fan-out, but the foundation has already finished — it is NOT in the
+    // triaged-waiting pool (no worker dir), so it is an OUT-OF-SET blocker
+    // hydrated via exec. A terminal (Done) out-of-set blocker no longer blocks →
+    // all three leaves are ready and (with capacity) promote.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 6 }));
+    for (const t of ["CTL-L1", "CTL-L2", "CTL-L3"]) writeSignal(t, "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const fr = relMap({
+      "CTL-L1": relBlockedBy("CTL-FOUND"),
+      "CTL-L2": relBlockedBy("CTL-FOUND"),
+      "CTL-L3": relBlockedBy("CTL-FOUND"),
+    });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: fr,
+      // CTL-FOUND is out-of-set; hydrate it Done so it no longer blocks.
+      exec: execWithStates({ "CTL-FOUND": "Done" }),
+    });
+    const promoted = r.advanced.map((a) => a.ticket).sort();
+    expect(promoted).toEqual(["CTL-L1", "CTL-L2", "CTL-L3"]);
+    // None held "blocked" once the foundation is terminal.
+    expect(applied.filter((a) => a.label === "blocked")).toEqual([]);
+  });
+
+  test("double-fill guard: maxParallel 2, one triaged + one new-work → exactly 2 dispatches (not 3)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done"); // triaged-waiting, promotes to research
+    const dispatch = fakeDispatch();
+    const eligible = [
+      { identifier: "CTL-X", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+    });
+    // STEP B promotes CTL-7 (+promotedCount); STEP C subtracts it so sweep 2 has
+    // exactly 1 remaining slot for CTL-X — 2 total dispatches, not 3.
+    expect(dispatch.calls).toHaveLength(2);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(r.dispatched).toEqual(["CTL-X"]);
+  });
+
+  test("double-fill guard, promotion↔resume: one free slot is claimed by the triage→research promotion OR the resume sweep, never both (CTL-755 fix #1)", () => {
+    // ONE tick, ONE free global slot, contended by TWO sweeps:
+    //  - STEP B: a triaged-waiting candidate (CTL-7) eligible for triage→research.
+    //  - sweep 1.5: a parked/preempted ticket (CTL-Park) eligible for resume.
+    // maxParallel 2 with liveBackgroundCount 1 → computeFreeSlots == 1 (the live
+    // count models the one running sibling that holds the second slot; the parked
+    // ticket's bg worker was killed at preemption, so it is NOT live-counted).
+    //
+    // Fix #1 subtracts promotedCount from the resume sweep's slot budget:
+    //   resumeSlots = max(0, computeFreeSlots(2, 1) - promotedCount) = max(0, 1 - 1) = 0
+    // so once STEP B promotes CTL-7 the resume sweep sees ZERO slots and bows out.
+    // WITHOUT fix #1 the resume sweep would read resumeSlots = computeFreeSlots(2,1)
+    // = 1 and ALSO dispatch CTL-Park into the same single slot — two NEW dispatches
+    // into one free slot (over-admission past maxParallel). This test would then
+    // see dispatch.calls length 2 and fail the single-slot assertion below.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // Triaged-waiting candidate — promotes via STEP B (unblocked, free slot).
+    writeSignal("CTL-7", "triage", "done");
+    // Parked/preempted candidate — a phase-research signal in the "preempted"
+    // status on its parkedFrom phase, with a (killed) bg_job_id, plus a persisted
+    // priority so the resume sweep's rankTickets has a descriptor to rank. This is
+    // the exact shape seedPreempted writes for the resume-after-preemption tests.
+    writeSignalRaw("CTL-Park", "research", {
+      ticket: "CTL-Park",
+      phase: "research",
+      status: "preempted",
+      parkedFrom: "research",
+      bg_job_id: "dead-bg-from-preemption",
+      attentionReason: "preempted-by-priority",
+    });
+    writeWorkerPriority(orchDir, "CTL-Park", { priority: 2, createdAt: "2026-05-01T00:00:00Z" });
+
+    // A dispatch that writes a runnable "dispatched" signal so BOTH the promotion's
+    // and (were it to fire) the resume sweep's verifyDispatched + signal reset would
+    // succeed — i.e. nothing other than fix #1 suppresses a second dispatch.
+    const calls = [];
+    const dispatch = (args) => {
+      calls.push(args);
+      const dir = join(orchDir, "workers", args.ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${args.phase}.json`),
+        JSON.stringify({ ticket: args.ticket, phase: args.phase, status: "dispatched", bg_job_id: "new-bg" }),
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    dispatch.calls = calls;
+
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [], // no brand-new work — isolate promotion vs resume
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1, // 1 live sibling → computeFreeSlots(2,1) == 1
+      reclaimDeadWork: () => "noop", // CTL-690: never revive the parked signal
+      resolveSession: () => "uuid-park", // the resume sweep would resume-with-session
+      appendResumedAfterPreemptionEvent: () => {}, // capture-free; presence proves reachability
+      fetchRelations: () => relUnblocked(), // CTL-7's deps are satisfied → admitted
+    });
+
+    // Exactly ONE new dispatch consumed the single free slot. Fix #1 makes the
+    // promotion win and the resume sweep stand down (promotedCount drained the
+    // resume budget to zero); the parked ticket is NOT re-dispatched this tick.
+    expect(dispatch.calls).toHaveLength(1);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-7", phase: "research" });
+    expect(dispatch.calls.find((c) => c.ticket === "CTL-Park")).toBeUndefined();
+    // The parked signal stays parked (the resume sweep never reset it to "stalled").
+    const parkSig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-Park", "phase-research.json"), "utf8"),
+    );
+    expect(parkSig.status).toBe("preempted");
+  });
+
+  test("double-fill guard, 1 slot: a higher-priority NEW ticket wins over a lower-priority triaged candidate", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-7", "triage", "done"); // priority 3 (lower)
+    const dispatch = fakeDispatch();
+    // CTL-X is brand-new ready work at priority 1 (more urgent).
+    const eligible = [
+      { identifier: "CTL-X", priority: 1, createdAt: "x", state: "Todo", relations: { nodes: [] }, inverseRelations: { nodes: [] } },
+    ];
+    const { ws, applied } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked({ priority: 3 }),
+    });
+    // The single slot goes to the higher-priority new work; CTL-7 is held
+    // "waiting" (ready, lost the selection), not promoted.
+    expect(r.advanced).toEqual([]);
+    expect(r.dispatched).toEqual(["CTL-X"]);
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-X", phase: "research" }]);
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("staleness gate (livenessIsFresh=false) holds the triage→research promotion", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 3 }));
+    writeSignal("CTL-7", "triage", "done"); // unblocked, slots available on paper
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // would show 3 free slots
+      livenessIsFresh: () => false, // but the snapshot is stale → hold
+      fetchRelations: () => relUnblocked(),
+    });
+    expect(dispatch.calls).toEqual([]); // promotion held
+    expect(r.advanced).toEqual([]);
+    // Deps are satisfied (in readyIds) but the promotion budget is 0 → "waiting".
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "waiting" });
+  });
+
+  test("early-exit: zero triaged-waiting tickets → fetchRelations never called (zero Linear cost)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "research", "running"); // in-flight but NOT triaged-waiting
+    let fetchCalls = 0;
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: labelSpy().ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => { fetchCalls++; return relUnblocked(); },
+    });
+    expect(fetchCalls).toBe(0); // STEP A early-exited
+  });
+
+  test("read-failure (fetchRelations → null) fails SAFE: the candidate is held", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => null, // read failed → non-terminal sentinel → held
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(r.advanced).toEqual([]);
+  });
+
+  test("read-failure held event carries the DISTINCT 'dependency-state-unknown' reason with empty blockers (CTL-755 fix #2)", () => {
+    // Same fail-safe path as above, but pinning the held-event CLASSIFICATION. A
+    // null relations read forces CTL-7 out of readyIds (A.4), so STEP A.7 classifies
+    // it as "blocked". Fix #2: because readFailedTickets.has(CTL-7), the emitted
+    // phase.advance.held reason is "dependency-state-unknown" (a hydration failure,
+    // NOT a confirmed open dependency) and blockers is []. WITHOUT fix #2 the same
+    // branch would fall through to reason "blocked-by-open-dependency" with blockers
+    // = unmetBlockersFor(...) — which, on a null read with no edges, is [] but with
+    // the WRONG reason, conflating a read failure with a genuine dependency hold.
+    // The reason assertion below would then fail.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => null, // read failed → fail-safe hold
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    expect(dispatch.calls).toEqual([]);
+    expect(r.advanced).toEqual([]);
+    expect(held.events).toHaveLength(1);
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "dependency-state-unknown",
+    });
+    // blockers must be EXACTLY [] (deep-equal), distinguishing a read-failure hold
+    // from a genuine open-dependency hold that names its unmet blocker ids.
+    expect(held.events[0].blockers).toEqual([]);
+    // And it must NOT carry the genuine-open-dependency reason.
+    expect(held.events[0].reason).not.toBe("blocked-by-open-dependency");
+  });
+
+  // ── STEP E: dep persistence (scheduler-side) ──
+  //
+  // A writeStatus spy that ALSO records applyBlockedByRelation (the durable
+  // blocked_by write STEP E issues). Mirrors labelSpy but exposes `relations`.
+  function depSpy() {
+    const relations = [];
+    const applied = [];
+    const ws = {
+      applyPhaseStatus: () => {},
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: (a) => { applied.push(a); return { applied: true, reason: null }; },
+      removeLabel: () => ({ removed: true }),
+      applyBlockedByRelation: (a) => { relations.push(a); return { applied: true, reason: null }; },
+    };
+    return { ws, relations, applied };
+  }
+
+  // Write workers/<T>/triage.json with a `.dependencies` array (the flat-string
+  // shape the phase-triage skill scrapes). The worker dir already exists from
+  // writeSignal.
+  function writeTriageDeps(ticket, dependencies) {
+    writeFileSync(
+      join(orchDir, "workers", ticket, "triage.json"),
+      JSON.stringify({ ticket, classification: "feature", dependencies }),
+    );
+  }
+
+  // An exec stub: `linearis issues read <id>` → keyed state, or code!==0 for
+  // ids in `unresolvable` (so fetchTicketState returns null and STEP E drops it).
+  function execStates(stateById, unresolvable = new Set()) {
+    return (_cmd, args) => {
+      const id = args?.[2];
+      if (unresolvable.has(id)) return { code: 1, stdout: "", stderr: "not found" };
+      const name = stateById[id] ?? "Triage";
+      return { code: 0, stdout: JSON.stringify({ state: { name } }), stderr: "" };
+    };
+  }
+
+  test("dep persistence: a resolvable non-terminal dep is written, a prose-only/unresolvable token is dropped", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-100 resolves (non-terminal); PROSE-1 is a TEAM-NNN-shaped token that
+    // does not resolve to a real ticket → dropped.
+    writeTriageDeps("CTL-7", ["CTL-100", "PROSE-1"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7 has NO existing relations (so the dep write is not idempotently
+      // skipped); the dep states are resolved via exec below.
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }, new Set(["PROSE-1"])),
+    });
+    // Exactly one durable edge: CTL-7 blocked_by CTL-100. PROSE-1 dropped.
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  test("dep persistence is idempotent: a dep already in the candidate's relations → zero writes", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7's FRESH relations already carry blocked_by CTL-100 (durable edge
+      // exists) → STEP E must NOT re-write it. (CTL-100 In Progress also holds
+      // the gate, but the persistence path is what we pin here.)
+      fetchRelations: () => relBlockedBy("CTL-100"),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([]); // idempotent — nothing written
+  });
+
+  test("dep persistence: a TERMINAL dep is NOT written (no durable edge for a Done blocker)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "Done" }), // terminal → no durable edge
+    });
+    expect(relations).toEqual([]);
+  });
+
+  test("dep persistence: a self-ref dependency token is dropped", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", ["CTL-7", "CTL-100"]); // CTL-7 is self → dropped
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  test("dep persistence tolerates the rich {id} descriptor shape (forward-compat)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDeps("CTL-7", [{ id: "CTL-100", exists: true, blockerState: "In Progress" }]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchRelations: () => relUnblocked(),
+      exec: execStates({ "CTL-100": "In Progress" }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
+  // ── STEP D integration: dead-triage reclaim → STEP A re-eval → promotion ──
+  //
+  // The isolated recovery tests pin reclaim behaviour but never prove a reclaimed
+  // triage worker later ADVANCES. This integration test drives a real
+  // reclaimDeadWorkIfPossible (production wiring — scheduler.mjs:1624 passes only
+  // { repoRoot }) through a single schedulerTick and asserts the worker does NOT
+  // strand: the reclaim sweep flips the dead triage worker's signal to `done`,
+  // STEP A re-evaluates it as a triaged-waiting candidate, and STEP B promotes it
+  // (unblocked + free slot). The gate is enforced DOWNSTREAM at STEP B (which holds
+  // any triage:done worker not admitted), so flipping the signal to `done` never
+  // bypasses admission control. (Regression anchor for the CTL-755 strand bug where
+  // the now-removed `reclaim-held` early-return left the signal at `running`, which
+  // STEP A's `triage === "done"` pool then skipped forever.)
+
+  // A production-faithful reclaimDeadWork: the real reclaimDeadWorkIfPossible with
+  // the triage probe forced true (triage.json present → work done), a dead-gone
+  // statJob, and an emitComplete that flips the ON-DISK signal to `done` (what the
+  // real phase-agent-emit-complete --status complete does). The options bag matches
+  // production (no special-casing) — there is no admission predicate inside reclaim.
+  function prodTriageReclaim(orchDirArg) {
+    return (od, sig) =>
+      reclaimDeadWorkIfPossible(od, sig, {
+        statJob: () => null, // dead-gone → reclaim-eligible
+        probes: { triage: () => true, ...EMPTY_NONTRIAGE_PROBES },
+        emitComplete: ({ orchDir: o, signal }) => {
+          // Mirror the real closer: flip phase-<phase>.json.status → done.
+          const p = join(o ?? orchDirArg, "workers", signal.ticket, `phase-${signal.phase}.json`);
+          const cur = JSON.parse(readFileSync(p, "utf8"));
+          writeFileSync(p, JSON.stringify({ ...cur, status: "done" }));
+          return { code: 0 };
+        },
+        appendEvent: () => {},
+        postReclaimMirror: () => {},
+      });
+  }
+  // Probes for the non-triage phases the reclaim sweep may also see — never true
+  // here (no other dead workers), but keeps the probe bag total.
+  const EMPTY_NONTRIAGE_PROBES = { implement: () => false, research: () => false, plan: () => false };
+
+  test("STEP D integration: a dead triage:running worker (work done) is NOT stranded — reclaim flips it to done, STEP A re-evals, STEP B promotes (unblocked + free slot)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // A dead triage worker whose signal never reached `done` (it died mid-flight
+    // with status running) but whose triage.json IS on disk (probe passes). This
+    // is the exact class the reclaim branch-B path exists to recover.
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "running",
+      bg_job_id: "job-dead-7",
+      liveness: { kind: "bg", value: "job-dead-7" },
+    });
+    const dispatch = fakeDispatch();
+    const { ws } = labelSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0, // a free slot
+      reclaimDeadWork: prodTriageReclaim(orchDir),
+      fetchRelations: () => relUnblocked(), // deps satisfied
+    });
+    // The reclaim sweep flipped the signal to done (no longer stranded at running).
+    expect(readPhaseSignals(orchDir, "CTL-7").triage).toBe("done");
+    // STEP A re-evaluated it as triaged-waiting and STEP B promoted it to research.
+    expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+    expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+  });
+
+  test("STEP D integration: a dead triage:running worker held by deps does NOT strand — reclaim flips to done, STEP A holds it 'blocked' (gate enforced downstream)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignalRaw("CTL-7", "triage", {
+      ticket: "CTL-7",
+      phase: "triage",
+      status: "running",
+      bg_job_id: "job-dead-7",
+      liveness: { kind: "bg", value: "job-dead-7" },
+    });
+    const dispatch = fakeDispatch();
+    const { ws, applied } = labelSpy();
+    const held = heldSpy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      reclaimDeadWork: prodTriageReclaim(orchDir),
+      // CTL-7 is blocked by an out-of-set blocker still In Progress.
+      fetchRelations: () => relBlockedBy("CTL-DEP"),
+      exec: execWithStates({ "CTL-DEP": "In Progress" }),
+      appendPhaseAdvanceHeldEvent: held.fn,
+    });
+    // Signal still flipped to done (reclaim ran) — but research is HELD by the gate.
+    expect(readPhaseSignals(orchDir, "CTL-7").triage).toBe("done");
+    expect(dispatch.calls).toEqual([]); // STEP B held the research promotion
+    expect(r.advanced).toEqual([]);
+    expect(applied).toContainEqual({ ticket: "CTL-7", label: "blocked" });
+    expect(held.events[0]).toMatchObject({
+      ticket: "CTL-7",
+      reason: "blocked-by-open-dependency",
+      blockers: ["CTL-DEP"],
+    });
   });
 });

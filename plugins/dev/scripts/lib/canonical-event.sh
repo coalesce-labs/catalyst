@@ -155,6 +155,12 @@ synthesize_event_id() {
 #   --claude-context-used-pct N    claude.context.used_pct (integer)
 #   --claude-context-tokens N      claude.context.tokens (integer)
 #   --claude-turn N                claude.turn (integer)
+#   --claude-ratelimit-5h-pct N    claude.ratelimit.five_hour_pct (integer, CTL-760)
+#   --claude-ratelimit-7d-pct N    claude.ratelimit.seven_day_pct (integer, CTL-760)
+#   --claude-ratelimit-7d-opus-pct N    claude.ratelimit.seven_day_opus_pct (integer, CTL-763)
+#   --claude-ratelimit-7d-sonnet-pct N  claude.ratelimit.seven_day_sonnet_pct (integer, CTL-763)
+#   --phase-attempt N        phase.attempt (integer, CTL-761)
+#   --phase-revive-count N   phase.revive_count (integer, CTL-761)
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -167,6 +173,12 @@ build_canonical_line() {
   local project="" linear_key="" cat_orch=""
   local claude_session_id="" claude_model=""
   local claude_context_used_pct="" claude_context_tokens="" claude_turn=""
+  # CTL-760: rate-limit 5h/7d used-percentages (numeric typed attributes).
+  local claude_rl_5h="" claude_rl_7d=""
+  # CTL-763: per-model 7d split.
+  local claude_rl_7d_opus="" claude_rl_7d_sonnet=""
+  # CTL-761: dispatch attempt + revive count (typed int attributes).
+  local phase_attempt="" phase_revive_count=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -199,6 +211,12 @@ build_canonical_line() {
       --claude-context-used-pct)   claude_context_used_pct="$2"; shift 2 ;;
       --claude-context-tokens)     claude_context_tokens="$2"; shift 2 ;;
       --claude-turn)               claude_turn="$2"; shift 2 ;;
+      --claude-ratelimit-5h-pct)        claude_rl_5h="$2"; shift 2 ;;
+      --claude-ratelimit-7d-pct)        claude_rl_7d="$2"; shift 2 ;;
+      --claude-ratelimit-7d-opus-pct)   claude_rl_7d_opus="$2"; shift 2 ;;
+      --claude-ratelimit-7d-sonnet-pct) claude_rl_7d_sonnet="$2"; shift 2 ;;
+      --phase-attempt)       phase_attempt="$2"; shift 2 ;;
+      --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -257,6 +275,12 @@ build_canonical_line() {
     --arg claude_context_used_pct "$claude_context_used_pct" \
     --arg claude_context_tokens "$claude_context_tokens" \
     --arg claude_turn "$claude_turn" \
+    --arg claude_rl_5h "$claude_rl_5h" \
+    --arg claude_rl_7d "$claude_rl_7d" \
+    --arg claude_rl_7d_opus "$claude_rl_7d_opus" \
+    --arg claude_rl_7d_sonnet "$claude_rl_7d_sonnet" \
+    --arg phase_attempt "$phase_attempt" \
+    --arg phase_revive_count "$phase_revive_count" \
     '{
       ts: $ts,
       id: $id,
@@ -294,6 +318,12 @@ build_canonical_line() {
         + (if $claude_context_used_pct == "" then {} else { "claude.context.used_pct": ($claude_context_used_pct | tonumber) } end)
         + (if $claude_context_tokens == "" then {} else { "claude.context.tokens": ($claude_context_tokens | tonumber) } end)
         + (if $claude_turn == "" then {} else { "claude.turn": ($claude_turn | tonumber) } end)
+        + (if $claude_rl_5h == "" then {} else { "claude.ratelimit.five_hour_pct": ($claude_rl_5h | tonumber) } end)
+        + (if $claude_rl_7d == "" then {} else { "claude.ratelimit.seven_day_pct": ($claude_rl_7d | tonumber) } end)
+        + (if $claude_rl_7d_opus   == "" then {} else { "claude.ratelimit.seven_day_opus_pct":   ($claude_rl_7d_opus   | tonumber) } end)
+        + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
+        + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
+        + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
       ),
       body: (
         (if $message == "" then {} else { message: $message } end)

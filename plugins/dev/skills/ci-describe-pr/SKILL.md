@@ -71,6 +71,14 @@ Analyze all commits and changes. Generate a complete PR description following th
 
 **CRITICAL: NO Claude attribution** — remove any "Generated with Claude" or "Co-Authored-By" lines.
 
+**CTL-623 — sibling reference format (REQUIRED):** When referencing related/sibling
+work in prose, reference it by its **GitHub PR number (`#NNN`)**, never by a bare Linear
+token (`TEAM-NNN`) or a Linear issue URL. A bare sibling `TEAM-NNN` token is auto-linked
+by Linear's GitHub integration and drags that sibling's workflow status (Done → Implement)
+on PR open/merge. Do **not** emit bare sibling Linear tokens in prose. The own ticket's
+`Fixes https://linear.app/...` line is correct and stays. Sibling neutralization is
+handled mechanically by the guard block appended at write-back time (step 6).
+
 ### 6. Save and Update
 
 ```bash
@@ -78,6 +86,24 @@ Analyze all commits and changes. Generate a complete PR description following th
 cat > "thoughts/shared/prs/${PR_NUMBER}_description.md" <<EOF
 [Generated description]
 EOF
+
+# CTL-623: append a Linear automation guard block so sibling tickets embedded in
+# the branch name or pulled into the body are NOT auto-linked and dragged backward
+# in status when this PR opens/merges. Scans the branch AND the assembled body;
+# no-op for single-ticket PRs. See https://linear.app/docs/github (skip/ignore
+# negative magic word).
+# CTL-633: branch and body are scanned in DIFFERENT modes — the branch goes
+# through the awk segmenter (legitimate sibling-number recovery); the body
+# uses canonical-only regex so prose, dashed dates, and SHAs cannot fabricate
+# fake `skip TEAM-NNN` lines. Stays non-interactive — no cache refresh prompt.
+# shellcheck source=/dev/null
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh"
+body="$(cat "$body_file")"
+skip_block="$( {
+    linear_sibling_skip_block_from_branch "$ticket" "$branch"
+    linear_sibling_skip_block_from_body   "$ticket" "$body"
+} | awk '/^skip /{if(!seen[$0]++) print; next} {if(!h){print; h=1}}' )"
+[[ -n "$skip_block" ]] && printf '\n%s\n' "$skip_block" >>"$body_file"
 
 # Sync thoughts
 humanlayer thoughts sync

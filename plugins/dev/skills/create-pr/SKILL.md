@@ -185,6 +185,24 @@ if [[ "$ticket" ]]; then
 Refs: $ticket"
 fi
 
+# CTL-623: prevent Linear from auto-linking sibling tickets embedded in the
+# branch name (multi-ticket orchestrator runs build branches like
+# `o-adv-1155-1156-1157-ADV-1155`) and dragging their workflow status when this
+# PR opens. The skip/ignore negative magic word fully unlinks siblings even when
+# the branch still carries their IDs (https://linear.app/docs/github). No-op for
+# single-ticket branches. Linking can fire on PR-open, BEFORE /describe-pr runs,
+# so the guard block must be present in this transient initial body too.
+# CTL-633: create-pr scans the BRANCH only — the transient body is assembled
+# from commit messages, not user prose, so no body-mode scan is needed (and
+# adding one risks fabricating from commit subjects). Call _from_branch
+# explicitly to opt into the new mode-aware API.
+# shellcheck source=/dev/null
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh"
+skip_block="$(linear_sibling_skip_block_from_branch "$ticket" "$branch")"
+[[ -n "$skip_block" ]] && body="$body
+
+$skip_block"
+
 # Create PR (author will be the git user)
 gh pr create --title "$title" --body "$body" --base "$base"
 ```

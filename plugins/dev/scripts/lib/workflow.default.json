@@ -12,16 +12,56 @@
     { "id": "plan",           "rank": 2, "linearKey": "planning",   "next": "implement",
       "effort": "high",
       "rules": [
-        { "when": { "field": "ticket.scope", "op": "in", "value": ["large", "epic"] },
-          "set": { "effort": "max", "model": "opusplan" },
+        { "when": { "field": "ticket.estimate", "op": "lt", "value": 3 },
+          "set": { "effort": "medium" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 3 },
+          "set": { "effort": "high" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 8 },
+          "set": { "effort": "xhigh" },
           "appendPostamble": [
-            "This is a large ticket (scope: ${ticket.scope}, ~${ticket.estimate} pts).",
+            "This is a high-point ticket (~${ticket.estimate} pts).",
             "Use the /workflows Workflow tool to decompose the plan into parallel sub-steps before writing the final plan document."
           ] }
       ] },
-    { "id": "implement",      "rank": 3, "linearKey": "inProgress", "next": "verify" },
-    { "id": "verify",         "rank": 5, "linearKey": "verifying",  "next": "review" },
-    { "id": "review",         "rank": 6, "linearKey": "reviewing",  "next": "pr" },
+    { "id": "implement",      "rank": 3, "linearKey": "inProgress", "next": "verify",
+      "rules": [
+        { "when": { "field": "ticket.estimate", "op": "lt", "value": 3 },
+          "set": { "effort": "medium" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 3 },
+          "set": { "effort": "high" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 8 },
+          "set": { "effort": "xhigh" },
+          "appendPostamble": [
+            "This is a high-point ticket (~${ticket.estimate} pts).",
+            "Use the /workflows Workflow tool to decompose the implementation into parallel sub-steps before writing code."
+          ] }
+      ] },
+    { "id": "verify",         "rank": 5, "linearKey": "verifying",  "next": "review",
+      "rules": [
+        { "when": { "field": "ticket.estimate", "op": "lt", "value": 3 },
+          "set": { "effort": "medium" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 3 },
+          "set": { "effort": "high" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 8 },
+          "set": { "effort": "xhigh" },
+          "appendPostamble": [
+            "This is a high-point ticket (~${ticket.estimate} pts).",
+            "Use the /workflows Workflow tool to fan out verification (types, tests, lint, security, review) into parallel checks."
+          ] }
+      ] },
+    { "id": "review",         "rank": 6, "linearKey": "reviewing",  "next": "pr",
+      "rules": [
+        { "when": { "field": "ticket.estimate", "op": "lt", "value": 3 },
+          "set": { "effort": "medium" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 3 },
+          "set": { "effort": "high" } },
+        { "when": { "field": "ticket.estimate", "op": "gte", "value": 8 },
+          "set": { "effort": "xhigh" },
+          "appendPostamble": [
+            "This is a high-point ticket (~${ticket.estimate} pts).",
+            "Use the /workflows Workflow tool to fan out the review across parallel dimensions before recording the verdict."
+          ] }
+      ] },
     { "id": "pr",             "rank": 7, "linearKey": "inReview",   "next": "monitor-merge" },
     { "id": "monitor-merge",  "rank": 8, "linearKey": "inReview",   "next": "monitor-deploy" },
     { "id": "monitor-deploy", "rank": 9, "preemptable": false, "linearKey": "inReview", "next": null }

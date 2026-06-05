@@ -338,6 +338,26 @@ plugins/dev/scripts/resolve-linear-ids.sh
 plugins/dev/scripts/linear-transition.sh --ticket ENG-123 --transition done
 ```
 
+### Team-key allowlist cache (CTL-633)
+
+The PR-body guard `lib/linear-pr-skip.sh` optionally filters its output
+through a cached snapshot of workspace team keys at
+`${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/linear-team-keys.json`. The
+cache is **manual** and **fail-open** — when the file is missing, empty,
+malformed, or unreadable, the helper does no filtering (fresh installs
+behave like today). Populate / refresh it with:
+
+```bash
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/catalyst"
+linearis teams list --json |
+  jq '{keys:[.nodes[].key]|sort, fetched_at:(now|todate)}' \
+  > "${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/linear-team-keys.json"
+```
+
+Re-run after onboarding a new Linear team. The helper is invoked inside
+non-interactive `gh pr create` / `gh pr edit` paths — no automatic
+refresh is wired in.
+
 ## Important Rules
 
 1. **--status NOT --state**: Always `--status` for issue updates (`--state` is not a valid flag)

@@ -95,6 +95,19 @@ the standalone script never aborts setup. The standalone script is also
 idempotent and can be run directly per team (`setup-execution-core-states.sh
 --config .catalyst/config.json [--dry-run] [--json]`).
 
+**Linear git automations (CTL-759).** As its last Linear step,
+`setup-execution-core-states.sh` reconciles the team's *git automations* —
+Linear's built-in "move ticket on git event" rules. It pins exactly two
+(`start` → `PR`, `merge` → `Done`) and deletes any `review` automation, so the
+execution-core daemon stays the single authority on ticket state. The reconcile
+is best-effort and tolerant: a Linear permission/transport failure prints a
+WARNING and continues — it never aborts setup and never alters the script's exit
+codes. `check-project-setup.sh` (hot path) warns on drift via a TTL-gated cached
+read; a missing per-project token is a silent skip. Separately, Linear's
+**branch-name "magic words" toggle** (Settings → Team → Workflow → Git) has no
+API surface and **cannot** be reconciled — it must be turned OFF by hand, or it
+races the daemon and re-introduces the CTL-758 backward state-write.
+
 For issues needing user input, explain what's needed and how to provide it:
 
 | Issue | What to tell the user |
@@ -102,6 +115,9 @@ For issues needing user input, explain what's needed and how to provide it:
 | Linear API token not set | Show the secrets file path, explain where to get the token from Linear settings |
 | No project config | Suggest running `setup-catalyst.sh` or offer to create a minimal `.catalyst/config.json` interactively |
 | direnv not installed | Show `brew install direnv` and the shell hook setup |
+| Linear "magic words" auto-move ON | Tell the user to turn it OFF in Settings → Team → Workflow → Git — it races the execution-core daemon and causes backward state writes (CTL-758). No API surface; must be toggled by hand. |
+| Linear `review` git automation set | Run `setup-execution-core-states.sh` to remove it; the pipeline owns the Validate/review state, not Linear. |
+| Personal git automations override team ones | Remind the user that Linear lets each member set *personal* git automations that shadow the team defaults — check Settings → Account → Git if drift persists after the team reconcile. |
 
 **Observability (OTel) is optional.** If Docker or OTel containers aren't found, note it as
 informational — don't treat it as an issue. Point the user to

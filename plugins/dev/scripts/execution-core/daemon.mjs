@@ -12,7 +12,9 @@
 
 import {
   watch,
+  readFileSync,
   writeFileSync,
+  appendFileSync,
   renameSync,
   mkdirSync,
   existsSync,
@@ -22,8 +24,9 @@ import {
   fstatSync,
   readSync,
   closeSync,
+  readdirSync,
 } from "node:fs";
-import { resolve, dirname, basename } from "node:path";
+import { resolve, dirname, basename, join } from "node:path";
 import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
@@ -31,6 +34,7 @@ import {
   getEventLogPath,
   log,
   EVENT_DEBOUNCE_MS,
+  TAILER_POLL_INTERVAL_MS,
   readWaitWatcherConfig,
   readMemorySamplerConfig,
 } from "./config.mjs";
@@ -66,6 +70,13 @@ import {
 } from "./scheduler.mjs";
 import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
+import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
+import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
+// CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
+// no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
+// so the phantom worker-dir validity sweep is operative in production.
+import { classifyTicketResolution } from "./linear-query.mjs";
+import { isBgJobAlive } from "./claude-agents.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -87,12 +98,74 @@ let _memorySampler = null;
 let _stopAutoTuner = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
+let _eventPollTimer = null; // CTL-769: poll-fallback drain (fs.watch debounce never fires on the continuously-appended log)
 let _eventLogCursor = 0;
 // CTL-649: the trailing partial line carried across reads. _eventLogCursor is a
 // BYTE offset; consumeEventTail reads only NEW bytes via a file descriptor and
 // stitches the leftover onto the front so a line split across two writes (or a
 // half-written line at read time) is parsed exactly once, never truncated.
 let _eventLogLeftover = "";
+
+// readLinearBotUserId — read catalyst.monitor.linear.botUserId from Layer 1
+// config (.catalyst/config.json). Returns "" when absent/unreadable so callers
+// can treat it as "no filter". Never throws. CTL-749.
+function readLinearBotUserId(configPath) {
+  if (!configPath) return "";
+  try {
+    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const uid = parsed?.catalyst?.monitor?.linear?.botUserId;
+    return typeof uid === "string" && uid.length > 0 ? uid : "";
+  } catch {
+    return "";
+  }
+}
+
+// createCommentInboxWriter — factory for a per-daemon onComment subscriber.
+// Appends a JSONL entry to ORCH_DIR/workers/<ticket>/inbox.jsonl when the
+// ticket is in-flight (workers/ dir exists). Filters bot self-echo via
+// botUserId. Exported for testing. CTL-749.
+export function createCommentInboxWriter(orchDir, botUserId) {
+  return function writeCommentToInbox(parsed) {
+    const ticket = parsed.ticket ?? parsed.identifier ?? null;
+    if (!ticket) return;
+    if (botUserId && parsed.authorId === botUserId) return;
+    const workerDir = join(orchDir, "workers", ticket);
+    if (!existsSync(workerDir)) return;
+    const entry = JSON.stringify({
+      kind: "comment",
+      ticket,
+      commentId: parsed.commentId,
+      body: parsed.body,
+      authorId: parsed.authorId,
+      authorName: parsed.authorName ?? null,
+      receivedAt: new Date().toISOString(),
+    });
+    appendFileSync(join(workerDir, "inbox.jsonl"), entry + "\n");
+  };
+}
+
+// createUpdateInboxWriter — factory for a per-daemon onUpdate subscriber.
+// Appends a JSONL entry only when descriptionChanged is true and the ticket is
+// in-flight. Filters bot self-echo via botUserId. Exported for testing. CTL-749.
+export function createUpdateInboxWriter(orchDir, botUserId) {
+  return function writeUpdateToInbox(parsed) {
+    if (!parsed.descriptionChanged) return;
+    const ticket = parsed.ticket ?? parsed.identifier ?? null;
+    if (!ticket) return;
+    if (botUserId && parsed.actorId === botUserId) return;
+    const workerDir = join(orchDir, "workers", ticket);
+    if (!existsSync(workerDir)) return;
+    const entry = JSON.stringify({
+      kind: "description_changed",
+      ticket,
+      description: parsed.description ?? null,
+      actorId: parsed.actorId ?? null,
+      actorName: parsed.actorName ?? null,
+      receivedAt: new Date().toISOString(),
+    });
+    appendFileSync(join(workerDir, "inbox.jsonl"), entry + "\n");
+  };
+}
 
 // ensureState — idempotently write a minimal machine-level state.json so the
 // CTL-536 scheduler has a maxParallel to read. Never overwrites an operator's
@@ -104,6 +177,58 @@ function ensureState(orchDir) {
     const tmp = `${statePath}.tmp`;
     writeFileSync(tmp, JSON.stringify({ maxParallel: DEFAULT_MAX_PARALLEL }, null, 2));
     renameSync(tmp, statePath);
+  }
+}
+
+// handleCommentWake — CTL-549 re-dispatch hook. Called on each
+// `linear.comment.created` event by the daemon's `onComment` callback wired
+// into startMonitor. Scans all phase signals for the comment's ticket; for
+// each signal with status === "needs-input", removes the needs-human/question
+// label and re-dispatches via dispatchTicket with the parked handoffPath.
+// Fail-open throughout — a bad signal file or removeLabel failure is logged
+// and skipped, never fatal.
+export async function handleCommentWake(
+  parsed,
+  { orchDir, dispatch, removeLabel, botUserId },
+) {
+  const { ticket } = parsed ?? {};
+  if (!ticket) return;
+  // CTL-756: self-echo guard — never re-dispatch on the bot's own comment
+  // (e.g. the parking-question comment the parked worker just posted as the
+  // Catalyst app actor). Fail-open when botUserId is unset. Mirrors the inbox
+  // writers' guard (daemon.mjs:124 / :148).
+  if (botUserId && parsed.authorId === botUserId) return;
+
+  const workerDir = join(orchDir, "workers", ticket);
+  let signalFiles;
+  try {
+    signalFiles = readdirSync(workerDir).filter(
+      (f) => f.startsWith("phase-") && f.endsWith(".json"),
+    );
+  } catch {
+    return;
+  }
+
+  for (const fname of signalFiles) {
+    let sig;
+    try {
+      sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8"));
+    } catch {
+      continue;
+    }
+
+    if (sig.status !== "needs-input") continue;
+
+    const parkedPhase = sig.parkedFrom ?? sig.phase;
+    const handoffPath = sig.handoffPath ?? undefined;
+
+    try {
+      await removeLabel(ticket, "needs-human/question");
+    } catch {
+      /* fail-open */
+    }
+
+    dispatch(orchDir, ticket, parkedPhase, { handoffPath });
   }
 }
 
@@ -122,10 +247,16 @@ export function startDaemon({
   reconcile = reconcileAll,
   watchRegistry = true,
   debounceMs = EVENT_DEBOUNCE_MS,
+  // CTL-769: reaper poll-fallback interval. Injectable so tests can drive the
+  // reap-intent drain deterministically; defaults to TAILER_POLL_INTERVAL_MS.
+  pollMs = TAILER_POLL_INTERVAL_MS,
   pidFile = null,
   // CTL-649: reaper + orphan-sweep timer. Disable via env knob for tests
   // that only exercise monitor + scheduler.
   enableReaper = process.env.EXECUTION_CORE_DISABLE_REAPER !== "1",
+  // CTL-769: reaper factory seam — defaults to the real Reaper; injectable so
+  // tests can spy on reap dispatch driven by the poll fallback.
+  makeReaper = (opts) => new Reaper(opts),
   orphanReaperConfig = null,
   // CTL-707: worktree refresh timer config (catalyst.orchestration.worktreeRefresh).
   worktreeRefreshConfig = null,
@@ -208,11 +339,33 @@ export function startDaemon({
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
-    monitorFn({ orchDir, cache }); // CTL-535 + CTL-565 + CTL-634
+    // CTL-749: resolve the bot user ID from .catalyst/config.json so the inbox
+    // writers can filter out self-echo comments (the bot posting mirror comments).
+    const linearBotUserId = readLinearBotUserId(configPath);
+    const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserId);
+    monitorFn({
+      orchDir,
+      cache,
+      concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
+      onComment: (parsed) => {
+        commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserId }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
+      },
+      onUpdate: createUpdateInboxWriter(orchDir, linearBotUserId), // CTL-749
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
-    schedulerFn({ orchDir, cache, concurrency, configPath, layer2Path }); // CTL-536 + CTL-634 + CTL-665 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
+    schedulerFn({
+      orchDir,
+      cache,
+      concurrency,
+      configPath,
+      layer2Path,
+      // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader.
+      classifyResolution: classifyTicketResolution,
+      isBgJobAlive,
+    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
     // CTL-684: start the side-car auto-tuner AFTER the scheduler so the
     // scheduler's first tick runs with the operator's current Layer-2 value
     // before any auto-tune adjustments. configPath + layer2Path are threaded
@@ -248,7 +401,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, pollMs, orchDir, makeReaper });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -278,7 +431,20 @@ export function startDaemon({
 //
 // Boot replay is best-effort: if it throws, log and continue with live
 // consumption only.
-function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, orchDir }) {
+function startReaperAndTimer({
+  orphanReaperConfig,
+  worktreeRefreshConfig,
+  debounceMs,
+  orchDir,
+  // CTL-769: poll-fallback interval. Defaults to TAILER_POLL_INTERVAL_MS
+  // (env-tunable via EXECUTION_CORE_TAILER_POLL_MS); injectable so tests can
+  // drive the drain on a tiny interval deterministically.
+  pollMs = TAILER_POLL_INTERVAL_MS,
+  // CTL-769: reaper factory seam. Defaults to the real Reaper; injectable so a
+  // test can observe that the poll-fallback timer (not an fs.watch event)
+  // dispatched a reap-requested line into reaper.handle().
+  makeReaper = (opts) => new Reaper(opts),
+}) {
   const eventLogPath = getEventLogPath();
   // CTL-649: the periodic sweep honors the configured recency floor
   // (minIdleSeconds, default 900s). includeInteractive stays at its safe
@@ -286,7 +452,7 @@ function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, deboun
   // CTL-661: bind the per-ticket reconciler's canonical-owner reader to this
   // daemon's orchDir so the sweep resolves the authoritative active-phase
   // bg_job_id (falling back to newest-by-last_seen when no signal is found).
-  _reaper = new Reaper({
+  _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
   });
@@ -319,6 +485,16 @@ function startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, deboun
     });
   } catch (err) {
     log.error({ err }, "reaper: event-log watch failed — relying on boot replay only");
+  }
+
+  // CTL-769: fs.watch + debounce is perpetually reset by the continuously-
+  // appended unified event log, so consumeEventTail only fires during >5s idle
+  // gaps — the reaper starves exactly when workers are busy and predecessors
+  // accumulate. Mirror the new-work tailer's poll fallback (monitor.mjs:684-685,
+  // CTL-711): a cheap, idempotent, cursor-based poll drains reap-intents in ~2s
+  // instead of waiting up to the 600s reconcile sweep.
+  if (pollMs > 0) {
+    _eventPollTimer = setInterval(() => consumeEventTail(), pollMs);
   }
 
   const cfg = orphanReaperConfig ?? {};
@@ -357,6 +533,14 @@ export function __resetEventTailCursorForTest(cursor = 0, leftover = "") {
 // __getEventTailLeftoverForTest — inspect the carried partial line. Test-only.
 export function __getEventTailLeftoverForTest() {
   return _eventLogLeftover;
+}
+
+// __getEventPollTimerForTest — inspect the CTL-769 poll-fallback interval handle
+// so a test can pin its teardown directly (non-null while running, null after
+// stopDaemon) instead of inferring it from drain side-effects, which the
+// `_reaper = null` guard in stopDaemon would otherwise mask. Test-only.
+export function __getEventPollTimerForTest() {
+  return _eventPollTimer;
 }
 
 // consumeEventTail — read the NEW BYTES appended to the event log since the
@@ -464,6 +648,10 @@ export function stopDaemon() {
   if (_eventDebounceTimer) {
     clearTimeout(_eventDebounceTimer);
     _eventDebounceTimer = null;
+  }
+  if (_eventPollTimer) {
+    clearInterval(_eventPollTimer);
+    _eventPollTimer = null;
   }
   if (_orphanTimer) {
     try {

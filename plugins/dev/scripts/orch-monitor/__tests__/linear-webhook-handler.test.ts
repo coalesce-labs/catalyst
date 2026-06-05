@@ -371,6 +371,68 @@ describe("createLinearWebhookHandler", () => {
   });
 });
 
+describe("buildLinearEventLogEnvelope — description fields (CTL-749)", () => {
+  it("issue.updated envelope carries description and descriptionChanged", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.updated",
+        ticket: "CTL-749",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: ["description"],
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: { description: "old text" },
+        description: "new text",
+        descriptionChanged: true,
+      },
+      TS
+    );
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["description"]).toBe("new text");
+    expect(payload["descriptionChanged"]).toBe(true);
+  });
+
+  it("description is null and descriptionChanged is false when not a description edit", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "update",
+        topic: "linear.issue.updated",
+        ticket: "CTL-749",
+        teamKey: "CTL",
+        data: {},
+        updatedFromKeys: [],
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
+      },
+      TS
+    );
+    const payload = env!.body.payload as Record<string, unknown>;
+    expect(payload["description"]).toBeNull();
+    expect(payload["descriptionChanged"]).toBe(false);
+  });
+});
+
 describe("buildLinearEventLogEnvelope — comment fields (CTL-681)", () => {
   it("comment envelope includes body, authorId, authorName in body.payload", () => {
     const env = buildLinearEventLogEnvelope(
@@ -455,6 +517,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -486,6 +550,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -513,6 +579,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -540,6 +608,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -568,6 +638,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -598,6 +670,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
           stateId: "old-state",
           labelIds: ["old-label"],
         },
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -631,6 +705,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -662,6 +738,8 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
@@ -755,6 +833,8 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS,
       TEAMS
@@ -783,6 +863,8 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS,
       TEAMS
@@ -811,6 +893,8 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS,
       TEAMS
@@ -941,9 +1025,72 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         toProject: null,
         toProjectId: null,
         previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
       },
       TS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+});
+
+describe("buildLinearEventLogEnvelope — agent_session and mention", () => {
+  it("produces linear.agent_session.created for kind=agent_session action=create", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "agent_session",
+        action: "create",
+        sessionId: "sess-uuid",
+        issueId: "issue-uuid",
+        actorId: "actor-uuid",
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    expect(env!.attributes["event.name"]).toBe("linear.agent_session.created");
+    expect(env!.attributes["linear.actor.id"]).toBe("actor-uuid");
+    expect(env!.attributes["linear.issue.id"]).toBe("issue-uuid");
+  });
+
+  it("produces linear.agent_session.updated for action=update", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "agent_session",
+        action: "update",
+        sessionId: "sess-uuid",
+        issueId: null,
+        actorId: null,
+        data: {},
+      },
+      TS
+    );
+    expect(env!.attributes["event.name"]).toBe("linear.agent_session.updated");
+  });
+
+  it("produces linear.mention.created for kind=mention action=create", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "mention",
+        action: "create",
+        ticket: "CTL-550",
+        commentId: "comment-uuid",
+        issueId: "issue-uuid",
+        body: "hey @catalyst",
+        authorId: "author-uuid",
+        authorName: "Ryan",
+        data: {},
+      },
+      TS
+    );
+    expect(env).not.toBeNull();
+    expect(env!.attributes["event.name"]).toBe("linear.mention.created");
+    expect(env!.attributes["linear.issue.identifier"]).toBe("CTL-550");
+    expect(env!.attributes["linear.actor.id"]).toBe("author-uuid");
+  });
+
+  it("returns null for kind=ignored", () => {
+    const env = buildLinearEventLogEnvelope({ kind: "ignored", reason: "test" }, TS);
+    expect(env).toBeNull();
   });
 });

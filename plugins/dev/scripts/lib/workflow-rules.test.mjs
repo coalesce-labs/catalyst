@@ -23,6 +23,18 @@ describe("buildContext + scope→points", () => {
   test("scope→points map", () => {
     expect(SCOPE_POINTS).toEqual({ small: 1, medium: 3, large: 8, epic: 13 });
   });
+  test("direct numeric estimate overrides scope-derived points", () => {
+    expect(buildContext({ scope: "medium", estimate: 5 }).ticket.estimate).toBe(5);
+  });
+  test("direct numeric estimate with no scope", () => {
+    expect(buildContext({ estimate: 8 }).ticket.estimate).toBe(8);
+  });
+  test("null estimate falls back to scope-derived points (back-compat)", () => {
+    expect(buildContext({ scope: "large", estimate: null }).ticket.estimate).toBe(8);
+  });
+  test("no scope and no estimate → estimate null", () => {
+    expect(buildContext({}).ticket.estimate).toBeNull();
+  });
 });
 
 describe("evalPredicate (closed ops, no eval)", () => {
@@ -93,16 +105,49 @@ describe("resolveStep", () => {
   });
 });
 
-describe("resolveDescriptorStep against the real default descriptor (marquee example is REAL)", () => {
-  test("plan step fires the large-ticket rule end-to-end", () => {
-    const r = resolveDescriptorStep(descriptor, "plan", buildContext({ scope: "epic", ticketId: "CTL-1" }));
-    expect(r.effort).toBe("max");
-    expect(r.model).toBe("opusplan");
-    expect(r.postamble.join(" ")).toContain("/workflows");
-  });
-  test("plan step on a small ticket keeps descriptor defaults (effort high, no postamble)", () => {
-    const r = resolveDescriptorStep(descriptor, "plan", buildContext({ scope: "small" }));
+describe("resolveDescriptorStep — estimate-based effort across heavy phases (CTL-747)", () => {
+  const HEAVY = ["plan", "implement", "verify", "review"];
+
+  for (const phase of HEAVY) {
+    test(`${phase}: 8-pt → xhigh + /workflows postamble, model NOT opusplan`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ estimate: 8, ticketId: "CTL-1" }));
+      expect(r.effort).toBe("xhigh");
+      expect(r.postamble.join(" ")).toContain("/workflows");
+      expect(r.model).not.toBe("opusplan");
+    });
+    test(`${phase}: 13-pt → xhigh + /workflows`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ estimate: 13 }));
+      expect(r.effort).toBe("xhigh");
+      expect(r.postamble.join(" ")).toContain("/workflows");
+    });
+    test(`${phase}: 5-pt → high, no postamble`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ estimate: 5 }));
+      expect(r.effort).toBe("high");
+      expect(r.postamble).toEqual([]);
+    });
+    test(`${phase}: 3-pt → high, no postamble`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ estimate: 3 }));
+      expect(r.effort).toBe("high");
+      expect(r.postamble).toEqual([]);
+    });
+    test(`${phase}: 1-pt → medium, no postamble`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ estimate: 1 }));
+      expect(r.effort).toBe("medium");
+      expect(r.postamble).toEqual([]);
+    });
+  }
+
+  // Fail-open: plan keeps its base high; the other three emit NO effort (no flag).
+  test("fail-open: no estimate → plan keeps base effort high, no postamble", () => {
+    const r = resolveDescriptorStep(descriptor, "plan", buildContext({ scope: null }));
     expect(r.effort).toBe("high");
     expect(r.postamble).toEqual([]);
   });
+  for (const phase of ["implement", "verify", "review"]) {
+    test(`fail-open: no estimate → ${phase} sets NO effort (no flag), no postamble`, () => {
+      const r = resolveDescriptorStep(descriptor, phase, buildContext({ scope: null }));
+      expect(r.effort).toBeUndefined();
+      expect(r.postamble).toEqual([]);
+    });
+  }
 });

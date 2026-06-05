@@ -106,8 +106,7 @@ TRIAGE_SUMMARY=$(jq -r '.summary // .classification // ""' "$TRIAGE_FILE" 2>/dev
 /goal "I have written thoughts/shared/research/<date>-${ticket-lower}.md with valid
        frontmatter, a 'Summary' section, a 'Findings' section containing at least 10
        file:line references, and a 'References' section linking related thoughts/plans.
-       I have printed the path on stdout. OR I have stopped after 35 turns and printed
-       a clear partial-progress summary."
+       I have printed the path on stdout."
 ```
 
 Replace `<date>` with `$(date -u +%Y-%m-%d)` and `<ticket-lower>` with the lowercased
@@ -155,6 +154,28 @@ is performed.
 If [[research-codebase]] hits a question it cannot resolve, post a `question` comms
 message and continue with the best-effort answer — do not block the pipeline.
 
+### Inbox check (CTL-749)
+
+After `/catalyst-dev:research-codebase` Task returns, check for mid-flight context updates from the human:
+
+1. If `${ORCH_DIR}/workers/${TICKET}/inbox.jsonl` exists and is non-empty, read it fully.
+2. Parse each JSONL line — entries have `kind: "comment"` or `kind: "description_changed"`.
+3. For each entry, decide:
+   - **Absorb and continue**: the update is additive context (clarification, extra constraints,
+     "also handle X") — fold it into your working context and continue. Post a brief reply comment
+     acknowledging the update (one sentence).
+   - **Pause and replan**: the update fundamentally changes scope or invalidates the current
+     approach — emit `failed` with `reason: "mid_flight_replan_needed"` via
+     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a
+     comment before exiting.
+4. After reading, archive processed entries:
+   ```bash
+   [[ -f "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" ]] && \
+     mv "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" \
+        "${ORCH_DIR}/workers/${TICKET}/inbox.processed-$(date +%s).jsonl" || true
+   ```
+5. If no inbox file or it is empty, continue normally.
+
 ## End block
 
 ```bash
@@ -198,10 +219,12 @@ EOF
   fi
   [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
 ${MIRROR_FOOTER}"
-  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+  if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
-    echo "phase-research: linearis discuss failed (continuing)" >&2
+    echo "phase-research: linear-comment-post failed (continuing)" >&2
   fi
 fi
 ```

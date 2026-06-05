@@ -6,8 +6,12 @@ import {
   applyTerminalDone,
   applyLabel,
   applyTriageStatus,
+  removeLabel,
+  applyBlockedByRelation,
+  applyEstimate,
   teamOf,
 } from "./linear-write.mjs";
+import { createTicketStateCache } from "./linear-cache.mjs";
 
 const okExec = (calls) => (cmd, args) => {
   calls.push({ cmd, args });
@@ -46,7 +50,13 @@ describe("applyPhaseStatus", () => {
       resolveRepoRoot: () => "/repo",
       exec: okExec(calls),
     });
-    const args = calls[0].args;
+    // CTL-758: the backward-write guard pre-reads current state via
+    // `linearis issues read` for non-terminal keys, so the transition shell call
+    // is no longer necessarily calls[0]. Locate it explicitly by its --transition
+    // arg (the guard read has no --transition).
+    const transitionCall = calls.find((c) => c.args.includes("--transition"));
+    expect(transitionCall).toBeDefined();
+    const args = transitionCall.args;
     expect(args).toContain("--transition");
     expect(args[args.indexOf("--transition") + 1]).toBe("verifying");
     expect(args).toContain("--ticket");
@@ -94,6 +104,239 @@ describe("applyTerminalDone", () => {
     applyTerminalDone({ ticket: "CTL-1", resolveRepoRoot: () => "/repo", exec: okExec(calls) });
     const args = calls[0].args;
     expect(args[args.indexOf("--transition") + 1]).toBe("done");
+  });
+});
+
+// CTL-758: the backward-write guard in runTransition refuses to drag a ticket
+// already at a terminal Linear state (Done/Canceled) BACK to a non-terminal
+// state — EXCEPT the forward terminal write (key === "done"), which must always
+// proceed (the CRITICAL SAFETY case: a bug here strands every monitor-deploy at PR).
+describe("CTL-758: backward-write guard", () => {
+  const resolveRepoRoot = () => "/repo";
+
+  // exec that records calls AND returns the transition shell JSON. The guard's
+  // pre-read uses a SEPARATE injected fetchState, so any --transition call in
+  // `calls` proves the shell ran.
+  function recordingExec(calls) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Done" }), stderr: "" };
+    };
+  }
+  const ranShell = (calls) => calls.some((c) => c.args.includes("--transition"));
+
+  test("terminal current + NON-terminal key (verifying) ⇒ skips the shell (exec 0 --transition calls)", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify", // → key "verifying", a non-terminal key
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      // shared cache reader proves the ticket is already Done
+      cache: { get: () => "Done", set: () => {} },
+      // when a cache hit exists fetchTicketState returns it without exec; but be
+      // explicit — the guard reads via fetchState(ticket,{exec,cache}).
+    });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("terminal-no-backward");
+    expect(r.reason).toBe("skipped-terminal-no-backward");
+    expect(r.from_state).toBe("Done");
+    expect(ranShell(calls)).toBe(false); // CRITICAL: the shell never ran
+  });
+
+  test("Canceled current + non-terminal key ⇒ skips the shell", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-2",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "Canceled", set: () => {} },
+    });
+    expect(r.skipped).toBe("terminal-no-backward");
+    expect(ranShell(calls)).toBe(false);
+  });
+
+  test("NON-terminal current + non-terminal key ⇒ shell PROCEEDS (no false block)", () => {
+    const calls = [];
+    const r = applyPhaseStatus({
+      ticket: "CTL-3",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "PR", set: () => {} }, // non-terminal
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true);
+  });
+
+  // ── THE CRITICAL SAFETY TEST ──────────────────────────────────────────────
+  test("forward terminal write (key='done') PROCEEDS even when current state is terminal", () => {
+    // A ticket already at Done re-confirming Done via applyTerminalDone must NOT
+    // be blocked by the guard — key === TERMINAL_LINEAR_KEY is exempt, so the
+    // guard never even reads, and the idempotent shell runs.
+    const calls = [];
+    const cacheReads = [];
+    const r = applyTerminalDone({
+      ticket: "CTL-4",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: (k) => { cacheReads.push(k); return "Done"; }, set: () => {} },
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true); // the forward Done write proceeded
+    // the guard is exempt for the terminal key → it never read the cache
+    expect(cacheReads.length).toBe(0);
+  });
+
+  test("non-terminal current + key='done' ⇒ proceeds (normal monitor-deploy Done)", () => {
+    const calls = [];
+    const r = applyTerminalDone({
+      ticket: "CTL-5",
+      resolveRepoRoot,
+      exec: recordingExec(calls),
+      cache: { get: () => "PR", set: () => {} },
+    });
+    expect(r.applied).toBe(true);
+    expect(ranShell(calls)).toBe(true);
+  });
+
+  // ── API-STORM REGRESSION (plan Top-Risk: "Cache not threaded = single most
+  // likely regression"). Wire the REAL fetchTicketState through the guard with a
+  // shared TTL cache (the scheduler's threading) and assert the guard issues
+  // ≤1 underlying `linearis issues read` across TWO guarded writes within TTL.
+  // The guard read MUST flow through the injected `cache`, not re-exec per write.
+  test("guard read goes through the shared cache — ≤1 `issues read` exec per ticket per TTL", () => {
+    const cache = createTicketStateCache({ now: () => 0 }); // TTL never expires within the test
+    let reads = 0;
+    // One exec serves BOTH the guard's cached `linearis issues read` AND any
+    // `linear-transition.sh --transition` shell. Only the read path increments
+    // `reads`; a non-terminal state means the guard proceeds to the shell.
+    const exec = (_cmd, args) => {
+      if (args[0] === "issues" && args[1] === "read") {
+        reads += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };
+      }
+      // the transition shell
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Validate" }), stderr: "" };
+    };
+    // Two successive guarded writes (non-terminal key) for the SAME ticket.
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec, cache });
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec, cache });
+    expect(reads).toBe(1); // second guard read was a cache hit — no API storm
+  });
+
+  test("WITHOUT a shared cache the guard re-reads each write (proves the cache is what dedups)", () => {
+    let reads = 0;
+    const exec = (_cmd, args) => {
+      if (args[0] === "issues" && args[1] === "read") {
+        reads += 1;
+        return { code: 0, stdout: JSON.stringify({ state: { name: "PR" } }), stderr: "" };
+      }
+      return { code: 0, stdout: JSON.stringify({ action: "transitioned", currentState: "PR", targetState: "Validate" }), stderr: "" };
+    };
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec }); // no cache
+    applyPhaseStatus({ ticket: "CTL-9", phase: "verify", resolveRepoRoot, exec });
+    expect(reads).toBe(2); // no cache → one read per write (contrast to the dedup above)
+  });
+});
+
+// CTL-757: runTransition (via applyPhaseStatus/applyTerminalDone) returns
+// from_state/to_state parsed from linear-transition.sh's --json currentState/
+// targetState — FREE (no extra read), feeds the caller-emitted state.write event.
+describe("CTL-757: runTransition from_state/to_state propagation", () => {
+  const resolveRepoRoot = () => "/repo";
+
+  // A transition exec that mirrors linear-transition.sh's emit() JSON shape.
+  function transitionExec({ action = "transitioned", currentState = "", targetState = "", code = 0 } = {}) {
+    return () => ({
+      code,
+      stdout: JSON.stringify({ ticket: "CTL-1", currentState, targetState, action }),
+      stderr: "",
+    });
+  }
+
+  test("applyPhaseStatus surfaces from_state/to_state from the shell JSON", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "Research", targetState: "Plan" }),
+    });
+    expect(r.applied).toBe(true);
+    expect(r.from_state).toBe("Research");
+    expect(r.to_state).toBe("Plan");
+  });
+
+  test("applyTerminalDone surfaces from_state/to_state", () => {
+    const r = applyTerminalDone({
+      ticket: "CTL-1",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "PR", targetState: "Done" }),
+    });
+    expect(r.from_state).toBe("PR");
+    expect(r.to_state).toBe("Done");
+  });
+
+  test("idempotent skip (from==to, action:skipped) — applied:true, from_state==to_state", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "verify",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "skipped", currentState: "Validate", targetState: "Validate" }),
+    });
+    expect(r.applied).toBe(true);
+    expect(r.from_state).toBe("Validate");
+    expect(r.to_state).toBe("Validate");
+    expect(r.from_state).toBe(r.to_state);
+  });
+
+  test("failure path (exit non-zero, update-failed) still returns from_state + reason", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ action: "update-failed", currentState: "Research", targetState: "Plan", code: 1 }),
+    });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBe("exit-1");
+    expect(r.from_state).toBe("Research");
+    expect(r.to_state).toBe("Plan");
+  });
+
+  test("empty currentState/targetState normalise to null (not empty string)", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: transitionExec({ currentState: "", targetState: "" }),
+    });
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
+  });
+
+  test("non-JSON stdout (no-linearis / spawn) → from_state/to_state null, applied stays false", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot,
+      exec: () => ({ code: 1, stdout: "not json", stderr: "boom" }),
+    });
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
+    expect(r.applied).toBe(false);
+  });
+
+  test("no-repo-root path returns from_state/to_state null", () => {
+    const r = applyPhaseStatus({
+      ticket: "CTL-1",
+      phase: "plan",
+      resolveRepoRoot: () => null,
+      exec: transitionExec(),
+    });
+    expect(r.reason).toBe("no-repo-root");
+    expect(r.from_state).toBeNull();
+    expect(r.to_state).toBeNull();
   });
 });
 
@@ -301,5 +544,143 @@ describe("applyTriageStatus", () => {
     const r = applyTriageStatus({ ticket: "CTL-704", resolveRepoRoot, exec, fetchState });
     expect(r.applied).toBe(false);
     expect(r.verified).toBe(false);
+  });
+});
+
+// CTL-549: removeLabel — remove a single label via linearis --label-mode remove
+describe("removeLabel (CTL-549)", () => {
+  test("shells linearis issues update with --label-mode remove", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].args).toContain("--label-mode");
+    expect(cmds[0].args).toContain("remove");
+    expect(cmds[0].args).toContain("needs-human/question");
+    expect(cmds[0].args).toContain("CTL-1");
+  });
+
+  test("returns { removed: true } on exit 0", async () => {
+    const exec = () => ({ code: 0, stdout: "", stderr: "" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(true);
+  });
+
+  test("returns { removed: false, reason } on non-zero exit", async () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBeTruthy();
+  });
+
+  test("returns { removed: false, reason: 'transient' } on thrown exec", async () => {
+    const exec = () => { throw new Error("spawn failed"); };
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("transient");
+  });
+});
+
+// CTL-537: applyBlockedByRelation — durable blocked-by edge write.
+describe("applyBlockedByRelation", () => {
+  test("success — exec returns code 0 → applied:true, reason:null", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: true, reason: null });
+  });
+
+  test("arg order — exact argv: issues update CTL-1 --blocked-by CTL-2", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--blocked-by", "CTL-2"]);
+  });
+
+  test("non-zero exit → applied:false, reason:transient, never throws", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "some error" });
+    expect(() => applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec })).not.toThrow();
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("exec throws → applied:false, reason:transient, never throws", () => {
+    const exec = () => { throw new Error("spawn boom"); };
+    expect(() => applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec })).not.toThrow();
+    const r = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("idempotent re-apply — two successive calls both return applied:true, two update calls recorded", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r1 = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    const r2 = applyBlockedByRelation({ ticket: "CTL-1", blockedBy: "CTL-2", exec });
+    expect(r1.applied).toBe(true);
+    expect(r2.applied).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+});
+
+describe("applyEstimate", () => {
+  test("valid estimate, exec returns code:0 → applied:true, correct args", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].cmd).toBe("linearis");
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--estimate", "5"]);
+  });
+
+  test("exec returns code:1 → applied:false with non-null reason, does not throw", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "some error" });
+    expect(() => applyEstimate({ ticket: "CTL-1", estimate: 5, exec })).not.toThrow();
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).not.toBeNull();
+  });
+
+  test("exec throws → applied:false, reason non-null, swallowed", () => {
+    const exec = () => { throw new Error("spawn boom"); };
+    expect(() => applyEstimate({ ticket: "CTL-1", estimate: 5, exec })).not.toThrow();
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.reason).toBeTruthy();
+  });
+
+  test("invalid estimate 4 → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("null estimate → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: null, exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("string estimate 'x' → applied:false, reason:invalid-estimate, exec not called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: "x", exec });
+    expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("all valid estimate values (1,3,5,8,13) are accepted", () => {
+    for (const est of [1, 3, 5, 8, 13]) {
+      const calls = [];
+      const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec });
+      expect(r.applied).toBe(true);
+      expect(calls[0].args).toContain(String(est));
+    }
   });
 });

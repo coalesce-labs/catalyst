@@ -57,9 +57,12 @@ import { dirname, join } from "node:path";
 // Source of truth: the workflow descriptor (derived from workflow.default.json).
 import { PHASES, ANCILLARY_PHASES } from "../../lib/workflow-descriptor.mjs";
 // Data-layer copies.
-import { PHASE_ORDER, PHASE_TO_LINEAR } from "../lib/board-data.mjs";
+import { PHASE_ORDER, PHASE_TO_LINEAR, TERMINAL } from "../lib/board-data.mjs";
 
 const SOT = "workflow.default.json (via lib/workflow-descriptor.mjs PHASES)";
+
+// formatters.ts is pure (no imports) → direct import is safe under bun test.
+import { PHASE_COLORS as FMT_PHASE_COLORS } from "../ui/src/lib/formatters.ts";
 
 // ── Board.tsx text extraction ───────────────────────────────────────────────
 // We read Board.tsx as TEXT (never import it) because it pulls in React + CSS +
@@ -234,6 +237,25 @@ test("Board.tsx PHASE_C keys cover every descriptor PHASE (color map is a supers
   expect(missing).toEqual([]);
 });
 
+// ── Requirement 8 (CTL-754): TicketCard renders phaseSummary strip via PHASE_C ─
+test("TicketCard renders the phaseSummary strip from PHASE_C (CTL-754)", () => {
+  expect(boardSrc).toContain("phaseSummary");
+  expect(/phaseSummary[\s\S]{0,400}PHASE_C\[/.test(boardSrc)).toBe(true);
+});
+
+// ── Requirement 9 (CTL-754): formatters.ts PHASE_COLORS covers canonical phases ─
+test("formatters.ts PHASE_COLORS covers every canonical pipeline phase", () => {
+  const missing = [...PHASES].filter((p) => !(p in FMT_PHASE_COLORS));
+  if (missing.length) {
+    throw new Error(
+      `DRIFT: ui/src/lib/formatters.ts PHASE_COLORS is missing canonical phase color(s): ` +
+        `${JSON.stringify(missing)}.\nAdd them (alongside the legacy verb-form keys) so ` +
+        `phaseColor("<phase>") resolves on the canonical board path.`,
+    );
+  }
+  expect(missing).toEqual([]);
+});
+
 // ── Requirement 6: PHASE_TO_LINEAR value-space === Board.tsx LINEAR_COLS keys ─
 // Every Linear column label the data layer can emit must have a UI column, and
 // every UI Linear column must be backed by a label the data layer emits.
@@ -263,4 +285,34 @@ test("Board.tsx LINEAR_COLS keys equal the value-space of board-data PHASE_TO_LI
   }
   expect(uiMissing).toEqual([]);
   expect(dataMissing).toEqual([]);
+});
+
+// ── Requirement 10 (CTL-754): Board.tsx TERMINAL_STATUSES === board-data TERMINAL ─
+// PhaseStrip decides the live-outline "running" flag from a terminal-status
+// list. That list was originally a verbatim inline copy of the data-layer
+// TERMINAL set, in a separate package with no shared constant — a new terminal
+// status added to TERMINAL would silently render that finished phase as
+// "running" on the strip. We hoisted the inline copy to a named
+// `const TERMINAL_STATUSES` in Board.tsx and lock it to the data-layer source of
+// truth here (read as text — same reason as PHASE_C above). The data layer's
+// TERMINAL is an unordered Set, so compare as sorted sets.
+const terminalStatusesValues = (() => {
+  const init = extractConstInitializer(boardSrc, "TERMINAL_STATUSES");
+  return (init.match(/"([^"]+)"/g) ?? []).map((s) => s.slice(1, -1));
+})();
+test("Board.tsx TERMINAL_STATUSES equals board-data.mjs TERMINAL (terminal-boundary drift)", () => {
+  const ui = [...terminalStatusesValues].sort();
+  const data = [...TERMINAL].sort();
+  if (JSON.stringify(ui) !== JSON.stringify(data)) {
+    throw new Error(
+      `DRIFT: ui/src/board/Board.tsx TERMINAL_STATUSES diverged from the ` +
+        `data-layer source of truth (lib/board-data.mjs TERMINAL).\n` +
+        `  board-data TERMINAL:      ${JSON.stringify(data)}\n` +
+        `  Board.tsx TERMINAL_STATUSES: ${JSON.stringify(ui)}\n` +
+        `A terminal status present in one but not the other makes PhaseStrip ` +
+        `mislabel a finished phase as "running" (or vice-versa). Reconcile the ` +
+        `two lists; TERMINAL in board-data.mjs is the source of truth.`,
+    );
+  }
+  expect(ui).toEqual(data);
 });

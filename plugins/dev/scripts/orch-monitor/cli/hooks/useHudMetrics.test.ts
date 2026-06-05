@@ -15,6 +15,7 @@ function worker(overrides: Partial<WorkerSignal>): WorkerSignal {
     workerName: "o-1-X-1",
     label: null,
     status: "researching",
+    stalledReason: null,
     phase: 1,
     phaseName: null,
     phaseTimestamps: {},

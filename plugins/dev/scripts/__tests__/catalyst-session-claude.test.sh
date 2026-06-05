@@ -124,6 +124,69 @@ expect_eq "cost is NOT a typed attribute" "false" "$CTX_COST_ATTR_PRESENT"
 CTX_MAX_PAYLOAD="$(printf '%s' "$CTX_LINE" | jq -r '.body.payload.context_max')"
 expect_eq "context_max lives in body.payload" "1000000" "$CTX_MAX_PAYLOAD"
 
+# ─── 5b. CTL-760: rate-limit 5h/7d percentages + resets + resource.linear.key ─
+# Start a session bound to a ticket so the session.context resource block
+# carries linear.key (the per-worker join key for Grafana panels).
+SID_RL="$(bash "$SESSION_SCRIPT" start --skill phase-implement \
+            --ticket CTL-760 --claude-session-id "uuid-rl-1")"
+
+bash "$SESSION_SCRIPT" emit-context "$SID_RL" \
+  --context-pct 30 --turn 7 --model "claude-opus-4-7" \
+  --ratelimit-5h-pct 26 --ratelimit-7d-pct 15 \
+  --ratelimit-5h-reset "2026-06-03T05:00:00Z" \
+  --ratelimit-7d-reset "2026-06-10T00:00:00Z" \
+  --ratelimit-7d-opus-pct 12 --ratelimit-7d-sonnet-pct 9 \
+  --ratelimit-7d-opus-reset "2026-06-10T00:00:00Z" \
+  --ratelimit-7d-sonnet-reset "2026-06-10T00:00:00Z" >/dev/null
+
+RL_LINE="$(grep '"session.context"' "$EF" | grep "$SID_RL" | tail -n 1)"
+expect_not_empty "session.context event recorded for rate-limit test" "$RL_LINE"
+
+RL_5H="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct"')"
+expect_eq "session.context claude.ratelimit.five_hour_pct" "26" "$RL_5H"
+
+RL_5H_TYPE="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.five_hour_pct" | type')"
+expect_eq "five_hour_pct is a number" "number" "$RL_5H_TYPE"
+
+RL_7D="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct"')"
+expect_eq "session.context claude.ratelimit.seven_day_pct" "15" "$RL_7D"
+
+RL_7D_TYPE="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_pct" | type')"
+expect_eq "seven_day_pct is a number" "number" "$RL_7D_TYPE"
+
+# Reset timestamps travel in body.payload only (informational, no label cardinality).
+RL_5H_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_5h_reset')"
+expect_eq "5h reset in body.payload" "2026-06-03T05:00:00Z" "$RL_5H_RESET"
+
+RL_7D_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_reset')"
+expect_eq "7d reset in body.payload" "2026-06-10T00:00:00Z" "$RL_7D_RESET"
+
+# Resets MUST NOT be typed attributes (avoid label cardinality explosion).
+RL_5H_RESET_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes | has("claude.ratelimit.five_hour_reset")')"
+expect_eq "5h reset is NOT a typed attribute" "false" "$RL_5H_RESET_ATTR"
+
+# CTL-763: per-model 7d split.
+OPUS_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_opus_pct"')"
+expect_eq "emit-context seven_day_opus_pct typed attr" "12" "$OPUS_ATTR"
+SONNET_ATTR="$(printf '%s' "$RL_LINE" | jq -r '.attributes."claude.ratelimit.seven_day_sonnet_pct"')"
+expect_eq "emit-context seven_day_sonnet_pct typed attr" "9" "$SONNET_ATTR"
+
+OPUS_BODY="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_opus_pct')"
+expect_eq "emit-context ratelimit_7d_opus_pct in body" "12" "$OPUS_BODY"
+OPUS_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_opus_reset')"
+expect_eq "emit-context ratelimit_7d_opus_reset in body" "2026-06-10T00:00:00Z" "$OPUS_RESET"
+SONNET_BODY="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_sonnet_pct')"
+expect_eq "emit-context ratelimit_7d_sonnet_pct in body" "9" "$SONNET_BODY"
+SONNET_RESET="$(printf '%s' "$RL_LINE" | jq -r '.body.payload.ratelimit_7d_sonnet_reset')"
+expect_eq "emit-context ratelimit_7d_sonnet_reset in body" "2026-06-10T00:00:00Z" "$SONNET_RESET"
+
+HAS_OPUS_RESET_ATTR="$(printf '%s' "$RL_LINE" | jq '.attributes | has("claude.ratelimit.seven_day_opus_reset")')"
+expect_eq "opus reset is body-only, not a typed attr" "false" "$HAS_OPUS_RESET_ATTR"
+
+# CTL-760: per-worker linear.key lands in the resource block.
+RL_LINEAR_KEY="$(printf '%s' "$RL_LINE" | jq -r '.resource."linear.key" // ""')"
+expect_eq "session.context resource.linear.key populated from ticket" "CTL-760" "$RL_LINEAR_KEY"
+
 # ─── 6. No threshold crossing below 70 — only session.context emitted ──────
 SID_BELOW="$(bash "$SESSION_SCRIPT" start --skill below70 \
               --claude-session-id "uuid-below")"
@@ -217,6 +280,49 @@ expect_not_empty "session.phase event recorded for no-REPO test" "$NOREPO_LINE"
 NOREPO_HAS="$(printf '%s' "$NOREPO_LINE" | jq -r '.attributes | has("vcs.repository.name")')"
 expect_eq "session.phase omits vcs.repository.name when \$REPO unset" \
   "false" "$NOREPO_HAS"
+
+# ─── 13. CTL-748: metric --turns persists num_turns to session_metrics ───────
+SID_TURNS="$(bash "$SESSION_SCRIPT" start --skill phase-research)"
+expect_not_empty "start returns id for turns test" "$SID_TURNS"
+
+bash "$SESSION_SCRIPT" metric "$SID_TURNS" \
+  --cost 0.25 --input 1000 --output 500 \
+  --cache-read 0 --cache-creation 0 --duration-ms 10000 --turns 12
+
+STORED_TURNS="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT num_turns FROM session_metrics WHERE session_id = '${SID_TURNS}';")"
+expect_eq "metric --turns writes num_turns to DB" "12" "$STORED_TURNS"
+
+# ─── 14. CTL-752: workflow_id resolution (frozen-daemon leak guard) ──────────
+
+# (a) A leaked daemon session id passed as --workflow is overridden by ORCH_ID.
+WF_SID="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+          --skill phase-plan --ticket CTL-752 \
+          --workflow "sess_20260528T202656_16651cb1")"
+WF_DB="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID';")"
+expect_eq "leaked sess_* --workflow overridden by CATALYST_ORCHESTRATOR_ID" \
+  "CTL-752" "$WF_DB"
+
+# (b) An explicit, non-sess_* workflow id is preserved (legacy oneshot parent).
+WF_SID2="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+           --skill oneshot --ticket CTL-752 --workflow "wf-legacy-parent")"
+WF_DB2="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID2';")"
+expect_eq "explicit non-sess_* workflow id preserved" "wf-legacy-parent" "$WF_DB2"
+
+# (c) Empty --workflow with ORCH_ID set populates workflow_id from ORCH_ID.
+WF_SID3="$(CATALYST_ORCHESTRATOR_ID=CTL-752 bash "$SESSION_SCRIPT" start \
+           --skill phase-research --ticket CTL-752 --workflow "")"
+WF_DB3="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT workflow_id FROM sessions WHERE session_id = '$WF_SID3';")"
+expect_eq "empty --workflow falls back to CATALYST_ORCHESTRATOR_ID" "CTL-752" "$WF_DB3"
+
+# (d) No ORCH_ID + no --workflow → workflow_id stays empty (interactive, no regression).
+WF_SID4="$(env -u CATALYST_ORCHESTRATOR_ID bash "$SESSION_SCRIPT" start --skill manual)"
+WF_DB4="$(sqlite3 "$CATALYST_DB_FILE" \
+  "SELECT COALESCE(workflow_id,'') FROM sessions WHERE session_id = '$WF_SID4';")"
+expect_eq "no orch id + no workflow stays empty (no regression)" "" "$WF_DB4"
 
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"

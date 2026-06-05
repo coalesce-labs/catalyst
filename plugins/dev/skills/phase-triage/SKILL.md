@@ -31,8 +31,7 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
        acronyms_expanded, dependencies, and a non-empty summary — refined with
        real analysis (not just the deterministic placeholders), AND posted the
        triage analysis comment to the Linear ticket, AND printed the triage.json
-       path on stdout. OR I have stopped after 15 turns and recorded a partial
-       triage.json with whatever I could classify."
+       path on stdout."
 ```
 
 CTL-656: the `/goal` evaluator keeps the agent working until the triage is
@@ -252,14 +251,17 @@ if [[ -n "${ORCH_DIR:-}" && -x "${__PT_FOOTER}" ]]; then
 ${MIRROR_FOOTER}"
 fi
 
-# CTL-614: the Linear comment post is best-effort. triage.json is already on
-# disk; the canonical pipeline contract is `phase.triage.complete.<TICKET>`
-# (see CTL-452). A transient `linearis issues discuss` failure (notably the
-# rolling-hour HTTP 429 rate-limit from `linearis`) must NOT escalate the
-# ticket to `needs-human`. Capture stderr and surface it so operators can
-# still diagnose 429s from `daemon.log`.
-DISCUSS_STDERR="$(linearis issues discuss "$TICKET" --body "$COMMENT_BODY" 2>&1 >/dev/null)" \
-  || echo "phase-triage: linearis issues discuss failed (continuing): ${DISCUSS_STDERR}" >&2
+# CTL-614 / CTL-550: the Linear comment post is best-effort. triage.json is
+# already on disk; the canonical pipeline contract is
+# `phase.triage.complete.<TICKET>` (see CTL-452). A comment-post failure must
+# NOT escalate the ticket to `needs-human`.
+__PT_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
+if [[ ! -x "$__PT_COMMENT_POST" ]]; then __PT_COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+if [[ -n "$__PT_COMMENT_POST" && -x "$__PT_COMMENT_POST" ]] && "$__PT_COMMENT_POST" "${TICKET}" "${COMMENT_BODY}" >/dev/null 2>&1; then
+  true
+else
+  echo "phase-triage: linear-comment-post failed (continuing)" >&2
+fi
 
 # 5. There is no `triaged` label. Triage completion is signaled by the
 #    analysis comment posted above plus the local triage.json the coordinator
@@ -279,8 +281,58 @@ The bash body above is fully self-sufficient — the e2e test exercises only tha
 runs this skill, it should:
 
 1. Run the bash body to produce the baseline `triage.json` and Linear comment.
+
 2. Read the ticket back, refine the classification + scope estimate with model-quality judgement,
    and re-write `triage.json` if anything changed.
+
+**2b. Anchor a numeric estimate against the reference class (CTL-751).** Run:
+
+```bash
+bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
+  --corpus "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-corpus.json" \
+  --title "<ticket title>" --json
+```
+
+where `REPO_ROOT` is the repo root (the worktree's checkout path, e.g. the directory containing
+`plugins/`). Parse `reference_class.points` from the JSON output. If the command succeeds and
+yields a points value in `{1, 3, 5, 8, 13}`, re-write `triage.json` adding
+`"estimate": <points>` alongside the existing `estimated_scope` field. If the lookup errors or
+returns no usable points value, leave `triage.json` without an `estimate` field — the coordinator
+then skips the Linear estimate write for this ticket (Q4 design decision: no SCOPE_POINTS
+fallback for the Linear estimate field). The bash body intentionally does **not** write `estimate`
+(CTL-558 guard).
+
+**2c. Validate the scraped dependencies — READ-ONLY (CTL-755).** The bash body's `2d` step scrapes
+every `TEAM-NNN` token from the body into a flat `dependencies` array but does NOT verify any of them
+resolve to a real ticket. When running in Opus mode, enrich each scraped id using **read-only**
+`linearis issues read <id>` so the richer shape carries existence + the blocker's current state:
+
+```jsonc
+"dependencies": [
+  { "id": "CTL-447", "exists": true,  "blockerState": "In Progress" },
+  { "id": "CTL-9999", "exists": false, "blockerState": null }
+]
+```
+
+For each id, run `linearis issues read <id>` (the same read the bash body already uses for the
+ticket itself). On a successful read, set `exists: true` and `blockerState` to the ticket's
+`state.name`; on a non-zero exit / unparseable output (a prose token that merely matched the
+`TEAM-NNN` regex but is not a real ticket), set `exists: false`, `blockerState: null`. Re-write
+`triage.json` with the enriched `dependencies`. This is purely advisory metadata — the durable
+ordering edge is written **scheduler-side** (see the hard constraint below), so a missing/extra
+entry here can never deadlock the pipeline.
+
+**Hard constraint — the skill makes ZERO Linear writes for dependencies.** Do NOT call
+`linearis issues update ... --blocked-by` (or any `linearis issues update`) from this skill. The
+admission gate's durable `blocked_by` persistence lives in the execution-core scheduler (CTL-755
+STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates each token via
+`fetchTicketState`, drops unresolvable/terminal/cycle-closing tokens, and writes the durable edge
+with `applyBlockedByRelation`). Keeping the write scheduler-side preserves the CTL-497/CTL-558
+contract — the phase-triage e2e negative guard (`phase-triage-e2e.test.sh:172`) fails the build if
+this skill ever emits a `linearis issues update` call. `linearis issues read` is read-only and is
+fine. Because STEP E tolerates BOTH the flat-string and the rich `{id}` shapes, emitting the rich
+shape here is forward-compatible and changes nothing scheduler-side.
+
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.
 

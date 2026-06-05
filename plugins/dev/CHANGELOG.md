@@ -1,5 +1,49 @@
 # Changelog
 
+## [10.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.5.0...catalyst-dev-v10.6.0) (2026-06-04)
+
+
+### Features
+
+* **dev:** CTL-760 per-worker OpenTelemetry for the background-worker execution model ([#1294](https://github.com/coalesce-labs/catalyst/issues/1294)) ([5399a29](https://github.com/coalesce-labs/catalyst/commit/5399a29624f40ac19ecd398798b549ad9fb4aefe))
+* **dev:** CTL-770 setpoint-seeking autotuner + CTL-771 autotune OTel gauges ([#1307](https://github.com/coalesce-labs/catalyst/issues/1307)) ([6f4cfd9](https://github.com/coalesce-labs/catalyst/commit/6f4cfd9bf1af2dcaf37664ef9bfad57530d19bbd))
+
+
+### Bug Fixes
+
+* **dev:** CTL-769 give the execution-core reaper a poll-fallback drain ([#1304](https://github.com/coalesce-labs/catalyst/issues/1304)) ([068795d](https://github.com/coalesce-labs/catalyst/commit/068795d5af789effaad22bc041fca4d57d617c93))
+* **dev:** CTL-770 reach idle convergence — autotuner no longer bails at bgCount===0 ([#1308](https://github.com/coalesce-labs/catalyst/issues/1308)) ([3cc5c99](https://github.com/coalesce-labs/catalyst/commit/3cc5c99211f583d73fd2aade90fb9323f56a722a))
+
+## [10.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.4.0...catalyst-dev-v10.5.0) (2026-06-03)
+
+
+### Features
+
+* **dev:** CTL-747 per-phase effort + dynamic-workflow execution driven by ticket points ([#1262](https://github.com/coalesce-labs/catalyst/issues/1262)) ([0b7bbe0](https://github.com/coalesce-labs/catalyst/commit/0b7bbe0773be9657da1d149628f039bb0420b40c))
+
+
+### Bug Fixes
+
+* **dev:** CTL-736 revive re-issues the phase command so a pre-first-turn death self-heals ([#1263](https://github.com/coalesce-labs/catalyst/issues/1263)) ([084a522](https://github.com/coalesce-labs/catalyst/commit/084a522209ece59f25a51b71adea499b25e796e2))
+* **dev:** CTL-745 gate synthetic done on terminal pipeline state ([#1287](https://github.com/coalesce-labs/catalyst/issues/1287)) ([b65bc27](https://github.com/coalesce-labs/catalyst/commit/b65bc27277a72d88b1b019224ead66421a5365c2))
+* **dev:** CTL-752 neutralize frozen-daemon workflow_id leak + doc join queries ([#1274](https://github.com/coalesce-labs/catalyst/issues/1274)) ([d499be9](https://github.com/coalesce-labs/catalyst/commit/d499be98adb60214b4f2537336c14b83d5337df3))
+* **dev:** CTL-756 self-echo guard for handleCommentWake ([#1283](https://github.com/coalesce-labs/catalyst/issues/1283)) ([7319d7c](https://github.com/coalesce-labs/catalyst/commit/7319d7cc4432983863cb8ae1717dba0f70447a94))
+
+## [10.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.3.0...catalyst-dev-v10.4.0) (2026-05-31)
+
+
+### Features
+
+* **dev:** atomic single-flight worker claim + fencing token (CTL-736 Phase 1) ([#1235](https://github.com/coalesce-labs/catalyst/issues/1235)) ([d09fb2b](https://github.com/coalesce-labs/catalyst/commit/d09fb2b24ddfcb4a4067b2e3d6fbc2dd8266398a))
+* **dev:** board SharedWorker + IndexedDB real-time client (CTL-733 PR-2b) ([#1242](https://github.com/coalesce-labs/catalyst/issues/1242)) ([4a76d27](https://github.com/coalesce-labs/catalyst/commit/4a76d2739637c114f73002acaace8d6bb98a7eba))
+* **dev:** CTL-736 Phase 2-3 — state.json death trigger + progress probe (retire the revive-storm guard stack) ([#1245](https://github.com/coalesce-labs/catalyst/issues/1245)) ([0a0624a](https://github.com/coalesce-labs/catalyst/commit/0a0624a6b7bc81454d3059c80f4a3a18ce567c03))
+* **dev:** per-step conditional levers — model/effort/preamble in dispatch (descriptor v1.1) ([#1239](https://github.com/coalesce-labs/catalyst/issues/1239)) ([673bdc1](https://github.com/coalesce-labs/catalyst/commit/673bdc1841b3dc1c9fffc44d38850f76355723fa))
+
+
+### Bug Fixes
+
+* **dev:** clear verify/remediate claim tombstones on cycle reset (CTL-736 GATE-0) ([#1237](https://github.com/coalesce-labs/catalyst/issues/1237)) ([5c50ded](https://github.com/coalesce-labs/catalyst/commit/5c50dedaf41c0a051c9c1ab3d359797e5eb4c04c))
+
 ## [10.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.2.2...catalyst-dev-v10.3.0) (2026-05-30)
 
 

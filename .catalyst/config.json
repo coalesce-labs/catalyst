@@ -8,7 +8,7 @@
       "teamKey": "CTL",
       "stateMap": {
         "backlog": "Backlog",
-        "todo": "Ready",
+        "todo": "Todo",
         "triage": "Triage",
         "research": "Research",
         "planning": "Plan",
@@ -42,6 +42,10 @@
           {
             "key": "ADV",
             "vcsRepo": "coalesce-labs/adva"
+          },
+          {
+            "key": "OTL",
+            "vcsRepo": "coalesce-labs/catalyst-otel"
           }
         ]
       }

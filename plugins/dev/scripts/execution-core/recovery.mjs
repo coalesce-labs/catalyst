@@ -49,6 +49,11 @@ import {
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
+// CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
+// the scheduler's fetchTicketState + cache (threaded via reclaimOpts) so a
+// terminal/merged ticket adds ≤1 cached read; it is INERT when no reader is
+// threaded (the default for every legacy unit test).
+import { isTicketTerminalOrMerged } from "./terminal-state.mjs";
 // CTL-638: pull the once-marker + per-(ticket, phase) cool-down primitives
 // from the shared leaf module. labelOnce is the same guard CTL-585 introduced
 // for scheduler.mjs's `needs-human` path — pre-CTL-638 the recovery sweep's
@@ -348,8 +353,10 @@ export function defaultPostReclaimMirror(
   {
     existsSync: exists = existsSync,
     writeMarker = (p) => writeFileSync(p, ""),
-    runLinearis = (t, bodyText) =>
-      spawnSync("linearis", ["issues", "discuss", t, "--body", bodyText], { encoding: "utf8" }),
+    runCommentPost = (t, bodyText) => {
+      const helperPath = join(dirname(fileURLToPath(import.meta.url)), "../lib/linear-comment-post.sh");
+      return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
+    },
   } = {},
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
@@ -366,11 +373,11 @@ export function defaultPostReclaimMirror(
     "_Posted automatically by the daemon reclaim sweep (CTL-664)._",
   ].join("\n");
   try {
-    const r = runLinearis(ticket, bodyText);
+    const r = runCommentPost(ticket, bodyText);
     if (r && r.status === 0) {
       writeMarker(marker);
     } else {
-      log.warn({ ticket, phase }, "reclaim-mirror: linearis discuss failed (continuing)");
+      log.warn({ ticket, phase }, "reclaim-mirror: linear-comment-post failed (continuing)");
     }
   } catch (err) {
     log.warn({ ticket, phase, err: err?.message }, "reclaim-mirror: post threw (continuing)");
@@ -518,6 +525,28 @@ export function defaultAppendDispatchFailedEvent({
   );
 }
 
+// CTL-671: runaway-loop alert event. Fires once-per-window from schedulerTick
+// when a single ticket's per-ticket event rate dominates the unified log
+// (>= SCHEDULER_RUNAWAY_THRESHOLD events in SCHEDULER_RUNAWAY_WINDOW_MS). This
+// is OBSERVABILITY ONLY — it does not itself quarantine (the phantom sweep +
+// circuit breaker handle enforcement); a real but noisy ticket gets surfaced,
+// not killed. Routes via the broker's PHASE_EVENT_PATTERN as
+// phase.dispatch.runaway.<TICKET> (phase slot "dispatch", action "runaway").
+// Best-effort, mirroring every other audit emitter.
+export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "dispatch",
+      ticket,
+      orchId,
+      action: "runaway",
+      reason: "event-rate-domination",
+      payloadExtras: { count, window_ms },
+    }),
+    "runaway",
+  );
+}
+
 // CTL-660: success-path dispatch lifecycle events — the complement to
 // defaultAppendDispatchFailedEvent. The daemon already emits on the dispatch
 // FAILURE path (above) and on phase COMPLETION, but nothing when it DECIDES to
@@ -606,6 +635,32 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
   );
 }
 
+// CTL-755: triage→research admission-hold event — phase.advance.held.<ticket>.
+// Emitted by the scheduler's STEP-A admission gate when a triage-complete ticket
+// is NOT promoted to research this tick. `reason` distinguishes the two hold
+// classes:
+//   "blocked-by-open-dependency"     — ≥1 blocked_by dependency is non-terminal
+//                                       (the candidate is not in readyIds).
+//   "awaiting-capacity-or-priority"  — deps satisfied (in readyIds) but the
+//                                       candidate lost the priority/capacity
+//                                       selection this tick.
+// `blockers` carries the unmet blocker identifiers (empty for the capacity case).
+// Best-effort, never throws — mirrors defaultAppendDispatchRequestedEvent. The
+// scheduler emits it only-on-state-change to bound log volume.
+export function defaultAppendPhaseAdvanceHeldEvent({ orchId, ticket, reason, blockers }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "advance",
+      ticket,
+      orchId,
+      action: "held",
+      reason,
+      payloadExtras: { blockers: blockers ?? [] },
+    }),
+    "advance-held",
+  );
+}
+
 // CTL-713: cooldown GC event — phase.scheduler.cooldown-gc.<ticket>.
 // Emitted once per reaped cooldown marker so GC activity is queryable from the
 // unified event log.
@@ -691,6 +746,46 @@ export function defaultAppendParallelismAdjustedEvent({
   );
 }
 
+// CTL-770/CTL-771: auto-tuner setpoint gauge event —
+// phase.scheduler.autotune-gauge.<label>. Emitted UNCONDITIONALLY once per tick
+// (unlike parallelism-adjusted, which is write-on-change) so the OTel dashboard
+// renders the effective/target/load/mem gauges every sample interval. Mirrors
+// defaultAppendParallelismSampledEvent's transport: a CanonicalEvent envelope
+// appended best-effort to the unified event log, which otel-forward tails and
+// translates to OTLP. The metric VALUES live as flat scalars inside body.payload
+// (via the payloadExtras seam), exactly as the parallelism-sampled precedent
+// does. Best-effort — never throws (appendEnvelopeBestEffort).
+export function defaultAppendAutotuneGaugeEvent({
+  label = "execution-core",
+  maxParallelEffective,
+  maxParallelTarget,
+  runningWorkers,
+  load1,
+  loadPerCore,
+  memFreePct,
+  reason,
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase: "scheduler",
+      ticket: label,
+      orchId: label,
+      action: "autotune-gauge",
+      reason,
+      payloadExtras: {
+        max_parallel_effective: maxParallelEffective,
+        max_parallel_target: maxParallelTarget,
+        running_workers: runningWorkers,
+        load1,
+        load_per_core: loadPerCore,
+        mem_free_pct: memFreePct,
+        decision_reason: reason,
+      },
+    }),
+    "autotune-gauge",
+  );
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
@@ -708,7 +803,7 @@ export function defaultAppendParallelismAdjustedEvent({
 // outer `reviveDispatch` would otherwise leave the signal-reset logic — the
 // load-bearing half — uncovered).
 export function defaultReviveDispatch(
-  { orchDir, ticket, phase, resumeSession },
+  { orchDir, ticket, phase, resumeSession, attempt },
   {
     dispatch = defaultDispatch,
     // CTL-660: success-path lifecycle emitters, injectable for tests. Default
@@ -761,6 +856,7 @@ export function defaultReviveDispatch(
   // spawns `claude --bg --resume <uuid>`. Only present on the resume path; a
   // cold/unresumable revive omits it and falls through to a fresh dispatch.
   if (resumeSession) dispatchArgs.resumeSession = resumeSession;
+  if (attempt != null) dispatchArgs.attempt = attempt; // CTL-761
   // CTL-660: record the revive DECISION before the spawn (reason="revive"),
   // then the verified launch after a clean dispatch. Both best-effort — the
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
@@ -1270,6 +1366,17 @@ export function reclaimDeadWorkIfPossible(
     // never treated as a human-intervention condition (and never adds to the
     // write storm). Injected for tests; defaults to the shared singleton.
     breaker = linearBreaker,
+    // CTL-642: the SHARED TTL state cache + fetchState + prAdapter for the
+    // terminal short-circuit (below). fetchState defaults to UNDEFINED (not the
+    // real linear-query helper) so the short-circuit is INERT unless a caller
+    // explicitly threads a reader: production wires fetchState: fetchTicketState +
+    // cache via the scheduler's reclaimOpts (scheduler.mjs:~1672), while every
+    // legacy unit test that omits it is byte-for-byte unchanged (no surprise
+    // network read, no false short-circuit). isTicketTerminalOrMerged no-ops when
+    // fetchState is not a function.
+    fetchState,
+    cache,
+    prAdapter,
     now = Date.now,
   } = {},
 ) {
@@ -1279,6 +1386,14 @@ export function reclaimDeadWorkIfPossible(
   // (running, OR dead-by-missing-job-dir) is routed through the status trigger
   // below; the job dir's existence/mtime is no longer the death signal.
   if (klass === "terminal" || klass === "unknown") return "noop";
+
+  // CTL-549: needs-input signals are intentionally parked awaiting a human
+  // comment. Neither reclaim nor escalate — the comment-wake path in daemon.mjs
+  // handles re-dispatch. Treat as noop so the per-tick sweep never interferes.
+  if (signal?.status === "needs-input") {
+    log.debug({ ticket: signal.ticket }, "reclaimDeadWork: skipping needs-input (parked for human)");
+    return "noop";
+  }
 
   const { ticket, phase } = signal;
   const orchId = signal.raw?.orchestrator;
@@ -1323,6 +1438,61 @@ export function reclaimDeadWorkIfPossible(
     recordEscalationFn(orchDir, ticket, phase, reason, now());
     log.warn({ ticket, phase, reason }, "ctl-587: escalated");
     return "escalated";
+  }
+
+  // CTL-642 — TERMINAL SHORT-CIRCUIT. Placed BEFORE the lifecycle/alive branch so
+  // it DOMINATES all three escalateOnce sites (alive busy-ceiling, no-probe,
+  // no-progress): a ticket the pipeline (or a human) has already finished
+  // (Linear state Done/Canceled) or whose PR already merged must NEVER be
+  // escalated to needs-human nor revived — those are the CTL-624/625
+  // merged-but-running-zombie and CTL-549/550 false-escalation storms. Runs for
+  // BOTH alive (the merged-but-still-running zombie) AND dead workers (a
+  // crashed-after-merge worker). On terminal/merged: flip the signal to `done`
+  // via emitComplete (so the scheduler drops it from the attention set next tick),
+  // audit it (completion_origin:"terminal-short-circuit"), and return the new
+  // outcome `terminal-short-circuit` (the scheduler treats it like reclaimed/noop
+  // — NO escalated event). Best-effort: a non-zero emitComplete falls through to
+  // the normal lifecycle path (re-evaluated next tick), never strands the ticket.
+  //
+  // The check is cheap-first (terminal-state.isTicketTerminalOrMerged): the cached
+  // Linear read runs first; the `gh` PR view runs ONLY when non-terminal AND a PR
+  // number exists. A null/unreadable read fails safe to NOT-terminal (D5), so a
+  // transient linearis outage never manufactures a false completion.
+  const terminalCheck = isTicketTerminalOrMerged({
+    ticket,
+    signal,
+    fetchState,
+    cache,
+    prAdapter,
+  });
+  if (terminalCheck.terminal) {
+    appendEvent({
+      phase,
+      ticket,
+      orchId,
+      death_signal: "terminal-short-circuit",
+      prev_state_json_mtime: prevStateJsonMtime,
+      probe_passed: false,
+      probe_checked: terminalCheck.reason,
+      completion_origin: "terminal-short-circuit",
+      reclaimed_bg_job_id: prevBgJobId,
+      stopped_bg_job_ids: [],
+      title: `phase ${phase} short-circuited (ticket already terminal)`,
+      body: `Daemon short-circuited ${ticket} ${phase}: ${terminalCheck.reason} (state=${terminalCheck.state ?? "?"}). Flipping signal to done; no escalation.`,
+    });
+    const sc = emitComplete({ orchDir, signal });
+    if (sc.code !== 0) {
+      log.warn(
+        { ticket, phase, code: sc.code, stderr: sc.stderr, reason: terminalCheck.reason },
+        "ctl-642: terminal short-circuit emit-complete failed; falling through to lifecycle path (retry next tick)",
+      );
+    } else {
+      log.info(
+        { ticket, phase, reason: terminalCheck.reason },
+        "ctl-642: terminal short-circuit — ticket already terminal/merged, signal flipped to done (no escalation)",
+      );
+      return "terminal-short-circuit";
+    }
   }
 
   // CTL-736 — THE DEATH TRIGGER. The authoritative LOCAL state.json lifecycle
@@ -1423,6 +1593,21 @@ export function reclaimDeadWorkIfPossible(
   //     can locate their artifact; implementProbe ignores the extra key.
   const probe = probes[phase];
   if (probe({ ticket, repoRoot, orchDir })) {
+    // CTL-755 STEP D (CORRECTED): a dead-but-work-done `triage` worker is
+    // reclaimed normally — emitComplete flips its signal to `triage:done`. This
+    // does NOT bypass the admission gate: the gate lives DOWNSTREAM at the
+    // scheduler's STEP-B advancement guard (scheduler.mjs:2096), which holds the
+    // triage→research promotion for ANY `triage:done` worker not in
+    // `admittedThisTick` — regardless of HOW the signal reached `done` (live
+    // complete, reclaim, or post-boot). The earlier non-mutating `reclaim-held`
+    // outcome STRANDED such a worker: a dead triage worker only reaches branch B
+    // with a NON-terminal signal (a `done` signal short-circuits to `noop` at the
+    // `klass === "terminal"` gate above), so holding it left the signal at
+    // `running`, and STEP A's `s.triage === "done"` pool requirement then skipped
+    // it forever. Flipping to `done` lands it exactly where STEP A expects it, so
+    // the gate re-evaluates deps/priority/capacity next tick (and STEP B holds the
+    // research dispatch until admitted). No phase is special-cased here.
+    //
     // CTL-661 hole #3: a worker reaching branch (B) is reclaim-eligible, so it
     // is either `absent` (nothing live to stop) or `idle`-confirmed (between
     // turns → safe to stop). Emit a fire-and-forget reap-intent BEFORE
@@ -1661,7 +1846,10 @@ export function reclaimDeadWorkIfPossible(
     });
     return "revive-suppressed";
   }
-  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession });
+  // CTL-761: forward the DISPATCH ordinal (= revive ordinal + 1; cold=1, first
+  // revive=2) so the revived worker's terminal event carries phase.attempt /
+  // phase.revive_count. `attempt` here is the revive ordinal (priorRevives+1).
+  const dispatchRes = reviveDispatch({ orchDir, ticket, phase, resumeSession, attempt: attempt + 1 });
   if (dispatchRes.code === 0) {
     writeReviveMarker({ orchDir, ticket, attempt });
     log.info({ ticket, phase, attempt }, "ctl-587: revived");

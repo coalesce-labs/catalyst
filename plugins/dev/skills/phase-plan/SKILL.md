@@ -120,8 +120,7 @@ RESEARCH_DOC="${RESEARCH_MATCHES[-1]}"
 /goal "I have written thoughts/shared/plans/<date>-${ticket-lower}.md containing the
        full plan with: Overview, Phase 1..N sections each with Tests First (Red),
        Implementation (Green), Refactor, and Success Criteria (Automated + Manual).
-       I have printed the path on stdout. OR I have stopped after 25 turns and
-       printed a clear partial-progress summary."
+       I have printed the path on stdout."
 ```
 
 ## Work block
@@ -166,6 +165,28 @@ If [[create-plan]] runs into a question it cannot resolve from the research
 document, post a `question` comms message to the orchestrator with `--re <msg_id>`
 correlation; do not block waiting for a reply — record the assumption and proceed.
 
+### Inbox check (CTL-749)
+
+After `/catalyst-dev:create-plan` Task returns, check for mid-flight context updates from the human:
+
+1. If `${ORCH_DIR}/workers/${TICKET}/inbox.jsonl` exists and is non-empty, read it fully.
+2. Parse each JSONL line — entries have `kind: "comment"` or `kind: "description_changed"`.
+3. For each entry, decide:
+   - **Absorb and continue**: the update is additive context (clarification, extra constraints,
+     "also handle X") — fold it into your working context and continue. Post a brief reply comment
+     acknowledging the update (one sentence).
+   - **Pause and replan**: the update fundamentally changes scope or invalidates the current
+     approach — emit `failed` with `reason: "mid_flight_replan_needed"` via
+     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a
+     comment before exiting.
+4. After reading, archive processed entries:
+   ```bash
+   [[ -f "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" ]] && \
+     mv "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" \
+        "${ORCH_DIR}/workers/${TICKET}/inbox.processed-$(date +%s).jsonl" || true
+   ```
+5. If no inbox file or it is empty, continue normally.
+
 ## End block
 
 ```bash
@@ -203,10 +224,12 @@ EOF
   fi
   [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
 ${MIRROR_FOOTER}"
-  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+  if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
-    echo "phase-plan: linearis discuss failed (continuing)" >&2
+    echo "phase-plan: linear-comment-post failed (continuing)" >&2
   fi
 fi
 ```

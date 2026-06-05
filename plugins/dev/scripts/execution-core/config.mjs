@@ -224,3 +224,26 @@ export const AUTOTUNE_MEM_WARN_PCT =
 
 // Kill-switch: EXECUTION_CORE_AUTOTUNE=0 disables all sampling and Layer-2 writes.
 export const AUTOTUNE_ENABLED = process.env.EXECUTION_CORE_AUTOTUNE !== "0";
+
+// --- Claude-attributable resource control law (CTL-775) ---
+// High-water mark for Claude-attributable cpu/mem (% of whole host). Above this
+// → shed; below it (minus deadband) → we have headroom to scale up.
+export const AUTOTUNE_CLAUDE_RESOURCE_HIGH_WATER_PCT =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_CLAUDE_HIGH_WATER_PCT) || 75;
+
+// Hysteresis around the high-water so a sample straddling the line doesn't flap
+// between scale-up and shed.
+export const AUTOTUNE_ATTRIBUTION_DEADBAND_PCT =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_ATTRIBUTION_DEADBAND_PCT) || 5;
+
+// Step sizes for the saturation-gated scale-up and the over-provisioned
+// drift-down toward the setpoint.
+export const AUTOTUNE_SCALE_UP_STEP =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_SCALE_UP_STEP) || 1;
+export const AUTOTUNE_DRIFT_DOWN_STEP =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_DRIFT_DOWN_STEP) || 1;
+
+// Multiplicative shed factor applied when Claude-attributable resources hit the
+// high-water (reuses the legacy ×0.75 trend-up shed factor).
+export const AUTOTUNE_CLAUDE_SHED_FACTOR =
+  Number(process.env.EXECUTION_CORE_AUTOTUNE_CLAUDE_SHED_FACTOR) || 0.75;

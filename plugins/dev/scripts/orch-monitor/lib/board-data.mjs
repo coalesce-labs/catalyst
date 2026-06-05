@@ -34,9 +34,37 @@ export const PHASE_ORDER = [
   "triage", "research", "plan", "implement", "verify",
   "review", "pr", "monitor-merge", "monitor-deploy",
 ];
-const TERMINAL = new Set([
+// Single source of truth for which phase statuses are terminal (no longer
+// running). Exported so the UI's PhaseStrip terminal-status list can be guarded
+// against drift (board-phase-drift.test.ts) instead of carrying a silent
+// hand-copied duplicate (CTL-754).
+export const TERMINAL = new Set([
   "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
 ]);
+
+// CTL-755 held-indicator labels (admission-control gate). A triaged-waiting
+// ticket the scheduler holds before the triage→research promotion carries one of
+// these Linear labels: `blocked` (≥1 non-terminal blocked_by dependency) or
+// `waiting` (deps satisfied but it lost the priority/capacity selection this
+// tick). The scheduler converges them ON A DIFF (apply/remove) and clears BOTH
+// on pickup. These two strings MUST stay in lock-step with
+// execution-core/scheduler.mjs HELD_LABEL_BLOCKED / HELD_LABEL_WAITING — the
+// board-held-indicator drift guard asserts that, so the board reads the same
+// label the daemon writes (we copy the literals rather than import the whole
+// scheduler module into the lightweight board data layer).
+export const HELD_LABEL_BLOCKED = "blocked";
+export const HELD_LABEL_WAITING = "waiting";
+
+// heldFor — classify a ticket's held state from its Linear label set. `blocked`
+// wins over `waiting` when both are somehow present (it is the more severe hold;
+// steady-state convergence only ever leaves one applied). Returns "blocked" |
+// "waiting" | null. Pure + exported so it is unit-testable.
+export function heldFor(labels) {
+  const set = new Set(Array.isArray(labels) ? labels : []);
+  if (set.has(HELD_LABEL_BLOCKED)) return HELD_LABEL_BLOCKED;
+  if (set.has(HELD_LABEL_WAITING)) return HELD_LABEL_WAITING;
+  return null;
+}
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
 export const PHASE_TO_LINEAR = {
@@ -137,8 +165,10 @@ async function deriveActiveState(ticket, phase, ageMs) {
 
 // ── derive a ticket's current phase + status from its signal files ──────────
 // Takes the pre-read phase signals (PHASE_ORDER-aligned) to avoid re-reading.
-function deriveCurrentPhase(phaseSigs) {
+// Exported (like buildPhaseSummary) so it is unit-testable (CTL-745).
+export function deriveCurrentPhase(phaseSigs) {
   let lastTerminal = null;
+  let lastTerminalIndex = -1;
   for (let i = 0; i < PHASE_ORDER.length; i++) {
     const sig = phaseSigs[i];
     if (!sig) continue;
@@ -148,11 +178,66 @@ function deriveCurrentPhase(phaseSigs) {
       return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
     }
     lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+    lastTerminalIndex = i;
   }
-  // all phases terminal → if the last one failed/stalled surface that, else done
-  if (lastTerminal && (lastTerminal.status === "failed" || lastTerminal.status === "stalled"))
-    return lastTerminal;
-  return { phase: "done", status: "done", model: lastTerminal?.model || null };
+  // No phase has written a signal file yet → pre-pipeline. Surface the first
+  // column (Research), never Done (CTL-745).
+  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null };
+  // A failed/stalled phase always surfaces at its own column, wherever it sits.
+  if (lastTerminal.status === "failed" || lastTerminal.status === "stalled") return lastTerminal;
+  // CTL-745: the pipeline is genuinely "done" ONLY when its FINAL phase
+  // (monitor-deploy) has reached a terminal status. The loop skips absent signal
+  // files (`if (!sig) continue`), so reaching the end with a terminal mid-pipeline
+  // phase (e.g. verify.done) does NOT mean the pipeline finished — the next
+  // phase's signal file simply hasn't been written yet. Synthesizing "done" here
+  // jumped the card to the Done column while the ticket was still at Validate.
+  // Surface the real last phase instead so the column matches true progress.
+  if (lastTerminalIndex === PHASE_ORDER.length - 1) {
+    return { phase: "done", status: "done", model: lastTerminal.model };
+  }
+  return lastTerminal;
+}
+
+// CTL-754: per-phase timing for the board progression strip. Pure + exported so
+// it is unit-testable (assembleBoard itself is not — WORKERS_DIR is a homedir
+// const and it shells out to `claude agents`). `now` is passed in for the same
+// reason. Terminal phases without a completedAt yield null (unknown), not a
+// now-anchored runaway duration.
+export function buildPhaseSummary(phaseSigs, now) {
+  return phaseSigs
+    .map((sig, i) => {
+      if (!sig || !sig.startedAt) return null;
+      const start = Date.parse(sig.startedAt);
+      if (!Number.isFinite(start)) return null;
+      let end = null;
+      if (sig.completedAt) {
+        const c = Date.parse(sig.completedAt);
+        end = Number.isFinite(c) ? c : null;
+      } else if (!TERMINAL.has(sig.status)) {
+        end = now;
+      }
+      // A clock-skewed or re-walk-rewritten completedAt earlier than startedAt
+      // would yield a NEGATIVE duration, which fmtDuration renders as an empty
+      // string — visually identical to a healthy phase, laundering corrupt
+      // timing as clean. Collapse end < start to null (the existing "unknown"
+      // convention) so it is not silently swallowed (CTL-754).
+      const durationMs = end != null && end >= start ? end - start : null;
+      // Surface raw timestamps; normalize absent/unparseable completedAt to null
+      // so consumers get a clean string-or-null signal (CTL-734).
+      const rawCompleted = sig.completedAt ?? null;
+      const completedAt =
+        rawCompleted != null && Number.isFinite(Date.parse(rawCompleted))
+          ? rawCompleted
+          : null;
+      return {
+        phase: PHASE_ORDER[i],
+        status: sig.status,
+        durationMs,
+        startedAt: sig.startedAt ?? null,
+        completedAt,
+      };
+    })
+    .filter(Boolean);
 }
 
 function ticketUpdatedAt(phaseSigs) {
@@ -170,6 +255,14 @@ function ticketTitle(ticket, triage, eligibleIndex) {
   return ticket;
 }
 const ticketType = (triage) => triage?.classification || triage?.type || "task";
+// CTL-755: the scraped dependency ids triage recorded (flat string[] or rich
+// [{id}] — readTriageDependencies in the scheduler tolerates both, so we do too).
+// Surfaced as the held card's `blockers` so a `blocked` chip can name WHAT it is
+// waiting on, without the board taking on a second (event-log) data source.
+const ticketBlockers = (triage) =>
+  (Array.isArray(triage?.dependencies) ? triage.dependencies : [])
+    .map((d) => (typeof d === "string" ? d : d?.id))
+    .filter(Boolean);
 // triage's coarse size estimate (xs/small/medium/large/xl) — present once a
 // ticket has been triaged; the closest thing to a Linear estimate for CTL.
 const ticketScope = (triage) => triage?.estimated_scope || null;
@@ -200,6 +293,10 @@ async function linearInfo() {
           priority: typeof n.priority === "number" ? n.priority : 0,
           estimate: n.estimate ?? null,
           project: n.project?.name || (typeof n.project === "string" ? n.project : null),
+          // CTL-755: label names for the held indicator (blocked/waiting). The
+          // same cached list call already returns labels.nodes[].name, so this
+          // costs zero extra Linear traffic.
+          labels: (n.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean),
         };
       }
     } catch { /* linearis unavailable — leave this team unenriched */ }
@@ -227,6 +324,35 @@ async function costByTicket() {
       map[tk] = { costUSD: Number(cost) || 0, tokens: Number(tokens) || 0 };
     }
   } catch { /* sqlite missing — costs default to 0 */ }
+  return map;
+}
+
+// ── cost + turns rollup per ticket per phase ─────────────────────────────────
+async function costByPhase() {
+  const map = {};
+  if (!(await exists(DB))) return map;
+  try {
+    const sql =
+      "SELECT s.ticket_key, s.skill_name, ROUND(COALESCE(SUM(m.cost_usd),0),4), " +
+      "COALESCE(SUM(m.input_tokens+m.output_tokens),0), COALESCE(SUM(m.num_turns),0) " +
+      "FROM sessions s JOIN session_metrics m ON m.session_id=s.session_id " +
+      "WHERE s.ticket_key IS NOT NULL AND s.skill_name LIKE 'phase-%' " +
+      "GROUP BY s.ticket_key, s.skill_name;";
+    const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
+      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+    });
+    for (const line of stdout.trim().split("\n")) {
+      if (!line) continue;
+      const [tk, skill, cost, tokens, turns] = line.split("\t");
+      const phase = skill.replace(/^phase-/, "");
+      if (!map[tk]) map[tk] = {};
+      map[tk][phase] = {
+        costUSD: Number(cost) || 0,
+        tokens: Number(tokens) || 0,
+        turns: Number(turns) || 0,
+      };
+    }
+  } catch { /* sqlite missing or schema pre-migration */ }
   return map;
 }
 
@@ -288,8 +414,8 @@ async function readTicketArtifacts(id) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, eligible, linfo, mp] = await Promise.all([
-    liveAgents(), costByTicket(), loadEligible(), linearInfo(), maxParallel(),
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp] = await Promise.all([
+    liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -326,6 +452,7 @@ export async function assembleBoard() {
   let tickets = await Promise.all([...ticketIds].map(async (id) => {
     const { phaseSigs, triage, prSigs } = await readTicketArtifacts(id);
     const cur = deriveCurrentPhase(phaseSigs);
+    const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
     return {
       id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
@@ -338,7 +465,18 @@ export async function assembleBoard() {
       priority: linfo[id]?.priority ?? 0,
       estimate: linfo[id]?.estimate ?? null, scope: ticketScope(triage),
       project: linfo[id]?.project ?? null,
+      // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
+      // ticket's Linear labels (the scheduler's admission gate writes them).
+      // `blockers` names the dependencies a `blocked` hold is waiting on (only
+      // meaningful when held === "blocked"); empty otherwise.
+      held: heldFor(linfo[id]?.labels),
+      blockers: ticketBlockers(triage),
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
+      turns: phaseCostsByTicket[id]
+        ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
+        : null,
+      phaseCosts: phaseCostsByTicket[id] ?? null,
+      phaseSummary,
       pr: prFor(prSigs),
       updatedAt: ticketUpdatedAt(phaseSigs),
     };

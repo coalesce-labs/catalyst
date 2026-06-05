@@ -288,4 +288,163 @@ describe("dispatchTicket", () => {
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, resumeSession: "uuid-123" });
     expect(calls[0].resumeSession).toBe("uuid-123");
   });
+
+  // CTL-549: handoffPath thread-through
+  test("backward compat: no handoffPath → dispatch receives no handoffPath key", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
+    expect("handoffPath" in calls[0]).toBe(false);
+  });
+
+  test("forwards handoffPath to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "implement", { dispatch, handoffPath: "/path/to/handoff.md" });
+    expect(calls[0].handoffPath).toBe("/path/to/handoff.md");
+  });
+});
+
+// CTL-549: handoffPath → CATALYST_HANDOFF_PATH env var in spawned process
+describe("defaultRunPhaseAgent — handoffPath env injection (CTL-549)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("sets CATALYST_HANDOFF_PATH when handoffPath provided", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", handoffPath: "/path/to/handoff.md" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBe("/path/to/handoff.md");
+  });
+
+  test("does NOT set CATALYST_HANDOFF_PATH when handoffPath absent", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBeUndefined();
+  });
+});
+
+// CTL-549: defaultDispatch forwards handoffPath to runPhaseAgent
+describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
+  const seams = (handoffPath) => {
+    const calls = [];
+    return {
+      resolveProject: () => ({ repoRoot: "/repo" }),
+      createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
+      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      calls,
+      handoffPath,
+    };
+  };
+
+  test("forwards handoffPath to runPhaseAgent when set", () => {
+    const s = seams("/path/to/handoff.md");
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", handoffPath: "/path/to/handoff.md" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].handoffPath).toBe("/path/to/handoff.md");
+  });
+
+  test("handoffPath is undefined on a cold dispatch (no handoffPath)", () => {
+    const s = seams(undefined);
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].handoffPath).toBeUndefined();
+  });
+});
+
+// CTL-761: attempt thread-through (dispatch ordinal for revive observability)
+describe("defaultRunPhaseAgent — attempt arg (CTL-761)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("forwards --attempt to phase-agent-dispatch when provided", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", attempt: 2 },
+      { spawn },
+    );
+    const { args } = spawn.calls[0];
+    expect(args).toContain("--attempt");
+    expect(args[args.indexOf("--attempt") + 1]).toBe("2");
+  });
+
+  test("backward compat: no attempt → no --attempt flag (exact arg array)", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    const { args } = spawn.calls[0];
+    expect(args).not.toContain("--attempt");
+    expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
+  });
+});
+
+describe("defaultDispatch — attempt passthrough (CTL-761)", () => {
+  const seams = () => {
+    const calls = [];
+    return {
+      resolveProject: () => ({ repoRoot: "/repo" }),
+      createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
+      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      calls,
+    };
+  };
+
+  test("forwards attempt to runPhaseAgent when provided", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "plan", attempt: 3 },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].attempt).toBe(3);
+  });
+
+  test("attempt is undefined on a cold dispatch (no attempt)", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].attempt).toBeUndefined();
+  });
+});
+
+describe("dispatchTicket — attempt thread-through (CTL-761)", () => {
+  test("backward compat: no attempt → dispatch receives no attempt key", () => {
+    const calls = [];
+    const dispatch = (a) => { calls.push(a); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
+    expect("attempt" in calls[0]).toBe(false);
+  });
+
+  test("forwards attempt to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (a) => { calls.push(a); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "implement", { dispatch, attempt: 2 });
+    expect(calls[0].attempt).toBe(2);
+  });
 });

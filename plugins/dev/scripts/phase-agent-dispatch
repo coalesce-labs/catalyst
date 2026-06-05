@@ -326,6 +326,11 @@ compose_otel_resource_attrs() {
 		attrs="linear.key=${TICKET},catalyst.orchestration=${ORCH_ID}"
 	fi
 	attrs="${attrs},task.type=phase-${PHASE}"
+	# CTL-760: launch-mode dimension. Rides OTEL_RES_ATTRS → the --settings env →
+	# the worker's native Claude-Code metrics, so every bg phase metric slices by
+	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
+	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
+	attrs="${attrs},catalyst.exec_context=phase-bg"
 	printf '%s\n' "$attrs"
 }
 
@@ -343,10 +348,13 @@ _WF_RULES="${SCRIPT_DIR}/lib/workflow-rules.mjs"
 if [[ -f "$_WF_RULES" ]] && command -v bun >/dev/null 2>&1; then
 	_TRIAGE_JSON="${ORCH_DIR}/workers/${TICKET}/triage.json"
 	_TRIAGE_SCOPE=""
-	[[ -f "$_TRIAGE_JSON" ]] &&
+	_TRIAGE_ESTIMATE=""
+	if [[ -f "$_TRIAGE_JSON" ]]; then
 		_TRIAGE_SCOPE="$(jq -r '.estimated_scope // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
+		_TRIAGE_ESTIMATE="$(jq -r '.estimate // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
+	fi
 	_WF_RESOLVED="$(bun "$_WF_RULES" resolve --phase "$PHASE" --ticket "$TICKET" \
-		--scope "$_TRIAGE_SCOPE" 2>/dev/null || true)"
+		--scope "$_TRIAGE_SCOPE" --estimate "$_TRIAGE_ESTIMATE" 2>/dev/null || true)"
 	if [[ -n "$_WF_RESOLVED" ]]; then
 		_WF_M="$(jq -r '.model // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
 		_WF_E="$(jq -r '.effort // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
@@ -587,9 +595,10 @@ jq -nc \
 	--arg ts "$TS" \
 	--arg wt "$WORKTREE_PATH_RESOLVED" \
 	--argjson generation "$GENERATION" \
+	--argjson attempt "$ATTEMPT" \
 	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
-    worktreePath: $wt, generation: $generation,
+    worktreePath: $wt, generation: $generation, attempt: $attempt,
     startedAt: $ts, updatedAt: $ts}' >"$SIGNAL_FILE" ||
 	die "failed to write signal file $SIGNAL_FILE"
 
@@ -666,6 +675,110 @@ PROMPT="/catalyst-dev:phase-${PHASE} ${TICKET} --orch-dir ${ORCH_DIR}"
 # direnv produces for the interactive orchestrator.
 OTEL_RES_ATTRS="$(compose_otel_resource_attrs)"
 
+# ─── CTL-760: per-worker --settings env injection ───────────────────────────
+#
+# `claude --bg` is an RPC to the per-user daemon, so the spawned worker inherits
+# the DAEMON's frozen env — the per-worker OTEL_RESOURCE_ATTRIBUTES we set in
+# DISPATCH_ENV below never reaches it, and the worker emits Claude-Code
+# metrics/logs with empty linear_key / branch / project labels. The only lever
+# that crosses the RPC is `claude --bg --settings '{"env":{...}}'`, which MERGES
+# with ~/.claude/settings.json (it does not replace it) — verified empirically.
+#
+# compose_worker_settings_json builds that settings object with `jq -nc` (never
+# hand-built JSON):
+#   { "env": { <telemetry toggles>, "OTEL_RESOURCE_ATTRIBUTES": "<attrs>",
+#              <CTL-777 context vars> },
+#     "statusLine": { "type": "command", "command": "<SCRIPT_DIR>/catalyst-statusline.sh" } }
+#
+# CTL-777: settings.env now ALSO carries the 5 CATALYST_* context vars
+# (CATALYST_ORCHESTRATOR_DIR / _ID / PHASE / TICKET / GENERATION) over this same
+# surviving --settings channel — DISPATCH_ENV below carries them too but on the
+# DROPPED plain env prefix, so without this the worker's CATALYST_ORCHESTRATOR_DIR
+# was empty and phase-agent-emit-complete's step-2 signal flip silently skipped,
+# wedging the pipeline. Riding settings.env makes it non-empty so the flip fires.
+#
+# Telemetry toggles are re-asserted from the dispatcher's own inherited env (the
+# same keys that enable telemetry in ~/.claude/settings.json's .env block),
+# defaulting CLAUDE_CODE_ENABLE_TELEMETRY=1 / OTEL_METRICS_EXPORTER=otlp /
+# OTEL_LOGS_EXPORTER=otlp. OTEL_EXPORTER_OTLP_ENDPOINT and
+# OTEL_EXPORTER_OTLP_PROTOCOL are included ONLY when non-empty (absent optionals
+# are omitted, never written as null/empty keys).
+#
+# statusLine.command points at this repo's catalyst-statusline.sh — the entire
+# statusLine key is OMITTED (fail-open) when that file is absent. Always emits a
+# valid settings object; an empty OTEL_RES_ATTRS still yields valid JSON.
+#
+# ─── CTL-777: thread the 5 CATALYST_* context vars through settings.env ──────
+# The same --settings channel that carries the CTL-760 telemetry keys is the ONLY
+# lever that survives the `claude --bg` RPC (the plain env prefix in DISPATCH_ENV
+# below is DROPPED by the daemon). Previously CATALYST_ORCHESTRATOR_DIR rode only
+# that dropped prefix, so the worker saw it empty and phase-agent-emit-complete's
+# step-2 signal flip (hard-gated on CATALYST_ORCHESTRATOR_DIR) silently skipped →
+# the pipeline wedged on an idle zombie. We now also emit the 5 context vars
+# (CATALYST_ORCHESTRATOR_DIR / _ID / PHASE / TICKET / GENERATION) into settings.env
+# so they reach the worker via the surviving channel and the signal flip fires.
+# Telemetry keys stay first/unchanged; each context var is omitted when empty
+# (mirroring the optional-OTLP pattern) so the post-call `jq -e .` fail-open guard
+# still validates and an empty optional never becomes a null key.
+compose_worker_settings_json() {
+	local enable_telemetry metrics_exporter logs_exporter otlp_endpoint otlp_protocol
+	enable_telemetry="${CLAUDE_CODE_ENABLE_TELEMETRY:-1}"
+	metrics_exporter="${OTEL_METRICS_EXPORTER:-otlp}"
+	logs_exporter="${OTEL_LOGS_EXPORTER:-otlp}"
+	otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+	otlp_protocol="${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
+
+	# CTL-777: the same context values DISPATCH_ENV carries on the dropped env
+	# prefix — sourced from the dispatcher's own resolved vars.
+	local orch_dir="${ORCH_DIR:-}"
+	local orch_id="${ORCH_ID:-}"
+	local phase_val="${PHASE:-}"
+	local ticket_val="${TICKET:-}"
+	local generation_val="${GENERATION:-}"
+
+	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
+
+	jq -nc \
+		--arg enable_telemetry "$enable_telemetry" \
+		--arg metrics_exporter "$metrics_exporter" \
+		--arg logs_exporter "$logs_exporter" \
+		--arg otlp_endpoint "$otlp_endpoint" \
+		--arg otlp_protocol "$otlp_protocol" \
+		--arg otel_attrs "$OTEL_RES_ATTRS" \
+		--arg orch_dir "$orch_dir" \
+		--arg orch_id "$orch_id" \
+		--arg phase "$phase_val" \
+		--arg ticket "$ticket_val" \
+		--arg generation "$generation_val" \
+		--arg statusline_cmd "$statusline_script" \
+		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
+		'{
+       env: (
+         {
+           "CLAUDE_CODE_ENABLE_TELEMETRY": $enable_telemetry,
+           "OTEL_METRICS_EXPORTER": $metrics_exporter,
+           "OTEL_LOGS_EXPORTER": $logs_exporter
+         }
+         + (if $otlp_endpoint == "" then {} else { "OTEL_EXPORTER_OTLP_ENDPOINT": $otlp_endpoint } end)
+         + (if $otlp_protocol == "" then {} else { "OTEL_EXPORTER_OTLP_PROTOCOL": $otlp_protocol } end)
+         + (if $otel_attrs == "" then {} else { "OTEL_RESOURCE_ATTRIBUTES": $otel_attrs } end)
+         + (if $orch_dir == "" then {} else { "CATALYST_ORCHESTRATOR_DIR": $orch_dir } end)
+         + (if $orch_id == "" then {} else { "CATALYST_ORCHESTRATOR_ID": $orch_id } end)
+         + (if $phase == "" then {} else { "CATALYST_PHASE": $phase } end)
+         + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
+         + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
+       )
+     }
+     + (if $have_statusline
+        then { statusLine: { type: "command", command: $statusline_cmd } }
+        else {} end)'
+}
+WORKER_SETTINGS_JSON="$(compose_worker_settings_json)"
+# Fail-open: never let a malformed settings string reach the spawn or dry-run.
+if ! printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1; then
+	WORKER_SETTINGS_JSON='{}'
+fi
+
 DISPATCH_ENV=(
 	"CATALYST_ORCHESTRATOR_DIR=${ORCH_DIR}"
 	"CATALYST_ORCHESTRATOR_ID=${ORCH_ID}"
@@ -704,11 +817,12 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
+		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,
       resumeSession: (if $resumeSession == "" then null else $resumeSession end),
-      env: $env, status: "dispatched", dryRun: true}'
+      env: $env, settings: $settings, status: "dispatched", dryRun: true}'
 	exit 0
 fi
 
@@ -834,25 +948,40 @@ spawn_claude_bg() {
 	# CTL descriptor v1.1: thread the resolved per-step levers. ADDITIVE +
 	# fail-open — when WORKER_EFFORT and APPEND_SYSTEM_PROMPT are both empty the
 	# launch is byte-identical to today (no --effort / --append-system-prompt).
+	# CTL-760: --settings carries the per-worker telemetry env + statusLine across
+	# the `claude --bg` daemon RPC (the DISPATCH_ENV prefix is kept belt-and-braces
+	# but is lost to the frozen daemon env on the far side). Threaded immediately
+	# after --model in BOTH branches so every spawn site (fresh, resume,
+	# resume-fallback) inherits it.
 	if [[ -n "$WORKER_EFFORT" || -n "$APPEND_SYSTEM_PROMPT" ]]; then
 		local _levers=()
 		[[ -n "$WORKER_EFFORT" ]] && _levers+=(--effort "$WORKER_EFFORT")
 		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" "${_levers[@]}" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "${_levers[@]}" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	else
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	fi
 }
 
-# CTL-658: resume-first-then-fresh launch. When --resume-session is set, attempt
-# `claude --bg --resume <uuid>` and classify its stderr:
-#   launched → use it (the dead session continues where it left off).
+# CTL-658 + CTL-736: resume-first-then-fresh launch. When --resume-session is set,
+# attempt `claude --bg --resume <uuid> "$PROMPT"` and classify its stderr:
+#   launched → use it. CTL-736: we re-issue "$PROMPT" (the /catalyst-dev:phase-*
+#              command) ALONGSIDE --resume so the resumed worker inherits the dead
+#              session's context AND gets a fresh executable turn. A worker that
+#              died BEFORE its first assistant turn has nothing for `claude --bg
+#              --resume`'s generic "Continue from where you left off." nudge to
+#              anchor on — it replies "No response requested." and idles, leaving
+#              the ticket stuck. Re-issuing the phase command re-drives it. This is
+#              idempotent: the phase skills' work-done probes skip already-finished
+#              work, so a mid-work death re-drives with full context (verified live:
+#              a bare --resume of a session that DID real work already auto-continues;
+#              only the pre-first-turn death needed the explicit command).
 #   alive    → the worker is still a live bg job; the resume was rejected. Do NOT
 #              spawn a duplicate — mark the signal stalled (resume-rejected-alive)
 #              and exit non-zero so the next daemon liveness tick re-evaluates.
@@ -860,7 +989,7 @@ spawn_claude_bg() {
 #              same invocation so the phase still gets a worker.
 # With no --resume-session this is exactly today's single fresh-start spawn.
 if [[ -n $RESUME_SESSION ]]; then
-	spawn_claude_bg --resume "$RESUME_SESSION"
+	spawn_claude_bg --resume "$RESUME_SESSION" "$PROMPT"
 	RC=$?
 	OUTCOME="$(classify_resume_stderr "$(cat "$BG_ERR")")"
 	if [[ $RC -ne 0 || $OUTCOME != "launched" ]]; then

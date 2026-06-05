@@ -288,6 +288,29 @@ else
   fail "expected non-zero exit on outcome=bogus"
 fi
 
+# ─── Test 11: CTL-748 — --phase flag adds phase attribute to log record ─────
+echo ""
+echo "--- Test 11: --phase flag adds phase attribute to log record ---"
+STUB_DIR_11="$SCRATCH/stub11"
+setup_curl_stub "$STUB_DIR_11"
+export PATH="$STUB_DIR_11:$PATH"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://x:4317"
+export CURL_STUB_ARGS="$SCRATCH/args11"
+export CURL_STUB_BODY="$SCRATCH/body11"
+
+"$EMIT_SCRIPT" \
+  --event "claude_code.session.outcome" \
+  --outcome success \
+  --session-id "sess_phase_test" \
+  --phase "research" \
+  >/dev/null 2>&1
+
+BODY_11=$(cat "$SCRATCH/body11" 2>/dev/null || echo "{}")
+PHASE_ATTR=$(echo "$BODY_11" | jq -r '
+  .resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]
+  | select(.key == "phase") | .value.stringValue // ""')
+assert_eq "research" "$PHASE_ATTR" "--phase adds phase attribute to log record"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────"

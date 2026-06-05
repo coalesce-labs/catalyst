@@ -206,7 +206,7 @@ Plan §"Per-phase /goal conditions":
 /goal "`gh pr view --json number,state,headRefName` shows an open PR linked
        to ${TICKET} AND Linear state is `In Review` AND describe-pr has run
        successfully (I have printed the PR URL and `describe-pr ran` to my
-       transcript); OR I have stopped after 12 turns."
+       transcript)."
 ```
 
 Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`).
@@ -315,10 +315,12 @@ ${MIRROR_FOOTER}"
 
 _... (truncated)_"
   fi
-  if linearis issues discuss "${TICKET}" --body "${MIRROR_BODY}" >/dev/null 2>&1; then
+  COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
+  if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
-    echo "phase-pr: linearis discuss failed (continuing)" >&2
+    echo "phase-pr: linear-comment-post failed (continuing)" >&2
   fi
 fi
 ```

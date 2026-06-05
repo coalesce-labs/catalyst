@@ -282,6 +282,7 @@ export function handleRegister(event) {
   const isTicketLifecycle = d.interest_type === "ticket_lifecycle";
   const isCommsLifecycle = d.interest_type === "comms_lifecycle";
   const isPhaseLifecycle = d.interest_type === "phase_lifecycle";
+  const isWorkflowSubstep = d.interest_type === "workflow_substep_lifecycle";
   interests.set(id, {
     notify_event: d.notify_event ?? `filter.wake.${id}`,
     prompt: d.prompt ?? "",
@@ -311,8 +312,8 @@ export function handleRegister(event) {
         ? d.types_of_interest
         : null
       : null,
-    // phase_lifecycle fields (CTL-447)
-    ticket: isPhaseLifecycle ? (d.ticket ?? null) : null,
+    // phase_lifecycle fields (CTL-447) + workflow_substep_lifecycle (CTL-753)
+    ticket: (isPhaseLifecycle || isWorkflowSubstep) ? (d.ticket ?? null) : null,
     phase_names: isPhaseLifecycle ? (Array.isArray(d.phase_names) ? d.phase_names : []) : null,
     // CTL-407: suppress redundant wakes when downstream state unchanged.
     // Defaults true for pr_lifecycle (opt-out via suppress_identical_wakes: false).
@@ -1149,6 +1150,33 @@ export function tryPhaseLifecycleRoute(event, interestsMap) {
   return matches;
 }
 
+// CTL-753: workflow substep lifecycle route — informational only, no pipeline advancement.
+const WORKFLOW_SUBSTEP_PATTERN =
+  /^workflow\.substep\.(started|complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$/;
+
+export function tryWorkflowSubstepRoute(event, interestsMap) {
+  const matches = [];
+  const name = getEventName(event);
+  if (!name.startsWith("workflow.substep.")) return matches;
+  const m = WORKFLOW_SUBSTEP_PATTERN.exec(name);
+  if (!m) return matches;
+  const [, status, ticket] = m;
+  const eventId = event.id ?? synthesizeEventId(event);
+
+  for (const [interestId, reg] of interestsMap) {
+    if (reg.interest_type !== "workflow_substep_lifecycle") continue;
+    if (reg.ticket !== ticket) continue;
+    matches.push({
+      interestId,
+      reason: `Workflow substep ${status} on ${ticket}`,
+      sourceEventId: eventId,
+      sourceEvent: summarizeEvent(event),
+      ticket,
+    });
+  }
+  return matches;
+}
+
 // --- Event classification ---
 
 // CTL-346: skip events the broker itself emitted so we never re-ingest
@@ -1628,7 +1656,8 @@ export function processEvent(event) {
   const prMatches = tryDeterministicRoute(event, interests);
   const ticketMatches = tryTicketLifecycleRoute(event, interests);
   const phaseMatches = tryPhaseLifecycleRoute(event, interests);
-  const directMatches = [...prMatches, ...ticketMatches, ...phaseMatches];
+  const substepMatches = tryWorkflowSubstepRoute(event, interests);
+  const directMatches = [...prMatches, ...ticketMatches, ...phaseMatches, ...substepMatches];
 
   for (const m of directMatches) {
     const reg = interests.get(m.interestId);

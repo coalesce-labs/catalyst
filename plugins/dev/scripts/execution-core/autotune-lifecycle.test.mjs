@@ -38,19 +38,53 @@ describe("autoTuneTick", () => {
     };
   }
 
-  test("when liveBackgroundCount() === 0 → no sampled event, no write, window reset", () => {
-    const state = makeState({ window: [{ load1: 1, load5: 2, load15: 3, memFreePct: 50, coreCount: 4 }] });
+  // CTL-770 fix-up: idle (bgCount===0) no longer bails. The trend window is
+  // reset (no workers ⇒ no meaningful trend) but the tick falls through to
+  // sample → gauge → setpoint seed/hold. With NO setpoint configured it still
+  // makes no write (insufficient-samples hold), but it DOES sample + can emit a
+  // gauge — observability no longer goes dark at idle.
+  test("when liveBackgroundCount() === 0 with no setpoint → samples + gauge but no write (window holds one fresh sample)", () => {
+    const state = makeState({ window: [{ load1: 9, load5: 9, load15: 9, memFreePct: 50, coreCount: 4 }] });
     const sampledCalls = [];
     const writeCalls = [];
+    const gaugeCalls = [];
     const seams = makeSeams({
       liveBackgroundCount: () => 0,
       appendSampledEvent: (args) => { sampledCalls.push(args); return true; },
       writeLayer2: (v) => { writeCalls.push(v); return true; },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
     });
     autoTuneTick(state, seams);
-    expect(sampledCalls).toHaveLength(0);
-    expect(writeCalls).toHaveLength(0);
-    expect(state.window).toHaveLength(0); // reset
+    expect(sampledCalls).toHaveLength(1);        // samples even at idle now
+    expect(gaugeCalls).toHaveLength(1);          // gauge emits at idle now
+    expect(gaugeCalls[0].runningWorkers).toBe(0);
+    expect(writeCalls).toHaveLength(0);          // no setpoint → no change
+    expect(state.window).toHaveLength(1);        // reset, then one fresh sample
+  });
+
+  // CTL-770 fix-up regression pin: idle + a host setpoint above the current
+  // floor MUST seed to the setpoint. With the pre-fix early `return` this wrote
+  // nothing and the autotuner stayed stuck at the floor at idle (the live bug).
+  test("when liveBackgroundCount() === 0 AND setpoint > current → seeds to setpoint + emits gauge", () => {
+    const state = makeState({ window: [] });
+    const writeCalls = [];
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 0,
+      loadavg: () => [1, 1, 1],                  // safe/idle load
+      freemem: () => 8e9,
+      totalmem: () => 10e9,                       // 80% free → mem ok
+      cpus: () => Array(8),                       // coreCount 8 → core-bound min(6, 6) = 6
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 40 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }), // host override setpoint
+      writeLayer2: (v) => { writeCalls.push(v); return true; },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(writeCalls).toEqual([6]);             // seeded to the setpoint
+    expect(gaugeCalls).toHaveLength(1);
+    expect(gaugeCalls[0].maxParallelTarget).toBe(6);
+    expect(gaugeCalls[0].runningWorkers).toBe(0);
   });
 
   test("when active → exactly one appendSampledEvent with correct fields", () => {
@@ -147,6 +181,281 @@ describe("autoTuneTick", () => {
     });
     expect(() => autoTuneTick(state, seams)).not.toThrow();
   });
+
+  test("autoTuneTick passes layer1Max from readLayer1Concurrency to decideMaxParallel", () => {
+    // Seed 2 down-trend samples; seam provides a 3rd completing the trend.
+    // Layer-2 has maxParallel=1, Layer-1 has maxParallel=4, mem=ok → should jump to 4.
+    const downSamples = [
+      { load1: 2, load5: 4, load15: 6, memFreePct: 50, coreCount: 4 },
+      { load1: 1, load5: 3, load15: 5, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: downSamples, trendMinSamples: 3 });
+    const decisions = [];
+    const seams = makeSeams({
+      loadavg: () => [1, 2, 4], // 3rd down-trend sample (load1<load5<load15)
+      freemem: () => 8e9,
+      totalmem: () => 16e9,   // 50% free = ok
+      cpus: () => Array(4),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({ maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 }),
+      writeLayer2: (v) => { decisions.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toBe(4); // jumped to layer1Max, not 2
+  });
+
+  // --- CTL-770: setpoint resolution + plumbing -------------------------------
+
+  test("autoTuneTick resolves setpoint from Layer-2 targetParallel and passes it to decideMaxParallel", () => {
+    // Flat-idle, mem-ok, current=1, cores=8 → with setpoint=6 the converge
+    // branch fires and writeLayer2 is called with the core-bounded setpoint.
+    const flatIdle = [
+      { load1: 1.2, load5: 1.2, load15: 1.3, memFreePct: 50, coreCount: 8 },
+      { load1: 1.2, load5: 1.3, load15: 1.2, memFreePct: 50, coreCount: 8 },
+    ];
+    const state = makeState({ window: flatIdle, loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      loadavg: () => [1.3, 1.2, 1.2], // 3rd flat sample
+      freemem: () => 8e9,
+      totalmem: () => 16e9, // 50% ok
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({ maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    // cores=8 → core-bound max(1, 8-2)=6, min(6,6)=6 → setpoint=6 → converge to 6.
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(6);
+  });
+
+  test("setpoint is core-bounded: low-core box caps the target", () => {
+    // cores=4 → max(minParallel, 4-2)=2; target=6 bounded to 2.
+    const flatIdle = [
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 4 },
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: flatIdle, loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(4),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(2); // core-bounded to 2
+  });
+
+  test("fail-safe: readLayer2Concurrency absent → setpoint resolves from Layer-1 maxParallel, no throw", () => {
+    const flatIdle = [
+      { load1: 1.2, load5: 1.2, load15: 1.3, memFreePct: 50, coreCount: 8 },
+      { load1: 1.2, load5: 1.3, load15: 1.2, memFreePct: 50, coreCount: 8 },
+    ];
+    const state = makeState({ window: flatIdle, loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      loadavg: () => [1.3, 1.2, 1.2],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({ maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 }),
+      // readLayer2Concurrency intentionally absent
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(4); // setpoint resolved from Layer-1 maxParallel=4
+  });
+
+  test("fail-safe: a throwing readLayer2Concurrency does not propagate (falls back to Layer-1)", () => {
+    const flatIdle = [
+      { load1: 1.2, load5: 1.2, load15: 1.3, memFreePct: 50, coreCount: 8 },
+      { load1: 1.2, load5: 1.3, load15: 1.2, memFreePct: 50, coreCount: 8 },
+    ];
+    const state = makeState({ window: flatIdle, loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      loadavg: () => [1.3, 1.2, 1.2],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 1, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer1Concurrency: () => ({ maxParallel: 4, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => { throw new Error("malformed host file"); },
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(4);
+  });
+
+  // --- CTL-771: per-tick gauge emit ------------------------------------------
+
+  test("autoTuneTick calls appendGaugeEvent every tick with effective+target+workers+load+mem+reason", () => {
+    // next===current (hold) — the gauge must still fire (unconditional).
+    const state = makeState({ window: [{ load1: 5, load5: 5, load15: 5, memFreePct: 50, coreCount: 4 }] });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 3,
+      loadavg: () => [4, 4, 4],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 2, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(gaugeCalls).toHaveLength(1);
+    const g = gaugeCalls[0];
+    expect(g.maxParallelEffective).toBe(10);
+    expect(g.maxParallelTarget).toBe(6);   // core-bounded (8-2=6, min(6,6)=6)
+    expect(g.runningWorkers).toBe(3);      // === bgCount
+    expect(g.load1).toBe(4);
+    expect(g.loadPerCore).toBeCloseTo(4 / 8, 5);
+    expect(g.memFreePct).toBe(50);
+    expect(typeof g.reason).toBe("string");
+  });
+
+  test("appendGaugeEvent fires even when the autotuner changes maxParallel (one per tick)", () => {
+    const upSamples = [
+      { load1: 10, load5: 8, load15: 6, memFreePct: 50, coreCount: 4 },
+      { load1: 12, load5: 9, load15: 7, memFreePct: 50, coreCount: 4 },
+    ];
+    const state = makeState({ window: upSamples });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      loadavg: () => [15, 11, 8], // completes trend-up → change
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 2, maxParallelCeiling: 20 }),
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(gaugeCalls).toHaveLength(1);
+    expect(gaugeCalls[0].reason).toBe("trend-up");
+  });
+
+  test("a throwing appendGaugeEvent does not propagate out of autoTuneTick", () => {
+    const state = makeState();
+    const seams = makeSeams({
+      appendGaugeEvent: () => { throw new Error("io error"); },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+  });
+
+  // --- CTL-775: attribution seam wiring + the live 16-with-2 fix --------------
+
+  // A flat-idle 2-sample window the seam's 3rd flat sample completes; loadSafe.
+  function flatIdleWindow() {
+    return [
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 8 },
+      { load1: 0.5, load5: 0.5, load15: 0.5, memFreePct: 50, coreCount: 8 },
+    ];
+  }
+
+  test("attribution seams present → claudeCpuPct/memPct computed and threaded into the gauge", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 68.7e9,
+      cpus: () => Array(16),
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 1, maxParallelCeiling: 20 }),
+      listAgents: () => [
+        { kind: "background", pid: 100, sessionId: "a" },
+        { kind: "background", pid: 200, sessionId: "b" },
+      ],
+      psLinesWithCpu: () => [
+        "100 1 80.0 400000",
+        "101 100 40.0 173440",
+        "200 1 90.0 400000",
+        "201 200 30.0 173440",
+      ],
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(gaugeCalls).toHaveLength(1);
+    expect(typeof gaugeCalls[0].claudeCpuPct).toBe("number");
+    expect(typeof gaugeCalls[0].claudeMemPct).toBe("number");
+    expect(gaugeCalls[0].claudeCpuPct).toBeGreaterThan(0);
+    expect(gaugeCalls[0].claudeMemPct).toBeGreaterThan(0);
+  });
+
+  test("attribution seams ABSENT → claudeCpuPct/memPct null, no throw, degrades to setpoint behavior", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 10, minParallel: 1, maxParallelCeiling: 20 }),
+      // no listAgents / psLinesWithCpu
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(gaugeCalls[0].claudeCpuPct).toBeNull();
+    expect(gaugeCalls[0].claudeMemPct).toBeNull();
+  });
+
+  test("LIVE 16-with-2 integration: current=16, running=2, setpoint=6 → writeLayer2(15) drift", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const writes = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9, // 50% ok
+      cpus: () => Array(8), // core-bound setpoint: min(6, 8-2)=6
+      readConcurrency: () => ({ maxParallel: 16, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      listAgents: () => [
+        { kind: "background", pid: 100, sessionId: "a" },
+        { kind: "background", pid: 200, sessionId: "b" },
+      ],
+      psLinesWithCpu: () => [
+        "100 1 10.0 100000",
+        "200 1 10.0 100000",
+      ],
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    autoTuneTick(state, seams);
+    expect(writes).toEqual([15]); // 16 → 15 drift-to-setpoint
+  });
+
+  test("a throwing psLinesWithCpu seam does not propagate; attribution falls back to null", () => {
+    const state = makeState({ window: flatIdleWindow(), loadSafeFactor: 2 });
+    const gaugeCalls = [];
+    const writes = [];
+    const seams = makeSeams({
+      liveBackgroundCount: () => 2,
+      loadavg: () => [0.5, 0.5, 0.5],
+      freemem: () => 8e9,
+      totalmem: () => 16e9,
+      cpus: () => Array(8),
+      readConcurrency: () => ({ maxParallel: 16, minParallel: 1, maxParallelCeiling: 20 }),
+      readLayer2Concurrency: () => ({ targetParallel: 6 }),
+      listAgents: () => [{ kind: "background", pid: 100, sessionId: "a" }],
+      psLinesWithCpu: () => { throw new Error("ps timed out"); },
+      appendGaugeEvent: (args) => { gaugeCalls.push(args); return true; },
+      writeLayer2: (v) => { writes.push(v); return true; },
+    });
+    expect(() => autoTuneTick(state, seams)).not.toThrow();
+    expect(gaugeCalls[0].claudeCpuPct).toBeNull();
+    // Drift/setpoint path still runs (running=2, setpoint=6, current=16) → 15.
+    expect(writes).toEqual([15]);
+  });
 });
 
 // --- startAutoTuner / stopAutoTuner lifecycle --------------------------------
@@ -154,7 +463,7 @@ describe("autoTuneTick", () => {
 describe("startAutoTuner / stopAutoTuner", () => {
   test("startAutoTuner calls setIntervalFn once with the configured interval and returns a stop handle", () => {
     const intervals = [];
-    const setIntervalFn = (fn, ms) => { intervals.push(ms); return "timer-handle"; };
+    const setIntervalFn = (_fn, ms) => { intervals.push(ms); return "timer-handle"; };
     const clearIntervalFn = () => {};
     const stop = startAutoTuner({
       configPath: null,
@@ -172,7 +481,7 @@ describe("startAutoTuner / stopAutoTuner", () => {
 
   test("stopAutoTuner calls clearIntervalFn with the stored handle", () => {
     const cleared = [];
-    const setIntervalFn = (fn, ms) => "my-timer";
+    const setIntervalFn = (_fn, _ms) => "my-timer";
     const clearIntervalFn = (h) => cleared.push(h);
     startAutoTuner({
       configPath: null,

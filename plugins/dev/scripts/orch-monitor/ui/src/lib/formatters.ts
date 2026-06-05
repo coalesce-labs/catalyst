@@ -84,6 +84,7 @@ export const SEMANTIC_PILL_CLASSES: Record<StatusSemantic, string> = {
 };
 
 export const PHASE_COLORS: Record<string, string> = {
+  // legacy verb-form keys (legacy orchestrator path: worker.phaseTimestamps lookups)
   dispatched: "#475569",
   researching: "#3b82f6",
   planning: "#a855f7",
@@ -98,6 +99,17 @@ export const PHASE_COLORS: Record<string, string> = {
   done: "#6b7280",
   failed: "#ef4444",
   stalled: "#eab308",
+  // canonical 9-phase aliases (CTL-754) — keep in lock-step with Board.tsx PHASE_C
+  triage: "#64748b",
+  research: "#3b82f6",
+  plan: "#a855f7",
+  implement: "#10b981",
+  verify: "#f59e0b",
+  remediate: "#f472b6",
+  review: "#eab308",
+  pr: "#14b8a6",
+  "monitor-merge": "#4ea1ff",
+  "monitor-deploy": "#39d07a",
 };
 
 const FALLBACK_PHASE_COLOR = "#3b82f6";

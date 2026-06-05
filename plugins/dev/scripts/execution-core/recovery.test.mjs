@@ -26,8 +26,10 @@ import {
   defaultAppendYieldFileSkipEvent,
   defaultAppendParallelismSampledEvent,
   defaultAppendParallelismAdjustedEvent,
+  defaultAppendAutotuneGaugeEvent,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
+  defaultAppendRunawayEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -1148,6 +1150,193 @@ describe("reclaimDeadWorkIfPossible — CTL-736 state.json death trigger", () =>
   });
 });
 
+// --- CTL-642: TERMINAL SHORT-CIRCUIT ---------------------------------------
+//
+// Placed BEFORE the lifecycle/alive branch so it DOMINATES all three escalateOnce
+// sites (alive busy-ceiling, no-probe, no-progress). A ticket already terminal
+// (Linear Done/Canceled) or whose PR merged must NEVER escalate to needs-human
+// nor revive — it flips its signal to done (emitComplete), audits with
+// completion_origin:"terminal-short-circuit", and returns the new outcome.
+describe("reclaimDeadWorkIfPossible — CTL-642 terminal short-circuit", () => {
+  const orch = "/orch";
+
+  // Deterministic seam set with the short-circuit ENABLED (fetchState threaded).
+  // Every escalateOnce-feeding gate is reachable; the short-circuit must win.
+  function seams(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      probes: { implement: () => false },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(true),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      ...extra,
+    };
+  }
+
+  // ── PATH 1: alive busy-ceiling. An alive worker past BUSY_CEILING_MS with no
+  // committed work would escalate "busy-ceiling-exceeded" — UNLESS terminal.
+  test("alive busy-ceiling path: terminal Linear state ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "Done",
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0); // never escalated
+  });
+
+  // ── PATH 2: no-probe-for-phase. A dead worker on a probe-less phase escalates
+  // "no-probe-for-phase" — UNLESS terminal.
+  test("no-probe path: merged PR ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const sig = { ...implementSignal({ status: "running" }), phase: "research" };
+    sig.raw.phase = "research";
+    sig.raw.pr = { number: 7, repo: "o/r" };
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      sig,
+      seams({
+        jobLifecycle: () => "dead-gone",
+        // research has a probe by default; force the no-probe branch with empty probes
+        probes: {},
+        listTicketPhases: () => ["research"],
+        fetchState: () => "PR", // non-terminal Linear → falls to PR check
+        prAdapter: { prView: () => ({ state: "MERGED", mergedAt: "2026-06-04T00:00:00Z" }) },
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  // ── PATH 3: no-progress. A dead worker with zero forward progress would be
+  // stopped + escalated "no-progress" — UNLESS terminal.
+  test("no-progress path: terminal Linear state ⇒ 'terminal-short-circuit', emitComplete, NO escalated event", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running" }),
+      seams({
+        jobLifecycle: () => "dead-gone",
+        probes: { implement: () => false }, // work not done → would head to no-progress
+        progressMark: () => 0,
+        readProgressMark: () => 0, // 0 <= 0 → no-progress STOP
+        fetchState: () => "Canceled",
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).toBe("terminal-short-circuit");
+    expect(emitComplete.calls.length).toBe(1);
+    expect(appendEscalatedEvent.calls.length).toBe(0);
+  });
+
+  test("audit event carries completion_origin:'terminal-short-circuit'", () => {
+    const appendEvent = recorder(undefined);
+    reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running" }),
+      seams({ jobLifecycle: () => "dead-gone", fetchState: () => "Done", appendEvent }),
+    );
+    expect(appendEvent.calls.length).toBe(1);
+    expect(appendEvent.calls[0][0].completion_origin).toBe("terminal-short-circuit");
+  });
+
+  test("NON-terminal + open PR ⇒ does NOT short-circuit (normal path runs)", () => {
+    const emitComplete = recorder({ code: 0 });
+    const appendEscalatedEvent = recorder(undefined);
+    const sig = implementSignal({ status: "running", startedAt: new Date(0).toISOString() });
+    sig.raw.pr = { number: 7, repo: "o/r" };
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      sig,
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "PR",
+        prAdapter: { prView: () => ({ state: "OPEN", mergedAt: null }) },
+        emitComplete,
+        appendEscalatedEvent,
+      }),
+    );
+    expect(r).not.toBe("terminal-short-circuit");
+    expect(r).toBe("escalated"); // the busy-ceiling escalation runs as before
+    expect(appendEscalatedEvent.calls.length).toBe(1);
+  });
+
+  test("INERT when no fetchState threaded (legacy callers unchanged)", () => {
+    // No fetchState/prAdapter → isTicketTerminalOrMerged no-ops → normal escalate.
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+        // no fetchState
+      }),
+    );
+    expect(r).toBe("escalated");
+    expect(appendEscalatedEvent.calls[0][0].reason).toBe("busy-ceiling-exceeded");
+  });
+
+  test("a failed emitComplete falls through to the normal lifecycle path (never strands)", () => {
+    const appendEscalatedEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(
+      orch,
+      implementSignal({ status: "running", startedAt: new Date(0).toISOString() }),
+      seams({
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        fetchState: () => "Done",
+        emitComplete: recorder({ code: 1, stderr: "emit boom" }),
+        appendEscalatedEvent,
+      }),
+    );
+    // emitComplete failed → did NOT return terminal-short-circuit; the alive
+    // busy-ceiling escalation ran as the fallthrough.
+    expect(r).toBe("escalated");
+  });
+});
+
 // --- CTL-661 Phase 2: reap-intent on the reclaim happy path (B) -------------
 //
 // When a stale-by-mtime worker reaches branch (B) (probe says work IS done) it
@@ -1274,7 +1463,7 @@ describe("CTL-664: reclaim Linear mirror", () => {
 });
 
 // defaultPostReclaimMirror — driven through its injected existsSync / writeMarker
-// / runLinearis seams (no filesystem or `linearis` spawn in the test).
+// / runCommentPost seams (no filesystem or network I/O in the test). CTL-550.
 describe("defaultPostReclaimMirror (CTL-664)", () => {
   const base = {
     orchDir: "/orch",
@@ -1287,14 +1476,14 @@ describe("defaultPostReclaimMirror (CTL-664)", () => {
 
   test("marker absent → posts the comment and writes the marker", () => {
     const written = [];
-    const linearis = recorder({ status: 0 });
+    const post = recorder({ status: 0 });
     defaultPostReclaimMirror(base, {
       existsSync: () => false,
       writeMarker: (p) => written.push(p),
-      runLinearis: linearis,
+      runCommentPost: post,
     });
-    expect(linearis.calls.length).toBe(1);
-    const [t, body] = linearis.calls[0];
+    expect(post.calls.length).toBe(1);
+    const [t, body] = post.calls[0];
     expect(t).toBe("CTL-9");
     expect(body).toContain("**Phase Reclaim**");
     expect(body).toContain("work-done-despite-dead-bg");
@@ -1303,36 +1492,36 @@ describe("defaultPostReclaimMirror (CTL-664)", () => {
   });
 
   test("marker present → skips the post (first-writer-wins)", () => {
-    const linearis = recorder({ status: 0 });
+    const post = recorder({ status: 0 });
     const written = [];
     defaultPostReclaimMirror(base, {
       existsSync: () => true,
       writeMarker: (p) => written.push(p),
-      runLinearis: linearis,
+      runCommentPost: post,
     });
-    expect(linearis.calls.length).toBe(0);
+    expect(post.calls.length).toBe(0);
     expect(written.length).toBe(0);
   });
 
-  test("linearis non-zero → no marker written, no throw (fail-open)", () => {
+  test("runCommentPost non-zero → no marker written, no throw (fail-open)", () => {
     const written = [];
     expect(() =>
       defaultPostReclaimMirror(base, {
         existsSync: () => false,
         writeMarker: (p) => written.push(p),
-        runLinearis: () => ({ status: 1, stderr: "offline" }),
+        runCommentPost: () => ({ status: 1, stderr: "offline" }),
       }),
     ).not.toThrow();
     expect(written.length).toBe(0);
   });
 
-  test("runLinearis throws → swallowed, no marker, no throw (fail-open)", () => {
+  test("runCommentPost throws → swallowed, no marker, no throw (fail-open)", () => {
     const written = [];
     expect(() =>
       defaultPostReclaimMirror(base, {
         existsSync: () => false,
         writeMarker: (p) => written.push(p),
-        runLinearis: () => {
+        runCommentPost: () => {
           throw new Error("spawn EACCES");
         },
       }),
@@ -1625,6 +1814,23 @@ describe("reclaimDeadWorkIfPossible — CTL-587 revive/suppress/escalate", () =>
     expect(s.opts.killBgJob.calls.length).toBe(1);
     // resumeSession is null on the dispatch (the fresh-start path).
     expect(s.opts.reviveDispatch.calls[0][0].resumeSession).toBeNull();
+  });
+
+  // CTL-761: attempt is the DISPATCH ordinal (revive ordinal + 1), so the
+  // revived worker's signal.attempt carries a value > 1 → revive_count > 0.
+  test("CTL-761: first revive (priorRevives=0) forwards attempt=2 (dispatch ordinal) to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 0 });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    expect(s.opts.reviveDispatch.calls.length).toBe(1);
+    // revive ordinal = 0+1=1; dispatch ordinal = 1+1=2
+    expect(s.opts.reviveDispatch.calls[0][0].attempt).toBe(2);
+  });
+
+  test("CTL-761: second revive (priorRevives=1) forwards attempt=3 to reviveDispatch", () => {
+    const s = setupReviveScenario({ reviveCount: 1 });
+    reclaimDeadWorkIfPossible(s.orch, s.sig, s.opts);
+    // revive ordinal = 1+1=2; dispatch ordinal = 2+1=3
+    expect(s.opts.reviveDispatch.calls[0][0].attempt).toBe(3);
   });
 });
 
@@ -2297,6 +2503,24 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.worktree_path).toBe("/wt/CTL/CTL-LC-1");
   });
 
+  test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
+    const ok = defaultAppendRunawayEvent({
+      ticket: "CTL-9",
+      orchId: "orch-rw",
+      count: 312,
+      window_ms: 600_000,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.dispatch.runaway.CTL-9");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("runaway");
+    expect(env.body.payload.reason).toBe("event-rate-domination");
+    expect(env.body.payload.count).toBe(312);
+    expect(env.body.payload.window_ms).toBe(600_000);
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
+  });
+
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {
     // Point CATALYST_DIR at a path whose parent is a regular file, so the
     // events/ mkdir + append cannot succeed. Mirrors appendEnvelopeBestEffort's
@@ -2321,6 +2545,34 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
         worktree_path: "/x",
       }),
     ).toBe(false);
+  });
+
+  // CTL-771: autotune-gauge envelope round-trip. The metric values live as flat
+  // scalars in body.payload so otel-forward processLine keeps the line (it has
+  // truthy .attributes) and toAttrArray maps the numbers as the OTLP precedent.
+  test("defaultAppendAutotuneGaugeEvent writes a gauge envelope", () => {
+    const ok = defaultAppendAutotuneGaugeEvent({
+      label: "execution-core",
+      maxParallelEffective: 4,
+      maxParallelTarget: 6,
+      runningWorkers: 3,
+      load1: 2.4,
+      loadPerCore: 0.3,
+      memFreePct: 42.5,
+      reason: "converge-to-setpoint",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.scheduler.autotune-gauge.execution-core");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("autotune-gauge");
+    expect(env.body.payload.max_parallel_effective).toBe(4);
+    expect(env.body.payload.max_parallel_target).toBe(6);
+    expect(env.body.payload.running_workers).toBe(3);
+    expect(env.body.payload.load1).toBe(2.4);
+    expect(env.body.payload.load_per_core).toBe(0.3);
+    expect(env.body.payload.mem_free_pct).toBe(42.5);
+    expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
   });
 });
 
@@ -3036,5 +3288,170 @@ describe("parallelism event envelopes (CTL-684)", () => {
     });
     const env = readBackEnvelope();
     expect(env.attributes["event.name"]).toBe("phase.scheduler.parallelism-adjusted.execution-core");
+  });
+});
+
+// CTL-549: reclaimDeadWorkIfPossible returns "noop" for needs-input signal
+describe("reclaimDeadWorkIfPossible — needs-input guard (CTL-549)", () => {
+  test("returns 'noop' for a needs-input signal without touching any seams", () => {
+    const orch = "/orch";
+    const sig = implementSignal({ status: "needs-input" });
+    const probed = [];
+    const dispatched = [];
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ state: "stopped", firstTerminalAt: "2026-01-01T00:00:00Z" }),
+      probes: { implement: () => { probed.push(true); return false; } },
+      reviveDispatch: (...a) => { dispatched.push(a); return { code: 0 }; },
+      emitComplete: () => ({ code: 0 }),
+      appendEvent: () => {},
+      appendReviveEvent: () => {},
+      appendEscalatedEvent: () => {},
+      appendReviveSuppressedEvent: () => {},
+      applyStalledLabel: () => {},
+      killBgJob: () => {},
+      countReviveEvents: () => 0,
+      writeReviveMarker: () => {},
+      readBootSince: () => undefined,
+      progressMark: () => 0,
+      readProgressMark: () => 0,
+      writeProgressMark: () => {},
+      emitReapIntent: () => {},
+      postReclaimMirror: () => {},
+    });
+    expect(r).toBe("noop");
+    expect(probed).toHaveLength(0);
+    expect(dispatched).toHaveLength(0);
+  });
+});
+
+// CTL-755 STEP D (CORRECTED) — a dead-but-work-done `triage` worker is reclaimed
+// NORMALLY (emitComplete flips its signal to `triage:done`), exactly like any
+// other phase. The admission gate is NOT enforced inside reclaim — it lives
+// DOWNSTREAM at the scheduler's STEP-B advancement guard, which holds the
+// triage→research promotion for any `triage:done` worker not in
+// `admittedThisTick`. The earlier `reclaim-held` non-mutating outcome was a bug:
+// a dead triage worker only reaches branch B with a NON-terminal signal (a `done`
+// signal short-circuits to `noop` at the terminal gate), so holding it left the
+// signal at `running` and the scheduler's STEP-A triaged-waiting pool (which keys
+// on `triage === "done"`) skipped it FOREVER — the ticket stranded. Flipping the
+// signal to `done` lands it exactly where STEP A expects, so the gate
+// re-evaluates next tick (see scheduler.test.mjs "STEP D integration").
+describe("reclaimDeadWorkIfPossible — CTL-755 dead-triage reclaim (gate is downstream)", () => {
+  const orch = "/orch";
+
+  // A dead (job dir gone) triage signal whose triage probe passes (work done) but
+  // whose status never reached `done` (it died mid-flight as `running`). This is
+  // the exact class the reclaim branch-B path recovers — and the class the old
+  // `reclaim-held` early-return stranded.
+  function triageSignal({ ticket = "CTL-7" } = {}) {
+    return {
+      ticket,
+      phase: "triage",
+      status: "running",
+      liveness: { kind: "bg", value: "job-x" },
+      signalPath: `/x/${ticket}/phase-triage.json`,
+      raw: {
+        ticket,
+        phase: "triage",
+        orchestrator: ticket,
+        status: "running",
+        bg_job_id: "job-x",
+      },
+    };
+  }
+
+  test("dead triage + work done → 'reclaimed', emit FIRES (signal flips to done; the gate is enforced downstream in the scheduler, not here)", () => {
+    const probe = recorder(true); // triage.json present → work done
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null, // dead-gone → reclaim-eligible
+      probes: { triage: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {}, // keep hermetic
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1); // branch B was entered (probe ran)
+    // The reclaim flips the signal to done so the scheduler's STEP A picks it up —
+    // STEP B then holds the triage→research promotion until the ticket is admitted.
+    expect(emit.calls.length).toBe(1);
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("triage reclaim emits the reap-intent for the dead bg job (no longer suppressed by a hold)", () => {
+    const emitReapIntent = recorder(Promise.resolve());
+    reclaimDeadWorkIfPossible(orch, triageSignal(), {
+      statJob: () => null,
+      probes: { triage: recorder(true) },
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      emitReapIntent,
+      postReclaimMirror: () => {},
+      now: () => 1_000,
+    });
+    // The dead worker's lingering session is reaped (the old `reclaim-held`
+    // non-mutating return skipped this, leaking the bg session).
+    expect(emitReapIntent.calls.length).toBe(1);
+  });
+
+  test("a NON-triage dead worker (implement) with work done reclaims identically (no phase special-casing)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => null,
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {},
+      now: () => 1_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1); // mid-pipeline reclaim proceeds
+  });
+});
+
+
+describe("defaultReviveDispatch — CTL-761 attempt passthrough", () => {
+  let orchDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl761-revdisp-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = orchDir;
+    mkdirSync(join(orchDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  function seed(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  test("attempt is forwarded to dispatch when set", () => {
+    seed("CTL-761A", "implement", { status: "running", bg_job_id: "bg-a" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-761A", phase: "implement", attempt: 2 },
+      { dispatch },
+    );
+    expect(dispatch.calls[0][0].attempt).toBe(2);
+  });
+
+  test("attempt absent → dispatch called without the key", () => {
+    seed("CTL-761B", "implement", { status: "running", bg_job_id: "bg-b" });
+    const dispatch = recorder({ code: 0 });
+    defaultReviveDispatch(
+      { orchDir, ticket: "CTL-761B", phase: "implement" },
+      { dispatch },
+    );
+    expect("attempt" in dispatch.calls[0][0]).toBe(false);
   });
 });

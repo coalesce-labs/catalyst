@@ -77,7 +77,7 @@ if (import.meta.main) {
   const flushTimer = setInterval(flush, FLUSH_MS);
 
   const ckTimer = setInterval(() => {
-    writeCheckpoint(CHECKPOINT_PATH, { path: tailer.currentPath(), offset: 0 });
+    writeCheckpoint(CHECKPOINT_PATH, { path: tailer.currentPath(), offset: tailer.currentOffset() });
   }, 10_000);
 
   log.info(
