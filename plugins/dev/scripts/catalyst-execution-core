@@ -112,6 +112,26 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-785: authenticate the daemon's Linear calls as the Catalyst Orchestrator app-actor
+	# (its own 5000/hr OAuth bucket — isolated from the personal token it would otherwise pin).
+	# Mint a fresh client_credentials token from the creds in the global config. --noproxy keeps
+	# the mint off the audit MITM (curl can't trust its CA); a failed mint leaves the existing
+	# LINEAR_API_TOKEN intact so the daemon still starts. No-op when no orchestrator app is set up.
+	local _g="${HOME}/.config/catalyst/config.json" _ocid _ocsec _otok
+	_ocid=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "$_g" 2>/dev/null)
+	_ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
+	if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
+		_otok=$(curl -s --noproxy '*' -X POST https://api.linear.app/oauth/token \
+			-d grant_type=client_credentials -d "client_id=$_ocid" -d "client_secret=$_ocsec" \
+			-d 'scope=read,write,comments:create' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
+		if [[ -n "$_otok" ]]; then
+			export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
+			echo "catalyst-execution-core: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
+		else
+			echo "catalyst-execution-core: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
+		fi
+		unset _ocid _ocsec _otok
+	fi
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true
