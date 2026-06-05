@@ -187,7 +187,7 @@ describe("resolveEligibleQuery", () => {
   test("merges the entry's team and applies defaults for an absent eligibleQuery", () => {
     expect(resolveEligibleQuery({ team: "CTL", repoRoot: "/r" })).toEqual({
       team: "CTL",
-      status: "Ready",
+      status: "Todo",
       triageStatus: "Triage",
       project: null,
       label: null,
@@ -201,8 +201,8 @@ describe("resolveEligibleQuery", () => {
     expect(q.status).toBe("Ready");
   });
 
-  test("status defaults to Ready (the execution-core contract state) when absent", () => {
-    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: {} }).status).toBe("Ready");
+  test("status defaults to Todo (the start state; Ready removed 2026-06-02) when absent", () => {
+    expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: {} }).status).toBe("Todo");
   });
 
   test("triageStatus defaults to Triage but an explicit value is preserved", () => {
@@ -230,7 +230,7 @@ describe("resolveEligibleQuery", () => {
   test("a non-object eligibleQuery (hand-edited registry) degrades to defaults", () => {
     expect(resolveEligibleQuery({ team: "CTL", eligibleQuery: "garbage" })).toEqual({
       team: "CTL",
-      status: "Ready",
+      status: "Todo",
       triageStatus: "Triage",
       project: null,
       label: null,
