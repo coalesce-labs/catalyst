@@ -63,6 +63,8 @@ import {
   readWorkerPriority,
   writeWorkerPriority,
   buildGlobalRanking,
+  // CTL-700 (Item A)
+  readDispatchFailureReason,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
@@ -6609,5 +6611,59 @@ describe("CTL-755: admission gate", () => {
       reason: "blocked-by-open-dependency",
       blockers: ["CTL-DEP"],
     });
+  });
+});
+
+// ── CTL-700 (Item A): readDispatchFailureReason ────────────────────────────
+describe("readDispatchFailureReason (CTL-700)", () => {
+  test("returns failureReason when present", () => {
+    const dir = join(orchDir, "workers", "CTL-700A-1");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-research.json"),
+      JSON.stringify({ ticket: "CTL-700A-1", phase: "research", failureReason: "rebase_conflict_with_origin_main" })
+    );
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-1", "research")).toBe("rebase_conflict_with_origin_main");
+  });
+
+  test("returns attentionReason when only attentionReason is present", () => {
+    const dir = join(orchDir, "workers", "CTL-700A-2");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-700A-2", phase: "implement", attentionReason: "claude-bg-launch-failed" })
+    );
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-2", "implement")).toBe("claude-bg-launch-failed");
+  });
+
+  test("returns failureReason when both failureReason and attentionReason are present", () => {
+    const dir = join(orchDir, "workers", "CTL-700A-3");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-plan.json"),
+      JSON.stringify({ failureReason: "the_real_reason", attentionReason: "secondary_reason" })
+    );
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-3", "plan")).toBe("the_real_reason");
+  });
+
+  test("returns null when neither field is present", () => {
+    const dir = join(orchDir, "workers", "CTL-700A-4");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-verify.json"),
+      JSON.stringify({ ticket: "CTL-700A-4", status: "running" })
+    );
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-4", "verify")).toBeNull();
+  });
+
+  test("returns null when signal file is missing", () => {
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-5-nonexistent", "research")).toBeNull();
+  });
+
+  test("returns null when signal file is unparseable", () => {
+    const dir = join(orchDir, "workers", "CTL-700A-6");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-research.json"), "{not json");
+    expect(readDispatchFailureReason(orchDir, "CTL-700A-6", "research")).toBeNull();
   });
 });
