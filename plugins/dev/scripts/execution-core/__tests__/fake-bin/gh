@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Fake `gh` for hermetic execution-core tests — intercepts every GitHub-CLI call
+# (pr view / api pulls / issue / auth status) so a test that reaches a default
+# `gh` exec seam never floods the real GitHub API. Records the invocation and
+# returns benign, shape-valid output. NEVER touches the network. Installed on
+# PATH by test-setup.mjs alongside the fake `linearis`/`claude`. A non-empty
+# `gh ...` line in .fake-bin-invocations.log after a run is the leak surface: a
+# test reached the default gh seam instead of injecting a runGh/run stub.
+printf 'gh %s\n' "$*" >>"${CATALYST_FAKE_BIN_LOG:-/dev/null}" 2>/dev/null
+
+# `gh ... pr view`           → an empty-ish PR view object (state/mergeStateStatus
+#                              null; the probes treat that as "not yet merged").
+# `gh api ...`               → empty JSON object ({}.state/{}.merged are undefined,
+#                              which ghPullRest/pr probes read as "unknown/false").
+# `gh ... pr ...` (list etc) → empty JSON array.
+# `gh issue ...`             → empty JSON array.
+# `gh auth status`           → success, no body.
+# anything else              → empty JSON object, exit 0.
+case "$*" in
+  *"pr view"*) echo '{"state":null,"mergeStateStatus":null,"mergedAt":null,"mergeCommit":null}' ;;
+  *"api "*|*" api "*) echo '{}' ;;
+  *"pr "*|*"pr") echo '[]' ;;
+  *"issue"*) echo '[]' ;;
+  *"auth status"*) ;;
+  *) echo '{}' ;;
+esac
+exit 0
