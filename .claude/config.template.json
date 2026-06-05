@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
-  "$comment": "Catalyst Configuration Template - Copy to config.json and fill in values. Secrets go in ~/.config/catalyst/config-{projectKey}.json",
+  "$comment": "Catalyst Configuration Template - Copy to config.json and fill in values. Secrets (including the Linear app-actor OAuth creds) go in ~/.config/catalyst/config-{projectKey}.json; monitor.linear.botUserId is NOT a secret and stays here in Layer 1.",
   "catalyst": {
     "projectKey": "my-project",
     "repository": {
@@ -59,7 +59,9 @@
         "repoColors": {}
       },
       "linear": {
-        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET"
+        "$comment": "botUserId is the Linear USER UUID of the Catalyst app-actor (CTL-550). Required for the Linear app-actor comms channel — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749). It lets execution-core and orch-monitor tell the agent's own mirror comments/issue events apart from a human's (loop / self-echo prevention). To obtain: TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-{projectKey}.json) && curl -s -X POST https://api.linear.app/graphql -H \"Authorization: Bearer $TOKEN\" -H \"Content-Type: application/json\" -d '{\"query\":\"query{viewer{id name}}\"}' | jq -r .data.viewer.id — then restart the monitor and execution-core daemon (both read botUserId only at startup).",
+        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET",
+        "botUserId": null
       }
     },
     "filter": {

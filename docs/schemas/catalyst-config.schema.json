@@ -148,6 +148,12 @@
                       }
                     }
                   }
+                },
+                "botUserId": {
+                  "type": ["string", "null"],
+                  "format": "uuid",
+                  "description": "Linear user UUID of the Catalyst app-actor (the 'Linear for Agents' app user, installed via CTL-550). Used by orch-monitor and the execution-core daemon to suppress bot self-echo comments/updates and bot-authored issue events, preventing write loops (CTL-749). Required for the Linear app-actor comms channel — i.e. when the execution-core daemon mirrors phase-agent output to Linear and wakes on human replies (CTL-550 / CTL-549 / CTL-749); omitting it makes the system treat the agent's own comments as human input. Obtain it from the app-actor access token's viewer.id (NOT a personal/admin token): query{viewer{id}}. This value is workspace-specific — set it only in the local .catalyst/config.json, not in committed templates (use null + a placeholder there). Default null disables suppression.",
+                  "examples": ["00000000-0000-0000-0000-000000000000", null]
                 }
               }
             }

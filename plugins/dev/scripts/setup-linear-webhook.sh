@@ -538,6 +538,21 @@ chmod 600 "$SECRET_FILE"
 # Write the Layer 2 registration record (CTL-238).
 write_linear_record "$REGISTER_KEY" "$WEBHOOK_ID" "$WEBHOOK_URL" "$RESOURCE_TYPES_JSON"
 
+# CTL-749 reminder (NOT set here): the Linear app-actor identity
+# `catalyst.monitor.linear.botUserId` — read from the project's Layer-1
+# `.catalyst/config.json` by the execution-core daemon (daemon.mjs
+# readLinearBotUserId) and orch-monitor's Linear webhook handler — must be the
+# Catalyst **app-actor** user UUID so the agent's OWN comments/issue-events are
+# filtered (self-echo / write-loop guard; without it a human reply can't be told
+# apart from the agent's mirror comments). This script authenticates with the
+# personal/admin Linear token for webhook CRUD, whose `viewer.id` is the HUMAN
+# operator — writing that as botUserId would wrongly suppress real human replies.
+# Obtain it with the app-actor token (Layer-2 catalyst.linear.agent.accessToken)
+# via `query{viewer{id}}`, write it to .catalyst/config.json ->
+# catalyst.monitor.linear.botUserId, then restart the monitor + daemon. See
+# /catalyst-dev:setup-catalyst or docs/configuration.md "Linear Webhook Bot Identity".
+echo "NOTE: set catalyst.monitor.linear.botUserId (the app-actor viewer.id, NOT this admin token's) in .catalyst/config.json — see /catalyst-dev:setup-catalyst. Not written here." >&2
+
 cat <<EOF
 Created Linear webhook $WEBHOOK_ID for $WEBHOOK_URL
   Resource types: $(printf '%s, ' "${RESOURCE_TYPES[@]}" | sed 's/, $//')

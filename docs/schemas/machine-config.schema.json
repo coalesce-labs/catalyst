@@ -115,7 +115,7 @@
                 },
                 "botUserId": {
                   "type": "string",
-                  "description": "Linear user UUID of the app actor. Used for loop prevention (suppresses events authored by the agent)."
+                  "description": "Linear user UUID of the app-actor. NOT USED in machine config (this field is for reference only; the operational botUserId is read from Layer 1 catalyst.monitor.linear.botUserId). Kept here for backwards compatibility / documentation of the app-actor identity."
                 }
               }
             }
