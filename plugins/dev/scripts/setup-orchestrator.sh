@@ -15,7 +15,7 @@
 #   --project "Name"      Use project mode (passed through to orchestrate)
 #   --auto N              Auto-pick top N Todo tickets (passed through to orchestrate)
 #   --quiet               Suppress all output except WORKTREE_PATH=... line
-#   --launch              Exec claude with /catalyst-dev:orchestrate in the new worktree
+#   --launch              Exec claude with /catalyst-legacy:orchestrate in the new worktree
 
 set -euo pipefail
 
@@ -240,10 +240,10 @@ if [[ "$QUIET" != true && "$LAUNCH" != true ]]; then
   echo " Orchestrator ready: ${DISPLAY_PATH}"
   echo ""
   echo " Dry run (preview wave plan):"
-  echo "   cd ${DISPLAY_PATH} && claude \"/catalyst-dev:orchestrate ${TICKET_ARGS} --dry-run\""
+  echo "   cd ${DISPLAY_PATH} && claude \"/catalyst-legacy:orchestrate ${TICKET_ARGS} --dry-run\""
   echo ""
   echo " Full run (dispatch workers):"
-  echo "   cd ${DISPLAY_PATH} && claude \"/catalyst-dev:orchestrate ${TICKET_ARGS}\""
+  echo "   cd ${DISPLAY_PATH} && claude \"/catalyst-legacy:orchestrate ${TICKET_ARGS}\""
   echo ""
   echo " Monitor (optional — real-time web + terminal dashboard):"
   echo "   bun run ${DISPLAY_MONITOR}"
@@ -267,5 +267,5 @@ if [[ "$LAUNCH" == true ]]; then
   # shellcheck source=lib/task-type.sh
   . "${SCRIPT_DIR}/lib/task-type.sh"
   __catalyst_append_task_type "orchestrate"
-  exec claude "/catalyst-dev:orchestrate ${TICKET_ARGS}"
+  exec claude "/catalyst-legacy:orchestrate ${TICKET_ARGS}"
 fi

@@ -328,7 +328,7 @@ fi
 
 # ─── Test 8: orchestrate-dispatch-next without --phase preserves legacy path
 echo ""
-echo "Test 8: orchestrate-dispatch-next without --phase uses legacy /catalyst-dev:oneshot path"
+echo "Test 8: orchestrate-dispatch-next without --phase uses legacy /catalyst-legacy:oneshot path"
 T8="${SCRATCH}/t8"
 mkdir -p "${T8}/orch/workers/output" "${T8}/wt/demo-T-1" "${T8}/bin"
 
@@ -379,10 +379,10 @@ assert_eq "0" "$RC" "dispatcher exits 0 without --phase (legacy path)"
   || fail "legacy worker signal file written"
 LOG=$(cat "$CLAUDE_STUB_LOG_T8" 2>/dev/null || echo "")
 if [[ -n "$LOG" ]]; then
-  if grep -q -- "-p .*catalyst-dev:oneshot" <<<"$LOG"; then
-    pass "legacy path runs claude -p /catalyst-dev:oneshot"
+  if grep -q -- "-p .*catalyst-legacy:oneshot" <<<"$LOG"; then
+    pass "legacy path runs claude -p /catalyst-legacy:oneshot"
   else
-    fail "legacy path runs claude -p /catalyst-dev:oneshot — log: $LOG"
+    fail "legacy path runs claude -p /catalyst-legacy:oneshot — log: $LOG"
   fi
   if grep -q -- "--bg" <<<"$LOG"; then
     fail "legacy path must NOT use --bg — log: $LOG"

@@ -162,7 +162,7 @@
               "type": "string",
               "enum": ["phase-agents", "oneshot-legacy"],
               "default": "phase-agents",
-              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-dev:oneshot job per ticket. Default is 'phase-agents'."
+              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
             },
             "executionCore": {
               "type": "object",

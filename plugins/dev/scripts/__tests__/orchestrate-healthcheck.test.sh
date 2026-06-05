@@ -412,11 +412,14 @@ scratch_teardown
 # instead of the once-per-wave-only behavior. Doc-placement assertion in the
 # style of the repo's other docs-drift tests.
 echo "test (CTL-511 Phase 4): SKILL.md runs orchestrate-healthcheck in the reactive scan, not only per-wave"
-SKILL_MD="${REPO_ROOT}/plugins/dev/skills/orchestrate/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/orchestrate/SKILL.md"
 if [ ! -f "$SKILL_MD" ]; then
 	fail "orchestrate/SKILL.md not found at $SKILL_MD"
 else
-	HC_COUNT=$(grep -c 'scripts/orchestrate-healthcheck' "$SKILL_MD")
+	# CTL-726: invocations are `${CATALYST_DEV_SCRIPTS}/orchestrate-healthcheck`
+	# (was `${CLAUDE_PLUGIN_ROOT}/scripts/...`); match the trailing invocation
+	# form so the count is resolver-agnostic.
+	HC_COUNT=$(grep -c '/orchestrate-healthcheck"' "$SKILL_MD")
 	if [ "$HC_COUNT" -ge 2 ]; then
 		pass "SKILL.md invokes orchestrate-healthcheck beyond the once-per-wave dispatch (count=$HC_COUNT)"
 	else
