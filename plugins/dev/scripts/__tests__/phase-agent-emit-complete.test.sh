@@ -511,6 +511,63 @@ env -u CATALYST_ORCHESTRATOR_DIR "$EMIT_SCRIPT" \
 STILL_RUNNING=$(jq -r '.status' "$SIGNAL" 2>/dev/null)
 assert_eq "running" "$STILL_RUNNING" "no env + no --orch-dir → signal NOT flipped (the wedge this fix avoids)"
 
+# ─── CTL-700 (Item D): failureReason null on --status complete ────────────────
+# Gate both signal .failureReason and event failure_reason on --status not being
+# "complete". A stale .failureReason from a prior failed attempt must also be
+# cleared to null when the phase later completes successfully.
+
+echo ""
+echo "Test 31 (CTL-700 D): event payload omits failure_reason on --status complete with --reason"
+fresh_env t31
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1
+LINE=$(read_event_line)
+HAS_REASON=$(echo "$LINE" | jq -r '.body.payload | has("failure_reason")')
+assert_eq "false" "$HAS_REASON" "failure_reason absent from event payload on complete"
+
+echo ""
+echo "Test 32 (CTL-700 D): signal file gets failureReason=null on --status complete with --reason"
+fresh_env t32
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete --reason "should be dropped" >/dev/null 2>&1
+FAILURE_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
+assert_eq "null" "$FAILURE_REASON" "signal .failureReason is null on complete"
+
+echo ""
+echo "Test 33 (CTL-700 D): signal clears a stale failureReason on --status complete"
+fresh_env t33
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research","failureReason":"leftover_from_failed_attempt"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status complete >/dev/null 2>&1
+FAILURE_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
+assert_eq "null" "$FAILURE_REASON" "stale failureReason cleared to null on complete"
+
+echo ""
+echo "Test 34 (CTL-700 D): regression-lock — failed path still carries failure_reason"
+fresh_env t34
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-research.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"research"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase research --ticket CTL-100 --status failed --reason "tests red after 3 attempts" >/dev/null 2>&1
+LINE=$(read_event_line)
+REASON_FIELD=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+SIGNAL_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
+assert_eq "tests red after 3 attempts" "$REASON_FIELD" "failed path still carries failure_reason in event"
+assert_eq "tests red after 3 attempts" "$SIGNAL_REASON" "failed path still carries failureReason in signal"
+
+echo ""
+echo "Test 35 (CTL-700 D): regression-lock — turn-cap-exhausted still carries failure_reason"
+fresh_env t35
+SIGNAL="${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/phase-implement.json"
+echo '{"status":"running","ticket":"CTL-100","phase":"implement"}' >"$SIGNAL"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status turn-cap-exhausted --reason "turn cap hit (75)" >/dev/null 2>&1
+LINE=$(read_event_line)
+PAYLOAD_REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason')
+SIGNAL_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
+assert_eq "turn cap hit (75)" "$PAYLOAD_REASON" "turn-cap path still carries failure_reason in event"
+assert_eq "turn cap hit (75)" "$SIGNAL_REASON" "turn-cap path still carries failureReason in signal"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

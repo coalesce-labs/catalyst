@@ -1458,6 +1458,25 @@ function recordRunawayAlert(orchDir, ticket, now) {
 // returned {ok, reason} feeds the demotion path: on !ok the rc=0 result is
 // reclassified as a failure with reason="verify_failed:<reason>" and a
 // phase.dispatch.failed.<T> event fires.
+// CTL-700 (Item A): read the reason the dispatch bash script recorded into the
+// signal file so the scheduler's phase.dispatch.failed event carries the real
+// reason instead of the generic "dispatch_nonzero_exit". The dispatch script
+// writes .failureReason on the rebase/thoughts-conflict stall path and
+// .attentionReason on launch failures. Read-with-fallback: returns null when
+// the signal is absent, unparseable, or carries no reason — callers OR this
+// with the legacy literal.
+export function readDispatchFailureReason(orchDir, ticket, phase) {
+  const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
+  let signal;
+  try {
+    signal = JSON.parse(readFileSync(signalPath, "utf8"));
+  } catch {
+    return null;
+  }
+  const reason = signal?.failureReason ?? signal?.attentionReason;
+  return typeof reason === "string" && reason.length > 0 ? reason : null;
+}
+
 export function verifyDispatchedSignal(orchDir, ticket, phase) {
   const signalPath = join(orchDir, "workers", ticket, `phase-${phase}.json`);
   let raw;
@@ -2539,7 +2558,7 @@ export function schedulerTick(
         ticket,
         target_phase: next,
         code: r.code,
-        reason: "dispatch_nonzero_exit",
+        reason: readDispatchFailureReason(orchDir, ticket, next) ?? "dispatch_nonzero_exit",
         expiresAt: cd2.expiresAt,
         consecutiveFailures: cd2.consecutiveFailures,
       });
@@ -2650,7 +2669,7 @@ export function schedulerTick(
           recordDispatchFailure(orchDir, pd.identifier, parkedPhase, r.code, now());
           appendDispatchFailedEvent({
             orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase,
-            code: r.code, reason: "dispatch_nonzero_exit",
+            code: r.code, reason: readDispatchFailureReason(orchDir, pd.identifier, parkedPhase) ?? "dispatch_nonzero_exit",
           });
         }
       }
@@ -2842,7 +2861,7 @@ export function schedulerTick(
         ticket: t.identifier,
         target_phase: NEW_WORK_ENTRY_PHASE,
         code: r.code,
-        reason: "dispatch_nonzero_exit",
+        reason: readDispatchFailureReason(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE) ?? "dispatch_nonzero_exit",
         expiresAt: cd4.expiresAt,
         consecutiveFailures: cd4.consecutiveFailures,
       });
