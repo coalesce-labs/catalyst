@@ -29,6 +29,7 @@ import {
   defaultAppendAutotuneGaugeEvent,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
+  defaultAppendRunawayEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -2500,6 +2501,24 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.target_phase).toBe("research");
     expect(env.body.payload.bg_job_id).toBe("deadbeef");
     expect(env.body.payload.worktree_path).toBe("/wt/CTL/CTL-LC-1");
+  });
+
+  test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
+    const ok = defaultAppendRunawayEvent({
+      ticket: "CTL-9",
+      orchId: "orch-rw",
+      count: 312,
+      window_ms: 600_000,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.dispatch.runaway.CTL-9");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("runaway");
+    expect(env.body.payload.reason).toBe("event-rate-domination");
+    expect(env.body.payload.count).toBe(312);
+    expect(env.body.payload.window_ms).toBe(600_000);
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
   });
 
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {

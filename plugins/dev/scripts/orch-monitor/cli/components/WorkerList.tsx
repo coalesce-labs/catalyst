@@ -116,6 +116,9 @@ export function WorkerList({
               </Box>
               <Box flexGrow={1}>
                 <Text dimColor={!selected} inverse={selected}>{worktree}</Text>
+                {w.stalledReason && (
+                  <Text color="yellow" inverse={selected}>{` ⚠ ${w.stalledReason}`}</Text>
+                )}
               </Box>
             </Box>
             {ws && selected && (

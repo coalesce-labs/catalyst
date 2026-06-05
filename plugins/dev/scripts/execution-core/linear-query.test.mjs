@@ -8,6 +8,7 @@ import {
   fetchTicketState,
   fetchTicketLabels,
   fetchTicketRelations,
+  classifyTicketResolution,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -459,5 +460,77 @@ describe("fetchTicketRelations (CTL-755)", () => {
       fetchTicketRelations("CTL-1", { exec });
       expect(calls).toBe(2);
     });
+  });
+});
+
+// ── CTL-671 Phase 2: 3-valued phantom-resolution classifier ──
+describe("classifyTicketResolution (CTL-671)", () => {
+  test("resolvable ticket → exists", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-100", state: { name: "Ready" } }),
+    });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("exists");
+  });
+
+  test("clean empty result → not-found", () => {
+    // linearis exits 0 with a null node for a missing ticket
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
+  });
+
+  test("clean empty object → not-found (no identifier/id/state)", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
+  });
+
+  test("REAL linearis missing-ticket shape (exit 0 + error body) → not-found", () => {
+    // Observed contract: `linearis issues read CTL-9` exits 0 with this body.
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ error: 'Issue with identifier "CTL-9" not found' }),
+    });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("not-found");
+  });
+
+  test("exit-0 error body that is NOT 'not found' → unknown (auth/transient — fail safe)", () => {
+    // A non-not-found error body must never quarantine a real ticket.
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ error: "Authentication required" }) });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
+  });
+
+  test("REAL linearis resolvable shape (exit 0 + identifier/id) → exists", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({
+        id: "36fced03-bb1e-45b4-be96-234aaab39040",
+        identifier: "CTL-671",
+        title: "Guard + monitor runaway phase-dispatch loops",
+      }),
+    });
+    expect(classifyTicketResolution("CTL-671", { exec })).toBe("exists");
+  });
+
+  test("explicit not-found stderr with nonzero exit → unknown (NOT not-found — fail safe)", () => {
+    // A nonzero exit is ambiguous (auth/network/not-found all exit nonzero);
+    // never quarantine on it. This is the load-bearing safety assertion.
+    const exec = fakeExec({ code: 1, stderr: "linearis: issue CTL-9 not found" });
+    expect(classifyTicketResolution("CTL-9", { exec })).toBe("unknown");
+  });
+
+  test("auth/network failure → unknown (never quarantines a real ticket)", () => {
+    const exec = fakeExec({ code: 1, stderr: "auth failed" });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
+  });
+
+  test("unparseable stdout → unknown", () => {
+    const exec = fakeExec({ code: 0, stdout: "not json" });
+    expect(classifyTicketResolution("CTL-100", { exec })).toBe("unknown");
+  });
+
+  test("reads via `linearis issues read <identifier>`", () => {
+    const exec = fakeExec({ code: 0, stdout: "null" });
+    classifyTicketResolution("CTL-9", { exec });
+    expect(exec.calls[0]).toEqual({ cmd: "linearis", args: ["issues", "read", "CTL-9"] });
   });
 });
