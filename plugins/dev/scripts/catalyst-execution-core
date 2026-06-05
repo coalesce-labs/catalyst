@@ -104,6 +104,14 @@ cmd_start() {
 	local neutral_otel
 	neutral_otel="$(_neutralize_otel_attrs "${OTEL_RESOURCE_ATTRIBUTES-}")"
 	export OTEL_RESOURCE_ATTRIBUTES="$neutral_otel"
+	# Machine-local daemon env: source ~/.config/catalyst/execution-core.env if present
+	# so per-machine settings survive restarts — e.g. routing the daemon's Linear/gh
+	# (Node fetch/undici) traffic through the local mitmproxy audit. Node's native
+	# fetch ignores *_PROXY unless NODE_USE_ENV_PROXY=1, and the MITM'd TLS needs
+	# NODE_EXTRA_CA_CERTS to be trusted. NOT committed (machine-specific); absent = no-op.
+	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
+	# shellcheck disable=SC1090
+	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true
