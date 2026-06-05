@@ -1,5 +1,25 @@
 # Changelog
 
+## [11.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.6.0...catalyst-dev-v11.0.0) (2026-06-05)
+
+
+### Features
+
+* **dev:** CTL-734 ticket-detail drill-in — kibo-ui Gantt of per-phase worker spans ([#1319](https://github.com/coalesce-labs/catalyst/issues/1319)) ([5b5d562](https://github.com/coalesce-labs/catalyst/commit/5b5d562b21e5ecbe8ac4bd1033e14ff41f2417a7))
+* **dev:** CTL-761 emit revive/attempt count as OTEL dimensions on terminal phase events ([#1321](https://github.com/coalesce-labs/catalyst/issues/1321)) ([087e4b1](https://github.com/coalesce-labs/catalyst/commit/087e4b194818854f66c5aa5e80083c72b1d605a1))
+* **dev:** CTL-775 demand-driven autotuner — saturation-gated up, Claude-attributed down ([#1316](https://github.com/coalesce-labs/catalyst/issues/1316)) ([1da9db8](https://github.com/coalesce-labs/catalyst/commit/1da9db899ab535d3017864e51356eaf54df054eb))
+* **dev:** document and enforce the Linear app-actor botUserId requirement ([#1282](https://github.com/coalesce-labs/catalyst/issues/1282)) ([a4bb94d](https://github.com/coalesce-labs/catalyst/commit/a4bb94d6ce3173abf78fcc5932ea03fead55b191))
+
+
+### Bug Fixes
+
+* **dev:** CTL-623 residual — describe-pr sibling-ref prose + ci-describe-pr body_file fix ([#1322](https://github.com/coalesce-labs/catalyst/issues/1322)) ([cab4e9b](https://github.com/coalesce-labs/catalyst/commit/cab4e9b3b7dccd270251d49f62b831e9a8007676))
+* **dev:** CTL-731 residual — default eligibleQuery to Todo + Release-As 11.0.0 ([#1331](https://github.com/coalesce-labs/catalyst/issues/1331)) ([f9345bd](https://github.com/coalesce-labs/catalyst/commit/f9345bdbe2419038acb00bc8fb67f14f9848875b))
+* **dev:** CTL-766 persist real tailer offset in otel-forward checkpoint ([#1310](https://github.com/coalesce-labs/catalyst/issues/1310)) ([1ddf24a](https://github.com/coalesce-labs/catalyst/commit/1ddf24a36749ebf354fc76a4801900c72b41eee6))
+* **dev:** CTL-772 platform-aware available memory — stop autotuner false-clamping to 1 on macOS ([#1311](https://github.com/coalesce-labs/catalyst/issues/1311)) ([a06c481](https://github.com/coalesce-labs/catalyst/commit/a06c4815b7f98f8b1cc74af7bb9f7b5f2379c555))
+* **dev:** CTL-777 reliable phase-worker signal flip via surviving settings.env channel (step 1) ([#1326](https://github.com/coalesce-labs/catalyst/issues/1326)) ([ccab289](https://github.com/coalesce-labs/catalyst/commit/ccab289343c9c641e9fbfe302d783963af85c83b))
+* **dev:** repair removeLabel (linearis rejects --label-mode remove) + hermetic test guard ([#1327](https://github.com/coalesce-labs/catalyst/issues/1327)) ([0e80e26](https://github.com/coalesce-labs/catalyst/commit/0e80e261dc4c9afab889158d320bc2773660dfde))
+
 ## [10.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v10.5.0...catalyst-dev-v10.6.0) (2026-06-04)
 
 
