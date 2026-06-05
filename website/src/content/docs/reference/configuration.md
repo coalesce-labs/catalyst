@@ -88,6 +88,56 @@ For `execution-core` mode, the number of workers comes from a separate committed
 
 In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets are ready — for example, `status: "Ready"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also needs six Linear states to exist — `Ready`, `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates.
 
+## Linear app-actor identity (`catalyst.monitor.linear.botUserId`)
+
+You must set `catalyst.monitor.linear.botUserId` for the Linear app-actor comms channel — i.e. when the daemon mirrors phase-agent output to Linear and wakes on human replies (the "Linear for Agents" identity that posts comments **as Catalyst**). It's the Linear user UUID of that app actor. This lives in the committed `.catalyst/config.json` — not the secrets file — because the value isn't secret (it appears on every comment the app posts), but it is workspace-specific.
+
+```json
+{
+  "catalyst": {
+    "monitor": {
+      "linear": {
+        "teams": ["ACME"],
+        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET",
+        "botUserId": null
+      }
+    }
+  }
+}
+```
+
+| Key | What it does |
+| --- | --- |
+| `catalyst.monitor.linear.botUserId` | Linear user UUID of the Catalyst app actor. Required for the Linear app-actor comms channel — when the daemon mirrors phase-agent output to Linear and wakes on human replies; leave `null` otherwise |
+
+### Why it's required
+
+Catalyst's app identity lets it post comments as the app, and a human reply on a ticket can wake a parked worker. To make that work, the system must tell the agent's **own** comments and description updates apart from a human's. Without `botUserId` loaded, it can't:
+
+- The agent's own mirror comments get written into the worker inbox as if a human had replied — noise, and a false "human replied" signal.
+- Bot-authored issue events feed back into the event log as write loops.
+
+So `botUserId` is the self-echo and loop-prevention guard for the whole Linear-for-Agents channel. Set it for any workspace that uses the app-actor comms.
+
+### How to obtain it
+
+Query `viewer.id` with the app-actor token. The app OAuth credentials live in the secrets file under `catalyst.linear.agent`:
+
+```bash
+TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-{projectKey}.json)
+BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
+```
+
+Write `$BOT_ID` into `.catalyst/config.json` under `catalyst.monitor.linear.botUserId`, then restart both readers — they only load it at startup:
+
+```bash
+catalyst-monitor stop && catalyst-monitor start
+catalyst-execution-core restart
+```
+
 ## Secrets config (`~/.config/catalyst/config-{projectKey}.json`)
 
 Never commit this. One file per project, linked by `projectKey`. It holds API keys.
