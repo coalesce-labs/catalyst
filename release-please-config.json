@@ -5,6 +5,7 @@
   "packages": {
     "plugins/dev": {
       "release-type": "simple",
+      "release-as": "11.0.0",
       "component": "catalyst-dev",
       "package-name": "catalyst-dev",
       "changelog-path": "CHANGELOG.md",
