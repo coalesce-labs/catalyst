@@ -1,7 +1,7 @@
 import { memo, useMemo } from "react";
 import { Box, Text, useStdout } from "ink";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
-import { formatDateTime, formatDetailBody } from "../lib/format.ts";
+import { formatDateTime, formatDetailBody, fmtDuration } from "../lib/format.ts";
 import type { DispatchLatency } from "../lib/dispatch-latency.ts";
 
 export interface DetailPaneProps {
@@ -45,10 +45,10 @@ export function buildDetailLines(
   // decided → worker live; wall-clock = worker live → phase done.
   if (dispatchLatency?.pickupMs !== undefined || dispatchLatency?.wallClockMs !== undefined) {
     if (dispatchLatency.pickupMs !== undefined) {
-      lines.push({ k: "field", label: "pickup", value: `${dispatchLatency.pickupMs}ms`, color: "cyan" });
+      lines.push({ k: "field", label: "pickup", value: fmtDuration(dispatchLatency.pickupMs), color: "cyan" });
     }
     if (dispatchLatency.wallClockMs !== undefined) {
-      lines.push({ k: "field", label: "wall-clock", value: `${dispatchLatency.wallClockMs}ms`, color: "cyan" });
+      lines.push({ k: "field", label: "wall-clock", value: fmtDuration(dispatchLatency.wallClockMs), color: "cyan" });
     }
     lines.push({ k: "sep" });
   }
