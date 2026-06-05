@@ -266,7 +266,7 @@ PAYLOAD=$(jq -nc \
 	--arg handoff "$HANDOFF_PATH" \
 	--arg duration "$DURATION_SECONDS" \
 	'{phase: $phase, ticket: $ticket, status: $status}
-   + (if $reason == "" then {} else {failure_reason: $reason} end)
+   + (if ($reason == "" or $status == "complete") then {} else {failure_reason: $reason} end)
    + (if $handoff == "" then {} else {handoff_path: $handoff} end)
    + (if $duration == "" then {} else {duration_seconds: ($duration | tonumber)} end)')
 
@@ -326,6 +326,7 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		fi
 		TMP="${SIGNAL_FILE}.tmp.$$"
 		if jq --arg status "$NEW_STATUS" \
+			--arg rawstatus "$STATUS" \
 			--arg ts "$TS" \
 			--arg reason "$REASON" \
 			--arg handoff "$HANDOFF_PATH" \
@@ -333,7 +334,9 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
-           | (if \$reason  == \"\" then . else .failureReason = \$reason end)
+           | (if \$rawstatus == \"complete\" then .failureReason = null
+              elif \$reason == \"\" then .
+              else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
            | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
