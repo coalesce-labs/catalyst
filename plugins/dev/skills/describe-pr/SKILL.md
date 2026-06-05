@@ -342,6 +342,28 @@ gh pr edit $pr_number --title "$new_title"
 **Update body:**
 
 ```bash
+body_file="thoughts/shared/prs/${pr_number}_description.md"
+
+# CTL-623: append a Linear automation guard block so sibling tickets embedded in
+# the branch name or pulled into the body (Linear relations/description) are NOT
+# auto-linked and dragged backward in status when this PR opens/merges. Scans the
+# branch AND the assembled body; no-op for single-ticket PRs. See
+# https://linear.app/docs/github (skip/ignore negative magic word).
+# CTL-633: branch and body are scanned in DIFFERENT modes — the branch goes
+# through the awk segmenter (legitimate sibling-number recovery from
+# build_orch_name slugs); the body goes through a canonical-only regex
+# (\b[A-Z]+-[0-9]+\b) so prose like "Released 2026-05-25", "UTF-8", and
+# "abc123" cannot fabricate fake `skip TEAM-NNN` lines. Both modes are also
+# filtered through the optional team-key allowlist for defense in depth.
+# shellcheck source=/dev/null
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/linear-pr-skip.sh"
+body="$(cat "$body_file")"
+skip_block="$( {
+    linear_sibling_skip_block_from_branch "$ticket" "$branch"
+    linear_sibling_skip_block_from_body   "$ticket" "$body"
+} | awk '/^skip /{if(!seen[$0]++) print; next} {if(!h){print; h=1}}' )"
+[[ -n "$skip_block" ]] && printf '\n%s\n' "$skip_block" >>"$body_file"
+
 # Ensure no Claude attribution in the description file
 gh pr edit $pr_number --body-file "thoughts/shared/prs/${pr_number}_description.md"
 ```
