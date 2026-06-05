@@ -1,1 +1,6 @@
 node_modules/
+
+# Transient leak ledger rewritten on every `bun test` run by test-setup.mjs.
+# The fake-bin/* scripts, bunfig.toml and test-setup.mjs ARE tracked; only this
+# per-run recording is not.
+__tests__/.fake-bin-invocations.log

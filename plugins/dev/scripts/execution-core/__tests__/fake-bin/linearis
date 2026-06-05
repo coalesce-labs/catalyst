@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Fake `linearis` for hermetic execution-core tests. Records the invocation and
+# returns benign, shape-valid empty JSON. NEVER touches the network. Installed on
+# PATH by test-setup.mjs so even child-shell calls (linear-transition.sh's bare
+# `linearis`) are intercepted. A non-empty .fake-bin-invocations.log after a run
+# is the leak surface: a test reached a default exec seam instead of injecting a stub.
+printf 'linearis %s\n' "$*" >>"${CATALYST_FAKE_BIN_LOG:-/dev/null}" 2>/dev/null
+case "$1 $2" in
+  "issues list" | "labels list" | "comments list") echo '{"nodes":[]}' ;;
+  "issues read") echo '{}' ;;
+  "issues update") echo '{}' ;;
+  *) echo '{}' ;;
+esac
+exit 0

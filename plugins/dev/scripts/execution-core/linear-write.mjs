@@ -236,25 +236,54 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
   }
 }
 
-// removeLabel — remove a single label from a ticket via linearis --label-mode
-// remove (CTL-549). Counterpart to applyLabel; used by handleCommentWake to
-// clear needs-human/question when re-dispatching a parked worker. No read-back
-// (remove is idempotent for absent labels). Returns { removed: true } on
-// success, { removed: false, reason } on failure. Never throws.
-export async function removeLabel(ticket, label, { exec = defaultExec } = {}) {
+// removeLabel — remove a single label from a ticket while preserving its OTHER
+// labels (CTL-549). Counterpart to applyLabel; used by handleCommentWake to
+// clear needs-human/question when re-dispatching a parked worker.
+//
+// linearis 2026.4.9 has NO single-label-remove primitive: `--label-mode` only
+// accepts `add` or `overwrite` (the old `remove` value is REJECTED with
+// "--label-mode must be either 'add' or 'overwrite'"), and `--clear-labels`
+// drops ALL labels. So the only way to remove one label without clobbering the
+// rest is read-modify-write: read the current label set, filter out the target,
+// and overwrite with the remainder (or --clear-labels when nothing remains).
+// This keeps the write inside linearis and preserves the issue's other labels.
+//
+// Idempotent: if the label is already absent we return { removed: true } without
+// a write. A failed read (fetchLabels returns non-array) is { removed: false,
+// reason: 'transient' } so the caller retries. Mirrors applyLabel's shape for
+// logging + failure classification. Never throws.
+export async function removeLabel(
+  ticket,
+  label,
+  { exec = defaultExec, fetchLabels = fetchTicketLabels } = {}
+) {
   try {
-    const res = exec("linearis", [
-      "issues",
-      "update",
-      ticket,
-      "--labels",
-      label,
-      "--label-mode",
-      "remove",
-    ]);
+    const current = fetchLabels(ticket, { exec });
+    if (!Array.isArray(current)) {
+      // Read failed (linearis non-zero / non-JSON) — cannot safely overwrite
+      // without knowing the current set, so retry next tick.
+      log.warn({ ticket, label, reason: "transient" }, "removeLabel: read failed");
+      return { removed: false, reason: "transient" };
+    }
+    if (!current.includes(label)) {
+      // Idempotent: the label is already gone, no write needed.
+      return { removed: true };
+    }
+    const remaining = current.filter((l) => l !== label);
+    const res = remaining.length
+      ? exec("linearis", [
+          "issues",
+          "update",
+          ticket,
+          "--labels",
+          remaining.join(","),
+          "--label-mode",
+          "overwrite",
+        ])
+      : exec("linearis", ["issues", "update", ticket, "--clear-labels"]);
     if ((res.code ?? res.status ?? 0) !== 0) {
       const reason = classifyLabelFailure(res.stderr ?? "");
-      log.warn({ ticket, label, reason }, "removeLabel: failed");
+      log.warn({ ticket, label, reason, stderr: res.stderr }, "removeLabel: write failed");
       return { removed: false, reason };
     }
     return { removed: true };
