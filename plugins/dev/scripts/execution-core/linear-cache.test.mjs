@@ -82,3 +82,98 @@ describe("createTicketStateCache", () => {
     expect(c.stats().hitRate).toBe(0);
   });
 });
+
+// CTL-784 — the relations read-through store (getRelations / setRelations) lives
+// in a SEPARATE map from the string-state store, with its own TTL. The state
+// store (get/set/stats) contract above is unchanged by these.
+describe("createTicketStateCache — relations store (CTL-784)", () => {
+  const desc = (state, extra = {}) => ({
+    state,
+    relations: { nodes: [] },
+    inverseRelations: { nodes: [] },
+    priority: 2,
+    labels: [],
+    ...extra,
+  });
+
+  it("returns undefined on a cold relations miss", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+  });
+
+  it("returns a set descriptor within the TTL window", () => {
+    let t = 0;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000 });
+    c.setRelations("CTL-1", desc("Triage", { priority: 3 }));
+    t = 59_000;
+    const got = c.getRelations("CTL-1");
+    expect(got.state).toBe("Triage");
+    expect(got.priority).toBe(3);
+    expect(got.relations).toEqual({ nodes: [] });
+  });
+
+  it("expires a descriptor past the TTL window (returns undefined)", () => {
+    let t = 0;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000 });
+    c.setRelations("CTL-1", desc("Triage"));
+    t = 60_001;
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+  });
+
+  it("setRelations primes the state cache so fetchTicketState-style get() hits", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.setRelations("CTL-1", desc("Done"));
+    expect(c.get("CTL-1")).toBe("Done"); // state store primed
+  });
+
+  it("getRelations overlays the freshest state from the state cache (write-through wins)", () => {
+    let t = 0;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000 });
+    c.setRelations("CTL-1", desc("Triage"));
+    // monitor write-through updates the STATE on a state_changed event
+    c.set("CTL-1", "In Progress");
+    const got = c.getRelations("CTL-1");
+    expect(got.state).toBe("In Progress"); // overlaid, not the stale "Triage"
+    expect(got.relations).toEqual({ nodes: [] }); // edges still from the descriptor
+  });
+
+  it("getRelations falls back to the descriptor state when the state entry expired", () => {
+    let t = 0;
+    const c = createTicketStateCache({ now: () => t, ttlMs: 60_000 });
+    c.setRelations("CTL-1", desc("Triage"));
+    // advance past the state TTL but the relations entry was re-set later
+    t = 30_000;
+    c.setRelations("CTL-1", desc("Backlog"));
+    t = 30_000 + 59_000; // state entry (set at 30_000) still fresh here
+    expect(c.getRelations("CTL-1").state).toBe("Backlog");
+  });
+
+  it("never stores a null descriptor (fail-safe)", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.setRelations("CTL-1", null);
+    c.setRelations("CTL-2", undefined);
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+    expect(c.getRelations("CTL-2")).toBeUndefined();
+  });
+
+  it("invalidate drops BOTH the state and relations entries", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.setRelations("CTL-1", desc("Done"));
+    c.invalidate("CTL-1");
+    expect(c.getRelations("CTL-1")).toBeUndefined();
+    expect(c.get("CTL-1")).toBeUndefined();
+  });
+
+  it("relationsStats counts relation hits/misses separately from stats()", () => {
+    const c = createTicketStateCache({ now: () => 0 });
+    c.getRelations("CTL-1"); // rel miss
+    c.setRelations("CTL-1", desc("Done"));
+    c.getRelations("CTL-1"); // rel hit
+    const rs = c.relationsStats();
+    expect(rs.hits).toBe(1);
+    expect(rs.misses).toBe(1);
+    expect(rs.hitRate).toBeCloseTo(1 / 2, 5);
+    // state-store stats untouched by relation lookups (only the setRelations prime)
+    expect(c.stats().hits).toBe(0);
+  });
+});
