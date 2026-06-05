@@ -535,6 +535,21 @@ export function formatDetails(event: CanonicalEvent): string {
     detailsCache.set(event, sanitized);
     return sanitized;
   }
+  // CTL-671: runaway event-rate alert — render the dominating count + window so
+  // an operator sees the severity of the storm at a glance (it is an
+  // attention/WARN row via severityText, surfaced by formatStatus's "!").
+  if (name?.startsWith("phase.dispatch.runaway.")) {
+    const p = payload as Record<string, unknown> | undefined;
+    const count = typeof p?.["count"] === "number" ? p["count"] : "?";
+    const windowMs = typeof p?.["window_ms"] === "number" ? p["window_ms"] : 0;
+    const windowMin = windowMs ? Math.round(windowMs / 60_000) : 0;
+    const out = sanitize(
+      `runaway: ${count} events in ${windowMin}min`,
+      "oneline"
+    );
+    detailsCache.set(event, out);
+    return out;
+  }
   const msg = event.body?.message ?? "";
   let raw = msg;
   if (payload && typeof payload === "object") {

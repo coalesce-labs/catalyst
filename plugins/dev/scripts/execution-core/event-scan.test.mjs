@@ -17,6 +17,7 @@ import {
   countDistinctRevivingTickets,
   countRemediateCycles,
   __resetEventScanIndexForTest,
+  countTicketEventsInWindow,
 } from "./event-scan.mjs";
 
 // makeEvent — minimal envelope mirroring buildEventEnvelope in recovery.mjs.
@@ -313,5 +314,71 @@ describe("incremental index (CTL-673)", () => {
     expect(
       countDistinctRevivingTickets({ windowMs: 10 * 60 * 1000, now: at("2026-05-27T00:15:00Z"), path }),
     ).toBe(1); // A aged out of the window
+  });
+});
+
+// ─── CTL-671 Phase 4: countTicketEventsInWindow — per-ticket event-rate ───
+// Total phase.*.<ticket> envelopes in a rolling window. Counts ALL actions
+// (the CTL-9 storm was 92% non-failed work-done probes), unlike a
+// dispatch-failure-only counter — the runaway-loop domination signal.
+
+describe("countTicketEventsInWindow (CTL-671)", () => {
+  test("counts all phase.*.<ticket> events in window regardless of action", () => {
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "work-done-probe", ticket: "CTL-9", ts: recent }),
+      makeEvent({ phase: "implement", action: "failed", ticket: "CTL-9", ts: recent }),
+      makeEvent({ phase: "research", action: "complete", ticket: "CTL-100", ts: recent }), // other ticket
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(2);
+  });
+
+  test("excludes events older than the window", () => {
+    const now = 10_000_000;
+    const old = new Date(now - 10 * 60_000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "work-done-probe", ticket: "CTL-9", ts: old }),
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(0);
+  });
+
+  test("does NOT match a ticket that is a prefix of another (suffix boundary)", () => {
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-90", ts: recent }), // CTL-90 ≠ CTL-9
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }), // match
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1);
+  });
+
+  test("ignores events with unparseable ts", () => {
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: "not-a-date" }),
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }),
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1);
+  });
+
+  test("missing log → 0", () => {
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => 1, path: "/nope" })
+    ).toBe(0);
+  });
+
+  test("throws when ticket or windowMs is missing", () => {
+    expect(() => countTicketEventsInWindow({ windowMs: 60_000 })).toThrow();
+    expect(() => countTicketEventsInWindow({ ticket: "CTL-9" })).toThrow();
   });
 });

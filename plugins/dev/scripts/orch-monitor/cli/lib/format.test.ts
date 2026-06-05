@@ -3,7 +3,7 @@
 // CTL-419: filter.wake wake-event rendering with recipient-short suffix
 
 import { describe, test, expect } from "bun:test";
-import { formatDetails, formatRef } from "./format";
+import { formatDetails, formatRef, shouldSkipEvent, formatStatus } from "./format";
 import type { CanonicalEvent } from "../../lib/canonical-event.ts";
 
 function makeEvent(
@@ -175,6 +175,24 @@ describe("formatDetails — session.phase (CTL-418)", () => {
   test("falls back to generic when no payload.to", () => {
     const ev = makeEvent("session.phase", {}, undefined, "session.phase");
     expect(formatDetails(ev)).toBe("session.phase");
+  });
+});
+
+describe("phase.dispatch.runaway — CTL-671 runaway alert", () => {
+  const runaway = (count = 312, windowMs = 600_000) =>
+    makeEvent("phase.dispatch.runaway.CTL-9", {}, { count, window_ms: windowMs });
+
+  test("is NOT skipped by the HUD filter (operator-critical)", () => {
+    expect(shouldSkipEvent(runaway())).toBe(false);
+  });
+
+  test("renders count + window in DETAILS", () => {
+    expect(formatDetails(runaway(312, 600_000))).toBe("runaway: 312 events in 10min");
+  });
+
+  test("WARN severity drives the attention glyph", () => {
+    const ev = { ...runaway(), severityText: "WARN" } as ReturnType<typeof runaway>;
+    expect(formatStatus(ev)).toBe("! ");
   });
 });
 

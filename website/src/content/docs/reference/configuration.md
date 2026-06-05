@@ -119,3 +119,13 @@ For hands-off merging, set your `main` branch to require pull requests, require 
 ## More settings
 
 Catalyst reads many more keys — for the event broker, the Monitor dashboard, webhooks, deploy checks, and worktree setup. The setup script writes them, and `plugins/dev/templates/config.template.json` lists them all. You only need the keys above to get started.
+
+### Runaway-dispatch guards (CTL-671)
+
+The execution-core scheduler protects itself against a single ticket dominating the dispatch loop. These knobs are env vars on the `catalyst-execution-core` process:
+
+- `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` (default `8`) — consecutive failed dispatches (no forward progress) before a ticket is quarantined to terminal `stalled` + `needs-human`. A successful dispatch resets the counter, so a healthy ticket can never trip it.
+- `SCHEDULER_RUNAWAY_THRESHOLD` (default `50`) — per-ticket `phase.*.<ticket>` event count within `SCHEDULER_RUNAWAY_WINDOW_MS` that fires one `phase.dispatch.runaway.<ticket>` alert. Observability only — it surfaces a dominating ticket without quarantining it.
+- `SCHEDULER_RUNAWAY_WINDOW_MS` (default `600000`, 10 min) — rolling window for the runaway-rate alert and its once-per-window suppression marker.
+
+The **phantom worker-dir validity sweep** quarantines a `workers/<ticket>/` dir only when all three hold: the ticket is definitively **not-found** in Linear (a clean exit-0 not-found body — a nonzero exit or transient outage classifies as `unknown` and is never quarantined), it is **not in the eligible set**, and it has **no live bg worker**. This conjunction guarantees a transient Linear outage can never quarantine a healthy, resolvable, in-flight ticket. `SCHEDULER_CIRCUIT_BREAKER_THRESHOLD` is the Linear-independent backstop; the runaway knobs are observability only.
