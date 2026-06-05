@@ -82,8 +82,10 @@ handled mechanically by the guard block appended at write-back time (step 6).
 ### 6. Save and Update
 
 ```bash
+body_file="thoughts/shared/prs/${PR_NUMBER}_description.md"
+
 # Save to thoughts
-cat > "thoughts/shared/prs/${PR_NUMBER}_description.md" <<EOF
+cat > "$body_file" <<EOF
 [Generated description]
 EOF
 
@@ -110,7 +112,7 @@ humanlayer thoughts sync
 
 # Update PR on GitHub
 gh pr edit $PR_NUMBER --title "$new_title"
-gh pr edit $PR_NUMBER --body-file "thoughts/shared/prs/${PR_NUMBER}_description.md"
+gh pr edit $PR_NUMBER --body-file "$body_file"
 ```
 
 ### 7. Update Linear (if ticket found)
