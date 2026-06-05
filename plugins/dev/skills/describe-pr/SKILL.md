@@ -225,8 +225,17 @@ If ticket found:
 ## Related Issues/PRs
 
 - Fixes https://linear.app/{workspace}/issue/{ticket}
-- Related to [any other linked issues]
+- Related to #NNN (reference sibling work by its **GitHub PR number**)
 ```
+
+**CTL-623 — sibling reference format (REQUIRED):** When referencing related/sibling
+work in prose, reference it by its **GitHub PR number (`#NNN`)**, never by a bare
+Linear token (`TEAM-NNN`) or a Linear issue URL. A bare sibling `TEAM-NNN` token in the
+body is auto-linked by Linear's GitHub integration and drags that sibling's workflow
+status (Done → Implement) on PR open/merge. Do **not** emit bare sibling Linear tokens
+in prose. The own ticket's `Fixes https://linear.app/...` line is correct and stays —
+that link/transition is intended. Sibling neutralization is handled mechanically by the
+guard block appended at write-back time (see below).
 
 Get Linear ticket details using the Linearis CLI (run `linearis issues usage` for read syntax).
 Extract title and description with jq. Use ticket title and description for context.
