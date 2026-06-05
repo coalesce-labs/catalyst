@@ -12,7 +12,11 @@
 #     --count <int> \
 #     --linear-key <KEY> \
 #     [--start-ns <unix-ns>] \
-#     [--scope <scope-name>]
+#     [--scope <scope-name>] \
+#     [--resource-attr k=v ...]
+#
+# --resource-attr appends into the OTLP resource attributes array. Integer
+# values (^-?[0-9]+$) are emitted as intValue; all others as stringValue.
 #
 # Emits a single counter data point tagged {kind, linear.key}. The metric
 # aggregation temporality is CUMULATIVE and isMonotonic=true, matching the

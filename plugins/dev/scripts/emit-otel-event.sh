@@ -11,8 +11,11 @@
 # Usage:
 #   emit-otel-event.sh --event <name> --outcome <enum> --session-id <id>
 #                      [--reason <text>] [--linear-key <key>] [--attr k=v ...]
+#                      [--resource-attr k=v ...]
 #
 # --outcome must be one of: success, fail, timeout, abandoned.
+# --resource-attr appends into the OTLP resource attributes array. Integer
+# values (^-?[0-9]+$) are emitted as intValue; all others as stringValue.
 #
 # Transport: OTLP/HTTP (port 4318) to OTEL_EXPORTER_OTLP_ENDPOINT. When that
 # env var is unset or the POST fails, we exit 0 silently — the caller is a

@@ -444,6 +444,12 @@ BODY_17=$(cat "$SCRATCH/body17" 2>/dev/null || echo "{}")
 BOGUS_CNT="$(echo "$BODY_17" | jq -r '[.resourceLogs[0].resource.attributes[]? | select(.key=="bogus")] | length')"
 assert_eq "0" "$BOGUS_CNT" "malformed --resource-attr: bogus key not present"
 
+# ─── Test 18: --help output includes --resource-attr ────────────────────────
+echo ""
+echo "--- Test 18: --help output documents --resource-attr ---"
+HELP_OUT=$("$EMIT_SCRIPT" --help 2>&1 || true)
+assert_contains "$HELP_OUT" "--resource-attr" "--help output includes --resource-attr"
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────"
