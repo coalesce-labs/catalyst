@@ -30,6 +30,17 @@ set -uo pipefail
 
 die_silent() { exit 0; }  # explicit shorthand for "fail silently"
 
+# Append one k=v into a JSON attr array on stdin, choosing intValue for
+# integer-looking values (matches otel-forward otlp.ts), stringValue otherwise.
+append_attr_json() {  # args: <key> <val>; reads array on stdin, writes on stdout
+  local k="$1" v="$2"
+  if [[ "$v" =~ ^-?[0-9]+$ ]]; then
+    jq -c --arg k "$k" --argjson n "$v" '. + [{key:$k,value:{intValue:$n}}]'
+  else
+    jq -c --arg k "$k" --arg v "$v" '. + [{key:$k,value:{stringValue:$v}}]'
+  fi
+}
+
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
 METRIC_NAME="${1:-}"
@@ -42,15 +53,17 @@ LINEAR_KEY=""
 START_NS=""
 SCOPE="catalyst.session"
 PHASE=""
+RES_EXTRA_ATTRS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --kind)       KIND="$2";       shift 2 ;;
-    --count)      COUNT="$2";      shift 2 ;;
-    --linear-key) LINEAR_KEY="$2"; shift 2 ;;
-    --start-ns)   START_NS="$2";   shift 2 ;;
-    --scope)      SCOPE="$2";      shift 2 ;;
-    --phase)      PHASE="$2";      shift 2 ;;
+    --kind)          KIND="$2";              shift 2 ;;
+    --count)         COUNT="$2";             shift 2 ;;
+    --linear-key)    LINEAR_KEY="$2";        shift 2 ;;
+    --start-ns)      START_NS="$2";          shift 2 ;;
+    --scope)         SCOPE="$2";             shift 2 ;;
+    --phase)         PHASE="$2";             shift 2 ;;
+    --resource-attr) RES_EXTRA_ATTRS+=("$2"); shift 2 ;;
     *) die_silent ;;  # unknown flag — silent noop, we're on the session-end hot path
   esac
 done
@@ -83,28 +96,35 @@ NOW_NS="$(date -u +%s)000000000"
 
 SERVICE_NAME="${OTEL_SERVICE_NAME:-claude-code}"
 
+# Build resource attributes via step-append (preserves today's exact order).
+RES_ATTRS_JSON=$(jq -nc --arg svc "$SERVICE_NAME" '[{key:"service.name",value:{stringValue:$svc}}]')
+if [[ -n "$LINEAR_KEY" ]]; then
+  RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" \
+    | jq -c --arg k "$LINEAR_KEY" '. + [{key:"linear.key",value:{stringValue:$k}}]')
+fi
+for kv in "${RES_EXTRA_ATTRS[@]:-}"; do
+  [[ -n "$kv" ]] || continue
+  key="${kv%%=*}"; val="${kv#*=}"
+  [[ -n "$key" && "$key" != "$kv" ]] || continue
+  RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" | append_attr_json "$key" "$val")
+done
+
 # Emit the OTLP/HTTP payload. Uses `jq -n` with --arg so caller-supplied
 # values can never break the JSON structure.
 PAYLOAD=$(jq -nc \
-  --arg metric     "$METRIC_NAME" \
-  --arg scope      "$SCOPE" \
-  --arg service    "$SERVICE_NAME" \
-  --arg kind       "$KIND" \
-  --arg linear_key "$LINEAR_KEY" \
-  --arg count      "$COUNT" \
-  --arg start_ns   "$START_NS" \
-  --arg now_ns     "$NOW_NS" \
-  --arg phase      "$PHASE" \
+  --arg metric       "$METRIC_NAME" \
+  --arg scope        "$SCOPE" \
+  --argjson res_attrs "$RES_ATTRS_JSON" \
+  --arg kind         "$KIND" \
+  --arg count        "$COUNT" \
+  --arg start_ns     "$START_NS" \
+  --arg now_ns       "$NOW_NS" \
+  --arg phase        "$PHASE" \
   '{
     resourceLogs: null,
     resourceMetrics: [{
       resource: {
-        attributes: [
-          {key: "service.name", value: {stringValue: $service}},
-          (if $linear_key == "" then empty else
-            {key: "linear.key", value: {stringValue: $linear_key}}
-          end)
-        ]
+        attributes: $res_attrs
       },
       scopeMetrics: [{
         scope: {name: $scope},
