@@ -106,29 +106,55 @@ let _eventLogCursor = 0;
 // half-written line at read time) is parsed exactly once, never truncated.
 let _eventLogLeftover = "";
 
-// readLinearBotUserId — read catalyst.monitor.linear.botUserId from Layer 1
-// config (.catalyst/config.json). Returns "" when absent/unreadable so callers
-// can treat it as "no filter". Never throws. CTL-749.
-function readLinearBotUserId(configPath) {
-  if (!configPath) return "";
-  try {
-    const parsed = JSON.parse(readFileSync(configPath, "utf8"));
-    const uid = parsed?.catalyst?.monitor?.linear?.botUserId;
-    return typeof uid === "string" && uid.length > 0 ? uid : "";
-  } catch {
-    return "";
+// readLinearBotUserIds — collect all known Linear bot user UUIDs from both
+// config layers so the self-echo guard covers every app-actor identity:
+//   1. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+//   2. NEW:  ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+//   3. OLD:  .catalyst/config.json           catalyst.monitor.linear.botUserId  (Layer-1)
+// Returns a Set<string>. Empty set = no filter (fail-open). Never throws. CTL-749.
+export function readLinearBotUserIds(layer1Path, layer2Path) {
+  const ids = new Set();
+  function addFromPath(path, extractor) {
+    if (!path) return;
+    try {
+      const parsed = JSON.parse(readFileSync(path, "utf8"));
+      extractor(parsed, ids);
+    } catch { /* ignore unreadable / malformed files */ }
   }
+  // NEW global path: both worker and orchestrator bot identities (Layer 2).
+  addFromPath(layer2Path, (p, s) => {
+    const bot = p?.catalyst?.linear?.bot;
+    if (typeof bot?.worker?.botUserId === "string" && bot.worker.botUserId.length > 0)
+      s.add(bot.worker.botUserId);
+    if (typeof bot?.orchestrator?.botUserId === "string" && bot.orchestrator.botUserId.length > 0)
+      s.add(bot.orchestrator.botUserId);
+  });
+  // OLD Layer-1 path: catalyst.monitor.linear.botUserId (back-compat). CTL-749.
+  addFromPath(layer1Path, (p, s) => {
+    const uid = p?.catalyst?.monitor?.linear?.botUserId;
+    if (typeof uid === "string" && uid.length > 0) s.add(uid);
+  });
+  return ids;
+}
+
+// _isBotId — returns true when actorId is in the bot-ids set or (for backward
+// compat with tests that pass a plain string) equals the string directly.
+// Centralises the "is this the bot?" check used in the three self-echo guards.
+export function _isBotId(botUserId, actorId) {
+  if (!botUserId || !actorId) return false;
+  if (botUserId instanceof Set) return botUserId.has(actorId);
+  return botUserId === actorId;
 }
 
 // createCommentInboxWriter — factory for a per-daemon onComment subscriber.
 // Appends a JSONL entry to ORCH_DIR/workers/<ticket>/inbox.jsonl when the
 // ticket is in-flight (workers/ dir exists). Filters bot self-echo via
-// botUserId. Exported for testing. CTL-749.
+// botUserId (string or Set<string>). Exported for testing. CTL-749.
 export function createCommentInboxWriter(orchDir, botUserId) {
   return function writeCommentToInbox(parsed) {
     const ticket = parsed.ticket ?? parsed.identifier ?? null;
     if (!ticket) return;
-    if (botUserId && parsed.authorId === botUserId) return;
+    if (_isBotId(botUserId, parsed.authorId)) return;
     const workerDir = join(orchDir, "workers", ticket);
     if (!existsSync(workerDir)) return;
     const entry = JSON.stringify({
@@ -152,7 +178,7 @@ export function createUpdateInboxWriter(orchDir, botUserId) {
     if (!parsed.descriptionChanged) return;
     const ticket = parsed.ticket ?? parsed.identifier ?? null;
     if (!ticket) return;
-    if (botUserId && parsed.actorId === botUserId) return;
+    if (_isBotId(botUserId, parsed.actorId)) return;
     const workerDir = join(orchDir, "workers", ticket);
     if (!existsSync(workerDir)) return;
     const entry = JSON.stringify({
@@ -196,8 +222,8 @@ export async function handleCommentWake(
   // CTL-756: self-echo guard — never re-dispatch on the bot's own comment
   // (e.g. the parking-question comment the parked worker just posted as the
   // Catalyst app actor). Fail-open when botUserId is unset. Mirrors the inbox
-  // writers' guard (daemon.mjs:124 / :148).
-  if (botUserId && parsed.authorId === botUserId) return;
+  // writers' guard. botUserId accepts a string or Set<string>.
+  if (_isBotId(botUserId, parsed.authorId)) return;
 
   const workerDir = join(orchDir, "workers", ticket);
   let signalFiles;
@@ -339,19 +365,21 @@ export function startDaemon({
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
-    // CTL-749: resolve the bot user ID from .catalyst/config.json so the inbox
-    // writers can filter out self-echo comments (the bot posting mirror comments).
-    const linearBotUserId = readLinearBotUserId(configPath);
-    const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserId);
+    // CTL-749: resolve bot user IDs from both config layers (Layer-1 old path +
+    // Layer-2 new global path) so inbox writers and the comment-wake guard
+    // suppress self-echo from BOTH the worker app-actor AND the orchestrator
+    // app-actor. Returns a Set<string> — empty = no filter (fail-open).
+    const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
+    const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     monitorFn({
       orchDir,
       cache,
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserId }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
       },
-      onUpdate: createUpdateInboxWriter(orchDir, linearBotUserId), // CTL-749
+      onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
     }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring

@@ -323,7 +323,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const botPayload = {
       action: "update",
@@ -337,11 +337,29 @@ describe("createLinearWebhookHandler", () => {
     expect(eventLog.appends.length).toBe(0);
   });
 
-  it("non-bot actor writes normally even when botUserId is configured", async () => {
+  it("suppresses issue event from orchestrator bot (second id in Set)", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["worker-uuid", "orch-uuid"]),
+    });
+    const orchPayload = {
+      action: "update",
+      type: "Issue",
+      actor: { id: "orch-uuid", name: "Catalyst Orchestrator" },
+      data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
+      updatedFrom: { stateId: "old" },
+    };
+    const res = await handler.handle(makeReq(orchPayload));
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(0);
+  });
+
+  it("non-bot actor writes normally even when botUserIds is configured", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const humanPayload = {
       action: "update",
@@ -358,7 +376,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const commentPayload = {
       action: "create",
@@ -483,7 +501,7 @@ describe("buildLinearEventLogEnvelope — comment fields (CTL-681)", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog: eventLog2,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const botComment = {
       action: "create",

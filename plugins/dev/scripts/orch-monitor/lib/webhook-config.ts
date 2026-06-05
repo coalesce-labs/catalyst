@@ -34,12 +34,15 @@ export interface WebhookCliConfig {
    */
   linearSmeeChannel: string;
   /**
-   * Linear user UUID for the catalyst bot. Issue events where the actor matches
-   * this ID are suppressed before reaching the event log (loop prevention). CTL-263.
-   * Read from `catalyst.monitor.linear.botUserId` in Layer 1 (project config).
-   * Empty string when not configured — no suppression.
+   * Linear bot user UUIDs for loop prevention. Suppresses issue events where the
+   * actor matches any ID in the set before they reach the event log. CTL-263.
+   * Collected from:
+   *   1. NEW: `~/.config/catalyst/config.json` catalyst.linear.bot.worker.botUserId
+   *   2. NEW: `~/.config/catalyst/config.json` catalyst.linear.bot.orchestrator.botUserId
+   *   3. OLD: `.catalyst/config.json`           catalyst.monitor.linear.botUserId
+   * Empty set when not configured — no suppression.
    */
-  linearBotUserId: string;
+  linearBotUserIds: ReadonlySet<string>;
   /**
    * Optional team→repo mapping read from `catalyst.monitor.linear.teams[]` in
    * Layer 1 (project config). Each entry is `{ key, vcsRepo }` where `key` is
@@ -76,7 +79,7 @@ interface FileExtract {
   /** smee.io channel URL for Linear, from Layer 2 only (per-machine). CTL-242. */
   linearSmeeChannel: string | null;
   /** Linear bot user UUID for loop prevention, from Layer 1 (project). CTL-263. */
-  linearBotUserId: string | null;
+  linearBotUserId: string | null; // single string; assembled into a Set in loadWebhookConfig
   /** Linear team→repo map from Layer 1 (project). CTL-362. */
   linearTeams: Array<{ key: string; vcsRepo: string }>;
 }
@@ -313,39 +316,62 @@ function readGithubSection(filePath: string): FileExtract | null {
 }
 
 /**
- * Load the Linear app-actor credentials from the project-specific Layer-2
- * config file (`~/.config/catalyst/config-{projectKey}.json`). Returns null
- * when the file is absent, the project key is missing, or the required fields
- * `clientId` / `clientSecret` are not present. The `accessToken` field is
- * intentionally not surfaced — callers should mint fresh tokens via
- * `client_credentials` grant using `clientId` / `clientSecret`. CTL-550.
+ * Load the Linear app-actor (worker) credentials. Reads from two locations with
+ * the NEW global path taking precedence over the OLD per-team path:
+ *
+ *   NEW (global):   `~/.config/catalyst/config.json`
+ *                   catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,botUserId}
+ *   OLD (per-team): `~/.config/catalyst/config-{projectKey}.json`
+ *                   catalyst.linear.agent.{clientId,clientSecret,webhookSecret,botUserId}
+ *
+ * Returns null when neither location has the required `clientId` / `clientSecret`.
+ * The `accessToken` field is intentionally not surfaced — callers mint fresh tokens
+ * via `client_credentials` grant. CTL-550.
  */
 export function loadLinearAgentConfig(
   homeConfigDir: string,
   projectKey: string | null,
 ): LinearAgentConfig | null {
-  if (projectKey === null || projectKey.length === 0) return null;
-  const configPath = join(homeConfigDir, `config-${projectKey}.json`);
-  let parsed: unknown;
+  // Helper: extract agent cred fields from a parsed config object under the given
+  // path (either catalyst.linear.bot.worker or catalyst.linear.agent).
+  function extractCreds(
+    parsed: unknown,
+    path: string[],
+  ): LinearAgentConfig | null {
+    let cur: unknown = parsed;
+    for (const key of path) {
+      if (!isRecord(cur)) return null;
+      cur = (cur as Record<string, unknown>)[key];
+    }
+    if (!isRecord(cur)) return null;
+    const clientId = typeof cur.clientId === "string" ? cur.clientId : "";
+    const clientSecret = typeof cur.clientSecret === "string" ? cur.clientSecret : "";
+    if (clientId.length === 0 || clientSecret.length === 0) return null;
+    const webhookSecret = typeof cur.webhookSecret === "string" ? cur.webhookSecret : "";
+    const botUserId =
+      typeof cur.botUserId === "string" && cur.botUserId.length > 0
+        ? cur.botUserId
+        : undefined;
+    return { clientId, clientSecret, webhookSecret, ...(botUserId !== undefined ? { botUserId } : {}) };
+  }
+
+  // 1. NEW: try global config.json → catalyst.linear.bot.worker
+  const globalConfigPath = join(homeConfigDir, "config.json");
   try {
-    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+    const globalParsed = JSON.parse(readFileSync(globalConfigPath, "utf8"));
+    const result = extractCreds(globalParsed, ["catalyst", "linear", "bot", "worker"]);
+    if (result !== null) return result;
+  } catch { /* absent / malformed — fall through */ }
+
+  // 2. OLD: try per-team config-{projectKey}.json → catalyst.linear.agent
+  if (projectKey === null || projectKey.length === 0) return null;
+  const perTeamConfigPath = join(homeConfigDir, `config-${projectKey}.json`);
+  try {
+    const perTeamParsed = JSON.parse(readFileSync(perTeamConfigPath, "utf8"));
+    return extractCreds(perTeamParsed, ["catalyst", "linear", "agent"]);
   } catch {
     return null;
   }
-  if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return null;
-  const linear = parsed.catalyst.linear;
-  if (!isRecord(linear)) return null;
-  const agent = linear.agent;
-  if (!isRecord(agent)) return null;
-  const clientId = typeof agent.clientId === "string" ? agent.clientId : "";
-  const clientSecret = typeof agent.clientSecret === "string" ? agent.clientSecret : "";
-  if (clientId.length === 0 || clientSecret.length === 0) return null;
-  const webhookSecret = typeof agent.webhookSecret === "string" ? agent.webhookSecret : "";
-  const botUserId =
-    typeof agent.botUserId === "string" && agent.botUserId.length > 0
-      ? agent.botUserId
-      : undefined;
-  return { clientId, clientSecret, webhookSecret, ...(botUserId !== undefined ? { botUserId } : {}) };
 }
 
 /**
@@ -435,8 +461,30 @@ export function loadWebhookConfig(
       ? linearSmeeChannelOverride
       : (fileLinearSmeeChannel ?? "");
 
-  // Linear bot user UUID for loop prevention. Layer 1 only (project/team setting). CTL-263.
-  const linearBotUserId = projectExtract?.linearBotUserId ?? "";
+  // Collect all known Linear bot user UUIDs for loop prevention. CTL-263.
+  // NEW: Layer-2 global config.json carries worker + orchestrator botUserIds.
+  // OLD: Layer-1 project config carries catalyst.monitor.linear.botUserId (back-compat).
+  const linearBotUserIds = new Set<string>();
+  try {
+    const globalParsed = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8")) as unknown;
+    if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
+      const bot = (globalParsed.catalyst as Record<string, unknown>).linear;
+      if (isRecord(bot) && isRecord((bot as Record<string, unknown>).bot)) {
+        const botSection = (bot as Record<string, unknown>).bot as Record<string, unknown>;
+        if (isRecord(botSection.worker) && typeof (botSection.worker as Record<string, unknown>).botUserId === "string") {
+          const id = (botSection.worker as Record<string, unknown>).botUserId as string;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+        if (isRecord(botSection.orchestrator) && typeof (botSection.orchestrator as Record<string, unknown>).botUserId === "string") {
+          const id = (botSection.orchestrator as Record<string, unknown>).botUserId as string;
+          if (id.length > 0) linearBotUserIds.add(id);
+        }
+      }
+    }
+  } catch { /* absent / malformed — continue to Layer-1 fallback */ }
+  // OLD Layer-1 back-compat: catalyst.monitor.linear.botUserId.
+  const layer1BotUserId = projectExtract?.linearBotUserId ?? "";
+  if (layer1BotUserId.length > 0) linearBotUserIds.add(layer1BotUserId);
 
   // Linear team→repo map. Layer 1 only — team-shared, committed. CTL-362.
   const linearTeams = projectExtract?.linearTeams ?? [];
@@ -456,7 +504,7 @@ export function loadWebhookConfig(
       watchRepos,
       linearSecrets,
       linearSmeeChannel,
-      linearBotUserId,
+      linearBotUserIds,
       linearTeams,
       linearAgentConfig,
     };
@@ -469,7 +517,7 @@ export function loadWebhookConfig(
     watchRepos,
     linearSecrets,
     linearSmeeChannel,
-    linearBotUserId,
+    linearBotUserIds,
     linearTeams,
     linearAgentConfig,
   };

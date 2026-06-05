@@ -207,8 +207,8 @@ export interface CreateServerOptions {
     linearSecrets: Array<{ key: string; secret: string }>;
     /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
     smeeChannel?: string;
-    /** Linear bot user UUID for loop prevention. CTL-263. */
-    botUserId?: string;
+    /** Linear bot user UUIDs for loop prevention (set of worker + orchestrator app-actor UUIDs). CTL-263. */
+    botUserIds?: ReadonlySet<string>;
     /** Linear team→repo map (CTL-362). When set, the handler stamps
      * `attributes["vcs.repository.name"]` on issue/comment/cycle envelopes for
      * teams that appear here so the HUD's REPO column populates for Linear
@@ -707,7 +707,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     });
     linearWebhookHandler = createLinearWebhookHandler({
       linearSecrets: linearWebhookConfig?.linearSecrets ?? [],
-      botUserId: linearWebhookConfig?.botUserId,
+      botUserIds: linearWebhookConfig?.botUserIds,
       linearTeams: linearWebhookConfig?.linearTeams ?? [],
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
@@ -2064,7 +2064,7 @@ if (import.meta.main) {
       ? {
           linearSecrets: fullWebhookConfig.linearSecrets,
           smeeChannel: fullWebhookConfig.linearSmeeChannel,
-          botUserId: fullWebhookConfig.linearBotUserId || undefined,
+          botUserIds: fullWebhookConfig.linearBotUserIds.size > 0 ? fullWebhookConfig.linearBotUserIds : undefined,
           linearTeams: fullWebhookConfig.linearTeams,
         }
       : null;

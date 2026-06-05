@@ -302,15 +302,17 @@ if [[ -n $CONFIG_PATH ]]; then
 		fi
 	fi
 
-	# CTL-749: botUserId is the Linear app-actor user UUID — read from the project's
-	# Layer-1 config ($CONFIG_PATH), the SAME place the execution-core daemon
-	# (daemon.mjs readLinearBotUserId) and orch-monitor's webhook handler read it.
-	# Without it, execution-core comms can't filter the agent's own mirror
-	# comments/updates and treats them as human input (false "human replied" signal).
+	# CTL-749: bot user IDs — daemon now reads a SET from two sources:
+	#   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.{worker,orchestrator}.botUserId
+	#   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (Layer-1, back-compat)
+	_GLOBAL_CFG="$HOME/.config/catalyst/config.json"
+	BOT_WORKER_ID=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "$_GLOBAL_CFG" 2>/dev/null)
+	BOT_ORCH_ID=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "$_GLOBAL_CFG" 2>/dev/null)
 	BOT_USER_ID=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$CONFIG_PATH" 2>/dev/null)
-	if [[ -z $BOT_USER_ID ]]; then
-		warnings+=("Missing catalyst.monitor.linear.botUserId in $CONFIG_PATH — execution-core comms won't filter bot self-echo (the agent's own Linear comments look like human replies)")
-		warnings+=("  Set it: query the Catalyst app-actor viewer.id (app token from ~/.config/catalyst/config-<projectKey>.json catalyst.linear.agent.accessToken) and write catalyst.monitor.linear.botUserId; see /catalyst-dev:setup-catalyst")
+	if [[ -z $BOT_WORKER_ID && -z $BOT_ORCH_ID && -z $BOT_USER_ID ]]; then
+		warnings+=("No Linear bot user IDs configured — execution-core comms won't filter bot self-echo (the agent's own Linear comments look like human replies)")
+		warnings+=("  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json")
+		warnings+=("  OLD fallback: set catalyst.monitor.linear.botUserId in $CONFIG_PATH; see /catalyst-dev:setup-catalyst")
 	fi
 
 	# Warn if config is still only in .claude/ (deprecated location)

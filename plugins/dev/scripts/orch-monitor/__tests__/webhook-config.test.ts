@@ -71,7 +71,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -102,7 +102,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -141,7 +141,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -174,7 +174,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -201,7 +201,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -229,7 +229,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -305,7 +305,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -341,7 +341,7 @@ describe("loadWebhookConfig", () => {
       watchRepos: [],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -436,7 +436,7 @@ describe("loadWebhookConfig watchRepos (CTL-216)", () => {
       watchRepos: ["a/b"],
       linearSecrets: [],
       linearSmeeChannel: "",
-      linearBotUserId: "",
+      linearBotUserIds: new Set(),
       linearTeams: [],
       linearAgentConfig: null,
     });
@@ -822,8 +822,8 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     expect(cfg!.linearSmeeChannel).toBe("https://smee.io/linear-only");
   });
 
-  // CTL-263: linearBotUserId
-  it("reads catalyst.monitor.linear.botUserId from Layer 1 into linearBotUserId", () => {
+  // CTL-263: linearBotUserIds (Set)
+  it("reads catalyst.monitor.linear.botUserId from Layer 1 into linearBotUserIds", () => {
     writeHome({
       catalyst: {
         monitor: {
@@ -850,10 +850,11 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg).not.toBeNull();
-    expect(cfg!.linearBotUserId).toBe("bot-linear-uuid-abc");
+    expect(cfg!.linearBotUserIds.has("bot-linear-uuid-abc")).toBe(true);
+    expect(cfg!.linearBotUserIds.size).toBe(1);
   });
 
-  it("linearBotUserId is empty string when not configured", () => {
+  it("linearBotUserIds is empty set when not configured", () => {
     writeHome({
       catalyst: {
         monitor: {
@@ -877,7 +878,107 @@ describe("loadWebhookConfig — linearSmeeChannel (CTL-242)", () => {
     const cfg = loadWebhookConfig(homeDir, projectConfigPath);
 
     expect(cfg).not.toBeNull();
-    expect(cfg!.linearBotUserId).toBe("");
+    expect(cfg!.linearBotUserIds.size).toBe(0);
+  });
+
+  it("reads worker botUserId from Layer-2 global config.json (new path)", () => {
+    // Write worker botUserId to the new global path in homeDir/config.json
+    writeHome({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "worker-bot-uuid" },
+          },
+        },
+        monitor: {
+          linear: {
+            workspace: { webhookId: "linear-webhook-123" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearBotUserIds.has("worker-bot-uuid")).toBe(true);
+    expect(cfg!.linearBotUserIds.size).toBe(1);
+  });
+
+  it("reads orchestrator botUserId from Layer-2 global config.json (new path)", () => {
+    writeHome({
+      catalyst: {
+        linear: {
+          bot: {
+            orchestrator: { botUserId: "orch-bot-uuid" },
+          },
+        },
+        monitor: {
+          linear: {
+            workspace: { webhookId: "linear-webhook-123" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: { webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET" },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearBotUserIds.has("orch-bot-uuid")).toBe(true);
+    expect(cfg!.linearBotUserIds.size).toBe(1);
+  });
+
+  it("collects worker + orchestrator + Layer-1 botUserIds into a unified set", () => {
+    writeHome({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "worker-uuid" },
+            orchestrator: { botUserId: "orch-uuid" },
+          },
+        },
+        monitor: {
+          linear: {
+            workspace: { webhookId: "linear-webhook-123" },
+          },
+        },
+      },
+    });
+    writeProject({
+      catalyst: {
+        monitor: {
+          linear: {
+            webhookSecretEnv: "CATALYST_LINEAR_WEBHOOK_SECRET",
+            botUserId: "legacy-uuid",
+          },
+        },
+      },
+    });
+    process.env.CATALYST_LINEAR_WEBHOOK_SECRET = "linear-secret";
+
+    const cfg = loadWebhookConfig(homeDir, projectConfigPath);
+
+    expect(cfg).not.toBeNull();
+    expect(cfg!.linearBotUserIds.has("worker-uuid")).toBe(true);
+    expect(cfg!.linearBotUserIds.has("orch-uuid")).toBe(true);
+    expect(cfg!.linearBotUserIds.has("legacy-uuid")).toBe(true);
+    expect(cfg!.linearBotUserIds.size).toBe(3);
   });
 });
 
@@ -1213,10 +1314,11 @@ describe("loadLinearAgentConfig", () => {
     expect(loadLinearAgentConfig(homeDir, "nonexistent")).toBeNull();
   });
 
-  it("returns null when catalyst.linear.agent is absent in the file", () => {
+  it("returns null when neither global bot.worker nor per-team agent section present", () => {
     writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
       catalyst: { monitor: {} },
     }));
+    // no config.json at all in homeDir either
     expect(loadLinearAgentConfig(homeDir, "testproj")).toBeNull();
   });
 
@@ -1258,6 +1360,48 @@ describe("loadLinearAgentConfig", () => {
     const result = loadLinearAgentConfig(homeDir, "testproj");
     expect(result).not.toBeNull();
     expect((result as unknown as Record<string, unknown>).accessToken).toBeUndefined();
+  });
+
+  // New global path tests
+  it("reads from global config.json catalyst.linear.bot.worker (new path) when present", () => {
+    writeFileSync(join(homeDir, "config.json"), JSON.stringify({
+      catalyst: { linear: { bot: { worker: { clientId: "gid", clientSecret: "gsec", webhookSecret: "gwhs" } } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result).not.toBeNull();
+    expect(result!.clientId).toBe("gid");
+    expect(result!.clientSecret).toBe("gsec");
+    expect(result!.webhookSecret).toBe("gwhs");
+  });
+
+  it("new global path wins over old per-team path when both present", () => {
+    writeFileSync(join(homeDir, "config.json"), JSON.stringify({
+      catalyst: { linear: { bot: { worker: { clientId: "global-id", clientSecret: "global-sec" } } } },
+    }));
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "per-team-id", clientSecret: "per-team-sec" } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result!.clientId).toBe("global-id"); // new global wins
+  });
+
+  it("falls back to per-team path when global config.json has no bot.worker section", () => {
+    writeFileSync(join(homeDir, "config.json"), JSON.stringify({
+      catalyst: { monitor: {} }, // no catalyst.linear.bot.worker
+    }));
+    writeFileSync(join(homeDir, "config-testproj.json"), JSON.stringify({
+      catalyst: { linear: { agent: { clientId: "fallback-id", clientSecret: "fallback-sec" } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result!.clientId).toBe("fallback-id"); // old path used as fallback
+  });
+
+  it("reads botUserId from global bot.worker path", () => {
+    writeFileSync(join(homeDir, "config.json"), JSON.stringify({
+      catalyst: { linear: { bot: { worker: { clientId: "gid", clientSecret: "gsec", botUserId: "global-bot-id" } } } },
+    }));
+    const result = loadLinearAgentConfig(homeDir, "testproj");
+    expect(result!.botUserId).toBe("global-bot-id");
   });
 });
 
