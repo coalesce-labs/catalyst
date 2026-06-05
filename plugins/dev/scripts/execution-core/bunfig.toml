@@ -1,0 +1,4 @@
+[test]
+# CTL test-leak guard: load the hermetic-Linear preload before any *.test.mjs so
+# no test can reach real Linear (api.linear.app) or `claude`. See test-setup.mjs.
+preload = ["./test-setup.mjs"]

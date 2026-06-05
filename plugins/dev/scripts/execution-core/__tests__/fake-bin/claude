@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Fake `claude` for hermetic execution-core tests — intercepts `claude agents
+# --json` (liveBackgroundCount / countBackgroundAgents) so tests never shell the
+# real CLI. Records the invocation; returns an empty agents list. No network.
+printf 'claude %s\n' "$*" >>"${CATALYST_FAKE_BIN_LOG:-/dev/null}" 2>/dev/null
+case "$*" in
+  *agents*) echo '[]' ;;
+  *) echo '' ;;
+esac
+exit 0
