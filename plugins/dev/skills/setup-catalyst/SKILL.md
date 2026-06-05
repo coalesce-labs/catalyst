@@ -146,6 +146,31 @@ read; a missing per-project token is a silent skip. Separately, Linear's
 API surface and **cannot** be reconciled — it must be turned OFF by hand, or it
 races the daemon and re-introduces the CTL-758 backward state-write.
 
+**Execution-core daemon env / proxy audit (machine-local, opt-in).**
+`catalyst-execution-core start` sources a machine-local env file —
+`~/.config/catalyst/execution-core.env` (override with `CATALYST_EXECUTION_CORE_ENV`)
+— right before it launches the daemon, so every var it exports is inherited by the
+daemon and every phase-agent bg job. An **absent file is a complete no-op** and is
+the common case; this is **not** auto-fixable because the values (proxy port, MITM
+CA path) are machine-specific. The committed template
+`plugins/dev/templates/execution-core.env.example` documents every option. The two
+uses are (1) routing the daemon's Linear/gh fetch traffic through a local mitmproxy
+audit and (2) widening the Linear state-cache TTL (`LINEAR_STATE_CACHE_TTL_MS`).
+
+The risk this guards against: a proxy that is configured but quietly broken silently
+kills the daemon's Linear connectivity on a fresh or changed machine, with nothing
+obvious to debug. So when the env file sets a proxy, `check-setup.sh` verifies it and
+warns **loudly + actionably** on each failure mode — (a) the proxy port is not
+listening, (b) `NODE_EXTRA_CA_CERTS` points at a missing file, or (c) `NODE_USE_ENV_PROXY=1`
+is missing. The `NODE_USE_ENV_PROXY` flag matters because Node 20+/24+ native fetch
+(undici) **ignores** `HTTPS_PROXY`/`HTTP_PROXY` without it — so the daemon's calls
+would bypass the audit entirely while looking perfectly healthy. `check-project-setup.sh`
+(the hot-path gate) carries only that one silent-bypass warning; full port/CA
+diagnostics live in `check-setup.sh`. Treat any of these as **needs-user-input** — relay
+the specific warning and fix, never write a machine path on the user's behalf, and
+remind them to `catalyst-execution-core restart` after editing (the daemon re-sources
+the file only on start/restart).
+
 For issues needing user input, explain what's needed and how to provide it:
 
 | Issue | What to tell the user |
@@ -156,6 +181,8 @@ For issues needing user input, explain what's needed and how to provide it:
 | Linear "magic words" auto-move ON | Tell the user to turn it OFF in Settings → Team → Workflow → Git — it races the execution-core daemon and causes backward state writes (CTL-758). No API surface; must be toggled by hand. |
 | Linear `review` git automation set | Run `setup-execution-core-states.sh` to remove it; the pipeline owns the Validate/review state, not Linear. |
 | Personal git automations override team ones | Remind the user that Linear lets each member set *personal* git automations that shadow the team defaults — check Settings → Account → Git if drift persists after the team reconcile. |
+| Proxy audit / daemon env wanted | Copy `plugins/dev/templates/execution-core.env.example` to `~/.config/catalyst/execution-core.env`, uncomment the vars you need (proxy + CA + `NODE_USE_ENV_PROXY=1`, and/or `LINEAR_STATE_CACHE_TTL_MS`), then `catalyst-execution-core restart`. **Needs user input, not auto-fix** — the proxy port and CA path are machine-specific. Never write machine paths for the user. |
+| Daemon env proxy configured but broken | The check reports the exact failure: port not listening (start `mitmdump … --listen-port <port>` or unset the proxy), `NODE_EXTRA_CA_CERTS` missing (fix the path / re-run mitmproxy to regenerate its CA), or `NODE_USE_ENV_PROXY=1` missing (add it — without it Node fetch silently bypasses the audit). Relay the specific warning + fix; restart the daemon after. |
 
 **Observability (OTel) is optional.** If Docker or OTel containers aren't found, note it as
 informational — don't treat it as an issue. Point the user to

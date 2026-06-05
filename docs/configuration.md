@@ -307,6 +307,77 @@ active.
 
 ---
 
+## Execution-core Daemon Env (`~/.config/catalyst/execution-core.env`)
+
+**Template:** [`plugins/dev/templates/execution-core.env.example`](../plugins/dev/templates/execution-core.env.example)
+
+### Purpose
+
+A **machine-local, never-committed** shell env file that the execution-core daemon sources on
+start. `catalyst-execution-core start` runs `[[ -f "$file" ]] && source "$file"` immediately before
+it launches the daemon, so every variable the file exports is inherited by the daemon process and
+by every phase-agent bg job it dispatches. `restart` re-sources it (it calls `stop` then `start`),
+so edits take effect on the next restart — **not** live.
+
+The path defaults to `~/.config/catalyst/execution-core.env` and can be overridden with the
+`CATALYST_EXECUTION_CORE_ENV` environment variable. This file is **entirely opt-in**: an absent file
+is a complete no-op, which is the common case. Because the values are machine-specific (proxy port,
+local CA path), setup never writes it for you — copy the committed example template and edit it by
+hand.
+
+### Options
+
+| Variable | Purpose |
+|----------|---------|
+| `HTTPS_PROXY` / `HTTP_PROXY` | Route the daemon's outbound Linear/GitHub HTTP(S) traffic through a local proxy (e.g. `http://127.0.0.1:8080`). |
+| `NODE_USE_ENV_PROXY` | Set to `1` to make Node's native `fetch`/undici honor the `*_PROXY` vars. **Required whenever you set a proxy** — see rationale below. |
+| `NODE_EXTRA_CA_CERTS` | Absolute path to a CA cert to trust (e.g. `$HOME/.mitmproxy/mitmproxy-ca-cert.pem`) so a MITM proxy's intercepted TLS validates. |
+| `LINEAR_STATE_CACHE_TTL_MS` | Widen the daemon's in-process Linear workflow-state cache window (milliseconds) to cut per-ticket read volume. Independent of the proxy. |
+
+### Proxy audit (opt-in)
+
+The daemon's Linear/GitHub calls go out over Node's native fetch. To observe or record them, run a
+local [mitmproxy](https://mitmproxy.org/) and point the daemon at it:
+
+```bash
+# 1. Start the proxy (its CA is created on first run at ~/.mitmproxy/mitmproxy-ca-cert.pem)
+mitmdump -s "$HOME/catalyst/mitm_linear_addon.py" --listen-port 8080
+
+# 2. In ~/.config/catalyst/execution-core.env:
+export NODE_USE_ENV_PROXY=1
+export HTTPS_PROXY=http://127.0.0.1:8080
+export HTTP_PROXY=http://127.0.0.1:8080
+export NODE_EXTRA_CA_CERTS=$HOME/.mitmproxy/mitmproxy-ca-cert.pem
+
+# 3. Apply it
+catalyst-execution-core restart
+```
+
+**Why `NODE_USE_ENV_PROXY=1` is required.** Node 20+/24+ native `fetch` (undici) **ignores**
+`HTTPS_PROXY`/`HTTP_PROXY` unless `NODE_USE_ENV_PROXY=1` is also set. Omit it and the daemon's
+Linear calls bypass the proxy entirely while looking perfectly healthy — the audit silently captures
+nothing.
+
+### Health check
+
+A misconfigured proxy silently breaks the daemon's Linear connectivity on a fresh or changed
+machine, which is otherwise hard to debug. `check-setup.sh` (and `/catalyst-dev:setup-catalyst`)
+therefore verify the setup whenever the env file configures a proxy, and warn loudly + actionably on
+each failure mode:
+
+- the proxy host:port is **not listening** → start `mitmdump` or unset the proxy vars;
+- `NODE_EXTRA_CA_CERTS` points at a **missing file** → fix the path or re-run mitmproxy to
+  regenerate its CA;
+- `*_PROXY` is set but `NODE_USE_ENV_PROXY=1` is **missing** → Node fetch will ignore the proxy and
+  calls bypass the audit silently.
+
+When no env file exists (or it sets no proxy) the check is a no-op and reports nothing but an
+informational pointer to the example template. `check-project-setup.sh` (the hot-path workflow gate)
+carries only the highest-impact `NODE_USE_ENV_PROXY` silent-bypass warning; the full port/CA
+diagnostics live in `check-setup.sh`.
+
+---
+
 ## Registry (`~/catalyst/execution-core/registry.json`)
 
 **Schema:** [`docs/schemas/registry.schema.json`](./schemas/registry.schema.json)
