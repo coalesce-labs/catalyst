@@ -16,6 +16,8 @@ import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
 import {
   parsePsLines,
+  splitCommArgs,
+  deriveCommand,
   rankTopN,
   attributeRow,
   sampleProcesses,
@@ -54,7 +56,7 @@ describe("parsePsLines", () => {
       comm: "/bin/node", // short enough to survive the 16-char column clamp
       args: "/usr/local/bin/node server.mjs --port 8080",
     });
-    const [row] = parsePsLines([line]);
+    const [row] = parsePsLines([line], { platform: "darwin" });
     expect(row.pid).toBe(4321);
     expect(row.ppid).toBe(4000);
     expect(row.cpu_pct).toBe(12.5);
@@ -74,10 +76,13 @@ describe("parsePsLines", () => {
       comm: "/Applications/Foo Bar.app/Contents/MacOS/Foo",
       args: '/Applications/Foo Bar.app/Contents/MacOS/Foo --flag "a b c"',
     });
-    const [row] = parsePsLines([line]);
+    const [row] = parsePsLines([line], { platform: "darwin" });
     expect(row.pid).toBe(900);
-    // basename of the 16-char-clamped comm "/Applications/Fo" → "fo".
-    expect(row.command).toBe("fo");
+    // The macOS comm column is clamped to 16 ("/Applications/Fo"). deriveCommand
+    // heals it from argv[0] in args: comm is a prefix of the first args token
+    // "/Applications/Foo", so basename(argv[0]) → "foo" (better than the clamped
+    // "fo"; argv[0] itself stops at the embedded space, but the basename is right).
+    expect(row.command).toBe("foo");
     // args is the full untruncated command line, spaces and quotes intact.
     expect(row.args).toBe('/Applications/Foo Bar.app/Contents/MacOS/Foo --flag "a b c"');
   });
@@ -91,38 +96,82 @@ describe("parsePsLines", () => {
       comm: "/opt/Claude/CLI", // 15 chars, fits the column un-truncated
       args: "/opt/Claude/CLI --serve",
     });
-    const [row] = parsePsLines([line]);
+    const [row] = parsePsLines([line], { platform: "darwin" });
     expect(row.command).toBe("cli");
   });
 
-  test("documents the 16-char comm-column clamp: a long comm path truncates", () => {
-    // macOS clamps the intermediate comm column to 16 chars, so a long
-    // executable path basename can be cut. This is an accepted ps limitation;
-    // the test pins the behavior so it is intentional, not a surprise.
+  test("macOS 16-char comm clamp is HEALED from argv[0] in args (CTL-812 fix)", () => {
+    // macOS clamps the comm column to 16 chars ("/usr/local/bin/node" → the
+    // truncated "/usr/local/bin/n"), which would yield the misleading command
+    // "n". deriveCommand recovers the real command from the full argv[0] in the
+    // args column: comm is a prefix of "/usr/local/bin/node", so basename(argv[0])
+    // → "node". (Pre-fix this asserted "n"; the review flagged the truncation.)
     const line = psRow({
       pid: 33,
       ppid: 1,
       cpu: 0.0,
       rss: 2048,
-      comm: "/usr/local/bin/node", // 19 chars → clamped to "/usr/local/bin/n"
+      comm: "/usr/local/bin/node", // 19 chars → comm column clamped to "/usr/local/bin/n"
       args: "/usr/local/bin/node x.mjs",
     });
-    const [row] = parsePsLines([line]);
-    expect(row.command).toBe("n");
-    // …but the full, untruncated command line is preserved in args (payload).
+    const [row] = parsePsLines([line], { platform: "darwin" });
+    expect(row.command).toBe("node");
+    // …and the full, untruncated command line is preserved in args (payload).
     expect(row.args).toBe("/usr/local/bin/node x.mjs");
+  });
+
+  test("macOS deep-path comm (logd, framework) heals to the real command", () => {
+    // The exact cases the CTL-812 review reproduced against real `ps` output:
+    //   /usr/libexec/logd → comm clamped to "/usr/libexec/log" → would give "log"
+    //   /System/Library/PrivateFrameworks/… → "/System/Library/" → would give "library"
+    // deriveCommand heals both from the full argv[0] in args.
+    const logd = psRow({
+      pid: 343, ppid: 1, cpu: 0.7, rss: 44192,
+      comm: "/usr/libexec/logd", // clamps to "/usr/libexec/log"
+      args: "/usr/libexec/logd",
+    });
+    const framework = psRow({
+      pid: 598, ppid: 1, cpu: 0.0, rss: 15296,
+      comm: "/System/Library/PrivateFrameworks/ModelCatalogRuntime.framework/Versions/A/modelcatalogd",
+      args: "/System/Library/PrivateFrameworks/ModelCatalogRuntime.framework/Versions/A/modelcatalogd",
+    });
+    const [a] = parsePsLines([logd], { platform: "darwin" });
+    const [b] = parsePsLines([framework], { platform: "darwin" });
+    expect(a.command).toBe("logd"); // not the truncated "log"
+    expect(b.command).toBe("modelcatalogd"); // not the truncated "library"
+  });
+
+  test("Linux comm column is natural-width (not 16-padded) — parsed correctly", () => {
+    // CTL-812 review: Linux `ps -o comm=,args=` does NOT fixed-pad comm to 16; it
+    // renders comm at its natural width with a single space before args. The
+    // darwin 16-char slice would split mid-token here. With platform:"linux" the
+    // first whitespace token is comm and the remainder is args.
+    //
+    // A SHORT comm (< 16): the macOS slice would absorb the leading args into
+    // comm; the linux split keeps them separate.
+    const shortComm = "1234 1 3.1 524288 node /usr/bin/node server.mjs --port 8080";
+    const [row] = parsePsLines([shortComm], { platform: "linux" });
+    expect(row.pid).toBe(1234);
+    expect(row.command).toBe("node");
+    expect(row.args).toBe("/usr/bin/node server.mjs --port 8080");
+
+    // A LONG comm (> 16) is NOT truncated on Linux: comm renders in full.
+    const longComm = "55 1 0.0 2048 systemd-resolved /lib/systemd/systemd-resolved";
+    const [row2] = parsePsLines([longComm], { platform: "linux" });
+    expect(row2.command).toBe("systemd-resolved");
+    expect(row2.args).toBe("/lib/systemd/systemd-resolved");
   });
 
   test("login-shell argv[0] (-zsh) does NOT mislead command: comm wins", () => {
     // Real macOS: a login shell's args is `-zsh` but comm is `/bin/zsh`.
     const line = psRow({ pid: 77, ppid: 1, cpu: 0.1, rss: 4096, comm: "/bin/zsh", args: "-zsh" });
-    const [row] = parsePsLines([line]);
+    const [row] = parsePsLines([line], { platform: "darwin" });
     expect(row.command).toBe("zsh");
   });
 
   test("skips blank lines and malformed (non-numeric leading) lines", () => {
     const good = psRow({ pid: 88, ppid: 1, cpu: 0.0, rss: 4096, comm: "/bin/bash", args: "bash" });
-    const rows = parsePsLines(["", "   ", "not a ps line at all", good, "\t"]);
+    const rows = parsePsLines(["", "   ", "not a ps line at all", good, "\t"], { platform: "darwin" });
     expect(rows.length).toBe(1);
     expect(rows[0].pid).toBe(88);
     expect(rows[0].command).toBe("bash");
@@ -130,7 +179,9 @@ describe("parsePsLines", () => {
 
   test("handles a comm-only line (no args column)", () => {
     // No args field: the whole tail is the (sub-16-char) comm.
-    const [row] = parsePsLines([psRow({ pid: 5, ppid: 1, cpu: 0.0, rss: 1024, comm: "bun" })]);
+    const [row] = parsePsLines([psRow({ pid: 5, ppid: 1, cpu: 0.0, rss: 1024, comm: "bun" })], {
+      platform: "darwin",
+    });
     expect(row.pid).toBe(5);
     expect(row.command).toBe("bun");
     expect(row.args).toBe("bun");
@@ -138,6 +189,77 @@ describe("parsePsLines", () => {
 
   test("ignores non-string entries", () => {
     expect(parsePsLines([null, undefined, 123]).length).toBe(0);
+  });
+});
+
+// ─── splitCommArgs (per-platform comm column) ──────────────────────────────────
+
+describe("splitCommArgs", () => {
+  test("darwin: fixed 16-char space-padded comm column, args to EOL", () => {
+    // "node" padded to 16, a space, then args. The 16-slice peels comm cleanly.
+    const tail = "node            /usr/bin/node x.mjs --port 8080";
+    expect(splitCommArgs(tail, "darwin")).toEqual({
+      comm: "node",
+      args: "/usr/bin/node x.mjs --port 8080",
+    });
+  });
+
+  test("darwin: a comm-only tail shorter than the column has empty args", () => {
+    expect(splitCommArgs("bun", "darwin")).toEqual({ comm: "bun", args: "" });
+  });
+
+  test("linux: comm is the first whitespace token (natural width), args is the rest", () => {
+    // No 16-padding: a SHORT comm would absorb args under the darwin slice; the
+    // linux split keeps them separate.
+    expect(splitCommArgs("node /usr/bin/node x.mjs", "linux")).toEqual({
+      comm: "node",
+      args: "/usr/bin/node x.mjs",
+    });
+    // A LONG comm (> 16) is NOT truncated on linux.
+    expect(splitCommArgs("systemd-resolved /lib/systemd/systemd-resolved", "linux")).toEqual({
+      comm: "systemd-resolved",
+      args: "/lib/systemd/systemd-resolved",
+    });
+  });
+
+  test("linux: a comm-only tail (no space) has empty args", () => {
+    expect(splitCommArgs("bun", "linux")).toEqual({ comm: "bun", args: "" });
+  });
+});
+
+// ─── deriveCommand (heal macOS truncation, defer to comm on rewritten argv0) ──
+
+describe("deriveCommand", () => {
+  test("comm is authoritative when it is NOT a truncated prefix of argv[0] (login shell)", () => {
+    // comm "/bin/zsh", argv0 "-zsh" — argv0 was rewritten; comm wins → "zsh".
+    expect(deriveCommand("/bin/zsh", "-zsh")).toBe("zsh");
+  });
+
+  test("heals a truncated comm from the full argv[0] (logd, framework)", () => {
+    // macOS clamps comm to 16; argv[0] in args carries the full path.
+    expect(deriveCommand("/usr/libexec/log", "/usr/libexec/logd")).toBe("logd");
+    expect(
+      deriveCommand(
+        "/System/Library/",
+        "/System/Library/PrivateFrameworks/ModelCatalogRuntime.framework/Versions/A/modelcatalogd",
+      ),
+    ).toBe("modelcatalogd");
+  });
+
+  test("comm wins when it equals argv[0] (no truncation to heal)", () => {
+    expect(deriveCommand("/opt/Claude/CLI", "/opt/Claude/CLI --serve")).toBe("cli");
+  });
+
+  test("comm wins when there is no args column at all", () => {
+    expect(deriveCommand("/bin/bash", "")).toBe("bash");
+  });
+
+  test("lowercases the result", () => {
+    expect(deriveCommand("/bin/ZSH", "-zsh")).toBe("zsh");
+  });
+
+  test("empty comm + empty args → null", () => {
+    expect(deriveCommand("", "")).toBeNull();
   });
 });
 
@@ -247,14 +369,20 @@ describe("sampleProcesses", () => {
     return new Map([[1000, { ticket: "CTL-555", phase: "implement", bg_job_id: "job-9" }]]);
   }
 
-  test("emits one host.process.sampled envelope per top-N row", () => {
+  // sampleProcesses is async (it drains in-flight OTLP POSTs before resolving),
+  // so every call is awaited. platform:"darwin" pins the macOS-shaped psRow
+  // fixtures so the suite is host-independent (it would mis-split on a Linux CI).
+  const DARWIN = { platform: "darwin" };
+
+  test("emits one host.process.sampled envelope per top-N row", async () => {
     const { emit, envelopes } = recordingEmit();
-    const out = sampleProcesses({
+    const out = await sampleProcesses({
       psLines: psSnapshot,
       readWorkerMap: workerMap,
       topN: 3,
       emit,
       now: () => FIXED_NOW,
+      ...DARWIN,
     });
     expect(out.length).toBe(3);
     expect(envelopes.length).toBe(3);
@@ -268,16 +396,16 @@ describe("sampleProcesses", () => {
     }
   });
 
-  test("top-N is by RSS desc: chrome(950k) > claude(900k) > worker-root(800k)", () => {
+  test("top-N is by RSS desc: chrome(950k) > claude(900k) > worker-root(800k)", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 3, emit });
+    await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 3, emit, ...DARWIN });
     const pids = envelopes.map((e) => e.body.payload.pid);
     expect(pids).toEqual([2000, 1200, 1000]);
   });
 
-  test("contract: attributes carry command/cpu/rss; payload carries pid/ppid/args/bg_job_id", () => {
+  test("contract: attributes carry command/cpu/rss; payload carries pid/ppid/args/bg_job_id", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit });
+    await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const claude = envelopes.find((e) => e.body.payload.pid === 1200);
     // dot-form value attributes
     expect(claude.attributes["process.command"]).toBe("claude");
@@ -291,40 +419,41 @@ describe("sampleProcesses", () => {
     expect(claude.body.payload.args).toBe("/opt/claude/claude --bg --resume");
   });
 
-  test("direct attribution: the worker root row gets ticket/phase/bg_job_id", () => {
+  test("direct attribution: the worker root row gets ticket/phase/bg_job_id", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit });
+    await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const root = envelopes.find((e) => e.body.payload.pid === 1000);
     expect(root.attributes["process.ticket"]).toBe("CTL-555");
     expect(root.attributes["process.phase"]).toBe("implement");
     expect(root.body.payload.bg_job_id).toBe("job-9");
   });
 
-  test("via-ancestor attribution: the claude grandchild inherits the worker's ticket", () => {
+  test("via-ancestor attribution: the claude grandchild inherits the worker's ticket", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit });
+    await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const claude = envelopes.find((e) => e.body.payload.pid === 1200);
     expect(claude.attributes["process.ticket"]).toBe("CTL-555");
     expect(claude.attributes["process.phase"]).toBe("implement");
     expect(claude.body.payload.bg_job_id).toBe("job-9");
   });
 
-  test("unattributed process omits ticket/phase attrs and has null bg_job_id", () => {
+  test("unattributed process omits ticket/phase attrs and has null bg_job_id", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit });
+    await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const chrome = envelopes.find((e) => e.body.payload.pid === 2000);
     expect("process.ticket" in chrome.attributes).toBe(false);
     expect("process.phase" in chrome.attributes).toBe(false);
     expect(chrome.body.payload.bg_job_id).toBeNull();
   });
 
-  test("missing workers dir → empty map → every process unattributed", () => {
+  test("missing workers dir → empty map → every process unattributed", async () => {
     const { emit, envelopes } = recordingEmit();
-    sampleProcesses({
+    await sampleProcesses({
       psLines: psSnapshot,
       readWorkerMap: () => new Map(), // simulate no workers dir
       topN: 5,
       emit,
+      ...DARWIN,
     });
     for (const e of envelopes) {
       expect("process.ticket" in e.attributes).toBe(false);
@@ -333,39 +462,49 @@ describe("sampleProcesses", () => {
     }
   });
 
-  test("a throwing psLines seam degrades to [] (never throws)", () => {
+  test("a throwing psLines seam degrades to [] (never throws)", async () => {
     let out;
-    expect(() => {
-      out = sampleProcesses({
+    let threw = false;
+    try {
+      out = await sampleProcesses({
         psLines: () => {
           throw new Error("ps exploded");
         },
         readWorkerMap: () => new Map(),
         emit: () => {},
+        ...DARWIN,
       });
-    }).not.toThrow();
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
     expect(out).toEqual([]);
   });
 
-  test("a throwing readWorkerMap seam degrades to all-unattributed (never throws)", () => {
+  test("a throwing readWorkerMap seam degrades to all-unattributed (never throws)", async () => {
     const { emit, envelopes } = recordingEmit();
-    expect(() => {
-      sampleProcesses({
+    let threw = false;
+    try {
+      await sampleProcesses({
         psLines: psSnapshot,
         readWorkerMap: () => {
           throw new Error("fs exploded");
         },
         topN: 2,
         emit,
+        ...DARWIN,
       });
-    }).not.toThrow();
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
     expect(envelopes.length).toBe(2);
     for (const e of envelopes) expect("process.ticket" in e.attributes).toBe(false);
   });
 
-  test("a throwing emit does not abort the tick (best-effort per row)", () => {
+  test("a throwing emit does not abort the tick (best-effort per row)", async () => {
     let calls = 0;
-    const out = sampleProcesses({
+    const out = await sampleProcesses({
       psLines: psSnapshot,
       readWorkerMap: workerMap,
       topN: 3,
@@ -374,10 +513,32 @@ describe("sampleProcesses", () => {
         throw new Error("emit boom");
       },
       now: () => FIXED_NOW,
+      ...DARWIN,
     });
     // All 3 envelopes were built and emit was attempted for each.
     expect(out.length).toBe(3);
     expect(calls).toBe(3);
+  });
+
+  test("drains in-flight OTLP POSTs before resolving (CTL-812: no abandoned POST)", async () => {
+    // The emit seam returns a slow promise (an OTLP POST). sampleProcesses must
+    // await it before resolving — otherwise the --once path would exit with the
+    // POST still in flight. We assert every returned promise has settled by the
+    // time sampleProcesses resolves.
+    let settled = 0;
+    const slowEmit = () =>
+      new Promise((resolve) => setTimeout(() => { settled++; resolve(true); }, 5));
+    const out = await sampleProcesses({
+      psLines: psSnapshot,
+      readWorkerMap: workerMap,
+      topN: 3,
+      emit: slowEmit,
+      now: () => FIXED_NOW,
+      ...DARWIN,
+    });
+    expect(out.length).toBe(3);
+    // All 3 slow POSTs completed before the tick resolved (not abandoned).
+    expect(settled).toBe(3);
   });
 });
 

@@ -171,7 +171,11 @@ export async function enumerateAccounts({
   for (const backup of backups) {
     let fresh = null;
     try {
-      fresh = await refreshToken(backup.refreshToken, { file: backup.file });
+      // Pass ONLY the refresh token: defaultRefreshToken's 2nd arg is { fetchImpl }
+      // (the file name is not one of its params). An earlier version passed
+      // { file } here, which defaultRefreshToken silently ignored — harmless but
+      // misleading (CTL-812 review). The file is used only for the warning below.
+      fresh = await refreshToken(backup.refreshToken);
     } catch {
       fresh = null;
     }

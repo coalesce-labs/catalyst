@@ -273,3 +273,62 @@ describe("defaultRefreshToken — injected fetch", () => {
     expect(body.client_id).toBe("9d1c250a-e61b-44d9-88ed-5944d1962f5e");
   });
 });
+
+// ─── enumerateAccounts × the REAL defaultRefreshToken (arg-shape) ─────────────
+
+describe("enumerateAccounts — real defaultRefreshToken integration (no injected refresh)", () => {
+  // CTL-812 review: enumerateAccounts used to call refreshToken(rt, { file }) but
+  // defaultRefreshToken's 2nd arg is { fetchImpl } — the { file } was silently
+  // ignored. These tests drive enumerateAccounts through the REAL defaultRefreshToken
+  // (NOT an injected stub), monkeypatching globalThis.fetch so no real network is
+  // touched, proving the default refresh seam actually works end to end via
+  // enumerateAccounts and that the (now corrected) call shape refreshes backups.
+  test("a backup is refreshed through the real defaultRefreshToken (fetch monkeypatched)", async () => {
+    const realFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url, init });
+      return { status: 200, json: async () => ({ access_token: "FAKE-fresh-from-real-refresh" }) };
+    };
+    try {
+      const accounts = await enumerateAccounts({
+        readActiveToken: () => null,
+        listBackups: () => [{ file: "swap.json", token: "FAKE-stale", refreshToken: "FAKE-rt-real" }],
+        // refreshToken intentionally OMITTED → exercises the real defaultRefreshToken.
+      });
+      expect(accounts).toEqual([
+        { source: "backup", token: "FAKE-fresh-from-real-refresh", file: "swap.json" },
+      ]);
+      // The real refresh seam actually hit the token endpoint with the backup's rt.
+      expect(calls.length).toBe(1);
+      expect(calls[0].url).toBe("https://platform.claude.com/v1/oauth/token");
+      expect(JSON.parse(calls[0].init.body).refresh_token).toBe("FAKE-rt-real");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("a real-refresh failure (non-200) drops the backup; no token leaks in the warning", async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({ status: 401, json: async () => ({}) });
+    const writes = [];
+    const origErr = process.stderr.write.bind(process.stderr);
+    const origOut = process.stdout.write.bind(process.stdout);
+    process.stderr.write = (c, ...r) => { writes.push(String(c)); return origErr(c, ...r); };
+    process.stdout.write = (c, ...r) => { writes.push(String(c)); return origOut(c, ...r); };
+    try {
+      const accounts = await enumerateAccounts({
+        readActiveToken: () => null,
+        listBackups: () => [{ file: "expired.json", token: "FAKE-stale", refreshToken: "FAKE-SECRET-rt" }],
+      });
+      expect(accounts).toEqual([]); // refresh failed → dropped
+    } finally {
+      process.stderr.write = origErr;
+      process.stdout.write = origOut;
+      globalThis.fetch = realFetch;
+    }
+    const all = writes.join("");
+    expect(all).not.toContain("FAKE-SECRET-rt");
+    expect(all).toContain("expired.json"); // file name IS allowed in the warning
+  });
+});

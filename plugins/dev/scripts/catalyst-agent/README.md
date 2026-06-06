@@ -62,7 +62,17 @@ launchd re-launches it each tick.
 ## Emit
 
 - **eventlog** (Approach A) — append each envelope as one JSONL line to
-  `~/catalyst/events/<YYYY-MM UTC>.jsonl`.
+  `~/catalyst/events/<YYYY-MM UTC>.jsonl` (synchronous `appendFileSync`).
 - **otlp** (Approach B) — POST OTLP/HTTP JSON logs to
-  `<CATALYST_AGENT_OTLP_ENDPOINT>/v1/logs`.
+  `<CATALYST_AGENT_OTLP_ENDPOINT>/v1/logs`. The POST is **awaited before the tick
+  returns**, so `--once` never exits with a request still in flight (numbers are
+  emitted as `doubleValue` for a stable per-key OTLP type).
 - **both** — do both.
+
+## Notes
+
+- **Process parsing is cross-platform.** `processes.mjs` parses `ps` per platform:
+  macOS renders the `comm` column at a fixed 16-char width (and truncates deep
+  paths), so the command name is healed from the full `argv[0]` in the `args`
+  column; Linux renders `comm` at its natural width. A rewritten `argv[0]`
+  (a login shell's `-zsh`) still defers to `comm`.

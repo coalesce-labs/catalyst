@@ -261,18 +261,24 @@ export async function sampleHost({
     "host.disk_used_pct": round1(clampPct(diskUsedPct)),
   };
 
-  return emit(HOST_EVENT_SAMPLED, { entity: "host", label, attrs }, { now });
+  // `await` normalizes both emit seams: the default async defaultEmit (which
+  // awaits its own OTLP POST) and the sync makeBuilderEmit (which returns the
+  // envelope synchronously and routes the POST into runOnce's drain).
+  return await emit(HOST_EVENT_SAMPLED, { entity: "host", label, attrs }, { now });
 }
 
 // defaultEmit — build the envelope and route it through the configured
 // transport(s) (eventlog / otlp / both) via the shared emitEnvelope() helper.
 // Kept as the sampler's default so a bare sampleHost() call writes telemetry;
 // tests inject a capturing emit instead. Never throws, and returns the envelope
-// so the caller can inspect it.
-function defaultEmit(name, spec, opts) {
+// so the caller can inspect it. The OTLP POST promise (otlp/both mode) is awaited
+// here so a bare sampleHost() never resolves with a request still in flight; in
+// the --once importer path the emit seam is makeBuilderEmit instead (which routes
+// the POST into runOnce's drain), so this default is the bare-call safety net.
+async function defaultEmit(name, spec, opts) {
   const envelope = buildAgentEnvelope(name, spec, opts);
   try {
-    emitEnvelope(envelope, readAgentConfig());
+    await emitEnvelope(envelope, readAgentConfig());
   } catch (err) {
     log.warn({ err: err?.message }, "host: emit failed");
   }

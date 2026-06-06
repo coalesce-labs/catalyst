@@ -6,21 +6,30 @@
 //
 // Run: cd plugins/dev/scripts/catalyst-agent && bun test emit.test.mjs
 
-import { describe, test, expect } from "bun:test";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { buildAgentEnvelope, emitEventLog, sendOtlp } from "./emit.mjs";
+import {
+  buildAgentEnvelope,
+  emitEventLog,
+  sendOtlp,
+  emitEnvelope,
+  makeBuilderEmit,
+  drainPending,
+} from "./emit.mjs";
 
-// A representative host.metrics spec exercising int + float + string attrs.
+// A representative host.metrics spec exercising number + string attrs. Every
+// number maps to doubleValue (CTL-812 review: one OTLP type per attribute key,
+// no int/double oscillation when a metric happens to round to a whole number).
 function hostSpec() {
   return {
     entity: "host",
     label: hostname(),
     attrs: {
-      "host.cpu_pct": 12.5, // float → doubleValue
-      "host.cpu_count": 10, // int → intValue
-      "host.load1": 2.0, // integer-valued float → intValue (Number.isInteger(2.0))
+      "host.cpu_pct": 12.5, // fractional → doubleValue
+      "host.cpu_count": 10, // whole number → STILL doubleValue (pinned type)
+      "host.load1": 2.0, // integer-valued → doubleValue
       "host.mem_used_mb": 8192,
     },
     payload: { sampledFrom: "test" },
@@ -192,15 +201,19 @@ describe("sendOtlp — mapping correctness with injected fetch", () => {
     expect(JSON.parse(rec.body.stringValue)).toEqual({ sampledFrom: "test" });
   });
 
-  test("attribute value types: int → intValue, float → doubleValue, string → stringValue", async () => {
+  test("every number → doubleValue (one type per key); strings → stringValue", async () => {
+    // CTL-812 review: a metric that rounds to a whole number (process.rss_mb 512)
+    // must NOT switch to intValue — the same attribute key would then carry
+    // intValue on one tick and doubleValue on another, an int/double oscillation
+    // that strict OTLP consumers reject. doubleValue is valid for every number.
     const { calls, fetchImpl } = captureFetch(200);
     const env = buildAgentEnvelope("host.process.sampled", {
       entity: "host",
       label: "h",
       attrs: {
         "process.command": "node", // string
-        "process.cpu_pct": 12.5, // float → doubleValue
-        "process.rss_mb": 512, // int → intValue
+        "process.cpu_pct": 12.5, // fractional → doubleValue
+        "process.rss_mb": 512, // whole number → STILL doubleValue
       },
     });
     await sendOtlp([env], { endpoint: "http://x:4318", fetchImpl });
@@ -208,7 +221,7 @@ describe("sendOtlp — mapping correctness with injected fetch", () => {
     const attrs = Object.fromEntries(rec.attributes.map((kv) => [kv.key, kv.value]));
     expect(attrs["process.command"]).toEqual({ stringValue: "node" });
     expect(attrs["process.cpu_pct"]).toEqual({ doubleValue: 12.5 });
-    expect(attrs["process.rss_mb"]).toEqual({ intValue: 512 });
+    expect(attrs["process.rss_mb"]).toEqual({ doubleValue: 512 });
     expect(attrs["event.name"]).toEqual({ stringValue: "host.process.sampled" });
   });
 
@@ -241,5 +254,168 @@ describe("sendOtlp — mapping correctness with injected fetch", () => {
     expect(await sendOtlp([env], { endpoint: "", fetchImpl })).toBe(false);
     expect(await sendOtlp([], { endpoint: "http://x:4318", fetchImpl })).toBe(false);
     expect(calls.length).toBe(0);
+  });
+});
+
+// ─── emitEnvelope — the mode router (CTL-812 review: was never exercised) ──────
+
+describe("emitEnvelope — eventlog | otlp | both router", () => {
+  // emitEnvelope routes by config.emit through the REAL transports: emitEventLog
+  // (CATALYST_DIR-relative monthly log) and sendOtlp (globalThis.fetch). We point
+  // CATALYST_DIR at a temp dir and monkeypatch fetch so both transports are real
+  // but isolated. Env + fetch are saved/restored so the suite is order-independent.
+  let dir;
+  let realFetch;
+  let posts;
+  const savedCatalystDir = { v: undefined };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl812-router-"));
+    savedCatalystDir.v = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    realFetch = globalThis.fetch;
+    posts = [];
+    globalThis.fetch = async (url, init) => {
+      posts.push({ url, init });
+      return { status: 200 };
+    };
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (savedCatalystDir.v === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = savedCatalystDir.v;
+  });
+
+  function monthlyLog() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    return join(dir, "events", `${ym}.jsonl`);
+  }
+  function env() {
+    return buildAgentEnvelope("host.metrics.sampled", hostSpec());
+  }
+  const cfg = (emit) => ({ emit, otlpEndpoint: "http://127.0.0.1:4318", otlpHeaders: {} });
+
+  test("eventlog mode writes the log and issues NO POST; returns null", async () => {
+    const ret = emitEnvelope(env(), cfg("eventlog"));
+    expect(ret).toBeNull(); // no OTLP promise to await
+    expect(existsSync(monthlyLog())).toBe(true);
+    expect(readFileSync(monthlyLog(), "utf8").trim().split("\n").length).toBe(1);
+    expect(posts.length).toBe(0);
+  });
+
+  test("otlp mode POSTs and does NOT write the log; returns an awaitable promise", async () => {
+    const ret = emitEnvelope(env(), cfg("otlp"));
+    expect(ret).not.toBeNull();
+    expect(typeof ret.then).toBe("function");
+    await ret; // drain the POST
+    expect(posts.length).toBe(1);
+    expect(posts[0].url).toBe("http://127.0.0.1:4318/v1/logs");
+    expect(existsSync(monthlyLog())).toBe(false);
+  });
+
+  test("both mode writes the log AND POSTs (returns the POST promise)", async () => {
+    const ret = emitEnvelope(env(), cfg("both"));
+    expect(ret).not.toBeNull();
+    await ret;
+    expect(existsSync(monthlyLog())).toBe(true);
+    expect(posts.length).toBe(1);
+  });
+
+  test("an unrecognized / missing emit mode does nothing (no log, no POST)", async () => {
+    expect(emitEnvelope(env(), { emit: "carrier-pigeon" })).toBeNull();
+    expect(emitEnvelope(env(), undefined)).toBeNull();
+    expect(existsSync(monthlyLog())).toBe(false);
+    expect(posts.length).toBe(0);
+  });
+
+  test("otlp mode never throws even when fetch rejects (returns false)", async () => {
+    globalThis.fetch = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+    const ret = emitEnvelope(env(), cfg("otlp"));
+    await expect(ret).resolves.toBe(false);
+  });
+});
+
+// ─── makeBuilderEmit — adapter + pending collection (was never referenced) ────
+
+describe("makeBuilderEmit", () => {
+  let realFetch;
+  let posts;
+  let savedDir;
+  let dir;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ctl812-builder-"));
+    savedDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = dir;
+    realFetch = globalThis.fetch;
+    posts = [];
+    globalThis.fetch = async (url, init) => {
+      posts.push({ url, init });
+      return { status: 200 };
+    };
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    if (savedDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = savedDir;
+  });
+
+  const cfg = (emit) => ({ emit, otlpEndpoint: "http://127.0.0.1:4318", otlpHeaders: {} });
+
+  test("builds the envelope from (name, spec, opts) and returns it", () => {
+    const emit = makeBuilderEmit(cfg("eventlog"));
+    const fixed = "2026-06-06T12:00:00Z";
+    const e = emit(
+      "host.metrics.sampled",
+      { entity: "host", label: "h", attrs: { "host.cpu_pct": 12.5 } },
+      { now: () => fixed },
+    );
+    expect(e.attributes["event.name"]).toBe("host.metrics.sampled");
+    expect(e.attributes["host.cpu_pct"]).toBe(12.5);
+    expect(e.ts).toBe(fixed); // opts.now forwarded into the envelope
+  });
+
+  test("collects the OTLP POST promise into `pending` so the caller can drain it", async () => {
+    const pending = [];
+    const emit = makeBuilderEmit(cfg("otlp"), { pending });
+    emit("host.metrics.sampled", { entity: "host", label: "h", attrs: { "host.cpu_pct": 1 } });
+    expect(pending.length).toBe(1);
+    expect(typeof pending[0].then).toBe("function");
+    await drainPending(pending);
+    expect(posts.length).toBe(1);
+  });
+
+  test("eventlog mode pushes nothing into `pending` (synchronous transport)", () => {
+    const pending = [];
+    const emit = makeBuilderEmit(cfg("eventlog"), { pending });
+    emit("host.metrics.sampled", { entity: "host", label: "h", attrs: { "host.cpu_pct": 1 } });
+    expect(pending.length).toBe(0);
+  });
+});
+
+// ─── drainPending — best-effort await of collected OTLP POSTs ─────────────────
+
+describe("drainPending", () => {
+  test("awaits every pending promise before resolving", async () => {
+    let settled = 0;
+    const pending = [0, 0, 0].map(
+      () => new Promise((r) => setTimeout(() => { settled++; r(true); }, 5)),
+    );
+    await drainPending(pending);
+    expect(settled).toBe(3);
+  });
+
+  test("a rejected pending promise does not make drainPending throw", async () => {
+    const pending = [Promise.reject(new Error("boom")), Promise.resolve(true)];
+    await expect(drainPending(pending)).resolves.toBeUndefined();
+  });
+
+  test("an empty / non-array argument is a no-op (never throws)", async () => {
+    await expect(drainPending([])).resolves.toBeUndefined();
+    await expect(drainPending(undefined)).resolves.toBeUndefined();
   });
 });

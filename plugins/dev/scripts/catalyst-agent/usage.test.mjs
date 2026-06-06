@@ -416,3 +416,63 @@ describe("tickUsage — non-200 / resilience", () => {
     expect(emitted.length).toBe(0);
   });
 });
+
+// ─── secrets hygiene (hard rule): the usage domain never logs a token ─────────
+
+describe("tickUsage — secrets hygiene", () => {
+  test("no log line on any branch (429 / non-200 / throw) ever carries the token", async () => {
+    // The usage domain handles live OAuth access tokens. Capture every stdout/
+    // stderr write (the console-shim logger target) across the throttle, non-200,
+    // and throwing-fetch branches and assert the obviously-fake token never leaks
+    // into any log payload — a regression guard mirroring accounts.test.mjs.
+    const SECRET = "FAKE-SECRET-usage-token-MUST-NOT-LEAK";
+    const writes = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    process.stdout.write = (chunk, ...rest) => {
+      writes.push(String(chunk));
+      return origOut(chunk, ...rest);
+    };
+    process.stderr.write = (chunk, ...rest) => {
+      writes.push(String(chunk));
+      return origErr(chunk, ...rest);
+    };
+    try {
+      // 429 branch (logs "stopping remaining accounts").
+      await tickUsage({
+        accounts: [{ source: "active", token: SECRET }],
+        fetchUsage: async () => ({ status: 429, body: null }),
+        resolveEmail: async () => null,
+        emit: () => {},
+      });
+      // non-200 branch (logs "non-200 usage response").
+      await tickUsage({
+        accounts: [{ source: "active", token: SECRET }],
+        fetchUsage: async () => ({ status: 500, body: null }),
+        resolveEmail: async () => null,
+        emit: () => {},
+      });
+      // throwing-fetch branch (logs "account tick failed").
+      await tickUsage({
+        accounts: [{ source: "active", token: SECRET }],
+        fetchUsage: async () => {
+          throw new Error("network down");
+        },
+        resolveEmail: async () => null,
+        emit: () => {},
+      });
+      // no-token branch (logs "account has no token").
+      await tickUsage({
+        accounts: [{ source: "backup", token: null, file: "x.json" }],
+        emit: () => {},
+      });
+    } finally {
+      process.stdout.write = origOut;
+      process.stderr.write = origErr;
+    }
+    const all = writes.join("");
+    expect(all).not.toContain(SECRET);
+    // Sanity: the branches DID log (so the assertion above is meaningful).
+    expect(all).toContain("usage:");
+  });
+});

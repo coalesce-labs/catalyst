@@ -95,14 +95,23 @@ export function emitEventLog(envelope, { logPath = getEventLogPath() } = {}) {
 }
 
 // otlpAnyValue — map a JS scalar to an OTLP AnyValue. Booleans before numbers
-// (typeof true === "boolean"); integers use intValue, other numbers doubleValue;
-// everything else stringifies. Null/undefined never reach here (filtered by the
-// put() pattern upstream) but are coerced to an empty string defensively.
+// (typeof true === "boolean"); everything else stringifies. Null/undefined never
+// reach here (filtered by the put() pattern upstream) but are coerced to an empty
+// string defensively.
+//
+// NUMERIC TYPE CHOICE (CTL-812 review): every number maps to doubleValue, never
+// intValue. The samplers round metrics to 1-3 decimals, so the SAME attribute key
+// (e.g. host.cpu_pct) would otherwise oscillate between intValue (when it rounds
+// to a whole number like 50) and doubleValue (50.5) across ticks — an int/double
+// type oscillation per key that strict OTLP consumers can reject. doubleValue is
+// a valid representation for every JS number (an integer-valued double is still a
+// number to Loki / the catalyst-otel collector), so pinning one type per key is
+// the safe, deterministic choice. (The sibling otel-forward collector forces
+// intValue even for fractional values, which is technically invalid OTLP; we go
+// the other, always-valid way.)
 function otlpAnyValue(value) {
   if (typeof value === "boolean") return { boolValue: value };
-  if (typeof value === "number") {
-    return Number.isInteger(value) ? { intValue: value } : { doubleValue: value };
-  }
+  if (typeof value === "number") return { doubleValue: value };
   return { stringValue: value == null ? "" : String(value) };
 }
 
@@ -181,24 +190,34 @@ export async function sendOtlp(envelopes, { endpoint, headers = {}, fetchImpl = 
  * emitEnvelope — route ONE already-built envelope through the transport(s) that
  * the resolved config selects. The single emit seam every domain sampler shares:
  *   eventlog → append a JSONL line to the monthly event log (Approach A)
- *   otlp     → POST it to <endpoint>/v1/logs (Approach B), fire-and-forget
+ *   otlp     → POST it to <endpoint>/v1/logs (Approach B)
  *   both     → do both
  * Best-effort: each transport is itself never-throw, and a rejected OTLP POST is
- * swallowed so a flaky collector never disrupts the tick. Returns nothing.
+ * swallowed so a flaky collector never disrupts the tick.
+ *
+ * RETURNS the pending OTLP POST promise (or null when no POST was issued) so the
+ * caller can AWAIT it before the process exits. This is load-bearing for the
+ * primary `--once` / launchd path: emit is not fire-and-forget — if the caller
+ * exited without awaiting, an in-flight POST would be killed by process.exit()
+ * and the telemetry dropped on every tick (CTL-812 review). The promise itself
+ * already swallows rejections (resolves to true/false), so awaiting it is safe.
  *
  * @param {object} envelope  a buildAgentEnvelope() result
  * @param {object} config    a readAgentConfig() result (emit/otlpEndpoint/otlpHeaders)
+ * @returns {Promise<boolean>|null} the OTLP POST promise, or null for eventlog-only
  */
 export function emitEnvelope(envelope, config) {
   if (config?.emit === "eventlog" || config?.emit === "both") {
     emitEventLog(envelope);
   }
   if (config?.emit === "otlp" || config?.emit === "both") {
-    // Fire-and-forget: the OTLP POST is async and best-effort.
-    Promise.resolve(
+    // sendOtlp is itself never-throw (resolves true/false), but guard the
+    // .catch defensively so a synchronous throw could never escape either.
+    return Promise.resolve(
       sendOtlp([envelope], { endpoint: config.otlpEndpoint, headers: config.otlpHeaders }),
-    ).catch(() => {});
+    ).catch(() => false);
   }
+  return null;
 }
 
 /**
@@ -207,13 +226,37 @@ export function emitEnvelope(envelope, config) {
  * It builds the envelope from (name, spec, {now}) and routes it through the
  * configured transport(s), returning the envelope so the caller can inspect it.
  *
- * @param {object} config  a readAgentConfig() result
+ * The pending OTLP POST promise (if any) is collected into `pending` so the
+ * caller can drain it before exiting — see drainPending(). Without this, the
+ * `--once` path would exit while POSTs are still in flight (CTL-812 review).
+ *
+ * @param {object}   config           a readAgentConfig() result
+ * @param {object}   [opts]
+ * @param {Array}    [opts.pending]    array the emit pushes each OTLP promise into
  * @returns {(name: string, spec: object, opts?: {now?: Function}) => object}
  */
-export function makeBuilderEmit(config) {
+export function makeBuilderEmit(config, { pending } = {}) {
   return (name, spec, opts) => {
     const envelope = buildAgentEnvelope(name, spec, opts);
-    emitEnvelope(envelope, config);
+    const posted = emitEnvelope(envelope, config);
+    if (posted && Array.isArray(pending)) pending.push(posted);
     return envelope;
   };
+}
+
+/**
+ * drainPending — await every collected OTLP POST promise so an in-flight POST is
+ * never abandoned by process.exit() in the `--once` path. Each promise already
+ * resolves (never rejects) to true/false, so Promise.allSettled is belt-and-
+ * braces. Returns nothing; NEVER throws.
+ *
+ * @param {Array<Promise<*>>} [pending]
+ */
+export async function drainPending(pending) {
+  if (!Array.isArray(pending) || pending.length === 0) return;
+  try {
+    await Promise.allSettled(pending);
+  } catch {
+    /* never throw — drain is best-effort */
+  }
 }
