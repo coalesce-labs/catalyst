@@ -7,7 +7,7 @@ description:
   notes there autonomously, captures new domain vocabulary to thoughts/CONCEPTS.md, and PROPOSES (for
   human approval) any ADR change. Non-blocking — runs after a ticket ships or fails, never on the
   critical path. Use when the user says "compound this ticket", "capture learnings", "what did we
-  learn", or run as /catalyst-foundry:ticket-compound <TICKET> [mode:headless].
+  learn", or run as /catalyst-dev:ticket-compound <TICKET> [mode:headless].
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, AskUserQuestion
@@ -28,21 +28,13 @@ Read `reference.md` (this dir) for the learnings-store schema before writing any
 ## Invocation
 
 ```
-/catalyst-foundry:ticket-compound <TICKET> [mode:headless]
+/catalyst-dev:ticket-compound <TICKET> [mode:headless]
 ```
 
 - `<TICKET>` — Linear key (e.g. `CTL-619`). If omitted, detect from the branch / `CATALYST_TICKET`.
 - `mode:headless` — non-interactive: apply all unambiguous autonomous actions silently, mark
   ambiguous learnings `status: stale`, never block on a prompt, end with the sentinel line. This is
   what the morning ritual (and, later, the daemon) use. Default is interactive.
-
-## Step 0 — Resolve shared scripts (fail fast)
-
-```bash
-source "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}/scripts/require-catalyst-dev.sh" \
-    "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}" || exit 1
-# $CATALYST_DEV_SCRIPTS now points at catalyst-dev's scripts (validate-learnings.sh etc).
-```
 
 ## Step 1 — Gather raw signal (the orchestrator reads; do NOT delegate writes)
 
@@ -83,7 +75,7 @@ partial-write races):
 Then validate frontmatter (fail loud on the YAML traps in `reference.md`):
 
 ```bash
-bash "${CATALYST_DEV_SCRIPTS}/compound/validate-learnings.sh" "<written-path>"
+bash "${CLAUDE_PLUGIN_ROOT:-plugins/dev}/scripts/compound/validate-learnings.sh" "<written-path>"
 ```
 
 ## Step 4 — Curate the store (five outcomes, autonomous in thoughts/)
@@ -128,7 +120,7 @@ not, propose (interactive) / apply (headless) a **minimal pointer** — never th
 
 ```
 thoughts/shared/learnings/ — past problem→solution entries (grep by component/tags/problem_type).
-Search before implementing or debugging in a known area. Curated by /catalyst-foundry:ticket-compound.
+Search before implementing or debugging in a known area. Curated by /catalyst-dev:ticket-compound.
 ```
 
 ## Step 8 — Report

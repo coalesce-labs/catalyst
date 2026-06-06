@@ -134,7 +134,7 @@ is performed.
    fi
    ```
    For each hit, read the frontmatter (`component` / `tags` / `problem_type` — see
-   `plugins/foundry/skills/ticket-compound/reference.md` for the schema) and keep
+   `plugins/dev/skills/ticket-compound/reference.md` for the schema) and keep
    only entries whose `component` matches this ticket's component. Inject a short
    `## Relevant Past Learnings` section **near the TOP of the research doc** (right
    under the Summary), one line per applicable entry as
