@@ -46,12 +46,13 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 11 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 12 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(11);
+    expect(REAP_INTENT_TYPES.length).toBe(12);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
+    expect(REAP_INTENT_TYPES).toContain("worktree.cleanup-deferred"); // CTL-791
   });
 
   it("accepts phase.terminal.reap-requested (CTL-695)", async () => {

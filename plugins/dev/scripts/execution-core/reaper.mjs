@@ -21,7 +21,14 @@ import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
-import { getAgentsCached } from "./claude-agents.mjs";
+import { getAgentsCached, listClaudeAgentsResult } from "./claude-agents.mjs";
+import {
+  isSafeToRemoveWorktree,
+  hasOrchProvenance,
+  deferWorktreeCleanup,
+  archiveWorktreeArtifacts,
+  lsofCwdUnder,
+} from "./worktree-safety.mjs";
 import { log } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
@@ -47,6 +54,48 @@ const DEFAULT_MIN_IDLE_MS = 15 * 60 * 1000; // 15 min
 // separate named constants.
 export const CLEANUP_GRACE_MS = 60_000;
 
+// defaultAssessWorktreeRemoval — CTL-791 evidence gate for the PR-merged cleanup.
+// Anchors the merged/clean/unpushed reads inside the worktree itself (-C path),
+// folds in the live `claude agents` snapshot + the lsof backstop + registry
+// provenance, and returns { safe, reasons }. Injectable as the Reaper's
+// `assessWorktreeRemoval` seam so unit tests drive the verdict without real git.
+export async function defaultAssessWorktreeRemoval(event, readAgents = () => listClaudeAgentsResult()) {
+  const gateRunGit = (args) =>
+    spawnSync("git", ["-C", event.worktree_path, ...args], { encoding: "utf8" });
+  // Fail-closed liveness: listClaudeAgentsResult distinguishes a FAILED read
+  // ({ ok:false }) from a genuinely-empty fleet, so a crashed/timed-out/cold
+  // `claude agents` yields agents-stale → unsafe rather than a false "no live
+  // session". (getAgentsCached().agents ALWAYS returns an array — cold cache → []
+  // — which would silently defeat the gate; CTL-791 adversarial review.)
+  // `readAgents` is injectable so a test can drive the failed-read branch.
+  let agentsList = [];
+  let agentsOk = false;
+  try {
+    const r = readAgents();
+    if (Array.isArray(r)) {
+      agentsList = r;
+      agentsOk = true;
+    } else {
+      agentsList = r?.agents ?? [];
+      agentsOk = r?.ok === true;
+    }
+  } catch {
+    agentsOk = false;
+  }
+  return isSafeToRemoveWorktree(
+    event.worktree_path,
+    {
+      ticket: event.ticket,
+      repoRoot: event.worktree_path,
+      branch: event.branch,
+      terminal: true,
+      prMerged: event.force === true, // event.force === confirmed GitHub MERGED
+      orchProvenance: hasOrchProvenance(event.ticket),
+    },
+    { runGit: gateRunGit, agentsList, agentsOk, procLive: lsofCwdUnder(event.worktree_path) === true },
+  );
+}
+
 /**
  * Reaper — composes injectable executors so the unit test never shells out.
  * Production wiring uses the defaults; tests pass fakes.
@@ -59,6 +108,11 @@ export class Reaper {
     gitWorktreeRemove = defaultGitWorktreeRemove,
     gitBranchDelete = defaultGitBranchDelete,
     cwdExists = defaultCwdExists,
+    // CTL-791: the PR-merged cleanup gate + archive seams. Defaults run the real
+    // evidence gate (GitHub-merged + clean + no-live-session + provenance) and the
+    // worktree-path archive; tests inject stubs to drive each branch.
+    assessWorktreeRemoval = defaultAssessWorktreeRemoval,
+    archiveWorktree = archiveWorktreeArtifacts,
     // CTL-649 safety guards:
     //  - includeInteractive: opt-in to reaping interactive (human) sessions.
     //    Default false — the daemon never opts in, so a stepped-away human
@@ -85,6 +139,8 @@ export class Reaper {
     this.gitWorktreeRemove = gitWorktreeRemove;
     this.gitBranchDelete = gitBranchDelete;
     this.cwdExists = cwdExists;
+    this.assessWorktreeRemoval = assessWorktreeRemoval;
+    this.archiveWorktree = archiveWorktree;
     this.includeInteractive = includeInteractive;
     this.minIdleMs = minIdleMs;
     this.lastSeenMs = lastSeenMs;
@@ -280,6 +336,42 @@ export class Reaper {
       });
       return;
     }
+    // 1b. CTL-791 evidence gate (injectable seam). The presweep above only
+    //     HARD-blocks interactive-kind sessions; an idle BACKGROUND agent (the
+    //     incident's hole), a dirty/unmerged tree, or an interactive/unknown
+    //     worktree must also block. Unsafe ⇒ flag (out-of-tree marker +
+    //     cleanup-deferred), never remove. ARCHIVE worktree-local docs first.
+    const verdict = await this.assessWorktreeRemoval(event);
+    if (!verdict.safe) {
+      deferWorktreeCleanup(
+        event.worktree_path,
+        { ticket: event.ticket, branch: event.branch, reasons: verdict.reasons },
+        { emit: (t, f) => this.emit(t, f) },
+      );
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: `unsafe:${(verdict.reasons || []).join(",")}`,
+      });
+      return;
+    }
+    const arch = this.archiveWorktree(event.worktree_path, { ticket: event.ticket });
+    if (!arch.ok) {
+      deferWorktreeCleanup(
+        event.worktree_path,
+        { ticket: event.ticket, branch: event.branch, reasons: ["archive-failed", arch.error] },
+        { emit: (t, f) => this.emit(t, f) },
+      );
+      await this.emit("pr.merged.cleanup-failed", {
+        ticket: event.ticket,
+        worktreePath: event.worktree_path,
+        branch: event.branch,
+        reason: "archive-failed",
+      });
+      return;
+    }
+
     // 2. Remove worktree.
     const wt = await this.gitWorktreeRemove(event.worktree_path);
     if (!wt.ok) {
@@ -710,7 +802,11 @@ async function defaultGitWorktreeRemove(path) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    if ((res.status ?? 0) === 0) return { ok: true };
+    // CTL-791: fail-closed. spawnSync sets `error` + a null status when git can't
+    // be spawned (ENOENT / resource limit); `?? 0` would mis-read that as a
+    // successful removal and trigger a false branch-delete + cleanup-complete.
+    if (res.error) return { ok: false, error: res.error.message };
+    if ((res.status ?? 1) === 0) return { ok: true };
     return { ok: false, error: res.stderr?.trim() || `git worktree remove rc=${res.status}` };
   } catch (err) {
     return { ok: false, error: err.message };
