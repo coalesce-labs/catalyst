@@ -74,13 +74,16 @@ Projected cost for the weekly Routine: ~$0.38/run (75K input tokens × $5/M),
 
 ## Skill body
 
-When invoked as `/catalyst-dev:research-curate`, run both directories
+When invoked as `/catalyst-foundry:research-curate`, run both directories
 sequentially and report the summary lines back to the user.
 
 ```bash
 set -euo pipefail
-SCRIPT="${CLAUDE_PLUGIN_ROOT:-.}/scripts/research-curate/run.sh"
-[[ -x "$SCRIPT" ]] || SCRIPT="plugins/dev/scripts/research-curate/run.sh"
+# Backing scripts live in catalyst-dev (the shared framework core). Resolve them
+# (and fail fast with a clear message if catalyst-dev is not installed).
+source "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}/scripts/require-catalyst-dev.sh" \
+    "${CLAUDE_PLUGIN_ROOT:-plugins/foundry}" || exit 1
+SCRIPT="${CATALYST_DEV_SCRIPTS}/research-curate/run.sh"
 
 bash "$SCRIPT" thoughts/shared/research
 bash "$SCRIPT" thoughts/shared/plans

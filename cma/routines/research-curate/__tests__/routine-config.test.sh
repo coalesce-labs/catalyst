@@ -117,11 +117,11 @@ fi
 echo "Assertion 4: prompt references committed skill"
 if [ -f "$ROUTINE_YAML" ]; then
 	PROMPT=$(read_yaml_field "$ROUTINE_YAML" "data.get('prompt', '')")
-	if grep -qF "plugins/dev/skills/research-curate/SKILL.md" <<<"$PROMPT"; then
-		pass "prompt references plugins/dev/skills/research-curate/SKILL.md"
+	if grep -qF "plugins/foundry/skills/research-curate/SKILL.md" <<<"$PROMPT"; then
+		pass "prompt references plugins/foundry/skills/research-curate/SKILL.md"
 	else
 		fail "prompt missing skill reference" \
-			"expected 'plugins/dev/skills/research-curate/SKILL.md' substring"
+			"expected 'plugins/foundry/skills/research-curate/SKILL.md' substring"
 	fi
 fi
 

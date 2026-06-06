@@ -337,7 +337,7 @@ if [[ -n "$_GLOBAL_WORKER_BOT" || -n "$_GLOBAL_ORCH_BOT" || -n "$_LAYER1_BOT" ]]
 else
     warn "No Linear bot user IDs configured — execution-core comms won't filter bot self-echo"
     info "NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json"
-    info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-dev:setup-catalyst"
+    info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-foundry:setup-catalyst"
 fi
 
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────

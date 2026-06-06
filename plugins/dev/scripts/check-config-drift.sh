@@ -188,7 +188,7 @@ jq -r '
     (.path | join(".")) as $p
     | (.template_value | tojson) as $v
     | "Missing \($p) in '"$CONFIG_PATH"' — template suggests \($v)",
-      "  Run /catalyst-dev:setup-catalyst to apply the missing key."
+      "  Run /catalyst-foundry:setup-catalyst to apply the missing key."
   )
 ' <<<"$DRIFT_JSON"
 

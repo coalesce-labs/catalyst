@@ -1,8 +1,8 @@
 ---
-name: compound
+name: compound-estimate
 description:
   "Closing ritual for the AI-native estimation feedback loop. **ALWAYS use when** the user says
-  'compound', 'close the loop', 'record learnings', 'compound-log', or wants to log post-merge
+  'compound-estimate', 'close the estimation loop', 'record actuals', 'compound-log', or wants to log post-merge
   actuals for a shipped Linear ticket. Writes a structured entry (linear.key, pr_number, merged_at,
   estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
   to `thoughts/shared/pm/metrics/YYYY-WW-compound-log.md` — one file per ISO week, appends."
@@ -11,7 +11,7 @@ allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plu
 version: 1.0.0
 ---
 
-# Compound — Closing Ritual at PR Merge
+# Compound Estimate — Closing Ritual at PR Merge
 
 Write a compound-log entry for a just-shipped ticket. This is the Phase 1 exit gate for AI-native estimation: without this closer, `claude-code-otel` cost/wall-time signals never feed future estimates and the calibration loop stays open.
 
@@ -20,7 +20,7 @@ The skill delegates all mechanical work to `plugins/dev/scripts/compound-log.sh`
 ## Invocation
 
 ```
-/compound <TICKET-ID>
+/compound-estimate <TICKET-ID>
 ```
 
 **Inputs:**
@@ -53,7 +53,7 @@ The helper will fail loud if `mergedAt` is missing, but give the user a clearer 
 PR_JSON=$(gh pr view --json number,state,mergedAt 2>/dev/null)
 STATE=$(echo "$PR_JSON" | jq -r '.state')
 if [ "$STATE" != "MERGED" ]; then
-  echo "error: PR on current branch is not merged (state=$STATE). Run /compound after the PR merges."
+  echo "error: PR on current branch is not merged (state=$STATE). Run /compound-estimate after the PR merges."
   exit 1
 fi
 ```
@@ -154,5 +154,5 @@ Covers ISO-week derivation, happy-path writes, append-idempotence, dedup + `--fo
 
 - Spec: `thoughts/shared/research/2026-04-24-CTL-159-compound-closing-ritual.md`
 - Plan: `thoughts/shared/plans/2026-04-24-CTL-159-compound-closing-ritual.md`
-- Unblocks: CTL-189 (auto-invoke from `merge-pr` / `oneshot` Phase 5)
+- Unblocks: CTL-189 (auto-invoke from `merge-pr` / `/catalyst-legacy:oneshot` Phase 5)
 - Consumer (future): `/pm:weekly-cycle-review` reads all `YYYY-WW-compound-log.md` files and joins to Linear cycle data for the retrospective

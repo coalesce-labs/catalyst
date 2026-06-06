@@ -12,7 +12,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 BF_DIR="${REPO_ROOT}/plugins/dev/scripts/briefing-followup"
 TARGET="${BF_DIR}/action-adr.sh"
 RECORD="${BF_DIR}/record-resolution.sh"
-SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/briefing-followup/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/dev/skills/briefing-followup/SKILL.md"
 
 FAILURES=0
 PASSES=0

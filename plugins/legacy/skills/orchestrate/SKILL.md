@@ -27,12 +27,10 @@ coordinates, monitors, and verifies.
 ## Prerequisites
 
 ```bash
-# CTL-726: resolve catalyst-dev scripts dir (skills moved to catalyst-legacy; scripts stay in dev).
-CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
-if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
-  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
-fi
-[[ -n "$CATALYST_DEV_SCRIPTS" ]] || { echo "warn: catalyst-dev scripts not found; set CATALYST_DEV_SCRIPTS manually" >&2; }
+# Resolve the shared catalyst-dev scripts dir (skills live in catalyst-legacy; scripts stay in
+# catalyst-dev). Fail fast with an actionable message if catalyst-dev is not installed.
+source "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}/scripts/require-catalyst-dev.sh" \
+    "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}" || exit 1
 
 # 1. Git (REQUIRED)
 if ! command -v git &>/dev/null; then
@@ -266,7 +264,7 @@ from the project's Layer-1 committed config at the flat path
 `<project>/.catalyst/config.json` → `catalyst.monitor.linear.botUserId` (not the Layer-2 home
 config, not a team-keyed sub-object). This is the Linear user UUID of the Catalyst app-actor (the
 "Linear for Agents" app user) — workspace-specific, and `null` in the committed config template.
-See `/catalyst-dev:setup-catalyst` for how to obtain it (query `viewer.id` with the app-actor
+See `/catalyst-foundry:setup-catalyst` for how to obtain it (query `viewer.id` with the app-actor
 token). (The execution-core daemon is the pull-based runner of the phase-agent pipeline; it is not
 a `dispatchMode` enum value — those are `phase-agents` and `oneshot-legacy`.)
 

@@ -97,11 +97,12 @@ Code to reload. Changes are distributed via the Claude Code plugin marketplace.
 
 ## Orchestration
 
-Catalyst orchestrators (`/catalyst-dev:orchestrate`) ship work as **phase-agent workers** — one
-short-lived `claude --bg` job per phase, walking a 9-phase pipeline (triage → research → plan →
-implement → verify → review → pr → monitor-merge → monitor-deploy). Legacy `oneshot-legacy` mode
-(one long-lived `claude -p /catalyst-dev:oneshot` per ticket) is preserved as a fallback. The
-mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
+Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived
+`claude --bg` job per phase, walking a 9-phase pipeline (triage → research → plan → implement →
+verify → review → pr → monitor-merge → monitor-deploy). The legacy wave-orchestration model —
+`/catalyst-legacy:orchestrate` and `oneshot-legacy` mode (one long-lived `claude -p
+/catalyst-legacy:oneshot` per ticket) — is preserved in the **catalyst-legacy** plugin as a
+fallback. The mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
 
 Cross-process communication is built on a **single unified event log** at
 `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook

@@ -179,7 +179,7 @@
     {
       "name": "catalyst-legacy",
       "source": "./plugins/legacy",
-      "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate, briefing-followup, iterate-plan. Superseded by catalyst-dev's execution-core/phase-agent pipeline.",
+      "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate. Superseded by catalyst-dev's execution-core/phase-agent pipeline.",
       "author": {
         "name": "Coalesce Labs",
         "email": "hello@coalesce.dev"
@@ -194,6 +194,26 @@
         "wave",
         "oneshot",
         "workflow"
+      ]
+    },
+    {
+      "name": "catalyst-foundry",
+      "source": "./plugins/foundry",
+      "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate).",
+      "author": {
+        "name": "Coalesce Labs",
+        "email": "hello@coalesce.dev"
+      },
+      "homepage": "https://github.com/coalesce-labs/catalyst",
+      "repository": "https://github.com/coalesce-labs/catalyst.git",
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "setup",
+        "maintenance",
+        "thoughts",
+        "curation",
+        "diagnostics"
       ]
     }
   ]

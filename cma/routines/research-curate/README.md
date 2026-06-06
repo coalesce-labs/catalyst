@@ -1,7 +1,7 @@
 # Research-Curate — CMA Routine
 
 The cloud-scheduled wrapper around the
-[`/catalyst-dev:research-curate`](../../../plugins/dev/skills/research-curate/SKILL.md) skill. Fires
+[`/catalyst-foundry:research-curate`](../../../plugins/foundry/skills/research-curate/SKILL.md) skill. Fires
 every Sunday at 9pm America/New_York, regenerates `INDEX.md` and updates `CONTRADICTIONS.md` for
 both `thoughts/shared/research/` and `thoughts/shared/plans/`, and pushes the result to the
 `routines/curation` branch on `coalesce-labs/thoughts`.
@@ -20,7 +20,7 @@ Tracked in [CTL-469](https://linear.app/coalesce-labs/issue/CTL-469).
 | `README.md`                        | This file                                                          |
 
 The skill code itself lives at
-[`plugins/dev/skills/research-curate/`](../../../plugins/dev/skills/research-curate/) and is the
+[`plugins/foundry/skills/research-curate/`](../../../plugins/foundry/skills/research-curate/) and is the
 source of truth for what the routine does on each run. This directory is purely the cloud wiring.
 
 ## What it does
@@ -175,7 +175,7 @@ bash cma/routines/research-curate/__tests__/routine-config.test.sh
   writable-clone block this routine uses
 - [`cma/routines/morning-briefing/`](../morning-briefing/) — the sibling routine on
   `routines/briefings`
-- [`plugins/dev/skills/research-curate/SKILL.md`](../../../plugins/dev/skills/research-curate/SKILL.md)
+- [`plugins/foundry/skills/research-curate/SKILL.md`](../../../plugins/foundry/skills/research-curate/SKILL.md)
   — the skill the routine wraps
 - [`thoughts/shared/plans/2026-05-16-catalyst-phase-agent-architecture.md`](../../../thoughts/shared/plans/2026-05-16-catalyst-phase-agent-architecture.md)
   §Initiative 4 Phase 3 — the parent plan
