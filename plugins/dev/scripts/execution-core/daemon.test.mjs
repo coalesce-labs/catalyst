@@ -510,6 +510,61 @@ describe("startDaemon", () => {
     expect(() => stopDaemon()).not.toThrow();
     expect(stopped).toBe(1);
   });
+
+  // CTL-787: the account-level rate-limit poller is started from startDaemon
+  // (default-on), gated by enableRatelimitPoller, and stopped in stopDaemon —
+  // mirroring the CTL-685 memory-sampler wiring.
+  test("starts the ratelimit-poller when enabled (CTL-787)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableRatelimitPoller: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the ratelimit-poller when disabled (CTL-787)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableRatelimitPoller: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the ratelimit-poller and swallows a throwing stop() (CTL-787)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated poller stop failure");
+        },
+      }),
+      enableRatelimitPoller: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under

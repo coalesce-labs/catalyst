@@ -37,9 +37,11 @@ import {
   TAILER_POLL_INTERVAL_MS,
   readWaitWatcherConfig,
   readMemorySamplerConfig,
+  readRatelimitPollerConfig,
 } from "./config.mjs";
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
+import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import {
   recoverStartup,
   startMonitor,
@@ -94,6 +96,8 @@ let _refreshTimer = null;
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
 let _memorySampler = null;
+// CTL-787: account-level rate-limit usage poller handle.
+let _ratelimitPoller = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -294,6 +298,11 @@ export function startDaemon({
   // knob (default-on, CATALYST_MEMORY_SAMPLER=0 disables) like the wait-watcher.
   startMemorySampler = realStartMemorySampler,
   enableMemorySampler = readMemorySamplerConfig().enabled,
+  // CTL-787: account-level rate-limit usage poller. Injectable for tests; gated
+  // by a config knob (default-on, CATALYST_RATELIMIT_POLLER=0 disables) like the
+  // memory sampler.
+  startRatelimitPoller = realStartRatelimitPoller,
+  enableRatelimitPoller = readRatelimitPollerConfig().enabled,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -442,6 +451,12 @@ export function startDaemon({
     // a throw triggers PID-file cleanup via stopDaemon.
     if (enableMemorySampler) {
       _memorySampler = startMemorySampler();
+    }
+
+    // CTL-787: start the account-level rate-limit usage poller. Inside the same
+    // try/catch so a throw triggers PID-file cleanup via stopDaemon.
+    if (enableRatelimitPoller) {
+      _ratelimitPoller = startRatelimitPoller();
     }
   } catch (err) {
     stopDaemon();
@@ -715,6 +730,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: memory-sampler stop failed");
     }
     _memorySampler = null;
+  }
+  // CTL-787: stop the account-level rate-limit usage poller.
+  if (_ratelimitPoller) {
+    try {
+      _ratelimitPoller.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: ratelimit-poller stop failed");
+    }
+    _ratelimitPoller = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {

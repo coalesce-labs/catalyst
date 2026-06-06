@@ -11,6 +11,7 @@ import {
   readWaitWatcherConfig,
   EVENT_DEBOUNCE_MS,
   readMemorySamplerConfig,
+  readRatelimitPollerConfig,
   AUTOTUNE_SAMPLE_INTERVAL_MS,
   AUTOTUNE_WINDOW_SAMPLES,
   AUTOTUNE_TREND_MIN_SAMPLES,
@@ -118,6 +119,63 @@ describe("readMemorySamplerConfig (CTL-685)", () => {
   test("zero interval falls back to 30000", () => {
     process.env.EXECUTION_CORE_MEMORY_SAMPLE_INTERVAL_MS = "0";
     expect(readMemorySamplerConfig().intervalMs).toBe(30_000);
+  });
+});
+
+// CTL-787: rate-limit poller config knob tests.
+const RL_ENVS = [
+  "CATALYST_RATELIMIT_POLLER",
+  "EXECUTION_CORE_RATELIMIT_POLL_INTERVAL_MS",
+  "EXECUTION_CORE_RATELIMIT_USAGE_ENDPOINT",
+];
+let savedRlEnvs = {};
+
+describe("readRatelimitPollerConfig (CTL-787)", () => {
+  beforeEach(() => {
+    for (const k of RL_ENVS) {
+      savedRlEnvs[k] = process.env[k];
+      delete process.env[k];
+    }
+  });
+
+  afterEach(() => {
+    for (const k of RL_ENVS) {
+      if (savedRlEnvs[k] === undefined) delete process.env[k];
+      else process.env[k] = savedRlEnvs[k];
+    }
+    savedRlEnvs = {};
+  });
+
+  test("returns defaults when env is unset", () => {
+    const cfg = readRatelimitPollerConfig();
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.intervalMs).toBe(300000);
+    expect(cfg.usageEndpoint).toBe("https://api.anthropic.com/api/oauth/usage");
+  });
+
+  test("CATALYST_RATELIMIT_POLLER=0 disables the poller", () => {
+    process.env.CATALYST_RATELIMIT_POLLER = "0";
+    expect(readRatelimitPollerConfig().enabled).toBe(false);
+  });
+
+  test("any non-zero CATALYST_RATELIMIT_POLLER keeps it enabled", () => {
+    process.env.CATALYST_RATELIMIT_POLLER = "1";
+    expect(readRatelimitPollerConfig().enabled).toBe(true);
+  });
+
+  test("numeric interval override parses correctly", () => {
+    process.env.EXECUTION_CORE_RATELIMIT_POLL_INTERVAL_MS = "600000";
+    expect(readRatelimitPollerConfig().intervalMs).toBe(600000);
+  });
+
+  test("non-numeric interval falls back to 300000", () => {
+    process.env.EXECUTION_CORE_RATELIMIT_POLL_INTERVAL_MS = "nope";
+    expect(readRatelimitPollerConfig().intervalMs).toBe(300000);
+  });
+
+  test("custom usage endpoint override is honored", () => {
+    process.env.EXECUTION_CORE_RATELIMIT_USAGE_ENDPOINT = "https://example/usage";
+    expect(readRatelimitPollerConfig().usageEndpoint).toBe("https://example/usage");
   });
 });
 
