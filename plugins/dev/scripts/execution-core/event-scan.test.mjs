@@ -17,6 +17,7 @@ import {
   countDistinctRevivingTickets,
   countRemediateCycles,
   __resetEventScanIndexForTest,
+  __phaseEventsLengthForTest,
   countTicketEventsInWindow,
 } from "./event-scan.mjs";
 
@@ -380,5 +381,100 @@ describe("countTicketEventsInWindow (CTL-671)", () => {
   test("throws when ticket or windowMs is missing", () => {
     expect(() => countTicketEventsInWindow({ windowMs: 60_000 })).toThrow();
     expect(() => countTicketEventsInWindow({ ticket: "CTL-9" })).toThrow();
+  });
+
+  // CTL-802 — the counter now rides the incremental cursor (no more offset-0 rescan).
+  test("incremental: a later append is counted without re-reading the whole file", () => {
+    __resetEventScanIndexForTest();
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }),
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1);
+    appendFileSync(
+      path,
+      makeEvent({ phase: "implement", action: "failed", ticket: "CTL-9", ts: recent }) + "\n",
+    );
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(2);
+  });
+
+  test("does NOT re-scan already-read bytes (overwrite a counted line; count stays cached)", () => {
+    __resetEventScanIndexForTest();
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }),
+    ]);
+    // Seed: cursor advances to EOF.
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1);
+    // Overwrite the already-scanned line with a DIFFERENT ticket of the SAME byte
+    // length (CTL-8 ≡ CTL-9 in width). size === cursor → refreshIndex short-circuits
+    // and never re-reads — proof the offset-0 full rescan is gone.
+    writeFileSync(path, makeEvent({ phase: "pr", action: "probe", ticket: "CTL-8", ts: recent }) + "\n");
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1); // cached CTL-9 record, no re-read
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-8", windowMs: 60_000, now: () => now, path })
+    ).toBe(0); // CTL-8 bytes were never scanned
+  });
+
+  test("window-prune shrinks the retained list (aged-out leading prefix is spliced)", () => {
+    __resetEventScanIndexForTest();
+    const now = 10_000_000;
+    const old = new Date(now - 20 * 60_000).toISOString(); // aged out (>10min)
+    const recent = new Date(now - 60_000).toISOString(); // in window
+    const { path } = tempLog([
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: old }),
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }),
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 10 * 60_000, now: () => now, path })
+    ).toBe(1);
+    // the aged-out entry was spliced — only the in-window record is retained
+    expect(__phaseEventsLengthForTest(path)).toBe(1);
+  });
+
+  test("PHASE_EVENT_CAP bounds the retained list even when the count is never read", async () => {
+    const prev = process.env.EXECUTION_CORE_PHASE_EVENT_CAP;
+    process.env.EXECUTION_CORE_PHASE_EVENT_CAP = "3";
+    try {
+      const mod = await import(`./event-scan.mjs?cap=${Date.now()}-${Math.random()}`);
+      mod.__resetEventScanIndexForTest();
+      const ts = new Date().toISOString();
+      const lines = [];
+      for (let i = 0; i < 8; i++) {
+        lines.push(makeEvent({ phase: "implement", action: "probe", ticket: `CTL-${i}`, ts }));
+      }
+      const { path } = tempLog(lines);
+      // refreshIndex (via the revive counter, which does NOT prune phaseEvents) must
+      // still cap the list at 3, not retain all 8.
+      mod.countReviveEvents({ ticket: "CTL-0", path });
+      expect(mod.__phaseEventsLengthForTest(path)).toBe(3);
+    } finally {
+      if (prev === undefined) delete process.env.EXECUTION_CORE_PHASE_EVENT_CAP;
+      else process.env.EXECUTION_CORE_PHASE_EVENT_CAP = prev;
+    }
+  });
+
+  test("ignores a non-phase event whose trailing segment collides with the ticket id", () => {
+    __resetEventScanIndexForTest();
+    const now = 10_000_000;
+    const recent = new Date(now - 1000).toISOString();
+    const { path } = tempLog([
+      // a non-phase event family that happens to end in ".CTL-9" — must NOT be counted
+      JSON.stringify({ ts: recent, attributes: { "event.name": "session.ended.CTL-9" } }),
+      makeEvent({ phase: "pr", action: "probe", ticket: "CTL-9", ts: recent }), // the real one
+    ]);
+    expect(
+      countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
+    ).toBe(1);
   });
 });

@@ -46,9 +46,33 @@ import { getEventLogPath } from "./config.mjs";
 const REVIVE_NAME_RE = /^phase\.[^.]+\.revive\./;
 const REMEDIATE_NAME_PREFIX = "phase.remediate.complete.";
 
+// CTL-802 — countTicketEventsInWindow (the CTL-671 runaway detector) used to scan
+// the WHOLE log from offset 0 on every call — and it is called once per in-flight
+// signal per scheduler tick. On a large monthly log that single function dominated
+// tick latency (~20s/tick observed; blocked the event loop, starved the liveness
+// warmer → held new-work dispatch). It now rides the SAME incremental cursor as the
+// revive/remediate counters: refreshIndex records a compact {t, k} for every
+// `phase.*.<ticket>` event, and countTicketEventsInWindow filters that time-windowed
+// list instead of re-reading the file. PHASE_EVENT_CAP bounds the retained list for
+// the pathological case where the count is never read (so the per-call window prune
+// never runs) — keep only the most-recent slice. Env-overridable so tests can
+// drive the cap with a small fixture instead of 20k events.
+const PHASE_EVENT_CAP = Number(process.env.EXECUTION_CORE_PHASE_EVENT_CAP) || 20_000;
+
+// ticketOfPhaseEvent — the trailing dot-segment of a `phase.<phase>.<action>.<ticket>`
+// name (e.g. "phase.implement.revive.CTL-728" → "CTL-728"). Mirrors the old
+// `.endsWith(".<ticket>")` suffix match exactly (so "CTL-9" still never matches
+// "CTL-90") while letting one forward pass bucket every phase event by ticket.
+// Returns "" for a non-phase / non-string name.
+function ticketOfPhaseEvent(name) {
+  if (typeof name !== "string" || !name.startsWith("phase.")) return "";
+  return name.slice(name.lastIndexOf(".") + 1);
+}
+
 // Per-path incremental index. We retain ONLY the two event families the counters
-// query — a tiny fraction of the log — so memory stays bounded as the file grows.
-const _index = new Map(); // path -> { cursor, leftover, events: [{ name, orchId, ts, label }] }
+// query plus the compact per-ticket {t,k} phase-event records (CTL-802) — a small
+// fraction of the log — so memory stays bounded as the file grows.
+const _index = new Map(); // path -> { cursor, leftover, events: [...], phaseEvents: [{ t, k }] }
 
 function isRelevant(name) {
   return (
@@ -64,7 +88,7 @@ function isRelevant(name) {
 function refreshIndex(path) {
   let entry = _index.get(path);
   if (!entry) {
-    entry = { cursor: 0, leftover: "", events: [] };
+    entry = { cursor: 0, leftover: "", events: [], phaseEvents: [] };
     _index.set(path, entry);
   }
   let size;
@@ -78,6 +102,7 @@ function refreshIndex(path) {
     entry.cursor = 0;
     entry.leftover = "";
     entry.events = [];
+    entry.phaseEvents = [];
   }
   if (size === entry.cursor) return entry; // no new bytes — never re-reads
   const { endOffset, leftover } = scanEventsChunked({
@@ -86,13 +111,27 @@ function refreshIndex(path) {
     leftover: entry.leftover,
     onEvent: (ev) => {
       const name = ev?.attributes?.["event.name"];
-      if (!isRelevant(name)) return;
-      entry.events.push({
-        name,
-        orchId: ev?.attributes?.["catalyst.orchestration"],
-        ts: ev?.ts,
-        label: ev?.attributes?.["event.label"],
-      });
+      if (isRelevant(name)) {
+        entry.events.push({
+          name,
+          orchId: ev?.attributes?.["catalyst.orchestration"],
+          ts: ev?.ts,
+          label: ev?.attributes?.["event.label"],
+        });
+      }
+      // CTL-802 — bucket every phase.*.<ticket> event for countTicketEventsInWindow,
+      // so it no longer re-scans the whole file. Skip unparseable ts (matches the
+      // old detector, which ignored them). Cap the list as a memory backstop.
+      const k = ticketOfPhaseEvent(name);
+      if (k) {
+        const t = Date.parse(ev?.ts || "");
+        if (Number.isFinite(t)) {
+          entry.phaseEvents.push({ t, k });
+          if (entry.phaseEvents.length > PHASE_EVENT_CAP) {
+            entry.phaseEvents.splice(0, entry.phaseEvents.length - PHASE_EVENT_CAP);
+          }
+        }
+      }
     },
   });
   entry.cursor = endOffset;
@@ -177,6 +216,13 @@ export function __resetEventScanIndexForTest() {
   _index.clear();
 }
 
+// Test-only: the retained phaseEvents length for a path. Guards the CTL-802
+// window-prune + PHASE_EVENT_CAP memory bounds (both are count-invisible — only
+// the retained-list size observes them).
+export function __phaseEventsLengthForTest(path = getEventLogPath()) {
+  return _index.get(path)?.phaseEvents?.length ?? 0;
+}
+
 // countTicketEventsInWindow — CTL-671. Total phase.*.<ticket> envelopes within
 // `windowMs` of now(). The runaway-loop signal: a healthy ticket emits a
 // handful of events per phase; a phantom probe-storm emits hundreds. Counts ALL
@@ -193,25 +239,20 @@ export function countTicketEventsInWindow({
 } = {}) {
   if (!ticket) throw new Error("countTicketEventsInWindow: ticket required");
   if (!windowMs) throw new Error("countTicketEventsInWindow: windowMs required");
+  // CTL-802: ride the incremental cursor instead of re-scanning from offset 0.
+  // refreshIndex has already bucketed every phase.*.<ticket> event as {t,k}.
+  const entry = refreshIndex(path);
   const cutoff = now() - windowMs;
-  const suffix = `.${ticket}`;
+  // Prune entries that have aged out of the window. The list is append-ordered by
+  // the forward scan (≈ chronological), so the stale entries are a leading prefix;
+  // splicing them bounds the retained list to ≈ one window of phase events. (The
+  // one production caller always passes the same RUNAWAY_WINDOW_MS, so this prune
+  // and the count below use a consistent cutoff.)
+  const arr = entry.phaseEvents;
+  let firstIn = 0;
+  while (firstIn < arr.length && arr[firstIn].t < cutoff) firstIn++;
+  if (firstIn > 0) arr.splice(0, firstIn);
   let n = 0;
-  // CTL-671 (rebased onto CTL-673): the runaway counter must see ALL
-  // `phase.*.<ticket>` envelopes, not just the revive/remediate families the
-  // retained `_index` keeps — so it cannot reuse refreshIndex. Use the same
-  // bounded `scanEventsChunked` primitive directly (fixed-size chunks, never the
-  // pre-CTL-673 whole-file readFileSync) for a memory-safe full scan.
-  scanEventsChunked({
-    path,
-    fromOffset: 0,
-    leftover: "",
-    onEvent: (ev) => {
-      const name = ev?.attributes?.["event.name"];
-      if (typeof name !== "string" || !name.startsWith("phase.") || !name.endsWith(suffix)) return;
-      const tsMs = Date.parse(ev?.ts || "");
-      if (!Number.isFinite(tsMs) || tsMs < cutoff) return;
-      n++;
-    },
-  });
+  for (const e of arr) if (e.k === ticket && e.t >= cutoff) n++;
   return n;
 }
