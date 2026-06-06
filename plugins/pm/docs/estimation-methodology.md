@@ -2,7 +2,7 @@
 
 This document describes the **reusable, calibrated estimation pipeline** ported from the proven
 Adva pipeline (ADV-424 / ADV-458 / ADV-426) into the Catalyst PM plugin. It covers the data
-sources, the three pipeline stages, the calibrated heuristic table, the T-shirt → story-point
+sources, the pipeline stages, the calibrated heuristic table, the T-shirt → story-point
 mapping, the calibration approach, and how the orchestrator's `phase-triage` agent and the
 execution-core scheduler should consume the output.
 
@@ -11,7 +11,9 @@ The scripts live in [`plugins/pm/scripts/estimate/`](../scripts/estimate/):
 | Stage | Script | Role |
 |---|---|---|
 | **Extract** | `extract-actuals-from-transcripts.ts` | Stream session transcripts → per-ticket actuals CSV (cost, turns, wall-hours) |
+| **Collect** | `collect-ticket-signals.ts` | CTL-813: join Linear Done tickets ⋈ merged PRs (LOC/files/domains/flags) ⋈ actuals CSV ⋈ compound-log re-scores → the Score input CSV |
 | **Score** | `score-tickets.ts` | Apply the calibrated heuristic → T-shirt + points + confidence + rationale, emit a corpus JSON |
+| **Refresh** | `refresh-corpus.sh` | CTL-813: recurring orchestration Extract→Collect→Score, then MERGE fresh entries over the committed corpus (see §5.5) |
 | **Lookup** | `reference-class-lookup.ts` | Read-side k-NN: nearest closed tickets by signal similarity + their actuals distribution |
 
 This methodology is the **runtime calibration anchor**; the on-ticket data contract it feeds is the
@@ -188,8 +190,28 @@ corpus entry carries both the T-shirt and the point value.
    medians — the §3 AI-native bands.
 4. Bands are sanity-checked against the structural votes: a well-calibrated table has the actuals
    votes agreeing with the structural votes on most Tier-1 tickets (high-confidence rows).
-5. Re-run periodically as the corpus grows; the geometric-midpoint rule makes re-derivation
-   mechanical. Human-labelled tickets (`estimate-source:human`) are excluded via `--check-labels`.
+5. **Re-run mechanism (CTL-813 — this closes the loop).** `refresh-corpus.sh` is the recurring
+   producer; `adapt-reference-corpus.ts` is bootstrap-only (the historical CTL-746 `/tmp` dict —
+   its entries carry no titles/signals, so the lookup's title/domain/flag similarity components
+   are inert against them until refreshed):
+
+   ```bash
+   plugins/pm/scripts/estimate/refresh-corpus.sh           # Extract → Collect → Score → merge
+   plugins/pm/scripts/estimate/refresh-corpus.sh --dry-run # preview the old→new summary
+   ```
+
+   - **Merge semantics**: fresh entries REPLACE same-ticket entries; entries not re-scored
+     (e.g. cross-repo ADV anchors whose PRs aren't in this repo) are RETAINED; `generated_at`
+     advances and the entry count never shrinks (guarded; `--force` to override).
+   - **Human ground truth**: the Collect step joins `compound-log.sh aggregate` — a ticket's
+     post-merge `estimate_actual` re-score overrides the voted score (`confidence: high`,
+     rationale annotated) and anchors the Tier-4 NN pool.
+   - **Cadence**: opportunistic — `compound-estimate` step 6 offers a refresh whenever the
+     committed corpus is >7 days old; run it manually (or via a scheduled routine) otherwise.
+     The compound-log sink fills at every merge: interactively via `merge-pr` step 12b, and
+     autonomously (agent-authored re-score) via `phase-monitor-merge`.
+   - Human-labelled tickets (`estimate-source:human`) are excluded via `--check-labels` (on by
+     default in the refresh).
 
 ---
 
@@ -215,7 +237,10 @@ scheduler, NOT in the phase-triage skill**. The scheduler picks up the proposed 
 
 - **OVERWRITE semantics**: the scheduler write **overwrites** the existing machine estimate (the
   estimate is derived, not hand-tuned), **except** when the ticket carries `estimate-source:human` —
-  human estimates are never clobbered (same guard as `score-tickets --check-labels`).
+  human estimates are never clobbered (same guard as `score-tickets --check-labels`). Enforced
+  since CTL-813 in `linear-write.mjs applyEstimate()`: it pre-reads the ticket's labels and skips
+  with `{skipped: "human-estimate"}`; an unreadable label set fails OPEN (matching the
+  `score-tickets --check-labels` precedent), since the scheduler's write is one-shot.
 - Putting the write in the scheduler (not the skill) preserves the CTL-497 negative guard in the
   execution-core e2e test and keeps the skill a pure read-only proposer.
 
