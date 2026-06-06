@@ -21,7 +21,7 @@ import { scanEventsChunked } from "./event-tail.mjs";
 import { shortIdFromSessionId, isSelfSession } from "./claude-ids.mjs";
 import { emitReapIntent, REAP_INTENT_TYPES } from "./reap-intent.mjs";
 import { lastSeenMsForSession } from "./session-recency.mjs";
-import { getAgentsCached } from "./claude-agents.mjs";
+import { getAgentsCached, listClaudeAgentsResult } from "./claude-agents.mjs";
 import {
   isSafeToRemoveWorktree,
   hasOrchProvenance,
@@ -59,15 +59,26 @@ export const CLEANUP_GRACE_MS = 60_000;
 // folds in the live `claude agents` snapshot + the lsof backstop + registry
 // provenance, and returns { safe, reasons }. Injectable as the Reaper's
 // `assessWorktreeRemoval` seam so unit tests drive the verdict without real git.
-async function defaultAssessWorktreeRemoval(event, agentsFn) {
+export async function defaultAssessWorktreeRemoval(event, readAgents = () => listClaudeAgentsResult()) {
   const gateRunGit = (args) =>
     spawnSync("git", ["-C", event.worktree_path, ...args], { encoding: "utf8" });
+  // Fail-closed liveness: listClaudeAgentsResult distinguishes a FAILED read
+  // ({ ok:false }) from a genuinely-empty fleet, so a crashed/timed-out/cold
+  // `claude agents` yields agents-stale → unsafe rather than a false "no live
+  // session". (getAgentsCached().agents ALWAYS returns an array — cold cache → []
+  // — which would silently defeat the gate; CTL-791 adversarial review.)
+  // `readAgents` is injectable so a test can drive the failed-read branch.
   let agentsList = [];
   let agentsOk = false;
   try {
-    const a = await agentsFn();
-    agentsList = Array.isArray(a) ? a : [];
-    agentsOk = Array.isArray(a);
+    const r = readAgents();
+    if (Array.isArray(r)) {
+      agentsList = r;
+      agentsOk = true;
+    } else {
+      agentsList = r?.agents ?? [];
+      agentsOk = r?.ok === true;
+    }
   } catch {
     agentsOk = false;
   }
@@ -330,7 +341,7 @@ export class Reaper {
     //     incident's hole), a dirty/unmerged tree, or an interactive/unknown
     //     worktree must also block. Unsafe ⇒ flag (out-of-tree marker +
     //     cleanup-deferred), never remove. ARCHIVE worktree-local docs first.
-    const verdict = await this.assessWorktreeRemoval(event, this.agents);
+    const verdict = await this.assessWorktreeRemoval(event);
     if (!verdict.safe) {
       deferWorktreeCleanup(
         event.worktree_path,
@@ -791,7 +802,11 @@ async function defaultGitWorktreeRemove(path) {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
-    if ((res.status ?? 0) === 0) return { ok: true };
+    // CTL-791: fail-closed. spawnSync sets `error` + a null status when git can't
+    // be spawned (ENOENT / resource limit); `?? 0` would mis-read that as a
+    // successful removal and trigger a false branch-delete + cleanup-complete.
+    if (res.error) return { ok: false, error: res.error.message };
+    if ((res.status ?? 1) === 0) return { ok: true };
     return { ok: false, error: res.stderr?.trim() || `git worktree remove rc=${res.status}` };
   } catch (err) {
     return { ok: false, error: err.message };
