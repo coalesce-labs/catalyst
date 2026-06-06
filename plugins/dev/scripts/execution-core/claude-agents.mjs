@@ -133,47 +133,89 @@ function backoffWindowMs(failures) {
 }
 
 // defaultExecFileAsync — the production async reader: execFile wrapped as a
-// promise, bound to an AbortSignal so the timeout path can kill the child.
+// promise, bound to an AbortSignal so the timeout path can kill the child. The
+// returned promise carries a `.child` reference (the ChildProcess) so the
+// deadline (refreshAgents) can ask whether the child has ACTUALLY exited rather
+// than discarding a completed-but-late read as a timeout (CTL-790). Any injected
+// execFileAsync may omit `.child`; the deadline tolerates its absence.
 function defaultExecFileAsync(bin, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) => {
+  let child;
+  const promise = new Promise((resolve, reject) => {
+    child = execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) => {
       if (err) reject(err);
       else resolve(stdout);
     });
   });
+  promise.child = child;
+  return promise;
 }
 
 // refreshAgents — perform ONE async, timed, single-flight `claude agents --json`
 // read and update the shared snapshot. Returns the resolved agents array (or the
 // last-good / [] on failure); never rejects. Concurrent callers join the same
 // in-flight promise (anti-stampede). Injectable seams: execFileAsync (the async
-// reader), now (clock), timeoutMs, setTimer/clearTimer (the deadline timer).
+// reader), now (clock), timeoutMs, setTimer/clearTimer (the deadline timer),
+// deferDecision (the phase-deferral primitive — setImmediate in production).
+//
+// CTL-790 — the deadline must NOT race the read with a bare reject-timer. The
+// scheduler tick is synchronous and blocks the Node event loop for many seconds;
+// libuv runs the TIMERS phase BEFORE the POLL phase, so an overdue deadline timer
+// fires before an already-COMPLETED read is delivered, and a `Promise.race` would
+// discard that good snapshot as a "timeout" — the bug that wedged new-work
+// dispatch forever (isFresh never went true). Instead the deadline DEFERS its
+// verdict one phase via `deferDecision` (setImmediate → the CHECK phase, which
+// runs AFTER poll): a read that finished during the block has had its result
+// delivered and `settled` is set, so it wins. Only a child that is GENUINELY
+// still running (exitCode/signalCode both null) — or an injected fake with no
+// `.child` — is aborted and treated as a timeout. This shrinks the discard
+// window to a child mid-flush; the async-tick refactor (CTL roadmap Stage 2)
+// closes it entirely by never blocking the loop > timeoutMs.
 export function refreshAgents({
   execFileAsync = defaultExecFileAsync,
   now = Date.now,
   timeoutMs = LIVENESS_TIMEOUT_MS,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  deferDecision = setImmediate,
 } = {}) {
   if (_inflight) return _inflight; // (c) join the in-flight read
   const controller = new AbortController();
   let timer = null;
+  let settled = false; // (b) set the instant the read resolves/rejects
   const run = (async () => {
     try {
-      const out = await Promise.race([
-        // (a) async read, bound to the abort signal for (b).
-        execFileAsync(CLAUDE_BIN, ["agents", "--json"], {
-          encoding: "utf8",
-          signal: controller.signal,
-        }),
-        // (b) deadline: abort the child and reject so we fall back to last-good.
-        new Promise((_, reject) => {
-          timer = setTimer(() => {
-            controller.abort();
-            reject(new Error("claude agents --json timed out"));
-          }, timeoutMs);
-        }),
-      ]);
+      // (a) async read, bound to the abort signal for (b). `.child` (when the
+      // reader exposes it) is the authoritative "has it exited?" signal.
+      const readP = execFileAsync(CLAUDE_BIN, ["agents", "--json"], {
+        encoding: "utf8",
+        signal: controller.signal,
+      });
+      const out = await new Promise((resolve, reject) => {
+        readP.then(
+          (o) => {
+            settled = true;
+            resolve(o);
+          },
+          (e) => {
+            settled = true;
+            reject(e);
+          },
+        );
+        // (b) deadline: defer the verdict past the poll phase so a completed read
+        // wins; abort + reject only a child that is genuinely still running.
+        timer = setTimer(() => {
+          deferDecision(() => {
+            if (settled) return; // read already completed — honor it
+            const child = readP.child;
+            if (!child || (child.exitCode === null && child.signalCode === null)) {
+              controller.abort();
+              reject(new Error("claude agents --json timed out"));
+            }
+            // else: child has exited; its read callback is imminent in poll —
+            // do nothing and let `readP` settle the outer promise.
+          });
+        }, timeoutMs);
+      });
       const parsed = JSON.parse(out);
       if (!Array.isArray(parsed)) throw new Error("claude agents --json: non-array JSON");
       _asyncSnap = { ts: now(), agents: parsed };
