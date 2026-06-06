@@ -31,13 +31,14 @@ import {
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
+  GHOST_GRACE_MS,
 } from "./config.mjs";
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
-import { claudeStop } from "./claude-agents.mjs";
+import { claudeStop, getAgentsCached, agentForShortId } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import {
@@ -1339,6 +1340,15 @@ export function reclaimDeadWorkIfPossible(
     // eventually-consistent `claude agents` snapshot reader (livenessForBgJob),
     // which is no longer consulted by the reclaim/death path at all.
     jobLifecycle: jobLifecycleFn = jobLifecycle,
+    // CTL-809 — GHOST BREAKER seams. agentsSnapshot returns the FRESH `claude
+    // agents` snapshot {agents,isFresh,ageMs}; production reads the warm
+    // getAgentsCached, tests inject a fake. ghostGraceMs is the just-dispatched
+    // grace window. Consulted ONLY to break the jobLifecycle-alive-but-process-gone
+    // tie in the alive branch below, strictly gated on isFresh (CTL-731/657-safe)
+    // and on a worker older than ghostGraceMs (no false-reclaim of a not-yet-
+    // registered fresh spawn — CTL-662-safe; a busy fan-out worker stays LISTED).
+    agentsSnapshot = getAgentsCached,
+    ghostGraceMs = GHOST_GRACE_MS,
     // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
     // signal has not been touched in this long is an abandoned historical dir,
     // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
@@ -1535,8 +1545,47 @@ export function reclaimDeadWorkIfPossible(
         return escalateOnce("busy-ceiling-exceeded", 0);
       }
     }
-    log.info({ ticket, phase, prevBgJobId }, "ctl-736: alive worker — reclaim suppressed");
-    return "alive-suppressed";
+    // CTL-809 — GHOST BREAKER. jobLifecycle reads ONLY the local state.json, which
+    // on CC 2.x is never rewritten terminal for a crashed/wedged --bg worker — so a
+    // corpse stuck at state:"working" (e.g. wedged on the bypass-permissions startup
+    // dialog) reads "alive" forever and is suppressed every tick. Cross-check the
+    // now-reliable (CTL-790/792) `claude agents` snapshot: a worker ABSENT from a
+    // FRESH snapshot, past the just-dispatched grace window, is genuinely gone — so
+    // fall through to the reclaim-eligible path below instead of suppressing forever.
+    //   • CTL-662-safe: a busy in-process sub-agent fan-out worker is STILL LISTED in
+    //     `claude agents` (active/idle), never absent → never reclaimed here.
+    //   • CTL-731/657-safe: STRICTLY gated on snap.isFresh — a stale/cold snapshot
+    //     skips the cross-check and suppresses exactly as before (no cold storm).
+    //   • just-spawned-safe: ghostGraceMs gate (reusing startedAtMs parsed above)
+    //     keeps a worker that has not yet registered in `claude agents` from being
+    //     false-reclaimed.
+    let ghostAbsent = false;
+    if (Number.isFinite(startedAtMs) && now() - startedAtMs > ghostGraceMs) {
+      let shortId = null;
+      if (prevBgJobId) {
+        try {
+          shortId = shortIdFromSessionId(prevBgJobId);
+        } catch {
+          shortId = null; // malformed bg_job_id → unresolvable → suppress (no throw)
+        }
+      }
+      if (shortId) {
+        const snap = agentsSnapshot();
+        if (snap?.isFresh && agentForShortId(shortId, snap.agents) === null) {
+          ghostAbsent = true;
+          log.warn(
+            { ticket, phase, prevBgJobId, snapshotAgeMs: snap.ageMs },
+            "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)",
+          );
+        }
+      }
+    }
+    if (!ghostAbsent) {
+      log.info({ ticket, phase, prevBgJobId }, "ctl-736: alive worker — reclaim suppressed");
+      return "alive-suppressed";
+    }
+    // ghostAbsent → fall through to the dead-eligible reclaim path below (supersede
+    // guard → no-probe escalate (A) / probe-done reclaim (B) / revive).
   }
 
   // ── dead-terminal | dead-gone share the reclaim-eligible path below.
