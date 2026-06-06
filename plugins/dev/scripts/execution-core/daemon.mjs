@@ -78,7 +78,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
 import { classifyTicketResolution } from "./linear-query.mjs";
-import { isBgJobAlive } from "./claude-agents.mjs";
+import { isBgJobAlive, refreshAgents } from "./claude-agents.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
 
@@ -103,6 +103,11 @@ let _stopAutoTuner = null;
 let _eventWatcher = null;
 let _eventDebounceTimer = null;
 let _eventPollTimer = null; // CTL-769: poll-fallback drain (fs.watch debounce never fires on the continuously-appended log)
+// CTL-792: short-interval liveness-snapshot warmer. ~TTL/2 so the dispatch gate's
+// staleMs (2×TTL ≈ 10s) window always sees a fresh snapshot regardless of the
+// idle scheduler-tick cadence. Env-tunable.
+const LIVENESS_WARM_INTERVAL_MS = Number(process.env.CATALYST_LIVENESS_WARM_MS) || 4_000;
+let _livenessTimer = null;
 let _eventLogCursor = 0;
 // CTL-649: the trailing partial line carried across reads. _eventLogCursor is a
 // BYTE offset; consumeEventTail reads only NEW bytes via a file descriptor and
@@ -336,6 +341,26 @@ export function startDaemon({
   clearProgressMarks(orchDir);
   _stopMonitor = stopMonitorFn;
   _stopScheduler = stopSchedulerFn;
+
+  // CTL-792: keep the liveness snapshot warm so an idle tick cadence doesn't hold
+  // new-work dispatch forever on the staleMs gate. CTL-790 made the snapshot
+  // POPULATE, but it is refreshed only LAZILY (once per scheduler tick) — and an
+  // idle daemon ticks every ~15-30s while staleMs is short, so the snapshot is
+  // always stale by the next gate check. A dedicated short-interval refresh keeps
+  // _asyncSnap < staleMs old AND keeps the worker count ~TTL-accurate (over-spawn-
+  // safe). UNCONDITIONAL — core to dispatch, must NOT depend on the optionally-
+  // disabled reaper (its earlier placement inside startReaperAndTimer never ran).
+  // Fire-and-forget + single-flight; unref'd; torn down in stopDaemon.
+  _livenessTimer = setInterval(() => {
+    try {
+      Promise.resolve(refreshAgents()).catch((err) =>
+        log.warn({ err: err?.message }, "liveness warmer: refresh failed"),
+      );
+    } catch (err) {
+      log.warn({ err: err?.message }, "liveness warmer: threw");
+    }
+  }, LIVENESS_WARM_INTERVAL_MS);
+  _livenessTimer.unref?.();
 
   // CTL-586: write the PID file BEFORE the synchronous boot work
   // (recover/monitor/scheduler each trigger a blocking reconcile that fans
@@ -695,6 +720,10 @@ export function stopDaemon() {
   if (_eventPollTimer) {
     clearInterval(_eventPollTimer);
     _eventPollTimer = null;
+  }
+  if (_livenessTimer) {
+    clearInterval(_livenessTimer);
+    _livenessTimer = null;
   }
   if (_orphanTimer) {
     try {
