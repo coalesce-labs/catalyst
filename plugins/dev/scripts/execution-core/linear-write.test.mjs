@@ -672,10 +672,12 @@ describe("applyBlockedByRelation", () => {
 });
 
 describe("applyEstimate", () => {
+  // CTL-813: fetchLabels is injected in call-counting tests so the
+  // estimate-source:human pre-read doesn't go through the counted exec.
   test("valid estimate, exec returns code:0 → applied:true, correct args", () => {
     const calls = [];
     const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec, fetchLabels: () => [] });
     expect(r).toEqual({ applied: true, reason: null });
     expect(calls).toHaveLength(1);
     expect(calls[0].cmd).toBe("linearis");
@@ -726,9 +728,91 @@ describe("applyEstimate", () => {
     for (const est of [1, 3, 5, 8, 13]) {
       const calls = [];
       const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec });
+      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec, fetchLabels: () => [] });
       expect(r.applied).toBe(true);
       expect(calls[0].args).toContain(String(est));
     }
+  });
+
+  // ── CTL-813: estimate-source:human guard ─────────────────────────────────
+  // estimation-methodology.md §6b promises human estimates are never clobbered
+  // (the contract score-tickets --check-labels already honors). applyEstimate
+  // pre-reads the label set and skips the write when the label is present.
+
+  test("ticket labeled estimate-source:human → skipped, update never called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => ["feature", "estimate-source:human"],
+    });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("human-estimate");
+    expect(r.reason).toBe("skipped-human-estimate");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("ticket with other labels but not the human label → write proceeds", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => ["feature", "estimation"],
+    });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--estimate", "5"]);
+  });
+
+  test("label pre-read fails (null) → FAIL-OPEN: write proceeds", () => {
+    // Matches the score-tickets --check-labels precedent: a failed label check
+    // warns and proceeds without the filter. The scheduler's estimate write is
+    // one-shot (triage→research advance) — failing closed would silently drop
+    // it forever on any transient read hiccup.
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec, fetchLabels: () => null });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("label pre-read throws → FAIL-OPEN: write proceeds, nothing thrown", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => { throw new Error("label boom"); },
+    });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("default fetchLabels wiring: linearis read returns human label via exec → skipped", () => {
+    // No injected fetchLabels — the real fetchTicketLabels path runs through
+    // the injected exec: first call is the `issues read`, and on seeing the
+    // human label no update call follows.
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === "issues" && args[1] === "read") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ labels: { nodes: [{ name: "estimate-source:human" }] } }),
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("human-estimate");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.slice(0, 2)).toEqual(["issues", "read"]);
   });
 });
