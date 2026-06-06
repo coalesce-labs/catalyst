@@ -208,9 +208,9 @@ if [[ -f "$SKILL_MONITOR_MERGE" ]]; then
   assert_grep 'catalyst-events wait-for' "$SKILL_MONITOR_MERGE" "uses catalyst-events wait-for (event-driven loop)"
   assert_grep 'github\.pr\.merged|github\.check_suite|github\.pr_review' "$SKILL_MONITOR_MERGE" \
     "references GitHub PR-lifecycle event names"
-  # Transitions Linear to done on merge (per plan §Linear Integration table).
-  assert_grep 'linear-transition\.sh' "$SKILL_MONITOR_MERGE" "calls linear-transition.sh"
-  assert_grep '\bdone\b' "$SKILL_MONITOR_MERGE" "transitions Linear to done"
+  # CTL-703: Linear Done is written by phase-teardown (10th phase), not phase-monitor-merge.
+  assert_not_grep 'linear-transition\.sh' "$SKILL_MONITOR_MERGE" \
+    "phase-monitor-merge does NOT transition Linear to done (CTL-703: teardown owns it)"
   assert_grep '^/goal' "$SKILL_MONITOR_MERGE" "declares a /goal line"
 fi
 
