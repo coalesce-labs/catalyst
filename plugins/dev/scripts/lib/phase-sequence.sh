@@ -13,7 +13,7 @@
 # guard test keeps the recovery scanners pure bash.
 
 # shellcheck disable=SC2034  # PHASES is consumed by sourcing scripts
-PHASES=(triage research plan implement verify review pr monitor-merge monitor-deploy)
+PHASES=(triage research plan implement verify review pr monitor-merge monitor-deploy teardown)
 
 # CTL-667: the BUILD phases that get a fresh-dispatch rebase onto origin/<base>.
 # Strict subset of PHASES — keep in that set (the phase-sequence drift test +
