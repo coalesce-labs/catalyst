@@ -4,6 +4,7 @@
 // seams) so nothing shells out to the real `claude`.
 
 import { describe, test, expect, beforeEach } from "bun:test";
+import { execFile } from "node:child_process";
 import {
   listClaudeAgents,
   listClaudeAgentsResult,
@@ -381,6 +382,108 @@ describe("refreshAgents + getAgentsCached (Phase 00 hardened liveness read)", ()
     });
     timeoutCb();
     expect(await p).toEqual([]);
+  });
+
+  test("(b/CTL-790) a read that COMPLETES before the deferred deadline verdict is HONORED, not discarded", async () => {
+    // The production stall in miniature: the deadline fires, but the read already
+    // settled (child exited). The deferred verdict must keep the good snapshot
+    // rather than discard it as a timeout (the bug that wedged dispatch forever).
+    let resolveRead = null;
+    const child = { exitCode: null, signalCode: null };
+    const reader = () => {
+      const pr = new Promise((res) => {
+        resolveRead = res;
+      });
+      pr.child = child;
+      return pr;
+    };
+    let timeoutCb = null;
+    let deferredCb = null;
+    const p = refreshAgents({
+      execFileAsync: reader,
+      now: () => 1000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+      deferDecision: (cb) => {
+        deferredCb = cb;
+      },
+    });
+    // Read completes (child exits) BEFORE the deferred verdict runs.
+    child.exitCode = 0;
+    resolveRead(JSON.stringify(agents));
+    await Promise.resolve(); // let the read's .then mark `settled`
+    timeoutCb(); // deadline fires → schedules the deferred verdict
+    deferredCb(); // verdict runs AFTER the read settled → must no-op
+    expect(await p).toEqual(agents); // NOT discarded
+    const snap = getAgentsCached({ now: () => 1000 });
+    expect(snap.populated).toBe(true);
+    expect(snap.isFresh).toBe(true);
+  });
+
+  test("(b/CTL-790) a GENUINELY-running read (child not exited) IS aborted at the deadline", async () => {
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
+    const child = { exitCode: null, signalCode: null }; // still running
+    let capturedSignal = null;
+    const hanging = (_bin, _args, opts) => {
+      capturedSignal = opts.signal;
+      const pr = new Promise(() => {}); // never resolves
+      pr.child = child;
+      return pr;
+    };
+    let timeoutCb = null;
+    const p = refreshAgents({
+      execFileAsync: hanging,
+      now: () => 5000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+      deferDecision: (cb) => cb(), // run the verdict synchronously
+    });
+    timeoutCb();
+    const result = await p;
+    expect(capturedSignal?.aborted).toBe(true); // still running → aborted, not leaked
+    expect(result).toEqual(agents); // served last-good
+  });
+
+  test("(b/CTL-790) INTEGRATION: a real read completing during a synchronous loop-block survives (libuv timers-before-poll)", async () => {
+    // The exact production trap: a real subprocess finishes in ms, but a
+    // synchronous scheduler tick busy-blocks the event loop > timeoutMs. The old
+    // `Promise.race` discarded the completed read as a timeout; the deferred
+    // verdict keeps it.
+    const sample = [
+      { sessionId: "aaaaaaaa-bbbb-cccc-dddd-000000000001", status: "idle", kind: "background" },
+    ];
+    const realReader = (_bin, _args, opts) => {
+      let child;
+      const pr = new Promise((res, rej) => {
+        child = execFile(
+          "sh",
+          ["-c", `printf '%s' '${JSON.stringify(sample)}'`],
+          opts,
+          (err, stdout) => (err ? rej(err) : res(stdout)),
+        );
+      });
+      pr.child = child;
+      return pr;
+    };
+    const p = refreshAgents({ execFileAsync: realReader, timeoutMs: 100, now: () => 1000 });
+    const end = Date.now() + 300; // block the loop > timeoutMs while the child finishes
+    while (Date.now() < end) {
+      /* busy-wait: starve the event loop, exactly like the synchronous tick */
+    }
+    await p;
+    const snap = getAgentsCached({ now: () => 1000 });
+    expect(snap.populated).toBe(true);
+    expect(snap.isFresh).toBe(true);
+    expect(snap.agents.length).toBe(1);
+    expect(countBackgroundAgents({ now: () => 1000 })).toBe(1);
   });
 
   test("(d) backoff: after the failure threshold, getAgentsCached does NOT fire a new refresh until the window elapses", async () => {

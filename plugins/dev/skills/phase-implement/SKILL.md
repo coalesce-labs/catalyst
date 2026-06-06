@@ -364,6 +364,41 @@ if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
 fi
 ```
 
+## Step N — Capture friction (compound loop, CTL-789)
+
+Just before the terminal emit, append **this phase's** friction to the shared per-ticket friction
+log. This is the producer half of the engineering compound loop: `ticket-compound` later harvests
+`thoughts/shared/friction/<TICKET>.md` to turn what hurt this run into durable learnings/ADRs.
+
+REPLACE each `<…>` placeholder below with your real experience from **this** phase (terse, 3–6
+lines total; `"None."` is a valid answer when the phase was frictionless). `${TICKET}` is already
+resolved upstream — do not re-derive it. This append is **best-effort and off the critical path**:
+it must NEVER fail the phase or block the emit-complete below. (Note this phase emits a signal JSON,
+not a `thoughts/` markdown doc — which is exactly why friction goes to the shared friction LOG; do
+not touch any `*.json` signal file.)
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## implement · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
+The record header `## implement · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)` is a CROSS-PHASE
+contract: `## <phase> · <TICKET> · <ISO-8601 timestamp>` carrying DATE+TIME+offset (e.g.
+`2026-06-06T14:23:01+0900`). Keep this format byte-identical across all five phases — the per-record
+stamp is what lets the morning briefing / daily review scan and sort "friction since last review";
+never drop to a date-only stamp.
+
+## End block — terminal emit (copy verbatim)
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then
