@@ -196,6 +196,20 @@ export function readMemorySamplerConfig() {
   };
 }
 
+// CTL-787 — account-level Claude rate-limit usage poller. Re-reads from
+// process.env on every call so tests can manipulate env vars freely (mirrors
+// readMemorySamplerConfig). The poller floors intervalMs at 180s internally;
+// the default cadence here is ~5 min.
+export function readRatelimitPollerConfig() {
+  return {
+    enabled: process.env.CATALYST_RATELIMIT_POLLER !== "0",
+    intervalMs: Number(process.env.EXECUTION_CORE_RATELIMIT_POLL_INTERVAL_MS) || 300000,
+    usageEndpoint:
+      process.env.EXECUTION_CORE_RATELIMIT_USAGE_ENDPOINT ||
+      "https://api.anthropic.com/api/oauth/usage",
+  };
+}
+
 // --- Auto-tuner (CTL-684) ---
 // Sample cadence — how often the auto-tuner polls load + memory.
 export const AUTOTUNE_SAMPLE_INTERVAL_MS =
