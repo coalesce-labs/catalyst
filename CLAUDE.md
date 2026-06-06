@@ -48,6 +48,12 @@ This workspace has no build process - it's markdown files and bash scripts.
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
 
+## Knowledge Store
+
+- `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type).
+  Search before implementing or debugging in a known area. Curated by `/catalyst-foundry:ticket-compound`.
+- `thoughts/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
+
 ## Commit Conventions
 
 - `feat(dev): add new skill` — catalyst-dev minor bump

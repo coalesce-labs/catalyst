@@ -5,9 +5,11 @@ description:
   thoughts/briefings/YYYY-MM-DD.md (built by [[morning-briefing]]), parses the structured
   decisions: frontmatter, walks the user through each open decision, and executes the
   selected action via supported handlers — schedule calendar entry, file Linear ticket,
-  dispatch orchestrator, draft email, plus ADR-drift-specific actions (update ADR / file
-  code-drift ticket / defer with a drift note). Phase 4 (CTL-465) writes resolutions
-  back to the briefing markdown.
+  dispatch orchestrator, draft email, ADR-drift-specific actions (update ADR / file
+  code-drift ticket / defer with a drift note), plus compound-engineering ADR proposals
+  from the ticket-compound curator (apply / edit / defer / reject — apply is the only
+  writer of docs/adrs.md). Phase 4 (CTL-465) writes resolutions back to the briefing
+  markdown.
 disable-model-invocation: true
 user-invocable: true
 allowed-tools: Read, Write, Edit, Bash, Task, mcp__*
@@ -139,28 +141,38 @@ echo "$DECISIONS_JSON" | jq -c '.[]' | while IFS= read -r dec; do
   PR_URL=$(echo "$dec"  | jq -r '.pr_url // empty')
   TICKET=$(echo "$dec"  | jq -r '.ticket // empty')
   ADR=$(echo "$dec"     | jq -r '.adr // empty')
+  PENDING=$(echo "$dec" | jq -r '.pending // empty')
 
   echo
   echo "═══ Decision $INDEX of $TOTAL ═══"
   echo "id:      $ID"
   echo "type:    $TYPE"
   echo "summary: $SUMMARY"
-  [[ -n "$PR_URL" ]] && echo "pr:      $PR_URL"
-  [[ -n "$TICKET" ]] && echo "ticket:  $TICKET"
-  [[ -n "$ADR"    ]] && echo "adr:     $ADR"
+  [[ -n "$PR_URL"  ]] && echo "pr:      $PR_URL"
+  [[ -n "$TICKET"  ]] && echo "ticket:  $TICKET"
+  [[ -n "$ADR"     ]] && echo "adr:     $ADR"
+  [[ -n "$PENDING" ]] && echo "pending: $PENDING"
   echo
 
-  case "$TYPE" in
-    blocked_pr)
-      echo "Actions: [a]pprove · [r]eject · [d]efer · [o]rchestrate · [s]kip · [q]uit"
-      ;;
-    adr_drift)
-      echo "Actions: [u]pdate ADR · [t]icket (code drift) · [D]efer · [s]kip · [q]uit"
-      ;;
-    *)
-      echo "Actions: [a]pprove · [r]eject · [d]efer · [c]alendar · [t]icket · [o]rchestrate · [e]mail · [s]kip · [q]uit"
-      ;;
-  esac
+  # A compound-engineering ADR proposal is discriminated by a non-empty
+  # `pending:` field (morning-briefing emits these as type=judgment_call with a
+  # `pending:` path, because the frontmatter schema's type enum has no
+  # `compound_adr` value). Check it before the type switch.
+  if [[ -n "$PENDING" ]]; then
+    echo "Actions: [a]pply ADR proposal · [e]dit then apply · [D]efer · [r]eject · [s]kip · [q]uit"
+  else
+    case "$TYPE" in
+      blocked_pr)
+        echo "Actions: [a]pprove · [r]eject · [d]efer · [o]rchestrate · [s]kip · [q]uit"
+        ;;
+      adr_drift)
+        echo "Actions: [u]pdate ADR · [t]icket (code drift) · [D]efer · [s]kip · [q]uit"
+        ;;
+      *)
+        echo "Actions: [a]pprove · [r]eject · [d]efer · [c]alendar · [t]icket · [o]rchestrate · [e]mail · [s]kip · [q]uit"
+        ;;
+    esac
+  fi
 done
 ```
 
@@ -180,6 +192,10 @@ to action handlers as follows:
 | edit / update the ADR (adr_drift only) | `action-adr.sh --mode update --adr-file "$ADR"` → `record_resolution "$ID" adr_update "$JSON"` | TSV + JSON |
 | file code-drift ticket / fix the code (adr_drift only) | `action-adr.sh --mode ticket --adr-file "$ADR" --team CTL --summary "$SUMMARY" --drift-status "$DRIFT_STATUS"` → `record_resolution "$ID" adr_ticket "$JSON"` | TSV + JSON |
 | defer / note as intentional (adr_drift only) | `action-adr.sh --mode defer --adr-file "$ADR" --reason "$REASON"` → `record_resolution "$ID" adr_defer "$JSON"` | TSV + JSON |
+| apply / approve / accept the ADR proposal (decisions with a `pending:` path) | `action-compound.sh --mode apply --pending "$PENDING" --ticket "$TICKET"` → `record_resolution "$ID" compound_apply "$JSON"` | TSV + JSON |
+| edit / tweak then apply the proposal (`pending:`) | `action-compound.sh --mode edit --pending "$PENDING" --ticket "$TICKET"` → `record_resolution "$ID" compound_edit "$JSON"` | TSV + JSON |
+| defer / not yet (`pending:`) | `action-compound.sh --mode defer --pending "$PENDING" --ticket "$TICKET" --reason "$REASON"` → `record_resolution "$ID" compound_defer "$JSON"` | TSV + JSON |
+| reject / decline the proposal (`pending:`) | `action-compound.sh --mode reject --pending "$PENDING" --ticket "$TICKET" --reason "$REASON"` → `record_resolution "$ID" compound_reject "$JSON"` | TSV + JSON |
 | skip | move on without logging |
 | quit / stop / done | break out of the loop |
 
@@ -208,11 +224,39 @@ record_resolution "$ID" schedule_calendar "$RESULT"
 log_response "$ID" schedule_calendar "$STATUS"
 ```
 
-The same pattern applies to `action-ticket.sh`, `action-orchestrate.sh`, and
-`action-email.sh` — only the script name and the action label change. All four handlers
-soft-skip cleanly when their underlying tool is missing or unauthenticated; the
-returned `{"status": "skipped", "reason": "..."}` JSON is captured the same way as a
-success result so the resolution log faithfully records what happened.
+The same pattern applies to `action-ticket.sh`, `action-orchestrate.sh`,
+`action-email.sh`, `action-adr.sh`, and `action-compound.sh` — only the script name and
+the action label change. All handlers soft-skip cleanly when their underlying tool or
+input is missing (e.g. `action-compound.sh` returns
+`{"status": "skipped", "reason": "pending proposal not found: ..."}` when the proposal
+has already been resolved on another machine); the returned skip JSON is captured the
+same way as a success result so the resolution log faithfully records what happened.
+
+For a compound-engineering ADR proposal (any decision carrying a `pending:` path —
+morning-briefing emits these as `type: judgment_call` with a `pending:` field, since the
+frontmatter schema's `type` enum has no `compound_adr` value), `--pending` is that path,
+surfaced by morning-briefing from `thoughts/shared/compound/pending/*.md`:
+
+```bash
+# Example — apply an approved ADR proposal:
+RESULT=$(bash "$SCRIPT_DIR/action-compound.sh" \
+  --mode apply --pending "$PENDING" --ticket "$TICKET")
+
+STATUS=$(echo "$RESULT" | jq -r '.status')
+case "$STATUS" in
+  applied)  echo "Applied — $(echo "$RESULT" | jq -r '.target') $(echo "$RESULT" | jq -r '.adr_id') @ $(echo "$RESULT" | jq -r '.commit_sha')" ;;
+  deferred) echo "Deferred — proposal left pending" ;;
+  rejected) echo "Rejected — $(echo "$RESULT" | jq -r '.reason')" ;;
+  skipped)  echo "Skipped: $(echo "$RESULT" | jq -r '.reason')" ;;
+  *)        echo "Failed: $(echo "$RESULT" | jq -r '.reason // "unknown"')" ;;
+esac
+record_resolution "$ID" compound_apply "$RESULT"
+log_response "$ID" compound_apply "$STATUS"
+```
+
+`action-compound.sh --mode apply` (and `edit`, which tweaks then applies) is the ONLY
+writer of `docs/adrs.md` in the system — the `ticket-compound` curator only ever
+*proposes* ADR changes; a human approves them here.
 
 ### Free-form note capture
 
@@ -306,6 +350,10 @@ returned no usable result).
 | Update ADR (adr_drift) | `action-adr.sh --mode update` | `{adr_file, adr_id, commit_sha, status: "updated"}` | `$EDITOR` unset, no save, or ADR not in a git repo |
 | File code-drift ticket (adr_drift) | `action-adr.sh --mode ticket` | `{identifier, url, adr_id, status: "filed"}` | `linearis` not on PATH |
 | Defer ADR drift (adr_drift) | `action-adr.sh --mode defer` | `{adr_file, adr_id, commit_sha, status: "deferred"}` | ADR not in a git repo |
+| Apply ADR proposal (`pending:`) | `action-compound.sh --mode apply` | `{adrs_file, adr_id, target, commit_sha, status: "applied"}` | proposal missing, or not in a git repo |
+| Edit + apply proposal (`pending:`) | `action-compound.sh --mode edit` | `{adrs_file, adr_id, target, commit_sha, status: "applied"}` | `$EDITOR` unset, proposal missing, or not in a git repo |
+| Defer ADR proposal (`pending:`) | `action-compound.sh --mode defer` | `{pending, ticket, status: "deferred"}` | proposal missing |
+| Reject ADR proposal (`pending:`) | `action-compound.sh --mode reject` | `{pending, ticket, reason, status: "rejected"}` | proposal missing |
 
 See `cma/mcp/google-calendar.md` and `cma/mcp/gmail.md` for the OAuth setup required
 to bypass the calendar / email soft-skip paths. Linear and orchestrator handlers
@@ -331,3 +379,9 @@ surfaces the relevant field to the user, then calls `record_resolution "$ID" <ac
   routine), and emits `briefing.followup.complete.<date>` so the next morning's
   briefing routine reads yesterday's resolutions as carryovers.
 - **Phase 5 (CTL-466, planned)**: end-to-end real-briefing review session.
+- **Compound engineering (CTL-789, this skill version)**: decisions carrying a
+  `pending:` path surface the `ticket-compound` curator's queued ADR proposals
+  (`thoughts/shared/compound/pending/*.md`; emitted as `type: judgment_call`
+  since the schema enum has no `compound_adr`). `action-compound.sh` resolves
+  them — `apply` (the only writer of `docs/adrs.md`), `edit` (tweak then apply),
+  `defer`, `reject` — keeping ADR edits human-gated and off the critical path.

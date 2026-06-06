@@ -350,6 +350,37 @@ _... (truncated)_"
 fi
 ```
 
+## Capture friction (compound loop, CTL-789)
+
+Before emitting completion, record this phase's friction to the shared per-ticket
+friction log. This is the **producer** half of the compound-engineering loop:
+[[ticket-compound]] later harvests `thoughts/shared/friction/${TICKET}.md` to
+distill durable learnings. `${TICKET}` is already resolved in the Prelude — do
+not re-derive it.
+
+Replace each `<…>` placeholder below with your **real** experience verifying this
+ticket — 3–6 lines total, terse. `"None."` is a valid value for any bullet when
+the phase was frictionless. The record header
+(`## <phase> · <TICKET> · <ISO-8601 timestamp>`) is a cross-phase contract shared
+by all five phase skills — keep it byte-identical; only the phase label differs.
+
+This append is **best-effort and off the critical path**: it must NEVER fail the
+phase or block the emit-complete below.
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## verify · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
 ```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete

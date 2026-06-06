@@ -50,6 +50,7 @@ For `<TICKET>`, collect:
 1. **Friction** — every `## Friction` / `friction:` block the phase agents left in their artifacts:
    `thoughts/shared/{research,plans}/*<TICKET>*.md` and the worker signal files
    `~/catalyst/workers/<TICKET>/*.json`.
+   - `thoughts/shared/friction/<TICKET>.md` — the dedicated per-phase friction log (primary friction source).
 2. **The diff** — `git log --oneline origin/main..HEAD` and `git diff --stat origin/main..HEAD`
    (or the merged SHA from `phase-monitor-merge.json`).
 3. **Ticket** — `linearis issues read <TICKET>` (title, description, final state, estimate).

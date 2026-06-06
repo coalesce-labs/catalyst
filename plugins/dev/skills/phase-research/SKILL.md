@@ -122,10 +122,29 @@ is performed.
    get the title, description, and any linked plan reference.
 2. Read the triage summary from `$TRIAGE_FILE` to understand classification and
    surfaced dependencies.
-3. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
+3. **Relevant Past Learnings lens (compound loop, CTL-789).** BEFORE the
+   `/catalyst-dev:research-codebase` fan-out, grep the shared learnings store for
+   prior problem→solution entries that touch this ticket's area, so the research
+   inherits hard-won context instead of rediscovering it. Pick 2–5 keywords from
+   the ticket + triage summary (component, feature, error type) and run:
+   ```bash
+   LEARN_DIR="thoughts/shared/learnings"
+   if [ -d "$LEARN_DIR" ]; then
+     rg -li "<2-5 keywords from the ticket: component, feature, error type>" "$LEARN_DIR"/**/*.md 2>/dev/null
+   fi
+   ```
+   For each hit, read the frontmatter (`component` / `tags` / `problem_type` — see
+   `plugins/foundry/skills/ticket-compound/reference.md` for the schema) and keep
+   only entries whose `component` matches this ticket's component. Inject a short
+   `## Relevant Past Learnings` section **near the TOP of the research doc** (right
+   under the Summary), one line per applicable entry as
+   `title — path — one-line guidance`. Write `None found.` when the store is empty
+   or nothing matches. The store may not exist yet — the `-d` guard above makes this
+   best-effort; NEVER block research on an empty store.
+4. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
    That skill spawns parallel sub-agents, synthesizes findings, and writes the
    document. Do not duplicate its logic.
-4. Confirm the artifact exists at the expected path before continuing.
+5. Confirm the artifact exists at the expected path before continuing.
    Two-step match (CTL-494) — try lowercase-tail first, then the wider
    `*${TICKET}*.md` pattern with `nocaseglob` fallback so canonical
    create-plan filenames (uppercase ticket + descriptive suffix) are
@@ -228,6 +247,36 @@ ${MIRROR_FOOTER}"
   fi
 fi
 ```
+
+## Step N — Capture friction (compound loop, CTL-789)
+
+IMMEDIATELY before emitting `phase.research.complete`, append this phase's friction
+to the shared per-ticket friction log. This is the PRODUCER half of the compound
+loop — what `ticket-compound` Step 1 later harvests. Replace each `<…>` placeholder
+below with your real experience THIS phase (terse, 3–6 lines total); `None.` is a
+valid value for any bullet when the phase ran frictionless. `${TICKET}` is already
+resolved in the Prelude — do not re-derive it. This append is best-effort and OFF
+the critical path: it must NEVER fail the phase.
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## research · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
+The record header `## <phase> · <TICKET> · <ISO-8601 timestamp>` is a CROSS-PHASE
+contract — keep it byte-identical across all five phase skills (only the `research`
+label differs here). The `$(date +%Y-%m-%dT%H:%M:%S%z)` stamp carries DATE+TIME+offset
+(e.g. `2026-06-06T14:23:01+0900`); do NOT drop to date-only — the morning briefing /
+daily review sorts "friction since last review" by this per-record timestamp.
 
 ```bash
 # Emit phase-complete event, close signal file, end catalyst-session.

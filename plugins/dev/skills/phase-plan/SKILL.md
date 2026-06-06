@@ -131,7 +131,11 @@ The body of [[create-plan]] is the single source of truth.
 Phase agents run inside `claude --bg` — there is no interactive user. Pass the
 research document as the input and operate non-interactively:
 
-1. Read `$RESEARCH_DOC` to understand the problem.
+1. Read `$RESEARCH_DOC` to understand the problem. While reading, skim any
+   `## Relevant Past Learnings` section the research phase surfaced, and any
+   directly-matching entries under `thoughts/shared/learnings/`, and let those
+   prior problem→solution notes inform the plan (the heavy grep lens lives in
+   phase-research — don't re-run it here).
 2. Invoke `/catalyst-dev:create-plan` against the research document. When that skill
    asks for clarifications, answer from the research document; if the research
    document is silent on a point, default to the most conservative reasonable choice
@@ -232,6 +236,31 @@ ${MIRROR_FOOTER}"
     echo "phase-plan: linear-comment-post failed (continuing)" >&2
   fi
 fi
+```
+
+## Step — Capture friction (compound loop, CTL-789)
+
+Before emitting completion, append **your** friction from this plan phase to the
+shared per-ticket friction log. This is the producer side of the compound loop —
+`ticket-compound` harvests these records later. Replace each `<…>` placeholder
+below with your real experience this phase (3–6 lines, terse; `None.` is a valid
+answer when the phase was frictionless). `${TICKET}` is already resolved in the
+Prelude — do not re-derive it. This append is best-effort: it must **never** fail
+the phase, so it stays off the critical path and runs immediately before
+emit-complete.
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## plan · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
 ```
 
 ```bash
