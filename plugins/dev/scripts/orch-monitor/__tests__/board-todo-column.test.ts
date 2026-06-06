@@ -18,7 +18,7 @@ test("PHASE_TO_LINEAR maps triage phase to 'Triage' column (not 'Research')", ()
 
 // ── Requirement B: PHASE_TO_LINEAR has queued → "Todo" for eligible synthesis ─
 test("PHASE_TO_LINEAR has queued → 'Todo' for eligible queue synthesis", () => {
-  expect((PHASE_TO_LINEAR as Record<string, string>).queued).toBe("Todo");
+  expect(PHASE_TO_LINEAR.queued).toBe("Todo");
 });
 
 // ── Requirement C: Board.tsx LINEAR_COLS includes Triage and Todo columns ─────
