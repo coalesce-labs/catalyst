@@ -464,6 +464,12 @@ phase_agent_dispatch_setup() {
 	cat >"${SCRATCH}/bin/phase-agent-dispatch" <<'EOF'
 #!/usr/bin/env bash
 echo "$@" >> "$PHASE_DISPATCH_LOG"
+# OTL-7: capture the dispatch-mode env so tests can assert the producer (the
+# /orchestrate wave) tagged this invocation and did NOT leak the daemon token.
+{
+  echo "CATALYST_DISPATCH_MODE=${CATALYST_DISPATCH_MODE:-}"
+  echo "CATALYST_EXECUTION_CORE=${CATALYST_EXECUTION_CORE:-}"
+} >> "${PHASE_DISPATCH_ENV_LOG:-/dev/null}"
 # Write the per-phase signal so the dispatcher's idempotency check sees it on
 # subsequent invocations — mirrors what the real helper does.
 ORCH_DIR=""; PHASE=""; TICKET=""
@@ -485,6 +491,9 @@ EOF
 	chmod +x "${SCRATCH}/bin/phase-agent-dispatch"
 	export PHASE_DISPATCH_LOG="${SCRATCH}/phase-dispatch.log"
 	: >"$PHASE_DISPATCH_LOG"
+	# OTL-7: separate log capturing the dispatch-mode env the stub was invoked with.
+	export PHASE_DISPATCH_ENV_LOG="${SCRATCH}/phase-dispatch-env.log"
+	: >"$PHASE_DISPATCH_ENV_LOG"
 	export CATALYST_PHASE_AGENT_DISPATCH="${SCRATCH}/bin/phase-agent-dispatch"
 }
 
@@ -634,6 +643,10 @@ RC=$?
 DISPATCHED=$(echo "$OUT" | jq -r '.dispatched | join(",")')
 [ "$DISPATCHED" = "T-1" ] && pass "dispatched=[T-1] via phase-agents mode" || fail "dispatched=[T-1] via phase-agents mode" "got: $DISPATCHED"
 grep -q -- "--phase triage" "$PHASE_DISPATCH_LOG" && pass "default phase=triage when dispatchMode=phase-agents" || fail "default phase=triage when dispatchMode=phase-agents" "log: $(cat "$PHASE_DISPATCH_LOG")"
+# OTL-7: the /orchestrate wave is the authoritative producer of dispatch_mode=orchestrate.
+grep -q "^CATALYST_DISPATCH_MODE=orchestrate$" "$PHASE_DISPATCH_ENV_LOG" && pass "phase-agent-dispatch invoked with CATALYST_DISPATCH_MODE=orchestrate" || fail "CATALYST_DISPATCH_MODE=orchestrate set by /orchestrate wave" "env log: $(cat "$PHASE_DISPATCH_ENV_LOG")"
+# Non-leak contract: the orchestrate path must NOT carry the daemon fencing token.
+grep -q "^CATALYST_EXECUTION_CORE=1$" "$PHASE_DISPATCH_ENV_LOG" && fail "orchestrate wave must NOT set CATALYST_EXECUTION_CORE=1" "env log: $(cat "$PHASE_DISPATCH_ENV_LOG")" || pass "orchestrate wave does not leak CATALYST_EXECUTION_CORE (daemon/orchestrator non-leak)"
 [ ! -s "$CLAUDE_LOG" ] && pass "claude (legacy oneshot) not invoked in phase-agents mode" || fail "claude not invoked in phase-agents mode"
 # Queue should be drained
 W1_LEN=$(jq -r '.queue.wave1Pending | length' "${ORCH_DIR}/state.json")

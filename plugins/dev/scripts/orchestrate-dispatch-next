@@ -436,6 +436,7 @@ while IFS=$'\t' read -r W T; do
 			CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
 				CATALYST_ORCHESTRATOR_ID="$ORCH_ID" \
 				CATALYST_SESSION_ID="$SESSION_ID" \
+				CATALYST_DISPATCH_MODE="orchestrate" \
 				"$PHASE_DISPATCH_BIN" \
 				--phase "$PHASE" \
 				--ticket "$T" \

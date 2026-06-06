@@ -331,6 +331,22 @@ compose_otel_resource_attrs() {
 	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
 	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
 	attrs="${attrs},catalyst.exec_context=phase-bg"
+	# OTL-7 dispatch_mode: WHO dispatched this phase — execution-core (daemon) vs
+	# orchestrate (/orchestrate wave). Closes the gap where both emitted
+	# task.type=phase-<P> + catalyst.exec_context=phase-bg and were indistinguishable.
+	# Pure explicit contract: each real dispatcher exports CATALYST_DISPATCH_MODE
+	# (execution-core/dispatch.mjs, orchestrate-dispatch-next). We do NOT infer from
+	# CATALYST_EXECUTION_CORE — an unknown caller that sets nothing yields an ABSENT
+	# label (honest unknown), never a guessed/wrong one. The value is whitelisted
+	# against the closed enum so a typo'd producer cannot inject an arbitrary
+	# Loki/Prometheus label. `oneshot` is reserved/forward-compat: /oneshot runs
+	# phases inline in an interactive session (already distinguishable via
+	# exec_context=interactive + task.type=oneshot), so it does not reach this path.
+	case "${CATALYST_DISPATCH_MODE:-}" in
+	execution-core | orchestrate | oneshot)
+		attrs="${attrs},catalyst.dispatch_mode=${CATALYST_DISPATCH_MODE}"
+		;;
+	esac
 	printf '%s\n' "$attrs"
 }
 

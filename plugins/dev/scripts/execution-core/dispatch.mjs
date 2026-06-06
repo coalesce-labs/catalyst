@@ -71,6 +71,12 @@ export function defaultRunPhaseAgent(
       CATALYST_PHASE: phase,
       CATALYST_TICKET: ticket,
       CATALYST_EXECUTION_CORE: "1",
+      // OTL-7 dispatch_mode telemetry: authoritative producer for the daemon-served
+      // pipeline. phase-agent-dispatch reads CATALYST_DISPATCH_MODE verbatim into
+      // OTEL_RESOURCE_ATTRIBUTES (catalyst.dispatch_mode) so phase-bg metrics
+      // distinguish daemon-dispatched (execution-core) from /orchestrate-dispatched
+      // (orchestrate) workers. Closed enum: execution-core | orchestrate | oneshot.
+      CATALYST_DISPATCH_MODE: "execution-core",
       ...extraEnv,
     },
   });

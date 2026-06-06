@@ -131,6 +131,10 @@ fresh_env() {
 	export CLAUDE_STUB_LOG="${TEST_DIR}/claude-stub.log"
 	export CLAUDE_STUB_JOB_ID="f124220a"
 	unset CLAUDE_STUB_EXIT
+	# OTL-7: dispatch_mode is read from CATALYST_DISPATCH_MODE; keep tests hermetic
+	# against a developer shell that has it (or the CATALYST_EXECUTION_CORE fencing
+	# token) exported. Tests that exercise these set them inline per-invocation.
+	unset CATALYST_DISPATCH_MODE CATALYST_EXECUTION_CORE
 	export PATH="${STUB_DIR}:${PATH}"
 }
 
@@ -704,6 +708,63 @@ LOG=$(cat "$CLAUDE_STUB_LOG")
 assert_contains "$LOG" \
 	"OTEL_RESOURCE_ATTRIBUTES=linear.key=CTL-100,catalyst.orchestration=orch-test,task.type=phase-triage,catalyst.exec_context=phase-bg" \
 	"task.type appended even when projectKey absent (short form)"
+
+# OTL-7: catalyst.dispatch_mode — WHO dispatched this phase.
+# Pure explicit contract: each real dispatcher (execution-core/dispatch.mjs,
+# orchestrate-dispatch-next) exports CATALYST_DISPATCH_MODE; phase-agent-dispatch
+# whitelists it into OTEL_RESOURCE_ATTRIBUTES as catalyst.dispatch_mode. There is
+# NO env inference — absent or unrecognized → the attribute is OMITTED (honest
+# unknown), never guessed. Closes the gap where an execution-core phase-bg and an
+# /orchestrate phase-bg were indistinguishable (both task.type=phase-X + phase-bg).
+echo ""
+echo "Test 15d (OTL-7): CATALYST_DISPATCH_MODE=execution-core → catalyst.dispatch_mode=execution-core"
+fresh_env t15d
+rm -rf "${CONFIG_DIR}"
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_DISPATCH_MODE=execution-core \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",catalyst.dispatch_mode=execution-core" \
+	"execution-core dispatcher tags catalyst.dispatch_mode=execution-core"
+
+echo ""
+echo "Test 15e (OTL-7): CATALYST_DISPATCH_MODE=orchestrate → catalyst.dispatch_mode=orchestrate"
+fresh_env t15e
+rm -rf "${CONFIG_DIR}"
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_DISPATCH_MODE=orchestrate \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_contains "$LOG" ",catalyst.dispatch_mode=orchestrate" \
+	"orchestrate dispatcher tags catalyst.dispatch_mode=orchestrate"
+
+echo ""
+echo "Test 15f (OTL-7): absent CATALYST_DISPATCH_MODE omits the attr even with CATALYST_EXECUTION_CORE=1 (no inference)"
+fresh_env t15f
+rm -rf "${CONFIG_DIR}"
+# CATALYST_EXECUTION_CORE is the worktree-path fencing token, NOT a telemetry
+# signal — it must never be inferred into a dispatch_mode label.
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_EXECUTION_CORE=1 \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_not_contains "$LOG" "catalyst.dispatch_mode=" \
+	"absent CATALYST_DISPATCH_MODE omits the attribute (no inference from CATALYST_EXECUTION_CORE)"
+
+echo ""
+echo "Test 15g (OTL-7): invalid CATALYST_DISPATCH_MODE rejected by the closed-enum whitelist"
+fresh_env t15g
+rm -rf "${CONFIG_DIR}"
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_DISPATCH_MODE=bogus-value \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+LOG=$(cat "$CLAUDE_STUB_LOG")
+assert_not_contains "$LOG" "catalyst.dispatch_mode=" \
+	"invalid dispatch_mode is not injected as an arbitrary label (whitelist guard)"
 
 # ─── CTL-511: claude --bg launch failure → signal stalled + phase.*.failed ───
 # A launch failure must leave the signal at status="stalled" with NO

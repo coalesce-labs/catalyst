@@ -336,6 +336,40 @@ describe("defaultRunPhaseAgent — handoffPath env injection (CTL-549)", () => {
   });
 });
 
+// OTL-7: the daemon is the authoritative producer of dispatch_mode=execution-core.
+// phase-agent-dispatch reads CATALYST_DISPATCH_MODE verbatim into
+// OTEL_RESOURCE_ATTRIBUTES (catalyst.dispatch_mode), so the spawned env must carry
+// it alongside the existing CATALYST_EXECUTION_CORE fencing token.
+describe("defaultRunPhaseAgent — dispatch_mode telemetry (OTL-7)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("sets CATALYST_DISPATCH_MODE=execution-core in the spawned env", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_DISPATCH_MODE).toBe("execution-core");
+  });
+
+  test("keeps CATALYST_EXECUTION_CORE=1 alongside dispatch_mode", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_EXECUTION_CORE).toBe("1");
+  });
+});
+
 // CTL-549: defaultDispatch forwards handoffPath to runPhaseAgent
 describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
   const seams = (handoffPath) => {
