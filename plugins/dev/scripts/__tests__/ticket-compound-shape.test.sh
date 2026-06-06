@@ -45,16 +45,16 @@ done
 # 4. Seed thoughts artifacts (gitignored + humanlayer-synced — only present where the
 #    thoughts store is seeded). Guarded so this stays a pure repo-structure test that also
 #    passes in a bare checkout / CI; skips-with-note otherwise. CONCEPTS.md is the vocabulary
-#    seed whose canonical synced path is a CTL-811 follow-up (currently top-level, unsynced).
+#    seed, now in the synced shared store (thoughts/shared/CONCEPTS.md).
 SEED="$ROOT/thoughts/shared/learnings/architecture-patterns/friction-capture-container.md"
 if [ -d "$ROOT/thoughts/shared/learnings" ]; then
   assert "seed learnings entry exists" "test -f '$SEED'"
   assert "validate-learnings.sh exits 0 on the seed entry" \
     "bash '$VALIDATOR' '$SEED' >/dev/null 2>&1"
-  if [ -f "$ROOT/thoughts/CONCEPTS.md" ]; then
-    assert "thoughts/CONCEPTS.md exists" "test -f '$ROOT/thoughts/CONCEPTS.md'"
+  if [ -f "$ROOT/thoughts/shared/CONCEPTS.md" ]; then
+    assert "thoughts/shared/CONCEPTS.md exists" "test -f '$ROOT/thoughts/shared/CONCEPTS.md'"
   else
-    echo "skip: thoughts/CONCEPTS.md not seeded here (CTL-811 follow-up: move under thoughts/shared/ to sync)"
+    echo "skip: thoughts/shared/CONCEPTS.md not seeded in this checkout"
   fi
 else
   echo "skip: thoughts store not seeded in this checkout — skipping seed-entry + CONCEPTS assertions"

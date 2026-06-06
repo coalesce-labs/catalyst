@@ -52,7 +52,7 @@ This workspace has no build process - it's markdown files and bash scripts.
 
 - `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type).
   Search before implementing or debugging in a known area. Curated by `/catalyst-dev:ticket-compound`.
-- `thoughts/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
+- `thoughts/shared/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
 
 ## Commit Conventions
 
