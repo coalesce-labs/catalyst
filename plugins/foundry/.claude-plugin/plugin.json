@@ -1,6 +1,6 @@
 {
   "name": "catalyst-foundry",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Setup, maintenance, and compounding upkeep of the Catalyst framework and the thoughts/ knowledge base: framework diagnostics/repair (setup-catalyst), terminal launcher config (setup-warp), and research-doc curation (research-curate). Future home for the compound-engineering retro/learning loop.",
   "author": {
     "name": "Coalesce Labs",
