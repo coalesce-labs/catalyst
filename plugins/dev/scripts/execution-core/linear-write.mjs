@@ -358,15 +358,48 @@ export function applyTriageStatus({
 // applyEstimate; anything else is rejected without calling linearis.
 const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
 
+// HUMAN_ESTIMATE_LABEL — tickets carrying this label have a hand-set estimate
+// that machine write-backs must never clobber (estimation-methodology.md §6b).
+// Same label score-tickets.ts --check-labels honors (its HUMAN_LABEL const).
+const HUMAN_ESTIMATE_LABEL = "estimate-source:human";
+
 // applyEstimate — write a numeric estimate to a ticket's Linear estimate field
 // (CTL-751). Best-effort, never throws; mirrors applyLabel shape (try/catch,
 // log.warn, tagged return). No read-back (the estimate field is not subject to
 // the label silent-success gap; a verifying read-back can be added as follow-up).
-export function applyEstimate({ ticket, estimate, exec = defaultExec }) {
+//
+// CTL-813 — estimate-source:human guard. Pre-reads the ticket's labels and
+// SKIPS the write when HUMAN_ESTIMATE_LABEL is present, honoring the
+// methodology contract that human estimates are never machine-overwritten.
+// FAIL-OPEN on an unreadable label set (null / throw): proceeding matches the
+// score-tickets --check-labels precedent ("label check failed; proceeding
+// without filter") — the scheduler's estimate write is one-shot (fires once on
+// the triage→research advance), so failing closed would silently drop it
+// forever on any transient read hiccup.
+export function applyEstimate({ ticket, estimate, exec = defaultExec, fetchLabels = fetchTicketLabels }) {
   if (!ALLOWED_ESTIMATE_POINTS.has(estimate)) {
     return { applied: false, reason: "invalid-estimate" };
   }
   try {
+    let labels = null;
+    try {
+      labels = fetchLabels(ticket, { exec });
+    } catch {
+      /* fail-open — treated as unreadable below */
+    }
+    if (Array.isArray(labels) && labels.includes(HUMAN_ESTIMATE_LABEL)) {
+      log.info(
+        { ticket, estimate, label: HUMAN_ESTIMATE_LABEL },
+        "linear-write: estimate write skipped — ticket carries a human estimate"
+      );
+      return { applied: false, skipped: "human-estimate", reason: "skipped-human-estimate" };
+    }
+    if (!Array.isArray(labels)) {
+      log.warn(
+        { ticket, estimate },
+        "linear-write: estimate label pre-read failed — proceeding without human-estimate guard (fail-open)"
+      );
+    }
     const res = exec("linearis", ["issues", "update", ticket, "--estimate", String(estimate)]);
     if (res.code !== 0) {
       log.warn(

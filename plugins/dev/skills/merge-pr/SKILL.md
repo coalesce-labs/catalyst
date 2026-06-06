@@ -465,6 +465,18 @@ EOF
 humanlayer thoughts sync
 ```
 
+### 12b. Compound-estimate closing ritual (CTL-189 / CTL-813)
+
+Close the estimation loop for the just-merged ticket — invoke
+`/catalyst-dev:compound-estimate $ticket_id`. It prompts for the post-merge re-score
+(CTL-746 scale: XS=1 S=3 M=5 L=8 XL=13) plus two short reflections, appends the weekly
+compound-log entry, and offers a corpus refresh when the reference-class corpus is stale.
+That entry is what `refresh-corpus.sh` feeds back into `reference-class-corpus.json` as human
+ground truth — skipping it is how the loop falls open again.
+
+**Off the critical path**: if the user declines, the ticket was never estimated, or the skill
+errors, log one line and continue — never block the merge ritual on it.
+
 ### 13. Detect Deployments and Report Success
 
 After branch cleanup, check if the merge triggered any deployment workflows:

@@ -357,6 +357,134 @@ test_wall_time_computed_from_pr() {
   unset FAKE_GH_PR_JSON FAKE_LINEARIS_JSON
 }
 
+# ─── read / aggregate (CTL-813: the consumer side of the loop) ─────────────
+#
+# Until CTL-813 the compound-log was a write-only sink (subcommands: iso-week,
+# write). `read` emits every entry as JSON Lines; `aggregate` reduces them to
+# a per-ticket latest map + calibration stats for the corpus-refresh join.
+
+# Seed two entries across two tickets via the public write path.
+seed_two_entries() {
+  local proj="$1"
+  export FAKE_GH_PR_JSON='{"number":900,"createdAt":"2026-04-24T09:00:00Z","mergedAt":"2026-04-24T12:00:00Z","state":"MERGED"}'
+  export FAKE_LINEARIS_JSON='{"identifier":"CTL-900","estimate":3}'
+  PATH="${proj}/bin:$PATH" "$COMPOUND" write CTL-900 \
+    --thoughts-dir "${proj}/thoughts" \
+    --estimate-actual 5 --cost-usd 1.50 \
+    --what-worked "tests first" --what-surprised-me "nothing" >/dev/null 2>&1
+
+  export FAKE_GH_PR_JSON='{"number":901,"createdAt":"2026-04-27T09:00:00Z","mergedAt":"2026-04-27T12:00:00Z","state":"MERGED"}'
+  export FAKE_LINEARIS_JSON='{"identifier":"CTL-901","estimate":8}'
+  PATH="${proj}/bin:$PATH" "$COMPOUND" write CTL-901 \
+    --thoughts-dir "${proj}/thoughts" \
+    --estimate-actual 8 --cost-usd 4.25 \
+    --what-worked "plan held" --what-surprised-me "ci flake" >/dev/null 2>&1
+  unset FAKE_GH_PR_JSON FAKE_LINEARIS_JSON
+}
+
+test_read_empty_store_exits_zero() {
+  proj=$(new_scratch_project read_empty)
+  out=$("$COMPOUND" read --thoughts-dir "${proj}/thoughts" 2>&1)
+  rc=$?
+  if [ $rc -eq 0 ] && [ -z "$out" ]; then
+    pass "read: empty store → exit 0, no output"
+  else
+    fail "read: empty store should be silent success (rc=$rc)" "$out"
+  fi
+}
+
+test_read_emits_json_lines() {
+  proj=$(new_scratch_project read_jsonl)
+  seed_two_entries "$proj"
+
+  "$COMPOUND" read --thoughts-dir "${proj}/thoughts" > "${SCRATCH}/out" 2>&1
+  rc=$?
+  lines=$(wc -l < "${SCRATCH}/out" | tr -d ' ')
+  keys=$(jq -r '.linear_key' "${SCRATCH}/out" 2>/dev/null | sort | paste -sd, -)
+  actual900=$(jq -r 'select(.linear_key=="CTL-900") | .estimate_actual' "${SCRATCH}/out" 2>/dev/null)
+  week900=$(jq -r 'select(.linear_key=="CTL-900") | .week' "${SCRATCH}/out" 2>/dev/null)
+  if [ $rc -eq 0 ] && [ "$lines" = "2" ] && [ "$keys" = "CTL-900,CTL-901" ] \
+     && [ "$actual900" = "5" ] && [ "$week900" = "2026-W17" ]; then
+    pass "read: emits one parseable JSON line per entry with typed fields"
+  else
+    fail "read: bad output (rc=$rc lines=$lines keys=$keys actual=$actual900 week=$week900)"
+  fi
+}
+
+test_read_week_filter() {
+  proj=$(new_scratch_project read_week)
+  seed_two_entries "$proj"   # CTL-900 → W17, CTL-901 → W18
+
+  out=$("$COMPOUND" read --thoughts-dir "${proj}/thoughts" --week 2026-W18 2>&1)
+  key=$(echo "$out" | jq -r '.linear_key' 2>/dev/null)
+  n=$(echo "$out" | grep -c '^{')
+  if [ "$n" = "1" ] && [ "$key" = "CTL-901" ]; then
+    pass "read: --week filters to one weekly file"
+  else
+    fail "read: --week filter wrong (n=$n key=$key)" "$out"
+  fi
+}
+
+test_read_roundtrips_quoted_text() {
+  proj=$(new_scratch_project read_quotes)
+  export FAKE_GH_PR_JSON='{"number":910,"createdAt":"2026-04-24T09:00:00Z","mergedAt":"2026-04-24T12:00:00Z","state":"MERGED"}'
+  export FAKE_LINEARIS_JSON='{"identifier":"CTL-910","estimate":3}'
+  PATH="${proj}/bin:$PATH" "$COMPOUND" write CTL-910 \
+    --thoughts-dir "${proj}/thoughts" \
+    --estimate-actual 3 --cost-usd 1.00 \
+    --what-worked 'said "quoted" thing' --what-surprised-me "b" >/dev/null 2>&1
+  unset FAKE_GH_PR_JSON FAKE_LINEARIS_JSON
+
+  ww=$("$COMPOUND" read --thoughts-dir "${proj}/thoughts" 2>/dev/null | jq -r '.what_worked')
+  if [ "$ww" = 'said "quoted" thing' ]; then
+    pass "read: quoted free text round-trips through YAML escaping"
+  else
+    fail "read: quote round-trip broken, got: $ww"
+  fi
+}
+
+test_aggregate_empty_store() {
+  proj=$(new_scratch_project agg_empty)
+  out=$("$COMPOUND" aggregate --thoughts-dir "${proj}/thoughts" 2>&1)
+  rc=$?
+  entries=$(echo "$out" | jq -r '.entries' 2>/dev/null)
+  cal=$(echo "$out" | jq -r '.calibration.count' 2>/dev/null)
+  if [ $rc -eq 0 ] && [ "$entries" = "0" ] && [ "$cal" = "0" ]; then
+    pass "aggregate: empty store → zeroed JSON, exit 0"
+  else
+    fail "aggregate: empty store wrong (rc=$rc entries=$entries cal=$cal)" "$out"
+  fi
+}
+
+test_aggregate_latest_per_ticket_and_calibration() {
+  proj=$(new_scratch_project agg_latest)
+  seed_two_entries "$proj"
+  # Second entry for CTL-900 with a LATER merged_at and a different actual —
+  # aggregate must pick this one for tickets["CTL-900"].
+  export FAKE_GH_PR_JSON='{"number":902,"createdAt":"2026-04-28T09:00:00Z","mergedAt":"2026-04-28T12:00:00Z","state":"MERGED"}'
+  export FAKE_LINEARIS_JSON='{"identifier":"CTL-900","estimate":3}'
+  PATH="${proj}/bin:$PATH" "$COMPOUND" write CTL-900 \
+    --thoughts-dir "${proj}/thoughts" \
+    --estimate-actual 8 --cost-usd 2.00 \
+    --what-worked "redo" --what-surprised-me "scope grew" >/dev/null 2>&1
+  unset FAKE_GH_PR_JSON FAKE_LINEARIS_JSON
+
+  out=$("$COMPOUND" aggregate --thoughts-dir "${proj}/thoughts" 2>&1)
+  entries=$(echo "$out" | jq -r '.entries')
+  latest900=$(echo "$out" | jq -r '.tickets["CTL-900"].estimate_actual')
+  cal_count=$(echo "$out" | jq -r '.calibration.count')
+  cal_exact=$(echo "$out" | jq -r '.calibration.exact')
+  # deltas: 900a: 5-3=2, 901: 8-8=0, 900b: 8-3=5 → mean 7/3 ≈ 2.33, exact 1
+  mean=$(echo "$out" | jq -r '.calibration.mean_signed_delta')
+  mean_ok=$(echo "$out" | jq -r '.calibration.mean_signed_delta > 2.3 and .calibration.mean_signed_delta < 2.4')
+  if [ "$entries" = "3" ] && [ "$latest900" = "8" ] && [ "$cal_count" = "3" ] \
+     && [ "$cal_exact" = "1" ] && [ "$mean_ok" = "true" ]; then
+    pass "aggregate: latest-per-ticket map + calibration stats"
+  else
+    fail "aggregate: wrong (entries=$entries latest900=$latest900 count=$cal_count exact=$cal_exact mean=$mean)" "$out"
+  fi
+}
+
 # ─── Run all test_* functions ───────────────────────────────────────────────
 
 for t in $(declare -F | awk '/^declare -f test_/{print $3}'); do
