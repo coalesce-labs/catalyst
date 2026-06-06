@@ -1,5 +1,30 @@
 # Changelog
 
+## [12.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.1...catalyst-dev-v12.0.0) (2026-06-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** plugin reorg — catalyst-foundry plugin, legacy topology fix, compound-estimate rename (CTL-786) ([#1350](https://github.com/coalesce-labs/catalyst/issues/1350))
+
+### Features
+
+* **dev:** account-level rate-limit usage poller (CTL-787) ([#1358](https://github.com/coalesce-labs/catalyst/issues/1358)) ([2e65fc9](https://github.com/coalesce-labs/catalyst/commit/2e65fc98fda822964f83a0b3c972c27814479bd1))
+* **dev:** authenticate the daemon as the Catalyst Orchestrator app-actor (isolated bucket) ([#1348](https://github.com/coalesce-labs/catalyst/issues/1348)) ([51accc4](https://github.com/coalesce-labs/catalyst/commit/51accc4f731ffc0b79c2fbf0a1f93a41bc8c5ab9))
+* **dev:** compound-engineering Slice 1 — engineering compound loop MVP (CTL-789) ([#1361](https://github.com/coalesce-labs/catalyst/issues/1361)) ([01740eb](https://github.com/coalesce-labs/catalyst/commit/01740ebe9ee67a4196417c735620bbad05301d65))
+* **dev:** CTL-784 batch per-tick Linear reads into one filtered query ([#1349](https://github.com/coalesce-labs/catalyst/issues/1349)) ([e19308c](https://github.com/coalesce-labs/catalyst/commit/e19308ca97e68bb04a9bb72843b2f45a26d1994c))
+* **dev:** plugin reorg — catalyst-foundry plugin, legacy topology fix, compound-estimate rename (CTL-786) ([#1350](https://github.com/coalesce-labs/catalyst/issues/1350)) ([0995954](https://github.com/coalesce-labs/catalyst/commit/09959540b8ec633ef6cb6f45a7c1778e15e3f4d6))
+* **dev:** portable daemon env / proxy-audit template + prerequisite checks ([#1343](https://github.com/coalesce-labs/catalyst/issues/1343)) ([0a59075](https://github.com/coalesce-labs/catalyst/commit/0a590751e9d6c7f531ac9c2aad3afc6d233e0648))
+* **dev:** read Linear bot creds + self-echo botUserIds from global config.linear.bot.{worker,orchestrator} (back-compat) ([#1347](https://github.com/coalesce-labs/catalyst/issues/1347)) ([150cc94](https://github.com/coalesce-labs/catalyst/commit/150cc9499ec55c1c4aed3ea607abc3ea8c012953))
+* **dev:** source machine-local execution-core.env on daemon start ([#1341](https://github.com/coalesce-labs/catalyst/issues/1341)) ([388db14](https://github.com/coalesce-labs/catalyst/commit/388db142bec14e49e6a53ae79bdf82b56629a403))
+
+
+### Bug Fixes
+
+* **dev:** defer CTL-731 liveness deadline verdict so a completed read survives loop starvation (CTL-790) ([#1360](https://github.com/coalesce-labs/catalyst/issues/1360)) ([5f416a4](https://github.com/coalesce-labs/catalyst/commit/5f416a44cb1a715feebda2b2b43944b19683603a))
+* **dev:** evidence-gate worktree removal — never delete without merged+clean+no-session+provenance (CTL-791) ([#1363](https://github.com/coalesce-labs/catalyst/issues/1363)) ([42e1c4e](https://github.com/coalesce-labs/catalyst/commit/42e1c4ea064c34d03034b9fbae79d5c385cf1240))
+* **dev:** warm the liveness snapshot + tolerate in-tick aging so dispatch isn't held forever (CTL-792) ([#1365](https://github.com/coalesce-labs/catalyst/issues/1365)) ([e9534cf](https://github.com/coalesce-labs/catalyst/commit/e9534cf241dd58308a33ff05c42b69c0ba140ba3))
+
 ## [11.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.0...catalyst-dev-v11.0.1) (2026-06-05)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "catalyst-legacy",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Pre-phase-agent (wave-based) orchestration workflow preserved as a documented fallback: oneshot, orchestrate, god, setup-orchestrate. Superseded by catalyst-dev's execution-core/phase-agent pipeline. Requires catalyst-dev (shared backing scripts).",
   "author": {
     "name": "Coalesce Labs",

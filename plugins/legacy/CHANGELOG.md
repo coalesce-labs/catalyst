@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-legacy-v1.0.0...catalyst-legacy-v2.0.0) (2026-06-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* **dev:** plugin reorg — catalyst-foundry plugin, legacy topology fix, compound-estimate rename (CTL-786) ([#1350](https://github.com/coalesce-labs/catalyst/issues/1350))
+
+### Features
+
+* **dev:** document and enforce the Linear app-actor botUserId requirement ([#1282](https://github.com/coalesce-labs/catalyst/issues/1282)) ([a4bb94d](https://github.com/coalesce-labs/catalyst/commit/a4bb94d6ce3173abf78fcc5932ea03fead55b191))
+* **dev:** plugin reorg — catalyst-foundry plugin, legacy topology fix, compound-estimate rename (CTL-786) ([#1350](https://github.com/coalesce-labs/catalyst/issues/1350)) ([0995954](https://github.com/coalesce-labs/catalyst/commit/09959540b8ec633ef6cb6f45a7c1778e15e3f4d6))
+
 ## 1.0.0 (2026-05-29)
 
 ### Features
