@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # validate-learnings.sh — guard a learnings-store entry's YAML frontmatter against the silent-corruption
-# traps and the required-field contract (see plugins/foundry/skills/ticket-compound/reference.md).
+# traps and the required-field contract (see plugins/dev/skills/ticket-compound/reference.md).
 # Usage: validate-learnings.sh <path-to-entry.md>
 # Exit 0 = valid; exit 1 = problems (printed to stderr). zsh/bash-safe.
 set -uo pipefail

@@ -13,7 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 fail=0; assert(){ if ! eval "$2"; then echo "FAIL: $1"; fail=1; else echo "ok: $1"; fi; }
 
 # 1. The ticket-compound curator skill.
-TC_DIR="$ROOT/plugins/foundry/skills/ticket-compound"
+TC_DIR="$ROOT/plugins/dev/skills/ticket-compound"
 assert "ticket-compound SKILL.md exists"   "test -f '$TC_DIR/SKILL.md'"
 assert "ticket-compound reference.md exists" "test -f '$TC_DIR/reference.md'"
 assert "SKILL.md frontmatter is user-invocable" "grep -q '^user-invocable: true' '$TC_DIR/SKILL.md'"
@@ -42,17 +42,28 @@ for p in "${PHASES[@]}"; do
     "grep -q '%H:%M' '$f'"
 done
 
-# 4. The seed learnings entry exists AND passes the validator (exit 0).
+# 4. Seed thoughts artifacts (gitignored + humanlayer-synced — only present where the
+#    thoughts store is seeded). Guarded so this stays a pure repo-structure test that also
+#    passes in a bare checkout / CI; skips-with-note otherwise. CONCEPTS.md is the vocabulary
+#    seed whose canonical synced path is a CTL-811 follow-up (currently top-level, unsynced).
 SEED="$ROOT/thoughts/shared/learnings/architecture-patterns/friction-capture-container.md"
-assert "seed learnings entry exists" "test -f '$SEED'"
-assert "validate-learnings.sh exits 0 on the seed entry" \
-  "bash '$VALIDATOR' '$SEED' >/dev/null 2>&1"
+if [ -d "$ROOT/thoughts/shared/learnings" ]; then
+  assert "seed learnings entry exists" "test -f '$SEED'"
+  assert "validate-learnings.sh exits 0 on the seed entry" \
+    "bash '$VALIDATOR' '$SEED' >/dev/null 2>&1"
+  if [ -f "$ROOT/thoughts/CONCEPTS.md" ]; then
+    assert "thoughts/CONCEPTS.md exists" "test -f '$ROOT/thoughts/CONCEPTS.md'"
+  else
+    echo "skip: thoughts/CONCEPTS.md not seeded here (CTL-811 follow-up: move under thoughts/shared/ to sync)"
+  fi
+else
+  echo "skip: thoughts store not seeded in this checkout — skipping seed-entry + CONCEPTS assertions"
+fi
 
-# 5. The approval-surface handler + the concepts seed.
+# 5. The approval-surface handler (repo file, always present).
 assert "briefing-followup action-compound.sh exists" \
   "test -f '$ROOT/plugins/dev/scripts/briefing-followup/action-compound.sh'"
 assert "action-compound.sh is executable" \
   "test -x '$ROOT/plugins/dev/scripts/briefing-followup/action-compound.sh'"
-assert "thoughts/CONCEPTS.md exists" "test -f '$ROOT/thoughts/CONCEPTS.md'"
 
 exit $fail
