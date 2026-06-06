@@ -221,11 +221,37 @@ fi
 - Today's calendar — already gathered in Step 2, reuse `$SCRATCH/calendar.json`
 - Follow-ups — extract action items from the prior day's Granola notes (`$SCRATCH/granola.json`)
   via a Claude-side synthesis pass
+- **Retro signals (CTL-814)** — the most recent `/catalyst-dev:ticket-retro` artifact's open
+  watch-items, rendered as a `Plan today → Retro signals` sub-section. Degrades to an empty
+  array (`_no data_`) when no retro has ever run.
 
 ```bash
-cat > "$SCRATCH/today.json" <<JSON
-{"today": {"linear_in_progress": [], "calendar": [], "followups": []}}
-JSON
+# ── Retro signals: open watch-items from the latest retro ────────────────────
+# Parse the machine contract (the fenced `yaml watch-items` block) from the
+# newest thoughts/shared/compound/retros/YYYY-MM-DD.md. Cap at 5 — the
+# briefing surfaces the watch list, the retro doc holds the detail.
+RETRO_DIR="thoughts/shared/compound/retros"
+: > "$SCRATCH/retro-signals.jsonl"
+LATEST_RETRO=""
+if [[ -d "$RETRO_DIR" ]]; then
+  for rf in "$RETRO_DIR"/*.md; do
+    [[ -e "$rf" ]] || continue
+    [[ "$(basename "$rf" .md)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || continue
+    [[ -z "$LATEST_RETRO" || "$rf" > "$LATEST_RETRO" ]] && LATEST_RETRO="$rf"
+  done
+fi
+if [[ -n "$LATEST_RETRO" ]]; then
+  awk '/^```yaml watch-items/{f=1; next} f && /^```/{f=0} f && /^- pattern:/ {
+         sub(/^- pattern:[ ]*/, ""); gsub(/^"|"$/, ""); print
+       }' "$LATEST_RETRO" | head -5 \
+    | while IFS= read -r wi; do
+        jq -nc --arg t "watch: $wi" '{title: $t}' >> "$SCRATCH/retro-signals.jsonl"
+      done
+fi
+
+jq -nc --slurpfile rs <(jq -sc '.' "$SCRATCH/retro-signals.jsonl") \
+  '{today: {linear_in_progress: [], calendar: [], followups: [],
+            retro_signals: ($rs[0] // [])}}' > "$SCRATCH/today.json"
 ```
 
 ## Step 5: Suggest orchestrator runs
@@ -362,8 +388,10 @@ The rendered markdown has YAML frontmatter validated against
 `generated_by`, `decisions`; optional `output_status` block populated by Step 7).
 Six `## ...` sections follow: the four `render.sh` owns (Review yesterday, Surface decisions,
 Plan today, Suggest orchestrator runs) plus the two compound digests appended in Step 6b
-(Friction since last briefing, Learnings since last briefing). Empty render sources render
-`_no data_`; empty compound stores render `_none_`. Neither path fails the run.
+(Friction since last briefing, Learnings since last briefing). Plan today carries a
+`### Retro signals` sub-section (CTL-814) surfacing the latest `ticket-retro` watch-items.
+Empty render sources render `_no data_`; empty compound stores render `_none_`. Neither path
+fails the run.
 
 Pending compound-engineering ADR proposals (`thoughts/shared/compound/pending/*.md`) surface as
 `decisions:` entries (`type: judgment_call`, carrying a `pending:` path) so `briefing-followup`'s

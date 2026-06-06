@@ -19,7 +19,8 @@
 #   "today": {
 #     "linear_in_progress": [{"id":"CTL-200","title":"..."}, ...],
 #     "calendar":           [{"title":"...","start":"..."}, ...],
-#     "followups":          [{"source":"granola","action":"..."}, ...]
+#     "followups":          [{"source":"granola","action":"..."}, ...],
+#     "retro_signals":      [{"title":"watch: ..."}, ...]
 #   },
 #   "suggested_runs": [{"id":"CTL-300","title":"...","priority":"High"}, ...]
 # }
@@ -139,6 +140,8 @@ render_section() {
   render_section '.today.linear_in_progress' 'Linear in-progress' | sed 's/^## /### /'
   render_section '.today.calendar'           'Calendar today'     | sed 's/^## /### /'
   render_section '.today.followups'          'Follow-ups'         | sed 's/^## /### /'
+  # CTL-814: latest ticket-retro's top recurring patterns + open watch-items.
+  render_section '.today.retro_signals'      'Retro signals'      | sed 's/^## /### /'
 
   echo "## Suggest orchestrator runs"
   echo

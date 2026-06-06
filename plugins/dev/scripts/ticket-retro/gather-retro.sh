@@ -155,8 +155,9 @@ while i < len(lines):
     if epoch <= floor:
         continue
     # Strip the bullet's bold field label ("**Backtracks / redone work:** …")
-    # so pattern clustering sees the substance, not the template.
-    one = re.sub(r'^\*\*[^*]+:\*\*\s*', '', one)
+    # so pattern clustering sees the substance, not the template. The leading
+    # "**" is already gone (lstrip above), so match label-text up to ":**".
+    one = re.sub(r'^[^:*]{1,60}:\*\*\s*', '', one)
     print(json.dumps({"ticket": ticket, "phase": phase, "ts": ts,
                       "line": re.sub(r'\s+', ' ', one)}))
 PY
@@ -200,7 +201,9 @@ if [ "$NO_GITHUB" -eq 0 ] && command -v gh >/dev/null 2>&1; then
       [ .[]
         | select(.mergedAt > $since)
         | . + {ticket: (try ((.headRefName + " " + .title)
-                             | capture("(?<t>[A-Za-z][A-Za-z0-9]*-[0-9]+)"; "i").t
+                             # Letters-only team prefix — "v2026-4"-style version
+                             # strings must NOT read as tickets (dogfood finding).
+                             | capture("(?<t>\\b[A-Za-z]+-[0-9]+)\\b"; "i").t
                              | ascii_upcase)
                         catch null)}
         | select(.ticket != null)

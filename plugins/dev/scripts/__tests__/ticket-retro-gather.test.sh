@@ -213,12 +213,43 @@ test_tickets_filter() {
     "$(echo "$out" | jq -r '.window.source')"
 }
 
+# ── merged_prs via fake gh: ticket extraction + version-string exclusion ────
+
+test_merged_prs_ticket_extraction() {
+  local proj out
+  proj=$(new_project ghfake)
+  mkdir -p "$proj/bin"
+  cat > "$proj/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+[
+  {"number": 10, "title": "feat(dev): real ticket work (CTL-99)", "headRefName": "ryan/ctl-99-thing",
+   "mergedAt": "2026-06-06T10:00:00Z", "additions": 100, "deletions": 20},
+  {"number": 11, "title": "docs(dev): refresh linearis skill to v2026.4.9", "headRefName": "docs/linearis-v2026-4-9",
+   "mergedAt": "2026-06-06T11:00:00Z", "additions": 50, "deletions": 5},
+  {"number": 12, "title": "old PR outside window (CTL-1)", "headRefName": "ctl-1-old",
+   "mergedAt": "2026-01-01T00:00:00Z", "additions": 9, "deletions": 9}
+]
+JSON
+EOF
+  chmod +x "$proj/bin/gh"
+
+  out=$(cd "$proj" && PATH="$proj/bin:$PATH" bash "$GATHER" \
+    --thoughts-dir "$proj/thoughts" --db /nonexistent --since 2026-06-01)
+  assert_eq "gh: one PR matched (version string + out-of-window excluded)" "1" \
+    "$(echo "$out" | jq '.merged_prs | length')"
+  assert_eq "gh: ticket uppercased from branch" "CTL-99" \
+    "$(echo "$out" | jq -r '.merged_prs[0].ticket')"
+  assert_eq "gh: churn carried" "100" "$(echo "$out" | jq '.merged_prs[0].additions')"
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
 test_empty_stores_degrade
 test_last_retro_window_and_watch_items
 test_since_override_and_stores
 test_tickets_filter
+test_merged_prs_ticket_extraction
 
 echo "---"
 echo "summary: ${PASSES} passed, ${FAILURES} failed"
