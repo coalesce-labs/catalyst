@@ -63,7 +63,10 @@ import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
-import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
+// CTL-791: the terminal-Done sweep removes a worktree ONLY through the evidence
+// gate (GitHub-merged + clean + no-live-session + orchestrator-provenance,
+// archive-first, never --force); an unsafe tree is flagged, not deleted.
+import { gatedTeardownWorktree as defaultTeardownWorktree } from "./worktree-safety.mjs";
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so

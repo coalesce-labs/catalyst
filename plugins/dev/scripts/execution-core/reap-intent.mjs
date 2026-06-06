@@ -28,6 +28,11 @@ export const REAP_INTENT_TYPES = Object.freeze([
   // final monitor-deploy phase completed, with no successor dispatch to trigger the
   // happy-path predecessor reap. Routed to the single-target (busy-OK) reap path.
   "phase.terminal.reap-requested",
+  // CTL-791: a worktree removal was REFUSED by the evidence gate (not merged /
+  // dirty / live session / unknown provenance / archive-failed). A FLAG, not a
+  // request — the reaper does not act on it; it surfaces the deferred worktree in
+  // the out-of-tree cleanup queue + orch-monitor for an operator / later tick.
+  "worktree.cleanup-deferred",
 ]);
 
 // camelCase → snake_case key mapping. The on-disk schema uses snake_case so

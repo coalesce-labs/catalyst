@@ -329,6 +329,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: (id) => { trace.push(["reap", id]); return Promise.resolve({ ok: true }); },
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
       gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
       emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
@@ -353,6 +355,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: () => Promise.resolve({ ok: true }),
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: () => Promise.resolve({ ok: true }),
       gitBranchDelete: (b, force) => { calls.push({ b, force }); return Promise.resolve({ ok: true }); },
       emit: () => Promise.resolve(),
@@ -373,6 +377,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: () => Promise.resolve({ ok: true }),
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: () => Promise.resolve({ ok: true }),
       // Non-force `-d` refuses an unmerged branch.
       gitBranchDelete: () => Promise.resolve({ ok: false, error: "not fully merged" }),
@@ -446,6 +452,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
       agents: agentsFixture([
         { sessionId: "99999999-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-649", status: "idle" },
       ]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: wtRemove,
       gitBranchDelete: () => Promise.resolve({ ok: true }),
       emit: () => Promise.resolve(),
@@ -460,6 +468,33 @@ describe("Reaper._handlePrMergedCleanup", () => {
     // Sibling session untouched, and cleanup proceeds for the real target.
     expect(stopped).toEqual([]);
     expect(wtRemove).toHaveBeenCalled();
+  });
+
+  it("CTL-791: an UNSAFE gate verdict DEFERS — no worktree remove, no branch delete, emits cleanup-deferred + failed", async () => {
+    const wtRemove = mock(() => Promise.resolve({ ok: true }));
+    const brDelete = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: false, reasons: ["dirty-worktree", "unknown-provenance"] }),
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: wtRemove,
+      gitBranchDelete: brDelete,
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+      force: true,
+    });
+    expect(wtRemove).not.toHaveBeenCalled();
+    expect(brDelete).not.toHaveBeenCalled();
+    expect(emitted.find((e) => e.evt === "worktree.cleanup-deferred")).toBeTruthy();
+    expect(emitted.find((e) => e.evt === "pr.merged.cleanup-failed")).toBeTruthy();
   });
 });
 
