@@ -108,11 +108,19 @@ export function cachedListClaudeAgents({
 //       isFresh so the scheduler can gate new-work dispatch on staleness.
 const LIVENESS_TIMEOUT_MS = Number(process.env.CATALYST_LIVENESS_TIMEOUT_MS) || 3_000;
 // Stale threshold for the non-blocking getter (and the scheduler's dispatch gate).
-// 2× the TTL: a snapshot older than this is "stale" and a background refresh is
-// kicked; the scheduler holds NEW-work dispatch while stale (fail-safe — never
-// over-spawn on an unknown/old count). Advancement of in-flight phases is
-// independent of this and continues regardless.
-const LIVENESS_STALE_MS = Number(process.env.CATALYST_LIVENESS_STALE_MS) || 2 * LIVENESS_TTL_MS;
+// A snapshot older than this is "stale" and the scheduler holds NEW-work dispatch
+// (fail-safe — never over-spawn on an unknown/old count). Advancement of in-flight
+// phases is independent of this and continues regardless.
+//
+// CTL-792: default ≥30s. The daemon's liveness warmer keeps the snapshot ~TTL-fresh
+// BETWEEN ticks, but a single SYNCHRONOUS scheduler tick can block the loop for tens
+// of seconds (the perf debt), during which no warmer can refresh — so the snapshot
+// ages WITHIN the tick. A 10s window held new-work forever on every such tick. 30s
+// tolerates that in-tick aging; it stays over-spawn-safe because the warmer (not this
+// threshold) drives refresh frequency, so the count is still ~TTL-accurate. The real
+// fix is a non-blocking tick (orchestrator redesign Stage 2).
+const LIVENESS_STALE_MS =
+  Number(process.env.CATALYST_LIVENESS_STALE_MS) || Math.max(30_000, 2 * LIVENESS_TTL_MS);
 // Backoff: below this many consecutive failures every stale read retries; at/above
 // it, suppress refresh for an exponential window (base × 2^over, capped).
 const LIVENESS_BACKOFF_AFTER = Number(process.env.CATALYST_LIVENESS_BACKOFF_AFTER) || 3;
