@@ -359,7 +359,7 @@ With `worktreeDir: "~/catalyst/api"` explicitly configured:
 2. Copies `.claude/` directory (Claude Code native config, plugins, rules)
 3. Copies `.catalyst/` directory (Catalyst workflow config, if it exists)
 4. **Runs `catalyst.worktree.setup` commands from config** — dependency install, thoughts init,
-   permission grants, or any project-specific setup (like Conductor's `conductor.json` lifecycle
+   permission grants, or any project-specific setup (like a worktree-manager's lifecycle
    hooks)
 5. If no `catalyst.worktree.setup` configured, falls back to auto-detected setup: `make setup` or
    `bun/npm install`, then `humanlayer thoughts init` + `sync`

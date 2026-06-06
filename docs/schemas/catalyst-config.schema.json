@@ -120,7 +120,7 @@
                     "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
                   },
                   "examples": [
-                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/conductor": "#E24A4A" }
+                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/adva": "#E24A4A" }
                   ]
                 }
               }

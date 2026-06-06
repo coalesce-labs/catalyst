@@ -904,13 +904,13 @@ EOF
 setup_worktree_directory() {
 	print_header "Setting Up Worktree Directory"
 
-	# Check if we're already inside a worktree (e.g., Conductor-managed)
+	# Check if we're already inside a worktree (e.g., one your tooling manages)
 	local git_dir
 	git_dir=$(git rev-parse --git-dir 2>/dev/null || echo "")
 
 	if [ -f "$git_dir" ] 2>/dev/null || [[ $git_dir == *"/worktrees/"* ]]; then
 		print_success "Already running inside a git worktree"
-		echo "Worktree management is handled by your tooling (e.g., Conductor, /create-worktree)."
+		echo "Worktree management is handled by your tooling (e.g., /create-worktree)."
 		echo ""
 		echo "To create additional worktrees, use:"
 		echo "  /create-worktree PROJ-123 feature-name"

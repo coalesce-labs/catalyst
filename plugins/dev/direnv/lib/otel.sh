@@ -85,15 +85,9 @@ use_otel_context() {
   local project="${1:-$(basename "$PWD")}"
   local attrs="project=${project},hostname=$(hostname -s)"
 
-  # Git branch: use $PWD (correct when .envrc is in the worktree dir itself).
-  # Fallback to CONDUCTOR_WORKSPACE_PATH for Conductor-launched sessions where
-  # direnv sets $PWD to the .envrc's parent dir, not the worktree.
-  local git_dir="${PWD}"
-  if [ -z "$(git -C "$git_dir" branch --show-current 2>/dev/null)" ] && [ -n "${CONDUCTOR_WORKSPACE_PATH:-}" ]; then
-    git_dir="$CONDUCTOR_WORKSPACE_PATH"
-  fi
+  # Git branch from $PWD (the .envrc lives in the worktree dir itself).
   local branch
-  branch=$(git -C "$git_dir" branch --show-current 2>/dev/null)
+  branch=$(git -C "${PWD}" branch --show-current 2>/dev/null)
   if [ -n "$branch" ]; then
     attrs="${attrs},branch=${branch}"
   fi
