@@ -32,8 +32,9 @@ const PHASE_C: Record<string, string> = {
   "monitor-merge": "#4ea1ff", "monitor-deploy": "#39d07a", merge: "#4ea1ff", deploy: "#39d07a", done: "#6b7280",
 };
 const LINEAR_COLS = [
-  { key: "Research", c: "#3b82f6" }, { key: "Plan", c: "#a855f7" }, { key: "Implement", c: "#10b981" },
-  { key: "Validate", c: "#f59e0b" }, { key: "PR", c: "#14b8a6" }, { key: "Done", c: "#6b7280" },
+  { key: "Todo",     c: "#94a3b8" }, { key: "Triage",   c: "#64748b" },
+  { key: "Research", c: "#3b82f6" }, { key: "Plan",     c: "#a855f7" }, { key: "Implement", c: "#10b981" },
+  { key: "Validate", c: "#f59e0b" }, { key: "PR",       c: "#14b8a6" }, { key: "Done",      c: "#6b7280" },
 ];
 const PHASE_COLS = [
   { key: "triage", label: "Triage", c: "#64748b" }, { key: "research", label: "Research", c: "#3b82f6" },

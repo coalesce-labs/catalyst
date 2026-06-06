@@ -341,7 +341,7 @@ export function loadLinearAgentConfig(
     let cur: unknown = parsed;
     for (const key of path) {
       if (!isRecord(cur)) return null;
-      cur = (cur as Record<string, unknown>)[key];
+      cur = cur[key];
     }
     if (!isRecord(cur)) return null;
     const clientId = typeof cur.clientId === "string" ? cur.clientId : "";
@@ -358,7 +358,7 @@ export function loadLinearAgentConfig(
   // 1. NEW: try global config.json → catalyst.linear.bot.worker
   const globalConfigPath = join(homeConfigDir, "config.json");
   try {
-    const globalParsed = JSON.parse(readFileSync(globalConfigPath, "utf8"));
+    const globalParsed: unknown = JSON.parse(readFileSync(globalConfigPath, "utf8"));
     const result = extractCreds(globalParsed, ["catalyst", "linear", "bot", "worker"]);
     if (result !== null) return result;
   } catch { /* absent / malformed — fall through */ }
@@ -367,7 +367,7 @@ export function loadLinearAgentConfig(
   if (projectKey === null || projectKey.length === 0) return null;
   const perTeamConfigPath = join(homeConfigDir, `config-${projectKey}.json`);
   try {
-    const perTeamParsed = JSON.parse(readFileSync(perTeamConfigPath, "utf8"));
+    const perTeamParsed: unknown = JSON.parse(readFileSync(perTeamConfigPath, "utf8"));
     return extractCreds(perTeamParsed, ["catalyst", "linear", "agent"]);
   } catch {
     return null;
@@ -466,17 +466,17 @@ export function loadWebhookConfig(
   // OLD: Layer-1 project config carries catalyst.monitor.linear.botUserId (back-compat).
   const linearBotUserIds = new Set<string>();
   try {
-    const globalParsed = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8")) as unknown;
+    const globalParsed: unknown = JSON.parse(readFileSync(join(homeConfigDir, "config.json"), "utf8"));
     if (isRecord(globalParsed) && isRecord(globalParsed.catalyst)) {
-      const bot = (globalParsed.catalyst as Record<string, unknown>).linear;
-      if (isRecord(bot) && isRecord((bot as Record<string, unknown>).bot)) {
-        const botSection = (bot as Record<string, unknown>).bot as Record<string, unknown>;
-        if (isRecord(botSection.worker) && typeof (botSection.worker as Record<string, unknown>).botUserId === "string") {
-          const id = (botSection.worker as Record<string, unknown>).botUserId as string;
+      const bot = globalParsed.catalyst.linear;
+      if (isRecord(bot) && isRecord(bot.bot)) {
+        const botSection = bot.bot;
+        if (isRecord(botSection.worker) && typeof botSection.worker.botUserId === "string") {
+          const id = botSection.worker.botUserId;
           if (id.length > 0) linearBotUserIds.add(id);
         }
-        if (isRecord(botSection.orchestrator) && typeof (botSection.orchestrator as Record<string, unknown>).botUserId === "string") {
-          const id = (botSection.orchestrator as Record<string, unknown>).botUserId as string;
+        if (isRecord(botSection.orchestrator) && typeof botSection.orchestrator.botUserId === "string") {
+          const id = botSection.orchestrator.botUserId;
           if (id.length > 0) linearBotUserIds.add(id);
         }
       }
