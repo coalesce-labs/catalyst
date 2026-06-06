@@ -1987,7 +1987,16 @@ export function schedulerTick(
       // NOT a new per-tick API storm). cache may be undefined (legacy tests that
       // don't inject it); fetchTicketState handles an undefined cache by exec-ing
       // every call exactly as before.
-      const reclaimOpts = { repoRoot, cache, fetchState: fetchTicketState, prAdapter };
+      const reclaimOpts = {
+        repoRoot,
+        cache,
+        fetchState: fetchTicketState,
+        prAdapter,
+        // CTL-809 — thread the warm agents snapshot so the reclaim alive-branch can
+        // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is
+        // already imported at scheduler.mjs:81).
+        agentsSnapshot: getAgentsCached,
+      };
       // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
       // claim bound the mass-revive storm structurally.

@@ -843,6 +843,142 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(0);
   });
 
+  // CTL-809 — GHOST BREAKER. jobLifecycle reports a crashed/wedged --bg worker
+  // "alive" forever (CC 2.x never flips its state.json terminal). The alive branch
+  // cross-checks a FRESH `claude agents` snapshot: absent-from-fresh + past grace =
+  // genuinely dead → fall through to reclaim. Strictly gated to preserve CTL-662
+  // (busy fan-out stays listed) and CTL-731/657 (stale snapshot never reclaims).
+  const GHOST_GRACE = 60_000;
+  const STARTED = "2026-06-06T00:00:00Z";
+  const STARTED_MS = Date.parse(STARTED);
+
+  test("CTL-809: alive worker ABSENT from a FRESH snapshot, past grace, work done → ghost-breaker reclaims", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }), // jobLifecycle → alive
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      // FRESH snapshot, our worker absent (only an unrelated agent present)
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "deadbeef-1111-2222-3333-444444444444" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000, // > grace, < busy ceiling
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-809: alive worker PRESENT in a FRESH snapshot (busy fan-out) → still alive-suppressed (CTL-662)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      // our worker's shortId IS in the fresh snapshot → busy, not a ghost
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker absent but snapshot STALE/cold → still alive-suppressed (CTL-731/657, no cold storm)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // cold
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker absent from a FRESH snapshot but WITHIN grace → suppress (just-spawned-safe)", () => {
+    const emit = recorder({ code: 0 });
+    let snapCalls = 0;
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => {
+        snapCalls++;
+        return { agents: [], isFresh: true, ageMs: 1 };
+      },
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 30_000, // 30s < 60s grace
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(snapCalls).toBe(0); // within grace → snapshot never consulted
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker PAST busy-ceiling with work done but PRESENT in a fresh snapshot → still suppressed (busy-ceiling × ghost-breaker)", () => {
+    // The dangerous intersection: past busy-ceiling with workDone:true skips the
+    // escalation and reaches the ghost-breaker. A worker still LISTED in a fresh
+    // snapshot is a live busy worker and must NEVER be reclaimed (CTL-662).
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) }, // workDone → skips busy-ceiling escalate
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }], // PRESENT
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      busyCeilingMs: 1, // tiny → now() is far past it
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: malformed bg_job_id → ghost-breaker suppresses without throwing (snapshot not consulted)", () => {
+    const emit = recorder({ code: 0 });
+    let snapCalls = 0;
+    const sig = implementSignal({ bgJobId: "zzzzzzzz", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => {
+        snapCalls++;
+        return { agents: [], isFresh: true, ageMs: 1 };
+      },
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed"); // shortIdFromSessionId throws → caught → suppress
+    expect(snapCalls).toBe(0);
+  });
+
   test("'noop' for an unknown signal (no bg_job_id)", () => {
     const sig = implementSignal();
     sig.liveness = { kind: "bg", value: null };

@@ -141,6 +141,17 @@ export const STALE_WORKER_CUTOFF_MS =
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
 
+// CTL-809 — ghost-breaker just-dispatched grace. The reclaim alive-branch
+// cross-checks the FRESH `claude agents` snapshot to catch a jobLifecycle-alive
+// worker whose process is actually gone (CC 2.x never flips a crashed/wedged
+// --bg worker's local state.json terminal, so jobLifecycle reports it alive
+// forever). A worker younger than this may simply not have registered in
+// `claude agents` yet, so its absence is NOT proof of death — only reclaim on
+// absence once past this window. Comfortably exceeds observed `claude --bg`
+// registration latency + one warmer interval. Env-overridable.
+export const GHOST_GRACE_MS =
+  Number(process.env.EXECUTION_CORE_GHOST_GRACE_MS) || 90_000;
+
 // CTL-735 — revival age ceiling (KEPT in CTL-736). `isTicketInFlight` treats any
 // ticket with a non-terminal signal as in-flight, so a worker that crashed at
 // `running` and never flipped terminal stays swept forever. A reclaim-eligible
