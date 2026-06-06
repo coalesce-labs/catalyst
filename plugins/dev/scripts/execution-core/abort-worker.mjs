@@ -9,9 +9,17 @@
 
 import { readdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { teardownWorktree as defaultTeardownWorktree } from "./worktree.mjs";
+import { gatedTeardownWorktree } from "./worktree-safety.mjs";
 import { log } from "./config.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
+
+// CTL-791: abort is NEVER terminal (the ticket is not Done/merged), so abort must
+// NOT remove the worktree. The gate, invoked with terminal:false, ALWAYS defers —
+// it flags the tree (worktree.cleanup-deferred + out-of-tree marker) and leaves it
+// for the scheduler's terminal-Done sweep to remove later, only once it is
+// genuinely safe (merged + clean + no live session + orchestrator-provenance).
+const defaultTeardownWorktree = ({ repoRoot, ticket }) =>
+  gatedTeardownWorktree({ repoRoot, ticket, terminal: false });
 
 // Signal statuses that mean a phase no longer holds a live worker — left as-is.
 //
@@ -107,13 +115,13 @@ export function abortWorker(
     );
   }
 
-  // Worktree teardown is SKIPPED while a bg job is still live in it: a
-  // `git worktree remove --force` would yank the filesystem out from under a
-  // running `claude` worker. defaultKillJob is a no-op (no `claude` bg-kill
-  // verb exists), so a recorded-but-unkilled job means the worker is presumed
-  // alive — leave its worktree for a later sweep (the scheduler's terminal-Done
-  // teardown once the phase settles, or an operator). A ticket with no bg job
-  // (never reached `claude --bg`) is safe to tear down now.
+  // Worktree teardown is SKIPPED while a bg job is still live in it (a removal
+  // would yank the filesystem out from under a running `claude` worker).
+  // defaultKillJob is a no-op (no `claude` bg-kill verb exists), so a
+  // recorded-but-unkilled job means the worker is presumed alive — leave its
+  // worktree. With no live job, the teardown seam still only FLAGS the worktree
+  // (CTL-791: abort is non-terminal → the gate defers); the scheduler's
+  // terminal-Done sweep removes it later, once it is genuinely safe.
   const liveJobs = [...jobIds].filter((id) => !jobsKilled.includes(id));
   let worktreeRemoved = false;
   if (liveJobs.length > 0) {
