@@ -4,7 +4,7 @@ description:
   Compound-engineering capture + curation for a finished ticket — the engineering feedback loop.
   Harvests the Friction sections that phase agents left in their artifacts plus the git diff, writes a
   structured entry to the shared learnings store (thoughts/shared/learnings/), prunes/amends stale
-  notes there autonomously, captures new domain vocabulary to thoughts/CONCEPTS.md, and PROPOSES (for
+  notes there autonomously, captures new domain vocabulary to thoughts/shared/CONCEPTS.md, and PROPOSES (for
   human approval) any ADR change. Non-blocking — runs after a ticket ships or fails, never on the
   critical path. Use when the user says "compound this ticket", "capture learnings", "what did we
   learn", or run as /catalyst-dev:ticket-compound <TICKET> [mode:headless].
@@ -21,7 +21,7 @@ Read `reference.md` (this dir) for the learnings-store schema before writing any
 
 **Two authority levels (hard rule):**
 - **Autonomous** — write/append/update/delete in `thoughts/shared/learnings/` and
-  `thoughts/CONCEPTS.md`, and prune stale notes in `thoughts/shared/{research,plans}/`.
+  `thoughts/shared/CONCEPTS.md`, and prune stale notes in `thoughts/shared/{research,plans}/`.
 - **Propose only (APPROVE-gated)** — any change to `docs/adrs.md`. Never edit an ADR directly; queue
   it for the morning ritual to approve.
 
@@ -96,7 +96,7 @@ unambiguous cases; mark the rest `status: stale` + `stale_reason`.
 
 ## Step 5 — Vocabulary → CONCEPTS.md (autonomous)
 
-Scan the diff + friction for Catalyst domain terms not yet in `thoughts/CONCEPTS.md` (e.g. "reclaim",
+Scan the diff + friction for Catalyst domain terms not yet in `thoughts/shared/CONCEPTS.md` (e.g. "reclaim",
 "revive-budget", "orphan", "signal ownership"). Append concise definitions. Create the file if absent.
 
 ## Step 6 — ADR changes → PROPOSE, never apply

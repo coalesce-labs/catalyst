@@ -64,7 +64,7 @@ unquoted `#` is silently truncated as a comment and unquoted `: ` is parsed as a
 - **Standing rule that every agent must always follow** → propose an **ADR** change (`docs/adrs.md`,
   `@import`ed into CLAUDE.md). APPROVE-gated.
 - **Shared domain vocabulary** (what "reclaim", "revive-budget", "orphan", "signal ownership" mean)
-  → `thoughts/CONCEPTS.md`. Autonomous.
+  → `thoughts/shared/CONCEPTS.md`. Autonomous.
 - **A specific problem→solution pair** → a learnings entry here. Autonomous.
 
 CLAUDE.md itself only ever gets a *pointer* to the store (the "discoverability check"), never the
