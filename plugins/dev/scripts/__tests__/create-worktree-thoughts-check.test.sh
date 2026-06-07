@@ -142,6 +142,17 @@ if [[ -d "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared present"; els
 if [[ -L "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared is a symlink"; else fail "not a symlink"; fi
 rm -rf "$SCRATCH"
 
+# CTL-845 Phase 4: guard against re-committing a machine-local worktree.setup script.
+# The committed .catalyst/config.json must never reference an absolute /Users/ path
+# so the repo remains portable across machines.
+echo "Test: committed config has no machine-local worktree.setup"
+if jq -e '.catalyst.worktree.setup // [] | map(select(test("^bash /Users/"))) | length > 0' \
+	"$REPO_ROOT/.catalyst/config.json" >/dev/null 2>&1; then
+	fail "config.json still references a machine-local worktree setup script"
+else
+	pass "config.json worktree.setup is portable"
+fi
+
 echo ""
 echo "Passed: $PASSES  Failed: $FAILURES"
 [[ $FAILURES -eq 0 ]] || exit 1
