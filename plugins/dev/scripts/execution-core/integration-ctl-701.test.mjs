@@ -6,7 +6,10 @@
 //
 // This file exercises Phases 1-3 in composition:
 //   Phase 1 fix: phase-monitor-deploy.json removed from ARTIFACT_NAMES
-//   Phase 2 fix: turn-cap-exhausted removed from TERMINAL
+//   Phase 2 fix (REVERSED by CTL-830): CTL-748 (2026-06-02) disabled per-phase
+//     turn caps — turn-cap-exhausted is now unambiguously TERMINAL again.
+//     CTL-D (implement/turn-cap-exhausted) is excluded from boot-resume and
+//     short-circuits reclaim/revive to noop (CTL-830).
 //   Phase 3 fix: daemon-boot.json as exec-core epoch for detectColdStart
 //
 // Run: bun test plugins/dev/scripts/execution-core/integration-ctl-701.test.mjs
@@ -81,7 +84,7 @@ function makeStatJob() {
 }
 
 describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
-  test("boot-resume reconciles all four in-flight tickets on logical cold start", () => {
+  test("boot-resume reconciles the three resumable tickets; turn-cap-exhausted is terminal (CTL-830)", () => {
     buildFixture();
 
     // Prove detectColdStart with exec-core epoch returns coldStart:true for our
@@ -95,7 +98,7 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
     expect(coldReport.coldStart).toBe(true);
     expect(coldReport.epochSource).toBe("exec-core");
 
-    // reconcileBootResume should dispatch all 4 tickets
+    // reconcileBootResume should dispatch the 3 non-terminal tickets (CTL-D is terminal)
     const dispatched = [];
     const events = [];
     const res = reconcileBootResume({
@@ -110,19 +113,19 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
       appendEvent: (e) => events.push(e),
     });
 
-    expect(res.dispatched).toBe(4);
+    expect(res.dispatched).toBe(3);
     expect(res.failed).toBe(0);
 
     const tickets = dispatched.map((d) => d.ticket).sort();
-    expect(tickets).toEqual(["CTL-A", "CTL-B", "CTL-C", "CTL-D"]);
+    expect(tickets).toEqual(["CTL-A", "CTL-B", "CTL-C"]);
 
-    // Monitor-deploy and turn-cap-exhausted must be in the dispatch list
+    // Monitor-deploy must be in the dispatch list; turn-cap-exhausted must be excluded
     const phases = Object.fromEntries(dispatched.map((d) => [d.ticket, d.phase]));
     expect(phases["CTL-C"]).toBe("monitor-deploy");
-    expect(phases["CTL-D"]).toBe("implement");
+    expect(phases["CTL-D"]).toBeUndefined();
   });
 
-  test("per-tick reclaim sweep does NOT short-circuit monitor-deploy or turn-cap-exhausted", () => {
+  test("per-tick reclaim sweep does NOT short-circuit monitor-deploy; turn-cap-exhausted IS terminal (CTL-830)", () => {
     buildFixture();
     // deadStatJob simulates all bg jobs having exited (no state.json present)
     const deadStatJob = () => null;
@@ -146,14 +149,13 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
       makeSig("CTL-D", "implement", "turn-cap-exhausted"),
     ];
 
-    // classifyWorker must return "dead" (not "terminal") for all four,
-    // including monitor-deploy (Phase 1 fix) and turn-cap-exhausted (Phase 2 fix)
-    for (const sig of signals) {
-      const klass = classifyWorker(sig, { statJob: deadStatJob });
-      expect(klass).toBe("dead");
+    // CTL-A/B/C must classify as "dead"; CTL-D (turn-cap-exhausted) must classify as "terminal"
+    for (const sig of signals.slice(0, 3)) {
+      expect(classifyWorker(sig, { statJob: deadStatJob })).toBe("dead");
     }
+    expect(classifyWorker(signals[3], { statJob: deadStatJob })).toBe("terminal");
 
-    // reclaimDeadWorkIfPossible must NOT return "noop" for any of the four
+    // reclaimDeadWorkIfPossible: CTL-A/B/C enter revive path; CTL-D short-circuits to noop
     const results = signals.map((sig) =>
       reclaimDeadWorkIfPossible(orchDir, sig, {
         statJob: deadStatJob,
@@ -172,10 +174,10 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
       }),
     );
 
-    for (let i = 0; i < results.length; i++) {
-      expect(results[i]).not.toBe("noop");
-    }
-    // All four should enter the revive path (probe=false → revived)
-    expect(results.every((r) => r === "revived")).toBe(true);
+    // CTL-A, CTL-B, CTL-C revive; CTL-D is noop (terminal)
+    expect(results[0]).toBe("revived");
+    expect(results[1]).toBe("revived");
+    expect(results[2]).toBe("revived");
+    expect(results[3]).toBe("noop");
   });
 });

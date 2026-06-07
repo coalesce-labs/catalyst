@@ -206,20 +206,14 @@ describe("selectBootResumeCandidates", () => {
     });
   });
 
-  test("selectBootResumeCandidates picks up implement/turn-cap-exhausted (CTL-701)", () => {
+  test("selectBootResumeCandidates EXCLUDES turn-cap-exhausted — terminal since CTL-748 (CTL-830)", () => {
     writeSignal(orchDir, "CTL-TCE", "implement", {
       worktreePath: "/wt/CTL-TCE",
       bg_job_id: "tce-job-1",
       status: "turn-cap-exhausted",
     });
     const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({
-      ticket: "CTL-TCE",
-      phase: "implement",
-      worktreePath: "/wt/CTL-TCE",
-      bgJobId: "tce-job-1",
-    });
+    expect(out).toHaveLength(0);
   });
 
   // CTL-665: a committed executionCore.maxParallel (threaded via `concurrency`)
@@ -564,9 +558,9 @@ describe("reconcileBootResume", () => {
   });
 });
 
-// ── CTL-701: turn-cap-exhausted boot-resume ───────────────────────────────────
-describe("reconcileBootResume — turn-cap-exhausted (CTL-701)", () => {
-  test("relaunches turn-cap-exhausted with --resume when session resolvable", () => {
+// ── CTL-830: turn-cap-exhausted is terminal — boot-resume must NOT relaunch it ──
+describe("reconcileBootResume — turn-cap-exhausted is terminal (CTL-830)", () => {
+  test("does NOT relaunch turn-cap-exhausted on cold start", () => {
     writeMaxParallel(orchDir, 3);
     writeSignal(orchDir, "CTL-TCE", "implement", {
       worktreePath: "/wt/CTL-TCE",
@@ -585,13 +579,9 @@ describe("reconcileBootResume — turn-cap-exhausted (CTL-701)", () => {
       resolveSession: (id) => (id === "tce-abc" ? "uuid-resume" : null),
       appendEvent: () => {},
     });
-    expect(res.dispatched).toBe(1);
-    expect(res.resumed).toBe(1);
-    expect(calls[0]).toMatchObject({
-      ticket: "CTL-TCE",
-      phase: "implement",
-      resumeSession: "uuid-resume",
-    });
+    expect(res.dispatched).toBe(0);
+    expect(res.resumed).toBe(0);
+    expect(calls).toHaveLength(0);
   });
 });
 

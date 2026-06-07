@@ -306,22 +306,21 @@ describe("listDispatchedPhases", () => {
   });
 });
 
-// CTL-701 Phase 2: byActivePhase — turn-cap-exhausted is NOT terminal
-describe("byActivePhase — turn-cap-exhausted (CTL-701)", () => {
-  test("turn-cap-exhausted sorts before done regardless of updatedAt", () => {
-    const tce = {
-      phase: "implement",
-      status: "turn-cap-exhausted",
-      updatedAt: "2026-05-28T10:00:00Z",
-    };
-    const done = {
-      phase: "monitor-deploy",
-      status: "done",
-      updatedAt: "2026-05-28T12:00:00Z",
-    };
+// CTL-830: turn-cap-exhausted is terminal since CTL-748 — it no longer
+// shadows in-flight phases, and ties with other terminals break on updatedAt.
+describe("byActivePhase — turn-cap-exhausted is terminal (CTL-830)", () => {
+  test("a running phase sorts before turn-cap-exhausted", () => {
+    const tce = { phase: "implement", status: "turn-cap-exhausted", updatedAt: "2026-05-28T12:00:00Z" };
+    const running = { phase: "monitor-deploy", status: "running", updatedAt: "2026-05-28T10:00:00Z" };
+    const sorted = [tce, running].sort(byActivePhase);
+    expect(sorted[0].status).toBe("running");
+  });
+
+  test("turn-cap-exhausted vs done tiebreaks on most-recent updatedAt", () => {
+    const tce = { phase: "implement", status: "turn-cap-exhausted", updatedAt: "2026-05-28T10:00:00Z" };
+    const done = { phase: "monitor-deploy", status: "done", updatedAt: "2026-05-28T12:00:00Z" };
     const sorted = [tce, done].sort(byActivePhase);
-    expect(sorted[0].status).toBe("turn-cap-exhausted");
-    expect(sorted[1].status).toBe("done");
+    expect(sorted[0].status).toBe("done"); // newer updatedAt wins among terminals
   });
 });
 
