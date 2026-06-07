@@ -1,7 +1,9 @@
 #!/bin/bash
 # setup-catalyst.sh - Complete Catalyst setup in one command
 # Usage: curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
-#        OR ./setup-catalyst.sh
+#        OR ./setup-catalyst.sh [--non-interactive|--defaults]
+#        Headless (CI/SSH/cron): --non-interactive or CATALYST_AUTONOMOUS=1 — prompts use
+#        defaults, integrations configure only from discoverable tokens (LINEAR_API_TOKEN, etc.)
 
 set -e
 
@@ -21,6 +23,7 @@ ORG_ROOT=""
 THOUGHTS_REPO=""
 WORKTREE_BASE=""
 USER_NAME=""
+NON_INTERACTIVE=0
 
 #
 # Utility functions
@@ -46,22 +49,82 @@ print_error() {
 	echo -e "${RED}✗ $1${NC}"
 }
 
+# True when /dev/tty can actually be opened (existence alone is not enough:
+# with no controlling tty, open(2) fails ENXIO — "Device not configured").
+# The subshell absorbs the failed open so `set -e` does not kill the script.
+can_open_tty() {
+	(: </dev/tty) 2>/dev/null
+}
+
+# Parse CLI flags. CATALYST_AUTONOMOUS is the project-wide headless signal
+# (same contract as plugins/dev/scripts/check-project-setup.sh).
+parse_args() {
+	if [[ -n ${CATALYST_AUTONOMOUS:-} ]]; then
+		NON_INTERACTIVE=1
+	fi
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--non-interactive | --defaults)
+			NON_INTERACTIVE=1
+			shift
+			;;
+		-h | --help)
+			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			exit 0
+			;;
+		*)
+			print_error "Unknown option: $1"
+			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			exit 1
+			;;
+		esac
+	done
+}
+
 ask_yes_no() {
 	local prompt="$1"
 	local default="${2:-y}"
+	local ni_answer="${3:-$default}"
+	local suffix="[y/N]"
+	[[ $default == "y" ]] && suffix="[Y/n]"
 
-	if [[ $default == "y" ]]; then
-		read -p "$prompt [Y/n] " -n 1 -r
-	else
-		read -p "$prompt [y/N] " -n 1 -r
+	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+		echo "$prompt $suffix → ${ni_answer} (non-interactive)" >&2
+		[[ $ni_answer == "y" ]]
+		return
 	fi
-	echo
+
+	if [[ -t 0 ]]; then
+		# Interactive terminal: keep single-keypress UX.
+		read -p "$prompt $suffix " -n 1 -r || REPLY=""
+		echo
+	else
+		# Piped/redirected stdin: consume the whole line so subsequent
+		# reads stay aligned; EOF (read rc!=0) falls back to the default.
+		read -p "$prompt $suffix " -r || REPLY=""
+		REPLY="${REPLY:0:1}"
+	fi
 
 	if [[ -z $REPLY ]]; then
 		[[ $default == "y" ]]
 	else
 		[[ $REPLY =~ ^[Yy]$ ]]
 	fi
+}
+
+# prompt_value <prompt> <default> — echo the answer; in non-interactive mode
+# (or on EOF) echo the default without consuming stdin.
+prompt_value() {
+	local prompt="$1"
+	local default="${2:-}"
+	local reply=""
+	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
+		echo "$default"
+		return 0
+	fi
+	read -p "$prompt " -r reply || reply=""
+	echo "${reply:-$default}"
 }
 
 #
@@ -685,7 +748,7 @@ offer_install_humanlayer() {
 	echo ""
 	echo "  Install: npm install -g humanlayer"
 	echo ""
-	if ! ask_yes_no "Attempt to install via npm now?"; then
+	if ! ask_yes_no "Attempt to install via npm now?" "y" "n"; then
 		print_warning "Skipping HumanLayer installation. Setup cannot continue."
 		return 1
 	fi
@@ -707,7 +770,7 @@ offer_install_gh_cli() {
 	echo ""
 	echo "GitHub CLI is used for PR automation and Linear/GitHub integration."
 	echo ""
-	if ! ask_yes_no "Install GitHub CLI now?"; then
+	if ! ask_yes_no "Install GitHub CLI now?" "y" "n"; then
 		echo "  Manual install: https://cli.github.com/"
 		return 1
 	fi
@@ -756,7 +819,7 @@ offer_install_jq() {
 	echo "jq is required for config file manipulation."
 	echo ""
 
-	if ask_yes_no "Attempt to install jq now?"; then
+	if ask_yes_no "Attempt to install jq now?" "y" "n"; then
 		if command -v brew &>/dev/null; then
 			brew install jq
 			return 0
@@ -833,6 +896,10 @@ detect_org_and_repo() {
 			# Fallback: ask user
 			echo ""
 			print_warning "Could not detect GitHub org/repo from remote or path"
+			if [[ $NON_INTERACTIVE -eq 1 ]]; then
+				print_error "Cannot detect GitHub org/repo (no remote, unrecognized path). Run interactively or set a GitHub remote."
+				exit 1
+			fi
 			read -p "Enter GitHub organization name: " ORG_NAME
 			read -p "Enter repository name: " REPO_NAME
 		fi
@@ -846,6 +913,10 @@ detect_org_and_repo() {
 }
 
 determine_project_location() {
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		print_error "Not in a git repository. Run setup from inside the target repo when using --non-interactive."
+		exit 1
+	fi
 	echo ""
 	echo "Where is your project located?"
 	echo ""
@@ -1160,8 +1231,7 @@ setup_project_config() {
 	echo "  - PR titles (e.g., [${PROJECT_KEY}-123] Add new feature)"
 	echo "  - Commit messages and documentation"
 	echo ""
-	read -p "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]: " ticket_prefix
-	ticket_prefix="${ticket_prefix:-PROJ}"
+	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]:" "PROJ")
 
 	# Prompt for project name
 	echo ""
@@ -1170,8 +1240,7 @@ setup_project_config() {
 	echo "  Used in documentation, reports, and thought documents."
 	echo "  Example: 'Acme API' instead of 'acme-api-backend'"
 	echo ""
-	read -p "Enter project name [${REPO_NAME}]: " project_name
-	project_name="${project_name:-${REPO_NAME}}"
+	project_name=$(prompt_value "Enter project name [${REPO_NAME}]:" "${REPO_NAME}")
 
 	# Create/update config
 	cat >"$config_file" <<EOF
@@ -1256,8 +1325,7 @@ setup_humanlayer_config() {
 	echo "  Detected system user: ${USER}"
 	echo "  You can use your system username or choose something else (like your first name)."
 	echo ""
-	read -p "Enter your name for thoughts [${USER}]: " thoughts_user
-	thoughts_user="${thoughts_user:-${USER}}"
+	thoughts_user=$(prompt_value "Enter your name for thoughts [${USER}]:" "${USER}")
 	USER_NAME="$thoughts_user"
 
 	# Create config
@@ -1352,6 +1420,12 @@ prompt_linear_config() {
 		fi
 	fi
 
+	if [[ $NON_INTERACTIVE -eq 1 ]] && ! discover_linear_token >/dev/null 2>&1; then
+		echo "Skipping Linear (non-interactive, no token discoverable)." >&2
+		echo "$config"
+		return 0
+	fi
+
 	if ! ask_yes_no "Configure Linear integration?"; then
 		echo "Skipping Linear. You can add it later by re-running this script." >&2
 		echo "$config"
@@ -1406,16 +1480,22 @@ prompt_linear_config() {
 					linear_team_name=$(echo "$linear_teams" | jq -r '.[0].name')
 					echo "Using team: $linear_team ($linear_team_name)" >&2
 				else
-					# Multiple teams, let user choose
-					echo "Select a team:" >&2
-					echo "$linear_teams" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.key): \(.value.name)"' >&2
-					echo "" >&2
+					# Multiple teams
+					if [[ $NON_INTERACTIVE -eq 1 ]]; then
+						linear_team=$(echo "$linear_teams" | jq -r '.[0].key')
+						linear_team_name=$(echo "$linear_teams" | jq -r '.[0].name')
+						echo "Non-interactive: auto-selecting first team: $linear_team ($linear_team_name)" >&2
+					else
+						echo "Select a team:" >&2
+						echo "$linear_teams" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.key): \(.value.name)"' >&2
+						echo "" >&2
 
-					read -p "Enter team number [1-$team_count]: " team_num
-					team_num=$((team_num - 1))
+						read -p "Enter team number [1-$team_count]: " team_num
+						team_num=$((team_num - 1))
 
-					linear_team=$(echo "$linear_teams" | jq -r ".[$team_num].key")
-					linear_team_name=$(echo "$linear_teams" | jq -r ".[$team_num].name")
+						linear_team=$(echo "$linear_teams" | jq -r ".[$team_num].key")
+						linear_team_name=$(echo "$linear_teams" | jq -r ".[$team_num].name")
+					fi
 				fi
 			fi
 		else
@@ -1529,6 +1609,12 @@ prompt_sentry_config() {
 		fi
 	fi
 
+	if [[ $NON_INTERACTIVE -eq 1 ]] && ! discover_sentry_token >/dev/null 2>&1; then
+		echo "Skipping Sentry (non-interactive, no token discoverable)." >&2
+		echo "$config"
+		return 0
+	fi
+
 	if ! ask_yes_no "Configure Sentry integration?"; then
 		echo "Skipping Sentry. You can add it later by re-running this script." >&2
 		echo "$config"
@@ -1584,15 +1670,21 @@ prompt_sentry_config() {
 					sentry_projects=$(echo "$validation_result" | jq -r '.projects')
 					echo "  Found $(echo "$sentry_projects" | jq 'length') project(s)" >&2
 				else
-					# Multiple orgs, let user choose
-					echo "Select an organization:" >&2
-					echo "$sentry_orgs" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
-					echo "" >&2
+					# Multiple orgs
+					if [[ $NON_INTERACTIVE -eq 1 ]]; then
+						sentry_org=$(echo "$sentry_orgs" | jq -r '.[0].slug')
+						local ni_org_name=$(echo "$sentry_orgs" | jq -r '.[0].name')
+						echo "Non-interactive: auto-selecting first org: $sentry_org ($ni_org_name)" >&2
+					else
+						echo "Select an organization:" >&2
+						echo "$sentry_orgs" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
+						echo "" >&2
 
-					read -p "Enter organization number [1-$org_count]: " org_num
-					org_num=$((org_num - 1))
+						read -p "Enter organization number [1-$org_count]: " org_num
+						org_num=$((org_num - 1))
 
-					sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
+						sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
+					fi
 				fi
 
 				# Let user select project(s)
@@ -1614,7 +1706,12 @@ prompt_sentry_config() {
 						echo "  1-$project_count. Choose one default project" >&2
 						echo "" >&2
 
-						read -p "Enter choice [A/S/1-$project_count]: " project_choice
+						if [[ $NON_INTERACTIVE -eq 1 ]]; then
+							project_choice="A"
+							echo "Non-interactive: auto-selecting all projects" >&2
+						else
+							read -p "Enter choice [A/S/1-$project_count]: " project_choice
+						fi
 
 						case "${project_choice^^}" in
 						A)
@@ -1781,6 +1878,12 @@ prompt_posthog_config() {
 		fi
 	fi
 
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		echo "Skipping PostHog (non-interactive, no token discovery available)." >&2
+		echo "$config"
+		return 0
+	fi
+
 	if ! ask_yes_no "Configure PostHog integration?"; then
 		echo "Skipping PostHog. You can add it later by re-running this script." >&2
 		echo "$config"
@@ -1831,6 +1934,12 @@ prompt_exa_config() {
 			echo "$config"
 			return 0
 		fi
+	fi
+
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		echo "Skipping Exa (non-interactive, no token discovery available)." >&2
+		echo "$config"
+		return 0
 	fi
 
 	if ! ask_yes_no "Configure Exa integration?"; then
@@ -2194,7 +2303,7 @@ offer_github_backup() {
 	echo "  3. Skip (set up backup manually later)"
 	echo ""
 
-	read -p "Select option (1, 2, or 3): " backup_option
+	backup_option=$(prompt_value "Select option (1, 2, or 3):" "3")
 
 	case $backup_option in
 	1)
@@ -2220,7 +2329,7 @@ offer_github_backup() {
 
 		git remote add origin "$remote_url"
 
-		if ask_yes_no "Push now?"; then
+		if ask_yes_no "Push now?" "y" "n"; then
 			git push -u origin main || git push -u origin master
 			print_success "Thoughts pushed to GitHub"
 		fi
@@ -2281,12 +2390,14 @@ init_session_database() {
 #
 
 main() {
+	parse_args "$@"
+
 	# Handle curl | bash: redirect stdin from terminal for interactive prompts.
 	# When piped, bash reads the script from stdin. Once loaded (main is a function,
 	# so bash reads the full definition before executing), we redirect stdin to /dev/tty
 	# so that read commands can get user input from the terminal.
-	if [ ! -t 0 ]; then
-		if [ -e /dev/tty ]; then
+	if [[ $NON_INTERACTIVE -eq 0 ]] && [ ! -t 0 ]; then
+		if can_open_tty; then
 			exec </dev/tty
 		else
 			print_warning "No terminal available. Interactive prompts will use defaults."
@@ -2325,9 +2436,10 @@ main() {
 	fi
 }
 
-# Run main (guard allows sourcing for testing without executing main).
-# When piped to bash (curl ... | bash), BASH_SOURCE[0] is empty — main must
-# still run in that case; only a `source` invocation should skip it.
-if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
+# Run main unless the script is being sourced (tests source it for unit access).
+# When piped to bash (curl ... | bash) or executed directly, the return-probe
+# fails (return is only valid inside a sourced script/function), so main runs;
+# only a `source` invocation skips it.
+if ! (return 0 2>/dev/null); then
 	main "$@"
 fi
