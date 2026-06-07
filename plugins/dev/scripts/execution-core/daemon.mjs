@@ -147,6 +147,30 @@ export function readLinearBotUserIds(layer1Path, layer2Path) {
   return ids;
 }
 
+// readLinearBotWriteId — the SINGLE bot UUID the daemon writes as assignee on
+// claim (CTL-781): the orchestrator app-actor identity, preferred from Layer-2,
+// falling back to the legacy Layer-1 monitor botUserId. Null = self-assign
+// disabled (the respect-assignment predicate still runs off the Set). Never throws.
+export function readLinearBotWriteId(layer1Path, layer2Path) {
+  // Prefer Layer-2: catalyst.linear.bot.orchestrator.botUserId.
+  if (layer2Path) {
+    try {
+      const p = JSON.parse(readFileSync(layer2Path, "utf8"));
+      const id = p?.catalyst?.linear?.bot?.orchestrator?.botUserId;
+      if (typeof id === "string" && id.length > 0) return id;
+    } catch { /* ignore */ }
+  }
+  // Fallback: Layer-1 catalyst.monitor.linear.botUserId.
+  if (layer1Path) {
+    try {
+      const p = JSON.parse(readFileSync(layer1Path, "utf8"));
+      const id = p?.catalyst?.monitor?.linear?.botUserId;
+      if (typeof id === "string" && id.length > 0) return id;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
 // _isBotId — returns true when actorId is in the bot-ids set or (for backward
 // compat with tests that pass a plain string) equals the string directly.
 // Centralises the "is this the bot?" check used in the three self-echo guards.
@@ -408,17 +432,21 @@ export function startDaemon({
     // suppress self-echo from BOTH the worker app-actor AND the orchestrator
     // app-actor. Returns a Set<string> — empty = no filter (fail-open).
     const linearBotUserIds = readLinearBotUserIds(configPath, layer2Path);
+    const linearBotWriteId = readLinearBotWriteId(configPath, layer2Path); // CTL-781
     const commentInboxWriter = createCommentInboxWriter(orchDir, linearBotUserIds);
     monitorFn({
       orchDir,
       cache,
       concurrency, // CTL-716: slot-gate uses the same ceiling as the scheduler
+      botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
+      botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
+      gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
         handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
-    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716
+    }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781
     // CTL-558: the scheduler writes Linear status via its default `writeStatus`
     // (linear-write.mjs) on every committed phase transition — no daemon wiring
     // needed; production uses the real module, tests inject fakes.
@@ -428,6 +456,8 @@ export function startDaemon({
       concurrency,
       configPath,
       layer2Path,
+      botUserIds: linearBotUserIds, // CTL-781: respect-assignment gate
+      botWriteId: linearBotWriteId, // CTL-781: self-assign on claim
       // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader.
       // CTL-823: the sweep's existence probe consults the durable broker
       // descriptor store first (gateway-read.mjs) — a fresh not-removed

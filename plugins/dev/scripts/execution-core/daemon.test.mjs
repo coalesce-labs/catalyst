@@ -31,6 +31,7 @@ import {
   createCommentInboxWriter,
   createUpdateInboxWriter,
   readLinearBotUserIds,
+  readLinearBotWriteId,
   _isBotId,
 } from "./daemon.mjs";
 import { getEventLogPath } from "./config.mjs";
@@ -1462,5 +1463,38 @@ describe("CTL-823 gateway wiring", () => {
     // daemon's reader cannot be dropped by the caller's opts.
     expect(captured.classifyResolution("CTL-MISSING", { exec })).toBe("not-found");
     expect(execCalls.length).toBe(1);
+  });
+});
+
+// readLinearBotWriteId — resolves the SINGLE bot UUID to write as assignee (CTL-781).
+describe("readLinearBotWriteId (CTL-781)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-write-id-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("returns catalyst.linear.bot.orchestrator.botUserId from Layer-2 when present", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
+    }));
+    expect(readLinearBotWriteId(null, layer2)).toBe("orch-uuid-1");
+  });
+
+  test("falls back to Layer-1 catalyst.monitor.linear.botUserId when Layer-2 absent", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "legacy-uuid-1" } } }
+    }));
+    expect(readLinearBotWriteId(layer1, null)).toBe("legacy-uuid-1");
+  });
+
+  test("returns null when neither layer configures an ID (self-assign disabled)", () => {
+    expect(readLinearBotWriteId("/nonexistent/l1.json", "/nonexistent/l2.json")).toBeNull();
+  });
+
+  test("never throws on unreadable/malformed files", () => {
+    const bad = join(tmpDir, "bad.json");
+    writeFileSync(bad, "not-json{{");
+    expect(() => readLinearBotWriteId(bad, bad)).not.toThrow();
   });
 });
