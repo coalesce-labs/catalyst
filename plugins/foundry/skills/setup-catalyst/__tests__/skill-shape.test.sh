@@ -49,6 +49,28 @@ assert_grep "setup_execution_core_states branches on execution-core" \
 assert_grep "main() calls setup_execution_core_states" \
   "$SETUP_CATALYST" "^[[:space:]]+setup_execution_core_states"
 
+# CTL-842 — non-interactive / headless mode.
+assert_contains "SKILL.md documents non-interactive mode" "Non-interactive / headless mode"
+assert_contains "SKILL.md mentions --non-interactive flag" "--non-interactive"
+assert_contains "SKILL.md mentions CATALYST_AUTONOMOUS" "CATALYST_AUTONOMOUS"
+assert_contains "SKILL.md mentions can_open_tty" "can_open_tty"
+assert_contains "SKILL.md mentions source guard" "return 0 2>/dev/null"
+
+assert_grep "setup-catalyst.sh defines can_open_tty" \
+  "$SETUP_CATALYST" "^can_open_tty\(\)"
+assert_grep "setup-catalyst.sh defines parse_args" \
+  "$SETUP_CATALYST" "^parse_args\(\)"
+assert_grep "setup-catalyst.sh defines prompt_value" \
+  "$SETUP_CATALYST" "^prompt_value\(\)"
+assert_grep "setup-catalyst.sh has NON_INTERACTIVE global" \
+  "$SETUP_CATALYST" "^NON_INTERACTIVE="
+assert_grep "setup-catalyst.sh uses return-probe source guard" \
+  "$SETUP_CATALYST" "return 0 2>/dev/null"
+assert_grep "setup-catalyst.sh pip offer declines in NI" \
+  "$SETUP_CATALYST" 'ask_yes_no.*pip.*"?y"?.*"?n"?'
+assert_grep "setup-catalyst.sh jq offer declines in NI" \
+  "$SETUP_CATALYST" 'ask_yes_no.*jq.*"?y"?.*"?n"?'
+
 echo ""
 echo "Results: $PASSES passed, $FAILURES failed"
 exit "$FAILURES"
