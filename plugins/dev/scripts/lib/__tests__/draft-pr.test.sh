@@ -608,6 +608,87 @@ printf '{"catalyst":{"orchestration":{"draftPr":{"enabled":true}}}}\n' > "$P4D_C
 P4D_OUT="$(CATALYST_CONFIG_PATH="$P4D_CONFIG" draft_pr_enabled 2>/dev/null)"
 assert_eq "true" "$P4D_OUT" "4d: explicit true → enabled=true"
 
+# ─── Suite 5: draft_pr_title (CTL-783) ───────────────────────────────────────
+echo ""
+echo "Suite 5: draft_pr_title"
+
+# Source once for all Suite 5 tests.
+source "$DRAFT_PR_LIB"
+
+# 5a: conventional subject without ticket → ticket injected after the prefix colon
+echo "5a: conventional subject without ticket → ticket injected"
+P5A_OUT="$(draft_pr_title "CTL-783" "feat(dev): add early draft open" 2>/dev/null)"
+assert_eq "feat(dev): CTL-783 add early draft open" "$P5A_OUT" "5a: ticket injected after prefix"
+
+# 5b: subject already contains ticket → unchanged
+echo "5b: subject already contains ticket → unchanged"
+P5B_OUT="$(draft_pr_title "CTL-783" "feat(dev): CTL-783 add early draft open" 2>/dev/null)"
+assert_eq "feat(dev): CTL-783 add early draft open" "$P5B_OUT" "5b: unchanged when ticket already present"
+
+# 5c: bang variant preserved
+echo "5c: bang variant preserved"
+P5C_OUT="$(draft_pr_title "CTL-783" "feat(dev)!: break things" 2>/dev/null)"
+assert_eq "feat(dev)!: CTL-783 break things" "$P5C_OUT" "5c: bang variant preserved"
+
+# 5d: scopeless conventional subject
+echo "5d: scopeless conventional subject"
+P5D_OUT="$(draft_pr_title "CTL-783" "fix: a bug" 2>/dev/null)"
+assert_eq "fix: CTL-783 a bug" "$P5D_OUT" "5d: scopeless prefix → ticket injected"
+
+# 5e: non-conventional subject → "<ticket>: <subject>"
+echo "5e: non-conventional subject → ticket: subject"
+P5E_OUT="$(draft_pr_title "CTL-783" "add early draft open" 2>/dev/null)"
+assert_eq "CTL-783: add early draft open" "$P5E_OUT" "5e: non-conventional → ticket: subject"
+
+# 5f: empty ticket → subject unchanged
+echo "5f: empty ticket → subject unchanged"
+P5F_OUT="$(draft_pr_title "" "feat(dev): add X" 2>/dev/null)"
+assert_eq "feat(dev): add X" "$P5F_OUT" "5f: empty ticket → subject unchanged"
+
+# 5g: empty subject → echoes ticket
+echo "5g: empty subject → echoes ticket"
+P5G_OUT="$(draft_pr_title "CTL-783" "" 2>/dev/null)"
+assert_eq "CTL-783" "$P5G_OUT" "5g: empty subject → echoes ticket"
+
+# 5h: zsh-safe — draft_pr_title accessible under zsh
+echo "5h: zsh-safe — draft_pr_title accessible under zsh"
+ZSH5H="$(zsh -c "source '${DRAFT_PR_LIB}' && type draft_pr_title" 2>&1)"
+if echo "$ZSH5H" | grep -qE 'not found|error|Error'; then
+  fail "5h: draft_pr_title not accessible under zsh — got: $ZSH5H"
+else
+  pass "5h: draft_pr_title accessible under zsh"
+fi
+
+# Extend Suite 0 zsh check to include draft_pr_title
+ZSH_CHECK5="$(zsh -c "source '${DRAFT_PR_LIB}' && type draft_pr_title && draft_pr_title 'CTL-783' 'feat(dev): add X'" 2>&1)"
+if echo "$ZSH_CHECK5" | grep -q 'feat(dev): CTL-783 add X'; then
+  pass "5h: draft_pr_title produces correct output under zsh"
+else
+  fail "5h: draft_pr_title zsh output — got: $ZSH_CHECK5"
+fi
+
+# Suite 2 extension: draft_pr_ensure routes through draft_pr_title
+echo ""
+echo "Suite 2 (ext): draft_pr_ensure uses draft_pr_title for --title argument"
+new_fixture p2ext
+(cd "$WORK" && git push -u origin HEAD --quiet)
+P2EXT_BIN="${SCRATCH}/p2ext-bin"
+P2EXT_LOG="${SCRATCH}/p2ext.log"
+install_gh_stub_no_pr "$P2EXT_BIN" "$P2EXT_LOG"
+(
+  cd "$WORK"
+  PATH="${P2EXT_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  draft_pr_ensure "main" "CTL-709" 2>/dev/null
+) || true
+# The gh stub logs all args one-per-line; find --title then check the following line
+TITLE_LINE="$(awk '/^--title$/{found=1; next} found{print; exit}' "$P2EXT_LOG" 2>/dev/null || true)"
+if [[ "$TITLE_LINE" == "feat: CTL-709 work commit" ]]; then
+  pass "Suite 2 ext: draft_pr_ensure routes through draft_pr_title (got: $TITLE_LINE)"
+else
+  fail "Suite 2 ext: draft_pr_ensure --title should be 'feat: CTL-709 work commit', got: '$TITLE_LINE'"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
