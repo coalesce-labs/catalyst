@@ -341,6 +341,21 @@ else
     info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-foundry:setup-catalyst"
 fi
 
+# Orchestrator Linear OAuth app (CTL-785) — the daemon mints its app-actor token
+# from these creds at start; absent/partial creds silently fall back to the
+# personal LINEAR_API_TOKEN (re-pinning the shared 2,500/hr bucket).
+_ORCH_CID=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_ORCH_CSEC=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+if [[ -n "$_ORCH_CID" && -n "$_ORCH_CSEC" ]]; then
+    pass "Orchestrator Linear app credentials configured (clientId ${_ORCH_CID:0:8}…)"
+elif [[ -n "$_ORCH_CID" || -n "$_ORCH_CSEC" ]]; then
+    warn "Orchestrator Linear app credentials incomplete — need BOTH clientId and clientSecret"
+    info "Set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
+else
+    warn "Orchestrator Linear app not configured — daemon will fall back to the personal LINEAR_API_TOKEN (CTL-785)"
+    info "Create a 'Catalyst Orchestrator' OAuth app in Linear, then set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
+fi
+
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
 
 header "Observability Stack (optional)"

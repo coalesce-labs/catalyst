@@ -8,6 +8,7 @@ import { descriptorAgeMs } from "./gateway-read.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
+import { withAuthRemint, linearReminter, isBatchAuthError } from "./linear-remint.mjs";
 
 // linearis caps a single page; 200 comfortably covers a project's pickable
 // set without pagination (the reconcile poll runs every 10 min anyway).
@@ -75,8 +76,10 @@ function rawExec(cmd, args) {
 // defaultExec — rawExec behind the CTL-679 process-wide rate-limit breaker. The
 // eligible poll and per-ticket reads short-circuit without spawning linearis
 // while the breaker is open. Shared singleton with linear-write.mjs so a 429 on
-// the write path also pauses reads (and vice-versa).
-const defaultExec = withBreaker(rawExec);
+// the write path also pauses reads (and vice-versa). CTL-785: withAuthRemint
+// interposes under the breaker — an open breaker still short-circuits before any
+// spawn (including the remint retry).
+const defaultExec = withBreaker(withAuthRemint(rawExec));
 
 // normalizeTicket — flatten linearis's nested shape into a stable record.
 // `state` and `project` arrive as `{ name }` objects from the Linear API;
@@ -238,6 +241,10 @@ export function authHeader(token = "") {
 // HTTP 400 not 429) OR a rate-limit message. Either must open the CTL-679 breaker
 // so the larger batch payload backs off instead of re-firing every tick.
 // Exported for unit coverage.
+// CTL-785: isBatchAuthError is imported from linear-remint.mjs and re-exported
+// here so callers that already depend on linear-query.mjs can access it without
+// a direct dependency on linear-remint.mjs.
+export { isBatchAuthError } from "./linear-remint.mjs";
 export function isBatchRateLimited(errors) {
   return (errors ?? []).some(
     (e) => e?.extensions?.code === "RATELIMITED" || isRateLimitError(e?.message),
@@ -273,6 +280,40 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
   return { args, payload };
 }
 
+// runBatchOnce — executes ONE curl GraphQL POST and classifies the result.
+// Returns { nodes, auth, ratelimit, curlFailed }. Never throws. Internal to
+// defaultBatchExec; extracted so the auth-retry path can call it a second time.
+function runBatchOnce(ids) {
+  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
+  const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
+  const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (res.status !== 0) {
+    return { nodes: null, auth: false, ratelimit: false, curlFailed: true };
+  }
+  const out = res.stdout ?? "";
+  const nl = out.lastIndexOf("\n");
+  const httpCode = Number(out.slice(nl + 1).trim());
+  const body = out.slice(0, Math.max(0, nl));
+  if (httpCode === 401) {
+    return { nodes: null, auth: true, ratelimit: false, curlFailed: false };
+  }
+  if (httpCode === 429) {
+    return { nodes: null, auth: false, ratelimit: true, curlFailed: false };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { nodes: null, auth: false, ratelimit: false, curlFailed: false };
+  }
+  if (parsed?.errors) {
+    const auth = isBatchAuthError(parsed.errors);
+    const ratelimit = !auth && isBatchRateLimited(parsed.errors);
+    return { nodes: null, auth, ratelimit, curlFailed: false };
+  }
+  return { nodes: parsed?.data?.issues?.nodes ?? [], auth: false, ratelimit: false, curlFailed: false };
+}
+
 // defaultBatchExec — CTL-784. ONE synchronous GraphQL POST (via curl, to keep
 // the scheduler tick synchronous — making the tick async would break the
 // no-overlapping-tick invariant) returning the issues nodes array, or null on
@@ -281,32 +322,16 @@ export function buildBatchCurlArgs(ids, { token = "", ca } = {}) {
 // spawning; a 429 (HTTP) or a RATELIMITED GraphQL error body opens it; a clean
 // response closes it. Auth uses LINEAR_API_TOKEN/LINEAR_API_KEY (the daemon
 // exports the orchestrator app-actor token, CTL-785).
+// CTL-785: an expired app-actor token serves 401 (HTTP) or AUTHENTICATION_ERROR
+// (GraphQL, HTTP 400). One remint attempt + one retry; cooldown bounds storms.
 function defaultBatchExec(ids) {
   if (linearBreaker.isOpen()) return null; // circuit-open → skip, no spawn
-  const token = process.env.LINEAR_API_TOKEN ?? process.env.LINEAR_API_KEY ?? "";
-  const { args, payload } = buildBatchCurlArgs(ids, { token, ca: process.env.NODE_EXTRA_CA_CERTS });
-  const res = spawnSync("curl", args, { input: payload, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  if (res.status !== 0) return null; // curl/network failure — fail-safe, no breaker change
-  const out = res.stdout ?? "";
-  const nl = out.lastIndexOf("\n");
-  const httpCode = Number(out.slice(nl + 1).trim());
-  const body = out.slice(0, Math.max(0, nl));
-  if (httpCode === 429) {
-    linearBreaker.recordRateLimited();
-    return null;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
-    return null; // unparseable — fail-safe
-  }
-  if (parsed?.errors) {
-    if (isBatchRateLimited(parsed.errors)) linearBreaker.recordRateLimited();
-    return null; // GraphQL-level error (incl. auth / RATELIMITED) — fail-safe
-  }
+  let r = runBatchOnce(ids);
+  if (r.auth && linearReminter.attempt()) r = runBatchOnce(ids);
+  if (r.ratelimit) { linearBreaker.recordRateLimited(); return null; }
+  if (r.nodes == null) return null; // auth-after-retry, curlFailed, or unparseable
   linearBreaker.recordSuccess();
-  return parsed?.data?.issues?.nodes ?? [];
+  return r.nodes;
 }
 
 // fetchTicketsBatch — CTL-784 THE root fix. Resolve the relation descriptors for

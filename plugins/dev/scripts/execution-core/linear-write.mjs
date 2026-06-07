@@ -11,6 +11,7 @@ import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
 import { fetchTicketLabels, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
+import { withAuthRemint } from "./linear-remint.mjs";
 // CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
 // set, NOT TERMINAL_LINEAR_KEY which is the transition KEY "done"). Gates the
 // backward-write guard below.
@@ -34,7 +35,9 @@ function rawExec(cmd, args) {
 // the status-write path (which shells linear-transition.sh, itself a Linear
 // read+write) short-circuits without spawning while the breaker is open. Shared
 // singleton with linear-query.mjs: one 429 on any path pauses every path.
-const defaultExec = withBreaker(rawExec);
+// CTL-785: withAuthRemint interposes under the breaker — an open breaker still
+// short-circuits before any spawn (including the remint retry).
+const defaultExec = withBreaker(withAuthRemint(rawExec));
 
 // teamOf — the Linear team key is the identifier prefix: "CTL-558" → "CTL".
 export function teamOf(ticket) {
