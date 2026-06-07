@@ -20,10 +20,25 @@
 //   2. Token unset: even if a real binary is somehow reached, no creds → no write.
 //   3. CATALYST_TEST flag: a tripwire other guards/tests can assert on.
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const fakeBin = join(import.meta.dir, "__tests__", "fake-bin");
 process.env.PATH = `${fakeBin}:${process.env.PATH ?? ""}`;
+
+// CTL-810: pin CATALYST_DIR to a fresh per-run temp dir so no test — and no
+// code under test reaching a default appendEvent/emitReapIntent seam (e.g.
+// recovery.test.mjs reclaim branches that never injected the emit seam) — can
+// append to the REAL ~/catalyst/events/YYYY-MM.jsonl. 69% of the prod event
+// log (194,544 lines) was CTL-9/bg-9 fixture pollution before this guard.
+// Tests that want their own scratch still set CATALYST_DIR themselves; the
+// common save/restore pattern now restores to this hermetic default instead
+// of falling back to the real ~/catalyst. CATALYST_HERMETIC_DIR is the stable
+// record of the pin (asserted by test-setup.test.mjs) — sibling tests mutate
+// CATALYST_DIR mid-suite, but nothing may touch the record.
+const hermeticDir = mkdtempSync(join(tmpdir(), "catalyst-hermetic-"));
+process.env.CATALYST_DIR = hermeticDir;
+process.env.CATALYST_HERMETIC_DIR = hermeticDir;
 
 // Belt: a real linearis reached despite the shim writes nothing without creds.
 delete process.env.LINEAR_API_TOKEN;
