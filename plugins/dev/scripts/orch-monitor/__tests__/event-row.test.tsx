@@ -30,6 +30,8 @@ const longDetailsEvent: CanonicalEvent = {
     "service.name": "test",
     "service.namespace": "catalyst",
     "service.version": "0.0.0",
+    "host.name": "test-host",
+    "host.id": "0000000000000000",
   },
   attributes: {
     "event.name": "orchestrator.worker.done",
@@ -138,6 +140,8 @@ const longOrchEvent: CanonicalEvent = {
     "service.name": "test",
     "service.namespace": "catalyst",
     "service.version": "0.0.0",
+    "host.name": "test-host",
+    "host.id": "0000000000000000",
   },
   attributes: {
     "event.name": "orchestrator.worker.done",
@@ -284,6 +288,8 @@ describe("EventRow ICON + EVENT columns (CTL-391)", () => {
       "service.name": "test",
       "service.namespace": "catalyst",
       "service.version": "0.0.0",
+      "host.name": "test-host",
+      "host.id": "0000000000000000",
     },
     attributes: {
       "event.name": "github.pr.merged",
@@ -377,6 +383,8 @@ describe("EventRow ICON column (CTL-391, Nerd Font enabled)", () => {
         "service.name": "test",
         "service.namespace": "catalyst",
         "service.version": "0.0.0",
+        "host.name": "test-host",
+        "host.id": "0000000000000000",
       },
       attributes: {
         "event.name": "github.pr.merged",

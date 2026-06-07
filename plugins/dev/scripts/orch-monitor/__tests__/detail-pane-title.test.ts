@@ -13,6 +13,8 @@ const baseEvent: CanonicalEvent = {
     "service.name": "github-webhook",
     "service.namespace": "catalyst",
     "service.version": "8.4.0",
+    "host.name": "test-host",
+    "host.id": "0000000000000000",
   },
   attributes: {
     "event.name": "github.workflow_run.in_progress",
