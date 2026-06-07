@@ -51,7 +51,11 @@ assert_dir_exists()  { if [ -d "$2" ]; then ok "$1"; else fail "$1" "missing dir
 # next, same as production where the model runs the fences in order).
 
 SKILL_BODY_FILE="$(mktemp -t phase-teardown-body.XXXXXX.sh)"
+# The phase-teardown-failure-template fence is excluded: it is an ad-hoc
+# template the agent runs on fatal errors, not sequential body — concatenated
+# after the emit block's `exit 0` it would be unreachable dead code.
 awk '
+  /^```bash phase-teardown-failure-template/ { next }
   /^```bash/ { capture=1; next }
   /^```$/    { if (capture) capture=0; next }
   capture    { print }
@@ -91,14 +95,15 @@ make_git_pair() {
 write_fixture_signals() {
   local worker="$1" merged="${2:-true}"
   local now; now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  local then; then="$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '120 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "${now}")"
+  # "earlier" not "then" — `then` as a variable name is fragile (shellcheck SC1010)
+  local earlier; earlier="$(date -u -v-120S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '120 seconds ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "${now}")"
 
   # phase-triage.json
-  jq -nc --arg s "$then" --arg c "$now" '{status:"done",startedAt:$s,completedAt:$c}' \
+  jq -nc --arg s "$earlier" --arg c "$now" '{status:"done",startedAt:$s,completedAt:$c}' \
     > "$worker/phase-triage.json"
 
   # phase-research.json
-  jq -nc --arg s "$then" --arg c "$now" '{status:"done",startedAt:$s,completedAt:$c}' \
+  jq -nc --arg s "$earlier" --arg c "$now" '{status:"done",startedAt:$s,completedAt:$c}' \
     > "$worker/phase-research.json"
 
   # phase-monitor-merge.json — merged or not merged
@@ -111,7 +116,7 @@ write_fixture_signals() {
   fi
 
   # phase-monitor-deploy.json
-  jq -nc --arg s "$then" --arg c "$now" \
+  jq -nc --arg s "$earlier" --arg c "$now" \
     '{status:"done",deploy_state:"success",startedAt:$s,completedAt:$c}' \
     > "$worker/phase-monitor-deploy.json"
 
@@ -159,8 +164,8 @@ echo "Case 1: happy path (merged PR, deploy done)"
 C1="$TMPROOT/case1"
 PRIMARY_GIT="$C1/primary-repo"
 WT_PATH="$C1/ticket-wt"
-ORCH_DIR="$C1/orch"
-WORKER="$ORCH_DIR/workers/CTL-9999"
+ORCH_DIR1="$C1/orch"
+WORKER="$ORCH_DIR1/workers/CTL-9999"
 FAKE_HOME="$C1/home"
 mkdir -p "$WORKER" "$FAKE_HOME/catalyst/archives"
 
@@ -187,14 +192,14 @@ mkdir -p "$FAKE_HOME/catalyst/events"
 : > "$FAKE_HOME/catalyst/events/${MONTH}.jsonl"
 
 (
-  cd "$WT_PATH"
+  cd "$WT_PATH" || exit 1
   HOME="$FAKE_HOME" \
   PATH="$STUB_BIN:$PATH" \
   TICKET=CTL-9999 \
-  CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR" \
+  CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR1" \
   CATALYST_ORCHESTRATOR_ID="orch-test-1" \
   CATALYST_DIR="$FAKE_HOME/catalyst" \
-  ORCH_DIR="$ORCH_DIR" \
+  ORCH_DIR="$ORCH_DIR1" \
   ORCH_ID="orch-test-1" \
   PLUGIN_ROOT="$PLUGIN_ROOT1" \
   PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
@@ -309,7 +314,7 @@ mkdir -p "$FAKE_HOME2/catalyst/events"
 : > "$FAKE_HOME2/catalyst/events/${MONTH2}.jsonl"
 
 (
-  cd "$WT_PATH2"
+  cd "$WT_PATH2" || exit 1
   HOME="$FAKE_HOME2" \
   PATH="$STUB_BIN2:$PATH" \
   TICKET=CTL-9999 \
@@ -394,7 +399,7 @@ mkdir -p "$FAKE_HOME3/catalyst/events"
 : > "$FAKE_HOME3/catalyst/events/${MONTH3}.jsonl"
 
 (
-  cd "$WT_PATH3"
+  cd "$WT_PATH3" || exit 1
   HOME="$FAKE_HOME3" \
   PATH="$STUB_BIN3:$PATH" \
   TICKET=CTL-9999 \
@@ -435,6 +440,101 @@ if [ -f "$SIG3" ]; then
   SIG3_STATUS="$(jq -r '.status // empty' "$SIG3" 2>/dev/null)"
   assert_eq "case3: signal status==done on idempotent re-run" "done" "$SIG3_STATUS"
 fi
+
+# keepWorktreeAfterMerge=true → the worktree AND its branch must survive the run.
+# Pairs with Case 1's keep=false→removed arm so a regression flipping/dropping
+# the KEEP_WT guard fails the suite instead of passing undetected.
+assert_dir_exists "case3: worktree kept (keepWorktreeAfterMerge=true)" "$WT_PATH3"
+if git -C "$PRIMARY_GIT3" rev-parse --verify --quiet ctl-9999-branch >/dev/null 2>&1; then
+  ok "case3: branch kept (keepWorktreeAfterMerge=true)"
+else
+  fail "case3: branch kept (keepWorktreeAfterMerge=true)" "branch ctl-9999-branch was deleted"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cases 4 + 5: prior-artifact guards in the skill body itself.
+# (Test 60 in the dispatch suite covers the DISPATCHER gate; these cover the
+# skill body's own guards.) Each omits one required artifact and asserts the
+# failed event, the specific failureReason, and that the worktree is NOT removed.
+
+run_prior_artifact_case() {
+  # $1 = case label, $2 = artifact file to delete, $3 = expected failureReason
+  local label="$1" omit_file="$2" want_reason="$3"
+  local CDIR="$TMPROOT/$label"
+  local PRIMARY_GITX="$CDIR/primary-repo" WT_PATHX="$CDIR/ticket-wt"
+  local ORCH_DIRX="$CDIR/orch" FAKE_HOMEX="$CDIR/home"
+  local WORKERX="$ORCH_DIRX/workers/CTL-9999"
+  mkdir -p "$WORKERX" "$FAKE_HOMEX/catalyst/archives"
+
+  write_fixture_signals "$WORKERX" "true"
+  rm -f "$WORKERX/$omit_file"
+  make_git_pair "$PRIMARY_GITX" "$WT_PATHX" "ctl-9999-branch"
+
+  mkdir -p "$WT_PATHX/.catalyst"
+  echo '{"catalyst":{"projectKey":"CTL","orchestration":{"keepWorktreeAfterMerge":false}}}' \
+    > "$WT_PATHX/.catalyst/config.json"
+
+  local STUB_BINX="$CDIR/bin" PLUGIN_ROOTX="$CDIR/plugin-root"
+  mkdir -p "$STUB_BINX" "$PLUGIN_ROOTX/scripts/lib"
+  linearis_stub_install "$STUB_BINX" "$CDIR/linearis-calls.log"
+  linear_comment_post_stub_install "$STUB_BINX" "$CDIR/linear-comment-calls.log"
+  install_linear_transition_stub "$PLUGIN_ROOTX" "$CDIR/linear-transition-calls.log"
+  install_presweep_stub "$PLUGIN_ROOTX"
+
+  local MONTHX; MONTHX=$(date -u +%Y-%m)
+  mkdir -p "$FAKE_HOMEX/catalyst/events"
+  : > "$FAKE_HOMEX/catalyst/events/${MONTHX}.jsonl"
+
+  (
+    cd "$WT_PATHX" || exit 1
+    HOME="$FAKE_HOMEX" \
+    PATH="$STUB_BINX:$PATH" \
+    TICKET=CTL-9999 \
+    CATALYST_ORCHESTRATOR_DIR="$ORCH_DIRX" \
+    CATALYST_ORCHESTRATOR_ID="orch-test-$label" \
+    CATALYST_DIR="$FAKE_HOMEX/catalyst" \
+    ORCH_DIR="$ORCH_DIRX" \
+    ORCH_ID="orch-test-$label" \
+    PLUGIN_ROOT="$PLUGIN_ROOTX" \
+    PHASE_AGENT_REPO_ROOT="$REPO_ROOT" \
+    PHASE_EMIT_HELPER="$EMIT_HELPER" \
+    PHASE_EMIT_WRAPPER="$EMIT_WRAPPER" \
+    CATALYST_COMMENT_POST_HELPER="$STUB_BINX/linear-comment-post.sh" \
+      bash "$SKILL_BODY_FILE" >"$CDIR/stdout.log" 2>"$CDIR/stderr.log"
+    echo $? > "$CDIR/exit-code"
+  )
+
+  local EXITX; EXITX="$(cat "$CDIR/exit-code" 2>/dev/null || echo 0)"
+  if [ "$EXITX" -ne 0 ]; then
+    ok "$label: exits non-zero when $omit_file absent"
+  else
+    fail "$label: exits non-zero when $omit_file absent" "expected non-zero exit, got $EXITX"
+  fi
+
+  local EVX
+  EVX="$(jq -r '.attributes."event.name" // empty' \
+    "$FAKE_HOMEX/catalyst/events/${MONTHX}.jsonl" 2>/dev/null | grep '^phase\.teardown\.' | tail -1)"
+  assert_eq "$label: emits phase.teardown.failed event" \
+    "phase.teardown.failed.CTL-9999" "$EVX"
+
+  local REASONX
+  REASONX="$(jq -r '.failureReason // empty' "$WORKERX/phase-teardown.json" 2>/dev/null)"
+  assert_eq "$label: signal failureReason==$want_reason" "$want_reason" "$REASONX"
+
+  if [ -d "$WT_PATHX" ]; then
+    ok "$label: worktree NOT removed (prior-artifact guard)"
+  else
+    fail "$label: worktree NOT removed (prior-artifact guard)" "worktree was incorrectly deleted: $WT_PATHX"
+  fi
+}
+
+echo ""
+echo "Case 4: prior-artifact guard (phase-monitor-deploy.json absent)"
+run_prior_artifact_case "case4" "phase-monitor-deploy.json" "prior_artifact_missing:monitor_deploy"
+
+echo ""
+echo "Case 5: prior-artifact guard (phase-monitor-merge.json absent)"
+run_prior_artifact_case "case5" "phase-monitor-merge.json" "prior_artifact_missing:monitor_merge"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary

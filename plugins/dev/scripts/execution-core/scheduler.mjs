@@ -65,8 +65,9 @@ import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution, fetchTic
 import { getProjectConfig, listProjects } from "./registry.mjs";
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
-// The gatedTeardownWorktree import is removed; worktree-safety.mjs is still
-// used by the teardown phase agent directly.
+// The gatedTeardownWorktree import is removed; the teardown phase agent
+// re-implements the gate in bash (merge-confirmation evidence + worktree
+// presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
@@ -975,13 +976,17 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
   const sig = signals ?? {};
   let latest = null;
   for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
-  // CTL-703: `skipped` is now also advancement-eligible for non-terminal phases.
+  // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
   // monitor-deploy `skipped` must advance to teardown (just as `done` does),
-  // so the pipeline can reach the dedicated teardown phase. The previous
-  // behavior treated `skipped` as terminal (only recognized on TERMINAL_PHASE),
-  // but TERMINAL_PHASE is now `teardown`, not `monitor-deploy`.
+  // so the pipeline can reach the dedicated teardown phase even when no deploy
+  // event arrived before the timeout. Every OTHER phase keeps the
+  // isTicketInFlight invariant: a stray mid-pipeline `skipped` holds the slot
+  // (does NOT advance) so a producer bug can't silently leak past a phase.
   const latestStatus = sig[latest];
-  if (latest === null || (latestStatus !== "done" && latestStatus !== "skipped")) return null;
+  const advanceEligible =
+    latestStatus === "done" ||
+    (latestStatus === "skipped" && latest === "monitor-deploy");
+  if (latest === null || !advanceEligible) return null;
 
   // CTL-653: verdict routing at verify. A verdict-fail detours to remediate
   // (until the cycle cap); pass/null/undefined falls through to the normal
@@ -2960,11 +2965,13 @@ export function schedulerTick(
   }
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
-    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`).
-    // When teardown completes, the whole pipeline is done — write Linear Done.
+    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
+    // read via the descriptor's TERMINAL_PHASE so a future pipeline change
+    // can't silently bypass this sweep (redispatch research F2).
+    // When the terminal phase completes, the pipeline is done — write Linear Done.
     // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
     // CTL-757: thread emitStateWrite so the terminal Done write is audited.
-    if (signals["teardown"] === "done") {
+    if (signals[TERMINAL_PHASE] === "done") {
       terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state

@@ -64,6 +64,14 @@ fi
 
 : "${TICKET:?phase-teardown: TICKET env var required}"
 
+# Re-validate the ticket-ID shape before TICKET is interpolated into archive /
+# worker paths. phase-agent-dispatch validates this, but a standalone invocation
+# does not — without it a crafted TICKET could path-traverse the archive dest.
+if ! printf '%s' "$TICKET" | grep -Eq '^[A-Za-z][A-Za-z0-9_]*-[0-9]+$'; then
+  echo "phase-teardown: invalid TICKET '$TICKET' (expected e.g. CTL-703)" >&2
+  exit 1
+fi
+
 # Trust the command arg / env over leaked CATALYST_* from a sibling dispatch
 # (per memory: phase_env_ticket_leak_from_sibling). ORCH_DIR/ORCH_ID come from
 # CATALYST_* but we pass --orch-id explicitly on the emit call below.
@@ -94,7 +102,8 @@ DEPLOY_FILE="$WORKER_DIR/phase-monitor-deploy.json"
 if [[ ! -f "$DEPLOY_FILE" ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
     --reason "prior_artifact_missing:monitor_deploy" \
-    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}
+    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+    || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1
 fi
 
@@ -103,7 +112,8 @@ MERGE_FILE="$WORKER_DIR/phase-monitor-merge.json"
 if [[ ! -f "$MERGE_FILE" ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
     --reason "prior_artifact_missing:monitor_merge" \
-    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}
+    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+    || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1
 fi
 
@@ -113,7 +123,8 @@ MERGED_AT="$(jq -r '.pr.mergedAt // empty' "$MERGE_FILE" 2>/dev/null)"
 if [[ "$MERGE_CI_STATUS" != "merged" && -z "$MERGED_AT" ]]; then
   "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
     --reason "pr_not_merged" \
-    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}
+    ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+    || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
   exit 1
 fi
 ```
@@ -163,8 +174,20 @@ done
 # Called while still in the ticket worktree so .catalyst/config.json is adjacent.
 LINEAR_TRANSITION="${PLUGIN_ROOT}/scripts/linear-transition.sh"
 if [[ -x "$LINEAR_TRANSITION" ]]; then
-  "$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
-    --config .catalyst/config.json 2>/dev/null || true
+  # Capture rc + stderr instead of suppressing them: linear-transition.sh can
+  # print "transitioned" even when the underlying linearis update fails (memory:
+  # linear_transition_silent_success), so a silent failure here would leave the
+  # ticket at PR/inReview while the pipeline reports success. Non-fatal — the
+  # scheduler's terminalDoneOnce backstop (fires on teardown===done) retries the
+  # Done write — but the failure must be LOUD so it is diagnosable.
+  LINEAR_DONE_OUT="$("$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
+    --config .catalyst/config.json 2>&1)"
+  LINEAR_DONE_RC=$?
+  if [[ $LINEAR_DONE_RC -ne 0 ]]; then
+    echo "phase-teardown: Linear Done transition FAILED (rc=${LINEAR_DONE_RC}) — terminalDoneOnce backstop will retry: ${LINEAR_DONE_OUT}" >&2
+  else
+    echo "phase-teardown: Linear Done transition: ${LINEAR_DONE_OUT}"
+  fi
 else
   echo "phase-teardown: linear-transition.sh not found at $LINEAR_TRANSITION; skipping Done transition" >&2
 fi
@@ -172,17 +195,21 @@ fi
 
 ```bash phase-teardown-archive
 # ─── Archive worker dir ───────────────────────────────────────────────────────
-# Best-effort: copy signal files to ~/catalyst/archives/<TICKET>/.
-# Failure logs and continues — teardown must not abort before worktree removal.
+# Archive-first contract (CTL-791): copy signal files to
+# ~/catalyst/archives/<TICKET>/ BEFORE any destructive step. ARCHIVE_OK gates
+# the worktree-removal block below — if the archive failed we keep the worktree
+# (its artifacts are the only remaining copy) and continue to the mirror/emit.
 ARCHIVE_DIR="${HOME}/catalyst/archives/${TICKET}"
+ARCHIVE_OK="false"
 if mkdir -p "$ARCHIVE_DIR" 2>/dev/null; then
   if cp -R "${WORKER_DIR}/." "$ARCHIVE_DIR/" 2>/dev/null; then
     echo "phase-teardown: worker dir archived to $ARCHIVE_DIR"
+    ARCHIVE_OK="true"
   else
-    echo "phase-teardown: archive cp failed (continuing)" >&2
+    echo "phase-teardown: archive cp failed — worktree removal will be SKIPPED (archive-first contract)" >&2
   fi
 else
-  echo "phase-teardown: cannot create archive dir $ARCHIVE_DIR (continuing)" >&2
+  echo "phase-teardown: cannot create archive dir $ARCHIVE_DIR — worktree removal will be SKIPPED" >&2
 fi
 ```
 
@@ -195,7 +222,11 @@ fi
 KEEP_WT="$(jq -r '.catalyst.orchestration.keepWorktreeAfterMerge // false' \
   .catalyst/config.json 2>/dev/null || echo "false")"
 
-if [[ "$KEEP_WT" != "true" ]]; then
+# Archive-first gate: never remove the worktree when the archive step above did
+# not complete — the worker dir / worktree artifacts would be lost (CTL-791).
+if [[ "${ARCHIVE_OK:-false}" != "true" ]]; then
+  echo "phase-teardown: archive did not complete; auto-teardown skipped (worktree kept)" >&2
+elif [[ "$KEEP_WT" != "true" ]]; then
   WORKTREE_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
   PRIMARY_WT="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
   BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
@@ -213,7 +244,13 @@ if [[ "$KEEP_WT" != "true" ]]; then
       # CTL-649: do NOT swallow presweep stderr — its "N session(s) still alive
       # in <path>" diagnostic is the precise leak signal this teardown exists to
       # surface. Let it flow straight through to the operator.
-      if [[ -x "$PRESWEEP_BIN" ]] && ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
+      # FAIL CLOSED: removal proceeds ONLY when the presweep liveness check
+      # actually ran and passed. A missing/non-executable presweep helper must
+      # NOT fall through to an ungated `git worktree remove` — that can yank a
+      # worktree from under a live claude --bg session (the CTL-649 leak class).
+      if [[ ! -x "$PRESWEEP_BIN" ]]; then
+        echo "phase-teardown: worktree-presweep.sh missing/non-executable at $PRESWEEP_BIN; auto-teardown skipped (fail-closed)" >&2
+      elif ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
         echo "phase-teardown: presweep failed for $WORKTREE_PATH; auto-teardown skipped" >&2
       else
         # Capture the real `git worktree remove` stderr so a failed teardown
@@ -292,21 +329,28 @@ fi
 ```bash phase-teardown-emit
 # ─── Emit canonical phase event ──────────────────────────────────────────────
 # Pass --orch-id explicitly to avoid CATALYST_* leak from a sibling dispatch
-# (per memory: phase_env_ticket_leak_from_sibling).
+# (per memory: phase_env_ticket_leak_from_sibling). Loud (non-fatal) diagnostic
+# if the emitter itself fails — otherwise the ticket stalls with the failure of
+# the surfacing mechanism itself unobservable.
 "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status complete \
-  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}
+  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+  || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
 exit 0
 ```
 
 ## Failure handling
 
-```bash
+```bash phase-teardown-failure-template
+# TEMPLATE fence — invoked by the agent ad-hoc on a fatal error, NOT part of
+# the sequential body (the e2e harness excludes this fence by name: after the
+# emit block's `exit 0` it would be unreachable dead code in a concatenated run).
 # Called when a fatal error is detected before the emit block.
 # $1 = reason string
 _REASON="${1:-phase-teardown fatal error}"
 "$__TD_WRAPPER" --phase teardown --ticket "$TICKET" --status failed \
   --reason "$_REASON" \
-  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"}
+  ${ORCH_ID:+--orch-id "$ORCH_ID"} ${ORCH_DIR:+--orch-dir "$ORCH_DIR"} \
+  || echo "phase-teardown: CRITICAL — phase-agent-emit-complete failed; no terminal teardown event landed" >&2
 exit 1
 ```
 

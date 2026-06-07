@@ -152,9 +152,11 @@ previously had no clear owner:
 
 - Posts the final Linear comment summarising the completed run.
 - Transitions the Linear ticket to `Done`.
-- Removes the git worktree (`git worktree remove --force`).
-- Deletes the remote branch (`git push origin --delete`).
-- Archives the worker directory under `~/catalyst/archives/<orchId>/`.
+- Removes the git worktree (non-force `git worktree remove`, gated on a
+  merge-confirmation check + worktree presweep liveness check).
+- Deletes the local branch (`git branch -D`; the remote branch was already
+  deleted by monitor-merge's `gh pr merge --delete-branch`).
+- Archives the worker directory under `~/catalyst/archives/<TICKET>/`.
 
 **monitor-merge no longer writes Done or removes the worktree.** It merges the PR
 and emits `phase.monitor-merge.complete`, then hands off to monitor-deploy and

@@ -1402,6 +1402,11 @@ describe("deriveAdvancement", () => {
   test("monitor-deploy skipped → teardown (CTL-703: skipped is advancement-eligible for non-terminal phase)", () => {
     expect(deriveAdvancement({ "monitor-deploy": "skipped" })).toBe("teardown");
   });
+  test("skipped on any OTHER phase does NOT advance (holds the slot — isTicketInFlight producer-bug guard)", () => {
+    expect(deriveAdvancement({ implement: "skipped" })).toBeNull();
+    expect(deriveAdvancement({ triage: "done", research: "skipped" })).toBeNull();
+    expect(deriveAdvancement({ verify: "skipped" })).toBeNull();
+  });
   test("teardown done → null (pipeline terminal after CTL-703)", () => {
     expect(deriveAdvancement({ "teardown": "done" })).toBeNull();
   });
@@ -3612,27 +3617,31 @@ describe("schedulerTick — worktree teardown removed from sweep (CTL-703)", () 
     applyLabel() {},
   });
 
-  test("monitor-deploy done does NOT call teardownWorktree (CTL-703: teardown is now a phase)", () => {
+  test("monitor-deploy done advances to a teardown phase dispatch, not a sweep-side removal (CTL-703)", () => {
     writeSignal("CTL-4", "monitor-deploy", "done");
-    let called = false;
+    const dispatch = fakeDispatch();
     schedulerTick(orchDir, {
       readEligible: () => [],
-      dispatch: fakeDispatch(),
+      dispatch,
       writeStatus: noStatusWrites(),
+      verifyDispatched: verifyOk,
     });
-    // no teardownWorktree injectable → verifying the scheduler no longer calls it
-    expect(called).toBe(false);
+    // The teardown work is a dispatched phase — the sweep itself removes nothing.
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-4", phase: "teardown" });
   });
 
-  test("monitor-deploy skipped does NOT call teardownWorktree (CTL-703)", () => {
+  test("monitor-deploy skipped advances to a teardown phase dispatch (CTL-703)", () => {
     writeSignal("CTL-4", "monitor-deploy", "skipped");
-    let called = false;
+    const dispatch = fakeDispatch();
     schedulerTick(orchDir, {
       readEligible: () => [],
-      dispatch: fakeDispatch(),
+      dispatch,
       writeStatus: noStatusWrites(),
+      verifyDispatched: verifyOk,
     });
-    expect(called).toBe(false);
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-4", phase: "teardown" });
   });
 
   test("tick does not throw when monitor-deploy is done and no teardown injectable (CTL-703)", () => {
@@ -6916,7 +6925,6 @@ Final polish, documentation, and code cleanup.
       readEligible: () => [],
       dispatch,
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-      teardownWorktree: () => true,
       reclaimDeadWork: (od, sig, opts) =>
         reclaimDeadWorkIfPossible(od, sig, {
           ...opts,
