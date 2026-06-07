@@ -116,6 +116,14 @@ SOURCE_OUT=$(HOME="$SCRATCH/home" PATH="$SCRATCH/stubs:/usr/bin:/bin" bash -c "s
 assert_not_grep "sourcing does not run main (no Checking Prerequisites)" "$SOURCE_OUT" "Checking Prerequisites"
 assert_not_grep "sourcing does not prompt the user" "$SOURCE_OUT" "GitHub"
 
+# Piped execution (curl ... | bash) MUST run main: BASH_SOURCE[0] is empty in
+# that mode, so a plain `BASH_SOURCE[0] == $0` guard silently no-ops the
+# documented one-line install. A DEBUG trap intercepts the guard's `main "$@"`
+# call and exits before main's body runs, keeping the test side-effect free.
+PIPE_OUT=$( { echo 'trap '"'"'case "$BASH_COMMAND" in main\ *|main) echo MAIN_INVOKED; exit 0;; esac'"'"' DEBUG'; cat "$SETUP"; } \
+  | HOME="$SCRATCH/home" PATH="$SCRATCH/stubs:/usr/bin:/bin" bash 2>&1 )
+assert_grep "piped execution (curl|bash) invokes main" "$PIPE_OUT" "MAIN_INVOKED"
+
 # ─── Phase 1: detect_arch ────────────────────────────────────────────────────
 
 echo ""

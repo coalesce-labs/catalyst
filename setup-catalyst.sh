@@ -2330,7 +2330,9 @@ main() {
 	fi
 }
 
-# Run main (guard allows sourcing for testing without executing main)
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+# Run main (guard allows sourcing for testing without executing main).
+# When piped to bash (curl ... | bash), BASH_SOURCE[0] is empty — main must
+# still run in that case; only a `source` invocation should skip it.
+if [[ "${BASH_SOURCE[0]:-}" == "$0" || -z "${BASH_SOURCE[0]:-}" ]]; then
 	main "$@"
 fi
