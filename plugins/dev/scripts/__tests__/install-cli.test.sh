@@ -20,7 +20,7 @@ setup_source() {
   mkdir -p "$src"
   for f in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-forward \
            catalyst-session.sh catalyst-state.sh catalyst-statusline.sh catalyst-db.sh \
-           catalyst-monitor.sh catalyst-thoughts.sh catalyst-claude.sh; do
+           catalyst-monitor.sh catalyst-thoughts.sh catalyst-claude.sh catalyst-stack; do
     echo '#!/usr/bin/env bash' > "$src/$f"
     echo "echo stub-$f" >> "$src/$f"
     chmod +x "$src/$f"
@@ -105,7 +105,7 @@ run "install creates bin dir" bash -c "
 
 for cli in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-forward \
            catalyst-session catalyst-state catalyst-statusline catalyst-db \
-           catalyst-monitor catalyst-thoughts catalyst-claude; do
+           catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack; do
   run "installs symlink: $cli" bash -c "
     [[ -L '$BIN1/$cli' ]]
   "
@@ -131,9 +131,9 @@ run "second run does not error" bash -c "
   CATALYST_CLI_SOURCE='$SRC1' CATALYST_CLI_BIN_DIR='$BIN1' $INSTALL_CLI --force >/dev/null 2>&1
 "
 
-run "second run leaves 11 symlinks" bash -c "
+run "second run leaves 12 symlinks" bash -c "
   count=\$(find '$BIN1' -maxdepth 1 -type l | wc -l | tr -d ' ')
-  [[ \"\$count\" = '11' ]]
+  [[ \"\$count\" = '12' ]]
 "
 
 # ── 7. re-point on source move — symlinks point at new location ────────────
