@@ -1030,6 +1030,24 @@ More details. Mention of ## Phase 3 inline does not count.
       ),
     ).toBe(false);
   });
+
+  test("readArtifact returning null → gate skipped (falsy body) → true on 1 commit", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: fivePhasePlan, readArtifact: () => null },
+      ),
+    ).toBe(true);
+  });
+
+  test("listArtifacts returning a non-array → gate skipped (Array.isArray guard) → true on 1 commit", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: () => "not-an-array", readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
 });
 
 describe("CTL-663: probe descriptions updated for plan-phase gate", () => {
