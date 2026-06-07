@@ -9,6 +9,7 @@ import {
   removeLabel,
   applyBlockedByRelation,
   applyEstimate,
+  applyAssignee,
   teamOf,
 } from "./linear-write.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
@@ -814,5 +815,95 @@ describe("applyEstimate", () => {
     expect(r.skipped).toBe("human-estimate");
     expect(calls).toHaveLength(1);
     expect(calls[0].args.slice(0, 2)).toEqual(["issues", "read"]);
+  });
+});
+
+describe("applyAssignee (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  function makeOkExec(calls) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === "issues" && args[1] === "update") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "issues" && args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }), stderr: "" };
+      }
+      return { code: 127, stdout: "", stderr: "unexpected" };
+    };
+  }
+
+  test("shells linearis issues update --assignee <uuid>", () => {
+    const calls = [];
+    applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    expect(calls[0].args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
+    expect(calls[0].args).toContain("--assignee");
+    expect(calls[0].args[calls[0].args.indexOf("--assignee") + 1]).toBe(BOT);
+  });
+
+  test("write exit-0 AND read-back assignee.id matches → applied:true, reason:null", () => {
+    const calls = [];
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls[0].args.slice(0, 2)).toEqual(["issues", "update"]);
+    expect(calls[1].args.slice(0, 2)).toEqual(["issues", "read"]);
+  });
+
+  test("write exits non-zero → applied:false, reason:'transient', no read-back exec", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 1, stdout: "", stderr: "update-failed" };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("write exit-0 BUT read-back assignee null → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: null }), stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("write exit-0 BUT read-back assignee.id differs → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: { id: "other-uuid" } }), stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("read-back unparseable stdout → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: "not-json", stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("never throws — a thrown exec is caught, applied:false reason:'transient'", () => {
+    const exec = () => { throw new Error("exec died"); };
+    expect(() => applyAssignee({ ticket: "CTL-1", userId: BOT, exec })).not.toThrow();
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("missing userId → applied:false, reason:'invalid-user', zero exec calls", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0 }; };
+    expect(applyAssignee({ ticket: "CTL-1", userId: "", exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(applyAssignee({ ticket: "CTL-1", userId: null, exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(applyAssignee({ ticket: "CTL-1", exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(calls).toHaveLength(0);
   });
 });
