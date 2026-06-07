@@ -1893,48 +1893,43 @@ init_humanlayer_thoughts() {
 		fi
 	fi
 
-	echo ""
-	echo "Running: humanlayer thoughts init --directory \"${REPO_NAME}\""
-	echo ""
+	# CTL-845: use vendored init (avoids ERR_INVALID_ARG_TYPE crash in humanlayer v0.17.2-npm).
+	# Resolve profile via existing logic then delegate to the vendored script.
+	local hl_config="$HOME/.config/humanlayer/humanlayer.json"
+	local profile_name=""
+	if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
+		if jq -e ".thoughts.profiles.\"${ORG_NAME}\"" "$hl_config" &>/dev/null; then
+			profile_name="$ORG_NAME"
+		elif jq -e ".thoughts.profiles.\"${PROJECT_KEY}\"" "$hl_config" &>/dev/null; then
+			profile_name="$PROJECT_KEY"
+		fi
+	fi
 
-	# Try per-project config first, then fall back to --profile flag
-	local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+	local _setup_dir
+	_setup_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _setup_dir=""
+	local VENDOR_INIT="${_setup_dir}/scripts/worktree-thoughts-init.sh"
+
 	local init_success=false
-
-	if [ -f "$config_file" ]; then
-		if HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME"; then
+	if [ -x "$VENDOR_INIT" ]; then
+		echo "Running: worktree-thoughts-init.sh --directory \"${REPO_NAME}\"${profile_name:+ --profile $profile_name}"
+		local vendor_args=(--directory "$REPO_NAME")
+		[ -n "$profile_name" ] && vendor_args+=(--profile "$profile_name")
+		if bash "$VENDOR_INIT" "${vendor_args[@]}"; then
 			init_success=true
 		fi
-	fi
-
-	# Fall back to --profile if per-project config didn't work
-	if ! $init_success; then
-		# Check if a matching profile exists in humanlayer.json
-		local hl_config="$HOME/.config/humanlayer/humanlayer.json"
-		local profile_name=""
-
-		if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
-			# Check for profile matching ORG_NAME
-			if jq -e ".thoughts.profiles.\"${ORG_NAME}\"" "$hl_config" &>/dev/null; then
-				profile_name="$ORG_NAME"
-			elif jq -e ".thoughts.profiles.\"${PROJECT_KEY}\"" "$hl_config" &>/dev/null; then
-				profile_name="$PROJECT_KEY"
-			fi
+	else
+		# Fallback for curl|bash mode where the vendored script is not on disk.
+		echo "Running: humanlayer thoughts init --directory \"${REPO_NAME}\""
+		local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+		if [ -f "$config_file" ]; then
+			HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME" && init_success=true || true
 		fi
-
-		if [ -n "$profile_name" ]; then
+		if ! $init_success && [ -n "$profile_name" ]; then
 			echo "Using HumanLayer profile: $profile_name"
-			if humanlayer thoughts init --profile "$profile_name" --directory "$REPO_NAME"; then
-				init_success=true
-			fi
+			humanlayer thoughts init --profile "$profile_name" --directory "$REPO_NAME" && init_success=true || true
 		fi
-	fi
-
-	# Final fallback: try with per-project config even if it doesn't exist yet
-	# (humanlayer might use defaults)
-	if ! $init_success; then
-		if humanlayer thoughts init --directory "$REPO_NAME"; then
-			init_success=true
+		if ! $init_success; then
+			humanlayer thoughts init --directory "$REPO_NAME" && init_success=true || true
 		fi
 	fi
 
