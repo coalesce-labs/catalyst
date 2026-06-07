@@ -162,6 +162,14 @@ This script will guide you through:
 # Restart Claude Code
 ```
 
+**Start the stack:**
+
+```bash
+catalyst-stack start
+```
+
+This brings up broker → monitor → execution-core in dependency order. Run it once after each reboot.
+
 You're ready! Try `/research-codebase` in your next session.
 
 See the [documentation site](https://catalyst.coalescelabs.ai) for detailed setup instructions.
@@ -244,6 +252,12 @@ claude plugin marketplace update catalyst
 
 **Important:** A restart is required for plugin updates to take effect. Active sessions use the old
 version until you restart Claude Code.
+
+**One-command post-merge update** (ff-pull + rsync into the live cache + restart):
+
+```bash
+catalyst-stack restart --hotpatch
+```
 
 **Check your versions:**
 

@@ -66,6 +66,7 @@ OPT_TOOLS=(
     "bun:Bun runtime"
     "direnv:direnv"
     "smee:smee-client (webhook tunnel)"
+    "mitmproxy:mitmproxy (optional — only needed for catalyst-stack --proxy)"
 )
 
 for spec in "${OPT_TOOLS[@]}"; do
@@ -82,7 +83,7 @@ done
 header "Catalyst CLI Install"
 
 CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
-CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
+CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack)
 
 if [[ -d "$CLI_BIN_DIR" ]]; then
     pass "Bin dir exists: $CLI_BIN_DIR"
