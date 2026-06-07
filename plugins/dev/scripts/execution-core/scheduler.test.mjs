@@ -6700,3 +6700,216 @@ describe("readDispatchFailureReason (CTL-700)", () => {
     expect(readDispatchFailureReason(orchDir, "CTL-700A-6", "research")).toBeNull();
   });
 });
+
+// ── CTL-781: respect-assignment + self-assign in schedulerTick new-work pull ──
+
+describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+
+  function candidateTicket(id) {
+    return {
+      identifier: id,
+      priority: 2,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    };
+  }
+
+  function gatewayStub(assigneeByTicket) {
+    return { getDescriptor: (id) => ({ assignee: assigneeByTicket[id] ?? null, removed: false }) };
+  }
+
+  beforeEach(() => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+  });
+
+  test("human-assigned candidate is SKIPPED — no dispatch, no cooldown marker, no dispatch.requested event", () => {
+    const dispatch = fakeDispatch();
+    const gateway = gatewayStub({ "CTL-H1": HUMAN });
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-H1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      gateway,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+    expect(existsSync(join(orchDir, ".dispatch-cooldowns", "CTL-H1", "research"))).toBe(false);
+  });
+
+  test("null-assignee candidate dispatches AND applyAssignee is called with botWriteId after verify", () => {
+    const dispatch = fakeDispatch();
+    const assigneeCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      applyAssignee: (a) => { assigneeCalls.push(a); return { applied: true, reason: null }; },
+    };
+    const gateway = gatewayStub({ "CTL-N1": null });
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-N1")],
+      dispatch,
+      writeStatus,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      gateway,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-N1"]);
+    expect(assigneeCalls).toHaveLength(1);
+    expect(assigneeCalls[0]).toMatchObject({ ticket: "CTL-N1", userId: BOT });
+  });
+
+  test("bot-assigned candidate (assignee in botUserIds) dispatches normally", () => {
+    const dispatch = fakeDispatch();
+    const gateway = gatewayStub({ "CTL-B1": BOT });
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-B1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      gateway,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-B1"]);
+  });
+
+  test("gateway miss → falls through to live read (exec seam); human assignee from live read skips", () => {
+    const dispatch = fakeDispatch();
+    const execCalls = [];
+    const exec = (cmd, args) => {
+      execCalls.push(args);
+      return { code: 0, stdout: JSON.stringify({ assignee: { id: HUMAN } }), stderr: "" };
+    };
+    const gateway = { getDescriptor: () => null };
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-M1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      gateway,
+      fetchAssignee: (id, opts) => {
+        execCalls.push(["fetchAssignee", id]);
+        return { known: true, assignee: HUMAN };
+      },
+    });
+    expect(dispatch.calls).toHaveLength(0);
+    expect(execCalls.some((c) => c[0] === "fetchAssignee")).toBe(true);
+  });
+
+  test("assignee unknown (live read fails) → candidate held this tick (no dispatch), NOT a recorded failure", () => {
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-U1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      gateway: { getDescriptor: () => null },
+      fetchAssignee: () => ({ known: false }),
+    });
+    expect(dispatch.calls).toHaveLength(0);
+    expect(existsSync(join(orchDir, ".dispatch-cooldowns", "CTL-U1", "research"))).toBe(false);
+  });
+
+  test("no botUserIds threaded (undefined) → predicate skipped entirely, no assignee reads, dispatches as today", () => {
+    const dispatch = fakeDispatch();
+    const fetchAssigneeCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-ND1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchAssignee: (id) => { fetchAssigneeCalls.push(id); return { known: true, assignee: HUMAN }; },
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-ND1"]);
+    expect(fetchAssigneeCalls).toHaveLength(0);
+  });
+
+  test("empty botUserIds Set → predicate skipped (CTL-749 fail-open convention)", () => {
+    const dispatch = fakeDispatch();
+    const fetchAssigneeCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-E1")],
+      dispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set(),
+      fetchAssignee: (id) => { fetchAssigneeCalls.push(id); return { known: true, assignee: HUMAN }; },
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-E1"]);
+    expect(fetchAssigneeCalls).toHaveLength(0);
+  });
+
+  test("botWriteId absent → dispatch proceeds, NO applyAssignee call (predicate may still gate)", () => {
+    const dispatch = fakeDispatch();
+    const assigneeCalls = [];
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      applyAssignee: (a) => { assigneeCalls.push(a); return { applied: true, reason: null }; },
+    };
+    const gateway = gatewayStub({ "CTL-WI1": null });
+    schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-WI1")],
+      dispatch,
+      writeStatus,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      gateway,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toEqual(["CTL-WI1"]);
+    expect(assigneeCalls).toHaveLength(0);
+  });
+
+  test("applyAssignee failure (applied:false) does not fail the dispatch — ticket still advances", () => {
+    const dispatch = fakeDispatch();
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+      applyAssignee: () => ({ applied: false, reason: "transient" }),
+    };
+    const gateway = gatewayStub({ "CTL-AF1": null });
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-AF1")],
+      dispatch,
+      writeStatus,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      gateway,
+    });
+    expect(r.dispatched).toContain("CTL-AF1");
+  });
+
+  test("writeStatus stub WITHOUT applyAssignee (legacy test shape) → no throw", () => {
+    const dispatch = fakeDispatch();
+    const writeStatus = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyLabel: () => {},
+    };
+    const gateway = gatewayStub({ "CTL-LS1": null });
+    expect(() => schedulerTick(orchDir, {
+      readEligible: () => [candidateTicket("CTL-LS1")],
+      dispatch,
+      writeStatus,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      gateway,
+    })).not.toThrow();
+  });
+});

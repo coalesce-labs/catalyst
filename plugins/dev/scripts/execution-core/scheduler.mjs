@@ -61,7 +61,7 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
-import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution } from "./linear-query.mjs";
+import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 // CTL-791: the terminal-Done sweep removes a worktree ONLY through the evidence
 // gate (GitHub-merged + clean + no-live-session + orchestrator-provenance,
@@ -1819,6 +1819,15 @@ export function schedulerTick(
     // fetchState injections below. undefined in bare unit ticks (fail-open —
     // fetchTicketState without gateway behaves exactly as before).
     gateway = undefined,
+    // CTL-781: respect-assignment + self-assign. botUserIds is the Set of known
+    // bot UUIDs (predicate membership); botWriteId is the single orchestrator
+    // UUID written as assignee on claim. undefined / empty Set → the gate and
+    // the write are both skipped (fail-open, CTL-749 convention) — every
+    // existing test and unconfigured install behaves byte-for-byte as before.
+    botUserIds = undefined,
+    botWriteId = undefined,
+    // CTL-781: injectable assignee read so tests never shell out.
+    fetchAssignee = fetchTicketAssignee,
     // CTL-671: runaway-alert seams. countTicketEvents reads the unified event
     // log (safe in tests — CATALYST_DIR is redirected), so it defaults to the
     // real scan; appendRunawayEvent writes the canonical alert. Both injectable
@@ -2836,6 +2845,25 @@ export function schedulerTick(
     // CTL-671: circuit breaker — stop re-dispatching a new-work ticket that has
     // failed its entry-phase dispatch THRESHOLD times in a row.
     if (maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE)) continue;
+    // CTL-781: respect-assignment gate — claim only assignee ∈ {null, bot}.
+    // Gateway-first (rate-free); live read only on a miss. An unreadable
+    // assignee HOLDS the candidate this tick (fail-safe) — it is not a dispatch
+    // failure, so no cooldown marker and no failure event. Empty/absent
+    // botUserIds disables the gate (CTL-749 fail-open convention).
+    if (botUserIds instanceof Set && botUserIds.size > 0) {
+      const a = fetchAssignee(t.identifier, { gateway, exec });
+      if (!a.known) {
+        log.debug({ ticket: t.identifier }, "ctl-781: assignee unreadable — holding candidate this tick");
+        continue;
+      }
+      if (!isAssigneeClaimable(a.assignee, botUserIds)) {
+        log.debug(
+          { ticket: t.identifier, assignee: a.assignee },
+          "ctl-781: candidate assigned to a non-bot — skipping (respect-assignment)"
+        );
+        continue;
+      }
+    }
     // CTL-660: record the new-work dispatch DECISION before the spawn.
     safeEmit(
       appendDispatchRequestedEvent,
@@ -2888,6 +2916,15 @@ export function schedulerTick(
           },
           { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
         );
+        // CTL-781: self-assign the Catalyst bot so the claim is visible in
+        // Linear. Best-effort (safeWrite) — an assignment failure never blocks
+        // the pipeline; the read-back inside applyAssignee logs the gap.
+        if (botWriteId) {
+          safeWrite(
+            () => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }),
+            { ticket: t.identifier, phase: "assignment" }
+          );
+        }
       } else {
         const cd3 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
         if (cd3.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
@@ -3158,6 +3195,9 @@ function runTick() {
       // + the standalone main() pass the real impls to arm the sweep.
       classifyResolution: runningOpts.classifyResolution,
       isBgJobAlive: runningOpts.isBgJobAlive,
+      // CTL-781: respect-assignment + self-assign seams (undefined = gate off).
+      botUserIds: runningOpts.botUserIds,
+      botWriteId: runningOpts.botWriteId,
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -3228,6 +3268,9 @@ export function startScheduler({
   // real daemon (startDaemon) and the standalone main() pass the real impls.
   classifyResolution,
   isBgJobAlive,
+  // CTL-781: respect-assignment + self-assign. Undefined → gate off (fail-open).
+  botUserIds,
+  botWriteId,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -3251,6 +3294,8 @@ export function startScheduler({
     prAdapter, // CTL-642/758: live PR-merged adapter (built once above), threaded per-tick
     classifyResolution, // CTL-671: optional phantom-sweep Linear-probe seam
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
+    botUserIds, // CTL-781: respect-assignment predicate membership set
+    botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
