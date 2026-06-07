@@ -115,6 +115,23 @@ for cli in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-
   "
 done
 
+# ── CTL-847: catalyst-stack fresh-install contract — installed link is runnable ─
+# Replace the stub with the real catalyst-stack + its lib dependency so --version
+# exercises the genuine version path (catalyst-stack:38-51). The symlink
+# $BIN1/catalyst-stack already points to $SRC1/catalyst-stack — no reinstall needed.
+cp "$REPO_ROOT/plugins/dev/scripts/catalyst-stack" "$SRC1/catalyst-stack"
+mkdir -p "$SRC1/lib"
+cp "$REPO_ROOT/plugins/dev/scripts/lib/catalyst-version.sh" "$SRC1/lib/catalyst-version.sh"
+
+run "catalyst-stack installed entry is executable" bash -c "
+  [[ -x '$BIN1/catalyst-stack' ]]
+"
+
+run "catalyst-stack installed entry invokes end-to-end (--version)" bash -c "
+  out=\$('$BIN1/catalyst-stack' --version 2>&1) || { echo \"exit nonzero: \$out\"; exit 1; }
+  [[ -n \"\$out\" ]]
+"
+
 # ── 4. .sh suffix stripped on link name ─────────────────────────────────────
 run "catalyst-session points at catalyst-session.sh" bash -c "
   target=\$(readlink '$BIN1/catalyst-session')
