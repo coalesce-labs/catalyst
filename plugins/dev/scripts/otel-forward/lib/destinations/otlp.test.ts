@@ -66,12 +66,37 @@ describe("buildOtlpPayload", () => {
     expect(evName?.value?.stringValue).toBe("session.heartbeat");
   });
 
-  test("maps numeric attributes to intValue", () => {
+  test("maps integer attributes to intValue", () => {
     const event: CanonicalEvent = { ...SAMPLE_EVENT, attributes: { "event.name": "test", "vcs.pr.number": 42 } };
     const payload = buildOtlpPayload([event]) as any;
     const attrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
     const prNum = attrs.find((a: any) => a.key === "vcs.pr.number");
     expect(prNum?.value?.intValue).toBe(42);
+  });
+
+  test("maps fractional attributes to doubleValue, never intValue (CTL-812)", () => {
+    // The collector's OTLP/JSON decoder rejects a float inside intValue
+    // ("assertInteger: can not decode float as int" → HTTP 400) and the whole
+    // batch dead-letters. catalyst-agent metrics (host.cpu_pct, ratelimit
+    // paces) are fractional, so they MUST ride as doubleValue.
+    const event: CanonicalEvent = {
+      ...SAMPLE_EVENT,
+      attributes: {
+        "event.name": "host.metrics.sampled",
+        "host.cpu_pct": 30.3,
+        "host.load1": 6.02,
+        "ratelimit.seven_day_pace": -0.344,
+      },
+    };
+    const payload = buildOtlpPayload([event]) as any;
+    const attrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
+    const get = (k: string) => attrs.find((a: any) => a.key === k)?.value;
+    expect(get("host.cpu_pct")).toEqual({ doubleValue: 30.3 });
+    expect(get("host.load1")).toEqual({ doubleValue: 6.02 });
+    expect(get("ratelimit.seven_day_pace")).toEqual({ doubleValue: -0.344 });
+    for (const k of ["host.cpu_pct", "host.load1", "ratelimit.seven_day_pace"]) {
+      expect(get(k)?.intValue).toBeUndefined();
+    }
   });
 
   test("maps event.id to OTLP logRecordUid (CTL-344)", () => {

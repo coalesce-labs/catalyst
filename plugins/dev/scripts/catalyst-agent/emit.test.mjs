@@ -197,8 +197,10 @@ describe("sendOtlp — mapping correctness with injected fetch", () => {
     expect(rec.severityText).toBe("INFO");
     // timeUnixNano = ms-since-epoch * 1e6, as a string.
     expect(rec.timeUnixNano).toBe(String(Date.parse("2026-06-06T12:00:00Z") * 1_000_000));
-    // body is the JSON-stringified payload.
-    expect(JSON.parse(rec.body.stringValue)).toEqual({ sampledFrom: "test" });
+    // body is the bare event name — the otel-forward convention, so the
+    // dashboards' LogQL line filters (|= "host.metrics.sampled") match the
+    // direct-OTLP path exactly like the event-log path (CTL-812).
+    expect(rec.body.stringValue).toBe("host.metrics.sampled");
   });
 
   test("every number → doubleValue (one type per key); strings → stringValue", async () => {
