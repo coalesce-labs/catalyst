@@ -104,7 +104,7 @@ curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-c
 ## Requirements
 
 - **Required**: Git, Bash
-- **Optional**: HumanLayer CLI (`pip install humanlayer`) for the thoughts persistence system
+- **Optional**: HumanLayer CLI (`npm install -g humanlayer`) for the thoughts persistence system
 - **Optional**: Linearis CLI (`npm install -g linearis`) for Linear integration
 - **Optional**: GitHub CLI (`brew install gh`) for PR workflows
 
