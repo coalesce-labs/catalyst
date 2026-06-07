@@ -413,6 +413,37 @@ export function classifyTicketResolution(
   return id ? "exists" : "not-found";
 }
 
+// fetchTicketAssignee — the CTL-781 respect-assignment read: the ticket's
+// current assignee UUID (or null = unassigned), gateway-first so the hot
+// new-work predicate is rate-free, live `linearis issues read` on a miss.
+// Tri-state return so callers can distinguish "known unassigned" from
+// "couldn't read": { known: true, assignee: string|null } | { known: false }.
+// A not-removed descriptor is trusted regardless of age (the assignment gate
+// is rate-free by design; a stale miss is corrected by the future Reconciler).
+export function fetchTicketAssignee(identifier, { exec = defaultExec, gateway } = {}) {
+  if (gateway) {
+    const d = gateway.getDescriptor(identifier);
+    if (d && !d.removed) return { known: true, assignee: d.assignee ?? null };
+  }
+  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return { known: false };
+  try {
+    const node = JSON.parse(stdout);
+    return { known: true, assignee: node?.assignee?.id ?? null };
+  } catch {
+    return { known: false };
+  }
+}
+
+// isAssigneeClaimable — the CTL-781 rule-set predicate: a ticket is the
+// daemon's to claim iff assignee ∈ {null, bot}. Pure; shared by the scheduler
+// new-work pull, the monitor triage one-shot, and (future) the CTL-780
+// staleness sweep.
+export function isAssigneeClaimable(assignee, botUserIds) {
+  if (assignee == null) return true;
+  return botUserIds instanceof Set && botUserIds.has(assignee);
+}
+
 // runEligibleQuery — run the query, parse + normalize, apply the priority
 // floor. A non-zero linearis exit THROWS (never a silent []): a silent empty
 // would let one failed poll flatten a project's eligible set to zero. The

@@ -13,6 +13,8 @@ import {
   buildBatchCurlArgs,
   isBatchRateLimited,
   classifyTicketResolution,
+  fetchTicketAssignee,
+  isAssigneeClaimable,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -856,5 +858,91 @@ describe("fetchTicketState — gateway state-freshness boundary (CTL-823)", () =
     const stale = fakeGateway({ ticket: "CTL-21", state: "Todo", removed: false, updatedAt: at(61_000) });
     expect(fetchTicketState("CTL-21", { exec, gateway: stale })).toBe("PR");
     expect(exec.calls.length).toBe(1);
+  });
+});
+
+// ─── CTL-781: fetchTicketAssignee + isAssigneeClaimable ─────────────────────
+
+describe("fetchTicketAssignee (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  test("gateway descriptor present + !removed → {known:true, assignee:<uuid>}, zero exec", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-1", assignee: BOT, removed: false, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-1", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("gateway descriptor present with assignee null → {known:true, assignee:null}, zero exec", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-2", assignee: null, removed: false, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-2", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: null });
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("gateway descriptor removed → falls through to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const gateway = fakeGateway({ ticket: "CTL-3", assignee: BOT, removed: true, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-3", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("gateway absent/miss (getDescriptor null) → live read parses assignee.id", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const gateway = fakeGateway(null);
+    const r = fetchTicketAssignee("CTL-4", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("live read: top-level assignee null → {known:true, assignee:null}", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: null }) });
+    const r = fetchTicketAssignee("CTL-5", { exec });
+    expect(r).toEqual({ known: true, assignee: null });
+  });
+
+  test("live read non-zero exit → {known:false}", () => {
+    const exec = fakeExec({ code: 1, stdout: "", stderr: "fail" });
+    const r = fetchTicketAssignee("CTL-6", { exec });
+    expect(r).toEqual({ known: false });
+  });
+
+  test("live read unparseable stdout → {known:false}", () => {
+    const exec = fakeExec({ code: 0, stdout: "not-json" });
+    const r = fetchTicketAssignee("CTL-7", { exec });
+    expect(r).toEqual({ known: false });
+  });
+
+  test("no gateway param at all → straight to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const r = fetchTicketAssignee("CTL-8", { exec });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+});
+
+describe("isAssigneeClaimable (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  test("null assignee → claimable regardless of botUserIds", () => {
+    expect(isAssigneeClaimable(null, new Set([BOT]))).toBe(true);
+    expect(isAssigneeClaimable(null, new Set())).toBe(true);
+    expect(isAssigneeClaimable(null, undefined)).toBe(true);
+  });
+
+  test("assignee in botUserIds Set → claimable", () => {
+    expect(isAssigneeClaimable(BOT, new Set([BOT]))).toBe(true);
+  });
+
+  test("assignee NOT in botUserIds Set → NOT claimable", () => {
+    expect(isAssigneeClaimable("human-uuid", new Set([BOT]))).toBe(false);
+  });
+
+  test("empty botUserIds Set + non-null assignee → NOT claimable", () => {
+    expect(isAssigneeClaimable(BOT, new Set())).toBe(false);
+    expect(isAssigneeClaimable("human-uuid", new Set())).toBe(false);
   });
 });
