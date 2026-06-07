@@ -324,6 +324,10 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 		else
 			SET_COMPLETED='.completedAt = $ts'
 		fi
+		# CTL-852: defensive backfill of host block for signals created before
+		# this change. canonical-event.sh already sourced host-identity.sh.
+		_EMIT_HOST_NAME="$(catalyst_host_name 2>/dev/null || true)"
+		_EMIT_HOST_ID="$(catalyst_host_id 2>/dev/null || true)"
 		TMP="${SIGNAL_FILE}.tmp.$$"
 		if jq --arg status "$NEW_STATUS" \
 			--arg rawstatus "$STATUS" \
@@ -331,6 +335,8 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
 			--arg reason "$REASON" \
 			--arg handoff "$HANDOFF_PATH" \
 			--arg phase "$PHASE" \
+			--arg host_name "$_EMIT_HOST_NAME" \
+			--arg host_id "$_EMIT_HOST_ID" \
 			".status = \$status
            | ${SET_COMPLETED}
            | .updatedAt = \$ts
@@ -338,7 +344,8 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
               elif \$reason == \"\" then .
               else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
-           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)" \
+           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)
+           | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
 			mv "$TMP" "$SIGNAL_FILE"
 		else
