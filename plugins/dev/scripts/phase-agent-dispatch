@@ -60,6 +60,10 @@ EMIT_COMPLETE="${CATALYST_EMIT_COMPLETE:-${SCRIPT_DIR}/phase-agent-emit-complete
 # shellcheck source=lib/executor.sh
 source "${SCRIPT_DIR}/lib/executor.sh"
 
+# CTL-852: host-identity primitives (catalyst_host_name, catalyst_host_id).
+# shellcheck source=lib/host-identity.sh
+source "${SCRIPT_DIR}/lib/host-identity.sh"
+
 # CTL-658: shared resume-stderr classifier (classify_resume_stderr), shared with
 # orchestrate-revive's legacy bash revive path. Used when --resume-session is set
 # to tell a clean resume from an alive-rejection from a hard failure.
@@ -586,6 +590,10 @@ TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 # dispatch. A later revive reads this field back and asserts the registry-
 # derived path matches it before launching the bg worker.
 WORKTREE_PATH_RESOLVED="$(pwd)"
+# CTL-852: capture host identity at dispatch time (nested object, not OTel
+# dotted-key style — signal files use nested fields, unlike event resource blocks).
+_DISPATCH_HOST_NAME="$(catalyst_host_name)"
+_DISPATCH_HOST_ID="$(catalyst_host_id)"
 jq -nc \
 	--arg ticket "$TICKET" \
 	--arg phase "$PHASE" \
@@ -596,10 +604,13 @@ jq -nc \
 	--arg wt "$WORKTREE_PATH_RESOLVED" \
 	--argjson generation "$GENERATION" \
 	--argjson attempt "$ATTEMPT" \
+	--arg host_name "$_DISPATCH_HOST_NAME" \
+	--arg host_id "$_DISPATCH_HOST_ID" \
 	'{ticket: $ticket, phase: $phase, orchestrator: $orch, model: $model,
     turnCap: $turnCap, status: "dispatched", bg_job_id: null,
     worktreePath: $wt, generation: $generation, attempt: $attempt,
-    startedAt: $ts, updatedAt: $ts}' >"$SIGNAL_FILE" ||
+    startedAt: $ts, updatedAt: $ts,
+    host: {name: $host_name, id: $host_id}}' >"$SIGNAL_FILE" ||
 	die "failed to write signal file $SIGNAL_FILE"
 
 # ─── CTL-511: launch-failure recovery helper ────────────────────────────────

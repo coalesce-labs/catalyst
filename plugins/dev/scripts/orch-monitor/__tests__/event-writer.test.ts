@@ -35,6 +35,8 @@ function sampleEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
       "service.name": "catalyst.github",
       "service.namespace": "catalyst",
       "service.version": "8.2.0",
+      "host.name": "test-host",
+      "host.id": "0000000000000000",
     },
     attributes: {
       "event.name": "github.pr.merged",
