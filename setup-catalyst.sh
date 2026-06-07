@@ -429,6 +429,38 @@ check_command_exists() {
 	command -v "$1" &>/dev/null
 }
 
+# No-sudo install helpers (CTL-844) ──────────────────────────────────────────
+
+LOCAL_BIN="$HOME/.local/bin"
+
+detect_arch() {
+	case "$(uname -m)" in
+	arm64 | aarch64) echo "arm64" ;;
+	x86_64) echo "amd64" ;;
+	*) echo "$(uname -m)" ;;
+	esac
+}
+
+detect_os() {
+	case "$(uname -s)" in
+	Darwin) echo "macos" ;;
+	Linux) echo "linux" ;;
+	*) echo "unknown" ;;
+	esac
+}
+
+# Create ~/.local/bin and persist it on PATH via ~/.zshenv. Idempotent.
+ensure_local_bin() {
+	mkdir -p "$LOCAL_BIN"
+	local line='export PATH="$HOME/.local/bin:$PATH"'
+	if ! grep -qsF "$line" "$HOME/.zshenv" 2>/dev/null; then
+		printf '\n# Added by catalyst setup (no-sudo tool installs)\n%s\n' "$line" >>"$HOME/.zshenv"
+	fi
+	export PATH="$LOCAL_BIN:$PATH"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 check_prerequisites() {
 	print_header "Checking Prerequisites"
 
@@ -474,6 +506,22 @@ check_prerequisites() {
 		missing_critical=true
 	else
 		print_success "sqlite3 installed"
+	fi
+
+	# Critical: node + npm (linearis, humanlayer CLI, agent-browser are npm packages)
+	if ! check_command_exists "node" || ! check_command_exists "npm"; then
+		print_warning "node/npm not found (required for linearis + HumanLayer CLI)"
+		offer_install_node || missing_critical=true
+	else
+		print_success "node installed ($(node --version 2>/dev/null))"
+	fi
+
+	# Critical: bun (catalyst-monitor + execution-core daemons require it)
+	if ! check_command_exists "bun"; then
+		print_warning "bun not found (required for the daemon stack)"
+		offer_install_bun || missing_critical=true
+	else
+		print_success "bun installed"
 	fi
 
 	# Critical: humanlayer (for thoughts system)
@@ -527,15 +575,6 @@ check_prerequisites() {
 		missing_optional=true
 	fi
 
-	# Optional: bun (for orch-monitor dashboard)
-	if check_command_exists "bun"; then
-		print_success "bun installed"
-	else
-		print_warning "bun not found (optional — required for orch-monitor dashboard)"
-		echo "  Install: curl -fsSL https://bun.sh/install | bash"
-		missing_optional=true
-	fi
-
 	if [ "$missing_critical" = true ]; then
 		print_error "Critical prerequisites missing. Cannot continue."
 		exit 1
@@ -556,50 +595,128 @@ check_prerequisites() {
 	echo ""
 }
 
+offer_install_node() {
+	echo ""
+	echo "node + npm are required (linearis and the HumanLayer CLI install via npm)."
+	echo ""
+	if ! ask_yes_no "Install Node.js LTS to ~/.local/node now (no sudo)?"; then
+		return 1
+	fi
+	if command -v brew &>/dev/null; then
+		brew install node && return 0
+	fi
+	ensure_local_bin
+	local os arch version tarball
+	os=$([[ "$(uname -s)" == "Darwin" ]] && echo "darwin" || echo "linux")
+	arch=$([[ "$(detect_arch)" == "arm64" ]] && echo "arm64" || echo "x64")
+	version="${CATALYST_NODE_VERSION:-$(curl -fsSL https://nodejs.org/dist/index.json |
+		jq -r '[.[] | select(.lts != false)][0].version')}"
+	[[ -n "$version" && "$version" != "null" ]] || {
+		print_error "Could not resolve Node LTS version"
+		return 1
+	}
+	tarball="node-${version}-${os}-${arch}.tar.gz"
+	echo "  Downloading ${tarball} ..."
+	mkdir -p "$HOME/.local"
+	if curl -fsSL "https://nodejs.org/dist/${version}/${tarball}" |
+		tar -xz -C "$HOME/.local" &&
+		rm -rf "$HOME/.local/node" &&
+		mv "$HOME/.local/node-${version}-${os}-${arch}" "$HOME/.local/node"; then
+		ln -sf "$HOME/.local/node/bin/node" "$LOCAL_BIN/node"
+		ln -sf "$HOME/.local/node/bin/npm" "$LOCAL_BIN/npm"
+		ln -sf "$HOME/.local/node/bin/npx" "$LOCAL_BIN/npx"
+		print_success "Node $(node --version 2>/dev/null || echo "$version") installed to ~/.local/node"
+		return 0
+	fi
+	print_error "Node install failed. Manual: https://nodejs.org/en/download"
+	return 1
+}
+
+offer_install_bun() {
+	echo ""
+	echo "bun is required (catalyst-monitor + execution-core daemons run on bun)."
+	echo ""
+	if ! ask_yes_no "Install bun now via the official installer (no sudo)?"; then
+		return 1
+	fi
+	if curl -fsSL https://bun.sh/install | bash; then
+		local line='export PATH="$HOME/.bun/bin:$PATH"'
+		if ! grep -qsF "$line" "$HOME/.zshenv" 2>/dev/null; then
+			printf '%s\n' "$line" >>"$HOME/.zshenv"
+		fi
+		export PATH="$HOME/.bun/bin:$PATH"
+		command -v bun &>/dev/null && {
+			print_success "bun installed ($(bun --version))"
+			return 0
+		}
+	fi
+	print_error "bun install failed. Manual: https://bun.sh"
+	return 1
+}
+
 offer_install_humanlayer() {
 	echo ""
 	echo "HumanLayer CLI is required for the thoughts system."
 	echo ""
-	echo "Installation options:"
-	echo "  1. pip install humanlayer"
-	echo "  2. pipx install humanlayer"
+	echo "  Install: npm install -g humanlayer"
 	echo ""
-
-	if ask_yes_no "Attempt to install via pip now?"; then
-		if command -v pip &>/dev/null; then
-			pip install humanlayer
-			return 0
-		elif command -v pip3 &>/dev/null; then
-			pip3 install humanlayer
-			return 0
-		else
-			print_error "pip not found. Please install Python and pip first."
-			return 1
-		fi
-	else
+	if ! ask_yes_no "Attempt to install via npm now?"; then
 		print_warning "Skipping HumanLayer installation. Setup cannot continue."
 		return 1
 	fi
+	if ! command -v npm &>/dev/null; then
+		print_error "npm not found — node/npm must be installed first (see above)."
+		return 1
+	fi
+	if npm install -g humanlayer && command -v humanlayer &>/dev/null; then
+		print_success "HumanLayer CLI installed ($(humanlayer --version 2>/dev/null || true))"
+		return 0
+	fi
+	print_error "HumanLayer install failed. Manual: npm install -g humanlayer"
+	return 1
 }
 
 offer_install_gh_cli() {
 	echo ""
-	echo "GitHub CLI is useful for:"
-	echo "  - Linear integration (via gh api)"
-	echo "  - Backing up thoughts repo to GitHub"
+	echo "GitHub CLI is used for PR automation and Linear/GitHub integration."
 	echo ""
-	echo "Installation: https://cli.github.com/"
-	echo ""
-
-	if ask_yes_no "Open installation page in browser?"; then
-		if command -v open &>/dev/null; then
-			open "https://cli.github.com/"
-		elif command -v xdg-open &>/dev/null; then
-			xdg-open "https://cli.github.com/"
-		fi
+	if ! ask_yes_no "Install GitHub CLI now?"; then
+		echo "  Manual install: https://cli.github.com/"
+		return 1
 	fi
-
-	return 1 # User will install manually
+	if command -v brew &>/dev/null; then
+		brew install gh && return 0
+	fi
+	# No-sudo: release archive → ~/.local/bin (jq is guaranteed installed by now)
+	ensure_local_bin
+	local ver os arch ext dir tmp
+	ver=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
+		jq -r '.tag_name' | sed 's/^v//')
+	[[ -n "$ver" && "$ver" != "null" ]] || {
+		print_error "Could not resolve gh version. Manual: https://cli.github.com/"
+		return 1
+	}
+	if [[ "$(uname -s)" == "Darwin" ]]; then os="macOS"; ext="zip"; else os="linux"; ext="tar.gz"; fi
+	arch=$(detect_arch)
+	dir="gh_${ver}_${os}_${arch}"
+	tmp=$(mktemp -d)
+	if curl -fsSL -o "$tmp/gh.$ext" \
+		"https://github.com/cli/cli/releases/download/v${ver}/${dir}.${ext}"; then
+		if [[ "$ext" == "zip" ]]; then
+			unzip -q "$tmp/gh.$ext" -d "$tmp"
+		else
+			tar -xzf "$tmp/gh.$ext" -C "$tmp"
+		fi
+		install -m 0755 "$tmp/$dir/bin/gh" "$LOCAL_BIN/gh"
+		rm -rf "$tmp"
+		command -v gh &>/dev/null && {
+			print_success "GitHub CLI installed to $LOCAL_BIN/gh"
+			return 0
+		}
+	fi
+	rm -rf "$tmp"
+	print_error "gh install failed. Manual: https://cli.github.com/"
+	return 1
 }
 
 offer_install_jq() {
@@ -615,6 +732,15 @@ offer_install_jq() {
 			sudo apt-get install -y jq
 			return 0
 		else
+			echo "  No package manager found — installing official jq binary (no sudo) ..."
+			ensure_local_bin
+			local artifact="jq-$(detect_os)-$(detect_arch)"
+			if curl -fsSL -o "$LOCAL_BIN/jq" \
+				"https://github.com/jqlang/jq/releases/latest/download/${artifact}" &&
+				chmod +x "$LOCAL_BIN/jq" && command -v jq &>/dev/null; then
+				print_success "jq installed to $LOCAL_BIN/jq"
+				return 0
+			fi
 			print_error "Could not auto-install. Install manually: https://jqlang.github.io/jq/"
 			return 1
 		fi
@@ -2169,5 +2295,7 @@ main() {
 	fi
 }
 
-# Run main
-main "$@"
+# Run main (guard allows sourcing for testing without executing main)
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

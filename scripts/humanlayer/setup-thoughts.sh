@@ -20,9 +20,7 @@ if ! command -v humanlayer &>/dev/null; then
 	echo "The thoughts system uses the HumanLayer CLI to manage the central repository."
 	echo ""
 	echo "Install humanlayer:"
-	echo "  pip install humanlayer"
-	echo "  # or"
-	echo "  pipx install humanlayer"
+	echo "  npm install -g humanlayer"
 	echo ""
 	exit 1
 fi
