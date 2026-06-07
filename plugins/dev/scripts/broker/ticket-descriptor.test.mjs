@@ -68,7 +68,7 @@ describe("upsertTicketDescriptor / getTicketDescriptor", () => {
     expect(d.updatedAt).toBeTruthy();
   });
 
-  test("partial upsert is COALESCE-sticky — absent fields survive", () => {
+  test("key-presence: absent fields survive a partial upsert", () => {
     upsertTicketDescriptor(FULL);
     upsertTicketDescriptor({ ticket: "CTL-821", state: "Todo" });
     const d = getTicketDescriptor("CTL-821");
@@ -79,8 +79,40 @@ describe("upsertTicketDescriptor / getTicketDescriptor", () => {
     expect(d.priority).toBe(2);
   });
 
+  test("key-presence: explicit null CLEARS a field (Linear unassign webhook)", () => {
+    upsertTicketDescriptor(FULL);
+    upsertTicketDescriptor({ ticket: "CTL-821", assignee: null });
+    const d = getTicketDescriptor("CTL-821");
+    expect(d.assignee).toBeNull();
+    // siblings untouched
+    expect(d.uuid).toBe(FULL.uuid);
+    expect(d.labels).toEqual(["feature", "broker"]);
+  });
+
+  test("priority can go back to 0 (Linear no-priority) and to null", () => {
+    upsertTicketDescriptor(FULL);
+    upsertTicketDescriptor({ ticket: "CTL-821", priority: 0 });
+    expect(getTicketDescriptor("CTL-821").priority).toBe(0);
+    upsertTicketDescriptor({ ticket: "CTL-821", priority: null });
+    expect(getTicketDescriptor("CTL-821").priority).toBeNull();
+  });
+
+  test("pre-stringified JSON for relations/labels throws loud", () => {
+    expect(() =>
+      upsertTicketDescriptor({ ticket: "CTL-821", relations: '[{"type":"blocks"}]' })
+    ).toThrow(TypeError);
+    expect(() => upsertTicketDescriptor({ ticket: "CTL-821", labels: '["bug"]' })).toThrow(
+      TypeError
+    );
+  });
+
   test("unknown ticket reads null", () => {
     expect(getTicketDescriptor("CTL-0")).toBeNull();
+  });
+
+  test("duplicate uuid on a second ticket fails loud (UNIQUE index)", () => {
+    upsertTicketDescriptor(FULL);
+    expect(() => upsertTicketDescriptor({ ticket: "CTL-999", uuid: FULL.uuid })).toThrow();
   });
 });
 
@@ -95,6 +127,11 @@ describe("getTicketDescriptorByUuid", () => {
 
   test("unknown uuid resolves null", () => {
     expect(getTicketDescriptorByUuid("dead-beef")).toBeNull();
+  });
+
+  test("matches uuid only — a ticket IDENTIFIER does not resolve", () => {
+    upsertTicketDescriptor(FULL);
+    expect(getTicketDescriptorByUuid("CTL-821")).toBeNull();
   });
 });
 
@@ -128,6 +165,23 @@ describe("markTicketRemovedByUuid", () => {
     markTicketRemovedByUuid(FULL.uuid);
     upsertTicketDescriptor({ ticket: "CTL-821", state: "Canceled" });
     expect(getTicketDescriptor("CTL-821").removed).toBe(true);
+  });
+
+  test("removed_at is sticky — a duplicate removal keeps the FIRST timestamp", () => {
+    upsertTicketDescriptor(FULL);
+    markTicketRemovedByUuid(FULL.uuid);
+    const first = getTicketDescriptor("CTL-821").removedAt;
+    Bun.sleepSync(5); // ensure a later wall-clock would differ if overwritten
+    markTicketRemovedByUuid(FULL.uuid);
+    upsertTicketDescriptor({ ticket: "CTL-821", removed: true });
+    expect(getTicketDescriptor("CTL-821").removedAt).toBe(first);
+  });
+
+  test("insert-then-remove path: brand-new row with removed:true lands removed", () => {
+    upsertTicketDescriptor({ ticket: "CTL-NEW", uuid: "u-new", removed: true });
+    const d = getTicketDescriptor("CTL-NEW");
+    expect(d.removed).toBe(true);
+    expect(d.removedAt).toBeTruthy();
   });
 });
 
@@ -170,6 +224,51 @@ describe("schema migration", () => {
     closeBrokerStateDb();
     openBrokerStateDb(dbPath);
     expect(getTicketDescriptor("CTL-821").uuid).toBe(FULL.uuid);
+  });
+
+  test("PARTIALLY-migrated DB (aborted earlier boot) self-heals on open", () => {
+    closeBrokerStateDb();
+    rmSync(dbPath, { force: true });
+    // Legacy 4 columns plus a SUBSET of the new ones — as if a prior boot's
+    // ALTER loop died midway. The next open must add only the missing columns.
+    const partial = new Database(dbPath, { create: true });
+    partial.run(`
+      CREATE TABLE ticket_state (
+        ticket       TEXT PRIMARY KEY,
+        linear_state TEXT,
+        pr_number    INTEGER,
+        updated_at   TEXT NOT NULL,
+        relations    TEXT,
+        labels       TEXT,
+        priority     INTEGER
+      )
+    `);
+    partial.run(
+      `INSERT INTO ticket_state (ticket, linear_state, pr_number, updated_at, labels)
+       VALUES ('CTL-200', 'Todo', NULL, '2026-01-01T00:00:00Z', '["bug"]')`
+    );
+    partial.close();
+
+    openBrokerStateDb(dbPath);
+    const d = getTicketDescriptor("CTL-200");
+    expect(d.state).toBe("Todo");
+    expect(d.labels).toEqual(["bug"]);
+    expect(d.assignee).toBeNull();
+    expect(d.removed).toBe(false);
+    upsertTicketDescriptor({ ticket: "CTL-200", uuid: "u-200", assignee: "bot" });
+    expect(getTicketDescriptorByUuid("u-200")?.assignee).toBe("bot");
+  });
+
+  test("corrupt JSON in a descriptor column reads null, never throws", () => {
+    upsertTicketDescriptor(FULL);
+    closeBrokerStateDb();
+    const raw = new Database(dbPath);
+    raw.run(`UPDATE ticket_state SET relations = '{not json' WHERE ticket = 'CTL-821'`);
+    raw.close();
+    openBrokerStateDb(dbPath);
+    const d = getTicketDescriptor("CTL-821");
+    expect(d.relations).toBeNull();
+    expect(d.labels).toEqual(["feature", "broker"]);
   });
 });
 

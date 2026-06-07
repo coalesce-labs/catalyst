@@ -31,6 +31,9 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   db = new Database(dbPath, { create: true });
   db.run("PRAGMA journal_mode=WAL");
+  // CTL-821: don't fail instantly on transient WAL contention (live broker +
+  // orch-monitor + test drivers can hold handles on the same file).
+  db.run("PRAGMA busy_timeout = 5000");
 
   // Legacy filter_state table (CTL-284) — still needed for PR↔deploy correlation.
   db.run(`
@@ -118,8 +121,13 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       /* already exists */
     }
   }
+  // UNIQUE so a buggy upstream writing one entityId onto two identifiers fails
+  // loud instead of silently shadowing a row in the remove-webhook resolution.
+  // Drop-then-create migrates any interim non-unique version of this index;
+  // ticket_state is small (hundreds of rows) so the per-boot rebuild is ~ms.
+  db.run(`DROP INDEX IF EXISTS idx_ticket_state_uuid`);
   db.run(`
-    CREATE INDEX IF NOT EXISTS idx_ticket_state_uuid
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_state_uuid
       ON ticket_state(uuid)
       WHERE uuid IS NOT NULL
   `);
@@ -488,61 +496,78 @@ export function getTicketState(ticket) {
 
 // ─── ticket descriptor helpers (CTL-821, Gateway L1 child a) ─────────────────
 
-// upsertTicketDescriptor — COALESCE-sticky like upsertTicketState: an absent
-// field never regresses what a previous (possibly richer) webhook wrote.
-// relations/labels are stored as JSON text (mirrors how fetchTicketRelations
-// hydrates its store). `removed` is tri-state: true stamps removed_at (sticky
-// on the first stamp), false clears it (Linear archive→unarchive arrives as
-// `update`), undefined leaves it untouched.
-export function upsertTicketDescriptor({
-  ticket,
-  state,
-  prNumber,
-  relations,
-  labels,
-  priority,
-  resolution,
-  assignee,
-  uuid,
-  removed,
-}) {
+// Descriptor field → column map. Internal constant — the dynamic SQL below
+// only ever interpolates these fixed column names, never caller input.
+const DESCRIPTOR_COLUMNS = {
+  state: "linear_state",
+  prNumber: "pr_number",
+  relations: "relations",
+  labels: "labels",
+  priority: "priority",
+  resolution: "resolution",
+  assignee: "assignee",
+  uuid: "uuid",
+};
+
+// upsertTicketDescriptor — KEY-PRESENCE semantics (not COALESCE): a field
+// ABSENT from the input keeps its stored value; a field present with an
+// explicit null CLEARS it. This is load-bearing for the Assignment layer —
+// a Linear unassign webhook carries assignee:null and MUST be expressible
+// (back-off-when-human-assignee-removed keys off it). Webhook write-through
+// callers should pass exactly the fields the webhook carried.
+//
+// relations/labels must be arrays/objects (stored as JSON text); passing a
+// pre-stringified JSON string throws — silent double-encoding would hand
+// child (b) a string where readers expect an array.
+//
+// `removed` is tri-state: true stamps removed_at (sticky — the FIRST removal
+// timestamp survives duplicates), false clears it (Linear archive→unarchive
+// arrives as `update`), undefined leaves it untouched. The whole upsert runs
+// in one transaction so concurrent WAL readers (orch-monitor, the child-c
+// read API) never observe the row between the insert and the removed stamp.
+export function upsertTicketDescriptor(input = {}) {
+  const { ticket, removed } = input;
   if (!ticket) return;
-  const json = (v) => (v === undefined || v === null ? null : JSON.stringify(v));
-  ensure().run(
-    `INSERT INTO ticket_state
-       (ticket, linear_state, pr_number, relations, labels, priority, resolution, assignee, uuid, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(ticket) DO UPDATE SET
-       linear_state = COALESCE(excluded.linear_state, linear_state),
-       pr_number    = COALESCE(excluded.pr_number, pr_number),
-       relations    = COALESCE(excluded.relations, relations),
-       labels       = COALESCE(excluded.labels, labels),
-       priority     = COALESCE(excluded.priority, priority),
-       resolution   = COALESCE(excluded.resolution, resolution),
-       assignee     = COALESCE(excluded.assignee, assignee),
-       uuid         = COALESCE(excluded.uuid, uuid),
-       updated_at   = excluded.updated_at`,
-    [
-      ticket,
-      state ?? null,
-      prNumber ?? null,
-      json(relations),
-      json(labels),
-      priority ?? null,
-      resolution ?? null,
-      assignee ?? null,
-      uuid ?? null,
-      nowIso(),
-    ]
-  );
-  if (removed === true) {
-    ensure().run(`UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?) WHERE ticket = ?`, [
-      nowIso(),
-      ticket,
-    ]);
-  } else if (removed === false) {
-    ensure().run(`UPDATE ticket_state SET removed_at = NULL WHERE ticket = ?`, [ticket]);
+  const cols = [];
+  const vals = [];
+  for (const [field, col] of Object.entries(DESCRIPTOR_COLUMNS)) {
+    if (!(field in input) || input[field] === undefined) continue; // absent → keep
+    let v = input[field];
+    if ((field === "relations" || field === "labels") && v !== null) {
+      if (typeof v === "string") {
+        throw new TypeError(
+          `upsertTicketDescriptor: ${field} must be an array/object, not a pre-stringified JSON string`
+        );
+      }
+      v = JSON.stringify(v);
+    }
+    cols.push(col);
+    vals.push(v);
   }
+  const d = ensure();
+  const ts = nowIso();
+  d.transaction(() => {
+    const insertCols = ["ticket", ...cols, "updated_at"];
+    const placeholders = insertCols.map(() => "?").join(", ");
+    const setClauses = [
+      ...cols.map((c) => `${c} = excluded.${c}`),
+      "updated_at = excluded.updated_at",
+    ];
+    d.run(
+      `INSERT INTO ticket_state (${insertCols.join(", ")})
+       VALUES (${placeholders})
+       ON CONFLICT(ticket) DO UPDATE SET ${setClauses.join(", ")}`,
+      [ticket, ...vals, ts]
+    );
+    if (removed === true) {
+      d.run(`UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?) WHERE ticket = ?`, [
+        ts,
+        ticket,
+      ]);
+    } else if (removed === false) {
+      d.run(`UPDATE ticket_state SET removed_at = NULL WHERE ticket = ?`, [ticket]);
+    }
+  })();
 }
 
 function rowToTicketDescriptor(row) {
