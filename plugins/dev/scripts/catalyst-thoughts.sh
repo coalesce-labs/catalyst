@@ -120,16 +120,30 @@ cmd_init_or_repair() {
 		return 2
 	fi
 
-	# Case C: thoughts/shared does not exist. Prefer humanlayer re-init when configured.
+	# Case C: thoughts/shared does not exist. Prefer vendored re-init when configured.
+	# CTL-845: use worktree-thoughts-init.sh to avoid ERR_INVALID_ARG_TYPE crash in
+	# humanlayer v0.17.2-npm. Falls back to humanlayer thoughts init if vendored script
+	# is not found (should not occur in a properly installed catalyst workspace).
 	if command -v humanlayer &>/dev/null && _read_thoughts_config && [[ -n "${CAT_DIR:-}" ]]; then
-		local init_args=(thoughts init --force --directory "$CAT_DIR")
-		if [[ -n "${CAT_PROFILE:-}" ]]; then
-			init_args+=(--profile "$CAT_PROFILE")
-		fi
-		echo "  Running: humanlayer ${init_args[*]}"
-		if humanlayer "${init_args[@]}"; then
-			_mkdir_subdirs "thoughts/shared"
-			return 0
+		local _ct_dir
+		_ct_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+		local VENDOR_INIT="${_ct_dir}/../../../scripts/worktree-thoughts-init.sh"
+		local init_args=(--directory "$CAT_DIR")
+		[[ -n "${CAT_PROFILE:-}" ]] && init_args+=(--profile "$CAT_PROFILE")
+		if [ -x "$VENDOR_INIT" ]; then
+			echo "  Running: worktree-thoughts-init.sh ${init_args[*]}"
+			if bash "$VENDOR_INIT" "${init_args[@]}"; then
+				_mkdir_subdirs "thoughts/shared"
+				return 0
+			fi
+		else
+			local hl_args=(thoughts init --force --directory "$CAT_DIR")
+			[[ -n "${CAT_PROFILE:-}" ]] && hl_args+=(--profile "$CAT_PROFILE")
+			echo "  Running: humanlayer ${hl_args[*]}"
+			if humanlayer "${hl_args[@]}"; then
+				_mkdir_subdirs "thoughts/shared"
+				return 0
+			fi
 		fi
 		echo "ERROR: humanlayer thoughts init failed" >&2
 		return 1
