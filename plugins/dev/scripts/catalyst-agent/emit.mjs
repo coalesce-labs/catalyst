@@ -24,6 +24,16 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
+
+// shortHostname — os.hostname() with the macOS-appended ".local" suffix
+// stripped, matching the hostname Claude Code's native OTel emits
+// ("Ryans-MacBook-Pro-2", not "Ryans-MacBook-Pro-2.local") — so the
+// dashboard's hostname labels, template variable, and filters see exactly ONE
+// identity per machine (CTL-812 multi-host finding).
+export function shortHostname() {
+  return hostname().replace(/\.local$/, "");
+}
+
 import { getEventLogPath, log } from "./config.mjs";
 
 /**
@@ -70,7 +80,7 @@ export function buildAgentEnvelope(name, { entity, label, attrs = {}, payload = 
     resource: {
       "service.name": "catalyst.agent",
       "service.namespace": "catalyst",
-      hostname: hostname(),
+      hostname: shortHostname(),
     },
     body: { payload },
     attributes,

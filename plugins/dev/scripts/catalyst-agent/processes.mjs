@@ -37,7 +37,8 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, basename } from "node:path";
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
+import { shortHostname } from "./emit.mjs";
 import { buildAgentEnvelope, emitEnvelope, drainPending } from "./emit.mjs";
 import { readAgentConfig, log } from "./config.mjs";
 
@@ -262,7 +263,7 @@ export async function sampleProcesses({
     workerMap = new Map();
   }
 
-  const host = hostname();
+  const host = shortHostname();
   const top = rankTopN(rows, topN);
   const envelopes = [];
   // OTLP POST promises returned by emit, drained before we resolve so the
