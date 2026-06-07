@@ -290,6 +290,15 @@ Do NOT run the corpus refresh here (that is `compound-estimate` step 6 /
 operator cadence — a background phase worker must not mutate the committed
 corpus).
 
+4. **Run the cross-ticket retro (CTL-831 — the per-ticket learning step).** After
+   the compound-log entry (success OR skip), invoke `/catalyst-dev:ticket-retro`
+   with no arguments. It regenerates `thoughts/shared/retros/ticket/<today>.md`
+   over the since-last-retro window (same-day re-runs are cumulative by design)
+   and refreshes the watch-items the morning briefing surfaces — this is how the
+   system learns from every ticket it ships. Same contract as the entry above:
+   **best-effort, never blocks the End block** — on any retro failure, log one
+   line and continue.
+
 ## End block
 
 Mirror the merge outcome to Linear as a single comment (CTL-632). Best-effort

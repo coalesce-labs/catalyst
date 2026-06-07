@@ -2,7 +2,7 @@
 # Shell tests for compound-log helper (CTL-159).
 #
 # The /compound skill is a closing ritual at PR merge that writes a
-# compound-log entry to thoughts/shared/pm/metrics/YYYY-WW-compound-log.md.
+# compound-log entry to thoughts/shared/retros/estimate/YYYY-WW-compound-log.md.
 # This helper does the mechanical work: ISO-week routing, fail-loud field
 # validation, dedup, and append.
 #
@@ -68,7 +68,7 @@ EOF
 new_scratch_project() {
   local name="$1"
   local dir="${SCRATCH}/${name}"
-  mkdir -p "${dir}/thoughts/shared/pm/metrics"
+  mkdir -p "${dir}/thoughts/shared/retros/estimate"
   mkdir -p "${dir}/.catalyst"
   install_fakes "${dir}/bin"
   echo "$dir"
@@ -135,7 +135,7 @@ test_write_creates_file_with_header() {
     > "${SCRATCH}/out" 2>&1
   rc=$?
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W17-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W17-compound-log.md"
   if [ $rc -eq 0 ] && [ -f "$outfile" ] && \
      grep -q "^# Compound Log" "$outfile" && \
      grep -q "^### CTL-159 — #273" "$outfile" && \
@@ -164,7 +164,7 @@ test_write_appends_to_existing_file() {
     --estimate-actual 5 --cost-usd 2.00 \
     --what-worked "c" --what-surprised-me "d" > "${SCRATCH}/out" 2>&1
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W17-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W17-compound-log.md"
   count=$(grep -c "^### CTL-" "$outfile" 2>/dev/null || echo 0)
   if [ "$count" = "2" ]; then
     pass "write: appends second entry to existing file"
@@ -217,7 +217,7 @@ test_write_force_replaces_duplicate() {
     --force > "${SCRATCH}/out" 2>&1
   rc=$?
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W17-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W17-compound-log.md"
   count=$(grep -c "^### CTL-300" "$outfile" 2>/dev/null || echo 0)
   if [ $rc -eq 0 ] && [ "$count" = "1" ] && grep -q "cost_usd: 9.99" "$outfile"; then
     pass "write: --force replaces existing entry"
@@ -304,7 +304,7 @@ test_dry_run_does_not_write() {
     --dry-run > "${SCRATCH}/out" 2>&1
   rc=$?
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W17-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W17-compound-log.md"
   if [ $rc -eq 0 ] && [ ! -f "$outfile" ] && grep -q "CTL-600" "${SCRATCH}/out"; then
     pass "dry-run: prints entry, writes nothing"
   else
@@ -326,11 +326,11 @@ test_week_routing_uses_merged_at() {
     --estimate-actual 5 --cost-usd 1.00 \
     --what-worked "a" --what-surprised-me "b" > "${SCRATCH}/out" 2>&1
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W18-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W18-compound-log.md"
   if [ -f "$outfile" ]; then
     pass "week routing: uses mergedAt (2026-W18 file created)"
   else
-    fail "week routing: expected 2026-W18 file, got $(ls "${proj}/thoughts/shared/pm/metrics/" 2>&1)"
+    fail "week routing: expected 2026-W18 file, got $(ls "${proj}/thoughts/shared/retros/estimate/" 2>&1)"
   fi
   unset FAKE_GH_PR_JSON FAKE_LINEARIS_JSON
 }
@@ -348,7 +348,7 @@ test_wall_time_computed_from_pr() {
     --estimate-actual 5 --cost-usd 1.00 \
     --what-worked "a" --what-surprised-me "b" > "${SCRATCH}/out" 2>&1
 
-  outfile="${proj}/thoughts/shared/pm/metrics/2026-W17-compound-log.md"
+  outfile="${proj}/thoughts/shared/retros/estimate/2026-W17-compound-log.md"
   if grep -q "wall_time_hours: 3" "$outfile" 2>/dev/null; then
     pass "wall-time: computed from PR createdAt→mergedAt"
   else

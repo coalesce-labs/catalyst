@@ -4,7 +4,7 @@
 # Closing ritual for the AI-native estimation feedback loop (CTL-159). At PR
 # merge, this helper writes a structured entry to:
 #
-#   <thoughts-dir>/shared/pm/metrics/<YYYY-WW>-compound-log.md
+#   <thoughts-dir>/shared/retros/estimate/<YYYY-WW>-compound-log.md
 #
 # One file per ISO week, one entry per merged PR. Fields follow the
 # CTL-159 schema: linear.key, pr_number, merged_at, estimate_at_start,
@@ -308,7 +308,7 @@ cmd_write() {
   # 7. Compute target week file from mergedAt (NOT today).
   local week outfile
   week=$(iso_week_of "$merged_at") || fatal "write: could not derive ISO week from mergedAt: $merged_at"
-  outfile="${thoughts_dir}/shared/pm/metrics/${week}-compound-log.md"
+  outfile="${thoughts_dir}/shared/retros/estimate/${week}-compound-log.md"
 
   # 8. Dry-run: print entry only.
   local entry
@@ -341,7 +341,7 @@ cmd_write() {
 
 # ─── subcommand: read (CTL-813) ─────────────────────────────────────────────
 #
-# Parse every <thoughts-dir>/shared/pm/metrics/*-compound-log.md and emit one
+# Parse every <thoughts-dir>/shared/retros/estimate/*-compound-log.md and emit one
 # JSON object per entry (JSON Lines). The yaml blocks are flat key: value
 # pairs written by render_entry, so an awk field-splitter is sufficient — the
 # only escaping in play is the \" that render_entry applies to free text.
@@ -359,7 +359,7 @@ cmd_read() {
     esac
   done
 
-  local metrics_dir="${thoughts_dir}/shared/pm/metrics"
+  local metrics_dir="${thoughts_dir}/shared/retros/estimate"
   [ -d "$metrics_dir" ] || return 0
 
   command -v jq >/dev/null 2>&1 || fatal "read: jq is required"

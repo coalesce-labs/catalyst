@@ -54,19 +54,25 @@ done
 
 command -v jq >/dev/null 2>&1 || { echo "gather-retro: jq is required" >&2; exit 1; }
 
-[ -z "$RETROS_DIR" ] && RETROS_DIR="${THOUGHTS_DIR}/shared/compound/retros"
+[ -z "$RETROS_DIR" ] && RETROS_DIR="${THOUGHTS_DIR}/shared/retros/ticket"
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/gather-retro.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
 # ── Prior retro + window floor ───────────────────────────────────────────────
+# CTL-831: retros run automatically at EVERY merge now, so several can land on
+# one day. The "prior retro" is the most recent one STRICTLY BEFORE today
+# (UTC) — a same-day re-run reuses the same floor and REGENERATES today's
+# file cumulatively instead of anchoring on itself (near-empty window).
 
+TODAY_UTC="$(date -u +%Y-%m-%d)"
 PRIOR_RETRO=""
 if [ -d "$RETROS_DIR" ]; then
   for rf in "$RETROS_DIR"/*.md; do
     [ -e "$rf" ] || continue
     case "$(basename "$rf" .md)" in
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
+        [ "$(basename "$rf" .md)" = "$TODAY_UTC" ] && continue
         if [ -z "$PRIOR_RETRO" ] || [ "$rf" \> "$PRIOR_RETRO" ]; then PRIOR_RETRO="$rf"; fi ;;
     esac
   done
