@@ -66,8 +66,8 @@ assert_grep "setup-catalyst.sh has NON_INTERACTIVE global" \
   "$SETUP_CATALYST" "^NON_INTERACTIVE="
 assert_grep "setup-catalyst.sh uses return-probe source guard" \
   "$SETUP_CATALYST" "return 0 2>/dev/null"
-assert_grep "setup-catalyst.sh pip offer declines in NI" \
-  "$SETUP_CATALYST" 'ask_yes_no.*pip.*"?y"?.*"?n"?'
+assert_grep "setup-catalyst.sh npm offer declines in NI" \
+  "$SETUP_CATALYST" 'ask_yes_no.*npm.*"?y"?.*"?n"?'
 assert_grep "setup-catalyst.sh jq offer declines in NI" \
   "$SETUP_CATALYST" 'ask_yes_no.*jq.*"?y"?.*"?n"?'
 

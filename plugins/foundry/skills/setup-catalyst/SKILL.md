@@ -130,7 +130,7 @@ In this mode:
 - `ask_yes_no` returns the default answer without reading stdin; a 3rd argument overrides the NI
   answer (install-offer sites pass `"n"` so they silently decline in CI).
 - `prompt_value` echoes the default to stderr and returns it without consuming stdin.
-- Install offers (`pip install humanlayer`, `brew install jq`, etc.) are declined automatically.
+- Install offers (`npm install -g humanlayer`, `brew install jq`, etc.) are declined automatically.
 - The Linear config step is skipped when no token is discoverable from the environment or standard
   config paths (`~/.config/catalyst/`, `~/.config/humanlayer/`). Prints: `Skipping Linear
   (non-interactive, no token discoverable)`.

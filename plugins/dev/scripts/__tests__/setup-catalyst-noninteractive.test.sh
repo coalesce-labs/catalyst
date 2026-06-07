@@ -110,7 +110,7 @@ rm -rf "$scratch_home"
 [[ "$out" == *"Skipping Linear"* ]] && pass "NI skips Linear without token" || fail "NI skips Linear without token" "$out"
 
 # T16: install offers are declined in NI mode (no pip/brew run)
-grep -qE 'ask_yes_no "Attempt to install via pip now\?" "?y"? "?n"?' "$SETUP" \
+grep -qE 'ask_yes_no "Attempt to install via npm now\?" "?y"? "?n"?' "$SETUP" \
   && pass "humanlayer install offer declines in NI" || fail "humanlayer install offer declines in NI"
 grep -qE 'ask_yes_no "Attempt to install jq now\?" "?y"? "?n"?' "$SETUP" \
   && pass "jq install offer declines in NI" || fail "jq install offer declines in NI"
@@ -118,6 +118,30 @@ grep -qE 'ask_yes_no "Attempt to install jq now\?" "?y"? "?n"?' "$SETUP" \
 # T17: main parses args before the tty redirect
 awk '/^main\(\)/,/^}/' "$SETUP" | head -5 | grep -q 'parse_args' \
   && pass "main calls parse_args first" || fail "main calls parse_args first"
+
+# T19: NI skips Sentry when no token is discoverable
+scratch_home=$(mktemp -d)
+out=$(env -u SENTRY_AUTH_TOKEN HOME="$scratch_home" bash -c "source '$SETUP'
+  NON_INTERACTIVE=1
+  prompt_sentry_config '{}' >/dev/null" 2>&1 </dev/null)
+rm -rf "$scratch_home"
+[[ "$out" == *"Skipping Sentry"* ]] && pass "NI skips Sentry without token" || fail "NI skips Sentry without token" "$out"
+
+# T20: NI skips PostHog and Exa unconditionally (skip notices print to stderr,
+# which run_sourced suppresses — use a raw sourced bash here)
+out=$(bash -c "source '$SETUP'; NON_INTERACTIVE=1; prompt_posthog_config '{}' >/dev/null" </dev/null 2>&1)
+[[ "$out" == *"Skipping PostHog"* ]] && pass "NI skips PostHog" || fail "NI skips PostHog" "$out"
+out=$(bash -c "source '$SETUP'; NON_INTERACTIVE=1; prompt_exa_config '{}' >/dev/null" </dev/null 2>&1)
+[[ "$out" == *"Skipping Exa"* ]] && pass "NI skips Exa" || fail "NI skips Exa" "$out"
+
+# T21: determine_project_location fails loudly (exit 1) in NI mode
+bash -c "source '$SETUP'; NON_INTERACTIVE=1; determine_project_location" </dev/null >/dev/null 2>&1 \
+  && fail "determine_project_location exits 1 in NI" || pass "determine_project_location exits 1 in NI"
+
+# T22: --help prints usage and exits 0
+out=$(run_sourced 'parse_args --help' </dev/null 2>&1)
+rc=$?
+[[ $rc -eq 0 && "$out" == *"Usage:"* ]] && pass "--help prints usage, exit 0" || fail "--help prints usage, exit 0" "rc=$rc"
 
 echo ""
 echo "=== Phase 4: Documentation shape ==="
