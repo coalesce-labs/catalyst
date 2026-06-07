@@ -157,6 +157,44 @@ test_render_no_data_placeholder() {
   fi
 }
 
+# ─── Test: render.sh Plan today carries the Retro signals sub-section ───────
+# CTL-814: .today.retro_signals (latest ticket-retro watch-items) renders as a
+# fourth Plan-today sub-section; absent/empty input degrades to _no data_.
+test_render_retro_signals() {
+  echo "test: render.sh renders Plan today → Retro signals"
+  local fixture="$SCRATCH/fixture-retro.json"
+  cat > "$fixture" <<'JSON'
+{
+  "date": "2026-06-07",
+  "decisions": [],
+  "today": {
+    "linear_in_progress": [],
+    "calendar": [],
+    "followups": [],
+    "retro_signals": [
+      {"title": "watch: signal file missing artifact path on re-walk"},
+      {"title": "watch: stale plugin cache serving old skill bodies"}
+    ]
+  }
+}
+JSON
+  local out="$SCRATCH/render-retro.md"
+  bash "$MB_DIR/render.sh" --input "$fixture" --output "$out" >/dev/null
+  local content
+  content=$(cat "$out")
+  assert_grep "Retro signals sub-section present" "### Retro signals" "$content"
+  assert_grep "watch-item rendered" "- watch: signal file missing artifact path on re-walk" "$content"
+
+  # Empty retro_signals (and legacy inputs without the key) degrade to _no data_.
+  local fixture2="$SCRATCH/fixture-retro-empty.json"
+  echo '{"date":"2026-06-07","decisions":[],"today":{"linear_in_progress":[],"calendar":[],"followups":[]}}' > "$fixture2"
+  local out2="$SCRATCH/render-retro-empty.md"
+  bash "$MB_DIR/render.sh" --input "$fixture2" --output "$out2" >/dev/null
+  local section
+  section=$(awk '/^### Retro signals/{f=1; next} /^##/{f=0} f' "$out2")
+  assert_grep "empty retro_signals degrades to _no data_" "_no data_" "$section"
+}
+
 # ─── Test: output-path.sh default ───────────────────────────────────────────
 test_output_path_default() {
   echo "test: output-path.sh --date prints thoughts/briefings/<date>.md"
@@ -298,6 +336,7 @@ test_schema_exists
 test_render_produces_4_sections
 test_render_writes_decisions_block
 test_render_no_data_placeholder
+test_render_retro_signals
 test_output_path_default
 test_output_path_dry_run
 test_output_path_default_date

@@ -84,6 +84,13 @@ export interface SignalRow {
   has_migration: string;
   has_frontend: string;
   has_backend: string;
+  /**
+   * CTL-813: optional post-merge human re-score (story points) from the
+   * compound-log (`collect-ticket-signals.ts` joins it in). When present and
+   * a valid point value, it OVERRIDES the voted score — human ground truth
+   * beats the heuristic. Absent on older CSVs.
+   */
+  human_actual_points?: string;
 }
 
 export interface ScoredRow {
@@ -599,6 +606,48 @@ export function scoreRow(
   };
 }
 
+// -- Human re-score override (CTL-813) ----------------------------------------
+
+/** Reverse of TSHIRT_POINTS — points value → T-shirt. */
+export const POINTS_TSHIRT: Record<number, TShirt> = {
+  1: "XS",
+  3: "S",
+  5: "M",
+  8: "L",
+  13: "XL",
+};
+
+/**
+ * Parse the row's `human_actual_points` column. Returns the points value when
+ * it is one of the allowed scale values {1,3,5,8,13}, else null (invalid
+ * values are reported by the caller, never silently coerced).
+ */
+export function humanOverridePoints(row: SignalRow): number | null {
+  const raw = row.human_actual_points ?? "";
+  if (raw === "") return null;
+  const pts = Number.parseInt(raw, 10);
+  return POINTS_TSHIRT[pts] ? pts : null;
+}
+
+/**
+ * Apply the compound-log human re-score as a final override: the post-merge
+ * human ground truth beats any heuristic vote, so the corpus entry should
+ * anchor on it. Confidence becomes "high" and the rationale is annotated so
+ * provenance survives into the corpus. No-op when the column is absent or
+ * invalid (the caller warns on invalid).
+ */
+export function applyHumanOverride(scored: ScoredRow, row: SignalRow): ScoredRow {
+  const pts = humanOverridePoints(row);
+  if (pts === null) return scored;
+  return {
+    ...scored,
+    proposed_tshirt: POINTS_TSHIRT[pts],
+    points: pts,
+    confidence: "high",
+    reasoning: `${scored.reasoning}; human re-score override (compound-log)`,
+  };
+}
+
 // -- Corpus entry builder ----------------------------------------------------
 
 function numOrNull(s: string): number | null {
@@ -863,7 +912,10 @@ async function main(): Promise<void> {
   for (const { row, tier } of tieredRows) {
     if (tier !== 4) {
       const { tshirt } = scoreClosedTicket(row, tier);
-      closedPool.push({ row, tshirt, tier });
+      // CTL-813: a human re-score anchors the NN pool too — neighbors should
+      // vote with ground truth, not the heuristic it corrects.
+      const humanPts = humanOverridePoints(row);
+      closedPool.push({ row, tshirt: humanPts !== null ? POINTS_TSHIRT[humanPts] : tshirt, tier });
     }
   }
 
@@ -873,8 +925,19 @@ async function main(): Promise<void> {
     );
   }
 
+  // CTL-813: warn (don't silently drop) when a human re-score is present but
+  // not on the points scale — the override only honors {1,3,5,8,13}.
+  for (const { row } of tieredRows) {
+    const raw = row.human_actual_points ?? "";
+    if (raw !== "" && humanOverridePoints(row) === null) {
+      console.warn(
+        `[score] ${row.ticket_id}: human_actual_points=${raw} not in {1,3,5,8,13} — override ignored`,
+      );
+    }
+  }
+
   const scored = tieredRows.map(({ row, tier }) =>
-    scoreRow(row, tier, closedPool),
+    applyHumanOverride(scoreRow(row, tier, closedPool), row),
   );
   const corpus = tieredRows.map(({ row }, i) =>
     buildCorpusEntry(row, scored[i]),

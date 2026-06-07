@@ -68,10 +68,46 @@ export function heldFor(labels) {
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
 export const PHASE_TO_LINEAR = {
-  triage: "Research", research: "Research", plan: "Plan", implement: "Implement",
+  triage: "Triage", research: "Research", plan: "Plan", implement: "Implement",
   verify: "Validate", review: "Validate", pr: "PR", "monitor-merge": "PR",
   "monitor-deploy": "Done", done: "Done",
+  queued: "Todo",  // synthetic phase for eligible-queue board cards (CTL-767)
 };
+
+// synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
+// so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
+// fields default to null / empty since there is no worker dir for these tickets.
+export function synthesizeQueuedTicket(e, linfo) {
+  const li = linfo[e.id] ?? {};
+  return {
+    id: e.id,
+    title: e.title || e.id,
+    type: "task",
+    repo: e.repo || repoFor(e.id),
+    team: e.team || teamFor(e.id),
+    phase: "queued",
+    status: "queued",
+    model: null,
+    linearState: PHASE_TO_LINEAR.queued,
+    workerStatus: null,
+    activeState: null,
+    working: false,
+    lastActiveMs: null,
+    priority: li.priority ?? e.priority ?? 0,
+    estimate: li.estimate ?? null,
+    scope: null,
+    project: li.project ?? null,
+    costUSD: null,
+    tokens: null,
+    turns: null,
+    phaseCosts: null,
+    phaseSummary: [],
+    pr: null,
+    updatedAt: e.createdAt || new Date(0).toISOString(),
+    held: heldFor(li.labels),
+    blockers: [],
+  };
+}
 
 // team/prefix → repo swim-lane label
 const TEAM_REPO = { CTL: "catalyst", ADV: "adva" };
@@ -496,11 +532,13 @@ export async function assembleBoard() {
     .filter((t) => t.workerStatus === null && t.status === "done")
     .sort(byRecent)
     .slice(0, 12);
-  tickets = [...liveTickets, ...moving, ...recentDone];
+  // eligible queue tickets → thin Todo-column board cards (CTL-767)
+  const notInFlight = eligible.filter((e) => !ticketIds.has(e.id));
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo));
+  tickets = [...liveTickets, ...moving, ...recentDone, ...queuedTickets];
 
-  // priority queue: eligible (not yet in-flight), globally ranked
-  const queue = await Promise.all(eligible
-    .filter((e) => !ticketIds.has(e.id))
+  // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
+  const queue = await Promise.all(notInFlight
     .sort(compareQueued)
     .map(async (e, i) => {
       const { triage } = await readTicketArtifacts(e.id);
