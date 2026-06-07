@@ -53,7 +53,7 @@ catalyst-events help
 
 ## 4. Start the stack
 
-Bring the four Catalyst services up in dependency order (broker → monitor → execution-core):
+Bring the three core Catalyst services up in dependency order (broker → monitor → execution-core), plus the opt-in mitmproxy capture service if you pass `--proxy`:
 
 ```bash
 catalyst-stack start

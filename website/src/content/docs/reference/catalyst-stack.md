@@ -68,7 +68,7 @@ Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` ins
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CATALYST_REPO_DIR` | `~/code-repos/github/coalesce-labs/catalyst` | Repo root used by `--hotpatch`. |
-| `MITM_LOG` | `~/catalyst/mitm.log` | mitmproxy process log. |
+| `MITM_LOG` | `~/catalyst/linear-proxy.jsonl` | JSONL capture path read by the mitmproxy addon (`mitm_linear_addon.py`) — not the process log. The mitmdump process log is fixed at `~/catalyst/mitm.log` and cannot be overridden. |
 
 ## Exit codes
 

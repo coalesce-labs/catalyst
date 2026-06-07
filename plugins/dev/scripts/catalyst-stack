@@ -2,7 +2,7 @@
 # catalyst-stack — bring the catalyst stack up (or down) on this host.
 #
 # Order on start: mitmproxy → broker → monitor → execution-core
-#               (monitor → broker → exec-core is the dependency order;
+#               (broker → monitor → exec-core is the dependency order;
 #                mitmproxy is independent + first so the proxy env vars
 #                set below have somewhere to forward to)
 # Order on stop: reverse.
