@@ -650,6 +650,16 @@ echo "5g: empty subject → echoes ticket"
 P5G_OUT="$(draft_pr_title "CTL-783" "" 2>/dev/null)"
 assert_eq "CTL-783" "$P5G_OUT" "5g: empty subject → echoes ticket"
 
+# 5i: multiple colons in subject → split on FIRST colon only (pins design decision)
+echo "5i: multiple colons → split on first colon only"
+P5I_OUT="$(draft_pr_title "CTL-783" "chore: a: b: c" 2>/dev/null)"
+assert_eq "chore: CTL-783 a: b: c" "$P5I_OUT" "5i: multi-colon subject splits on first colon"
+
+# 5j: uppercase type prefix is NOT conventional → falls through to "<ticket>: <subject>"
+echo "5j: uppercase type prefix → non-conventional fallback"
+P5J_OUT="$(draft_pr_title "CTL-783" "Feat(dev): uppercase type" 2>/dev/null)"
+assert_eq "CTL-783: Feat(dev): uppercase type" "$P5J_OUT" "5j: uppercase prefix treated as non-conventional"
+
 # 5h: zsh-safe — draft_pr_title accessible under zsh
 echo "5h: zsh-safe — draft_pr_title accessible under zsh"
 ZSH5H="$(zsh -c "source '${DRAFT_PR_LIB}' && type draft_pr_title" 2>&1)"
