@@ -449,13 +449,32 @@ detect_os() {
 	esac
 }
 
-# Create ~/.local/bin and persist it on PATH via ~/.zshenv. Idempotent.
+# Shell rc files to persist PATH lines into, picked by login shell ($SHELL):
+# zsh → ~/.zshenv; bash → ~/.bashrc + ~/.profile (interactive + login);
+# unknown → all three. Fresh Linux machines default to bash, so writing only
+# ~/.zshenv left installed tools invisible in new shells (CTL-844 remediate).
+path_rc_files() {
+	case "${SHELL:-}" in
+	*zsh) echo "$HOME/.zshenv" ;;
+	*bash) printf '%s\n' "$HOME/.bashrc" "$HOME/.profile" ;;
+	*) printf '%s\n' "$HOME/.zshenv" "$HOME/.bashrc" "$HOME/.profile" ;;
+	esac
+}
+
+# Append a PATH export line to each shell rc file exactly once. Idempotent.
+persist_path_line() {
+	local line="$1" rc
+	while IFS= read -r rc; do
+		if ! grep -qsF "$line" "$rc" 2>/dev/null; then
+			printf '\n# Added by catalyst setup (no-sudo tool installs)\n%s\n' "$line" >>"$rc"
+		fi
+	done < <(path_rc_files)
+}
+
+# Create ~/.local/bin and persist it on PATH via the shell rc files. Idempotent.
 ensure_local_bin() {
 	mkdir -p "$LOCAL_BIN"
-	local line='export PATH="$HOME/.local/bin:$PATH"'
-	if ! grep -qsF "$line" "$HOME/.zshenv" 2>/dev/null; then
-		printf '\n# Added by catalyst setup (no-sudo tool installs)\n%s\n' "$line" >>"$HOME/.zshenv"
-	fi
+	persist_path_line 'export PATH="$HOME/.local/bin:$PATH"'
 	export PATH="$LOCAL_BIN:$PATH"
 }
 
@@ -603,7 +622,8 @@ offer_install_node() {
 		return 1
 	fi
 	if command -v brew &>/dev/null; then
-		brew install node && return 0
+		if brew install node; then return 0; fi
+		print_warning "brew install node failed — falling back to no-sudo install"
 	fi
 	ensure_local_bin
 	local os arch version tarball
@@ -618,16 +638,24 @@ offer_install_node() {
 	tarball="node-${version}-${os}-${arch}.tar.gz"
 	echo "  Downloading ${tarball} ..."
 	mkdir -p "$HOME/.local"
-	if curl -fsSL "https://nodejs.org/dist/${version}/${tarball}" |
-		tar -xz -C "$HOME/.local" &&
-		rm -rf "$HOME/.local/node" &&
-		mv "$HOME/.local/node-${version}-${os}-${arch}" "$HOME/.local/node"; then
+	# Download + extract + verify in a temp dir, then swap — never delete a
+	# working ~/.local/node until the replacement node executes (CTL-844
+	# remediate: a partial extract must not clobber a good install).
+	local tmp
+	tmp=$(mktemp -d "$HOME/.local/.node-install.XXXXXX")
+	if curl -fsSL -o "$tmp/$tarball" "https://nodejs.org/dist/${version}/${tarball}" &&
+		tar -xzf "$tmp/$tarball" -C "$tmp" &&
+		"$tmp/node-${version}-${os}-${arch}/bin/node" --version >/dev/null 2>&1; then
+		rm -rf "$HOME/.local/node"
+		mv "$tmp/node-${version}-${os}-${arch}" "$HOME/.local/node"
+		rm -rf "$tmp"
 		ln -sf "$HOME/.local/node/bin/node" "$LOCAL_BIN/node"
 		ln -sf "$HOME/.local/node/bin/npm" "$LOCAL_BIN/npm"
 		ln -sf "$HOME/.local/node/bin/npx" "$LOCAL_BIN/npx"
 		print_success "Node $(node --version 2>/dev/null || echo "$version") installed to ~/.local/node"
 		return 0
 	fi
+	rm -rf "$tmp"
 	print_error "Node install failed. Manual: https://nodejs.org/en/download"
 	return 1
 }
@@ -640,10 +668,7 @@ offer_install_bun() {
 		return 1
 	fi
 	if curl -fsSL https://bun.sh/install | bash; then
-		local line='export PATH="$HOME/.bun/bin:$PATH"'
-		if ! grep -qsF "$line" "$HOME/.zshenv" 2>/dev/null; then
-			printf '%s\n' "$line" >>"$HOME/.zshenv"
-		fi
+		persist_path_line 'export PATH="$HOME/.bun/bin:$PATH"'
 		export PATH="$HOME/.bun/bin:$PATH"
 		command -v bun &>/dev/null && {
 			print_success "bun installed ($(bun --version))"
@@ -668,7 +693,9 @@ offer_install_humanlayer() {
 		print_error "npm not found — node/npm must be installed first (see above)."
 		return 1
 	fi
-	if npm install -g humanlayer && command -v humanlayer &>/dev/null; then
+	# Run the CLI, don't just `command -v` it — a global-npm prefix off PATH
+	# or a stale shim passes lookup without working (CTL-844 remediate).
+	if npm install -g humanlayer && humanlayer --version >/dev/null 2>&1; then
 		print_success "HumanLayer CLI installed ($(humanlayer --version 2>/dev/null || true))"
 		return 0
 	fi
@@ -685,7 +712,8 @@ offer_install_gh_cli() {
 		return 1
 	fi
 	if command -v brew &>/dev/null; then
-		brew install gh && return 0
+		if brew install gh; then return 0; fi
+		print_warning "brew install gh failed — falling back to no-sudo install"
 	fi
 	# No-sudo: release archive → ~/.local/bin (jq is guaranteed installed by now)
 	ensure_local_bin
@@ -697,6 +725,10 @@ offer_install_gh_cli() {
 		return 1
 	}
 	if [[ "$(uname -s)" == "Darwin" ]]; then os="macOS"; ext="zip"; else os="linux"; ext="tar.gz"; fi
+	if [[ "$ext" == "zip" ]] && ! command -v unzip &>/dev/null; then
+		print_error "unzip not found — cannot extract gh archive. Manual: https://cli.github.com/"
+		return 1
+	fi
 	arch=$(detect_arch)
 	dir="gh_${ver}_${os}_${arch}"
 	tmp=$(mktemp -d)
@@ -735,9 +767,12 @@ offer_install_jq() {
 			echo "  No package manager found — installing official jq binary (no sudo) ..."
 			ensure_local_bin
 			local artifact="jq-$(detect_os)-$(detect_arch)"
+			# Execute the downloaded binary once — chmod + command -v alone
+			# would bless a corrupted/partial download (CTL-844 remediate).
 			if curl -fsSL -o "$LOCAL_BIN/jq" \
 				"https://github.com/jqlang/jq/releases/latest/download/${artifact}" &&
-				chmod +x "$LOCAL_BIN/jq" && command -v jq &>/dev/null; then
+				chmod +x "$LOCAL_BIN/jq" &&
+				"$LOCAL_BIN/jq" --version >/dev/null 2>&1; then
 				print_success "jq installed to $LOCAL_BIN/jq"
 				return 0
 			fi
