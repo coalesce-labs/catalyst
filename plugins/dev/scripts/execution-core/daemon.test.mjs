@@ -1421,3 +1421,46 @@ describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)",
     expect(typeof capturedOpts?.onUpdate).toBe("function");
   });
 });
+
+// ─── CTL-823: gateway wiring (the slice's whole point — pin it) ──────────────
+
+describe("CTL-823 gateway wiring", () => {
+  test("injected classifyResolution serves a fresh store hit with ZERO live reads", async () => {
+    const { openBrokerStateDb, closeBrokerStateDb, upsertTicketDescriptor } = await import(
+      "../broker/broker-state.mjs"
+    );
+    // Seed the descriptor store at the path the daemon's default reader
+    // resolves (CATALYST_DIR/filter-state.db — pinned to this test's tmp dir).
+    openBrokerStateDb(join(catalystDir, "filter-state.db"));
+    upsertTicketDescriptor({ ticket: "CTL-GW", state: "Todo", uuid: "u-gw" });
+    closeBrokerStateDb();
+
+    let captured;
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        captured = o;
+      },
+      watchRegistry: false,
+    });
+
+    // The reader is threaded for the scheduler's fetchState injections…
+    expect(captured.gateway).toBeTruthy();
+    // …and the classify wrapper serves the store WITHOUT touching linearis:
+    // an exec that would return a definitive not-found must never be reached.
+    const execCalls = [];
+    const exec = (...args) => {
+      execCalls.push(args);
+      return { code: 0, stdout: JSON.stringify({ error: "Issue not found" }) };
+    };
+    expect(captured.classifyResolution("CTL-GW", { exec })).toBe("exists");
+    expect(execCalls.length).toBe(0);
+
+    // Store MISS falls through to the live read (fail-open) — and the
+    // daemon's reader cannot be dropped by the caller's opts.
+    expect(captured.classifyResolution("CTL-MISSING", { exec })).toBe("not-found");
+    expect(execCalls.length).toBe(1);
+  });
+});
