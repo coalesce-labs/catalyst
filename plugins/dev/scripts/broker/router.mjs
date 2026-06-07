@@ -57,6 +57,8 @@ import {
   markAgentDone,
   getAgentsByTicket,
   upsertTicketState,
+  upsertTicketDescriptor,
+  markTicketRemovedByUuid,
   upsertWaitingSession,
   clearWaitingSession,
 } from "./broker-state.mjs";
@@ -888,6 +890,60 @@ const TICKET_LIFECYCLE_ALL_WAKE_ON = [
   "comment_added",
 ];
 
+// foldLinearIssueDescriptor — CTL-822 (Gateway L1 child b): write-through of
+// every linear.issue.* event into the durable descriptor store (CTL-821).
+// KEY-PRESENCE semantics deliberately: a webhook's issue data is a full
+// snapshot, so toAssigneeId:null means UNASSIGNED (clear), and toLabels []
+// means explicitly-empty while null means "labels absent from payload"
+// (unknown → keep). Every non-remove issue event proves existence, so it also
+// clears any stale removed flag (Linear unarchive arrives as `update`).
+// `remove` payloads carry ONLY the entityId UUID → resolve via the CTL-821
+// UUID→identifier index; an unresolvable remove with no identifier is left
+// for the reconcile backstop (child e).
+function foldLinearIssueDescriptor(name, detail, eventTicket) {
+  if (typeof name !== "string" || !name.startsWith("linear.issue.")) return;
+  try {
+    const uuid = detail.issueId ?? null;
+    if (name === "linear.issue.removed") {
+      if (uuid) {
+        const hit = markTicketRemovedByUuid(uuid);
+        if (!hit && eventTicket) {
+          upsertTicketDescriptor({ ticket: eventTicket, uuid, removed: true });
+        }
+      } else if (eventTicket) {
+        upsertTicketDescriptor({ ticket: eventTicket, removed: true });
+      }
+      return;
+    }
+    if (!eventTicket) return;
+    const descriptor = { ticket: eventTicket, removed: false };
+    if (detail.toState != null) descriptor.state = detail.toState;
+    if (detail.toPriority !== undefined && detail.toPriority !== null) {
+      descriptor.priority = detail.toPriority;
+    }
+    if ("toAssigneeId" in detail) {
+      const v = detail.toAssigneeId ?? null;
+      // Linear sends partial issue payloads (data.assignee can be omitted on
+      // an ASSIGNED issue), and the emitter always includes the key. So a
+      // null only CLEARS when the unassignment is evidenced: an assignee
+      // change topic/updatedFrom, or a create (born unassigned). Otherwise
+      // null is "unknown" → keep. Non-null always sets.
+      const changeEvidenced =
+        v !== null ||
+        name === "linear.issue.assignee_changed" ||
+        detail.action === "create" ||
+        (Array.isArray(detail.updatedFromKeys) && detail.updatedFromKeys.includes("assigneeId"));
+      if (changeEvidenced) descriptor.assignee = v;
+    }
+    if (detail.toLabels != null) descriptor.labels = detail.toLabels;
+    if (uuid) descriptor.uuid = uuid;
+    upsertTicketDescriptor(descriptor);
+  } catch {
+    /* DB not opened, or a UNIQUE-uuid violation from a buggy upstream — the
+       routing path must never die on a descriptor write */
+  }
+}
+
 export function tryTicketLifecycleRoute(event, interestsMap) {
   const matches = [];
   // CTL-357: read event name + payload via the canonical-aware helpers so
@@ -1631,6 +1687,23 @@ export function processEvent(event) {
   }
 
   if (shouldSkipEvent(event)) return;
+
+  // CTL-822: durable descriptor write-through. MUST run for every
+  // linear.issue.* event REGARDLESS of registered interests — webhooks arrive
+  // whether or not any orchestration is active, and the descriptor store is
+  // CTL-823's source of truth. Mirrors the projectWorkerStateEvent model
+  // (folds live ABOVE the `if (!interests.size) return` gate; the verify
+  // panel caught that placing this inside tryTicketLifecycleRoute silently
+  // starved the store during idle periods).
+  if (typeof name === "string" && name.startsWith("linear.issue.")) {
+    const foldDetail = getEventPayload(event);
+    const foldTicket =
+      event.attributes?.["linear.issue.identifier"] ??
+      foldDetail.ticket ??
+      foldDetail.identifier ??
+      null;
+    foldLinearIssueDescriptor(name, foldDetail, foldTicket);
+  }
 
   if (name === "heartbeat") {
     const sourceId = event.worker ?? event.session ?? event.orchestrator;

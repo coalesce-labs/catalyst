@@ -19,6 +19,26 @@ function issuePayload(overrides: Record<string, unknown> = {}): unknown {
 }
 
 describe("parseLinearWebhookEvent — Issue", () => {
+  it("extracts issueId from data.id (CTL-822 — all a remove carries)", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload());
+    expect(ev.kind).toBe("issue");
+    if (ev.kind !== "issue") return;
+    expect(ev.issueId).toBe("issue-uuid-1");
+  });
+
+  it("remove with ONLY data.id still yields issueId (no identifier)", () => {
+    const ev = parseLinearWebhookEvent("Issue", {
+      action: "remove",
+      type: "Issue",
+      data: { id: "removed-uuid-9" },
+    });
+    expect(ev.kind).toBe("issue");
+    if (ev.kind !== "issue") return;
+    expect(ev.topic).toBe("linear.issue.removed");
+    expect(ev.issueId).toBe("removed-uuid-9");
+    expect(ev.ticket).toBeNull();
+  });
+
   it("Issue create → linear.issue.created", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",

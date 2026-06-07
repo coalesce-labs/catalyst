@@ -24,6 +24,12 @@ export type LinearWebhookEvent =
       teamKey: string | null;
       data: Record<string, unknown>;
       updatedFromKeys: string[];
+      /**
+       * Linear issue entityId UUID from data.id; null when absent. The
+       * `remove` action's payload carries ONLY this UUID (no identifier), so
+       * the Gateway's UUID→identifier index (CTL-821) is keyed off it. CTL-822.
+       */
+      issueId: string | null;
       /** Linear user UUID who triggered the action; null when absent. CTL-263. */
       actorId: string | null;
       /** Current state name from data.state.name; null when absent. CTL-424. */
@@ -198,6 +204,7 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     teamKey: teamKeyFromData(data),
     data,
     updatedFromKeys,
+    issueId: getOptStr(data, "id"), // CTL-822 — entityId UUID (all a `remove` carries)
     actorId,
     actorName,
     toState,
