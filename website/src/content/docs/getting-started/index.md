@@ -51,7 +51,17 @@ which catalyst-events
 catalyst-events help
 ```
 
-## 4. Add Catalyst to your project
+## 4. Start the stack
+
+Bring the four Catalyst services up in dependency order (broker → monitor → execution-core):
+
+```bash
+catalyst-stack start
+```
+
+Run this once after each reboot or after pulling new code. See [catalyst-stack reference](/reference/catalyst-stack/) for flags including `--hotpatch` (apply an update without reinstalling) and `--proxy` (opt-in Linear traffic capture via mitmproxy).
+
+## 5. Add Catalyst to your project
 
 Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code knows the available workflows:
 
@@ -59,7 +69,7 @@ Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code knows t
 cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
 ```
 
-## 5. Try it
+## 6. Try it
 
 Start a Claude Code session and run:
 
