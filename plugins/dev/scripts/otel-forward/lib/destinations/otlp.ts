@@ -5,12 +5,20 @@ import { log } from "../logger.ts";
 
 const destLog = log.child({ destination: "otlp" });
 
-interface OtlpAttr { key: string; value: { stringValue?: string; intValue?: number } }
+interface OtlpAttr { key: string; value: { stringValue?: string; intValue?: number; doubleValue?: number } }
 
+// CTL-812: fractional numbers MUST map to doubleValue. The collector's OTLP/JSON
+// decoder hard-rejects a float inside intValue ("assertInteger: can not decode
+// float as int" → HTTP 400), and one bad attribute 400s the ENTIRE batch — the
+// catalyst-agent's float metrics (host.cpu_pct, ratelimit.*_pace, …) wedged every
+// batch they rode in into the DLQ this way. Integers keep intValue so existing
+// integer-valued labels are byte-for-byte unchanged in Loki.
 function toAttrArray(obj: Record<string, unknown>): OtlpAttr[] {
   return Object.entries(obj).map(([key, val]) =>
     typeof val === "number"
-      ? { key, value: { intValue: val } }
+      ? Number.isInteger(val)
+        ? { key, value: { intValue: val } }
+        : { key, value: { doubleValue: val } }
       : { key, value: { stringValue: String(val ?? "") } }
   );
 }

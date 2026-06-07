@@ -122,8 +122,14 @@ function otlpAttributes(obj) {
 
 // envelopeToLogRecord — map one catalyst-agent envelope to an OTLP logRecord.
 // timeUnixNano is derived from the envelope ts (ms → ns); severity carries
-// through as INFO/9; the dot-form attributes become OTLP attributes and the
-// body.payload rides as a stringValue body for human readability.
+// through as INFO/9; the dot-form attributes become OTLP attributes.
+//
+// CTL-812 BODY CONVENTION: the body is the bare event name — exactly what
+// otel-forward emits for the same envelope (body.message ?? event.name). The
+// catalyst-otel dashboards match events with LogQL line filters
+// (|= "host.metrics.sampled"), so the direct-OTLP path must produce the same
+// line or every panel silently misses Approach-B events. The high-cardinality
+// body.payload mirror stays local to the event log on purpose.
 function envelopeToLogRecord(envelope) {
   const ms = Date.parse(envelope.ts);
   const timeUnixNano = String((Number.isFinite(ms) ? ms : Date.now()) * 1_000_000);
@@ -132,7 +138,7 @@ function envelopeToLogRecord(envelope) {
     observedTimeUnixNano: timeUnixNano,
     severityNumber: 9,
     severityText: "INFO",
-    body: { stringValue: JSON.stringify(envelope.body?.payload ?? {}) },
+    body: { stringValue: envelope.attributes?.["event.name"] ?? "" },
     attributes: otlpAttributes(envelope.attributes ?? {}),
   };
 }
