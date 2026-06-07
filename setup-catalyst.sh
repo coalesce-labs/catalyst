@@ -87,28 +87,26 @@ ask_yes_no() {
 	local ni_answer="${3:-$default}"
 	local suffix="[y/N]"
 	[[ $default == "y" ]] && suffix="[Y/n]"
+	local REPLY
 
+	# Non-interactive mode (HEAD/sibling feature): answer with ni_answer
+	# without touching stdin.
 	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
 		echo "$prompt $suffix → ${ni_answer} (non-interactive)" >&2
 		[[ $ni_answer == "y" ]]
 		return
 	fi
 
-	if [[ -t 0 ]]; then
-		# Interactive terminal: keep single-keypress UX.
-		read -p "$prompt $suffix " -n 1 -r || REPLY=""
-		echo
-	else
-		# Piped/redirected stdin: consume the whole line so subsequent
-		# reads stay aligned; EOF (read rc!=0) falls back to the default.
-		read -p "$prompt $suffix " -r || REPLY=""
-		REPLY="${REPLY:0:1}"
-	fi
+	# CTL-843: full-line read — `read -n 1` left the trailing newline in stdin,
+	# which bled into the next prompt and produced garbage config values. A
+	# full-line read keeps consecutive prompts aligned for both interactive
+	# terminals and piped stdin; EOF (read rc!=0) falls back to the default.
+	read -r -p "$prompt $suffix " REPLY || REPLY=""
 
 	if [[ -z $REPLY ]]; then
 		[[ $default == "y" ]]
 	else
-		[[ $REPLY =~ ^[Yy]$ ]]
+		[[ $REPLY =~ ^[Yy] ]]
 	fi
 }
 
@@ -125,6 +123,39 @@ prompt_value() {
 	fi
 	read -p "$prompt " -r reply || reply=""
 	echo "${reply:-$default}"
+}
+
+# Merge a patch object into .catalyst.<section> of a config JSON string (CTL-843).
+# The prompt run is authoritative for its own keys ($owned, a JSON array) — stale
+# owned keys are deleted — and ALL other keys (e.g. linear.agent) are preserved.
+merge_catalyst_section() {
+	local config="$1" section="$2" patch="$3" owned="$4"
+	echo "$config" | jq --arg s "$section" --argjson patch "$patch" --argjson owned "$owned" '
+		.catalyst //= {}
+		| .catalyst[$s] = (
+			((.catalyst[$s] // {}) | with_entries(select(.key as $k | $owned | index($k) | not)))
+			+ $patch
+		)'
+}
+
+# Write the per-project secrets config safely (CTL-843): validate JSON first,
+# back up the existing file (timestamped, 0600), then write atomically.
+write_secrets_config() {
+	local content="$1" config_file="$2" tmp
+	tmp=$(mktemp) || return 1
+	if ! echo "$content" | jq . >"$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		print_error "Refusing to write invalid JSON to $config_file — existing file left untouched"
+		return 1
+	fi
+	if [[ -f $config_file ]]; then
+		local backup="${config_file}.bak-$(date +%Y%m%d-%H%M%S)"
+		cp -p "$config_file" "$backup"
+		chmod 600 "$backup"
+		print_success "Backed up existing config to $backup"
+	fi
+	chmod 600 "$tmp"
+	mv "$tmp" "$config_file"
 }
 
 #
@@ -1378,22 +1409,24 @@ setup_catalyst_secrets() {
 		existing_config='{"catalyst":{}}'
 	fi
 
-	# Prompt for each integration
-	prompt_linear_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	# Prompt for each integration (CTL-843: private mktemp, not a fixed /tmp path)
+	local prompt_tmp
+	prompt_tmp=$(mktemp)
+	prompt_linear_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_sentry_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_sentry_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_posthog_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_posthog_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_exa_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_exa_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
+	rm -f "$prompt_tmp"
 
-	# Save final config
-	echo "$existing_config" | jq . >"$config_file"
-	rm /tmp/catalyst-config-temp.json
+	# Save final config (CTL-843: backup + atomic write)
+	write_secrets_config "$existing_config" "$config_file"
 
 	print_success "Secrets config saved: $config_file"
 	echo ""
@@ -1576,16 +1609,13 @@ prompt_linear_config() {
 		read -p "Linear team name: " linear_team_name
 	fi
 
-	# Build config
-	echo "$config" | jq \
-		--arg token "$linear_token" \
-		--arg team "$linear_team" \
+	# Build config (CTL-843: merge — never drop unprompted keys like .agent)
+	local patch
+	patch=$(jq -n --arg token "$linear_token" --arg team "$linear_team" \
 		--arg teamName "$linear_team_name" \
-		'.catalyst.linear = {
-      "apiToken": $token,
-      "teamKey": $team,
-      "defaultTeam": $teamName
-    }'
+		'{apiToken: $token, teamKey: $team, defaultTeam: $teamName}')
+	merge_catalyst_section "$config" linear "$patch" \
+		'["apiToken","teamKey","defaultTeam"]'
 }
 
 prompt_sentry_config() {
@@ -1821,40 +1851,22 @@ EOF
 		read -p "Sentry project slug: " sentry_project
 	fi
 
-	# Build config based on project selection
+	# Build config (CTL-843: merge — never drop unprompted keys)
+	local sentry_owned='["org","project","projects","defaultProject","authToken"]'
+	local patch
 	if [[ -z $sentry_project ]]; then
-		# All projects - just store org and token
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "authToken": $token
-      }'
+		patch=$(jq -n --arg org "$sentry_org" --arg token "$sentry_token" \
+			'{org: $org, authToken: $token}')
 	elif [[ $sentry_project =~ ^\[.*\]$ ]]; then
-		# Multiple projects - store as array
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--argjson projects "$sentry_project" \
+		patch=$(jq -n --arg org "$sentry_org" --argjson projects "$sentry_project" \
 			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "projects": $projects,
-        "defaultProject": $projects[0],
-        "authToken": $token
-      }'
+			'{org: $org, projects: $projects, defaultProject: $projects[0], authToken: $token}')
 	else
-		# Single project - store as string for backward compatibility
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--arg project "$sentry_project" \
+		patch=$(jq -n --arg org "$sentry_org" --arg project "$sentry_project" \
 			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "project": $project,
-        "authToken": $token
-      }'
+			'{org: $org, project: $project, authToken: $token}')
 	fi
+	merge_catalyst_section "$config" sentry "$patch" "$sentry_owned"
 }
 
 prompt_posthog_config() {
@@ -1906,13 +1918,10 @@ prompt_posthog_config() {
 	read -p "PostHog API key: " posthog_key
 	read -p "PostHog project ID: " posthog_project
 
-	echo "$config" | jq \
-		--arg apiKey "$posthog_key" \
-		--arg projectId "$posthog_project" \
-		'.catalyst.posthog = {
-      "apiKey": $apiKey,
-      "projectId": $projectId
-    }'
+	local patch
+	patch=$(jq -n --arg apiKey "$posthog_key" --arg projectId "$posthog_project" \
+		'{apiKey: $apiKey, projectId: $projectId}')
+	merge_catalyst_section "$config" posthog "$patch" '["apiKey","projectId"]'
 }
 
 prompt_exa_config() {
@@ -1963,11 +1972,9 @@ prompt_exa_config() {
 
 	read -p "Exa API key: " exa_key
 
-	echo "$config" | jq \
-		--arg apiKey "$exa_key" \
-		'.catalyst.exa = {
-      "apiKey": $apiKey
-    }'
+	local patch
+	patch=$(jq -n --arg apiKey "$exa_key" '{apiKey: $apiKey}')
+	merge_catalyst_section "$config" exa "$patch" '["apiKey"]'
 }
 
 #
@@ -2437,9 +2444,16 @@ main() {
 }
 
 # Run main unless the script is being sourced (tests source it for unit access).
-# When piped to bash (curl ... | bash) or executed directly, the return-probe
-# fails (return is only valid inside a sourced script/function), so main runs;
-# only a `source` invocation skips it.
-if ! (return 0 2>/dev/null); then
+# Two independent skip conditions, both required:
+#   1. (HEAD) return-probe: when piped to bash (curl ... | bash) or executed
+#      directly, the return-probe fails (return is only valid inside a sourced
+#      script/function), so main runs; a plain `source` invocation skips it.
+#   2. (CTL-843) CATALYST_SETUP_LIB_ONLY env guard: lets tests source the
+#      function library without running setup even from contexts where the
+#      return-probe would succeed/fail unexpectedly (curl | bash runs from
+#      stdin where BASH_SOURCE is empty, so an env guard is the reliable signal).
+if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY:-} ]]; then
+	:
+else
 	main "$@"
 fi
