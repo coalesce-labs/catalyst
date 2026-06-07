@@ -332,12 +332,12 @@ else
 fi
 ```
 
-CTL-709: push the branch and open a draft PR now that commits exist (past the empty-branch gate).
-The draft is fail-open — a push or PR failure prints a warning but does **not** block `--status
-complete`. Phase-pr detects and promotes the draft instead of creating a new PR (avoiding the
-`create-pr` interactive "PR already exists" hang). Gated on `draftPr.enabled` (default `true`)
-so it can be disabled with one config key. Writes `.draftPr={number,url,isDraft}` into the signal
-file so downstream phases can see the PR number without querying GitHub.
+CTL-783: The canonical `implement-plan` skill opens the draft PR at the **first** plan-phase
+commit via the `implement-plan-draft-pr-early` fence (idempotent — later commits just push).
+This End-block fence is the **idempotent backstop**: it fires after all phases complete and is
+the sole writer of `.draftPr` into the signal file. Gated on `draftPr.enabled` (default `true`)
+so it can be disabled with one config key. Phase-pr detects and promotes the draft instead of
+creating a new PR (avoiding the `create-pr` interactive "PR already exists" hang).
 
 ```bash phase-implement-draft-pr
 # CTL-709: open a draft PR + push as soon as we have commits, so CI runs during

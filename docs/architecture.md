@@ -276,6 +276,45 @@ The rebase is otherwise unchanged from CTL-667:
   (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.
 - **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc=1) is non-fatal.
 
+### PR as the durable work record (CTL-783)
+
+During an orchestrated implement phase the draft PR is the **off-disk record of active work**,
+visible in GitHub and survives daemon restarts:
+
+| Signal | Meaning |
+|--------|---------|
+| Branch exists, no PR | Worker not yet past first commit |
+| Draft PR open | Implementing (phase-implement in progress) |
+| PR ready (not draft) | In review (phase-pr promoted it) |
+| PR merged | Done |
+
+**Branch naming**: branches come from Linear's `branchName` field (`ryan/<ticket>-slug`); the
+daemon's `create-worktree.sh` never overrides this.
+
+**PR title convention**: `<type>(<scope>): <ticket> ...` (e.g.
+`feat(dev): CTL-783 draft-PR-early first-commit open`). Both `draft_pr_ensure` and
+`create-pr/SKILL.md` Step 7 route through `draft_pr_title` (in
+`plugins/dev/scripts/lib/draft-pr.sh`) which injects the ticket after the conventional prefix
+without fabricating type or scope.
+
+**Lifecycle**:
+
+1. `implement-plan/SKILL.md` runs the `implement-plan-draft-pr-early` fence after **each**
+   plan-phase commit — `draft_pr_push` + `draft_pr_ensure` (idempotent). First call opens the
+   draft PR; later calls just push. Interactive `/implement-plan` runs are gated out by
+   `[[ -n "${CATALYST_PHASE:-}" ]]`.
+2. `phase-implement/SKILL.md` End block runs the `phase-implement-draft-pr` fence as the
+   **idempotent backstop** after all phases complete; this is also the **sole writer** of
+   `.draftPr={number,url,isDraft}` into the phase signal file.
+3. `phase-pr/SKILL.md` calls `draft_pr_promote` to flip the draft PR to ready instead of
+   creating a new PR (avoids the `create-pr` interactive "PR already exists" hang).
+
+**Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` to create the PR
+only at the pr phase (End-block backstop still runs; `draft_pr_push` becomes the only push).
+
+**Deferred**: letting the scheduler read `.draftPr` draft-state as a secondary advancement
+signal (currently phase advancement is driven by signal `status === "done"` only).
+
 ### Runaway-loop guards (CTL-671)
 
 `schedulerTick` is hardened against runaway phase-dispatch/reclaim loops on phantom or

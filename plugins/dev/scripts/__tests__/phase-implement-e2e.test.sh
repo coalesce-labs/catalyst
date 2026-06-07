@@ -1299,6 +1299,182 @@ GHSTUB
   fi
 fi
 
+# ─── Test 24 (CTL-783): implement-plan early draft-pr fence contract ──────────
+SKILL_IMPLEMENT_PLAN="${REPO_ROOT}/plugins/dev/skills/implement-plan/SKILL.md"
+echo ""
+echo "Test 24 (CTL-783): implement-plan early draft-pr fence contract"
+if [[ -f "$SKILL_IMPLEMENT_PLAN" ]]; then
+  # A. fence present + uniquely named
+  assert_grep '```bash implement-plan-draft-pr-early' "$SKILL_IMPLEMENT_PLAN" \
+    "Test 24A: implement-plan-draft-pr-early fence present and uniquely named"
+  # B. sources lib/draft-pr.sh
+  assert_grep 'draft-pr\.sh' "$SKILL_IMPLEMENT_PLAN" \
+    "Test 24B: fence sources lib/draft-pr.sh"
+  # C. gated on CATALYST_PHASE being set
+  EARLY_FENCE_BODY="${SCRATCH}/t24-early-fence.sh"
+  awk '
+    /^```bash implement-plan-draft-pr-early$/ {grab=1; next}
+    grab && /^```[ \t]*$/ {grab=0}
+    grab {print}
+  ' "$SKILL_IMPLEMENT_PLAN" > "$EARLY_FENCE_BODY"
+  if [[ -s "$EARLY_FENCE_BODY" ]]; then
+    pass "Test 24: implement-plan-draft-pr-early fence extractable"
+    assert_grep 'CATALYST_PHASE' "$EARLY_FENCE_BODY" \
+      "Test 24C: fence is gated on CATALYST_PHASE (interactive runs unaffected)"
+    # D. gated on draft_pr_enabled
+    assert_grep 'draft_pr_enabled' "$EARLY_FENCE_BODY" \
+      "Test 24D: fence gates on draft_pr_enabled (config knob)"
+    # E. calls draft_pr_push AND draft_pr_ensure
+    assert_grep 'draft_pr_push' "$EARLY_FENCE_BODY" \
+      "Test 24E: fence calls draft_pr_push"
+    assert_grep 'draft_pr_ensure' "$EARLY_FENCE_BODY" \
+      "Test 24E: fence calls draft_pr_ensure"
+    # F. fail-open: no bare exit 1
+    if grep -qE '^\s*exit 1' "$EARLY_FENCE_BODY" 2>/dev/null; then
+      fail "Test 24F: fence must not contain bare 'exit 1' (fail-open required)"
+    else
+      pass "Test 24F: fence is fail-open (no bare exit 1)"
+    fi
+    # G. does NOT call phase-agent-emit-complete
+    if grep -q 'emit-complete' "$EARLY_FENCE_BODY" 2>/dev/null; then
+      fail "Test 24G: fence must not call emit-complete (phase wiring concern)"
+    else
+      pass "Test 24G: fence does not call emit-complete"
+    fi
+    # H. does NOT write .draftPr (signal writes belong to phase-implement End block)
+    if grep -q '\.draftPr' "$EARLY_FENCE_BODY" 2>/dev/null; then
+      fail "Test 24H: fence must not write .draftPr (signal writes belong to phase-implement End block)"
+    else
+      pass "Test 24H: fence does not write .draftPr (correct separation)"
+    fi
+    # I. runtime: extract + run fence with CATALYST_PHASE=implement, no-PR stub → gh pr create called once;
+    #    re-run with existing-PR stub → no second create.
+    T24_DIR="${SCRATCH}/t24-runtime"
+    mkdir -p "$T24_DIR"
+    T24_REPO="${T24_DIR}/repo"
+    T24_BARE="${T24_DIR}/repo-bare.git"
+    T24_BIN="${T24_DIR}/bin"
+    T24_GH_LOG="${T24_DIR}/gh.log"
+    T24_PLUGIN="${T24_DIR}/plugin"
+    mkdir -p "${T24_PLUGIN}/scripts/lib"
+    cp "${REPO_ROOT}/plugins/dev/scripts/lib/draft-pr.sh" "${T24_PLUGIN}/scripts/lib/draft-pr.sh"
+    git init --quiet "$T24_BARE" --bare -b main
+    git clone --quiet "$T24_BARE" "$T24_REPO"
+    (
+      cd "$T24_REPO"
+      git config user.email "test@example.com"
+      git config user.name "Test"
+      echo "base" > base.txt
+      git add base.txt
+      git commit --quiet -m "base"
+      git push --quiet origin main
+      git checkout --quiet -b feature
+      echo "work" > work.txt
+      git add work.txt
+      git commit --quiet -m "feat(dev): CTL-783 add draft pr early"
+      git push --quiet -u origin HEAD
+    ) 2>/dev/null
+    mkdir -p "$T24_BIN"
+    cat > "${T24_BIN}/gh" <<GHSTUB
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T24_GH_LOG}"
+if [[ "\$1" == "pr" && "\$2" == "view" ]]; then exit 1; fi
+if [[ "\$1" == "pr" && "\$2" == "create" ]]; then
+  echo "https://github.com/test/repo/pull/42"; exit 0
+fi
+if [[ "\$1" == "repo" && "\$2" == "view" ]]; then
+  echo '{"defaultBranchRef":{"name":"main"}}'; exit 0
+fi
+exit 0
+GHSTUB
+    chmod +x "${T24_BIN}/gh"
+    (
+      cd "$T24_REPO"
+      PATH="${T24_BIN}:${PATH}" \
+        CLAUDE_PLUGIN_ROOT="${T24_PLUGIN}" \
+        CATALYST_PHASE=implement \
+        CATALYST_TICKET=CTL-783 \
+        bash "$EARLY_FENCE_BODY" >"${T24_DIR}/stdout1.log" 2>"${T24_DIR}/stderr1.log"
+      echo "$?" > "${T24_DIR}/exit1"
+    ) || true
+    assert_eq "0" "$(cat "${T24_DIR}/exit1" 2>/dev/null)" "Test 24I: fence exits 0 (enabled + commits)"
+    if grep -q 'create' "${T24_GH_LOG}" 2>/dev/null; then
+      pass "Test 24I: gh pr create called on first run"
+    else
+      fail "Test 24I: gh pr create should be called — log: $(cat "${T24_GH_LOG}" 2>/dev/null)"
+    fi
+    # Re-run with existing-PR stub: assert NO second create
+    T24_BIN2="${T24_DIR}/bin2"
+    T24_GH_LOG2="${T24_DIR}/gh2.log"
+    mkdir -p "$T24_BIN2"
+    cat > "${T24_BIN2}/gh" <<GHSTUB2
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T24_GH_LOG2}"
+if [[ "\$1" == "pr" && "\$2" == "view" ]]; then
+  printf '{"number":42,"url":"https://github.com/test/repo/pull/42","isDraft":true}\n'; exit 0
+fi
+if [[ "\$1" == "pr" && "\$2" == "create" ]]; then
+  echo "gh stub: create unexpectedly called" >&2; exit 1
+fi
+exit 0
+GHSTUB2
+    chmod +x "${T24_BIN2}/gh"
+    (
+      cd "$T24_REPO"
+      PATH="${T24_BIN2}:${PATH}" \
+        CLAUDE_PLUGIN_ROOT="${T24_PLUGIN}" \
+        CATALYST_PHASE=implement \
+        CATALYST_TICKET=CTL-783 \
+        bash "$EARLY_FENCE_BODY" >"${T24_DIR}/stdout2.log" 2>"${T24_DIR}/stderr2.log"
+      echo "$?" > "${T24_DIR}/exit2"
+    ) || true
+    assert_eq "0" "$(cat "${T24_DIR}/exit2" 2>/dev/null)" "Test 24I: fence exits 0 on idempotent run"
+    if grep -q 'create' "${T24_GH_LOG2}" 2>/dev/null; then
+      fail "Test 24I: gh pr create must NOT be called on idempotent run — log: $(cat "${T24_GH_LOG2}" 2>/dev/null)"
+    else
+      pass "Test 24I: gh pr create NOT called (idempotent)"
+    fi
+    # J. runtime gate: CATALYST_PHASE unset → gh log empty (no push, no create)
+    T24_GH_LOG3="${T24_DIR}/gh3.log"
+    T24_BIN3="${T24_DIR}/bin3"
+    mkdir -p "$T24_BIN3"
+    cat > "${T24_BIN3}/gh" <<GHSTUB3
+#!/usr/bin/env bash
+printf '%s\n' "\$@" >> "${T24_GH_LOG3}"; exit 0
+GHSTUB3
+    chmod +x "${T24_BIN3}/gh"
+    (
+      cd "$T24_REPO"
+      PATH="${T24_BIN3}:${PATH}" \
+        CLAUDE_PLUGIN_ROOT="${T24_PLUGIN}" \
+        CATALYST_PHASE="" \
+        bash "$EARLY_FENCE_BODY" >"${T24_DIR}/stdout3.log" 2>"${T24_DIR}/stderr3.log"
+      echo "$?" > "${T24_DIR}/exit3"
+    ) || true
+    assert_eq "0" "$(cat "${T24_DIR}/exit3" 2>/dev/null)" "Test 24J: fence exits 0 when CATALYST_PHASE unset"
+    if [[ -s "${T24_GH_LOG3}" ]]; then
+      fail "Test 24J: gh must NOT be called when CATALYST_PHASE unset — log: $(cat "${T24_GH_LOG3}" 2>/dev/null)"
+    else
+      pass "Test 24J: gh NOT called when CATALYST_PHASE unset (interactive mode)"
+    fi
+  else
+    fail "Test 24: implement-plan-draft-pr-early fence not extractable (not yet implemented)"
+  fi
+else
+  fail "Test 24: implement-plan/SKILL.md not found"
+fi
+
+# Test 24 extension: phase-implement prose mentions implement-plan opens draft PR early
+echo ""
+echo "Test 24 ext: phase-implement prose mentions early draft PR from implement-plan (backstop note)"
+if [[ -f "$SKILL_IMPLEMENT" ]]; then
+  if grep -q 'implement-plan-draft-pr-early\|backstop' "$SKILL_IMPLEMENT" 2>/dev/null; then
+    pass "Test 24 ext: phase-implement references implement-plan-draft-pr-early or backstop"
+  else
+    fail "Test 24 ext: phase-implement should mention implement-plan-draft-pr-early or call End-block fence a backstop"
+  fi
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

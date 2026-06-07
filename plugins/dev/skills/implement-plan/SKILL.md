@@ -144,6 +144,24 @@ If you encounter a mismatch:
 - Update your progress in both the plan and your todos
 - Check off completed items in the plan file itself using Edit
 - **Check context usage** - monitor token consumption
+- **Push + ensure the draft PR (phase-agent mode)** — In phase-agent mode the draft PR opens
+  at the first phase commit (see the `implement-plan-draft-pr-early` fence); interactive
+  `/catalyst-dev:implement-plan` runs skip this automatically via the CATALYST_PHASE gate.
+
+```bash implement-plan-draft-pr-early
+# CTL-783: make the PR the durable off-disk work record from the FIRST commit.
+# Run after EVERY plan-phase commit: first run opens the draft PR, later runs
+# just push (draft_pr_ensure is idempotent). Interactive runs (no
+# CATALYST_PHASE) skip — no surprise pushes. Fail-open: never blocks the phase.
+if [[ -n "${CATALYST_PHASE:-}" && -r "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  if [[ "$(draft_pr_enabled)" == "true" ]]; then
+    draft_pr_push || true
+    draft_pr_ensure "main" "${TICKET_ID:-${CATALYST_TICKET:-}}" >/dev/null 2>&1 || true
+  fi
+fi
+```
 
 Don't let verification interrupt your flow - batch full suite runs at natural stopping points. But
 always run the specific tests you wrote during each Red → Green cycle.

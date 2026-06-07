@@ -81,6 +81,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.worktreeDir` | `~/catalyst/wt/<projectKey>` | Where worktrees are created |
 | `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
+| `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
 
 For `execution-core` mode, the number of workers comes from a separate committed block, `orchestration.executionCore.maxParallel` (default `4`). One daemon runs per machine and serves all your projects.
 

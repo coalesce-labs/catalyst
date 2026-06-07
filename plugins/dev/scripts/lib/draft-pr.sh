@@ -40,6 +40,26 @@ draft_pr_push() {
   fi
 }
 
+# draft_pr_title TICKET SUBJECT — normalize a PR title to the work-record
+# convention `<type>(<scope>): <ticket> ...` (CTL-783). Never fabricates
+# type/scope; injects TICKET when absent. Pure function, safe under zsh.
+draft_pr_title() {
+  local ticket="${1:-}" subject="${2:-}"
+  [[ -z "$subject" ]] && { printf '%s\n' "$ticket"; return 0; }
+  [[ -z "$ticket" ]] && { printf '%s\n' "$subject"; return 0; }
+  case "$subject" in
+    *"$ticket"*) printf '%s\n' "$subject"; return 0 ;;
+  esac
+  if printf '%s' "$subject" | grep -qE '^[a-z]+(\([a-z0-9-]+\))?!?: '; then
+    local prefix rest
+    prefix="${subject%%: *}"
+    rest="${subject#*: }"
+    printf '%s: %s %s\n' "$prefix" "$ticket" "$rest"
+  else
+    printf '%s: %s\n' "$ticket" "$subject"
+  fi
+}
+
 # draft_pr_ensure BASE TICKET — ensure a PR exists for the current branch.
 # Echoes "<number>\t<url>\t<isDraft>". No-op if a PR already exists.
 # Falls back to a non-draft PR if --draft is rejected. Fail-open.
@@ -70,7 +90,8 @@ draft_pr_ensure() {
   if [[ -z "$commit_subj" ]]; then
     commit_subj="$(git log --no-merges --format='%s' --max-count=1 HEAD 2>/dev/null || true)"
   fi
-  title="${commit_subj:-${ticket:-${branch}}}"
+  title="$(draft_pr_title "${ticket}" "${commit_subj}")"
+  [[ -z "$title" ]] && title="${ticket:-${branch}}"
 
   # Build PR body: commit list + "Refs: TICKET" — no Claude attribution.
   local commit_list
