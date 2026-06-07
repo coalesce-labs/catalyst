@@ -184,15 +184,34 @@ export function parseDfRoot(text) {
   return { usedKb, totalKb };
 }
 
-// defaultReadDisk — { usedGb, totalGb } for the root filesystem via `df -k /`.
-// Never throws.
-function defaultReadDisk({
-  df = () => execFileSync("df", ["-k", "/"], { encoding: "utf8" }),
+// defaultReadDisk — { usedGb, totalGb } for the data filesystem via `df -k`.
+//
+// CTL-812 VOLUME CHOICE: on macOS, `/` is the SEALED APFS SYSTEM SNAPSHOT — a
+// few GB of OS image on a ~1TB container, so `df -k /` reads ~1-2% "used" while
+// the machine is actually 75%+ full. User data lives on the Data volume
+// (`/System/Volumes/Data`), which shares the container and reports the real
+// usage. Probe the Data volume on darwin (falling back to `/` when it's absent,
+// e.g. non-APFS or a future layout change); Linux keeps `/`.
+// Never throws. Exported for the volume-selection tests (df + platform injectable).
+export function defaultReadDisk({
+  df = (path) => execFileSync("df", ["-k", path], { encoding: "utf8" }),
+  platform = process.platform,
 } = {}) {
-  try {
-    const parsed = parseDfRoot(df());
-    if (!parsed) return { usedGb: null, totalGb: null };
+  const probe = (path) => {
+    const parsed = parseDfRoot(df(path));
+    if (!parsed) return null;
     return { usedGb: parsed.usedKb / KB_PER_GB, totalGb: parsed.totalKb / KB_PER_GB };
+  };
+  try {
+    if (platform === "darwin") {
+      try {
+        const data = probe("/System/Volumes/Data");
+        if (data) return data;
+      } catch {
+        /* Data volume missing/unreadable — fall through to the root probe */
+      }
+    }
+    return probe("/") ?? { usedGb: null, totalGb: null };
   } catch {
     return { usedGb: null, totalGb: null };
   }

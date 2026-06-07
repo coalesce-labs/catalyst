@@ -298,3 +298,61 @@ describe("cpu two-sample delta helpers (pure)", () => {
     expect(cpuBusyPctFromDeltas(a, b)).toBe(100);
   });
 });
+
+// ─── defaultReadDisk — volume selection (CTL-812 disk fix) ──────────────────
+// On macOS `/` is the sealed APFS system snapshot (~1-2% used on a full disk);
+// the real usage lives on /System/Volumes/Data. These pin the platform branch.
+import { defaultReadDisk } from "./host.mjs";
+
+const DF_DATA = `Filesystem    1024-blocks      Used  Available Capacity iused ifree %iused  Mounted on
+/dev/disk3s5    971350180 741536048  188252552    80% 4168860 1882525520    0%   /System/Volumes/Data`;
+const DF_ROOT = `Filesystem    1024-blocks     Used  Available Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1  971350180 16325024  188252552     8%  356810 1882525520    0%   /`;
+
+describe("defaultReadDisk — volume selection", () => {
+  test("darwin probes /System/Volumes/Data (the real data volume, not the sealed snapshot)", () => {
+    const calls = [];
+    const df = (path) => {
+      calls.push(path);
+      return path === "/System/Volumes/Data" ? DF_DATA : DF_ROOT;
+    };
+    const disk = defaultReadDisk({ df, platform: "darwin" });
+    expect(calls).toEqual(["/System/Volumes/Data"]);
+    // 741536048 KB used of 971350180 KB ≈ 707.2 / 926.4 GB — ~76% used, not ~1.7%.
+    expect(disk.usedGb).toBeCloseTo(741536048 / (1024 * 1024), 1);
+    expect(disk.totalGb).toBeCloseTo(971350180 / (1024 * 1024), 1);
+  });
+
+  test("darwin falls back to / when the Data volume probe throws", () => {
+    const calls = [];
+    const df = (path) => {
+      calls.push(path);
+      if (path === "/System/Volumes/Data") throw new Error("ENOENT");
+      return DF_ROOT;
+    };
+    const disk = defaultReadDisk({ df, platform: "darwin" });
+    expect(calls).toEqual(["/System/Volumes/Data", "/"]);
+    expect(disk.totalGb).toBeCloseTo(971350180 / (1024 * 1024), 1);
+  });
+
+  test("darwin falls back to / when the Data volume output is unparseable", () => {
+    const df = (path) => (path === "/System/Volumes/Data" ? "garbage" : DF_ROOT);
+    const disk = defaultReadDisk({ df, platform: "darwin" });
+    expect(disk.usedGb).toBeCloseTo(16325024 / (1024 * 1024), 1);
+  });
+
+  test("linux probes / directly (single df call)", () => {
+    const calls = [];
+    const df = (path) => {
+      calls.push(path);
+      return DF_ROOT;
+    };
+    defaultReadDisk({ df, platform: "linux" });
+    expect(calls).toEqual(["/"]);
+  });
+
+  test("every probe failing returns nulls, never throws", () => {
+    const disk = defaultReadDisk({ df: () => { throw new Error("boom"); }, platform: "darwin" });
+    expect(disk).toEqual({ usedGb: null, totalGb: null });
+  });
+});
