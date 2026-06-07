@@ -1,11 +1,13 @@
 ---
 name: compound-estimate
 description:
-  "Closing ritual for the AI-native estimation feedback loop. **ALWAYS use when** the user says
-  'compound-estimate', 'close the estimation loop', 'record actuals', 'compound-log', or wants to log post-merge
-  actuals for a shipped Linear ticket. Writes a structured entry (linear.key, pr_number, merged_at,
-  estimate_at_start, estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
-  to `thoughts/shared/pm/metrics/YYYY-WW-compound-log.md` — one file per ISO week, appends."
+  "Closing ritual for the AI-native estimation feedback loop. **ALWAYS use when** a ticket's PR
+  has just merged (runs automatically per ticket: merge-pr step 12b / phase-monitor-merge,
+  CTL-189/CTL-831), or when the user says 'compound-estimate', 'close the estimation loop',
+  'record actuals', 'compound-log', or wants to log post-merge actuals for a shipped Linear
+  ticket. Writes a structured entry (linear.key, pr_number, merged_at, estimate_at_start,
+  estimate_actual, cost_usd, wall_time_hours, what_worked, what_surprised_me)
+  to `thoughts/shared/retros/estimate/YYYY-WW-compound-log.md` — one file per ISO week, appends."
 disable-model-invocation: false
 allowed-tools: Bash(gh *), Bash(linearis *), Bash(jq *), Bash(git *), Bash(./plugins/dev/scripts/compound-log.sh *), Bash(plugins/dev/scripts/compound-log.sh *), Bash(./plugins/pm/scripts/estimate/refresh-corpus.sh *), Bash(plugins/pm/scripts/estimate/refresh-corpus.sh *), Read, Write
 version: 1.0.0
@@ -28,7 +30,7 @@ The skill delegates all mechanical work to `plugins/dev/scripts/compound-log.sh`
 
 ## Output
 
-Appends an entry to `thoughts/shared/pm/metrics/YYYY-WW-compound-log.md`, creating the weekly file with a header if it doesn't exist. Weeks are ISO-8601 and derived from the PR's `mergedAt` (not today's date).
+Appends an entry to `thoughts/shared/retros/estimate/YYYY-WW-compound-log.md`, creating the weekly file with a header if it doesn't exist. Weeks are ISO-8601 and derived from the PR's `mergedAt` (not today's date).
 
 ## Process
 

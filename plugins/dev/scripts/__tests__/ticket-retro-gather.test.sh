@@ -44,8 +44,8 @@ new_project() {
   local dir="${SCRATCH}/$1"
   mkdir -p "$dir/thoughts/shared/friction" \
            "$dir/thoughts/shared/learnings/architecture-patterns" \
-           "$dir/thoughts/shared/pm/metrics" \
-           "$dir/thoughts/shared/compound/retros"
+           "$dir/thoughts/shared/retros/estimate" \
+           "$dir/thoughts/shared/retros/ticket"
   echo "$dir"
 }
 
@@ -75,7 +75,7 @@ EOF
 
 write_compound_week() {
   local dir="$1"
-  cat > "$dir/thoughts/shared/pm/metrics/2026-W23-compound-log.md" <<'EOF'
+  cat > "$dir/thoughts/shared/retros/estimate/2026-W23-compound-log.md" <<'EOF'
 # Compound Log — 2026-W23
 
 One entry per merged PR. Fields follow the CTL-159 schema.
@@ -99,7 +99,7 @@ EOF
 
 write_prior_retro() {
   local dir="$1" date="$2"
-  cat > "$dir/thoughts/shared/compound/retros/${date}.md" <<'EOF'
+  cat > "$dir/thoughts/shared/retros/ticket/${date}.md" <<'EOF'
 ---
 date: RETRO_DATE
 type: retro
@@ -125,8 +125,8 @@ generated_by: ticket-retro
   source: CTL-628
 ```
 EOF
-  sed -i '' "s/RETRO_DATE/${date}/g" "$dir/thoughts/shared/compound/retros/${date}.md" 2>/dev/null \
-    || sed -i "s/RETRO_DATE/${date}/g" "$dir/thoughts/shared/compound/retros/${date}.md"
+  sed -i '' "s/RETRO_DATE/${date}/g" "$dir/thoughts/shared/retros/ticket/${date}.md" 2>/dev/null \
+    || sed -i "s/RETRO_DATE/${date}/g" "$dir/thoughts/shared/retros/ticket/${date}.md"
 }
 
 run_gather() {
@@ -243,6 +243,29 @@ EOF
   assert_eq "gh: churn carried" "100" "$(echo "$out" | jq '.merged_prs[0].additions')"
 }
 
+# ── Same-day re-run (CTL-831): floor + prior_retro skip TODAY's retro ───────
+# Retros run automatically at every merge, so several land per day. A re-run
+# must regenerate today's file cumulatively — anchoring on itself would give a
+# near-empty window and lose the day's earlier content.
+
+test_same_day_rerun_uses_previous_floor() {
+  local proj out today
+  proj=$(new_project sameday)
+  today=$(date -u +%Y-%m-%d)
+  write_prior_retro "$proj" "2026-06-03"
+  write_prior_retro "$proj" "$today"
+  write_friction "$proj" "CTL-40" "implement" "2026-06-05T10:00:00+0900" "in window"
+
+  out=$(run_gather "$proj")
+  assert_eq "same-day: floor skips today's retro" "2026-06-03" \
+    "$(echo "$out" | jq -r '.window.since')"
+  assert_eq "same-day: window source still last-retro" "last-retro" \
+    "$(echo "$out" | jq -r '.window.source')"
+  assert_eq "same-day: prior_retro is the pre-today one" "2026-06-03" \
+    "$(echo "$out" | jq -r '.prior_retro.date')"
+  assert_eq "same-day: in-window friction kept" "1" "$(echo "$out" | jq '.friction | length')"
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 
 test_empty_stores_degrade
@@ -250,6 +273,7 @@ test_last_retro_window_and_watch_items
 test_since_override_and_stores
 test_tickets_filter
 test_merged_prs_ticket_extraction
+test_same_day_rerun_uses_previous_floor
 
 echo "---"
 echo "summary: ${PASSES} passed, ${FAILURES} failed"

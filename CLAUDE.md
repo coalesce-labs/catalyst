@@ -53,6 +53,9 @@ This workspace has no build process - it's markdown files and bash scripts.
 - `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type).
   Search before implementing or debugging in a known area. Curated by `/catalyst-dev:ticket-compound`.
 - `thoughts/shared/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
+- `thoughts/shared/retros/` — the compound-loop outputs, written automatically at every merge
+  (CTL-831): `ticket/<date>.md` cross-ticket retros with watch-items (`/catalyst-dev:ticket-retro`);
+  `estimate/<YYYY-WW>-compound-log.md` per-PR estimation actuals (`/catalyst-dev:compound-estimate`).
 
 ## Commit Conventions
 

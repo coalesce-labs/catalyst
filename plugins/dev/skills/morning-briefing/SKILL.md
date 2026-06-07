@@ -228,9 +228,9 @@ fi
 ```bash
 # ── Retro signals: open watch-items from the latest retro ────────────────────
 # Parse the machine contract (the fenced `yaml watch-items` block) from the
-# newest thoughts/shared/compound/retros/YYYY-MM-DD.md. Cap at 5 — the
+# newest thoughts/shared/retros/ticket/YYYY-MM-DD.md. Cap at 5 — the
 # briefing surfaces the watch list, the retro doc holds the detail.
-RETRO_DIR="thoughts/shared/compound/retros"
+RETRO_DIR="thoughts/shared/retros/ticket"
 : > "$SCRATCH/retro-signals.jsonl"
 LATEST_RETRO=""
 if [[ -d "$RETRO_DIR" ]]; then

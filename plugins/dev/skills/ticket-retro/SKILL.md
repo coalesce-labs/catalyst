@@ -1,13 +1,13 @@
 ---
 name: ticket-retro
 description:
-  "Cross-ticket retrospective VIEW (CTL-789 Loop C / CTL-814). **ALWAYS use when** the user says
-  'ticket retro', 'run a retro', 'retrospective', 'what did we learn lately', or 'how are the
-  estimates calibrating'. Synthesizes everything the compound loops captured since the last retro —
-  friction logs, learnings, compound-log calibration, catalyst.db / merged-PR actuals — into
-  thoughts/shared/compound/retros/<date>.md with a persisted watch-items block, and surfaces top
-  patterns in the morning briefing's Plan today."
-disable-model-invocation: true
+  "Cross-ticket retrospective VIEW (CTL-789 Loop C / CTL-814). **ALWAYS use when** a ticket's PR
+  has just merged (the workflow's compound closing step — runs automatically per ticket, CTL-831),
+  or when the user says 'ticket retro', 'run a retro', 'retrospective', 'what did we learn lately',
+  or 'how are the estimates calibrating'. Synthesizes everything the compound loops captured since
+  the last retro — friction logs, learnings, compound-log calibration, catalyst.db / merged-PR
+  actuals — into thoughts/shared/retros/ticket/<date>.md with a persisted watch-items block, and
+  surfaces top patterns in the morning briefing's Plan today."
 allowed-tools: Bash, Read, Write, Grep, Glob
 ---
 
@@ -17,9 +17,15 @@ Loop C of compound engineering: a human-readable reflection across a SET of tick
 **reads** what Loop B (friction logs, learnings) and Loop A (compound-log, estimation corpus)
 captured, then writes ONE artifact: the retro document.
 
+**Runs automatically per ticket (CTL-831):** `merge-pr` step 12b and `phase-monitor-merge` invoke
+this skill right after the compound-log entry lands, so the system learns from every ticket it
+ships without being asked. Best-effort in those contexts — a retro failure never blocks a merge
+or a phase. Several merges per day are normal: same-day re-runs REGENERATE today's file
+cumulatively (the gather floor skips today — see Step 3).
+
 **Hard contract — read-only VIEW:**
 
-- The ONLY thing this skill writes is `thoughts/shared/compound/retros/<YYYY-MM-DD>.md`.
+- The ONLY thing this skill writes is `thoughts/shared/retros/ticket/<YYYY-MM-DD>.md`.
 - It must NOT curate the learnings store, edit `thoughts/shared/CONCEPTS.md`, or touch ADRs —
   that is `ticket-compound`'s job (per-ticket curator). No Linear writes, no corpus writes.
 - Every input store degrades to `_none_` — empty stores are the normal early state, never an error.
@@ -34,7 +40,7 @@ captured, then writes ONE artifact: the retro document.
 
 Default scope is **since-last-retro, no time box** (solo-dev rhythm — design decision, plan
 line 114): the window floor is the date of the most recent retro in
-`thoughts/shared/compound/retros/`; the first retro ever falls back to 14 days.
+`thoughts/shared/retros/ticket/`; the first retro ever falls back to 14 days.
 
 ## Step 1: Gather (deterministic, read-only)
 
@@ -86,7 +92,10 @@ use it for the aggregate stats; treat db cost/hours as a bonus column where pres
 
 ## Step 3: Write the retro document
 
-Path: `thoughts/shared/compound/retros/<YYYY-MM-DD>.md` (today UTC). Template:
+Path: `thoughts/shared/retros/ticket/<YYYY-MM-DD>.md` (today UTC). **If today's file already
+exists, OVERWRITE it** — the gather floor deliberately skips today's retro (CTL-831), so a
+same-day re-run covers the same since-prior-retro window plus whatever just merged; today's file
+is always the cumulative day view, never a near-empty increment. Template:
 
 ```markdown
 ---
@@ -156,7 +165,7 @@ and `pattern` values double-quoted. `component` uses the learnings-store enum
 
 ```bash
 humanlayer thoughts sync 2>/dev/null || true
-echo "ticket-retro: wrote thoughts/shared/compound/retros/$(date -u +%Y-%m-%d).md"
+echo "ticket-retro: wrote thoughts/shared/retros/ticket/$(date -u +%Y-%m-%d).md"
 ```
 
 Report to the user: the retro path, top 3 recurring patterns, the calibration one-liner, and any
