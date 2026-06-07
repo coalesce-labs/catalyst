@@ -9,6 +9,7 @@
 # Usage:
 #   orchestrate-rebase <TICKET_ID> [--pr <number>] [--orch <name>] [--orch-dir <path>]
 #                      [--worker-dir <path>] [--base-branch <name>] [--model opus|sonnet]
+#                      [--signal-file <path>] [--prompt-template <path>]
 #                      [--dispatch] [--dry-run]
 #
 # Options:
@@ -18,6 +19,10 @@
 #   --worker-dir <path>    Rebase worker's worktree (typically the original worker's
 #                          worktree — we force-push the existing branch). Defaults to
 #                          detection by convention (<worktreeBase>/<orch>-<TICKET_ID>).
+#   --signal-file <path>   Override the rendered ${SIGNAL_FILE} in the prompt/dispatch.
+#                          Default: workers/<TICKET_ID>.json (legacy flat layout).
+#                          Use workers/<T>/rescue.json for CTL-782 rescue workers.
+#   --prompt-template <path>  Template file to render. Default: templates/rebase-prompt.md.
 #   --base-branch <name>   Base branch to rebase onto. Default: main.
 #   --model <model>        Worker model (opus|sonnet). Default: opus.
 #   --dispatch             Actually run the generated dispatch script in the background.
@@ -43,6 +48,8 @@ BASE_BRANCH="main"
 WORKER_MODEL="opus"
 DISPATCH=0
 DRY_RUN=0
+SIGNAL_FILE_OVERRIDE=""
+PROMPT_TEMPLATE_OVERRIDE=""
 
 usage() {
   sed -n '2,30p' "$0"
@@ -56,7 +63,9 @@ while [[ $# -gt 0 ]]; do
     --orch-dir)    ORCH_DIR="$2"; shift 2 ;;
     --worker-dir)  WORKER_DIR="$2"; shift 2 ;;
     --base-branch) BASE_BRANCH="$2"; shift 2 ;;
-    --model)       WORKER_MODEL="$2"; shift 2 ;;
+    --model)            WORKER_MODEL="$2"; shift 2 ;;
+    --signal-file)      SIGNAL_FILE_OVERRIDE="$2"; shift 2 ;;
+    --prompt-template)  PROMPT_TEMPLATE_OVERRIDE="$2"; shift 2 ;;
     --dispatch)    DISPATCH=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)     usage 0 ;;
@@ -87,7 +96,8 @@ if [ -z "$WORKER_DIR" ]; then
 fi
 
 BRANCH_NAME="${ORCH_NAME}-${TICKET_ID}"
-SIGNAL_FILE="${ORCH_DIR}/workers/${TICKET_ID}.json"
+SIGNAL_FILE="${SIGNAL_FILE_OVERRIDE:-${ORCH_DIR}/workers/${TICKET_ID}.json}"
+PROMPT_TEMPLATE="${PROMPT_TEMPLATE_OVERRIDE:-${TEMPLATE_PROMPT}}"
 PROMPT_FILE="${ORCH_DIR}/workers/rebase-${TICKET_ID}-prompt.md"
 DISPATCH_FILE="${ORCH_DIR}/workers/dispatch-rebase-${TICKET_ID}.sh"
 
@@ -147,7 +157,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "${ORCH_DIR}/workers"
-render "$TEMPLATE_PROMPT"   > "$PROMPT_FILE"
+render "$PROMPT_TEMPLATE"   > "$PROMPT_FILE"
 render "$TEMPLATE_DISPATCH" > "$DISPATCH_FILE"
 chmod +x "$DISPATCH_FILE"
 

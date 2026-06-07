@@ -82,6 +82,12 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
 | `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
+| `orchestration.stalePrRescue.enabled` | `true` | Periodically rescue orphaned PRs that drifted to DIRTY or BEHIND after their workers died. |
+| `orchestration.stalePrRescue.intervalSeconds` | `600` | How often the rescue timer ticks (seconds). |
+| `orchestration.stalePrRescue.stableSeconds` | `300` | How long a PR must sit DIRTY/BEHIND before a rescue is attempted (avoids reacting to transient states). |
+| `orchestration.stalePrRescue.behindThreshold` | `10` | BEHIND-commit count that triggers a rebase rescue (commits-behind below this are skipped). |
+| `orchestration.stalePrRescue.maxAttempts` | `1` | Max rescue attempts per ticket. After exhaustion, the ticket is escalated to `needs-human`. |
+| `orchestration.stalePrRescue.maxConflictFiles` | `5` | Max conflicting files before a DIRTY PR is deemed unresolvable and escalated instead of dispatched. |
 
 For `execution-core` mode, the number of workers comes from a separate committed block, `orchestration.executionCore.maxParallel` (default `4`). One daemon runs per machine and serves all your projects.
 

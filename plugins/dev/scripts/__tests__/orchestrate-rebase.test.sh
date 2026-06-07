@@ -125,6 +125,58 @@ CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_7" \
 run "--worker-dir override wins over state.json" \
   expect_contains "${ORCH_DIR_7}/workers/dispatch-rebase-TEST-7.sh" "WORKER_DIR=\"${EXPLICIT_DIR}\""
 
+# Test 8: --signal-file overrides the rendered SIGNAL_FILE (CTL-782)
+ORCH_DIR_8="${SCRATCH}/orch8"
+mkdir -p "${ORCH_DIR_8}/workers/T-1"
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_8" \
+  "$REBASE" T-1 --pr 5 \
+  --signal-file "${ORCH_DIR_8}/workers/T-1/rescue.json" > "${SCRATCH}/run8.out" 2>&1
+run "--signal-file override appears in prompt" \
+  expect_contains "${ORCH_DIR_8}/workers/rebase-T-1-prompt.md" "${ORCH_DIR_8}/workers/T-1/rescue.json"
+run "--signal-file override: legacy flat path absent from prompt" \
+  bash -c "! grep -qF '${ORCH_DIR_8}/workers/T-1.json' '${ORCH_DIR_8}/workers/rebase-T-1-prompt.md'"
+
+# Test 9: default (no --signal-file) keeps legacy flat path (backward compat)
+ORCH_DIR_9="${SCRATCH}/orch9"
+mkdir -p "${ORCH_DIR_9}/workers"
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_9" \
+  "$REBASE" T-1 --pr 5 > "${SCRATCH}/run9.out" 2>&1
+run "default no --signal-file uses legacy flat path" \
+  expect_contains "${ORCH_DIR_9}/workers/rebase-T-1-prompt.md" "${ORCH_DIR_9}/workers/T-1.json"
+
+# Test 10: --prompt-template renders the alternate template
+ORCH_DIR_10="${SCRATCH}/orch10"
+FIXTURE_TMPL="${SCRATCH}/fixture-template.md"
+mkdir -p "${ORCH_DIR_10}/workers"
+printf '# Rescue worker — ${TICKET_ID}\nOrch: ${ORCH_NAME}\nSignal: ${SIGNAL_FILE}\n' > "$FIXTURE_TMPL"
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_10" \
+  "$REBASE" T-2 --pr 6 --prompt-template "$FIXTURE_TMPL" > "${SCRATCH}/run10.out" 2>&1
+run "--prompt-template renders alternate template content" \
+  expect_contains "${ORCH_DIR_10}/workers/rebase-T-2-prompt.md" "Rescue worker — T-2"
+run "--prompt-template substitutes TICKET_ID" \
+  expect_contains "${ORCH_DIR_10}/workers/rebase-T-2-prompt.md" "T-2"
+run "--prompt-template substitutes ORCH_NAME" \
+  expect_contains "${ORCH_DIR_10}/workers/rebase-T-2-prompt.md" "orch-test"
+
+# Test 11: rescue template renders all placeholders (no ${...} left)
+PLUGIN_ROOT_11="$(cd "$(dirname "$REBASE")/.." && pwd)"
+RESCUE_TEMPLATE="${PLUGIN_ROOT_11}/templates/rescue-rebase-prompt.md"
+if [[ -f "$RESCUE_TEMPLATE" ]]; then
+  ORCH_DIR_11="${SCRATCH}/orch11"
+  mkdir -p "${ORCH_DIR_11}/workers"
+  CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_11" \
+    "$REBASE" T-3 --pr 7 --prompt-template "$RESCUE_TEMPLATE" \
+    --signal-file "${ORCH_DIR_11}/workers/T-3/rescue.json" > "${SCRATCH}/run11.out" 2>&1
+  run "rescue template: no unresolved render-time placeholders" \
+    bash -c "! grep -E '\\\$\{(TICKET_ID|ORCH_NAME|ORCH_DIR|WORKER_DIR|WORKTREE_PATH|BRANCH_NAME|PR_NUMBER|PR_URL|SIGNAL_FILE|PROMPT_FILE|WORKER_MODEL|BASE_BRANCH|SCOPE)\}' '${ORCH_DIR_11}/workers/rebase-T-3-prompt.md'"
+  run "rescue template: references rescue.json signal" \
+    expect_contains "${ORCH_DIR_11}/workers/rebase-T-3-prompt.md" "rescue.json"
+  run "rescue template: references auto-merge arming" \
+    expect_contains "${ORCH_DIR_11}/workers/rebase-T-3-prompt.md" "gh pr merge --auto"
+else
+  echo "  SKIP: rescue template not yet created (test 11)"
+fi
+
 echo ""
 echo "orchestrate-rebase: ${PASSES} passed, ${FAILURES} failed"
 exit "$FAILURES"
