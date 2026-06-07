@@ -125,6 +125,7 @@ export function buildLinearEventLogEnvelope(
       if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
       if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
       if (event.actorId !== null) attrs["linear.actor.id"] = event.actorId;
+      if (event.issueId !== null) attrs["linear.issue.id"] = event.issueId; // CTL-822
       const repo = lookupRepo(event.teamKey);
       if (repo !== undefined) attrs["vcs.repository.name"] = repo;
       return canonical({
@@ -140,6 +141,7 @@ export function buildLinearEventLogEnvelope(
           action: event.action,
           ticket: event.ticket,
           teamKey: event.teamKey,
+          issueId: event.issueId, // CTL-822 — the only key a `remove` payload carries
           updatedFromKeys: event.updatedFromKeys,
           actorId: event.actorId,
           actorName: event.actorName,

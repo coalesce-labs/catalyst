@@ -400,6 +400,7 @@ describe("buildLinearEventLogEnvelope — description fields (CTL-749)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["description"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -430,6 +431,7 @@ describe("buildLinearEventLogEnvelope — description fields (CTL-749)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -525,6 +527,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -558,6 +561,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: "In Review",
@@ -587,6 +591,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -616,6 +621,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: "actor-uuid-123",
         actorName: null,
         toState: null,
@@ -646,6 +652,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -675,6 +682,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId", "labelIds"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: "Ready",
@@ -713,6 +721,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: "actor-uuid-424",
         actorName: "Ryan",
         toState: "In Progress",
@@ -746,6 +755,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -841,6 +851,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -871,6 +882,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "FOO",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -901,6 +913,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: null,
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -1033,6 +1046,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -1049,6 +1063,37 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
       TS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("issueId flows to attrs[linear.issue.id] and payload.issueId (CTL-822)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "remove",
+        topic: "linear.issue.removed",
+        ticket: null, // a real remove carries no identifier — only the UUID
+        teamKey: null,
+        data: { id: "entity-uuid-7" },
+        updatedFromKeys: [],
+        issueId: "entity-uuid-7",
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
+      },
+      TS
+    );
+    expect(env!.attributes["event.name"]).toBe("linear.issue.removed");
+    expect(env!.attributes["linear.issue.id"]).toBe("entity-uuid-7");
+    expect((env!.body.payload as { issueId: string | null }).issueId).toBe("entity-uuid-7");
   });
 });
 
