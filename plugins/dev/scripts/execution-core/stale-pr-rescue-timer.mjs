@@ -238,8 +238,8 @@ function defaultWorktreeExists(worktreePath) {
 // dispatch. Exported so a unit test can assert the arg vector carries a
 // non-empty --orch (orchestrate-rebase hard-exits on an empty one) without
 // spawning anything (verify finding, CTL-782).
-export function buildRescueDispatchArgs(ticket, { prNumber, orchId, orchDir, worktreePath, base, signalFile }) {
-  return [
+export function buildRescueDispatchArgs(ticket, { prNumber, orchId, orchDir, worktreePath, base, signalFile, headRef }) {
+  const args = [
     ORCHESTRATE_REBASE_BIN,
     ticket,
     "--pr", String(prNumber),
@@ -249,8 +249,14 @@ export function buildRescueDispatchArgs(ticket, { prNumber, orchId, orchDir, wor
     "--base-branch", base,
     "--signal-file", signalFile,
     "--prompt-template", RESCUE_PROMPT_TEMPLATE,
-    "--dispatch",
   ];
+  // PR head branch: execution-core branches are just <TICKET>, while
+  // orchestrate-rebase's legacy default is <orch>-<TICKET> — without this
+  // override every rendered fetch/checkout/force-push targets a branch that
+  // does not exist (review finding, CTL-782).
+  if (headRef) args.push("--branch", headRef);
+  args.push("--dispatch");
+  return args;
 }
 
 // defaultDispatchRescue — invoke orchestrate-rebase --dispatch with rescue flags.
@@ -518,6 +524,10 @@ async function processTicket({
         worktreePath: prInfo.worktreePath,
         base: view.baseRefName ?? "main",
         signalFile,
+        // The PR's real head branch — execution-core branches are <TICKET>,
+        // not orchestrate-rebase's legacy <orch>-<TICKET> default (review
+        // finding, CTL-782).
+        headRef: view.headRefName,
       });
       if (result?.ok === false) {
         writeRescueState(orchDir, ticket, {

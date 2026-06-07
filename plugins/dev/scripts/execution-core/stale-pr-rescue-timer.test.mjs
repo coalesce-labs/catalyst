@@ -237,6 +237,10 @@ describe("startStalePrRescueTimer", () => {
 
     expect(dispatched.length).toBe(1);
     expect(dispatched[0].ticket).toBe("CTL-4");
+    // PR view's headRefName must reach the dispatch opts — orchestrate-rebase
+    // otherwise defaults to the legacy <orch>-<TICKET> branch name, which
+    // does not exist for execution-core PRs (review finding, CTL-782).
+    expect(dispatched[0].opts.headRef).toBe("CTL-TEST");
     const rs = readRescueState(orchDir, "CTL-4");
     expect(rs?.rescueAttempts).toBe(1);
     expect(emitted.some(e => e.includes("rescue.dispatched"))).toBe(true);
@@ -542,6 +546,28 @@ describe("buildRescueDispatchArgs", () => {
     expect(args[args.indexOf("--pr") + 1]).toBe("300");
     expect(args[args.indexOf("--base-branch") + 1]).toBe("main");
     expect(args[args.indexOf("--worker-dir") + 1]).toBe("/wt");
+  });
+
+  it("passes the PR headRef as --branch (execution-core branches are <TICKET>, not <orch>-<TICKET>)", () => {
+    const args = buildRescueDispatchArgs("CTL-30", {
+      prNumber: 300, orchId: "CTL-30", orchDir: "/orch",
+      worktreePath: "/wt", base: "main", signalFile: "/orch/workers/CTL-30/rescue.json",
+      headRef: "CTL-30",
+    });
+    const brIdx = args.indexOf("--branch");
+    expect(brIdx).toBeGreaterThan(-1);
+    expect(args[brIdx + 1]).toBe("CTL-30");
+    // --dispatch must stay terminal so orchestrate-rebase's arg loop sees it
+    expect(args[args.length - 1]).toBe("--dispatch");
+  });
+
+  it("omits --branch when headRef is absent (legacy <orch>-<TICKET> default applies)", () => {
+    const args = buildRescueDispatchArgs("CTL-30", {
+      prNumber: 300, orchId: "CTL-30", orchDir: "/orch",
+      worktreePath: "/wt", base: "main", signalFile: "/orch/workers/CTL-30/rescue.json",
+    });
+    expect(args).not.toContain("--branch");
+    expect(args).toContain("--dispatch");
   });
 });
 

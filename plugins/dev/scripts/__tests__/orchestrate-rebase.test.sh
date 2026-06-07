@@ -177,6 +177,20 @@ else
   echo "  SKIP: rescue template not yet created (test 11)"
 fi
 
+# Test 12: --branch overrides the legacy <orch>-<TICKET> branch derivation
+# (CTL-782 review finding: execution-core PR branches are just <TICKET>, so
+# rescue dispatches pass the PR's real headRefName via --branch).
+ORCH_DIR_12="${SCRATCH}/orch12"
+mkdir -p "${ORCH_DIR_12}/workers"
+CATALYST_ORCHESTRATOR_ID="orch-test" CATALYST_ORCHESTRATOR_DIR="$ORCH_DIR_12" \
+  "$REBASE" T-4 --pr 8 --branch "T-4" > "${SCRATCH}/run12.out" 2>&1
+run "--branch override lands in rendered prompt" \
+  expect_contains "${ORCH_DIR_12}/workers/rebase-T-4-prompt.md" "origin/T-4"
+run "--branch override suppresses legacy branch in git refs" \
+  bash -c "! grep -qF 'origin/orch-test-T-4' '${ORCH_DIR_12}/workers/rebase-T-4-prompt.md'"
+run "no --branch keeps legacy <orch>-<TICKET> default in git refs" \
+  expect_contains "${ORCH_DIR}/workers/rebase-TEST-1-prompt.md" "origin/orch-test-TEST-1"
+
 echo ""
 echo "orchestrate-rebase: ${PASSES} passed, ${FAILURES} failed"
 exit "$FAILURES"

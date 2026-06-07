@@ -10,7 +10,7 @@
 #   orchestrate-rebase <TICKET_ID> [--pr <number>] [--orch <name>] [--orch-dir <path>]
 #                      [--worker-dir <path>] [--base-branch <name>] [--model opus|sonnet]
 #                      [--signal-file <path>] [--prompt-template <path>]
-#                      [--dispatch] [--dry-run]
+#                      [--branch <name>] [--dispatch] [--dry-run]
 #
 # Options:
 #   --pr <number>          PR number. Auto-detected from the worker's branch if omitted.
@@ -23,6 +23,11 @@
 #                          Default: workers/<TICKET_ID>.json (legacy flat layout).
 #                          Use workers/<T>/rescue.json for CTL-782 rescue workers.
 #   --prompt-template <path>  Template file to render. Default: templates/rebase-prompt.md.
+#   --branch <name>        PR head branch the worker fetches/rebases/force-pushes.
+#                          Default: <orch>-<TICKET_ID> (legacy wave-orchestration
+#                          naming). Execution-core branches are just <TICKET_ID>,
+#                          so CTL-782 rescue dispatches pass the PR's real
+#                          headRefName here.
 #   --base-branch <name>   Base branch to rebase onto. Default: main.
 #   --model <model>        Worker model (opus|sonnet). Default: opus.
 #   --dispatch             Actually run the generated dispatch script in the background.
@@ -50,6 +55,7 @@ DISPATCH=0
 DRY_RUN=0
 SIGNAL_FILE_OVERRIDE=""
 PROMPT_TEMPLATE_OVERRIDE=""
+BRANCH_OVERRIDE=""
 
 usage() {
   sed -n '2,30p' "$0"
@@ -66,6 +72,7 @@ while [[ $# -gt 0 ]]; do
     --model)            WORKER_MODEL="$2"; shift 2 ;;
     --signal-file)      SIGNAL_FILE_OVERRIDE="$2"; shift 2 ;;
     --prompt-template)  PROMPT_TEMPLATE_OVERRIDE="$2"; shift 2 ;;
+    --branch)           BRANCH_OVERRIDE="$2"; shift 2 ;;
     --dispatch)    DISPATCH=1; shift ;;
     --dry-run)     DRY_RUN=1; shift ;;
     -h|--help)     usage 0 ;;
@@ -95,7 +102,7 @@ if [ -z "$WORKER_DIR" ]; then
   fi
 fi
 
-BRANCH_NAME="${ORCH_NAME}-${TICKET_ID}"
+BRANCH_NAME="${BRANCH_OVERRIDE:-${ORCH_NAME}-${TICKET_ID}}"
 SIGNAL_FILE="${SIGNAL_FILE_OVERRIDE:-${ORCH_DIR}/workers/${TICKET_ID}.json}"
 PROMPT_TEMPLATE="${PROMPT_TEMPLATE_OVERRIDE:-${TEMPLATE_PROMPT}}"
 PROMPT_FILE="${ORCH_DIR}/workers/rebase-${TICKET_ID}-prompt.md"
