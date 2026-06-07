@@ -61,3 +61,4 @@ The execution-core daemon persists its work queue to disk. If you stop the stack
 
 - [catalyst-stack reference](/reference/catalyst-stack/) — all flags and environment variables
 - [Install Catalyst](/getting-started/) — initial setup
+- [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/) — bring the stack up on a headless Mac
