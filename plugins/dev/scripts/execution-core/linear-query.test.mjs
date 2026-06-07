@@ -741,3 +741,120 @@ describe("classifyTicketResolution (CTL-671)", () => {
     expect(exec.calls[0]).toEqual({ cmd: "linearis", args: ["issues", "read", "CTL-9"] });
   });
 });
+
+// ─── gateway read-path (CTL-823) ─────────────────────────────────────────────
+
+function fakeGateway(descriptor) {
+  const calls = [];
+  return {
+    calls,
+    getDescriptor(ticket) {
+      calls.push(ticket);
+      return descriptor;
+    },
+  };
+}
+
+const FRESH = () => new Date().toISOString();
+const STALE = () => new Date(Date.now() - 11 * 60_000).toISOString();
+
+describe("classifyTicketResolution — gateway short-circuit (CTL-823)", () => {
+  test("fresh + present + not-removed → exists with ZERO live reads", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-1", removed: false, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-1", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("removed descriptor NEVER short-circuits — exactly one live re-read (fresh-before-quarantine)", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ error: "Issue not found" }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-2", removed: true, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-2", { exec, gateway })).toBe("not-found");
+    expect(exec.calls.length).toBe(1); // the destructive verdict paid a live read
+  });
+
+  test("stale descriptor falls through to the live read", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-3" }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-3", removed: false, updatedAt: STALE() });
+    expect(classifyTicketResolution("CTL-3", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("gateway miss (null) falls through to the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-4" }) });
+    const gateway = fakeGateway(null);
+    expect(classifyTicketResolution("CTL-4", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("a gateway 'exists' hit can never quarantine: only the NOT-quarantine case is served", () => {
+    // mutation guard: if someone makes a removed/absent descriptor return
+    // "not-found" from the store, this test pins the contract that the store
+    // can short-circuit ONLY the exists verdict.
+    const exec = fakeExec({ code: 1, stdout: "" }); // live read unavailable
+    const gateway = fakeGateway({ ticket: "CTL-5", removed: true, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-5", { exec, gateway })).toBe("unknown");
+  });
+
+  test("no gateway param → behavior unchanged", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-6" }) });
+    expect(classifyTicketResolution("CTL-6", { exec })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+});
+
+describe("fetchTicketState — gateway read-path (CTL-823)", () => {
+  test("fresh descriptor state serves with zero live reads and warms the cache", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-7", state: "Todo", removed: false, updatedAt: FRESH() });
+    const cache = createTicketStateCache();
+    expect(fetchTicketState("CTL-7", { exec, gateway, cache })).toBe("Todo");
+    expect(exec.calls.length).toBe(0);
+    expect(cache.get("CTL-7")).toBe("Todo"); // in-memory cache warmed from the store
+  });
+
+  test("stale descriptor falls through to live read", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ state: { name: "PR" } }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-8", state: "Todo", removed: false, updatedAt: STALE() });
+    expect(fetchTicketState("CTL-8", { exec, gateway })).toBe("PR");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("removed or stateless descriptor falls through to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "PR" } }) });
+    const gw1 = fakeGateway({ ticket: "CTL-9", state: "Todo", removed: true, updatedAt: FRESH() });
+    expect(fetchTicketState("CTL-9", { exec, gateway: gw1 })).toBe("PR");
+    const gw2 = fakeGateway({ ticket: "CTL-10", state: null, removed: false, updatedAt: FRESH() });
+    expect(fetchTicketState("CTL-10", { exec, gateway: gw2 })).toBe("PR");
+  });
+
+  test("in-memory cache hit still wins before the gateway is consulted", () => {
+    const gateway = fakeGateway({ ticket: "CTL-11", state: "Todo", removed: false, updatedAt: FRESH() });
+    const cache = createTicketStateCache();
+    cache.set("CTL-11", "Implement");
+    expect(fetchTicketState("CTL-11", { gateway, cache })).toBe("Implement");
+    expect(gateway.calls.length).toBe(0);
+  });
+});
+
+describe("fetchTicketState — gateway state-freshness boundary (CTL-823)", () => {
+  test("59s-old descriptor serves from the store; 61s falls through live", () => {
+    const at = (ms) => new Date(Date.now() - ms).toISOString();
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "PR" } }) });
+    const fresh = fakeGateway({ ticket: "CTL-20", state: "Todo", removed: false, updatedAt: at(59_000) });
+    expect(fetchTicketState("CTL-20", { exec, gateway: fresh })).toBe("Todo");
+    expect(exec.calls.length).toBe(0);
+    const stale = fakeGateway({ ticket: "CTL-21", state: "Todo", removed: false, updatedAt: at(61_000) });
+    expect(fetchTicketState("CTL-21", { exec, gateway: stale })).toBe("PR");
+    expect(exec.calls.length).toBe(1);
+  });
+});

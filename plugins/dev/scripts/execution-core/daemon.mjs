@@ -78,6 +78,7 @@ import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-5
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
 import { classifyTicketResolution } from "./linear-query.mjs";
+import { createGatewayReader } from "./gateway-read.mjs";
 import { isBgJobAlive, refreshAgents } from "./claude-agents.mjs";
 
 const DEFAULT_MAX_PARALLEL = 3;
@@ -396,6 +397,9 @@ export function startDaemon({
     // during out-of-set blocker hydration. A single instance threaded into
     // both is what turns a write-through into a guaranteed next-tick hit.
     const cache = createTicketStateCache();
+    // CTL-823: readonly client over the broker's durable descriptor store
+    // (~/catalyst/filter-state.db). Fail-open — see gateway-read.mjs.
+    const gatewayReader = createGatewayReader();
     // CTL-565: the monitor needs orchDir to one-shot-dispatch the triage phase
     // agent on a →Triage transition. `dispatch` stays an injectable default
     // (dispatch.mjs) so the daemon's fakes-pass-through pattern still holds.
@@ -425,7 +429,20 @@ export function startDaemon({
       configPath,
       layer2Path,
       // CTL-671: arm the phantom worker-dir validity sweep + bg-liveness reader.
-      classifyResolution: classifyTicketResolution,
+      // CTL-823: the sweep's existence probe consults the durable broker
+      // descriptor store first (gateway-read.mjs) — a fresh not-removed
+      // descriptor short-circuits "exists" with ZERO subprocess/Linear cost;
+      // removed/absent/stale always fall through to the live read
+      // (fresh-before-quarantine). Fail-open: any store failure behaves
+      // exactly like the pre-gateway path.
+      // Spread order matters: the daemon's reader is AUTHORITATIVE — callers
+      // (the sweep passes { exec }) cannot accidentally drop it.
+      classifyResolution: (identifier, opts = {}) =>
+        classifyTicketResolution(identifier, { ...opts, gateway: gatewayReader }),
+      // CTL-823: thread the reader to the scheduler's internal fetchState
+      // injections (reclaim + terminal backstop) so the 60s state window is
+      // live in production, not just in unit tests.
+      gateway: gatewayReader,
       isBgJobAlive,
     }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
     // CTL-684: start the side-car auto-tuner AFTER the scheduler so the

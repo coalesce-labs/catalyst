@@ -4,6 +4,7 @@
 // parses the JSON, normalizes the ticket list, and applies the priority-floor
 // post-filter that linearis cannot express server-side.
 
+import { descriptorAgeMs } from "./gateway-read.mjs";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { withBreaker, linearBreaker, isRateLimitError } from "./linear-breaker.mjs";
@@ -113,10 +114,35 @@ function normalizeTicket(node) {
 // failed/unparseable read is NEVER cached so the D5 fail-safe re-reads next
 // tick. The param is opt-in — callers that omit it exec on every call exactly
 // as before.
-export function fetchTicketState(identifier, { exec = defaultExec, cache } = {}) {
+// ─── gateway read-path (CTL-823, Gateway L1 child c) ────────────────────────
+// The durable broker descriptor store (gateway-read.mjs) serves the hot read
+// paths. Freshness windows: EXISTENCE decays only via a missed remove webhook
+// (the reconcile backstop's gap), so the exists short-circuit tolerates
+// 10 min; STATE changes constantly, so it gets the same 60s the in-memory
+// cache uses. The store is a safe optimization, never the source of truth —
+// every destructive decision still pays a live read.
+const GATEWAY_EXISTS_FRESH_MS = 10 * 60_000;
+const GATEWAY_STATE_FRESH_MS = 60_000;
+
+export function fetchTicketState(
+  identifier,
+  { exec = defaultExec, cache, gateway, gatewayFreshMs = GATEWAY_STATE_FRESH_MS } = {}
+) {
   if (cache) {
     const cached = cache.get(identifier);
     if (cached !== undefined) return cached; // hit
+  }
+  if (gateway) {
+    const d = gateway.getDescriptor(identifier);
+    if (
+      d &&
+      !d.removed &&
+      d.state != null &&
+      descriptorAgeMs(d) <= gatewayFreshMs
+    ) {
+      if (cache) cache.set(identifier, d.state); // warm the in-memory tier too
+      return d.state;
+    }
   }
   const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
   if (code !== 0) return null; // fail-safe — not cached
@@ -356,7 +382,19 @@ export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
 // discriminator is the BODY, not the exit code: a "not found" error string is
 // the definitive not-found; any other error body (auth/network/rate-limit) is
 // transient → unknown.
-export function classifyTicketResolution(identifier, { exec = defaultExec } = {}) {
+export function classifyTicketResolution(
+  identifier,
+  { exec = defaultExec, gateway, gatewayFreshMs = GATEWAY_EXISTS_FRESH_MS } = {}
+) {
+  // CTL-823: serve ONLY the cheap not-quarantine verdict from the durable
+  // store — a fresh, present, not-removed descriptor proves existence.
+  // removed/absent/stale NEVER short-circuit: quarantine is a destructive
+  // write, so those verdicts always pay a fresh live read
+  // (fresh-before-quarantine).
+  if (gateway) {
+    const d = gateway.getDescriptor(identifier);
+    if (d && !d.removed && descriptorAgeMs(d) <= gatewayFreshMs) return "exists";
+  }
   const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
   if (code !== 0) return "unknown"; // nonzero is ambiguous — NEVER not-found
   let node;

@@ -1815,6 +1815,10 @@ export function schedulerTick(
     // production; sweep-specific tests inject their own stubs.
     classifyResolution = () => "unknown",
     isBgJobAlive = () => true,
+    // CTL-823: the daemon's durable-descriptor-store reader; threaded into the
+    // fetchState injections below. undefined in bare unit ticks (fail-open —
+    // fetchTicketState without gateway behaves exactly as before).
+    gateway = undefined,
     // CTL-671: runaway-alert seams. countTicketEvents reads the unified event
     // log (safe in tests — CATALYST_DIR is redirected), so it defaults to the
     // real scan; appendRunawayEvent writes the canonical alert. Both injectable
@@ -1990,7 +1994,7 @@ export function schedulerTick(
       const reclaimOpts = {
         repoRoot,
         cache,
-        fetchState: fetchTicketState,
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
         prAdapter,
         // CTL-809 — thread the warm agents snapshot so the reclaim alive-branch can
         // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is
@@ -2958,7 +2962,7 @@ export function schedulerTick(
     reconcileTerminalBackstop(orchDir, ticket, signalByTicket.get(ticket), writeStatus, emitStateWrite, {
       cache,
       prAdapter,
-      fetchState: fetchTicketState,
+      fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
     });
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
