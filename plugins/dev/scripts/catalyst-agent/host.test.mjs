@@ -50,7 +50,7 @@ describe("sampleHost — emits one host.metrics.sampled per contract", () => {
     expect(calls.length).toBe(1);
     expect(calls[0].name).toBe(HOST_EVENT_SAMPLED);
     expect(calls[0].spec.entity).toBe("host");
-    expect(calls[0].spec.label).toBe(hostname());
+    expect(calls[0].spec.label).toBe(hostname().replace(/\.local$/, ""));
   });
 
   test("a custom label overrides the hostname default", async () => {

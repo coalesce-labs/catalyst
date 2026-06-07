@@ -41,7 +41,7 @@ describe("buildAgentEnvelope — resource + severity (contract)", () => {
     const env = buildAgentEnvelope("host.metrics.sampled", hostSpec());
     expect(env.resource["service.name"]).toBe("catalyst.agent");
     expect(env.resource["service.namespace"]).toBe("catalyst");
-    expect(env.resource.hostname).toBe(hostname());
+    expect(env.resource.hostname).toBe(hostname().replace(/\.local$/, ""));
   });
 
   test("severity is INFO / 9", () => {
@@ -419,5 +419,22 @@ describe("drainPending", () => {
   test("an empty / non-array argument is a no-op (never throws)", async () => {
     await expect(drainPending([])).resolves.toBeUndefined();
     await expect(drainPending(undefined)).resolves.toBeUndefined();
+  });
+});
+
+// ─── shortHostname (CTL-812 multi-host) ──────────────────────────────────────
+import { shortHostname } from "./emit.mjs";
+import { hostname as osHostname } from "node:os";
+
+describe("shortHostname", () => {
+  test("never carries the macOS .local suffix (matches Claude Code's native hostname)", () => {
+    expect(shortHostname().endsWith(".local")).toBe(false);
+    expect(shortHostname()).toBe(osHostname().replace(/\.local$/, ""));
+  });
+
+  test("envelope resource hostname uses the normalized form", () => {
+    const env = buildAgentEnvelope("host.metrics.sampled", { entity: "host", label: "x", attrs: {}, payload: {} });
+    expect(env.resource.hostname).toBe(shortHostname());
+    expect(env.resource.hostname.endsWith(".local")).toBe(false);
   });
 });
