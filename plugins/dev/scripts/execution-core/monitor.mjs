@@ -35,12 +35,12 @@ import {
   log,
 } from "./config.mjs";
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
-import { runEligibleQuery } from "./linear-query.mjs";
+import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
-import { applyTriageStatus as defaultApplyTriageStatus } from "./linear-write.mjs";
+import { applyTriageStatus as defaultApplyTriageStatus, applyAssignee as defaultApplyAssignee } from "./linear-write.mjs";
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
@@ -306,6 +306,12 @@ export function handleStateChangedEvent(
     readMaxParallelFn = readMaxParallel,
     liveBackgroundCount = () => countBackgroundAgents(),
     triageBudget,
+    // CTL-781: respect-assignment + self-assign seams.
+    botUserIds,
+    botWriteId,
+    gateway,
+    fetchAssignee = fetchTicketAssignee,
+    applyAssignee = defaultApplyAssignee,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -339,6 +345,11 @@ export function handleStateChangedEvent(
           appendEvent,
           orchId: parsed.identifier,
           budget, // CTL-716
+          botUserIds,
+          botWriteId,
+          gateway,
+          fetchAssignee,
+          applyAssignee,
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -385,6 +396,11 @@ export function handleStateChangedEvent(
           appendEvent,
           orchId: parsed.identifier,
           budget, // CTL-716
+          botUserIds,
+          botWriteId,
+          gateway,
+          fetchAssignee,
+          applyAssignee,
         });
       } else {
         log.debug(
@@ -455,6 +471,12 @@ function dispatchTriage(identifier, {
   appendEvent = defaultAppendEvent,
   orchId,
   budget,
+  // CTL-781: respect-assignment + self-assign seams.
+  botUserIds,
+  botWriteId,
+  gateway,
+  fetchAssignee = fetchTicketAssignee,
+  applyAssignee = defaultApplyAssignee,
 }) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
@@ -466,6 +488,20 @@ function dispatchTriage(identifier, {
       "monitor: triage dispatch deferred — no free slots (maxParallel); sweepMissingTriage will retry (CTL-716)"
     );
     return false;
+  }
+  // CTL-781: respect-assignment gate — a →Triage/→Todo ticket assigned to a
+  // non-bot is a human's; never claim it. Gateway-first, live read on miss;
+  // unknown holds (sweepMissingTriage retries next reconcile). Empty/absent
+  // botUserIds disables the gate (CTL-749 fail-open convention).
+  if (botUserIds instanceof Set && botUserIds.size > 0) {
+    const a = fetchAssignee(identifier, { gateway });
+    if (!a.known || !isAssigneeClaimable(a.assignee, botUserIds)) {
+      log.info(
+        { identifier, known: a.known, assignee: a.known ? (a.assignee ?? null) : undefined },
+        "monitor: triage dispatch skipped — respect-assignment (CTL-781)"
+      );
+      return false;
+    }
   }
   const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
   if (r.code !== 0) {
@@ -489,6 +525,14 @@ function dispatchTriage(identifier, {
     applied: res.applied,
     reason: res.reason,
   });
+  // CTL-781: self-assign the bot on claim — best-effort, never blocks triage.
+  if (botWriteId) {
+    try {
+      applyAssignee({ ticket: identifier, userId: botWriteId });
+    } catch (err) {
+      log.warn({ identifier, err: err.message }, "monitor: self-assign threw — continuing");
+    }
+  }
   return true;
 }
 
@@ -523,6 +567,12 @@ export function sweepMissingTriage({
   concurrency = {},
   readMaxParallelFn = readMaxParallel,
   liveBackgroundCount = () => countBackgroundAgents(),
+  // CTL-781: respect-assignment + self-assign seams.
+  botUserIds,
+  botWriteId,
+  gateway,
+  fetchAssignee = fetchTicketAssignee,
+  applyAssignee = defaultApplyAssignee,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -541,6 +591,11 @@ export function sweepMissingTriage({
         appendEvent,
         orchId: t.identifier,
         budget,
+        botUserIds,
+        botWriteId,
+        gateway,
+        fetchAssignee,
+        applyAssignee,
       });
     }
   }
@@ -719,6 +774,10 @@ export function startMonitor({
   concurrency = {},
   readMaxParallelFn,
   liveBackgroundCount,
+  // CTL-781: respect-assignment + self-assign seams.
+  botUserIds,
+  botWriteId,
+  gateway,
 } = {}) {
   // CTL-565: orchDir + dispatch + abortWorker are stored in tailerOpts so the
   // tailer-driven readNewEvents → handleStateChangedEvent path can one-shot-
@@ -726,9 +785,9 @@ export function startMonitor({
   // undefined, handleStateChangedEvent falls back to its real default.
   // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
   // populates the same instance the scheduler reads.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate, concurrency, readMaxParallelFn, liveBackgroundCount };
+  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway };
   reconcileAll({ exec });
-  sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount }); // CTL-711: triage pre-existing eligible tickets
+  sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
     // CTL-731 Phase 00: drain the cursor→EOF downtime gap FOLD-ONLY. Pre-CTL-731
@@ -754,7 +813,7 @@ export function startMonitor({
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
-    sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
+    sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
   }, reconcileIntervalMs);
 }
 

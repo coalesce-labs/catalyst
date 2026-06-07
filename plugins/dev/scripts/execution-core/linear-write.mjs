@@ -418,6 +418,48 @@ export function applyEstimate({ ticket, estimate, exec = defaultExec, fetchLabel
   }
 }
 
+// applyAssignee — write the Catalyst bot as the Linear assignee on a claimed
+// ticket (CTL-781). Mirrors applyLabel: try/catch, log.warn, tagged
+// {applied, reason} return, CTL-587-style read-back so applied:true means a
+// follow-up read confirmed the assignee landed. Never throws.
+// reason values: null | "invalid-user" | "transient" | "verify-failed".
+export function applyAssignee({ ticket, userId, exec = defaultExec }) {
+  if (typeof userId !== "string" || userId.length === 0) {
+    return { applied: false, reason: "invalid-user" };
+  }
+  try {
+    const writeRes = exec("linearis", ["issues", "update", ticket, "--assignee", userId]);
+    if (writeRes.code !== 0) {
+      log.warn(
+        { ticket, userId, code: writeRes.code, stderr: writeRes.stderr },
+        "linear-write: assignee write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    const readRes = exec("linearis", ["issues", "read", ticket]);
+    let actual = null;
+    try {
+      actual = JSON.parse(readRes.stdout ?? "")?.assignee?.id ?? null;
+    } catch {
+      /* unparseable read-back — falls through to verify-failed */
+    }
+    if (readRes.code !== 0 || actual !== userId) {
+      log.warn(
+        { ticket, userId, readback: actual },
+        "linear-write: assignee write exit-0 but read-back mismatch (silent-success gap)"
+      );
+      return { applied: false, reason: "verify-failed" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, userId, reason: "transient", err: err.message },
+      "linear-write: assignee write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
+  }
+}
+
 // applyBlockedByRelation — additively write a durable blocked-by edge
 // (CTL-537). Best-effort, never throws; mirrors applyLabel but without a
 // read-back: a blocked-by relation is durable (research:140) and the seam

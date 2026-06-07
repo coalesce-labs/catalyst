@@ -1509,3 +1509,151 @@ describe("handleIssueUpdatedEvent — onUpdate seam (CTL-749)", () => {
     stopMonitor();
   });
 });
+
+// ── CTL-781: respect-assignment + self-assign in dispatchTriage + sweep ──────
+
+describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+  const orchDir = "/orch-781";
+
+  function toTriageEvent(ticket) {
+    return {
+      event: "linear.issue.state_changed",
+      detail: { ticket, teamKey: "ENG", toState: "Triage" },
+    };
+  }
+
+  test("→Triage for a human-assigned ticket → NO dispatch, budget not decremented", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyAssignee = mock(() => ({ applied: true, reason: null }));
+    const fetchAssignee = () => ({ known: true, assignee: HUMAN });
+    handleStateChangedEvent(toTriageEvent("ENG-H1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(applyAssignee).not.toHaveBeenCalled();
+  });
+
+  test("→Triage for an unassigned ticket → dispatch fires AND applyAssignee called with botWriteId", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
+    const appendEvent = mock(() => {});
+    const applyAssignee = mock(() => ({ applied: true, reason: null }));
+    const fetchAssignee = () => ({ known: true, assignee: null });
+    handleStateChangedEvent(toTriageEvent("ENG-N1"), {
+      dispatch,
+      orchDir,
+      applyTriageStatus,
+      appendEvent,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(applyAssignee).toHaveBeenCalledTimes(1);
+    expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-N1", userId: BOT });
+  });
+
+  test("→Triage for a bot-assigned ticket → dispatch fires (re-claim of own ticket OK)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = () => ({ known: true, assignee: BOT });
+    handleStateChangedEvent(toTriageEvent("ENG-B1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test("assignee unknown (no gateway, live read fails) → dispatch SKIPPED this event (sweep retries)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = () => ({ known: false });
+    handleStateChangedEvent(toTriageEvent("ENG-U1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("no botUserIds threaded → gate skipped, dispatches as today (all existing tests unchanged)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = mock(() => ({ known: true, assignee: HUMAN }));
+    handleStateChangedEvent(toTriageEvent("ENG-ND1"), {
+      dispatch,
+      orchDir,
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(fetchAssignee).not.toHaveBeenCalled();
+  });
+
+  test("applyAssignee absent/failing → dispatch still completes, applyTriageStatus + appendEvent unaffected", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
+    const appendEvent = mock(() => {});
+    const applyAssignee = mock(() => ({ applied: false, reason: "transient" }));
+    const fetchAssignee = () => ({ known: true, assignee: null });
+    handleStateChangedEvent(toTriageEvent("ENG-FA1"), {
+      dispatch,
+      orchDir,
+      applyTriageStatus,
+      appendEvent,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(applyTriageStatus).toHaveBeenCalledTimes(1);
+    expect(appendEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sweepMissingTriage — CTL-781 threading", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+
+  test("sweep passes botUserIds/botWriteId/gateway through to dispatchTriage (human-assigned eligible ticket skipped)", () => {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [{ identifier: "ENG-SW1", state: "Todo", priority: 2, project: null }]);
+    const orchDir = mkdtempSync(join(tmpdir(), "sw-orch-"));
+    try {
+      const dispatch = mock(() => ({ code: 0 }));
+      const fetchAssignee = mock(() => ({ known: true, assignee: HUMAN }));
+      sweepMissingTriage({
+        orchDir,
+        dispatch,
+        botUserIds: new Set([BOT]),
+        fetchAssignee,
+        readMaxParallelFn: () => 5,
+        liveBackgroundCount: () => 0,
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(fetchAssignee).toHaveBeenCalledWith("ENG-SW1", expect.anything());
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
+  });
+});
