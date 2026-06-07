@@ -640,6 +640,10 @@ function startReaperAndTimer({
   }
 
   // CTL-782: start the periodic stale/conflicting-PR rescue timer.
+  // No orchId / linearWrite threading needed: the timer derives the per-ticket
+  // orchestrator id from the phase signal's `.orchestrator` (orchId === ticket
+  // convention — the daemon has no global orch id), and defaults linearWrite
+  // to the real linear-write module so escalations reach the needs-human queue.
   const rescueCfg = stalePrRescueConfig ?? {};
   if (rescueCfg.enabled !== false) {
     _stalePrRescueTimer = startStalePrRescueTimer({

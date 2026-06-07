@@ -8,7 +8,13 @@ import { join } from "node:path";
 import {
   startStalePrRescueTimer,
   readStalePrRescueConfig,
+  buildRescueDispatchArgs,
+  defaultMergeTree,
+  defaultLinearWrite,
 } from "./stale-pr-rescue-timer.mjs";
+import * as linearWriteModule from "./linear-write.mjs";
+import { spawnSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 
 // ── fake clock (same pattern as worktree-refresh-timer.test.mjs) ───────────
 function fakeClock(nowMs = 1_800_000_000_000) {
@@ -403,7 +409,7 @@ describe("startStalePrRescueTimer", () => {
       config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
       clock,
       ...makeSeams({
-        prView: async () => ({ state: "OPEN", mergeStateStatus: "BEHIND", baseRefName: "main" }),
+        prView: async () => ({ state: "OPEN", mergeStateStatus: "BEHIND", baseRefName: "main", headRefName: "CTL-9-branch" }),
         compareBehind: async () => 25,
         mergeTree: async () => { mergeTreeCalls.push(1); return { exitCode: 0, output: "" }; },
         dispatchRescue: (t) => dispatched.push(t),
@@ -414,6 +420,448 @@ describe("startStalePrRescueTimer", () => {
 
     expect(dispatched.length).toBe(1);
     expect(mergeTreeCalls.length).toBe(0);
+  });
+});
+
+// ── CTL-782 remediation: production-glue coverage (verify findings) ─────────
+
+describe("call-site argument assembly", () => {
+  // Guards against the self-compare regression: processTicket must hand
+  // mergeTree the PR HEAD branch from view.headRefName, never origin/<base>.
+  it("stable DIRTY: mergeTree receives (worktree, base, PR head) — not base vs itself", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-20");
+    writeSignal(orchDir, "CTL-20", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 200, url: "https://github.com/org/repo/pull/200" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-20", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const mergeTreeArgs = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        mergeTree: async (...args) => {
+          mergeTreeArgs.push(args);
+          return { exitCode: 1, output: "CONFLICT (content): Merge conflict in a.mjs" };
+        },
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(mergeTreeArgs.length).toBe(1);
+    expect(mergeTreeArgs[0]).toEqual(["/some/wt", "main", "CTL-TEST"]);
+  });
+
+  it("dispatch: opts carry non-empty orchId (signal .orchestrator preferred) + rescue.json signalFile", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-21");
+    writeSignal(orchDir, "CTL-21", "pr", {
+      status: "done", bg_job_id: "dead",
+      orchestrator: "ORCH-X",
+      pr: { number: 210, url: "https://github.com/org/repo/pull/210" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-21", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const dispatched = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        dispatchRescue: (ticket, opts) => { dispatched.push({ ticket, opts }); },
+        mergeTree: async () => ({ exitCode: 1, output: "CONFLICT (content): Merge conflict in a.mjs" }),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(dispatched.length).toBe(1);
+    expect(dispatched[0].opts.orchId).toBe("ORCH-X");
+    expect(dispatched[0].opts.signalFile).toBe(join(orchDir, "workers", "CTL-21", "rescue.json"));
+    expect(dispatched[0].opts.base).toBe("main");
+    expect(dispatched[0].opts.worktreePath).toBe("/some/wt");
+    // atomic write left no temp files behind
+    const leftovers = readdirSync(join(orchDir, "workers", "CTL-21")).filter(f => f.includes("rescue.json.tmp"));
+    expect(leftovers).toEqual([]);
+  });
+
+  it("dispatch: orchId falls back to the ticket when the signal has no .orchestrator (daemon call shape)", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-22");
+    writeSignal(orchDir, "CTL-22", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 220, url: "https://github.com/org/repo/pull/220" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-22", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const dispatched = [];
+    // No orchId param — exactly how daemon.mjs wires the timer.
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        dispatchRescue: (_ticket, opts) => { dispatched.push(opts); },
+        mergeTree: async () => ({ exitCode: 1, output: "CONFLICT (content): Merge conflict in a.mjs" }),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(dispatched.length).toBe(1);
+    expect(dispatched[0].orchId).toBe("CTL-22");
+  });
+});
+
+describe("buildRescueDispatchArgs", () => {
+  it("emits a non-empty --orch value and the rescue flags orchestrate-rebase expects", () => {
+    const args = buildRescueDispatchArgs("CTL-30", {
+      prNumber: 300, orchId: "CTL-30", orchDir: "/orch",
+      worktreePath: "/wt", base: "main", signalFile: "/orch/workers/CTL-30/rescue.json",
+    });
+    const orchIdx = args.indexOf("--orch");
+    expect(orchIdx).toBeGreaterThan(-1);
+    expect(args[orchIdx + 1]).toBe("CTL-30");
+    expect(args[orchIdx + 1]).not.toBe("");
+    const sigIdx = args.indexOf("--signal-file");
+    expect(args[sigIdx + 1]).toBe("/orch/workers/CTL-30/rescue.json");
+    expect(args).toContain("--dispatch");
+    expect(args[args.indexOf("--pr") + 1]).toBe("300");
+    expect(args[args.indexOf("--base-branch") + 1]).toBe("main");
+    expect(args[args.indexOf("--worker-dir") + 1]).toBe("/wt");
+  });
+});
+
+describe("escalation default seam", () => {
+  it("module default linearWrite is the real linear-write transport", () => {
+    expect(defaultLinearWrite).toBe(linearWriteModule);
+    expect(typeof defaultLinearWrite.applyLabel).toBe("function");
+  });
+
+  it("default escalate fires labelOnce through the injected linearWrite (needs-human + marker)", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-31");
+    writeSignal(orchDir, "CTL-31", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 310, url: "https://github.com/org/repo/pull/310" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-31", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const labels = [];
+    const seams = makeSeams({
+      mergeTree: async () => ({
+        exitCode: 1,
+        output: "CONFLICT (modify/delete): x.mjs deleted in HEAD",
+      }),
+    });
+    delete seams.escalate; // exercise defaultEscalate, not a stub
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      linearWrite: { applyLabel: (opts) => { labels.push(opts); return { applied: true }; } },
+      ...seams,
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+
+    expect(labels).toEqual([{ ticket: "CTL-31", label: "needs-human" }]);
+    expect(existsSync(join(orchDir, "workers", "CTL-31", ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
+
+describe("timer-level decision paths (previously only covered in the pure core)", () => {
+  it("CLOSED PR → no dispatch, no escalate", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-40");
+    writeSignal(orchDir, "CTL-40", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 400, url: "https://github.com/org/repo/pull/400" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-40", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const dispatched = [];
+    const escalated = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        prView: async () => ({ state: "CLOSED", mergeStateStatus: "UNKNOWN", baseRefName: "main", headRefName: "h" }),
+        dispatchRescue: (t) => dispatched.push(t),
+        escalate: (t) => escalated.push(t),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(dispatched.length).toBe(0);
+    expect(escalated.length).toBe(0);
+  });
+
+  it("worktree missing → escalate worktree_missing", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-41");
+    writeSignal(orchDir, "CTL-41", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 410, url: "https://github.com/org/repo/pull/410" },
+      worktreePath: "/gone/wt",
+    });
+
+    const escalated = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        worktreeExists: () => false,
+        escalate: (ticket, detail) => escalated.push({ ticket, detail }),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(escalated.length).toBe(1);
+    const rs = readRescueState(orchDir, "CTL-41");
+    expect(rs?.escalateReason).toBe("worktree_missing");
+  });
+
+  it("budget exhausted → escalate rescue_budget_exhausted, no dispatch", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-42");
+    writeSignal(orchDir, "CTL-42", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 420, url: "https://github.com/org/repo/pull/420" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-42", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+      rescueAttempts: 1,
+    });
+
+    const dispatched = [];
+    const escalated = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        dispatchRescue: (t) => dispatched.push(t),
+        escalate: (t) => escalated.push(t),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(dispatched.length).toBe(0);
+    expect(escalated.length).toBe(1);
+    const rs = readRescueState(orchDir, "CTL-42");
+    expect(rs?.escalateReason).toBe("rescue_budget_exhausted");
+    expect(rs?.rescueAttempts).toBe(1); // untouched
+  });
+});
+
+describe("state-integrity hardening", () => {
+  it("corrupt rescue.json → ticket skipped this tick (no prView, no dispatch, attempts not reset)", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-50");
+    writeSignal(orchDir, "CTL-50", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 500, url: "https://github.com/org/repo/pull/500" },
+      worktreePath: "/some/wt",
+    });
+    writeFileSync(join(orchDir, "workers", "CTL-50", "rescue.json"), "{ torn write");
+
+    const prViewCalls = [];
+    const dispatched = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        prView: async () => { prViewCalls.push(1); return { state: "OPEN", mergeStateStatus: "DIRTY", baseRefName: "main", headRefName: "h" }; },
+        dispatchRescue: (t) => dispatched.push(t),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(prViewCalls.length).toBe(0);
+    expect(dispatched.length).toBe(0);
+  });
+
+  it("failed dispatch ({ok:false}) → rescueAttempts NOT burned, lastDispatchError recorded, dispatch-failed emitted", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-51");
+    writeSignal(orchDir, "CTL-51", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 510, url: "https://github.com/org/repo/pull/510" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-51", {
+      firstSeenAt: new Date(fakeClock().now() - 660_000).toISOString(),
+    });
+
+    const emitted = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        dispatchRescue: () => ({ ok: false, error: "spawn blew up" }),
+        emit: (name) => emitted.push(name),
+        mergeTree: async () => ({ exitCode: 1, output: "CONFLICT (content): Merge conflict in a.mjs" }),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+
+    const rs = readRescueState(orchDir, "CTL-51");
+    expect(rs?.rescueAttempts ?? 0).toBe(0);
+    expect(rs?.lastDispatchError).toBe("spawn blew up");
+    expect(emitted.some(e => e.includes("rescue.dispatch-failed"))).toBe(true);
+    expect(emitted.some(e => e.includes("rescue.dispatched."))).toBe(false);
+  });
+
+  it("BEHIND with missing headRefName → skip with no compareBehind call (no base-vs-base substitute)", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-52");
+    writeSignal(orchDir, "CTL-52", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 520, url: "https://github.com/org/repo/pull/520" },
+      worktreePath: "/some/wt",
+    });
+
+    const compareCalls = [];
+    const dispatched = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        prView: async () => ({ state: "OPEN", mergeStateStatus: "BEHIND", baseRefName: "main" }),
+        compareBehind: async (...a) => { compareCalls.push(a); return 25; },
+        dispatchRescue: (t) => dispatched.push(t),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(compareCalls.length).toBe(0);
+    expect(dispatched.length).toBe(0);
+  });
+
+  it("stalled rescue whose PR merged externally → no escalation, status marked resolved", async () => {
+    const clock = fakeClock();
+    const orchDir = mkOrchDir();
+    mkTicketDir(orchDir, "CTL-53");
+    writeSignal(orchDir, "CTL-53", "pr", {
+      status: "done", bg_job_id: "dead",
+      pr: { number: 530, url: "https://github.com/org/repo/pull/530" },
+      worktreePath: "/some/wt",
+    });
+    writeRescueState(orchDir, "CTL-53", {
+      status: "rescue-stalled",
+      rescueAttempts: 1,
+    });
+
+    const escalated = [];
+    startStalePrRescueTimer({
+      enabled: true, orchDir, intervalSeconds: 1, clock,
+      config: { stableSeconds: 300, behindThreshold: 10, maxAttempts: 1 },
+      ...makeSeams({
+        prView: async () => ({ state: "MERGED", mergeStateStatus: "MERGED", baseRefName: "main", headRefName: "h" }),
+        escalate: (t) => escalated.push(t),
+      }),
+    });
+    clock.advance(1_000);
+    await new Promise(r => setTimeout(r, 20));
+    expect(escalated.length).toBe(0);
+    const rs = readRescueState(orchDir, "CTL-53");
+    expect(rs?.status).toBe("rescue-stalled-resolved");
+    expect(rs?.stalledResolvedAt).toBeTruthy();
+  });
+});
+
+describe("defaultMergeTree (real git)", () => {
+  function git(cwd, ...args) {
+    const res = spawnSync(
+      "git",
+      ["-C", cwd, "-c", "user.email=t@t.t", "-c", "user.name=t", ...args],
+      { encoding: "utf8" }
+    );
+    if (res.status !== 0) throw new Error(`git ${args.join(" ")}: ${res.stderr}`);
+    return res.stdout;
+  }
+
+  // Builds origin (bare) + a clone, with `main` and a `feature` branch.
+  // mutate(originWorkDir) shapes the divergence before the clone fetches.
+  function mkRepoPair() {
+    const root = tmpDir();
+    const originWork = join(root, "origin-work");
+    const originBare = join(root, "origin.git");
+    const clone = join(root, "clone");
+    mkdirSync(originWork, { recursive: true });
+    git(root, "init", "-b", "main", originWork);
+    writeFileSync(join(originWork, "a.txt"), "line1\nline2\n");
+    git(originWork, "add", "a.txt");
+    git(originWork, "commit", "-m", "base");
+    git(root, "clone", "--bare", originWork, originBare);
+    git(root, "clone", originBare, clone);
+    return { originWork, originBare, clone };
+  }
+
+  it("classifies a genuine content conflict (exit 1, CONFLICT in output) — no self-compare", async () => {
+    const { originWork, originBare, clone } = mkRepoPair();
+    // feature branch edits line1 one way…
+    git(originWork, "checkout", "-b", "feature");
+    writeFileSync(join(originWork, "a.txt"), "feature-edit\nline2\n");
+    git(originWork, "commit", "-am", "feature edit");
+    git(originWork, "push", originBare, "feature");
+    // …main edits line1 the other way, AFTER the clone was cut.
+    git(originWork, "checkout", "main");
+    writeFileSync(join(originWork, "a.txt"), "main-edit\nline2\n");
+    git(originWork, "commit", "-am", "main edit");
+    git(originWork, "push", originBare, "main");
+
+    const mt = await defaultMergeTree(clone, "main", "feature");
+    expect(mt.exitCode).toBe(1);
+    expect(mt.output).toContain("CONFLICT");
+  });
+
+  it("classifies a clean merge (exit 0) when branches touch different files", async () => {
+    const { originWork, originBare, clone } = mkRepoPair();
+    git(originWork, "checkout", "-b", "feature2");
+    writeFileSync(join(originWork, "b.txt"), "new file\n");
+    git(originWork, "add", "b.txt");
+    git(originWork, "commit", "-m", "feature2 adds b");
+    git(originWork, "push", originBare, "feature2");
+
+    const mt = await defaultMergeTree(clone, "main", "feature2");
+    expect(mt.exitCode).toBe(0);
+  });
+
+  it("throws when the fetch fails (no silent stale-base classification)", async () => {
+    const root = tmpDir();
+    const lonely = join(root, "lonely");
+    mkdirSync(lonely, { recursive: true });
+    git(root, "init", "-b", "main", lonely);
+    // no `origin` remote → fetch must fail
+    await expect(defaultMergeTree(lonely, "main", "feature")).rejects.toThrow();
   });
 });
 

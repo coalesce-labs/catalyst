@@ -11,6 +11,7 @@
 import {
   readFileSync,
   writeFileSync,
+  renameSync,
   mkdirSync,
   readdirSync,
   existsSync,
@@ -23,6 +24,15 @@ import { labelOnce } from "./label-guard.mjs";
 import { appendFileSync } from "node:fs";
 import { log, getEventLogPath } from "./config.mjs";
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
+// Default Linear transport for the escalation path. The daemon does not thread
+// a writer (scheduler.mjs threads its own), so without this default every
+// escalation reason would silently degrade to a log line and the ticket would
+// never reach the needs-human queue (verify finding, CTL-782).
+import * as linearWriteDefault from "./linear-write.mjs";
+
+// defaultLinearWrite — exported so tests can assert the module-level default
+// is the real linear-write transport (not null).
+export const defaultLinearWrite = linearWriteDefault;
 
 const ORCHESTRATE_REBASE_BIN = fileURLToPath(
   new URL("../orchestrate-rebase", import.meta.url)
@@ -68,17 +78,23 @@ function parseRepoSlug(url) {
 
 // readTicketPr — extract PR info from workers/<T>/ signal files.
 // Prefers phase-pr.json .pr.url for the slug (monitorMergeProbe precedent).
-// Returns { number, url, slug, worktreePath } or null if no PR info.
+// Also captures the signal's `.orchestrator` field — in execution-core the
+// per-ticket orchestrator id (orchId === ticket convention; scheduler.mjs
+// stamps it on every dispatch) — so dispatchRescue can pass a non-empty
+// --orch to orchestrate-rebase (verify finding, CTL-782).
+// Returns { number, url, slug, worktreePath, orchestrator } or null if no PR info.
 function readTicketPr(orchDir, ticket) {
   const dir = join(orchDir, "workers", ticket);
   let prInfo = null;
   let worktreePath = null;
+  let orchestrator = null;
 
   for (const fname of ["phase-pr.json", "phase-monitor-merge.json"]) {
     try {
       const raw = JSON.parse(readFileSync(join(dir, fname), "utf8"));
       if (raw?.pr?.number && !prInfo) prInfo = raw.pr;
       if (raw?.worktreePath && !worktreePath) worktreePath = raw.worktreePath;
+      if (raw?.orchestrator && !orchestrator) orchestrator = raw.orchestrator;
     } catch { /* absent or unreadable */ }
   }
 
@@ -88,6 +104,7 @@ function readTicketPr(orchDir, ticket) {
     url: prInfo.url,
     slug: parseRepoSlug(prInfo.url),
     worktreePath,
+    orchestrator,
   };
 }
 
@@ -111,21 +128,39 @@ function anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn) {
   return false;
 }
 
-// readRescueState — read workers/<T>/rescue.json. Returns {} on miss.
+// readRescueState — read workers/<T>/rescue.json.
+// Returns {} when the file is absent (ENOENT — first sighting), but null when
+// the file exists and is corrupt/torn (parse error). Conflating the two would
+// silently reset rescueAttempts to 0 on a torn read — a budget bypass that
+// re-dispatches past maxAttempts (verify finding, CTL-782). Callers must skip
+// the ticket this tick on null.
 function readRescueState(orchDir, ticket) {
+  const path = join(orchDir, "workers", ticket, "rescue.json");
+  let raw;
   try {
-    return JSON.parse(readFileSync(join(orchDir, "workers", ticket, "rescue.json"), "utf8"));
-  } catch { return {}; }
+    raw = readFileSync(path, "utf8");
+  } catch { return {}; } // ENOENT (or unreadable): treat as no prior state
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    log.warn(
+      { ticket, path, err: err.message },
+      "stale-pr-rescue: rescue.json corrupt/torn — skipping ticket this tick"
+    );
+    return null;
+  }
 }
 
-// writeRescueState — atomic write to workers/<T>/rescue.json.
+// writeRescueState — atomic write to workers/<T>/rescue.json via
+// writeFileSync(tmp) + renameSync(tmp, final). rename(2) is atomic on POSIX,
+// so the concurrent rescue worker (which rewrites the same file) can never
+// observe a torn write from this timer.
 function writeRescueState(orchDir, ticket, state) {
   const dir = join(orchDir, "workers", ticket);
   mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, "rescue.json.tmp");
+  const tmp = join(dir, `rescue.json.tmp.${process.pid}`);
   writeFileSync(tmp, JSON.stringify(state));
-  // rename is not available without node:fs/promises; use writeFileSync directly
-  writeFileSync(join(dir, "rescue.json"), JSON.stringify(state));
+  renameSync(tmp, join(dir, "rescue.json"));
 }
 
 // defaultPrView — call gh REST to get PR state, mergeStateStatus, and refs.
@@ -141,21 +176,54 @@ async function defaultPrView(slug, prNumber) {
 }
 
 // defaultCompareBehind — gh REST compare to count commits behind.
+// Throws on non-zero gh exit (consistent with defaultPrView; the per-ticket
+// catch logs it and retries next tick) — a transient gh failure must not
+// masquerade as "not behind" and silently suppress a legitimate rescue.
 async function defaultCompareBehind(slug, base, head) {
   const res = spawnSync(
     "gh",
     ["api", `repos/${slug}/compare/${base}...${head}`, "--jq", ".behind_by"],
     { encoding: "utf8", timeout: 15_000 }
   );
-  if (res.status !== 0) return 0;
-  return parseInt(res.stdout.trim(), 10) || 0;
+  if (res.status !== 0) {
+    throw new Error(res.stderr || `gh api compare failed (exit ${res.status})`);
+  }
+  const behind = parseInt(res.stdout.trim(), 10);
+  if (Number.isNaN(behind)) {
+    log.warn(
+      { slug, base, head, stdout: res.stdout },
+      "stale-pr-rescue: unparsable behind_by — treating as 0"
+    );
+    return 0;
+  }
+  return behind;
 }
 
-// defaultMergeTree — run git merge-tree --write-tree in the worktree.
-async function defaultMergeTree(worktreePath, base, head) {
+// defaultMergeTree — fetch origin/<base> + origin/<head> then run
+// `git merge-tree --write-tree origin/<base> origin/<head>` in the worktree.
+// base/head are BRANCH NAMES (the call site passes view.baseRefName /
+// view.headRefName) — comparing origin/<base> against the fetched PR head is
+// the whole point; the pre-fix code compared origin/<base> against itself,
+// which is always clean (verify finding, CTL-782). The fetch lives inside
+// this seam (not at the call site) so tests that inject mergeTree never spawn
+// git, and the fetch failure path is owned here: a failed fetch throws (the
+// per-ticket catch logs + retries next tick) instead of silently classifying
+// against a stale origin/<base>.
+// Exported for the real-git integration test.
+export async function defaultMergeTree(worktreePath, base, head) {
+  const fetchRes = spawnSync(
+    "git",
+    ["-C", worktreePath, "fetch", "origin", base, head],
+    { encoding: "utf8", timeout: 30_000 }
+  );
+  if (fetchRes.status !== 0) {
+    throw new Error(
+      `git fetch origin ${base} ${head} failed (exit ${fetchRes.status}): ${fetchRes.stderr ?? ""}`
+    );
+  }
   const res = spawnSync(
     "git",
-    ["-C", worktreePath, "merge-tree", "--write-tree", `origin/${base}`, head],
+    ["-C", worktreePath, "merge-tree", "--write-tree", `origin/${base}`, `origin/${head}`],
     { encoding: "utf8", timeout: 30_000 }
   );
   return { exitCode: res.status ?? 128, output: res.stdout ?? "" };
@@ -166,33 +234,58 @@ function defaultWorktreeExists(worktreePath) {
   return !!worktreePath && existsSync(worktreePath);
 }
 
+// buildRescueDispatchArgs — pure argv builder for the orchestrate-rebase
+// dispatch. Exported so a unit test can assert the arg vector carries a
+// non-empty --orch (orchestrate-rebase hard-exits on an empty one) without
+// spawning anything (verify finding, CTL-782).
+export function buildRescueDispatchArgs(ticket, { prNumber, orchId, orchDir, worktreePath, base, signalFile }) {
+  return [
+    ORCHESTRATE_REBASE_BIN,
+    ticket,
+    "--pr", String(prNumber),
+    "--orch", orchId,
+    "--orch-dir", orchDir,
+    "--worker-dir", worktreePath,
+    "--base-branch", base,
+    "--signal-file", signalFile,
+    "--prompt-template", RESCUE_PROMPT_TEMPLATE,
+    "--dispatch",
+  ];
+}
+
 // defaultDispatchRescue — invoke orchestrate-rebase --dispatch with rescue flags.
-function defaultDispatchRescue(ticket, { prNumber, orchId, orchDir, worktreePath, base, signalFile }) {
-  const res = spawnSync(
-    "bash",
-    [
-      ORCHESTRATE_REBASE_BIN,
-      ticket,
-      "--pr", String(prNumber),
-      "--orch", orchId,
-      "--orch-dir", orchDir,
-      "--worker-dir", worktreePath,
-      "--base-branch", base,
-      "--signal-file", signalFile,
-      "--prompt-template", RESCUE_PROMPT_TEMPLATE,
-      "--dispatch",
-    ],
-    { encoding: "utf8", timeout: 30_000 }
-  );
+// Returns { ok } so the call site can refuse to burn a rescueAttempt on a
+// dispatch that never spawned (verify finding, CTL-782). Guards the empty
+// orchId here too: orchestrate-rebase exits 1 on `--orch ""`, so spawning
+// would be a guaranteed-failing dispatch.
+function defaultDispatchRescue(ticket, opts) {
+  if (!opts.orchId) {
+    log.warn({ ticket }, "stale-pr-rescue: refusing dispatch with empty orchId");
+    return { ok: false, error: "empty_orch_id" };
+  }
+  const res = spawnSync("bash", buildRescueDispatchArgs(ticket, opts), {
+    encoding: "utf8",
+    timeout: 30_000,
+  });
   if (res.status !== 0) {
     log.warn({ ticket, stderr: res.stderr }, "stale-pr-rescue: dispatch failed");
+    return { ok: false, error: res.stderr || `exit ${res.status}` };
   }
+  return { ok: true };
 }
 
 // defaultEscalate — apply needs-human label once + emit event.
-function defaultEscalate(ticket, detail, { orchDir, orchId, linearWrite }) {
+// linearWrite defaults to the real linear-write module at the
+// startStalePrRescueTimer boundary; a null here means a caller explicitly
+// opted out, which leaves the ticket invisible to humans — say so loudly.
+function defaultEscalate(ticket, detail, { orchDir, linearWrite }) {
   if (linearWrite) {
     labelOnce(orchDir, ticket, "needs-human", linearWrite);
+  } else {
+    log.warn(
+      { ticket },
+      "stale-pr-rescue: no linearWrite transport — needs-human label NOT applied (log-only escalation)"
+    );
   }
   log.warn(
     { ticket, ...detail },
@@ -219,7 +312,9 @@ export function startStalePrRescueTimer({
   orchDir,
   orchId = "",
   config = {},
-  linearWrite = null,
+  // Real Linear transport by default — the daemon call site passes nothing,
+  // and a null default made every escalation a silent no-op (verify finding).
+  linearWrite = linearWriteDefault,
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -296,27 +391,77 @@ async function processTicket({
   if (anyPhaseJobAlive(orchDir, ticket, jobLifecycleFn)) return;
 
   const rescueState = readRescueState(orchDir, ticket);
+  // Corrupt/torn rescue.json (null sentinel): skip the ticket this tick rather
+  // than treating it as empty state — that would reset rescueAttempts and
+  // bypass the budget gate. readRescueState already logged the warn.
+  if (rescueState === null) return;
 
-  // 3. Check if rescue worker itself previously stalled.
+  // Per-ticket orchestrator id for dispatch/escalate context. In
+  // execution-core orchId === ticket (the scheduler stamps `.orchestrator`
+  // on every phase signal); the timer-level orchId param and finally the
+  // ticket itself are fallbacks — never empty, because orchestrate-rebase
+  // hard-exits on `--orch ""` (verify finding, CTL-782).
+  const effectiveOrchId = prInfo.orchestrator || orchId || ticket;
+
+  const { slug } = prInfo;
+
+  // 3. Check if rescue worker itself previously stalled. Re-check the PR
+  //    state first when possible: a stalled rescue whose PR has since
+  //    merged/closed externally needs no human (verify finding). If the
+  //    re-check itself fails (gh down), escalate anyway — fail-safe.
   if (rescueState.status === "rescue-stalled") {
-    escalate(ticket, { reason: "rescue_worker_stalled", ...rescueState }, { orchDir, orchId, linearWrite });
+    if (slug) {
+      let externalState = null;
+      try {
+        externalState = (await prView(slug, prInfo.number))?.state ?? null;
+      } catch { /* re-check unavailable — fall through to escalate */ }
+      if (externalState === "MERGED" || externalState === "CLOSED") {
+        log.info(
+          { ticket, prState: externalState },
+          "stale-pr-rescue: stalled rescue's PR resolved externally — not escalating"
+        );
+        writeRescueState(orchDir, ticket, {
+          ...rescueState,
+          status: "rescue-stalled-resolved",
+          stalledResolvedAt: new Date(nowMs).toISOString(),
+        });
+        return;
+      }
+    }
+    escalate(ticket, { reason: "rescue_worker_stalled", ...rescueState }, { orchDir, orchId: effectiveOrchId, linearWrite });
     writeRescueState(orchDir, ticket, { ...rescueState, escalatedAt: new Date(nowMs).toISOString() });
     emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
     return;
   }
 
   // 4. Fetch PR view (may throw — caught by per-ticket wrapper).
-  const { slug } = prInfo;
   if (!slug) return;
   const view = await prView(slug, prInfo.number);
+
+  // BEHIND/DIRTY work below needs the PR head ref. defaultPrView always
+  // populates it; a missing one means we cannot compare or classify —
+  // substituting the base ref would compare base...base (always clean /
+  // 0 behind) and silently suppress the rescue (verify finding). Skip the
+  // tick loudly instead.
+  const needsHead = view.mergeStateStatus === "BEHIND" || view.mergeStateStatus === "DIRTY";
+  if (needsHead && !view.headRefName) {
+    log.warn(
+      { ticket, mergeStateStatus: view.mergeStateStatus },
+      "stale-pr-rescue: PR view missing headRefName — skipping ticket this tick"
+    );
+    return;
+  }
 
   // 5. Get behindBy if BEHIND.
   let behindBy = 0;
   if (view.mergeStateStatus === "BEHIND") {
-    behindBy = await compareBehind(slug, view.baseRefName, view.headRefName ?? `origin/${view.baseRefName}`);
+    behindBy = await compareBehind(slug, view.baseRefName, view.headRefName);
   }
 
-  // 6. Run merge-tree classification only for stable DIRTY.
+  // 6. Run merge-tree classification only for stable DIRTY. The seam fetches
+  //    origin/<base> + origin/<head> itself and compares base against the PR
+  //    HEAD — the pre-fix call site passed origin/<base> as the head, a self-
+  //    compare that classified every conflict as resolvable (verify finding).
   let classification = null;
   if (view.mergeStateStatus === "DIRTY" && rescueState.firstSeenAt) {
     const seenMs = new Date(rescueState.firstSeenAt).getTime();
@@ -324,12 +469,7 @@ async function processTicket({
     if (elapsedMs >= cfg.stableSeconds * 1_000) {
       const wt = prInfo.worktreePath;
       if (wt && worktreeExists(wt)) {
-        try {
-          // fetch origin before merge-tree to get current base
-          spawnSync("git", ["-C", wt, "fetch", "origin", view.baseRefName ?? "main"],
-            { timeout: 30_000 });
-        } catch { /* best-effort */ }
-        const mt = await mergeTree(wt, view.baseRefName ?? "main", `origin/${view.baseRefName ?? "main"}`);
+        const mt = await mergeTree(wt, view.baseRefName ?? "main", view.headRefName);
         classification = classifyMergeTree(mt, { maxConflictFiles: cfg.maxConflictFiles });
       }
     }
@@ -367,26 +507,40 @@ async function processTicket({
 
     case "dispatch": {
       const signalFile = join(orchDir, "workers", ticket, "rescue.json");
+      // Dispatch FIRST, count after: a failed spawn must not burn the
+      // single-attempt budget on a rescue that never ran (verify finding,
+      // CTL-782). Seam contract: undefined (test stubs / legacy fakes) is
+      // success; only an explicit { ok: false } is a failed dispatch.
+      const result = await dispatchRescue(ticket, {
+        prNumber: prInfo.number,
+        orchId: effectiveOrchId,
+        orchDir,
+        worktreePath: prInfo.worktreePath,
+        base: view.baseRefName ?? "main",
+        signalFile,
+      });
+      if (result?.ok === false) {
+        writeRescueState(orchDir, ticket, {
+          ...rescueState,
+          lastDispatchAt: new Date(nowMs).toISOString(),
+          lastDispatchError: result.error ?? "dispatch failed",
+        });
+        emit(`phase.rescue.dispatch-failed.${ticket}`, { ticket, error: result.error ?? "dispatch failed" });
+        return;
+      }
       const newAttempts = (rescueState.rescueAttempts ?? 0) + 1;
       writeRescueState(orchDir, ticket, {
         ...rescueState,
         rescueAttempts: newAttempts,
         lastDispatchAt: new Date(nowMs).toISOString(),
-      });
-      dispatchRescue(ticket, {
-        prNumber: prInfo.number,
-        orchId,
-        orchDir,
-        worktreePath: prInfo.worktreePath,
-        base: view.baseRefName ?? "main",
-        signalFile,
+        lastDispatchError: undefined,
       });
       emit(`phase.rescue.dispatched.${ticket}`, { ticket, attempt: newAttempts });
       return;
     }
 
     case "escalate": {
-      escalate(ticket, decision.detail ?? {}, { orchDir, orchId, linearWrite });
+      escalate(ticket, decision.detail ?? {}, { orchDir, orchId: effectiveOrchId, linearWrite });
       writeRescueState(orchDir, ticket, {
         ...rescueState,
         escalatedAt: new Date(nowMs).toISOString(),
