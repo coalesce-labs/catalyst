@@ -69,6 +69,7 @@ import {
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
+import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
@@ -6911,5 +6912,136 @@ describe("schedulerTick — CTL-781 respect-assignment + self-assign", () => {
       botWriteId: BOT,
       gateway,
     })).not.toThrow();
+  });
+});
+
+// --- CTL-663: scheduler-level e2e regression lock ---------------------------
+// Exercises the full schedulerTick → reclaimDeadWork → implementProbe chain
+// with the REAL probe (fake git/fs seams). A stale implement worker with 1-of-5
+// plan phases committed must appear in result.revived (not result.reclaimed),
+// and the signal on disk must remain "running" (not flipped to "done").
+
+describe("schedulerTick — CTL-663 partial-commit implement e2e lock", () => {
+  function writeNestedSignalCTL663(ticket, phase, body) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `phase-${phase}.json`), JSON.stringify({ ticket, phase, ...body }));
+  }
+
+  // Local helpers matching the work-done-probes.test.mjs pattern.
+  function porcelainFor663(ticket, wt) {
+    return [
+      "worktree /repo",
+      "HEAD abcdef0",
+      "branch refs/heads/main",
+      "",
+      `worktree ${wt}`,
+      "HEAD 1234567",
+      `branch refs/heads/${ticket}`,
+      "",
+    ].join("\n");
+  }
+  function makeRunGit663(responses) {
+    return (args) => {
+      const key = args.join(" ");
+      if (responses[key]) return responses[key];
+      for (const [k, v] of Object.entries(responses)) {
+        if (key.endsWith(k)) return v;
+      }
+      return { code: 1, stdout: "", stderr: `fake runGit: no match for ${key}` };
+    };
+  }
+
+  const FIVE_PHASE_PLAN_BODY_E2E = `# Plan: CTL-663-E
+
+${"Overview and context for the five-phase implementation plan. ".repeat(5)}
+
+## Phase 1: Setup
+
+Establish the foundation and initial scaffolding.
+
+## Phase 2: Core Logic
+
+Implement the main business logic and algorithms.
+
+## Phase 3: Integration
+
+Wire up all components and integration points.
+
+## Phase 4: Tests
+
+Write comprehensive test coverage for all paths.
+
+## Phase 5: Cleanup
+
+Final polish, documentation, and code cleanup.
+
+### Success Criteria
+- [ ] All five phases land as discrete commits on the branch
+`;
+
+  test("CTL-663 e2e: stale implement, 1-of-5 plan phases committed → not bucketed reclaimed, signal not flipped", () => {
+    const ticket = "CTL-663-E";
+    const wt = `/wt/${ticket}`;
+    writeNestedSignalCTL663(ticket, "implement", { status: "running", bg_job_id: "bg-663-e" });
+
+    const probeSeams = {
+      runGit: makeRunGit663({
+        "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor663(ticket, wt), stderr: "" },
+        [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "1\n", stderr: "" },
+        [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+      }),
+      listArtifacts: () => [`2026-06-07-${ticket.toLowerCase()}.md`],
+      readArtifact: () => FIVE_PHASE_PLAN_BODY_E2E,
+    };
+    const realProbePartial = (args) => WORK_DONE_PROBES.implement(args, probeSeams);
+
+    const dispatch = recorder({ code: 0 });
+    const result = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
+      teardownWorktree: () => true,
+      reclaimDeadWork: (od, sig, opts) =>
+        reclaimDeadWorkIfPossible(od, sig, {
+          ...opts,
+          repoRoot: "/repo",
+          probes: { implement: realProbePartial },
+          jobLifecycle: () => "dead-gone",
+          progressMark: () => 1,
+          readProgressMark: () => 0,
+          writeProgressMark: () => {},
+          emitReapIntent: () => Promise.resolve(),
+          breaker: { isOpen: () => false },
+          listTicketPhases: () => ["implement"],
+          inEscalationCooldownFn: () => false,
+          recordEscalationFn: () => {},
+          appendReviveEvent: () => {},
+          appendEscalatedEvent: () => {},
+          appendReviveSuppressedEvent: () => {},
+          reviveDispatch: recorder({ code: 0 }),
+          applyStalledLabel: () => ({ applied: true }),
+          killBgJob: () => {},
+          countReviveEvents: () => 0,
+          writeReviveMarker: () => {},
+          resolveSession: () => null,
+          postReclaimMirror: () => {},
+          readBootSince: () => undefined,
+          now: () => 1_000_000,
+        }),
+    });
+
+    // Probe returned false (1 commit < 5 phases) → revived, not reclaimed.
+    expect(result.reclaimed).toEqual([]);
+    expect(result.revived).toEqual([{ ticket, phase: "implement" }]);
+
+    // Signal on disk must still be "running" (not flipped to "done" by emitComplete).
+    const signalPath = join(orchDir, "workers", ticket, "phase-implement.json");
+    const signal = JSON.parse(readFileSync(signalPath, "utf8"));
+    expect(signal.status).toBe("running");
+
+    // No next-phase dispatch fired (implement wasn't declared complete).
+    const verifyDispatches = dispatch.calls.filter((args) => args[0]?.phase === "verify");
+    expect(verifyDispatches.length).toBe(0);
   });
 });
