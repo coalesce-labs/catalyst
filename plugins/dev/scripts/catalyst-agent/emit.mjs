@@ -24,6 +24,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { hostname } from "node:os";
+import { hostName, hostId } from "../execution-core/lib/host-identity.mjs";
 
 // shortHostname — os.hostname() with the macOS-appended ".local" suffix
 // stripped, matching the hostname Claude Code's native OTel emits
@@ -81,6 +82,8 @@ export function buildAgentEnvelope(name, { entity, label, attrs = {}, payload = 
       "service.name": "catalyst.agent",
       "service.namespace": "catalyst",
       hostname: shortHostname(),
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     body: { payload },
     attributes,

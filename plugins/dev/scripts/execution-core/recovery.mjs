@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { hostName, hostId } from "./lib/host-identity.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
@@ -261,6 +262,8 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
       resource: {
         "service.name": "catalyst.execution-core",
         "service.namespace": "catalyst",
+        "host.name": hostName(),
+        "host.id": hostId(),
       },
       attributes: {
         "event.name": `phase.${phase}.${action}.${ticket}`,
