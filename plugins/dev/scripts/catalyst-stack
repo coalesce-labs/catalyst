@@ -1,0 +1,262 @@
+#!/usr/bin/env bash
+# catalyst-stack — bring the catalyst stack up (or down) on this host.
+#
+# Order on start: mitmproxy → broker → monitor → execution-core
+#               (monitor → broker → exec-core is the dependency order;
+#                mitmproxy is independent + first so the proxy env vars
+#                set below have somewhere to forward to)
+# Order on stop: reverse.
+#
+# Idempotent. If a service is already up, it is logged and left alone.
+#
+# Usage:
+#   catalyst-stack start [--proxy] [--hotpatch] [--yes]
+#   catalyst-stack stop
+#   catalyst-stack restart [--proxy] [--hotpatch] [--yes]
+#   catalyst-stack status
+#
+# --proxy:
+#   Opt-in to mitmproxy and set HTTPS_PROXY / NODE_USE_ENV_PROXY /
+#   NODE_EXTRA_CA_CERTS for the daemon. Installs mitmproxy via brew if absent.
+#   You only need this when you want Linear-traffic capture at
+#   ~/catalyst/linear-proxy.jsonl.
+#
+# --no-proxy:
+#   Accepted for backward compatibility; a no-op (proxy is already off by default).
+#
+# --hotpatch (start/restart only):
+#   ff-pull main, rsync plugins/dev/ into the resolved plugin-cache version dir,
+#   then start/restart. Use 'restart --hotpatch' after merging main to apply
+#   updates without a full reinstall.
+#
+# --yes:
+#   Non-interactive — auto-approve brew install of mitmproxy under --proxy.
+
+set -uo pipefail
+
+# CTL-390: --version handling (early, before any arg parsing).
+case "${1:-}" in
+  --version|-V)
+    _CV_SRC="${BASH_SOURCE[0]}"
+    while [[ -L "$_CV_SRC" ]]; do
+      _CV_D="$(cd -P "$(dirname "$_CV_SRC")" && pwd)" && _CV_SRC="$(readlink "$_CV_SRC")"
+      [[ "$_CV_SRC" != /* ]] && _CV_SRC="$_CV_D/$_CV_SRC"
+    done
+    _CV_DIR="$(cd -P "$(dirname "$_CV_SRC")" && pwd)"
+    [[ -f "${_CV_DIR}/lib/catalyst-version.sh" ]] && . "${_CV_DIR}/lib/catalyst-version.sh" \
+      && catalyst_print_version "catalyst-stack" "${BASH_SOURCE[0]}" && exit 0
+    echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
+    exit 1
+    ;;
+esac
+
+# ─── SCRIPT_DIR (symlink-walking) ────────────────────────────────────────────
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
+
+# ─── Proxy env (used only under --proxy) ─────────────────────────────────────
+PROXY_HOST="http://127.0.0.1:8080"
+MITM_CA="${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+MITM_ADDON="${HOME}/catalyst/mitm_linear_addon.py"
+MITM_LOG="${HOME}/catalyst/mitm.log"
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+log()  { printf '[catalyst-stack] %s\n' "$*"; }
+warn() { printf '[catalyst-stack] WARN: %s\n' "$*" >&2; }
+fail() { printf '[catalyst-stack] ERROR: %s\n' "$*" >&2; exit 1; }
+
+pid_alive() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+mitm_pid() { pgrep -f "mitmdump -s.*mitm_linear_addon" 2>/dev/null | head -1; }
+
+# ─── Service start/stop primitives ──────────────────────────────────────────
+ensure_proxy_deps() {
+  if ! command -v mitmdump >/dev/null 2>&1; then
+    if [[ "${ASSUME_YES:-no}" == "yes" ]]; then
+      brew install mitmproxy || return 1
+    else
+      read -r -p "mitmproxy not found. Install via 'brew install mitmproxy'? [y/N] " ans
+      [[ "$ans" =~ ^[Yy]$ ]] || { warn "mitmproxy required for --proxy"; return 1; }
+      command -v brew >/dev/null 2>&1 || { warn "brew not found"; return 1; }
+      brew install mitmproxy || return 1
+    fi
+  fi
+  if [[ ! -f "$MITM_CA" ]]; then
+    log "generating mitmproxy CA cert…"
+    ( nohup mitmdump --listen-port 8081 >/dev/null 2>&1 & sleep 2; kill %1 2>/dev/null ) || true
+    [[ -f "$MITM_CA" ]] || { warn "CA cert still missing at $MITM_CA"; return 1; }
+  fi
+  if [[ ! -f "$MITM_ADDON" ]]; then
+    local vendored="${SCRIPT_DIR}/mitm_linear_addon.py"
+    [[ -f "$vendored" ]] && { mkdir -p "$(dirname "$MITM_ADDON")"; cp "$vendored" "$MITM_ADDON"; } \
+      || { warn "vendored addon missing at $vendored"; return 1; }
+  fi
+}
+
+start_mitmproxy() {
+  local pid; pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "mitmproxy already running (pid $pid)"
+    return 0
+  fi
+  if [[ ! -f "$MITM_ADDON" ]]; then
+    warn "mitmproxy addon missing at $MITM_ADDON — skipping"
+    return 1
+  fi
+  if [[ ! -f "$MITM_CA" ]]; then
+    warn "mitmproxy CA cert missing at $MITM_CA — run 'mitmproxy' once to generate it, then re-run"
+    return 1
+  fi
+  log "starting mitmproxy (addon: $MITM_ADDON, log: $MITM_LOG)"
+  nohup mitmdump -s "$MITM_ADDON" --listen-port 8080 >"$MITM_LOG" 2>&1 &
+  disown $! 2>/dev/null || true
+  sleep 2
+  pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "  → mitmproxy started (pid $pid)"
+  else
+    warn "mitmproxy failed to start — see $MITM_LOG"
+    return 1
+  fi
+}
+
+stop_mitmproxy() {
+  local pid; pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "stopping mitmproxy (pid $pid)"
+    kill "$pid" 2>/dev/null
+    sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  else
+    log "mitmproxy not running"
+  fi
+}
+
+start_broker()  { catalyst-broker start 2>&1 | sed 's/^/  /'; }
+stop_broker()   { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+start_monitor() { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
+stop_monitor()  { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+
+start_daemon() {
+  local use_proxy="$1"
+  if catalyst-execution-core status 2>&1 | grep -q "^running"; then
+    log "execution-core already running ($(catalyst-execution-core status 2>&1 | head -1))"
+    return 0
+  fi
+  log "starting execution-core daemon (proxy=$use_proxy)"
+  if [[ "$use_proxy" == "yes" ]]; then
+    if [[ ! -f "$MITM_CA" ]]; then
+      warn "proxy requested but CA cert missing — daemon will fall back to no-proxy mode."
+      use_proxy="no"
+    fi
+  fi
+  if [[ "$use_proxy" == "yes" ]]; then
+    HTTPS_PROXY="$PROXY_HOST" \
+    NODE_USE_ENV_PROXY=1 \
+    NODE_EXTRA_CA_CERTS="$MITM_CA" \
+      catalyst-execution-core start 2>&1 | sed 's/^/  /'
+  else
+    catalyst-execution-core start 2>&1 | sed 's/^/  /'
+  fi
+}
+
+stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; }
+
+# ─── Hotpatch ────────────────────────────────────────────────────────────────
+_resolve_cache_dir() {
+  local cache="${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"
+  ls -d "${cache}"/[0-9]*.*.*/ 2>/dev/null | sort -V | tail -1 | sed 's|/$||'
+}
+
+cmd_hotpatch() {
+  local repo="${CATALYST_REPO_DIR:-${HOME}/code-repos/github/coalesce-labs/catalyst}"
+  [[ -d "$repo/.git" ]] || fail "catalyst repo not found at $repo (set CATALYST_REPO_DIR)"
+  log "hotpatch: ff-pull main in $repo"
+  git -C "$repo" pull --ff-only origin main || fail "git pull --ff-only failed — resolve manually then retry"
+  local dest; dest="$(_resolve_cache_dir)"
+  [[ -n "$dest" ]] || fail "could not resolve plugin cache version dir under ${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"
+  log "hotpatch: rsync plugins/dev/ → ${dest}/"
+  rsync -ac --exclude=node_modules --exclude=.orphaned_at \
+    "$repo/plugins/dev/" "${dest}/"
+}
+
+# ─── Top-level commands ─────────────────────────────────────────────────────
+cmd_start() {
+  local use_proxy="no"
+  local hotpatch="no"
+  ASSUME_YES="${ASSUME_YES:-no}"
+  for arg in "$@"; do
+    case "$arg" in
+      --proxy)    use_proxy="yes" ;;
+      --no-proxy) : ;;
+      --hotpatch) hotpatch="yes" ;;
+      --yes)      ASSUME_YES="yes" ;;
+      *) fail "unknown arg: $arg" ;;
+    esac
+  done
+
+  if [[ "$hotpatch" == "yes" ]]; then
+    if catalyst-execution-core status 2>&1 | grep -q "^running"; then
+      fail "stack is running — use 'catalyst-stack restart --hotpatch'"
+    fi
+    cmd_hotpatch
+  fi
+
+  if [[ "$use_proxy" == "yes" ]]; then
+    ensure_proxy_deps || fail "proxy preflight failed"
+    start_mitmproxy || warn "continuing without mitmproxy (Linear traffic won't be logged)"
+  fi
+  start_broker
+  start_monitor
+  start_daemon "$use_proxy"
+
+  log ""
+  log "stack up — current state:"
+  cmd_status
+}
+
+cmd_stop() {
+  stop_daemon
+  stop_monitor
+  stop_broker
+  stop_mitmproxy
+}
+
+cmd_restart() {
+  local hotpatch="no"
+  for a in "$@"; do [[ "$a" == "--hotpatch" ]] && hotpatch="yes"; done
+  cmd_stop
+  if [[ "$hotpatch" == "yes" ]]; then
+    cmd_hotpatch
+  fi
+  sleep 1
+  # Pass through all flags except --hotpatch (already applied above)
+  local start_args=()
+  for a in "$@"; do [[ "$a" != "--hotpatch" ]] && start_args+=("$a"); done
+  cmd_start "${start_args[@]}"
+}
+
+cmd_status() {
+  local mp; mp="$(mitm_pid)"
+  if pid_alive "$mp"; then echo "  mitmproxy        running  pid=$mp"; else echo "  mitmproxy        stopped"; fi
+  echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
+  echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
+  echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
+}
+
+# ─── Dispatch ───────────────────────────────────────────────────────────────
+case "${1:-}" in
+  start)   shift; cmd_start "$@" ;;
+  stop)    cmd_stop ;;
+  restart) shift; cmd_restart "$@" ;;
+  status|"") cmd_status ;;
+  -h|--help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status)" ;;
+esac
