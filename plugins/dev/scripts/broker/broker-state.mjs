@@ -97,6 +97,32 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       updated_at   TEXT NOT NULL
     )
   `);
+  // CTL-821 (Gateway L1 child a): grow ticket_state into the full Linear-truth
+  // descriptor — additive ALTERs in try/catch (the CTL-402 pattern), so an
+  // existing live filter-state.db migrates in place with zero data loss and a
+  // re-open is a no-op. `removed_at` is the removed flag (null = present);
+  // `uuid` carries the Linear entityId so a `remove` webhook (whose payload
+  // has ONLY the UUID, never the CTL-123 identifier) can be resolved.
+  for (const col of [
+    "relations TEXT",
+    "labels TEXT",
+    "priority INTEGER",
+    "resolution TEXT",
+    "assignee TEXT",
+    "uuid TEXT",
+    "removed_at TEXT",
+  ]) {
+    try {
+      db.run(`ALTER TABLE ticket_state ADD COLUMN ${col}`);
+    } catch {
+      /* already exists */
+    }
+  }
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_ticket_state_uuid
+      ON ticket_state(uuid)
+      WHERE uuid IS NOT NULL
+  `);
 
   // CTL-403: waiting_sessions tracks active wait-for loops so the watchdog can
   // distinguish 'silently dead' (no heartbeat AND no active wait) from
@@ -458,6 +484,120 @@ export function getTicketState(ticket) {
     prNumber: row.pr_number,
     updatedAt: row.updated_at,
   };
+}
+
+// ─── ticket descriptor helpers (CTL-821, Gateway L1 child a) ─────────────────
+
+// upsertTicketDescriptor — COALESCE-sticky like upsertTicketState: an absent
+// field never regresses what a previous (possibly richer) webhook wrote.
+// relations/labels are stored as JSON text (mirrors how fetchTicketRelations
+// hydrates its store). `removed` is tri-state: true stamps removed_at (sticky
+// on the first stamp), false clears it (Linear archive→unarchive arrives as
+// `update`), undefined leaves it untouched.
+export function upsertTicketDescriptor({
+  ticket,
+  state,
+  prNumber,
+  relations,
+  labels,
+  priority,
+  resolution,
+  assignee,
+  uuid,
+  removed,
+}) {
+  if (!ticket) return;
+  const json = (v) => (v === undefined || v === null ? null : JSON.stringify(v));
+  ensure().run(
+    `INSERT INTO ticket_state
+       (ticket, linear_state, pr_number, relations, labels, priority, resolution, assignee, uuid, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(ticket) DO UPDATE SET
+       linear_state = COALESCE(excluded.linear_state, linear_state),
+       pr_number    = COALESCE(excluded.pr_number, pr_number),
+       relations    = COALESCE(excluded.relations, relations),
+       labels       = COALESCE(excluded.labels, labels),
+       priority     = COALESCE(excluded.priority, priority),
+       resolution   = COALESCE(excluded.resolution, resolution),
+       assignee     = COALESCE(excluded.assignee, assignee),
+       uuid         = COALESCE(excluded.uuid, uuid),
+       updated_at   = excluded.updated_at`,
+    [
+      ticket,
+      state ?? null,
+      prNumber ?? null,
+      json(relations),
+      json(labels),
+      priority ?? null,
+      resolution ?? null,
+      assignee ?? null,
+      uuid ?? null,
+      nowIso(),
+    ]
+  );
+  if (removed === true) {
+    ensure().run(`UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?) WHERE ticket = ?`, [
+      nowIso(),
+      ticket,
+    ]);
+  } else if (removed === false) {
+    ensure().run(`UPDATE ticket_state SET removed_at = NULL WHERE ticket = ?`, [ticket]);
+  }
+}
+
+function rowToTicketDescriptor(row) {
+  const parse = (s) => {
+    if (s === null || s === undefined) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  };
+  return {
+    ticket: row.ticket,
+    state: row.linear_state,
+    prNumber: row.pr_number,
+    relations: parse(row.relations),
+    labels: parse(row.labels),
+    priority: row.priority ?? null,
+    resolution: row.resolution ?? null,
+    assignee: row.assignee ?? null,
+    uuid: row.uuid ?? null,
+    removed: row.removed_at != null,
+    removedAt: row.removed_at ?? null,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getTicketDescriptor(ticket) {
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE ticket = ?`).get(ticket);
+  return row ? rowToTicketDescriptor(row) : null;
+}
+
+// getTicketDescriptorByUuid — the UUID→identifier index lookup. Linear's
+// `remove` webhook payload carries only the entityId UUID; this resolves it to
+// the descriptor row populated by earlier create/update webhooks.
+export function getTicketDescriptorByUuid(uuid) {
+  if (!uuid) return null;
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE uuid = ?`).get(uuid);
+  return row ? rowToTicketDescriptor(row) : null;
+}
+
+// markTicketRemovedByUuid — the `remove`-webhook write path: resolve the UUID,
+// stamp removed_at (sticky — a duplicate remove keeps the first timestamp).
+// Returns the resolved identifier, or null when the UUID was never indexed
+// (the reconcile backstop, child e, owns that gap).
+export function markTicketRemovedByUuid(uuid) {
+  if (!uuid) return null;
+  const row = ensure().prepare(`SELECT ticket FROM ticket_state WHERE uuid = ?`).get(uuid);
+  if (!row) return null;
+  const ts = nowIso();
+  ensure().run(
+    `UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?), updated_at = ? WHERE ticket = ?`,
+    [ts, ts, row.ticket]
+  );
+  return { ticket: row.ticket };
 }
 
 // ─── worker_state helpers (CTL-532) ──────────────────────────────────────────
