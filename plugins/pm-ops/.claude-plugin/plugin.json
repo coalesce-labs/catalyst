@@ -1,6 +1,6 @@
 {
   "name": "catalyst-pm-ops",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Linear cycle/backlog/PR ops, daily and weekly cadence, status updates, and team comms — extracted from catalyst-pm",
   "author": {
     "name": "Coalesce Labs",

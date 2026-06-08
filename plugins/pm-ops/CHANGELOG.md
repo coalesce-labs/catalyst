@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.0.0...catalyst-pm-ops-v2.0.1) (2026-06-08)
+
+
+### Bug Fixes
+
+* **dev:** CTL-844 fresh-machine installer gaps — no-sudo, npm humanlayer, real gh CLI, bun required ([#1457](https://github.com/coalesce-labs/catalyst/issues/1457)) ([0c5e94d](https://github.com/coalesce-labs/catalyst/commit/0c5e94d851e4dd34066baecb9401035883852989))
+
 ## [2.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v1.0.0...catalyst-pm-ops-v2.0.0)
 
 May 11, 2026
@@ -17,4 +24,3 @@ The Linear/GitHub integration, daily cadence, and team communication skills have
 * **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537))
 * **pm-ops:** extract Linear/cadence/comms skills from catalyst-pm (CTL-319) ([#537](https://github.com/coalesce-labs/catalyst/issues/537)) ([5a9c582](https://github.com/coalesce-labs/catalyst/commit/5a9c58279129349645997d0e7b20928f93b32c4a))
 * **pm-ops:** initial plugin — extracted from catalyst-pm ([CTL-319](https://linear.app/coalesce-labs/issue/CTL-319))
-

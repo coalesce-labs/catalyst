@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v2.0.0...catalyst-foundry-v2.1.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** make setup-catalyst.sh safe for headless environments (CTL-842) ([#1456](https://github.com/coalesce-labs/catalyst/issues/1456)) ([4dd39d5](https://github.com/coalesce-labs/catalyst/commit/4dd39d530367fe37292e892b318093c3f6310b2b))
+
 ## [2.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-foundry-v1.0.0...catalyst-foundry-v2.0.0) (2026-06-06)
 
 
