@@ -339,7 +339,12 @@ export function processApprovedResumes({
   const workersDir = join(orchDir, "workers");
   let tickets;
   try {
-    tickets = readdirSync(workersDir);
+    // withFileTypes: filter to directories only — guards against non-directory
+    // entries at the workers/ level and prevents path-component confusion from
+    // any stray file whose name could produce an unexpected path join.
+    tickets = readdirSync(workersDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
   } catch {
     return { dispatched: 0, failed: 0 };
   }
