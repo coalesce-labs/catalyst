@@ -42,6 +42,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
+import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import {
   recoverStartup,
   startMonitor,
@@ -106,6 +107,8 @@ let _waitWatcher = null;
 let _memorySampler = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
+// CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
+let _heartbeat = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -342,6 +345,12 @@ export function startDaemon({
   // memory sampler.
   startRatelimitPoller = realStartRatelimitPoller,
   enableRatelimitPoller = readRatelimitPollerConfig().enabled,
+  // CTL-859: node-heartbeat emitter. Injectable for tests; default-on, gated by
+  // CATALYST_HEARTBEAT=0 (the test/opt-out knob, mirroring the other timers).
+  // ADDITIVE/dormant — the heartbeat only appends observability events; nothing
+  // in dispatch/claim consumes them in PR1.
+  startHeartbeat = realStartHeartbeat,
+  enableHeartbeat = process.env.CATALYST_HEARTBEAT !== "0",
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -538,6 +547,15 @@ export function startDaemon({
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
       _ratelimitPoller = startRatelimitPoller();
+    }
+
+    // CTL-859: start the node-heartbeat emitter. Appends a node.heartbeat event
+    // to the unified event log every HEARTBEAT_INTERVAL_MS so a future liveness
+    // reader (readClusterHeartbeats) can detect a dead node by heartbeat
+    // silence. ADDITIVE/dormant — pure observability, no behavior consumes it
+    // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
+    if (enableHeartbeat) {
+      _heartbeat = startHeartbeat();
     }
   } catch (err) {
     stopDaemon();
@@ -848,6 +866,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: ratelimit-poller stop failed");
     }
     _ratelimitPoller = null;
+  }
+  // CTL-859: stop the node-heartbeat emitter.
+  if (_heartbeat) {
+    try {
+      _heartbeat.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: heartbeat stop failed");
+    }
+    _heartbeat = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {
