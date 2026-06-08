@@ -211,3 +211,66 @@ export async function isFenceCurrent(ticket, generation, { post = defaultPost } 
   const current = await readClaim(ticket, { post });
   return current?.generation === generation;
 }
+
+// ─── CLI ─────────────────────────────────────────────────────────────────────
+// A thin argv shim so the SYNCHRONOUS daemon (scheduler.mjs / monitor.mjs) can
+// drive these async claim/fence functions through spawnSync — the same
+// sync-subprocess convention the daemon already uses for its Linear writes
+// (linear-write.mjs shells linear-transition.sh). cluster-claim-sync.mjs is the
+// in-process wrapper that spawnSync's `node cluster-claim.mjs <cmd> …`.
+//
+// runCli is exported (with an injectable `post`) so the CLI surface is unit
+// tested without the network; the main-guard below calls it with the real post.
+//
+//   claim <ticket> <host> <phase>  → stdout JSON {won, generation}; exit 0 iff
+//                                    the soft-CAS ran (read `won` from stdout —
+//                                    a non-zero exit means the operation threw,
+//                                    which the wrapper treats as won:false).
+//   fence-check <ticket> <gen>     → stdout JSON {current}; exit 0 when current,
+//                                    FENCE_STALE_EXIT (10) when stale — mirrors
+//                                    claim.mjs's host-local fence-check contract.
+const FENCE_STALE_EXIT = 10;
+
+export async function runCli(argv, { post = defaultPost } = {}) {
+  const [cmd, ...rest] = argv;
+  switch (cmd) {
+    case "claim": {
+      const [ticket, hostName, phase] = rest;
+      const res = await claimTicket(ticket, hostName, phase, { post });
+      process.stdout.write(JSON.stringify(res) + "\n");
+      return 0;
+    }
+    case "fence-check": {
+      const [ticket, gen] = rest;
+      const current = await isFenceCurrent(ticket, Number(gen), { post });
+      process.stdout.write(JSON.stringify({ current }) + "\n");
+      return current ? 0 : FENCE_STALE_EXIT;
+    }
+    default:
+      process.stderr.write(
+        `cluster-claim.mjs: unknown subcommand: ${cmd ?? "(none)"}\n` +
+          "usage: cluster-claim.mjs <claim <ticket> <host> <phase> | fence-check <ticket> <gen>>\n",
+      );
+      return 1;
+  }
+}
+
+// isMain — true when run as `node cluster-claim.mjs …`, false when imported.
+// Uses the suffix check (not bun-only import.meta.main) so the CLI fires under
+// the daemon's node runtime, mirroring claim.mjs::isMain.
+function isMain() {
+  return (
+    process.argv[1] &&
+    (process.argv[1].endsWith("/cluster-claim.mjs") ||
+      process.argv[1].endsWith("cluster-claim.mjs"))
+  );
+}
+
+if (isMain()) {
+  runCli(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      process.stderr.write(`cluster-claim.mjs: ${err?.message ?? err}\n`);
+      process.exit(1);
+    });
+}
