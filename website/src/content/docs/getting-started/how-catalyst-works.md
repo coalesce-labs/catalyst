@@ -7,7 +7,7 @@ sidebar:
 
 Here is the whole idea: you describe the work, autonomous agents build and ship it, and you watch it happen on your Linear board. You stay away from the keyboard for the run itself.
 
-Linear is the issue tracker Catalyst works from. (An issue, or "ticket," is one unit of work.) A background program called the **executor** watches your board and does the rest.
+Linear is the issue tracker Catalyst works from. (An issue, or "ticket," is one unit of work.) A background scheduler — the **execution-core** daemon (part of the Catalyst service stack: broker, monitor, execution-core) — watches your board and does the rest.
 
 ## The loop, in four steps
 

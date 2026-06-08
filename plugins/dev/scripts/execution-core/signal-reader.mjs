@@ -158,6 +158,9 @@ function parseSignal(path, layout) {
     // derived path to catch wrong-cwd redispatch (memory: ADV-1134). Null
     // for pre-CTL-615 signals — revive treats null as "skip check".
     worktreePath: raw.worktreePath ?? null,
+    // CTL-852: host identity written at dispatch time. Null for pre-CTL-852
+    // signals — read-only for audit/HUD; no scheduling behavior depends on it.
+    host: raw.host ?? null,
     raw,
   };
 }

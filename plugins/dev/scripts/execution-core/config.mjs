@@ -6,8 +6,9 @@
 // CATALYST_DIR per call so tests redirect by setting the env var; production
 // daemons pin a stable value at launch.
 
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { resolve } from "node:path";
+import { readFileSync } from "node:fs";
 
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
@@ -104,6 +105,80 @@ export function getEventLogPath() {
   const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   return resolve(catalystDir(), "events", `${ym}.jsonl`);
 }
+
+// --- Host identity + cluster roster (CTL-859) ---
+// PR1 of the distributed-coordination epic. ADDITIVE foundation: a configurable
+// host name + a committed cluster roster, read here so later PRs (HRW ownership,
+// Linear-CAS claim, takeover/healing) have one source of truth. Nothing in the
+// dispatch/claim/eligible-query path consults these yet.
+
+// Layer-2 (machine-local) config path. Mirrors daemon.mjs main()'s resolution:
+// CATALYST_LAYER2_CONFIG_FILE || ~/.config/catalyst/config.json. Each host's
+// Layer-2 file differs, so this is the right home for a per-host name.
+function getLayer2ConfigPath() {
+  return (
+    process.env.CATALYST_LAYER2_CONFIG_FILE ||
+    resolve(homedir(), ".config", "catalyst", "config.json")
+  );
+}
+
+// The repo root that owns the committed cluster roster (.catalyst/hosts.json).
+// CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json (mirrors the
+// reaper-config resolution in daemon.mjs main()); otherwise fall back to the
+// daemon's cwd. Re-resolved per call so tests can redirect via the env var.
+function getCatalystRepoDir() {
+  const cfgFile = process.env.CATALYST_CONFIG_FILE;
+  if (cfgFile) {
+    // <repoRoot>/.catalyst/config.json → <repoRoot>/.catalyst
+    return resolve(cfgFile, "..");
+  }
+  return resolve(process.cwd(), ".catalyst");
+}
+
+// getHostName — resolve this host's coordination name. Precedence:
+//   1. CATALYST_HOST_NAME env (test/alias override; matches lib/host-identity.mjs)
+//   2. catalyst.host.name in the Layer-2 (machine-local) config file
+//   3. os.hostname() with a trailing ".local" stripped (the bare mDNS suffix)
+// Never throws — an unreadable/malformed Layer-2 file falls through to the
+// hostname default. The result is the membership key HRW hashing will use.
+export function getHostName() {
+  const envOverride = process.env.CATALYST_HOST_NAME;
+  if (typeof envOverride === "string" && envOverride.length > 0) return envOverride;
+  try {
+    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
+    const name = parsed?.catalyst?.host?.name;
+    if (typeof name === "string" && name.length > 0) return name;
+  } catch {
+    /* missing/malformed Layer-2 file → hostname default */
+  }
+  return hostname().replace(/\.local$/, "");
+}
+
+// getClusterHosts — read the committed cluster roster from
+// <repoRoot>/.catalyst/hosts.json (a JSON array of host names). When the file
+// is absent, unreadable, malformed, or not a non-empty array of strings, fall
+// back to the single-host default ([getHostName()]) — the safe behavior for the
+// current single-primary deployment. Never throws.
+export function getClusterHosts() {
+  try {
+    const raw = readFileSync(resolve(getCatalystRepoDir(), "hosts.json"), "utf8");
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const hosts = parsed.filter((h) => typeof h === "string" && h.length > 0);
+      if (hosts.length > 0) return hosts;
+    }
+  } catch {
+    /* absent/malformed roster → single-host default */
+  }
+  return [getHostName()];
+}
+
+// CTL-859 — node-heartbeat cadence. The daemon appends one node.heartbeat event
+// to the unified event log every interval so a future liveness reader can decide
+// "dead" = no heartbeat for a generous grace window (see the design doc: 5–10 min
+// to bias hard against false eviction). Env-overridable for tests/tuning.
+export const HEARTBEAT_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_HEARTBEAT_INTERVAL_MS) || 30_000;
 
 // --- Intervals ---
 // The periodic reconcile poll — the missed-webhook correctness backstop.

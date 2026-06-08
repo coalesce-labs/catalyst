@@ -86,6 +86,16 @@ _neutralize_otel_attrs() {
 	printf '%s' "$out"
 }
 
+# CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.
+# Used to gate mitmproxy proxy vars so a down proxy degrades to direct mode instead of
+# breaking every daemon/worker API call with "connection refused".
+_proxy_listening() {
+	local host="$1" port="$2"
+	(echo >"/dev/tcp/${host}/${port}") 2>/dev/null && return 0
+	command -v nc >/dev/null 2>&1 && nc -z -w 1 "$host" "$port" 2>/dev/null && return 0
+	return 1
+}
+
 cmd_start() {
 	if read_pid >/dev/null 2>&1; then
 		echo "catalyst-execution-core already running (pid $(read_pid))"
@@ -112,6 +122,21 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-846: if proxy vars were sourced (here or via catalyst-stack --proxy's inline prefix —
+	# both converge on this process) but the proxy endpoint is not listening, strip them and warn
+	# so the daemon starts in direct mode instead of failing every API call with connection refused.
+	local _proxy_url _hp _phost _pport
+	_proxy_url="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+	if [[ -n "$_proxy_url" ]]; then
+		_hp="${_proxy_url#*://}"; _hp="${_hp%%/*}"
+		_phost="${_hp%%:*}"; _pport="${_hp##*:}"
+		[[ "$_pport" == "$_phost" ]] && _pport=80
+		if ! _proxy_listening "$_phost" "$_pport"; then
+			echo "catalyst-execution-core: WARNING proxy ${_phost}:${_pport} not listening — starting daemon in direct mode (proxy vars stripped)" >&2
+			unset HTTPS_PROXY HTTP_PROXY NODE_USE_ENV_PROXY
+		fi
+		unset _proxy_url _hp _phost _pport
+	fi
 	# CTL-785: authenticate the daemon's Linear calls as the Catalyst Orchestrator app-actor
 	# (its own 5000/hr OAuth bucket — isolated from the personal token it would otherwise pin).
 	# Mint a fresh client_credentials token from the creds in the global config. --noproxy keeps

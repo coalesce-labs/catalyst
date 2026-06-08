@@ -7,6 +7,9 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test config.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { tmpdir, hostname } from "node:os";
+import { join } from "node:path";
 import {
   readWaitWatcherConfig,
   EVENT_DEBOUNCE_MS,
@@ -19,6 +22,9 @@ import {
   AUTOTUNE_MEM_CRITICAL_PCT,
   AUTOTUNE_MEM_WARN_PCT,
   AUTOTUNE_ENABLED,
+  getHostName,
+  getClusterHosts,
+  HEARTBEAT_INTERVAL_MS,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -211,5 +217,126 @@ describe("auto-tuner defaults (CTL-684)", () => {
 
   test("AUTOTUNE_ENABLED defaults to true (kill-switch off)", () => {
     expect(AUTOTUNE_ENABLED).toBe(true);
+  });
+});
+
+// CTL-859: host identity + cluster roster.
+describe("getHostName (CTL-859)", () => {
+  const HOST_ENVS = ["CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {};
+  let tmp;
+
+  beforeEach(() => {
+    for (const k of HOST_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp = mkdtempSync(join(tmpdir(), "ctl859-host-"));
+  });
+
+  afterEach(() => {
+    for (const k of HOST_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("defaults to os.hostname() with trailing .local stripped", () => {
+    // Point Layer-2 at a non-existent file so the hostname default is exercised.
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+    const expected = hostname().replace(/\.local$/, "");
+    expect(getHostName()).toBe(expected);
+  });
+
+  test("reads catalyst.host.name from the Layer-2 config file", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { host: { name: "mac-studio" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(getHostName()).toBe("mac-studio");
+  });
+
+  test("CATALYST_HOST_NAME env wins over the Layer-2 config file", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { host: { name: "from-file" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_HOST_NAME = "from-env";
+    expect(getHostName()).toBe("from-env");
+  });
+
+  test("malformed Layer-2 file falls back to the hostname default", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, "{ this is not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    const expected = hostname().replace(/\.local$/, "");
+    expect(getHostName()).toBe(expected);
+  });
+});
+
+describe("getClusterHosts (CTL-859)", () => {
+  const ROSTER_ENVS = ["CATALYST_CONFIG_FILE", "CATALYST_HOST_NAME", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {};
+  let repo;
+
+  beforeEach(() => {
+    for (const k of ROSTER_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    repo = mkdtempSync(join(tmpdir(), "ctl859-roster-"));
+    mkdirSync(join(repo, ".catalyst"), { recursive: true });
+    // CATALYST_CONFIG_FILE points at <repoRoot>/.catalyst/config.json; the
+    // roster reader resolves hosts.json as its sibling.
+    process.env.CATALYST_CONFIG_FILE = join(repo, ".catalyst", "config.json");
+  });
+
+  afterEach(() => {
+    for (const k of ROSTER_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  test("reads the roster array from .catalyst/hosts.json when present", () => {
+    writeFileSync(
+      join(repo, ".catalyst", "hosts.json"),
+      JSON.stringify(["mini", "mac-studio"]),
+    );
+    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
+  });
+
+  test("absent roster returns the single-host default [getHostName()]", () => {
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    // no hosts.json written
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("malformed roster falls back to the single-host default", () => {
+    writeFileSync(join(repo, ".catalyst", "hosts.json"), "not-json-at-all");
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("empty array roster falls back to the single-host default", () => {
+    writeFileSync(join(repo, ".catalyst", "hosts.json"), "[]");
+    process.env.CATALYST_HOST_NAME = "solo-host";
+    expect(getClusterHosts()).toEqual(["solo-host"]);
+  });
+
+  test("non-string entries are filtered out", () => {
+    writeFileSync(
+      join(repo, ".catalyst", "hosts.json"),
+      JSON.stringify(["mini", 42, "", "mac-studio"]),
+    );
+    expect(getClusterHosts()).toEqual(["mini", "mac-studio"]);
+  });
+});
+
+describe("HEARTBEAT_INTERVAL_MS (CTL-859)", () => {
+  test("defaults to 30000ms", () => {
+    expect(HEARTBEAT_INTERVAL_MS).toBe(30_000);
   });
 });

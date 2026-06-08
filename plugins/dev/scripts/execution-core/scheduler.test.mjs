@@ -65,11 +65,15 @@ import {
   buildGlobalRanking,
   // CTL-700 (Item A)
   readDispatchFailureReason,
+  // CTL-834: held-label apply cool-down
+  convergeHeldLabel,
+  labelCooldownPath,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
+import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
@@ -3602,6 +3606,51 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     expect(calls).toBe(0);
   });
+
+  // CTL-646: stall→advance and terminal Done clear the needs-human label
+
+  test("clears needs-human when no phase is stalled and .applied marker exists (CTL-646)", () => {
+    writeSignal("CTL-14", "implement", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeFileSync(join(orchDir, "workers", "CTL-14", ".linear-label-needs-human.applied"), "");
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed).toContainEqual(expect.objectContaining({ t: "CTL-14", l: "needs-human" }));
+  });
+
+  test("still-stalled does not call removeLabel — labelOnce only (CTL-646)", () => {
+    writeSignal("CTL-15", "implement", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed.filter((r) => r.t === "CTL-15")).toHaveLength(0);
+  });
+
+  test("terminal Done clears needs-human unconditionally (CTL-646)", () => {
+    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`),
+    // so the terminal-Done sweep keys off a `teardown` done signal.
+    writeSignal("CTL-16", "teardown", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      applyTerminalDone: () => ({ applied: true }),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed).toContainEqual(expect.objectContaining({ t: "CTL-16", l: "needs-human" }));
+  });
 });
 
 // ── CTL-582 / CTL-703: worktree teardown moved to dedicated teardown phase ──
@@ -6966,5 +7015,210 @@ Final polish, documentation, and code cleanup.
     // No next-phase dispatch fired (implement wasn't declared complete).
     const verifyDispatches = dispatch.calls.filter((args) => args[0]?.phase === "verify");
     expect(verifyDispatches.length).toBe(0);
+  });
+});
+
+// ── CTL-850: HRW ownership filter + claim-on-dispatch (new-work path) ──
+//
+// These exercise the cross-host coordination wiring in schedulerTick. The
+// foundation is safe-by-construction: a single-host roster makes the HRW filter
+// an identity (ownedBy always true) AND gates off the claim, so the wiring is an
+// exact no-op until a 2nd host joins .catalyst/hosts.json. Every test injects a
+// fixed roster + a claimDispatch recorder so nothing touches Linear.
+describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "CTL-850";
+  // Compute the deterministic HRW owner of the fixture under the 2-host roster.
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+  const OTHER = ROSTER.find((h) => h !== OWNER);
+
+  const eligibleOne = (id = TICKET) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  // recordClaim — a claimDispatch seam that records every call and returns a
+  // fixed verdict, so a test asserts both WHETHER the claim ran and with WHAT.
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => {
+      calls.push(arg);
+      return verdict;
+    };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("single-host roster is an exact no-op: claim is NEVER attempted, dispatch proceeds", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: null }); // would block IF called
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(claimDispatch.calls).toHaveLength(0); // multiHost gate skipped the claim
+    expect(dispatch.calls).toHaveLength(1); // HRW identity → dispatched
+    expect(dispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "research" });
+  });
+
+  test("multi-host: a ticket OWNED by this host is dispatched (HRW keeps it)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    // The claim ran with this host + the entry phase before the spawn.
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: OWNER, phase: "research" });
+  });
+
+  test("multi-host: a ticket owned by ANOTHER host is filtered out — no claim, no dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OTHER, // not the HRW owner
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(0); // HRW excluded it before the loop
+    expect(claimDispatch.calls).toHaveLength(0); // never reached the claim
+  });
+
+  test("multi-host: a LOST claim defers WITHOUT a cooldown marker (reconsidered next tick)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: 2 }); // another host won
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(claimDispatch.calls).toHaveLength(1); // the claim was attempted
+    expect(dispatch.calls).toHaveLength(0); // but lost → not dispatched
+    // A lost claim is NOT a dispatch failure, so NO cooldown marker is written
+    // (the ticket is simply reconsidered next tick).
+    expect(existsSync(dispatchCooldownPath(orchDir, TICKET, "research"))).toBe(false);
+  });
+});
+
+// ── CTL-834: convergeHeldLabel held-label apply cool-down ──
+//
+// The held-label converger re-issued applyLabel(blocked/waiting) every ~22s tick.
+// When the apply failed UNRECOVERABLY (the desired label's exclusive-group
+// sibling is already on the ticket — "not exclusive child"), the label never
+// landed, the diff was never satisfied, and the write re-fired forever (the storm:
+// 218 fails / 44 min, burning the Linear write quota). These pin the time-boxed
+// cool-down that backs the apply off after such a failure (and self-heals).
+describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
+  // makeWs — a writeStatus fake whose applyLabel returns a fixed result and
+  // records calls; removeLabel records calls (fire-and-forget).
+  const makeWs = (applyResult) => {
+    const applyLabel = (...a) => {
+      applyLabel.calls.push(a);
+      return applyResult;
+    };
+    applyLabel.calls = [];
+    const removeLabel = (...a) => {
+      removeLabel.calls.push(a);
+    };
+    removeLabel.calls = [];
+    return { applyLabel, removeLabel };
+  };
+  const cd = (ticket, label) => existsSync(labelCooldownPath(orchDir, ticket, label));
+
+  test("happy path: apply succeeds → 1 write, NO cool-down marker", () => {
+    const ws = makeWs({ applied: true, reason: null });
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(cd("CTL-1", "blocked")).toBe(false);
+  });
+
+  test("unrecoverable apply (exclusive-conflict) → arms the cool-down marker", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(cd("CTL-1", "blocked")).toBe(true);
+  });
+
+  test("WITHIN the window: apply is SUPPRESSED (0 writes, applyLabel not re-called)", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 30_000 });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(1); // NOT re-attempted this tick
+  });
+
+  test("AFTER the window: apply retries (self-heals)", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 61_000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(2); // re-attempted past the window
+  });
+
+  test("transient apply failure → NO cool-down (retries next tick)", () => {
+    const ws = makeWs({ applied: false, reason: "transient" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(cd("CTL-1", "blocked")).toBe(false);
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 30_000 });
+    expect(writes).toBe(1); // not suppressed
+    expect(ws.applyLabel.calls).toHaveLength(2);
+  });
+
+  test("steady-state (label already present) → 0 writes (zero-write invariant intact)", () => {
+    const ws = makeWs({ applied: true });
+    const writes = convergeHeldLabel("CTL-1", ["blocked"], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+  });
+
+  test("desired=null with a stale held label → removes it (cool-down path not taken)", () => {
+    const ws = makeWs({ applied: true });
+    const writes = convergeHeldLabel("CTL-1", ["waiting"], null, ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.removeLabel.calls).toHaveLength(1);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+  });
+
+  test("no orchDir (legacy caller) → cool-down never arms, byte-for-byte prior behavior", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, {}); // no orchDir
+    convergeHeldLabel("CTL-1", [], "blocked", ws, {}); // attempted again — no suppression
+    expect(ws.applyLabel.calls).toHaveLength(2);
   });
 });

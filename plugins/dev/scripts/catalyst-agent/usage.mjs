@@ -115,12 +115,30 @@ export async function defaultFetchUsage(token, { userAgent, fetchImpl = fetch } 
   }
 }
 
+// parseOtelEmail — pull user.email from the comma-separated
+// OTEL_RESOURCE_ATTRIBUTES key=value list (the CTL-787 poller's fallback).
+// Only meaningful for the ACTIVE account — the ambient identity belongs to
+// whoever is logged in, never to a swapped-out backup. Returns null when absent.
+export function parseOtelEmail(env = process.env) {
+  const attrs = env.OTEL_RESOURCE_ATTRIBUTES;
+  if (!attrs) return null;
+  for (const pair of attrs.split(",")) {
+    const idx = pair.indexOf("=");
+    if (idx === -1) continue;
+    if (pair.slice(0, idx).trim() === "user.email") {
+      const value = pair.slice(idx + 1).trim();
+      return value || null;
+    }
+  }
+  return null;
+}
+
 // defaultResolveEmail — GET /api/oauth/profile to resolve .account.email plus
 // .organization.rate_limit_tier / .organization.subscription_status. Returns
 // { email, rateLimitTier, subscriptionType } (any field may be null) or null
 // when no email could be resolved. NEVER throws. Mirrors the execution-core
-// poller, minus the OTEL_RESOURCE_ATTRIBUTES env fallback (the standalone
-// multi-account agent has no single ambient email to fall back to).
+// poller; the OTEL_RESOURCE_ATTRIBUTES env fallback is applied by tickUsage
+// for the active account only.
 export async function defaultResolveEmail(token, { userAgent, fetchImpl = fetch } = {}) {
   try {
     const res = await fetchImpl(PROFILE_ENDPOINT, {
@@ -236,6 +254,23 @@ export async function tickUsage({
           rateLimitTier: resolved.rateLimitTier ?? null,
           subscriptionType: resolved.subscriptionType ?? null,
         };
+      }
+
+      // No email ⇒ no emit (CTL-812 live finding): the profile call can 429
+      // under poller contention, and an account.ratelimit.sampled without
+      // account.email renders as a GHOST ROW in the per-account scoreboard —
+      // an account-keyed sample is unusable without its key. The active
+      // account first falls back to OTEL_RESOURCE_ATTRIBUTES user.email (the
+      // CTL-787 poller's ambient identity; backups have no ambient identity).
+      // Skipping BEFORE fetchUsage also spares the rate-limited endpoint a
+      // call we could not attribute anyway; the next run re-resolves.
+      if (!email && account?.source === "active") email = parseOtelEmail();
+      if (!email) {
+        log.warn(
+          { source: account?.source },
+          "usage: account email unresolvable; skipping account this run",
+        );
+        continue;
       }
 
       const { status, body } = await fetchUsage(token, { userAgent });

@@ -390,7 +390,7 @@ describe("sampleProcesses", () => {
       expect(e.attributes["event.name"]).toBe(PROCESS_EVENT_SAMPLED);
       expect(e.attributes["event.entity"]).toBe("host");
       expect(e.attributes["event.action"]).toBe("process.sampled");
-      expect(e.attributes["event.label"]).toBe(hostname());
+      expect(e.attributes["event.label"]).toBe(hostname().replace(/\.local$/, ""));
       expect(e.resource["service.name"]).toBe("catalyst.agent");
       expect(e.ts).toBe(FIXED_NOW);
     }

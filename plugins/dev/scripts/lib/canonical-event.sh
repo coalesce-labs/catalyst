@@ -25,6 +25,10 @@ __CATALYST_CANONICAL_SOURCED=1
 # Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh (CTL-618).
 __CE_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
 __CE_LIB_DIR="$(cd "$(dirname "$__CE_SELF")" && pwd)"
+
+# CTL-852: source host-identity primitives (catalyst_host_name, catalyst_host_id).
+# shellcheck source=lib/host-identity.sh
+source "${__CE_LIB_DIR}/host-identity.sh"
 __CE_PLUGIN_JSON="${__CE_LIB_DIR}/../../.claude-plugin/plugin.json"
 __CE_VERSION_CACHED=""
 
@@ -239,9 +243,11 @@ build_canonical_line() {
       | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
-  local sev_num event_id
+  local sev_num event_id host_name host_id_val
   sev_num="$(severity_number "$severity")"
   event_id="$(generate_event_id)"
+  host_name="$(catalyst_host_name)"
+  host_id_val="$(catalyst_host_id)"
 
   jq -nc \
     --arg ts "$ts" \
@@ -252,6 +258,8 @@ build_canonical_line() {
     --arg span_id "$span_id" \
     --arg svc_name "$service" \
     --arg svc_ver "$service_version" \
+    --arg host_name "$host_name" \
+    --arg host_id "$host_id_val" \
     --arg event_name "$event_name" \
     --arg entity "$entity" \
     --arg action "$action" \
@@ -293,7 +301,9 @@ build_canonical_line() {
         {
           "service.name": $svc_name,
           "service.namespace": "catalyst",
-          "service.version": $svc_ver
+          "service.version": $svc_ver,
+          "host.name": $host_name,
+          "host.id": $host_id
         }
         + (if $project    == "" then {} else { "project": $project } end)
         + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)

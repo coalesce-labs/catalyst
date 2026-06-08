@@ -1,7 +1,9 @@
 #!/bin/bash
 # setup-catalyst.sh - Complete Catalyst setup in one command
 # Usage: curl -fsSL https://raw.githubusercontent.com/coalesce-labs/catalyst/main/setup-catalyst.sh | bash
-#        OR ./setup-catalyst.sh
+#        OR ./setup-catalyst.sh [--non-interactive|--defaults]
+#        Headless (CI/SSH/cron): --non-interactive or CATALYST_AUTONOMOUS=1 — prompts use
+#        defaults, integrations configure only from discoverable tokens (LINEAR_API_TOKEN, etc.)
 
 set -e
 
@@ -21,6 +23,7 @@ ORG_ROOT=""
 THOUGHTS_REPO=""
 WORKTREE_BASE=""
 USER_NAME=""
+NON_INTERACTIVE=0
 
 #
 # Utility functions
@@ -46,22 +49,113 @@ print_error() {
 	echo -e "${RED}✗ $1${NC}"
 }
 
+# True when /dev/tty can actually be opened (existence alone is not enough:
+# with no controlling tty, open(2) fails ENXIO — "Device not configured").
+# The subshell absorbs the failed open so `set -e` does not kill the script.
+can_open_tty() {
+	(: </dev/tty) 2>/dev/null
+}
+
+# Parse CLI flags. CATALYST_AUTONOMOUS is the project-wide headless signal
+# (same contract as plugins/dev/scripts/check-project-setup.sh).
+parse_args() {
+	if [[ -n ${CATALYST_AUTONOMOUS:-} ]]; then
+		NON_INTERACTIVE=1
+	fi
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--non-interactive | --defaults)
+			NON_INTERACTIVE=1
+			shift
+			;;
+		-h | --help)
+			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			exit 0
+			;;
+		*)
+			print_error "Unknown option: $1"
+			echo "Usage: setup-catalyst.sh [--non-interactive|--defaults]"
+			exit 1
+			;;
+		esac
+	done
+}
+
 ask_yes_no() {
 	local prompt="$1"
 	local default="${2:-y}"
+	local ni_answer="${3:-$default}"
+	local suffix="[y/N]"
+	[[ $default == "y" ]] && suffix="[Y/n]"
+	local REPLY
 
-	if [[ $default == "y" ]]; then
-		read -p "$prompt [Y/n] " -n 1 -r
-	else
-		read -p "$prompt [y/N] " -n 1 -r
+	# Non-interactive mode (HEAD/sibling feature): answer with ni_answer
+	# without touching stdin.
+	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+		echo "$prompt $suffix → ${ni_answer} (non-interactive)" >&2
+		[[ $ni_answer == "y" ]]
+		return
 	fi
-	echo
+
+	# CTL-843: full-line read — `read -n 1` left the trailing newline in stdin,
+	# which bled into the next prompt and produced garbage config values. A
+	# full-line read keeps consecutive prompts aligned for both interactive
+	# terminals and piped stdin; EOF (read rc!=0) falls back to the default.
+	read -r -p "$prompt $suffix " REPLY || REPLY=""
 
 	if [[ -z $REPLY ]]; then
 		[[ $default == "y" ]]
 	else
-		[[ $REPLY =~ ^[Yy]$ ]]
+		[[ $REPLY =~ ^[Yy] ]]
 	fi
+}
+
+# prompt_value <prompt> <default> — echo the answer; in non-interactive mode
+# (or on EOF) echo the default without consuming stdin.
+prompt_value() {
+	local prompt="$1"
+	local default="${2:-}"
+	local reply=""
+	if [[ ${NON_INTERACTIVE:-0} -eq 1 ]]; then
+		echo "$prompt [${default}] → ${default} (non-interactive)" >&2
+		echo "$default"
+		return 0
+	fi
+	read -p "$prompt " -r reply || reply=""
+	echo "${reply:-$default}"
+}
+
+# Merge a patch object into .catalyst.<section> of a config JSON string (CTL-843).
+# The prompt run is authoritative for its own keys ($owned, a JSON array) — stale
+# owned keys are deleted — and ALL other keys (e.g. linear.agent) are preserved.
+merge_catalyst_section() {
+	local config="$1" section="$2" patch="$3" owned="$4"
+	echo "$config" | jq --arg s "$section" --argjson patch "$patch" --argjson owned "$owned" '
+		.catalyst //= {}
+		| .catalyst[$s] = (
+			((.catalyst[$s] // {}) | with_entries(select(.key as $k | $owned | index($k) | not)))
+			+ $patch
+		)'
+}
+
+# Write the per-project secrets config safely (CTL-843): validate JSON first,
+# back up the existing file (timestamped, 0600), then write atomically.
+write_secrets_config() {
+	local content="$1" config_file="$2" tmp
+	tmp=$(mktemp) || return 1
+	if ! echo "$content" | jq . >"$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		print_error "Refusing to write invalid JSON to $config_file — existing file left untouched"
+		return 1
+	fi
+	if [[ -f $config_file ]]; then
+		local backup="${config_file}.bak-$(date +%Y%m%d-%H%M%S)"
+		cp -p "$config_file" "$backup"
+		chmod 600 "$backup"
+		print_success "Backed up existing config to $backup"
+	fi
+	chmod 600 "$tmp"
+	mv "$tmp" "$config_file"
 }
 
 #
@@ -429,6 +523,57 @@ check_command_exists() {
 	command -v "$1" &>/dev/null
 }
 
+# No-sudo install helpers (CTL-844) ──────────────────────────────────────────
+
+LOCAL_BIN="$HOME/.local/bin"
+
+detect_arch() {
+	case "$(uname -m)" in
+	arm64 | aarch64) echo "arm64" ;;
+	x86_64) echo "amd64" ;;
+	*) echo "$(uname -m)" ;;
+	esac
+}
+
+detect_os() {
+	case "$(uname -s)" in
+	Darwin) echo "macos" ;;
+	Linux) echo "linux" ;;
+	*) echo "unknown" ;;
+	esac
+}
+
+# Shell rc files to persist PATH lines into, picked by login shell ($SHELL):
+# zsh → ~/.zshenv; bash → ~/.bashrc + ~/.profile (interactive + login);
+# unknown → all three. Fresh Linux machines default to bash, so writing only
+# ~/.zshenv left installed tools invisible in new shells (CTL-844 remediate).
+path_rc_files() {
+	case "${SHELL:-}" in
+	*zsh) echo "$HOME/.zshenv" ;;
+	*bash) printf '%s\n' "$HOME/.bashrc" "$HOME/.profile" ;;
+	*) printf '%s\n' "$HOME/.zshenv" "$HOME/.bashrc" "$HOME/.profile" ;;
+	esac
+}
+
+# Append a PATH export line to each shell rc file exactly once. Idempotent.
+persist_path_line() {
+	local line="$1" rc
+	while IFS= read -r rc; do
+		if ! grep -qsF "$line" "$rc" 2>/dev/null; then
+			printf '\n# Added by catalyst setup (no-sudo tool installs)\n%s\n' "$line" >>"$rc"
+		fi
+	done < <(path_rc_files)
+}
+
+# Create ~/.local/bin and persist it on PATH via the shell rc files. Idempotent.
+ensure_local_bin() {
+	mkdir -p "$LOCAL_BIN"
+	persist_path_line 'export PATH="$HOME/.local/bin:$PATH"'
+	export PATH="$LOCAL_BIN:$PATH"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+
 check_prerequisites() {
 	print_header "Checking Prerequisites"
 
@@ -474,6 +619,22 @@ check_prerequisites() {
 		missing_critical=true
 	else
 		print_success "sqlite3 installed"
+	fi
+
+	# Critical: node + npm (linearis, humanlayer CLI, agent-browser are npm packages)
+	if ! check_command_exists "node" || ! check_command_exists "npm"; then
+		print_warning "node/npm not found (required for linearis + HumanLayer CLI)"
+		offer_install_node || missing_critical=true
+	else
+		print_success "node installed ($(node --version 2>/dev/null))"
+	fi
+
+	# Critical: bun (catalyst-monitor + execution-core daemons require it)
+	if ! check_command_exists "bun"; then
+		print_warning "bun not found (required for the daemon stack)"
+		offer_install_bun || missing_critical=true
+	else
+		print_success "bun installed"
 	fi
 
 	# Critical: humanlayer (for thoughts system)
@@ -527,15 +688,6 @@ check_prerequisites() {
 		missing_optional=true
 	fi
 
-	# Optional: bun (for orch-monitor dashboard)
-	if check_command_exists "bun"; then
-		print_success "bun installed"
-	else
-		print_warning "bun not found (optional — required for orch-monitor dashboard)"
-		echo "  Install: curl -fsSL https://bun.sh/install | bash"
-		missing_optional=true
-	fi
-
 	if [ "$missing_critical" = true ]; then
 		print_error "Critical prerequisites missing. Cannot continue."
 		exit 1
@@ -556,50 +708,141 @@ check_prerequisites() {
 	echo ""
 }
 
+offer_install_node() {
+	echo ""
+	echo "node + npm are required (linearis and the HumanLayer CLI install via npm)."
+	echo ""
+	if ! ask_yes_no "Install Node.js LTS to ~/.local/node now (no sudo)?"; then
+		return 1
+	fi
+	if command -v brew &>/dev/null; then
+		if brew install node; then return 0; fi
+		print_warning "brew install node failed — falling back to no-sudo install"
+	fi
+	ensure_local_bin
+	local os arch version tarball
+	os=$([[ "$(uname -s)" == "Darwin" ]] && echo "darwin" || echo "linux")
+	arch=$([[ "$(detect_arch)" == "arm64" ]] && echo "arm64" || echo "x64")
+	version="${CATALYST_NODE_VERSION:-$(curl -fsSL https://nodejs.org/dist/index.json |
+		jq -r '[.[] | select(.lts != false)][0].version')}"
+	[[ -n "$version" && "$version" != "null" ]] || {
+		print_error "Could not resolve Node LTS version"
+		return 1
+	}
+	tarball="node-${version}-${os}-${arch}.tar.gz"
+	echo "  Downloading ${tarball} ..."
+	mkdir -p "$HOME/.local"
+	# Download + extract + verify in a temp dir, then swap — never delete a
+	# working ~/.local/node until the replacement node executes (CTL-844
+	# remediate: a partial extract must not clobber a good install).
+	local tmp
+	tmp=$(mktemp -d "$HOME/.local/.node-install.XXXXXX")
+	if curl -fsSL -o "$tmp/$tarball" "https://nodejs.org/dist/${version}/${tarball}" &&
+		tar -xzf "$tmp/$tarball" -C "$tmp" &&
+		"$tmp/node-${version}-${os}-${arch}/bin/node" --version >/dev/null 2>&1; then
+		rm -rf "$HOME/.local/node"
+		mv "$tmp/node-${version}-${os}-${arch}" "$HOME/.local/node"
+		rm -rf "$tmp"
+		ln -sf "$HOME/.local/node/bin/node" "$LOCAL_BIN/node"
+		ln -sf "$HOME/.local/node/bin/npm" "$LOCAL_BIN/npm"
+		ln -sf "$HOME/.local/node/bin/npx" "$LOCAL_BIN/npx"
+		print_success "Node $(node --version 2>/dev/null || echo "$version") installed to ~/.local/node"
+		return 0
+	fi
+	rm -rf "$tmp"
+	print_error "Node install failed. Manual: https://nodejs.org/en/download"
+	return 1
+}
+
+offer_install_bun() {
+	echo ""
+	echo "bun is required (catalyst-monitor + execution-core daemons run on bun)."
+	echo ""
+	if ! ask_yes_no "Install bun now via the official installer (no sudo)?"; then
+		return 1
+	fi
+	if curl -fsSL https://bun.sh/install | bash; then
+		persist_path_line 'export PATH="$HOME/.bun/bin:$PATH"'
+		export PATH="$HOME/.bun/bin:$PATH"
+		command -v bun &>/dev/null && {
+			print_success "bun installed ($(bun --version))"
+			return 0
+		}
+	fi
+	print_error "bun install failed. Manual: https://bun.sh"
+	return 1
+}
+
 offer_install_humanlayer() {
 	echo ""
 	echo "HumanLayer CLI is required for the thoughts system."
 	echo ""
-	echo "Installation options:"
-	echo "  1. pip install humanlayer"
-	echo "  2. pipx install humanlayer"
+	echo "  Install: npm install -g humanlayer"
 	echo ""
-
-	if ask_yes_no "Attempt to install via pip now?"; then
-		if command -v pip &>/dev/null; then
-			pip install humanlayer
-			return 0
-		elif command -v pip3 &>/dev/null; then
-			pip3 install humanlayer
-			return 0
-		else
-			print_error "pip not found. Please install Python and pip first."
-			return 1
-		fi
-	else
+	if ! ask_yes_no "Attempt to install via npm now?" "y" "n"; then
 		print_warning "Skipping HumanLayer installation. Setup cannot continue."
 		return 1
 	fi
+	if ! command -v npm &>/dev/null; then
+		print_error "npm not found — node/npm must be installed first (see above)."
+		return 1
+	fi
+	# Run the CLI, don't just `command -v` it — a global-npm prefix off PATH
+	# or a stale shim passes lookup without working (CTL-844 remediate).
+	if npm install -g humanlayer && humanlayer --version >/dev/null 2>&1; then
+		print_success "HumanLayer CLI installed ($(humanlayer --version 2>/dev/null || true))"
+		return 0
+	fi
+	print_error "HumanLayer install failed. Manual: npm install -g humanlayer"
+	return 1
 }
 
 offer_install_gh_cli() {
 	echo ""
-	echo "GitHub CLI is useful for:"
-	echo "  - Linear integration (via gh api)"
-	echo "  - Backing up thoughts repo to GitHub"
+	echo "GitHub CLI is used for PR automation and Linear/GitHub integration."
 	echo ""
-	echo "Installation: https://cli.github.com/"
-	echo ""
-
-	if ask_yes_no "Open installation page in browser?"; then
-		if command -v open &>/dev/null; then
-			open "https://cli.github.com/"
-		elif command -v xdg-open &>/dev/null; then
-			xdg-open "https://cli.github.com/"
-		fi
+	if ! ask_yes_no "Install GitHub CLI now?" "y" "n"; then
+		echo "  Manual install: https://cli.github.com/"
+		return 1
 	fi
-
-	return 1 # User will install manually
+	if command -v brew &>/dev/null; then
+		if brew install gh; then return 0; fi
+		print_warning "brew install gh failed — falling back to no-sudo install"
+	fi
+	# No-sudo: release archive → ~/.local/bin (jq is guaranteed installed by now)
+	ensure_local_bin
+	local ver os arch ext dir tmp
+	ver=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest |
+		jq -r '.tag_name' | sed 's/^v//')
+	[[ -n "$ver" && "$ver" != "null" ]] || {
+		print_error "Could not resolve gh version. Manual: https://cli.github.com/"
+		return 1
+	}
+	if [[ "$(uname -s)" == "Darwin" ]]; then os="macOS"; ext="zip"; else os="linux"; ext="tar.gz"; fi
+	if [[ "$ext" == "zip" ]] && ! command -v unzip &>/dev/null; then
+		print_error "unzip not found — cannot extract gh archive. Manual: https://cli.github.com/"
+		return 1
+	fi
+	arch=$(detect_arch)
+	dir="gh_${ver}_${os}_${arch}"
+	tmp=$(mktemp -d)
+	if curl -fsSL -o "$tmp/gh.$ext" \
+		"https://github.com/cli/cli/releases/download/v${ver}/${dir}.${ext}"; then
+		if [[ "$ext" == "zip" ]]; then
+			unzip -q "$tmp/gh.$ext" -d "$tmp"
+		else
+			tar -xzf "$tmp/gh.$ext" -C "$tmp"
+		fi
+		install -m 0755 "$tmp/$dir/bin/gh" "$LOCAL_BIN/gh"
+		rm -rf "$tmp"
+		command -v gh &>/dev/null && {
+			print_success "GitHub CLI installed to $LOCAL_BIN/gh"
+			return 0
+		}
+	fi
+	rm -rf "$tmp"
+	print_error "gh install failed. Manual: https://cli.github.com/"
+	return 1
 }
 
 offer_install_jq() {
@@ -607,7 +850,7 @@ offer_install_jq() {
 	echo "jq is required for config file manipulation."
 	echo ""
 
-	if ask_yes_no "Attempt to install jq now?"; then
+	if ask_yes_no "Attempt to install jq now?" "y" "n"; then
 		if command -v brew &>/dev/null; then
 			brew install jq
 			return 0
@@ -615,6 +858,18 @@ offer_install_jq() {
 			sudo apt-get install -y jq
 			return 0
 		else
+			echo "  No package manager found — installing official jq binary (no sudo) ..."
+			ensure_local_bin
+			local artifact="jq-$(detect_os)-$(detect_arch)"
+			# Execute the downloaded binary once — chmod + command -v alone
+			# would bless a corrupted/partial download (CTL-844 remediate).
+			if curl -fsSL -o "$LOCAL_BIN/jq" \
+				"https://github.com/jqlang/jq/releases/latest/download/${artifact}" &&
+				chmod +x "$LOCAL_BIN/jq" &&
+				"$LOCAL_BIN/jq" --version >/dev/null 2>&1; then
+				print_success "jq installed to $LOCAL_BIN/jq"
+				return 0
+			fi
 			print_error "Could not auto-install. Install manually: https://jqlang.github.io/jq/"
 			return 1
 		fi
@@ -672,6 +927,10 @@ detect_org_and_repo() {
 			# Fallback: ask user
 			echo ""
 			print_warning "Could not detect GitHub org/repo from remote or path"
+			if [[ $NON_INTERACTIVE -eq 1 ]]; then
+				print_error "Cannot detect GitHub org/repo (no remote, unrecognized path). Run interactively or set a GitHub remote."
+				exit 1
+			fi
 			read -p "Enter GitHub organization name: " ORG_NAME
 			read -p "Enter repository name: " REPO_NAME
 		fi
@@ -685,6 +944,10 @@ detect_org_and_repo() {
 }
 
 determine_project_location() {
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		print_error "Not in a git repository. Run setup from inside the target repo when using --non-interactive."
+		exit 1
+	fi
 	echo ""
 	echo "Where is your project located?"
 	echo ""
@@ -999,8 +1262,7 @@ setup_project_config() {
 	echo "  - PR titles (e.g., [${PROJECT_KEY}-123] Add new feature)"
 	echo "  - Commit messages and documentation"
 	echo ""
-	read -p "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]: " ticket_prefix
-	ticket_prefix="${ticket_prefix:-PROJ}"
+	ticket_prefix=$(prompt_value "Enter ticket prefix (e.g., ENG, PROJ) [PROJ]:" "PROJ")
 
 	# Prompt for project name
 	echo ""
@@ -1009,8 +1271,7 @@ setup_project_config() {
 	echo "  Used in documentation, reports, and thought documents."
 	echo "  Example: 'Acme API' instead of 'acme-api-backend'"
 	echo ""
-	read -p "Enter project name [${REPO_NAME}]: " project_name
-	project_name="${project_name:-${REPO_NAME}}"
+	project_name=$(prompt_value "Enter project name [${REPO_NAME}]:" "${REPO_NAME}")
 
 	# Create/update config
 	cat >"$config_file" <<EOF
@@ -1095,8 +1356,7 @@ setup_humanlayer_config() {
 	echo "  Detected system user: ${USER}"
 	echo "  You can use your system username or choose something else (like your first name)."
 	echo ""
-	read -p "Enter your name for thoughts [${USER}]: " thoughts_user
-	thoughts_user="${thoughts_user:-${USER}}"
+	thoughts_user=$(prompt_value "Enter your name for thoughts [${USER}]:" "${USER}")
 	USER_NAME="$thoughts_user"
 
 	# Create config
@@ -1149,22 +1409,24 @@ setup_catalyst_secrets() {
 		existing_config='{"catalyst":{}}'
 	fi
 
-	# Prompt for each integration
-	prompt_linear_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	# Prompt for each integration (CTL-843: private mktemp, not a fixed /tmp path)
+	local prompt_tmp
+	prompt_tmp=$(mktemp)
+	prompt_linear_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_sentry_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_sentry_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_posthog_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_posthog_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
 
-	prompt_exa_config "$existing_config" >/tmp/catalyst-config-temp.json
-	existing_config=$(cat /tmp/catalyst-config-temp.json)
+	prompt_exa_config "$existing_config" >"$prompt_tmp"
+	existing_config=$(cat "$prompt_tmp")
+	rm -f "$prompt_tmp"
 
-	# Save final config
-	echo "$existing_config" | jq . >"$config_file"
-	rm /tmp/catalyst-config-temp.json
+	# Save final config (CTL-843: backup + atomic write)
+	write_secrets_config "$existing_config" "$config_file"
 
 	print_success "Secrets config saved: $config_file"
 	echo ""
@@ -1189,6 +1451,12 @@ prompt_linear_config() {
 			echo "$config"
 			return 0
 		fi
+	fi
+
+	if [[ $NON_INTERACTIVE -eq 1 ]] && ! discover_linear_token >/dev/null 2>&1; then
+		echo "Skipping Linear (non-interactive, no token discoverable)." >&2
+		echo "$config"
+		return 0
 	fi
 
 	if ! ask_yes_no "Configure Linear integration?"; then
@@ -1245,16 +1513,22 @@ prompt_linear_config() {
 					linear_team_name=$(echo "$linear_teams" | jq -r '.[0].name')
 					echo "Using team: $linear_team ($linear_team_name)" >&2
 				else
-					# Multiple teams, let user choose
-					echo "Select a team:" >&2
-					echo "$linear_teams" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.key): \(.value.name)"' >&2
-					echo "" >&2
+					# Multiple teams
+					if [[ $NON_INTERACTIVE -eq 1 ]]; then
+						linear_team=$(echo "$linear_teams" | jq -r '.[0].key')
+						linear_team_name=$(echo "$linear_teams" | jq -r '.[0].name')
+						echo "Non-interactive: auto-selecting first team: $linear_team ($linear_team_name)" >&2
+					else
+						echo "Select a team:" >&2
+						echo "$linear_teams" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.key): \(.value.name)"' >&2
+						echo "" >&2
 
-					read -p "Enter team number [1-$team_count]: " team_num
-					team_num=$((team_num - 1))
+						read -p "Enter team number [1-$team_count]: " team_num
+						team_num=$((team_num - 1))
 
-					linear_team=$(echo "$linear_teams" | jq -r ".[$team_num].key")
-					linear_team_name=$(echo "$linear_teams" | jq -r ".[$team_num].name")
+						linear_team=$(echo "$linear_teams" | jq -r ".[$team_num].key")
+						linear_team_name=$(echo "$linear_teams" | jq -r ".[$team_num].name")
+					fi
 				fi
 			fi
 		else
@@ -1335,16 +1609,13 @@ prompt_linear_config() {
 		read -p "Linear team name: " linear_team_name
 	fi
 
-	# Build config
-	echo "$config" | jq \
-		--arg token "$linear_token" \
-		--arg team "$linear_team" \
+	# Build config (CTL-843: merge — never drop unprompted keys like .agent)
+	local patch
+	patch=$(jq -n --arg token "$linear_token" --arg team "$linear_team" \
 		--arg teamName "$linear_team_name" \
-		'.catalyst.linear = {
-      "apiToken": $token,
-      "teamKey": $team,
-      "defaultTeam": $teamName
-    }'
+		'{apiToken: $token, teamKey: $team, defaultTeam: $teamName}')
+	merge_catalyst_section "$config" linear "$patch" \
+		'["apiToken","teamKey","defaultTeam"]'
 }
 
 prompt_sentry_config() {
@@ -1366,6 +1637,12 @@ prompt_sentry_config() {
 			echo "$config"
 			return 0
 		fi
+	fi
+
+	if [[ $NON_INTERACTIVE -eq 1 ]] && ! discover_sentry_token >/dev/null 2>&1; then
+		echo "Skipping Sentry (non-interactive, no token discoverable)." >&2
+		echo "$config"
+		return 0
 	fi
 
 	if ! ask_yes_no "Configure Sentry integration?"; then
@@ -1423,15 +1700,21 @@ prompt_sentry_config() {
 					sentry_projects=$(echo "$validation_result" | jq -r '.projects')
 					echo "  Found $(echo "$sentry_projects" | jq 'length') project(s)" >&2
 				else
-					# Multiple orgs, let user choose
-					echo "Select an organization:" >&2
-					echo "$sentry_orgs" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
-					echo "" >&2
+					# Multiple orgs
+					if [[ $NON_INTERACTIVE -eq 1 ]]; then
+						sentry_org=$(echo "$sentry_orgs" | jq -r '.[0].slug')
+						local ni_org_name=$(echo "$sentry_orgs" | jq -r '.[0].name')
+						echo "Non-interactive: auto-selecting first org: $sentry_org ($ni_org_name)" >&2
+					else
+						echo "Select an organization:" >&2
+						echo "$sentry_orgs" | jq -r 'to_entries | .[] | "  \(.key + 1). \(.value.slug): \(.value.name)"' >&2
+						echo "" >&2
 
-					read -p "Enter organization number [1-$org_count]: " org_num
-					org_num=$((org_num - 1))
+						read -p "Enter organization number [1-$org_count]: " org_num
+						org_num=$((org_num - 1))
 
-					sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
+						sentry_org=$(echo "$sentry_orgs" | jq -r ".[$org_num].slug")
+					fi
 				fi
 
 				# Let user select project(s)
@@ -1453,7 +1736,12 @@ prompt_sentry_config() {
 						echo "  1-$project_count. Choose one default project" >&2
 						echo "" >&2
 
-						read -p "Enter choice [A/S/1-$project_count]: " project_choice
+						if [[ $NON_INTERACTIVE -eq 1 ]]; then
+							project_choice="A"
+							echo "Non-interactive: auto-selecting all projects" >&2
+						else
+							read -p "Enter choice [A/S/1-$project_count]: " project_choice
+						fi
 
 						case "${project_choice^^}" in
 						A)
@@ -1563,40 +1851,22 @@ EOF
 		read -p "Sentry project slug: " sentry_project
 	fi
 
-	# Build config based on project selection
+	# Build config (CTL-843: merge — never drop unprompted keys)
+	local sentry_owned='["org","project","projects","defaultProject","authToken"]'
+	local patch
 	if [[ -z $sentry_project ]]; then
-		# All projects - just store org and token
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "authToken": $token
-      }'
+		patch=$(jq -n --arg org "$sentry_org" --arg token "$sentry_token" \
+			'{org: $org, authToken: $token}')
 	elif [[ $sentry_project =~ ^\[.*\]$ ]]; then
-		# Multiple projects - store as array
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--argjson projects "$sentry_project" \
+		patch=$(jq -n --arg org "$sentry_org" --argjson projects "$sentry_project" \
 			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "projects": $projects,
-        "defaultProject": $projects[0],
-        "authToken": $token
-      }'
+			'{org: $org, projects: $projects, defaultProject: $projects[0], authToken: $token}')
 	else
-		# Single project - store as string for backward compatibility
-		echo "$config" | jq \
-			--arg org "$sentry_org" \
-			--arg project "$sentry_project" \
+		patch=$(jq -n --arg org "$sentry_org" --arg project "$sentry_project" \
 			--arg token "$sentry_token" \
-			'.catalyst.sentry = {
-        "org": $org,
-        "project": $project,
-        "authToken": $token
-      }'
+			'{org: $org, project: $project, authToken: $token}')
 	fi
+	merge_catalyst_section "$config" sentry "$patch" "$sentry_owned"
 }
 
 prompt_posthog_config() {
@@ -1618,6 +1888,12 @@ prompt_posthog_config() {
 			echo "$config"
 			return 0
 		fi
+	fi
+
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		echo "Skipping PostHog (non-interactive, no token discovery available)." >&2
+		echo "$config"
+		return 0
 	fi
 
 	if ! ask_yes_no "Configure PostHog integration?"; then
@@ -1642,13 +1918,10 @@ prompt_posthog_config() {
 	read -p "PostHog API key: " posthog_key
 	read -p "PostHog project ID: " posthog_project
 
-	echo "$config" | jq \
-		--arg apiKey "$posthog_key" \
-		--arg projectId "$posthog_project" \
-		'.catalyst.posthog = {
-      "apiKey": $apiKey,
-      "projectId": $projectId
-    }'
+	local patch
+	patch=$(jq -n --arg apiKey "$posthog_key" --arg projectId "$posthog_project" \
+		'{apiKey: $apiKey, projectId: $projectId}')
+	merge_catalyst_section "$config" posthog "$patch" '["apiKey","projectId"]'
 }
 
 prompt_exa_config() {
@@ -1672,6 +1945,12 @@ prompt_exa_config() {
 		fi
 	fi
 
+	if [[ $NON_INTERACTIVE -eq 1 ]]; then
+		echo "Skipping Exa (non-interactive, no token discovery available)." >&2
+		echo "$config"
+		return 0
+	fi
+
 	if ! ask_yes_no "Configure Exa integration?"; then
 		echo "Skipping Exa. You can add it later by re-running this script." >&2
 		echo "$config"
@@ -1693,11 +1972,9 @@ prompt_exa_config() {
 
 	read -p "Exa API key: " exa_key
 
-	echo "$config" | jq \
-		--arg apiKey "$exa_key" \
-		'.catalyst.exa = {
-      "apiKey": $apiKey
-    }'
+	local patch
+	patch=$(jq -n --arg apiKey "$exa_key" '{apiKey: $apiKey}')
+	merge_catalyst_section "$config" exa "$patch" '["apiKey"]'
 }
 
 #
@@ -1732,48 +2009,43 @@ init_humanlayer_thoughts() {
 		fi
 	fi
 
-	echo ""
-	echo "Running: humanlayer thoughts init --directory \"${REPO_NAME}\""
-	echo ""
+	# CTL-845: use vendored init (avoids ERR_INVALID_ARG_TYPE crash in humanlayer v0.17.2-npm).
+	# Resolve profile via existing logic then delegate to the vendored script.
+	local hl_config="$HOME/.config/humanlayer/humanlayer.json"
+	local profile_name=""
+	if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
+		if jq -e ".thoughts.profiles.\"${ORG_NAME}\"" "$hl_config" &>/dev/null; then
+			profile_name="$ORG_NAME"
+		elif jq -e ".thoughts.profiles.\"${PROJECT_KEY}\"" "$hl_config" &>/dev/null; then
+			profile_name="$PROJECT_KEY"
+		fi
+	fi
 
-	# Try per-project config first, then fall back to --profile flag
-	local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+	local _setup_dir
+	_setup_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || _setup_dir=""
+	local VENDOR_INIT="${_setup_dir}/scripts/worktree-thoughts-init.sh"
+
 	local init_success=false
-
-	if [ -f "$config_file" ]; then
-		if HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME"; then
+	if [ -x "$VENDOR_INIT" ]; then
+		echo "Running: worktree-thoughts-init.sh --directory \"${REPO_NAME}\"${profile_name:+ --profile $profile_name}"
+		local vendor_args=(--directory "$REPO_NAME")
+		[ -n "$profile_name" ] && vendor_args+=(--profile "$profile_name")
+		if bash "$VENDOR_INIT" "${vendor_args[@]}"; then
 			init_success=true
 		fi
-	fi
-
-	# Fall back to --profile if per-project config didn't work
-	if ! $init_success; then
-		# Check if a matching profile exists in humanlayer.json
-		local hl_config="$HOME/.config/humanlayer/humanlayer.json"
-		local profile_name=""
-
-		if [ -f "$hl_config" ] && command -v jq &>/dev/null; then
-			# Check for profile matching ORG_NAME
-			if jq -e ".thoughts.profiles.\"${ORG_NAME}\"" "$hl_config" &>/dev/null; then
-				profile_name="$ORG_NAME"
-			elif jq -e ".thoughts.profiles.\"${PROJECT_KEY}\"" "$hl_config" &>/dev/null; then
-				profile_name="$PROJECT_KEY"
-			fi
+	else
+		# Fallback for curl|bash mode where the vendored script is not on disk.
+		echo "Running: humanlayer thoughts init --directory \"${REPO_NAME}\""
+		local config_file="$HOME/.config/humanlayer/config-${PROJECT_KEY}.json"
+		if [ -f "$config_file" ]; then
+			HUMANLAYER_CONFIG="$config_file" humanlayer thoughts init --directory "$REPO_NAME" && init_success=true || true
 		fi
-
-		if [ -n "$profile_name" ]; then
+		if ! $init_success && [ -n "$profile_name" ]; then
 			echo "Using HumanLayer profile: $profile_name"
-			if humanlayer thoughts init --profile "$profile_name" --directory "$REPO_NAME"; then
-				init_success=true
-			fi
+			humanlayer thoughts init --profile "$profile_name" --directory "$REPO_NAME" && init_success=true || true
 		fi
-	fi
-
-	# Final fallback: try with per-project config even if it doesn't exist yet
-	# (humanlayer might use defaults)
-	if ! $init_success; then
-		if humanlayer thoughts init --directory "$REPO_NAME"; then
-			init_success=true
+		if ! $init_success; then
+			humanlayer thoughts init --directory "$REPO_NAME" && init_success=true || true
 		fi
 	fi
 
@@ -2038,7 +2310,7 @@ offer_github_backup() {
 	echo "  3. Skip (set up backup manually later)"
 	echo ""
 
-	read -p "Select option (1, 2, or 3): " backup_option
+	backup_option=$(prompt_value "Select option (1, 2, or 3):" "3")
 
 	case $backup_option in
 	1)
@@ -2064,7 +2336,7 @@ offer_github_backup() {
 
 		git remote add origin "$remote_url"
 
-		if ask_yes_no "Push now?"; then
+		if ask_yes_no "Push now?" "y" "n"; then
 			git push -u origin main || git push -u origin master
 			print_success "Thoughts pushed to GitHub"
 		fi
@@ -2125,12 +2397,14 @@ init_session_database() {
 #
 
 main() {
+	parse_args "$@"
+
 	# Handle curl | bash: redirect stdin from terminal for interactive prompts.
 	# When piped, bash reads the script from stdin. Once loaded (main is a function,
 	# so bash reads the full definition before executing), we redirect stdin to /dev/tty
 	# so that read commands can get user input from the terminal.
-	if [ ! -t 0 ]; then
-		if [ -e /dev/tty ]; then
+	if [[ $NON_INTERACTIVE -eq 0 ]] && [ ! -t 0 ]; then
+		if can_open_tty; then
 			exec </dev/tty
 		else
 			print_warning "No terminal available. Interactive prompts will use defaults."
@@ -2169,5 +2443,17 @@ main() {
 	fi
 }
 
-# Run main
-main "$@"
+# Run main unless the script is being sourced (tests source it for unit access).
+# Two independent skip conditions, both required:
+#   1. (HEAD) return-probe: when piped to bash (curl ... | bash) or executed
+#      directly, the return-probe fails (return is only valid inside a sourced
+#      script/function), so main runs; a plain `source` invocation skips it.
+#   2. (CTL-843) CATALYST_SETUP_LIB_ONLY env guard: lets tests source the
+#      function library without running setup even from contexts where the
+#      return-probe would succeed/fail unexpectedly (curl | bash runs from
+#      stdin where BASH_SOURCE is empty, so an env guard is the reliable signal).
+if (return 0 2>/dev/null) || [[ -n ${CATALYST_SETUP_LIB_ONLY:-} ]]; then
+	:
+else
+	main "$@"
+fi

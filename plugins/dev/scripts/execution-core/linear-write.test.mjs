@@ -11,6 +11,7 @@ import {
   applyEstimate,
   applyAssignee,
   teamOf,
+  classifyLabelFailure,
 } from "./linear-write.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -470,6 +471,35 @@ describe("applyLabel", () => {
     };
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+  test("CTL-834: an exclusive-group conflict stderr → reason:'exclusive-conflict'", () => {
+    // The held-label converger adds `blocked` while `needs-human`/`waiting`
+    // (same exclusive group) is present — Linear rejects with this exact form.
+    const exec = () => ({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GraphQL request failed: LabelIds not exclusive child labels - blocked is in an exclusive group already represented.",
+    });
+    const r = applyLabel({ ticket: "CTL-838", label: "blocked", exec });
+    expect(r).toEqual({ applied: false, reason: "exclusive-conflict" });
+  });
+});
+
+// CTL-834: classifyLabelFailure — stderr → tagged reason. Exported so the new
+// exclusive-conflict mapping (and the existing unrecoverable cases) are pinned
+// directly, independent of applyLabel's read-back wrapper.
+describe("classifyLabelFailure (CTL-834)", () => {
+  test("'not exclusive child' → 'exclusive-conflict'", () => {
+    expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+    expect(classifyLabelFailure("... not exclusive ...")).toBe("exclusive-conflict");
+  });
+  test("existing mappings are unchanged", () => {
+    expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("missing-label");
+    expect(classifyLabelFailure("Rate limit exceeded")).toBe("rate-limited");
+    expect(classifyLabelFailure("anything else")).toBe("transient");
+    expect(classifyLabelFailure(undefined)).toBe("transient");
   });
 });
 

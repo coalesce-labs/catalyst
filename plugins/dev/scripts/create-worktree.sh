@@ -360,17 +360,15 @@ else
 		fi
 	fi
 
-	# 2. Initialize thoughts
+	# 2. Initialize thoughts (CTL-845: vendored layout creator, not the crashing CLI)
 	if command -v humanlayer >/dev/null 2>&1; then
 		THOUGHTS_INIT_EXPECTED=true
-		INIT_CMD="humanlayer thoughts init --directory $THOUGHTS_DIRECTORY"
-		if [ -n "$THOUGHTS_PROFILE" ]; then
-			INIT_CMD="$INIT_CMD --profile $THOUGHTS_PROFILE"
-		fi
-		echo "  Running: $INIT_CMD"
-		if eval "$INIT_CMD" >/dev/null 2>&1; then
+		VENDOR_INIT="${SCRIPT_DIR}/../../../scripts/worktree-thoughts-init.sh"
+		INIT_ARGS=(--directory "$THOUGHTS_DIRECTORY")
+		[ -n "$THOUGHTS_PROFILE" ] && INIT_ARGS+=(--profile "$THOUGHTS_PROFILE")
+		echo "  Running: worktree-thoughts-init.sh ${INIT_ARGS[*]}"
+		if [ -x "$VENDOR_INIT" ] && bash "$VENDOR_INIT" "${INIT_ARGS[@]}" >/dev/null 2>&1; then
 			echo -e "${GREEN}  ✅ Thoughts initialized${NC}"
-			echo "  Running: humanlayer thoughts sync"
 			humanlayer thoughts sync >/dev/null 2>&1 || echo -e "${YELLOW}  ⚠️  Sync warning: run 'humanlayer thoughts sync' manually${NC}"
 			# Verify thoughts/shared/ exists after init+sync
 			if [ ! -d "thoughts/shared" ]; then

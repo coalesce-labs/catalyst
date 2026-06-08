@@ -14,6 +14,7 @@ import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { getEventLogPath, log } from "./config.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { hostName, hostId } from "./lib/host-identity.mjs";
 
 /**
  * buildWaitEnvelope — assemble the canonical OTel envelope for a wait/resume
@@ -56,6 +57,8 @@ export function buildWaitEnvelope(name, { a = {}, state, waitingText, detail, me
     resource: {
       "service.name": "catalyst.execution-core",
       "service.namespace": "catalyst",
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     attributes: {
       "event.name": name,
