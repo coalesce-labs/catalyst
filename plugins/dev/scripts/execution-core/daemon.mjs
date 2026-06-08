@@ -54,7 +54,7 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper, defaultReadActivePhaseSignal } from "./reaper.mjs";
+import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import {
   startWorktreeRefreshTimer,
@@ -622,6 +622,7 @@ function startReaperAndTimer({
   _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
+    readSignalBgJobId: (ticket, phase) => defaultReadSignalBgJobId(orchDir, ticket, phase),
   });
 
   // Boot replay: cover for any intents that landed while the daemon was down.

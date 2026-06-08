@@ -925,3 +925,60 @@ describe("Reaper.reconcileTicketWorkers — CLEANUP_GRACE_MS spawn grace", () =>
     expect(CLEANUP_GRACE_MS).not.toBe(15 * 60 * 1000); // DEFAULT_MIN_IDLE_MS
   });
 });
+
+// CTL-778 Step 2B — reaper backstop on phase.*.complete events.
+// Safety net for a worker that emits complete but fails to self-stop.
+describe("Reaper — CTL-778 complete-event reap backstop", () => {
+  it("emits terminal reap-request on phase.<phase>.complete.<ticket>", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([{ sessionId: "abc12345-0000-0000-0000-000000000000", kind: "background" }]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } });
+    expect(emitted.length).toBe(1);
+    expect(emitted[0][0]).toBe("phase.terminal.reap-requested");
+    expect(emitted[0][1].ticket).toBe("CTL-1");
+    expect(emitted[0][1].phase).toBe("plan");
+  });
+
+  it("complete-event reap is once-guarded — duplicate event is a no-op", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([{ sessionId: "abc12345-0000-0000-0000-000000000000", kind: "background" }]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    const ev = { event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } };
+    await r.handle(ev);
+    await r.handle(ev); // duplicate — should be a no-op
+    expect(emitted.length).toBe(1);
+  });
+
+  it("no bg_job_id (readSignalBgJobId returns null) → no emit", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => null,
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } });
+    expect(emitted.length).toBe(0);
+  });
+
+  it("non-complete phase events (e.g. phase.plan.revive.CTL-1) are not processed", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.revive.CTL-1", attributes: { "event.name": "phase.plan.revive.CTL-1" } });
+    expect(emitted.length).toBe(0);
+  });
+});

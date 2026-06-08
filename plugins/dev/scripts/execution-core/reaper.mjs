@@ -132,6 +132,11 @@ export class Reaper {
     readActivePhaseSignal = () => null,
     now = () => Date.now(),
     log: logger = log,
+    // CTL-778 Step 2B — read the bg_job_id for a specific phase signal so the
+    // complete-event reaper backstop can stop a worker that missed self-stop.
+    // Returns the raw bg_job_id string or null (fail-open: skips the reap).
+    // Tests inject a stub; the daemon injects a real orchDir-backed reader.
+    readSignalBgJobId = () => null,
   } = {}) {
     this.executorReap = executorReap;
     this.agents = agents;
@@ -147,6 +152,7 @@ export class Reaper {
     this.readActivePhaseSignal = readActivePhaseSignal;
     this.now = now;
     this.log = logger;
+    this.readSignalBgJobId = readSignalBgJobId;
     this._inflight = new Map(); // key → expiresAt
   }
 
@@ -174,12 +180,20 @@ export class Reaper {
 
   async handle(event) {
     if (!event || typeof event.event !== "string") return;
+    // CTL-778: also admit phase.*.complete.* events for the reaper backstop.
+    const isCompleteEvent = /^phase\.[^.]+\.complete\.[^.]+$/.test(event.event);
     if (!event.event.endsWith(".reap-requested") && event.event !== "orphans.reap-requested" &&
-        event.event !== "pr.merged.cleanup-requested") {
+        event.event !== "pr.merged.cleanup-requested" && !isCompleteEvent) {
       return;
     }
     const key = `${event.event}:${event.bg_job_id ?? event.worktree_path ?? "scan"}`;
     if (this._isDuplicate(key)) return;
+
+    // CTL-778 Step 2B: backstop for workers that emitted complete but missed self-stop.
+    if (isCompleteEvent) {
+      await this._handleCompleteEvent(event);
+      return;
+    }
 
     try {
       switch (event.event) {
@@ -219,6 +233,30 @@ export class Reaper {
     } catch (err) {
       this.log.error({ err: err.message, event: event.event }, "reaper: handler threw");
     }
+  }
+
+  // CTL-778 Step 2B: backstop reap on phase.*.complete.<ticket> events.
+  // A worker that self-stopped already is a no-op (claude stop on absent session is safe).
+  async _handleCompleteEvent(event) {
+    // Parse phase and ticket from "phase.<phase>.complete.<ticket>".
+    const parts = event.event.split(".");
+    // parts: ["phase", "<phase>", "complete", "<ticket>"]
+    if (parts.length < 4 || parts[2] !== "complete") return;
+    const phase = parts[1];
+    const ticket = parts.slice(3).join("."); // rejoin in case ticket had dots (defensive)
+    if (!ticket || !phase) return;
+
+    const bgJobId = this.readSignalBgJobId(ticket, phase);
+    if (!bgJobId) return; // no signal or already gone — fail-open
+
+    await this.emit("phase.terminal.reap-requested", {
+      ticket,
+      phase,
+      bgJobId,
+      worktreePath: event.worktree_path ?? null,
+      reason: "ctl-778-complete-event-backstop",
+    });
+    this.log.info({ ticket, phase, bgJobId }, "ctl-778: reaper backstop — emitted terminal reap for complete-event worker");
   }
 
   async _handleBgReap(event) {
@@ -679,6 +717,23 @@ export function groupBackgroundSessionsByTicket(live) {
     groups.get(ticket).push(s);
   }
   return groups;
+}
+
+/**
+/**
+ * defaultReadSignalBgJobId — CTL-778 production reader for the complete-event
+ * reaper backstop. Reads ${orchDir}/workers/${ticket}/phase-${phase}.json and
+ * returns the raw bg_job_id string, or null if the file is missing/unparseable
+ * or has no bg_job_id. Never throws.
+ */
+export function defaultReadSignalBgJobId(orchDir, ticket, phase, { readFile = readFileSync } = {}) {
+  if (!orchDir || !ticket || !phase) return null;
+  try {
+    const raw = JSON.parse(readFile(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"));
+    return raw?.bg_job_id ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
