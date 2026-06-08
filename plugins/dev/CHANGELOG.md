@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.2.0...catalyst-dev-v12.3.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-880 wire gherkin-ticket standard into ticket-creation skills ([#1508](https://github.com/coalesce-labs/catalyst/issues/1508)) ([4b21363](https://github.com/coalesce-labs/catalyst/commit/4b21363b49ea74853f701d2329e07f61cd23334d))
+
 ## [12.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.1.0...catalyst-dev-v12.2.0) (2026-06-08)
 
 
