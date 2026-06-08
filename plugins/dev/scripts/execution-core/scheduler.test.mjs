@@ -3480,6 +3480,77 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     );
   });
 
+  // CTL-868 route (B): a stalled-no-recovery ticket also emits a canonical
+  // phase.<phase>.orphan-detected.<ticket> event so the dashboard surfaces the
+  // orphan beyond the buried needs-human label. Once-markered + fail-open.
+  test("CTL-868: emits orphan-detected (once) when a phase signal is stalled", () => {
+    writeSignal("CTL-77", "implement", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const orphans = [];
+    const writeStatus = { ...noWrites(), applyLabel: () => ({ applied: true }) };
+    const appendOrphanDetectedEvent = (e) => { orphans.push(e); return true; };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus, appendOrphanDetectedEvent });
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0]).toMatchObject({ ticket: "CTL-77", phase: "implement", reason: "stalled-no-recovery" });
+    expect(orphans[0].stalled_phases).toEqual(["implement"]);
+    // marker written → a second tick does NOT re-emit (hot-loop dedup)
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus, appendOrphanDetectedEvent });
+    expect(orphans).toHaveLength(1);
+  });
+
+  test("CTL-868: a non-stalled ticket emits no orphan-detected event", () => {
+    writeSignal("CTL-78", "implement", "running");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const orphans = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { ...noWrites(), applyLabel: () => ({ applied: true }) },
+      appendOrphanDetectedEvent: (e) => { orphans.push(e); return true; },
+    });
+    expect(orphans).toHaveLength(0);
+  });
+
+  test("CTL-868: a failed orphan-detected append leaves no marker (retries next tick)", () => {
+    writeSignal("CTL-79", "implement", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const markerPath = join(orchDir, "workers", "CTL-79", ".orphan-detected.applied");
+    const writeStatus = { ...noWrites(), applyLabel: () => ({ applied: true }) };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendOrphanDetectedEvent: () => false, // append failed
+    });
+    expect(existsSync(markerPath)).toBe(false);
+    // succeeds on a later tick → marker written, no further re-emit
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus,
+      appendOrphanDetectedEvent: () => true,
+    });
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  test("CTL-868: multiple stalled phases → one canonical event phase + full stalled list preserved", () => {
+    writeSignal("CTL-80", "implement", "stalled");
+    writeSignal("CTL-80", "verify", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const orphans = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { ...noWrites(), applyLabel: () => ({ applied: true }) },
+      appendOrphanDetectedEvent: (e) => { orphans.push(e); return true; },
+    });
+    expect(orphans).toHaveLength(1);
+    // the canonical event phase is ONE of the stalled phases (deterministic single pick)
+    expect(["implement", "verify"]).toContain(orphans[0].phase);
+    // the FULL stalled set is preserved — locks against a truncate-to-one regression
+    expect([...orphans[0].stalled_phases].sort()).toEqual(["implement", "verify"]);
+  });
+
   test("does not re-apply a label once the .applied marker exists", () => {
     writeSignal("CTL-7", "implement", "stalled");
     writeFileSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"), "");

@@ -234,6 +234,21 @@ export const BUSY_CEILING_MS =
 export const GHOST_GRACE_MS =
   Number(process.env.EXECUTION_CORE_GHOST_GRACE_MS) || 90_000;
 
+// CTL-868 — zombie state.json staleness floor. The CTL-809 ghost-breaker only
+// fires when the `claude agents` snapshot is FRESH (absent-from-fresh = ghost).
+// On a headless host that snapshot is unreliable (CTL-829: `claude agents --json`
+// under-reports the background flag), so a corpse stuck at state:"working" — the
+// dead-worker-classified-alive zombie that starves all slots — is never broken
+// out of `alive-suppressed`. When NO fresh snapshot is available, fall back to
+// this state.json mtime floor: a `working` job whose state.json has not been
+// rewritten in this long is a corpse (Claude rewrites state.json far more often
+// than this during real work — turn/heartbeat updates). Deliberately high (2h) so
+// a legitimate in-process sub-agent fan-out never trips it (CTL-662-safe); it is
+// ALSO subordinate to a fresh snapshot — a worker LISTED in a fresh snapshot is
+// busy and is never reclaimed by this floor, regardless of mtime. Env-overridable.
+export const ZOMBIE_STALE_FLOOR_MS =
+  Number(process.env.EXECUTION_CORE_ZOMBIE_STALE_FLOOR_MS) || 2 * 60 * 60_000;
+
 // CTL-735 — revival age ceiling (KEPT in CTL-736). `isTicketInFlight` treats any
 // ticket with a non-terminal signal as in-flight, so a worker that crashed at
 // `running` and never flipped terminal stays swept forever. A reclaim-eligible
