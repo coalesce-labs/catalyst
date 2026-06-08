@@ -106,6 +106,7 @@ import {
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendRunawayEvent,
+  defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -1755,6 +1756,41 @@ function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitSta
   }
 }
 
+// emitOrphanDetectedOnce — CTL-868 route (B) of the orphan-reconcile sweep. A
+// ticket with a `stalled` phase signal has exhausted automatic recovery: the
+// reclaim sweep (reclaimDeadWorkIfPossible) has already stopped the dead worker
+// and the sweep applies needs-human. Emit ONE canonical
+// phase.<phase>.orphan-detected.<ticket> event so the orch-monitor dashboard can
+// surface the orphan instead of it hiding behind a buried label, then drop a
+// marker so the hot loop never re-emits. Best-effort: a failed append leaves the
+// marker absent so it retries next tick; an unexpected throw never aborts the tick.
+//
+// SCOPE NOTE: this covers tickets that still have a worker dir (listStartedTickets).
+// The dir-less stranded case — a ticket that left Todo with NO worker dir at all
+// (e.g. a research=stalled zombie reaped to nothing) — needs a working-state Linear
+// query and is the CTL-808 Reconciler's job, which this ticket's RCA notes subsumes
+// the full sweep; re-implementing it here would duplicate CTL-808 (see CTL-870).
+function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent) {
+  const marker = join(orchDir, "workers", ticket, ".orphan-detected.applied");
+  if (existsSync(marker)) return;
+  const stalledPhases = Object.entries(signals)
+    .filter(([, s]) => s === "stalled")
+    .map(([p]) => p);
+  if (stalledPhases.length === 0) return;
+  try {
+    const ok = appendOrphanDetectedEvent({
+      phase: stalledPhases[0],
+      ticket,
+      orchId: ticket,
+      reason: "stalled-no-recovery",
+      stalled_phases: stalledPhases,
+    });
+    if (ok !== false) writeFileSync(marker, "");
+  } catch (err) {
+    log.warn({ ticket, err: err.message }, "ctl-868: orphan-detected emit threw — continuing tick");
+  }
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -1820,6 +1856,9 @@ export function schedulerTick(
     // CTL-713: GC + escalation emitters. Injectable for tests.
     appendCooldownGcEvent = defaultAppendCooldownGcEvent,
     appendCooldownEscalatedEvent = defaultAppendCooldownEscalatedEvent,
+    // CTL-868 — orphan-detected emitter (route B observability). Injectable; tests
+    // pass a spy, production uses the canonical unified-event-log appender.
+    appendOrphanDetectedEvent = defaultAppendOrphanDetectedEvent,
     // CTL-537: sequencing seam. Default undefined → the new-work gate is skipped
     // entirely (byte-for-byte legacy dispatch for every test that doesn't inject
     // it). Production wires defaultCheckSequencing via runTick/startScheduler.
@@ -3102,6 +3141,9 @@ export function schedulerTick(
     });
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
+      // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
+      // stalled-no-recovery ticket is visible on the dashboard, not just label-flagged.
+      emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEvent);
     } else {
       // CTL-646: no phase stalled → clear the ratchet if the marker exists.
       // Guard on marker presence so a no-stall, no-marker tick fires zero

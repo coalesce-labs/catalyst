@@ -976,6 +976,73 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(snapCalls).toBe(0);
   });
 
+  // CTL-868 — ZOMBIE BREAKER. The CTL-809 ghost-breaker only fires on a FRESH
+  // `claude agents` snapshot; on a headless host that snapshot is unreliable
+  // (CTL-829), so a corpse stuck at state:"working" stays alive-suppressed and
+  // starves a slot forever. When no fresh snapshot is available, the alive branch
+  // falls back to a state.json mtime staleness floor. These prove the breaker fires
+  // for a genuine zombie yet never overrides a fresh "present" verdict (CTL-662).
+  const ZOMBIE_FLOOR = 2 * 60 * 60_000;
+
+  test("CTL-868: alive worker, state.json mtime past the zombie floor, NO fresh snapshot, work done → reclaimed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      // state=working (jobLifecycle → alive) but state.json untouched for 3h → corpse
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h past mtime > 2h floor, < 6h busy ceiling
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-868: alive worker mtime past the floor but PRESENT in a FRESH snapshot → still suppressed (CTL-662, fresh-present wins over mtime)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }), // 3h stale
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      // a FRESH snapshot lists the worker → busy fan-out, NOT a zombie (mtime ignored)
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-868: alive worker, mtime WITHIN the zombie floor, no fresh snapshot → still suppressed", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 30 * 60_000, // 30min stale < 2h floor
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
   test("'noop' for an unknown signal (no bg_job_id)", () => {
     const sig = implementSignal();
     sig.liveness = { kind: "bg", value: null };

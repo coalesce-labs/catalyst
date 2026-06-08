@@ -33,6 +33,7 @@ import {
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
+  ZOMBIE_STALE_FLOOR_MS,
 } from "./config.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -344,6 +345,33 @@ export function defaultAppendReclaimEvent({
       },
     }),
     "reclaim",
+  );
+}
+
+// CTL-868 — defaultAppendOrphanDetectedEvent — phase.<phase>.orphan-detected.<ticket>.
+// Route (B) of the orphan-reconcile sweep: a worker stranded `stalled` with no
+// automatic recovery left (the reclaim sweep has already stopped it + applied
+// needs-human). This canonical event is the OBSERVABILITY complement so the
+// orch-monitor dashboard surfaces the orphan instead of it hiding behind a buried
+// needs-human label. Best-effort (never gates the tick). Exported for the
+// round-trip envelope test.
+export function defaultAppendOrphanDetectedEvent({
+  phase,
+  ticket,
+  orchId,
+  reason = "stalled-no-recovery",
+  stalled_phases = [],
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "orphan-detected",
+      reason,
+      payloadExtras: { stalled_phases },
+    }),
+    "orphan-detected",
   );
 }
 
@@ -1371,6 +1399,13 @@ export function reclaimDeadWorkIfPossible(
     // registered fresh spawn — CTL-662-safe; a busy fan-out worker stays LISTED).
     agentsSnapshot = getAgentsCached,
     ghostGraceMs = GHOST_GRACE_MS,
+    // CTL-868 — zombie state.json staleness floor (the GHOST BREAKER's fallback
+    // for when no FRESH `claude agents` snapshot is available, e.g. the headless
+    // mini where CTL-829 makes `claude agents` unreliable). A `working` job whose
+    // state.json mtime is older than this is a corpse and falls through to reclaim.
+    // Subordinate to a fresh snapshot (a LISTED worker is busy, never reclaimed
+    // here regardless of mtime — CTL-662-safe). Injectable; defaults to the const.
+    zombieStaleFloorMs = ZOMBIE_STALE_FLOOR_MS,
     // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
     // signal has not been touched in this long is an abandoned historical dir,
     // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
@@ -1593,12 +1628,33 @@ export function reclaimDeadWorkIfPossible(
       }
       if (shortId) {
         const snap = agentsSnapshot();
-        if (snap?.isFresh && agentForShortId(shortId, snap.agents) === null) {
-          ghostAbsent = true;
-          log.warn(
-            { ticket, phase, prevBgJobId, snapshotAgeMs: snap.ageMs },
-            "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)",
-          );
+        if (snap?.isFresh) {
+          // CTL-809: a FRESH snapshot is authoritative — absent = ghost (reclaim),
+          // present = busy in-process fan-out (suppress, CTL-662). mtime is NOT
+          // consulted on this path: the snapshot is the better liveness signal.
+          if (agentForShortId(shortId, snap.agents) === null) {
+            ghostAbsent = true;
+            log.warn(
+              { ticket, phase, prevBgJobId, snapshotAgeMs: snap.ageMs },
+              "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)",
+            );
+          }
+        } else {
+          // CTL-868: no FRESH snapshot to consult (CTL-829: `claude agents --json`
+          // is unreliable headless on the mini, so it is stale/cold here). Fall back
+          // to the state.json mtime floor: a `working` job whose state.json has not
+          // been rewritten in zombieStaleFloorMs is a corpse (Claude rewrites it far
+          // more often than 2h during real work). The high floor keeps an in-process
+          // fan-out safe (CTL-662), and this branch only runs when the fresh-agents
+          // cross-check cannot — so it never overrides a fresh "present" verdict.
+          const job = statJob(prevBgJobId);
+          if (job && Number.isFinite(job.mtimeMs) && now() - job.mtimeMs > zombieStaleFloorMs) {
+            ghostAbsent = true;
+            log.warn(
+              { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs },
+              "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)",
+            );
+          }
         }
       }
     }
