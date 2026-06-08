@@ -33,6 +33,8 @@ import { fetchTicketState } from "./linear-query.mjs";
 import {
   getReconcileHealth,
   readReconcileHealthMarkers,
+  recordReconcileFailure,
+  __resetReconcileHealthForTests,
 } from "./reconcile-health.mjs";
 
 let catalystDir;
@@ -310,6 +312,51 @@ describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
     expect(failed.ENG.alerting).toBe(true);
     expect(failed.ENG.consecutiveFailures).toBe(3);
     expect(failed.ENG.lastSuccessTs).toBe(priorTs); // unchanged — eligible set is frozen stale
+  });
+
+  // CTL-867 cross-restart fix: the in-memory health map is empty on every process
+  // start. Without rehydration, the first post-restart failure for a team that has
+  // been failing for hours would seed a FRESH entry and writeHealthMarker would
+  // OVERWRITE the truthful disk marker — resetting consecutiveFailures to 1,
+  // dropping the real lastSuccessTs to null, and clearing the alerting latch. That
+  // is the exact starvation scenario CTL-867 targets, so it must survive a restart.
+  test("a daemon restart rehydrates per-team health from the disk marker (preserves lastSuccessTs + alerting, increments the failure count)", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+    // Establish a truthful marker: one success (stamps a real lastSuccessTs), then
+    // drive past the threshold so the team is alerting with N consecutive failures.
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+    const staleSuccessTs = readReconcileHealthMarkers().ENG.lastSuccessTs;
+    expect(staleSuccessTs).toBeTruthy();
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+
+    const beforeRestart = readReconcileHealthMarkers().ENG;
+    expect(beforeRestart.alerting).toBe(true);
+    expect(beforeRestart.consecutiveFailures).toBe(3);
+    expect(beforeRestart.lastSuccessTs).toBe(staleSuccessTs);
+
+    // Simulate a daemon RESTART: the in-memory map is cleared, but the disk marker
+    // (the durable starvation truth) persists in the per-test reconcile-health dir.
+    __resetReconcileHealthForTests();
+    expect(getReconcileHealth("ENG")).toBeNull(); // confirm the in-memory map is empty
+
+    // ONE more failure after the restart. The seed must come from the disk marker,
+    // not fresh defaults — so the count increments to N+1, lastSuccessTs is the
+    // preserved stale timestamp (NOT null), and the alerting latch stays set.
+    recordReconcileFailure("ENG", "removed-state: Ready");
+
+    const afterRestart = readReconcileHealthMarkers().ENG;
+    expect(afterRestart.consecutiveFailures).toBe(4); // N+1, not reset to 1
+    expect(afterRestart.lastSuccessTs).toBe(staleSuccessTs); // preserved, not nulled
+    expect(afterRestart.alerting).toBe(true); // latch survives the restart
+
+    // The in-memory entry now mirrors the rehydrated-then-incremented state.
+    const inMem = getReconcileHealth("ENG");
+    expect(inMem.consecutiveFailures).toBe(4);
+    expect(inMem.lastSuccessTs).toBe(staleSuccessTs);
+    expect(inMem.alerting).toBe(true);
   });
 });
 

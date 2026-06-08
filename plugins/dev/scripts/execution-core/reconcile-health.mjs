@@ -64,13 +64,50 @@ function writeHealthMarker(team, state) {
   }
 }
 
+// ensureEntry — return the in-memory health entry for `team`, creating it lazily.
+//
+// CTL-867 cross-restart fix: the in-memory `health` Map is empty on every process
+// start, so the first call after a daemon restart would otherwise seed a FRESH
+// {consecutiveFailures:0, lastSuccessTs:null, alerting:false}. For a team that has
+// been failing for hours, the very next failure would then writeHealthMarker over
+// the truthful disk marker — resetting consecutiveFailures to 1, dropping the real
+// lastSuccessTs to null, and clearing the alerting latch. That defeats the exact
+// cross-restart starvation scenario this module targets. So on first touch we
+// HYDRATE the seed from the persisted per-team marker; only an absent/malformed
+// marker falls back to fresh defaults.
 function ensureEntry(team) {
   let entry = health.get(team);
   if (!entry) {
-    entry = { consecutiveFailures: 0, lastSuccessTs: null, alerting: false };
+    entry = hydrateEntry(team) ?? {
+      consecutiveFailures: 0,
+      lastSuccessTs: null,
+      alerting: false,
+    };
     health.set(team, entry);
   }
   return entry;
+}
+
+// hydrateEntry — read a team's persisted health marker and project it into a
+// fresh in-memory entry, preserving consecutiveFailures / lastSuccessTs / alerting
+// across a process restart. Returns null when the marker is absent or unreadable
+// (caller falls back to fresh defaults). Never throws — a disk fault must never
+// crash the reconcile timer. Reuses readReconcileHealthMarkers' parse/coercion so
+// the hydrated shape matches the marker schema exactly.
+function hydrateEntry(team) {
+  try {
+    const markers = readReconcileHealthMarkers();
+    const marker = markers[team];
+    if (!marker) return null;
+    return {
+      consecutiveFailures:
+        typeof marker.consecutiveFailures === "number" ? marker.consecutiveFailures : 0,
+      lastSuccessTs: marker.lastSuccessTs ?? null,
+      alerting: marker.alerting === true,
+    };
+  } catch {
+    return null; // best-effort: any read/parse fault → fresh defaults
+  }
 }
 
 // recordReconcileSuccess — a reconcile poll succeeded for `team`. Resets the
