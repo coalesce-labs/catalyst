@@ -1585,64 +1585,82 @@ export function verifyDispatchedSignal(orchDir, ticket, phase) {
   return { ok: true };
 }
 
-// REQUIRED_WORKSPACE_LABELS — the flat labels the CTL-558 coordinator sweep
-// writes. Must pre-exist in the Linear workspace; linearis has no
-// `labels create`. CTL-585's preflight warns once at daemon start if it
-// is missing, so an operator sees the contract gap before the per-tick label
-// sweep starts (and so the missing-label short-circuit in labelOnce does not
-// surprise a fresh operator).
-const REQUIRED_WORKSPACE_LABELS = ["needs-human"];
+// REQUIRED_WORKSPACE_LABELS — the worker-status labels the daemon's escalation
+// + admission-hold sweeps write. ALL THREE are WORKSPACE-scoped (team:null)
+// members of the `worker-status` exclusive group (CTL-764) and must pre-exist;
+// linearis has no `labels create`. CTL-585's preflight warns once at daemon
+// start if one is missing, so an operator sees the contract gap before the
+// per-tick label sweep starts (and so the missing-label short-circuit in
+// labelOnce / convergeHeldLabel does not surprise a fresh operator).
+//
+//   • needs-human — the escalation label (labelOnce, scheduler/recovery).
+//   • blocked / waiting — HELD_LABEL_BLOCKED / HELD_LABEL_WAITING, applied by
+//     convergeHeldLabel for admission-hold indicators (CTL-874: the pre-CTL-874
+//     set listed only needs-human, so a missing held label went undetected).
+const REQUIRED_WORKSPACE_LABELS = ["needs-human", HELD_LABEL_BLOCKED, HELD_LABEL_WAITING];
 
-// preflightWorkspaceLabels — best-effort daemon-start check. For each team,
-// list the team's labels and warn once per missing expected label. `exec`
-// defaults to a spawnSync wrapper that normalises the result shape; `log`
-// defaults to the module logger. Never throws — a broken linearis (missing
-// binary, network outage) logs a single info line and returns.
+// preflightWorkspaceLabels — best-effort daemon-start check. CTL-874: the
+// required labels are WORKSPACE-scoped (team:null), so the pre-CTL-874
+// `linearis labels list --team <team>` per-team query NEVER returned them and
+// the preflight warned "missing required label" on EVERY boot for EVERY team
+// even though the labels existed (and the runtime apply path, which lists
+// without --team, applied them fine). The fix lists WORKSPACE-scoped labels
+// ONCE via `--scope workspace` and warns per missing label (team-independent).
+// `teams` is retained only as a "is any team configured?" gate so an
+// unconfigured daemon stays a no-op. `exec` defaults to a spawnSync wrapper
+// that normalises the result shape; `log` defaults to the module logger. Never
+// throws — a broken linearis (missing binary, network outage) logs a single
+// info line and returns.
 export function preflightWorkspaceLabels({
   teams,
   exec = defaultPreflightExec,
   log: logger = log,
 } = {}) {
   if (!Array.isArray(teams) || teams.length === 0) return;
-  for (const team of teams) {
+  try {
+    const { code, stdout, stderr } = exec("linearis", [
+      "labels",
+      "list",
+      "--scope",
+      "workspace",
+      "--limit",
+      "250",
+    ]);
+    if (code !== 0) {
+      logger.info(
+        { code, stderr },
+        "scheduler: workspace-label preflight skipped — linearis labels list failed"
+      );
+      return;
+    }
+    // linearis labels list emits JSON ({nodes: [{name, ...}, ...]}) — match
+    // the parsing used in linear-query.mjs:100-106. A non-JSON stdout is
+    // treated as a soft preflight skip, not a throw.
+    let names = [];
     try {
-      const { code, stdout, stderr } = exec("linearis", ["labels", "list", "--team", team]);
-      if (code !== 0) {
-        logger.info(
-          { team, code, stderr },
-          "scheduler: workspace-label preflight skipped — linearis labels list failed"
-        );
-        continue;
-      }
-      // linearis labels list emits JSON ({nodes: [{name, ...}, ...]}) — match
-      // the parsing used in linear-query.mjs:100-106. A non-JSON stdout is
-      // treated as a soft preflight skip, not a throw.
-      let names = [];
-      try {
-        const parsed = JSON.parse(String(stdout || "{}"));
-        names = (parsed?.nodes ?? []).map((n) => n?.name).filter(Boolean);
-      } catch (err) {
-        logger.info(
-          { team, err: err.message },
-          "scheduler: workspace-label preflight skipped — linearis stdout is not JSON"
-        );
-        continue;
-      }
-      const present = new Set(names);
-      for (const label of REQUIRED_WORKSPACE_LABELS) {
-        if (!present.has(label)) {
-          logger.warn(
-            { team, label },
-            "scheduler: Linear workspace is missing required label — create it in the Linear UI; the label sweep will skip this label for this run"
-          );
-        }
-      }
+      const parsed = JSON.parse(String(stdout || "{}"));
+      names = (parsed?.nodes ?? []).map((n) => n?.name).filter(Boolean);
     } catch (err) {
       logger.info(
-        { team, err: err.message },
-        "scheduler: workspace-label preflight threw — swallowed"
+        { err: err.message },
+        "scheduler: workspace-label preflight skipped — linearis stdout is not JSON"
       );
+      return;
     }
+    const present = new Set(names);
+    for (const label of REQUIRED_WORKSPACE_LABELS) {
+      if (!present.has(label)) {
+        logger.warn(
+          { label },
+          "scheduler: Linear workspace is missing required label — create it in the Linear UI; the label sweep will skip this label for this run"
+        );
+      }
+    }
+  } catch (err) {
+    logger.info(
+      { err: err.message },
+      "scheduler: workspace-label preflight threw — swallowed"
+    );
   }
 }
 

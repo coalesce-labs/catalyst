@@ -4172,37 +4172,36 @@ function recorder(returnValue) {
 
 // ── CTL-585: daemon-start preflight for missing workspace labels ──
 
-describe("preflightWorkspaceLabels (CTL-585)", () => {
-  test("warns once per missing label per team", () => {
+describe("preflightWorkspaceLabels (CTL-585, CTL-874)", () => {
+  test("CTL-874: queries WORKSPACE scope once (not --team) and warns per missing required label", () => {
     const warnings = [];
+    const execCalls = [];
     const fakeLog = {
       warn: (obj, msg) => warnings.push({ obj, msg }),
       info: () => {},
       error: () => {},
     };
+    // Workspace has needs-human but is MISSING blocked + waiting.
     const exec = (cmd, args) => {
+      execCalls.push({ cmd, args });
       expect(cmd).toBe("linearis");
-      expect(args.slice(0, 3)).toEqual(["labels", "list", "--team"]);
-      const team = args[3];
-      // linearis labels list emits JSON ({nodes:[{name,...},...]}).
-      // CTL is missing the expected label; ENG has it.
-      const nodes =
-        team === "CTL"
-          ? [{ name: "orchestrate" }, { name: "enhancement" }]
-          : [{ name: "needs-human" }, { name: "bug" }];
-      return { code: 0, stdout: JSON.stringify({ nodes }), stderr: "" };
+      expect(args.slice(0, 4)).toEqual(["labels", "list", "--scope", "workspace"]);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ nodes: [{ name: "needs-human" }, { name: "bug" }] }),
+        stderr: "",
+      };
     };
-    preflightWorkspaceLabels({
-      teams: ["CTL", "ENG"],
-      exec,
-      log: fakeLog,
-    });
-    const ctlWarns = warnings.filter(
-      (w) => w.obj?.team === "CTL" && w.msg.includes("missing required label")
-    );
-    expect(ctlWarns.map((w) => w.obj.label).sort()).toEqual(["needs-human"]);
-    const engWarns = warnings.filter((w) => w.obj?.team === "ENG");
-    expect(engWarns).toHaveLength(0);
+    preflightWorkspaceLabels({ teams: ["CTL", "ENG"], exec, log: fakeLog });
+    // Exactly ONE workspace-scoped query regardless of team count (no per-team --team).
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args).not.toContain("--team");
+    // Warns for the two missing required labels (blocked, waiting), team-independent.
+    const missing = warnings
+      .filter((w) => w.msg.includes("missing required label"))
+      .map((w) => w.obj.label)
+      .sort();
+    expect(missing).toEqual(["blocked", "waiting"]);
   });
 
   test("does not throw on a linearis spawn failure", () => {
@@ -4219,9 +4218,11 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
     expect(() => preflightWorkspaceLabels({ teams: ["CTL"], exec, log: fakeLog })).not.toThrow();
   });
 
-  test("real JSON shape with both labels present produces zero warnings", () => {
-    // Regression: an early draft split stdout on newlines, which produced
-    // false-positive warnings against the real JSON output every daemon start.
+  test("CTL-874: all three worker-status labels present produces zero warnings", () => {
+    // Regression: the pre-CTL-874 preflight used --team, which never returns
+    // workspace-scoped labels, so it warned on EVERY boot even when the labels
+    // existed. With --scope workspace and the full required set present, the
+    // boot is silent.
     const warnings = [];
     const fakeLog = {
       warn: (obj, msg) => warnings.push({ obj, msg }),
@@ -4232,8 +4233,10 @@ describe("preflightWorkspaceLabels (CTL-585)", () => {
       code: 0,
       stdout: JSON.stringify({
         nodes: [
-          { name: "triaged", color: "#000" },
+          { name: "worker-status", color: "#000" },
           { name: "needs-human", color: "#fff" },
+          { name: "blocked" },
+          { name: "waiting" },
           { name: "bug" },
         ],
       }),
