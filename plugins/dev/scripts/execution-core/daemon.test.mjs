@@ -5,7 +5,7 @@
 // functions so no real timers, Linear polls, or child processes run — the
 // composition logic is exercised deterministically.
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -34,7 +34,7 @@ import {
   readLinearBotWriteId,
   _isBotId,
 } from "./daemon.mjs";
-import { getEventLogPath } from "./config.mjs";
+import { getEventLogPath, log } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
@@ -379,6 +379,47 @@ describe("startDaemon", () => {
       })
     ).toThrow("simulated scheduler failure");
     expect(existsSync(pidFile)).toBe(false);
+  });
+
+  // CTL-854: boot-warn when registry is empty — exactly once, names recovery verb
+  test("WARNs once when the registry is empty at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [],
+    });
+    const emptyWarns = warn.mock.calls.filter(
+      (c) => JSON.stringify(c).includes("registry") && JSON.stringify(c).includes("register"),
+    );
+    expect(emptyWarns.length).toBe(1);
+    warn.mockRestore();
+  });
+
+  test("does NOT warn when projects are registered at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [{ team: "CTL", repoRoot: catalystDir, eligibleQuery: null }],
+    });
+    const emptyWarns = warn.mock.calls.filter((c) => JSON.stringify(c).includes("register"));
+    expect(emptyWarns.length).toBe(0);
+    warn.mockRestore();
   });
 
   test("reconciles when the registry changes (debounced)", async () => {

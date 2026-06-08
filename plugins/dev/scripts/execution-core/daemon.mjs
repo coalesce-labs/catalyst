@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
+  getRegistryPath,
   getEventLogPath,
   log,
   EVENT_DEBOUNCE_MS,
@@ -42,6 +43,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
+import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import {
   recoverStartup,
@@ -371,6 +373,9 @@ export function startDaemon({
   // tests inject spies). The stop handle is stored so stopDaemon can tear it
   // down symmetrically with the scheduler block.
   startAutoTuner: startAutoTunerFn = startAutoTuner,
+  // CTL-854: injectable for the boot empty-registry health check. Tests inject
+  // a deterministic fake; production uses the real registry reader.
+  listProjects: listProjectsFn = realListProjects,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
@@ -563,6 +568,22 @@ export function startDaemon({
   } catch (err) {
     stopDaemon();
     throw err;
+  }
+
+  // CTL-854: a fresh/headless host whose registry was never written boots a
+  // perfectly healthy-looking daemon that dispatches NOTHING. Surface it once
+  // at startup (not per-reconcile) with the recovery verb so the operator has
+  // an actionable signal rather than a silent idle daemon.
+  try {
+    if (listProjectsFn().length === 0) {
+      log.warn(
+        { registry: getRegistryPath() },
+        "execution-core daemon: registry has 0 projects — nothing will be dispatched. " +
+          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`",
+      );
+    }
+  } catch (err) {
+    log.warn({ err }, "execution-core daemon: registry health check failed (continuing)");
   }
 
   log.info({ orchDir }, "execution-core daemon started");

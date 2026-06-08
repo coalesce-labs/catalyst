@@ -95,6 +95,10 @@ For `execution-core` mode, the number of workers comes from a separate committed
 
 In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets are ready — for example, `status: "Ready"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also needs six Linear states to exist — `Ready`, `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates.
 
+If the registry is missing (a fresh or headless host), enroll a project with
+`catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the
+file by hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
+
 ## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
 
 Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under `catalyst.linear.bot`, split into two app actors:
