@@ -268,6 +268,56 @@ describe("clearStalledLabel", () => {
     expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
   });
 
+  // CTL-639 verify: the async (Promise) branch is what the real Linearis
+  // removeLabel actually returns — exercise it directly, not just the sync stub.
+  test("async removeLabel resolving { removed: true } deletes the marker", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let resolveFn;
+    const pending = new Promise((res) => { resolveFn = res; });
+    const ws = { removeLabel: () => pending };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+    // Marker still present until the promise settles.
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    resolveFn({ removed: true });
+    await pending;
+    await Promise.resolve(); // flush the .then(finalize) microtask
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("async removeLabel rejecting does not throw and retains the marker", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let rejectFn;
+    // Deferred so clearStalledLabel's .catch attaches before the rejection
+    // fires — avoids a spurious unhandled-rejection flag.
+    const pending = new Promise((_res, rej) => { rejectFn = rej; });
+    const ws = { removeLabel: () => pending };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    rejectFn(new Error("network"));
+    await pending.catch(() => {}); // settle the rejection
+    await Promise.resolve();
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("removeLabel returning undefined is treated as success — marker deleted", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => undefined };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
   test("apply → clear → re-apply cycle re-arms the labelOnce guard", () => {
     const workerDir = join(orchDir, "workers", "CTL-1");
     mkdirSync(workerDir, { recursive: true });
