@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   labelOnce,
+  clearStalledLabel,
   inEscalationCooldown,
   recordEscalation,
   escalationCooldownPath,
@@ -206,5 +207,83 @@ describe("inEscalationCooldown / recordEscalation", () => {
     expect(inEscalationCooldown(orchDir, "CTL-9", "monitor-merge", t0)).toBe(true);
     expect(inEscalationCooldown(orchDir, "CTL-11", "pr", t0)).toBe(false);
     expect(inEscalationCooldown(orchDir, "CTL-9", "triage", t0)).toBe(false);
+  });
+});
+
+// ─── clearStalledLabel (CTL-646) ───
+
+describe("clearStalledLabel", () => {
+  test("clears label + deletes .applied marker together", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const removed = [];
+    const ws = { removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; } };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toEqual({ t: "CTL-1", l: "needs-human" });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("also deletes the .skipped marker", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.skipped"), "");
+    const ws = { removeLabel: () => ({ removed: true }) };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.skipped"))).toBe(false);
+  });
+
+  test("no-op when no marker present — still calls removeLabel, does not throw", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    const removed = [];
+    const ws = { removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; } };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    expect(removed).toHaveLength(1);
+  });
+
+  test("marker retained on failed removal (removed: false)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: false, reason: "transient" }) };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("never throws when removeLabel throws — marker kept", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => { throw new Error("network"); } };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("apply → clear → re-apply cycle re-arms the labelOnce guard", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+
+    // Apply
+    labelOnce(orchDir, "CTL-1", "needs-human", { applyLabel: () => ({ applied: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    // Clear
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+
+    // Re-apply
+    let applied = 0;
+    labelOnce(orchDir, "CTL-1", "needs-human", { applyLabel: () => { applied++; return { applied: true }; } });
+    expect(applied).toBe(1);
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
   });
 });

@@ -125,7 +125,7 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
-import { labelOnce } from "./label-guard.mjs";
+import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } from "./config.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
@@ -3042,6 +3042,8 @@ export function schedulerTick(
       terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
+      // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
+      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
@@ -3054,6 +3056,14 @@ export function schedulerTick(
     });
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
+    } else {
+      // CTL-646: no phase stalled → clear the ratchet if the marker exists.
+      // Guard on marker presence so a no-stall, no-marker tick fires zero
+      // removeLabel API calls (steady-state-zero-writes invariant).
+      const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+      if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+        clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+      }
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:

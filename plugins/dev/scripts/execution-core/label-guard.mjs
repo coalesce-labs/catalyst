@@ -16,7 +16,7 @@
 //     dispatch cool-down rationale in scheduler.mjs::dispatchCooldownPath and
 //     memory project_scheduler_marker_under_workers_excludes_ticket).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
 
@@ -37,8 +37,14 @@ import { log } from "./config.mjs";
 // marker so the next tick retries — CTL-558's recovery contract. CTL-638 pairs
 // this with the escalation cool-down below to break the per-tick storm even
 // when the transient-failure path keeps re-attempting the write.
+// labelMarkerBase — shared path prefix for the once-marker files used by
+// labelOnce and clearStalledLabel (single source of truth for the marker path).
+function labelMarkerBase(orchDir, ticket, label) {
+  return join(orchDir, "workers", ticket, `.linear-label-${label}`);
+}
+
 export function labelOnce(orchDir, ticket, label, writeStatus) {
-  const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
+  const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
@@ -58,6 +64,39 @@ export function labelOnce(orchDir, ticket, label, writeStatus) {
       { ticket, label, err: err.message },
       "scheduler: label write-back threw — continuing tick"
     );
+  }
+}
+
+// ─── CTL-646: clearStalledLabel — inverse of labelOnce ───
+//
+// Removes the Linear label AND deletes the once-marker(s) so the apply guard
+// re-arms. Both must happen together: deleting the marker without clearing the
+// label would let the daemon believe the label is gone while Linear still shows
+// it; clearing the label without deleting the marker would leave labelOnce
+// permanently disarmed. Best-effort and never throws (mirrors labelOnce).
+// The marker is deleted ONLY on a confirmed removal so a transient API failure
+// is retried next tick.
+export function clearStalledLabel(orchDir, ticket, label, writeStatus) {
+  const base = labelMarkerBase(orchDir, ticket, label);
+  try {
+    const res = writeStatus.removeLabel(ticket, label);
+    const finalize = (r) => {
+      // undefined (test stub) treated as success; otherwise require removed:true.
+      if (r === undefined || r?.removed) {
+        for (const suffix of [".applied", ".skipped"]) {
+          const p = `${base}${suffix}`;
+          if (existsSync(p)) { try { unlinkSync(p); } catch { /* best-effort */ } }
+        }
+      }
+    };
+    if (res && typeof res.then === "function") {
+      res.then(finalize).catch((err) =>
+        log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: removeLabel rejected — continuing"));
+    } else {
+      finalize(res);
+    }
+  } catch (err) {
+    log.warn({ ticket, label, err: err.message }, "clearStalledLabel: threw — continuing tick");
   }
 }
 
