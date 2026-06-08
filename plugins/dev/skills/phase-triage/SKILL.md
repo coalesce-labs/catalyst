@@ -23,6 +23,17 @@ The skill is dispatched in two modes:
 
 Both modes produce the same `triage.json` shape and emit the same canonical phase event.
 
+## Use-case conformance (Opus mode)
+
+When refining the analysis, also assess whether the ticket meets the `/catalyst-dev:gherkin-ticket`
+standard: an outcome-first title (not a mechanism/file/symbol name) and a body that opens with a
+plain-English use case followed by tiered Gherkin acceptance criteria. If it does **not** conform,
+add one line to the triage analysis comment flagging it — e.g. *"⚠️ Ticket does not lead with a
+use-case (per gherkin-ticket); consider rewriting the title/opening for scannability."* This surfaces
+non-conformant tickets for the operator without auto-rewriting them — triage is a documentarian, so
+**do not** edit the ticket's title or description here; flag only. (The deterministic bash body and
+`triage.json` schema are unchanged.)
+
 ## /goal
 
 ```

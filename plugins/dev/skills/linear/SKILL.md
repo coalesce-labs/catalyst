@@ -14,6 +14,15 @@ version: 1.0.0
 You are tasked with managing Linear tickets, including creating tickets from thoughts documents,
 updating existing tickets, and following a structured workflow using the Linearis CLI.
 
+## REQUIRED: ticket format gate
+
+**Before creating ANY ticket, apply the `/catalyst-dev:gherkin-ticket` standard.** Every ticket must
+open with a scannable use-case — an outcome-first title (`<actor> should <outcome> [so that
+<benefit>]`, no internal-mechanism jargon, no `[Component]` prefix) and a body that leads with a
+plain-English use case followed by tiered Gherkin (`Given/When/Then`) acceptance criteria. This is a
+hard gate: do not draft a title or description without first consulting that skill. Component goes in
+a Linear label, not the title.
+
 ## Prerequisites Check
 
 First, verify that Linearis CLI is installed and configured:
@@ -177,23 +186,25 @@ When referencing thoughts documents, always provide GitHub links:
    - If it mentions other thoughts documents, quickly check them
    - Look for any existing Linear tickets mentioned
 
-4. **Draft the ticket summary:** Present a draft to the user:
+4. **Draft the ticket summary** following the `/catalyst-dev:gherkin-ticket` standard. Present a
+   draft to the user:
 
    ```
    ## Draft Linear Ticket
 
-   **Title**: [Clear, action-oriented title]
+   **Title**: [outcome-first use-case sentence — <actor> should <outcome> [so that <benefit>];
+   no mechanism/file/symbol names, no [Component] prefix]
 
    **Description**:
-   [2-3 sentence summary of the problem/goal]
+   [short plain-English use case — who benefits and why — so a reader who didn't write it gets oriented]
 
-   ## Key Details
-   - [Bullet points of important details from thoughts]
-   - [Technical decisions or constraints]
-   - [Any specific requirements]
+   [Gherkin acceptance criteria in a ```gherkin fenced block, at the right tier:
+    A = features/bugs (full Given/When/Then), B = bugs (Then states correct behavior + # CURRENTLY:),
+    C = pure chores (Context/Motivation/Outcome prose)]
 
-   ## Implementation Notes (if applicable)
-   [Any specific technical approach or steps outlined]
+   ## Technical notes
+   - [implementation detail, technical decisions, constraints — preserved, but BELOW the use case]
+   - [any specific requirements]
 
    ## References
    - Source: `thoughts/[path]` ([View on GitHub](converted URL))
