@@ -63,7 +63,7 @@ import {
   readStalePrRescueConfig,
 } from "./stale-pr-rescue-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
-import { reconcileBootResume } from "./boot-resume.mjs";
+import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
 // main() can resolve the slot-ceiling config once and thread it into the
@@ -434,6 +434,9 @@ export function startDaemon({
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
     reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
+    // (operator may have dropped the sentinel while the daemon was down).
+    processApprovedResumes({ orchDir });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into

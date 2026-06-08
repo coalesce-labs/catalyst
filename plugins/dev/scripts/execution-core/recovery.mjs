@@ -411,6 +411,24 @@ export function defaultAppendBootResumeEvent({ phase, ticket, orchId }) {
   );
 }
 
+// defaultAppendBootResumeGatedEvent — phase.<phase>.boot-resume-gated.<ticket>.
+// CTL-644: emitted once when an expensive phase is gated behind operator approval.
+// Deliberately distinct from boot-resume so the broker ignores it (audit-only,
+// like defaultAppendBootResumeEvent). Exported so boot-resume.mjs imports it as
+// the default appendGatedEvent seam.
+export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume-gated",
+      reason: "cold-start-expensive-phase-awaiting-approval",
+    }),
+    "boot-resume-gated",
+  );
+}
+
 // CTL-587: three new audit-only event helpers. The broker's PHASE_EVENT_PATTERN
 // in router.mjs only matches complete|failed|turn-cap-exhausted|skipped, so
 // revive/escalated/revive-suppressed events are deliberately ignored by the

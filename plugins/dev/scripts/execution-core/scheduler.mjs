@@ -126,6 +126,7 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
 import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
+import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
 import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } from "./config.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
@@ -1934,6 +1935,12 @@ export function schedulerTick(
       );
     }
   }
+
+  // CTL-644: per-tick approval poll — dispatch any gated tickets that now have an
+  // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
+  // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
+  // can advance in the same tick it's dispatched.
+  processApprovedResumes({ orchDir });
 
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the

@@ -498,6 +498,41 @@ whatever inventory it exposes.
 Legacy `oneshot-legacy` mode is unchanged — all the above only activates when
 `dispatchMode = "phase-agents"` is set in `.catalyst/config.json`.
 
+## Cold-start recovery (CTL-639)
+
+When the daemon restarts after a crash or `kill`, the boot-resume pass
+(`boot-resume.mjs::reconcileBootResume`) re-dispatches in-flight tickets whose
+`--bg` workers are no longer alive. The pass classifies each candidate by phase:
+
+| Phase class | Phases | Boot behaviour |
+|---|---|---|
+| **Cheap** | `triage`, `research`, `plan` | Auto-re-dispatched immediately (no operator action needed). Work is short and idempotent. |
+| **Expensive** | `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `remediate` | **Gated** — a `.boot-resume-pending-approval` marker is written under `workers/<TICKET>/` and a `phase.<phase>.boot-resume-gated.<ticket>` audit event is emitted. No worker is spawned until the operator approves. |
+
+### Operator greenlight for expensive phases
+
+To approve re-dispatch of a gated ticket, create the approval sentinel:
+
+```bash
+touch "$ORCH_DIR/workers/<TICKET>/.boot-resume-approved"
+```
+
+The scheduler picks it up within one tick (≤30 s) and calls `reviveDispatch`
+for that ticket's phase — subject to the same MAX_REVIVES and storm-breaker
+guards as a per-tick reclaim. Both sentinels are deleted on a successful
+dispatch so a subsequent reboot does not re-dispatch.
+
+To list currently gated tickets:
+
+```bash
+find "$ORCH_DIR/workers" -name ".boot-resume-pending-approval" | while read p; do
+  echo "$(basename "$(dirname "$p")"): $(jq -r '.phase' "$p")"
+done
+```
+
+If a HUD button later writes the same sentinel it requires no logic changes —
+`processApprovedResumes` polls for the file, not for the transport that wrote it.
+
 ## See also
 
 - [`website/src/content/docs/reference/orchestration/phase-agents.md`](../website/src/content/docs/reference/orchestration/phase-agents.md) — user-facing canonical doc shipped in PR #812
