@@ -15,6 +15,14 @@ BODY="${2:?comment body required}"
 
 LINEAR_API="https://api.linear.app"
 
+# Scope for the client_credentials app-actor mint. `comments:create` is REQUIRED
+# for the commentCreate mutation below; `read` covers the issue-identifier
+# resolution query. Without an explicit scope Linear rejects the mint with
+# `400 invalid_scope` (CTL-835), so the mirror would fail open and the comment
+# would silently never post. This matches the canonical mints in
+# execution-core/linear-remint.mjs (MINT_SCOPE) and catalyst-execution-core.
+MINT_SCOPE="read,write,comments:create"
+
 # _find_layer2_config — resolve the OLD per-team Layer-2 file
 # (~/.config/catalyst/config-<key>.json) by walking up for .catalyst/config.json
 # and reading the project key. The key lives at `.catalyst.projectKey` (nested);
@@ -74,17 +82,26 @@ if [[ -z "$CLIENT_ID" || -z "$CLIENT_SECRET" ]]; then
 fi
 
 # 1. Mint app-actor token via client_credentials grant.
-TOKEN_RESPONSE=$(curl -sf -X POST "${LINEAR_API}/oauth/token" \
+#    Capture the body + HTTP status WITHOUT -f so a 400 (e.g. invalid_scope)
+#    surfaces the real error JSON instead of being discarded — the single
+#    diagnostic line below then carries the actual cause (CTL-835).
+TOKEN_HTTP=$(curl -s -w '\n%{http_code}' -X POST "${LINEAR_API}/oauth/token" \
   -d "grant_type=client_credentials" \
   -d "client_id=${CLIENT_ID}" \
   -d "client_secret=${CLIENT_SECRET}" \
+  -d "scope=${MINT_SCOPE}" \
   -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null) || {
-  echo "linear-comment-post: token mint failed" >&2
+  echo "linear-comment-post: token mint request failed (curl error)" >&2
   exit 1
 }
+TOKEN_CODE="${TOKEN_HTTP##*$'\n'}"
+TOKEN_RESPONSE="${TOKEN_HTTP%$'\n'*}"
 ACCESS_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
 if [[ -z "$ACCESS_TOKEN" ]]; then
-  echo "linear-comment-post: access_token missing in token response" >&2
+  # One clear diagnostic carrying the HTTP status + Linear's error/description so
+  # invalid_scope (and any future mint rejection) is no longer silent.
+  ERR_DETAIL=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '[.error, .error_description] | map(select(. != null and . != "")) | join(": ") // empty' 2>/dev/null)
+  echo "linear-comment-post: token mint failed (HTTP ${TOKEN_CODE:-?}${ERR_DETAIL:+; }${ERR_DETAIL}) — comment NOT posted" >&2
   exit 1
 fi
 
