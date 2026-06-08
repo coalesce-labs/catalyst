@@ -8,6 +8,12 @@ disable-model-invocation: false
 
 Generate engineering tickets from PRDs, feature specs, or task lists. Supports direct creation via Linear MCP or formatted text output.
 
+> **REQUIRED: every generated ticket must follow the `/catalyst-dev:gherkin-ticket` standard.**
+> Outcome-first title (`<actor> should <outcome> [so that <benefit>]`, no internal-mechanism jargon,
+> component as a *label* not a title prefix) + a body that opens with a plain-English use case
+> followed by tiered Gherkin acceptance criteria. The legacy `[Component] Action:` title format below
+> is superseded — see the updated Title Format and Ticket Body sections.
+
 ## Quick Start
 
 1. Point me to the source: PRD, feature spec, meeting action items, or describe the work
@@ -66,38 +72,36 @@ Read the source document and identify:
 
 For each ticket, generate:
 
-**Title Format:**
+**Title Format** (per `/catalyst-dev:gherkin-ticket` — outcome-first, no `[Component]` prefix):
 
 ```
-[Component] Action: Brief description
+<actor> should <outcome> [when <condition>] [so that <benefit>]
 ```
 
-Examples:
+The actor is whoever benefits (a user, an operator, the API, the scheduler). The component goes in a
+Linear **label**, not the title. Examples:
 
-- `[API] Add endpoint for user preferences`
-- `[Frontend] Build preference selection UI`
-- `[DB] Create user_preferences table`
+- `Users should be able to save and reload their preferences so settings persist across sessions`
+- `The preferences API should reject an unknown user with a 404 rather than a 500`
+- `Operators should see a preference-selection screen so they can configure defaults without code`
 
-**Ticket Body:**
+**Ticket Body** (use case first, then tiered Gherkin, then technical detail):
 
 ```markdown
-## Context
+[Short plain-English use case — who benefits and why — so a reader who didn't write it gets oriented.]
 
-[Link to PRD or parent epic]
+​```gherkin
+Scenario: <one specific behavior>
+  Given <minimum starting state>
+  When <the single action>
+  Then <observable outcome>
+​```
+(Tier A = features/bugs full scenarios; Tier B = bugs, `Then` states correct behavior + `# CURRENTLY:`;
+Tier C = pure chores, Context/Motivation/Outcome prose instead of a vacuous scenario.)
 
-## Objective
+## Technical notes
 
-[What this ticket accomplishes]
-
-## Acceptance Criteria
-
-- [ ] Specific outcome 1
-- [ ] Specific outcome 2
-- [ ] Specific outcome 3
-
-## Technical Notes
-
-[API contracts, data schemas, edge cases]
+[API contracts, data schemas, edge cases — preserved, but BELOW the use case]
 
 ## Dependencies
 
@@ -373,8 +377,8 @@ Priority: Medium
 
 ## Common Mistakes to Avoid
 
-❌ Vague titles: "Fix preferences"
-✅ Specific titles: "[API] Fix: Preferences endpoint returns 500 on missing user"
+❌ Mechanism/vague titles: "Fix preferences" / "[API] Fix preferences endpoint"
+✅ Outcome titles: "The preferences API should return 404 (not 500) when the user doesn't exist"
 
 ❌ No acceptance criteria
 ✅ Clear checklist of outcomes
@@ -450,7 +454,8 @@ When the PM uses `/create-tickets`, I automatically:
 
 Before delivering tickets, verify:
 
-- [ ] **Every ticket has a clear, specific title** -- "[Component] Action: Description" format, no vague titles like "Fix stuff"
+- [ ] **Every ticket has an outcome-first title** -- per `/catalyst-dev:gherkin-ticket` (`<actor> should <outcome>`), no `[Component]` prefix, no internal-mechanism jargon, no vague titles like "Fix stuff"
+- [ ] **Every ticket body opens with a use case + tiered Gherkin** -- plain-English context first, then `Given/When/Then` acceptance criteria
 - [ ] **Every ticket has testable acceptance criteria** -- At least 2-3 checkboxes that define "done"
 - [ ] **Every ticket has an effort estimate** -- T-shirt size (XS/S/M/L/XL) assigned to each
 - [ ] **XL tickets flagged for splitting** -- Any ticket estimated at 1-2 weeks has a suggested breakdown
