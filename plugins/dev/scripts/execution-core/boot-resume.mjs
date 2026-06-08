@@ -30,12 +30,22 @@
 // scheduler/signal-reader read helpers, and exhaustively unit-tested. The
 // reconcileBootResume orchestrator (Phase 2) wires in the side effects.
 
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
 import { readWorkerSignals, TERMINAL, byActivePhase } from "./signal-reader.mjs";
 import { listInFlightTickets, readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
 import { log } from "./config.mjs";
 import {
   defaultReviveDispatch,
   defaultAppendBootResumeEvent,
+  defaultAppendBootResumeGatedEvent,
   resolvePhaseSessionId,
 } from "./recovery.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
@@ -46,6 +56,53 @@ import { defaultDispatch } from "./dispatch.mjs";
 // Phase-1 exports import-light, but a lazy `import()` is async and the boot pass
 // must stay synchronous to complete before the monitor/scheduler start.)
 import { liveAgents } from "./cli/sessions.mjs";
+
+// ─── CTL-644: cheap/expensive classification ───────────────────────────────
+//
+// cheap = early phases whose work is cheap to re-run; auto-resume on cold start.
+// expensive = phases that edit application code or open PRs; require operator approval.
+// remediate is treated as expensive (edits app code, same cost class as implement).
+export const CHEAP_RESUME_PHASES = new Set(["triage", "research", "plan"]);
+export function isCheapPhase(phase) {
+  return CHEAP_RESUME_PHASES.has(phase);
+}
+
+// bootResumePendingPath — JSON marker written when a gated ticket is awaiting approval.
+// Schema: { ticket, phase, worktreePath, requestedAt }
+export function bootResumePendingPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".boot-resume-pending-approval");
+}
+
+// bootResumeApprovedPath — empty sentinel written by the operator (or a HUD button)
+// to approve re-dispatch of a gated ticket.
+export function bootResumeApprovedPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".boot-resume-approved");
+}
+
+// ─── internal helpers ──────────────────────────────────────────────────────
+
+function writePendingMarker(orchDir, ticket, phase, worktreePath) {
+  const p = bootResumePendingPath(orchDir, ticket);
+  if (existsSync(p)) return false; // idempotent — do not re-emit
+  try {
+    writeFileSync(
+      p,
+      JSON.stringify({ ticket, phase, worktreePath, requestedAt: new Date().toISOString() })
+    );
+    return true;
+  } catch (err) {
+    log.warn({ ticket, phase, err: err?.message }, "boot-resume: pending marker write failed — continuing");
+    return false;
+  }
+}
+
+function readPendingMarker(orchDir, ticket) {
+  try {
+    return JSON.parse(readFileSync(bootResumePendingPath(orchDir, ticket), "utf8"));
+  } catch {
+    return null;
+  }
+}
 
 // hasLiveBgWorker — does `agents` contain a live BACKGROUND session whose cwd is
 // exactly `worktreePath`? This is the synchronous reduction of research §6's
@@ -185,6 +242,8 @@ export function reconcileBootResume({
   dispatch = defaultDispatch, // inner seam handed to reviveDispatch
   reviveDispatch = defaultReviveDispatch,
   appendEvent = defaultAppendBootResumeEvent,
+  // CTL-644: gated-event appender — emitted once per expensive ticket gated.
+  appendGatedEvent = defaultAppendBootResumeGatedEvent,
   // CTL-690: session resolver — same helper recovery.mjs:1265 uses on the
   // per-tick reclaim path so boot-resume and reclaim share resume semantics.
   // Injectable so tests can drive both the resumable + unresumable branches
@@ -195,7 +254,7 @@ export function reconcileBootResume({
   concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
 } = {}) {
   if (!report || report.coldStart !== true) {
-    return { dispatched: 0, failed: 0, skipped: "not-cold-start" };
+    return { dispatched: 0, failed: 0, gated: 0, skipped: "not-cold-start" };
   }
 
   const liveAgentList = resolveAgents(agents);
@@ -204,7 +263,23 @@ export function reconcileBootResume({
   let dispatched = 0;
   let resumed = 0;
   let failed = 0;
-  for (const { ticket, phase, bgJobId } of candidates) {
+  let gated = 0;
+  for (const { ticket, phase, worktreePath, bgJobId } of candidates) {
+    // CTL-644: gate expensive phases behind operator approval; auto-dispatch cheap ones.
+    if (!isCheapPhase(phase)) {
+      const written = writePendingMarker(orchDir, ticket, phase, worktreePath);
+      if (written) {
+        gated++;
+        appendGatedEvent({ phase, ticket, orchId });
+        log.info(
+          { ticket, phase },
+          "boot-resume: expensive phase gated — awaiting operator approval"
+        );
+      }
+      continue;
+    }
+
+    // Cheap path — existing resume/dispatch logic unchanged.
     // CTL-690: try to map the dead worker's bg_job_id → resume UUID. Null
     // result (no bg id, no state.json, no/!.jsonl transcript) falls through
     // to the today-default fresh-dispatch path. The downstream stderr
@@ -243,8 +318,71 @@ export function reconcileBootResume({
   }
 
   log.info(
-    { dispatched, resumed, failed, candidates: candidates.length },
+    { dispatched, resumed, gated, failed, candidates: candidates.length },
     "boot-resume: cold-start reconciliation complete"
   );
-  return { dispatched, resumed, failed, candidates: candidates.length };
+  return { dispatched, resumed, gated, failed, candidates: candidates.length };
+}
+
+// processApprovedResumes — CTL-644. Dispatch gated tickets whose operator
+// approval sentinel exists. Called once at boot (after reconcileBootResume)
+// and each scheduler tick so a mid-run approval is honored without a restart.
+// Routes through reviveDispatch → same MAX_REVIVES / storm-breaker guards as
+// the cheap auto path. Clears both sentinels on a successful dispatch.
+export function processApprovedResumes({
+  orchDir,
+  reviveDispatch = defaultReviveDispatch,
+  dispatch = defaultDispatch,
+  appendEvent = defaultAppendBootResumeEvent,
+  orchId = undefined,
+} = {}) {
+  const workersDir = join(orchDir, "workers");
+  let tickets;
+  try {
+    // withFileTypes: filter to directories only — guards against non-directory
+    // entries at the workers/ level and prevents path-component confusion from
+    // any stray file whose name could produce an unexpected path join.
+    tickets = readdirSync(workersDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return { dispatched: 0, failed: 0 };
+  }
+
+  let dispatched = 0;
+  let failed = 0;
+  for (const ticket of tickets) {
+    const pendingPath = bootResumePendingPath(orchDir, ticket);
+    const approvedPath = bootResumeApprovedPath(orchDir, ticket);
+    if (!existsSync(pendingPath) || !existsSync(approvedPath)) continue;
+
+    const pending = readPendingMarker(orchDir, ticket);
+    if (!pending) {
+      log.warn({ ticket }, "processApprovedResumes: pending marker unreadable — skipping");
+      continue;
+    }
+
+    const { phase, worktreePath } = pending;
+    let res;
+    try {
+      res = reviveDispatch({ orchDir, ticket, phase, resumeSession: null }, { dispatch });
+    } catch (err) {
+      res = { code: 1, stderr: err?.message ?? String(err) };
+    }
+
+    if (res?.code === 0) {
+      dispatched++;
+      appendEvent({ phase, ticket, orchId });
+      try { unlinkSync(pendingPath); } catch { /* best-effort */ }
+      try { unlinkSync(approvedPath); } catch { /* best-effort */ }
+    } else {
+      failed++;
+      log.warn(
+        { ticket, phase, code: res?.code, stderr: res?.stderr },
+        "processApprovedResumes: dispatch failed — sentinels retained for retry"
+      );
+    }
+  }
+
+  return { dispatched, failed };
 }

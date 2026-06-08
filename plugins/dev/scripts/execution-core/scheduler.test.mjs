@@ -3598,6 +3598,49 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     expect(calls).toBe(0);
   });
+
+  // CTL-646: stall→advance and terminal Done clear the needs-human label
+
+  test("clears needs-human when no phase is stalled and .applied marker exists (CTL-646)", () => {
+    writeSignal("CTL-14", "implement", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeFileSync(join(orchDir, "workers", "CTL-14", ".linear-label-needs-human.applied"), "");
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed).toContainEqual(expect.objectContaining({ t: "CTL-14", l: "needs-human" }));
+  });
+
+  test("still-stalled does not call removeLabel — labelOnce only (CTL-646)", () => {
+    writeSignal("CTL-15", "implement", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed.filter((r) => r.t === "CTL-15")).toHaveLength(0);
+  });
+
+  test("terminal Done clears needs-human unconditionally (CTL-646)", () => {
+    writeSignal("CTL-16", "monitor-deploy", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const removed = [];
+    const writeStatus = {
+      ...noWrites(),
+      applyLabel: () => ({}),
+      applyTerminalDone: () => ({ applied: true }),
+      removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; },
+    };
+    schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
+    expect(removed).toContainEqual(expect.objectContaining({ t: "CTL-16", l: "needs-human" }));
+  });
 });
 
 // ── CTL-582: worktree teardown on terminal Done ──
