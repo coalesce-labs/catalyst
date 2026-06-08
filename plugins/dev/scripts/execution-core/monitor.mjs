@@ -44,6 +44,11 @@ import { applyTriageStatus as defaultApplyTriageStatus, applyAssignee as default
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
+import {
+  recordReconcileSuccess,
+  recordReconcileFailure,
+  __resetReconcileHealthForTests,
+} from "./reconcile-health.mjs";
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
@@ -209,7 +214,16 @@ const knownProjects = new Set();
 // edit is picked up without a daemon restart. A failed poll THROWS inside
 // runEligibleQuery; we log and return, preserving the prior eligible set
 // rather than flattening it to empty.
-export function reconcileProject(team, { exec } = {}) {
+//
+// CTL-867: a PERSISTENT per-team poll failure (e.g. the team's status references
+// a removed Linear state, so `linearis issues list --team X --status Ready`
+// exits 1 every tick) is no longer ONLY a buried log.error. Each call records
+// the per-team reconcile outcome (recordReconcileSuccess / recordReconcileFailure);
+// after N consecutive failures the health tracker escalates a canonical
+// `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
+// orch-monitor dashboard surfaces the silently-starving team, and a recovering
+// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
     log.warn({ team }, "reconcile: no registry entry for team — skipping");
@@ -221,8 +235,15 @@ export function reconcileProject(team, { exec } = {}) {
     tickets = runEligibleQuery(query, { exec });
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
+    // CTL-867: escalate persistent failures beyond the buried log line.
+    recordReconcileFailure(team, err.message, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
     return;
   }
+  // CTL-867: the poll succeeded — reset the failure streak, refresh the
+  // last-successful-refresh marker, and clear any standing alert. Recorded
+  // BEFORE the projection write so a successful poll counts as a recovery even
+  // if the (rare) projection write below fails.
+  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
   } catch (err) {
@@ -242,10 +263,10 @@ export function reconcileProject(team, { exec } = {}) {
 // reconcileAll — full reconcile of every registered team (the missed-webhook
 // backstop). Re-reads registry.json each call so a team added to the registry
 // is picked up and one removed is dropped within one tick.
-export function reconcileAll({ exec } = {}) {
+export function reconcileAll({ exec, appendHealthEvent } = {}) {
   const projects = listProjects();
   const seen = new Set(projects.map((p) => p.team));
-  for (const p of projects) reconcileProject(p.team, { exec });
+  for (const p of projects) reconcileProject(p.team, { exec, appendHealthEvent });
   for (const stale of knownProjects) {
     if (!seen.has(stale)) {
       dropProject(stale);
@@ -852,4 +873,5 @@ export function __resetForTests() {
   leftoverBuf = "";
   tailerOpts = {};
   resetLivenessCache();
+  __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
 }

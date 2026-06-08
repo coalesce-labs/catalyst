@@ -30,6 +30,12 @@ import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
+import {
+  getReconcileHealth,
+  readReconcileHealthMarkers,
+  recordReconcileFailure,
+  __resetReconcileHealthForTests,
+} from "./reconcile-health.mjs";
 
 let catalystDir;
 let prevCatalystDir;
@@ -196,6 +202,161 @@ describe("reconcileProject", () => {
     writeFileSync(join(projDir, "sentinel"), "x");
     expect(() => reconcileProject("ENG", { exec })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
+  });
+});
+
+// --- CTL-867: per-team reconcile-health escalation --------------------------
+//
+// A team whose eligibleQuery errors every poll (e.g. its status references a
+// removed Linear state) freezes its eligible projection stale for hours while
+// the daemon looks healthy — invisible starvation. reconcileProject now records
+// per-team reconcile health and, after N consecutive failures, escalates a
+// canonical monitor.reconcile.failing.<TEAM> event onto the unified event log;
+// a recovering poll clears the alert.
+
+describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
+  const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+  test("a reconcile that throws N consecutive times emits the failing alert exactly once", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    // First two failures: under the default threshold (3) → no alert yet.
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(2);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+
+    // Third consecutive failure crosses the threshold → exactly one alert.
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ team: "ENG", action: "failing", consecutiveFailures: 3 });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+
+    // Further failures do NOT re-fire the alert (latched until recovery).
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(1);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(5);
+  });
+
+  test("a recovering query clears the alert and resets the counter (emits a recovery event)", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    // Drive past the threshold so the team is alerting.
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(events).toHaveLength(1);
+
+    // A successful poll: counter resets, alert clears, recovery event fires.
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent });
+    const health = getReconcileHealth("ENG");
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.alerting).toBe(false);
+    expect(health.lastSuccessTs).toBeTruthy();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ team: "ENG", action: "recovered" });
+    // The successful poll also rebuilt the eligible set (no longer frozen stale).
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+
+  test("a single transient failure under the threshold never alerts; recovery emits nothing", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent }); // 1 failure
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent }); // recovers before alert
+
+    // No alert was ever raised, so the recovery must NOT emit a spurious clear.
+    expect(events).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(0);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+  });
+
+  test("a new streak after a recovery re-alerts (alert is per-streak, not once-ever)", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+    // failing(1) + recovered(1) so far.
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(2);
+  });
+
+  test("each call persists a per-team health marker the orch-monitor server reads", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+
+    const markers = readReconcileHealthMarkers();
+    expect(markers.ENG).toBeDefined();
+    expect(markers.ENG.lastSuccessTs).toBeTruthy();
+    expect(markers.ENG.alerting).toBe(false);
+    expect(markers.ENG.consecutiveFailures).toBe(0);
+
+    // After persistent failures the marker reflects the alert + frozen lastSuccessTs.
+    const priorTs = markers.ENG.lastSuccessTs;
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    const failed = readReconcileHealthMarkers();
+    expect(failed.ENG.alerting).toBe(true);
+    expect(failed.ENG.consecutiveFailures).toBe(3);
+    expect(failed.ENG.lastSuccessTs).toBe(priorTs); // unchanged — eligible set is frozen stale
+  });
+
+  // CTL-867 cross-restart fix: the in-memory health map is empty on every process
+  // start. Without rehydration, the first post-restart failure for a team that has
+  // been failing for hours would seed a FRESH entry and writeHealthMarker would
+  // OVERWRITE the truthful disk marker — resetting consecutiveFailures to 1,
+  // dropping the real lastSuccessTs to null, and clearing the alerting latch. That
+  // is the exact starvation scenario CTL-867 targets, so it must survive a restart.
+  test("a daemon restart rehydrates per-team health from the disk marker (preserves lastSuccessTs + alerting, increments the failure count)", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+    // Establish a truthful marker: one success (stamps a real lastSuccessTs), then
+    // drive past the threshold so the team is alerting with N consecutive failures.
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+    const staleSuccessTs = readReconcileHealthMarkers().ENG.lastSuccessTs;
+    expect(staleSuccessTs).toBeTruthy();
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+
+    const beforeRestart = readReconcileHealthMarkers().ENG;
+    expect(beforeRestart.alerting).toBe(true);
+    expect(beforeRestart.consecutiveFailures).toBe(3);
+    expect(beforeRestart.lastSuccessTs).toBe(staleSuccessTs);
+
+    // Simulate a daemon RESTART: the in-memory map is cleared, but the disk marker
+    // (the durable starvation truth) persists in the per-test reconcile-health dir.
+    __resetReconcileHealthForTests();
+    expect(getReconcileHealth("ENG")).toBeNull(); // confirm the in-memory map is empty
+
+    // ONE more failure after the restart. The seed must come from the disk marker,
+    // not fresh defaults — so the count increments to N+1, lastSuccessTs is the
+    // preserved stale timestamp (NOT null), and the alerting latch stays set.
+    recordReconcileFailure("ENG", "removed-state: Ready");
+
+    const afterRestart = readReconcileHealthMarkers().ENG;
+    expect(afterRestart.consecutiveFailures).toBe(4); // N+1, not reset to 1
+    expect(afterRestart.lastSuccessTs).toBe(staleSuccessTs); // preserved, not nulled
+    expect(afterRestart.alerting).toBe(true); // latch survives the restart
+
+    // The in-memory entry now mirrors the rehydrated-then-incremented state.
+    const inMem = getReconcileHealth("ENG");
+    expect(inMem.consecutiveFailures).toBe(4);
+    expect(inMem.lastSuccessTs).toBe(staleSuccessTs);
+    expect(inMem.alerting).toBe(true);
   });
 });
 

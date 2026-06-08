@@ -72,6 +72,20 @@ export function getEligibleDir() {
   return resolve(getExecutionCoreDir(), "eligible");
 }
 
+// CTL-867 — per-team reconcile-health dir. Holds <team>.json health markers
+// ({ team, lastSuccessTs, consecutiveFailures, alerting, updatedAt }) the
+// monitor writes on every reconcile and the orch-monitor /api/snapshot reads to
+// surface each team's "last successful eligible refresh age". This is a SEPARATE
+// marker from the eligible projection's content-keyed `updatedAt`: a healthy
+// reconcile of an unchanged eligible set skips the projection write entirely
+// (eligible-set.mjs skip-when-unchanged), so the projection timestamp can look
+// fresh while no poll has actually succeeded in hours. The health marker is
+// rewritten every reconcile regardless, so its lastSuccessTs is the truthful
+// staleness signal.
+export function getReconcileHealthDir() {
+  return resolve(getExecutionCoreDir(), "reconcile-health");
+}
+
 // The durable event-log tailer cursor — monitor.mjs persists its byte offset
 // here so a daemon restart resumes the fast path instead of re-seeding at EOF.
 export function getCursorPath() {
@@ -191,6 +205,21 @@ export const HEARTBEAT_INTERVAL_MS =
 // The periodic reconcile poll — the missed-webhook correctness backstop.
 export const RECONCILE_INTERVAL_MS =
   Number(process.env.EXECUTION_CORE_RECONCILE_INTERVAL_MS) || 10 * 60_000;
+
+// CTL-867 — per-team reconcile-health escalation threshold. A team's
+// eligibleQuery can error every poll (e.g. its status references a removed
+// Linear state → `linearis issues list --team X --status Ready` exits 1). The
+// catch in reconcileProject preserves the prior eligible set and logs, which
+// is correct, but a *persistent* failure freezes that team's eligible
+// projection stale for hours while the daemon looks healthy — invisible
+// starvation. After this many CONSECUTIVE failures the monitor escalates beyond
+// the buried log.error to a canonical `monitor.reconcile.failing.<TEAM>` event
+// the orch-monitor dashboard surfaces. A recovering query clears the alert and
+// resets the counter. Default 3 (≈30 min of a 10-min reconcile) so a single
+// transient linearis hiccup never alerts, but a removed-state misconfig does.
+// Env-overridable for tuning/tests.
+export const RECONCILE_FAILURE_ALERT_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD) || 3;
 
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.
