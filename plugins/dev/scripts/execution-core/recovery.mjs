@@ -410,7 +410,18 @@ export function defaultPostReclaimMirror(
     if (r && r.status === 0) {
       writeMarker(marker);
     } else {
-      log.warn({ ticket, phase }, "reclaim-mirror: linear-comment-post failed (continuing)");
+      // Surface the helper's own diagnostic (e.g. the CTL-835 token-mint HTTP
+      // status / invalid_scope) instead of swallowing it, so a credential or
+      // scope failure is no longer silent. Still fail-open (no throw).
+      const detail = String(r?.stderr ?? "")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .pop();
+      log.warn(
+        { ticket, phase, status: r?.status, detail },
+        "reclaim-mirror: linear-comment-post failed (continuing)",
+      );
     }
   } catch (err) {
     log.warn({ ticket, phase, err: err?.message }, "reclaim-mirror: post threw (continuing)");
