@@ -66,7 +66,7 @@ import {
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
 } from "./label-guard.mjs";
-import { countReviveEvents as defaultCountReviveEvents } from "./event-scan.mjs";
+import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(
@@ -1380,6 +1380,12 @@ export function reclaimDeadWorkIfPossible(
     // The SOLE long backstop now that the mtime triggers are gone: a busy worker
     // past it with no committed work is flagged for human, never silent-reclaimed.
     busyCeilingMs = BUSY_CEILING_MS,
+    // CTL-778 — has the worker already emitted phase.<phase>.complete.<ticket>?
+    // THE disambiguator between a done-but-idle alive worker (reclaim) and a busy
+    // fan-out worker (suppress). Defaults to the incremental event-scan query;
+    // tests inject a stub. Production wiring is correct by default since
+    // hasCompleteEvent reads the real event log.
+    completeEventSeen = ({ ticket: t, phase: p }) => hasCompleteEvent({ ticket: t, phase: p }),
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
     // dead session instead of re-walking from phase 0. Default reads the real
@@ -1556,6 +1562,60 @@ export function reclaimDeadWorkIfPossible(
   //    human (escalateOnce), never a silent reclaim-and-advance. (CTL-736
   //    Phase 3 generalizes this ceiling into the progress probe.)
   if (lifecycle === "alive") {
+    // CTL-778 step 3 — alive-but-idle reconcile. An alive worker that has ALREADY
+    // emitted phase.<phase>.complete AND whose work-done probe passes is done, not
+    // busy: flip the stuck `running` signal to `done` from the on-disk artifact and
+    // stop the idle worker. Gated on the complete EVENT (not the probe alone) so a
+    // busy in-process fan-out worker — which never emitted complete — is untouched
+    // (CTL-662/736/809-safe). Mirrors the dead-worker branch (B) below.
+    if (
+      hasProbe(phase) &&
+      completeEventSeen({ ticket, phase }) &&
+      probes[phase]({ ticket, repoRoot, orchDir })
+    ) {
+      if (prevBgJobId) {
+        emitReapIntent("phase.reclaim.reap-requested", {
+          ticket,
+          phase,
+          bgJobId: prevBgJobId,
+          worktreePath: signal.raw?.worktreePath,
+          reason: "ctl-778-alive-probe-reclaim",
+        }).catch(() => {});
+      }
+      appendEvent({
+        phase,
+        ticket,
+        orchId,
+        death_signal: "alive-probe-done",
+        prev_state_json_mtime: null,
+        probe_passed: true,
+        probe_checked: describeProbe(phase),
+        completion_origin: "alive-probe-reclaim",
+        reclaimed_bg_job_id: prevBgJobId,
+        stopped_bg_job_ids: [],
+        title: `phase ${phase} reclaimed (alive worker probe done)`,
+        body: `Daemon reclaimed alive ${phase} worker for ${ticket}: still alive but complete event + probe verified work done. bg_job_id=${prevBgJobId ?? "?"}.`,
+      });
+      const r = emitComplete({ orchDir, signal });
+      if (r.code !== 0) {
+        log.warn(
+          { ticket, phase, code: r.code, stderr: r.stderr },
+          "ctl-778 alive-probe-reclaim: emit-complete failed; will retry next tick",
+        );
+        return "reclaim-failed";
+      }
+      postReclaimMirror({
+        orchDir,
+        ticket,
+        phase,
+        deathSignal: "alive-probe-done",
+        probeChecked: describeProbe(phase),
+        reclaimedBgJobId: prevBgJobId,
+      });
+      log.info({ ticket, phase }, "ctl-778: alive-but-idle worker reclaimed (complete event + probe)");
+      return "reclaimed";
+    }
+
     const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
     if (Number.isFinite(startedAtMs) && now() - startedAtMs > busyCeilingMs) {
       const workDone = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
