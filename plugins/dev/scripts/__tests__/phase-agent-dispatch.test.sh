@@ -1464,6 +1464,126 @@ assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo
 	"loser writes no signal file (bows out before the signal write)"
 assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
 
+# ─── CTL-837: pre-spawn orphan claim is GC'd; live/young claims still bow out ──
+# A dispatcher that O_EXCL-created <phase>.claim.1 then DIED before writing the
+# signal/spawning leaves a tombstone. Because TARGET_GENERATION is FIXED (CTL-736
+# invariant), every later fresh dispatch recomputes gen=1, re-collides, and bows
+# out as claim-lost forever — the phase wedges. The fix: a fresh dispatch reaps
+# the orphan (no signal + claim older than grace) and proceeds. Single-flight is
+# preserved for any claim that has a signal (live worker) or is young (just-won
+# race still mid-dispatch).
+
+echo ""
+echo "Test 43b (CTL-837): pre-spawn orphan (no signal + claim older than grace) is reaped → dispatch proceeds"
+fresh_env t43b_orphan_reap
+# Seed an orphan claim at the FIXED fresh-dispatch generation (1) with NO signal
+# file, then age it past the 2-minute grace window so it reads as a pre-spawn
+# orphan (the dispatcher died before ever spawning a worker).
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43B=$?
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "0" "$RC43B" "orphan-reap dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
+	"orphan-reap dispatch proceeds to spawn (status=running, NOT claim-lost)"
+assert_eq "yes" "$([[ -f "$SIGNAL" ]] && echo yes || echo no)" \
+	"orphan-reap dispatch writes the signal file (the wedge is cleared)"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL" 2>/dev/null || echo missing)" \
+	"orphan-reap signal reaches status=running"
+assert_eq "1" "$(jq -r '.generation' "$SIGNAL" 2>/dev/null || echo missing)" \
+	"orphan-reap keeps the FIXED generation 1 (does not advance off high-water mark)"
+assert_eq "yes" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+	"orphan-reap dispatch DID spawn claude --bg"
+
+echo ""
+echo "Test 43c (CTL-837): orphan claim WITH a signal present → loser still bows out (single-flight)"
+fresh_env t43c_orphan_with_signal
+# A claim at gen 1 AND a signal file means a live (or in-flight) worker is behind
+# it — even if the claim file itself is old. The signal is written BEFORE spawn,
+# so its presence proves a worker was launched. The dispatch must NOT reap it;
+# it bows out as claim-lost to preserve single-flight.
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+printf '%s\n' '{"ticket":"CTL-100","phase":"triage","status":"running","generation":1,"bg_job_id":"deadbeef"}' \
+	>"${WORKER_DIR}/phase-triage.json"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43C=$?
+# The pre-claim status short-circuit (status=running) handles this BEFORE the
+# claim block — the contract is the same: it must NOT spawn and must NOT reap the
+# claim. Assert on the no-spawn + claim-survival invariant, which holds for both
+# the status short-circuit and the claim-lost branch.
+assert_eq "0" "$RC43C" "claim-with-signal dispatch exits 0 (no-op)"
+assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+	"claim-with-signal dispatch did NOT spawn a duplicate worker (single-flight)"
+assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"claim-with-signal: orphan-GC did NOT delete a claim that has a live signal"
+assert_eq "true" "$(echo "$STDOUT" | jq -r '.idempotent // false')" \
+	"claim-with-signal dispatch reports idempotent (bows out, no new work)"
+
+echo ""
+echo "Test 43c2 (CTL-837): REVIVE-gen pre-spawn orphan (stalled signal at gen<TARGET + aged claim, no live worker) is reaped → proceeds"
+fresh_env t43c2_revive_orphan
+# A revive: a `stalled` signal at gen 1 falls THROUGH the status short-circuit, so
+# the revive targets generation 2. The gen-2 worker created triage.claim.2 then
+# DIED before writing its own (gen-2) signal — so the only signal on disk is the
+# OLD stalled gen-1 one. The review found the original signal-absent guard wedged
+# this forever (signal-present was wrongly read as a live worker). The fix: the
+# signal's generation (1) < TARGET (2) AND the claim is aged ⇒ a pre-spawn orphan
+# at the revive generation ⇒ reap + re-dispatch gen 2 (NOT claim-lost).
+printf '%s\n' '{"ticket":"CTL-100","phase":"triage","status":"stalled","generation":1}' \
+	>"${WORKER_DIR}/phase-triage.json"
+printf '{"generation":2,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.2"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.2"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43C2=$?
+assert_eq "0" "$RC43C2" "revive-orphan dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
+	"revive-orphan is reaped → dispatch proceeds (status=running, NOT claim-lost)"
+assert_eq "yes" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+	"revive-orphan dispatch DID spawn claude --bg (the gen-2 wedge is cleared)"
+assert_eq "2" "$(jq -r '.generation' "${WORKER_DIR}/phase-triage.json")" \
+	"revive-orphan: signal rewritten at the revive generation 2 (authoritative source)"
+
+echo ""
+echo "Test 43e (CTL-837): CONCURRENT dispatch on one aged orphan → exactly ONE spawns (atomic reap, single-flight)"
+fresh_env t43e_concurrent_reap
+# Two dispatchers race the SAME aged pre-spawn orphan (no signal, claim > grace).
+# The reap MUST be atomic (rename-to-private): exactly one wins the mv + recreates
+# the claim + spawns; the other's mv fails (source gone) → it bows out claim-lost.
+# A non-atomic rm+create would let BOTH pass the read-only guard and both spawn —
+# the TOCTOU double-spawn the review caught (re-opening the CTL-736 race).
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out1" 2>/dev/null &
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out2" 2>/dev/null &
+wait
+RUNNING=$(cat "${ORCH_DIR}/cc_out1" "${ORCH_DIR}/cc_out2" | jq -r '.status' | grep -c '^running$' || true)
+assert_eq "1" "$RUNNING" \
+	"concurrent reap: exactly ONE dispatcher spawns (running); the other bows out (no double-spawn)"
+
+echo ""
+echo "Test 43d (CTL-837): YOUNG orphan claim within grace → loser bows out (don't reap a just-won claim)"
+fresh_env t43d_young_orphan
+# A claim at gen 1 with NO signal but FRESH mtime is a sibling dispatcher that
+# just won the O_EXCL race and is milliseconds from writing its signal. Reaping
+# it would re-open the double-spawn race. The claim is within the grace window
+# (just created → mtime ~now), so the loser must still bow out as claim-lost and
+# must NOT delete the just-won claim.
+printf '{"generation":1,"claimedAt":"2026-05-30T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+# (no touch — leave the claim's mtime at ~now so find -mmin +2 does NOT match)
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43D=$?
+assert_eq "0" "$RC43D" "young-orphan dispatch exits 0"
+assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" \
+	"young-orphan dispatch bows out as claim-lost (within grace → don't reap a just-won claim)"
+assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+	"young-orphan dispatch did NOT spawn claude --bg"
+assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"young-orphan claim survives (a just-won claim is not reaped)"
+assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo no)" \
+	"young-orphan loser writes no signal file"
+
 # ─── Test 44 (CTL-747): 8-pt ticket → plan launches with effort:xhigh + /workflows, no opusplan ───
 echo ""
 echo "Test 44 (CTL-747): 8-pt ticket → plan launches with effort:xhigh + /workflows postamble, no opusplan"
