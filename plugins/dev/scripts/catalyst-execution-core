@@ -277,6 +277,55 @@ dispatch_daemon() {
 	esac
 }
 
+# CTL-854: enroll a project in the execution-core registry. Resolves repoRoot
+# from --repo-root → $CATALYST_REPO_ROOT → git rev-parse --show-toplevel.
+# Delegates to registry.mjs upsert (the D9 seam — no new JSON write logic).
+cmd_register() {
+	local team="" repo_root="" eligible_query=""
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--team)      team="$2";           shift 2 ;;
+		--repo-root) repo_root="$2";      shift 2 ;;
+		--eligible-query) eligible_query="$2"; shift 2 ;;
+		*) echo "error: unknown flag: $1" >&2; return 1 ;;
+		esac
+	done
+
+	if [[ -z "$team" ]]; then
+		echo "error: --team is required for register" >&2
+		return 1
+	fi
+
+	# Resolve repoRoot: --repo-root > env > current git repo.
+	if [[ -z "$repo_root" ]]; then
+		repo_root="${CATALYST_REPO_ROOT:-}"
+	fi
+	if [[ -z "$repo_root" ]]; then
+		repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+	fi
+	if [[ -z "$repo_root" ]]; then
+		echo "error: could not resolve repo root — pass --repo-root <path> or run from inside a git repo" >&2
+		return 1
+	fi
+
+	local runtime
+	runtime="$(resolve_runtime)" || return 1
+
+	local registry_mjs="$SCRIPT_DIR/execution-core/registry.mjs"
+	if [[ ! -f "$registry_mjs" ]]; then
+		echo "error: registry.mjs not found: $registry_mjs" >&2
+		return 1
+	fi
+
+	local upsert_args=("$registry_mjs" upsert --team "$team" --repo-root "$repo_root")
+	if [[ -n "$eligible_query" ]]; then
+		upsert_args+=(--eligible-query "$eligible_query")
+	fi
+
+	"$runtime" "${upsert_args[@]}" || return 1
+	echo "registered — the daemon will pick it up on the next reconcile (no restart needed)" >&2
+}
+
 # CTL-649 devex finding #3: a real top-level help block. The audit CLI is read
 # by an AGENT as well as a human, so spell out what each noun does, point at the
 # safe starting point (`tidy --dry-run`), note the universal --json scripting
@@ -290,6 +339,9 @@ Usage: catalyst-execution-core <command> [args]
 
 Commands:
   daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status)
+  register    enroll a project in the execution-core registry
+              Usage: catalyst-execution-core register --team <TEAM> [--repo-root <path>] [--eligible-query JSON]
+              Resolves repo root from --repo-root, $CATALYST_REPO_ROOT, or git rev-parse --show-toplevel.
   sessions    inventory / reap leaked `claude --bg` sessions (list|show|waiting|prune)
   worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
   branches    inventory / delete merged or orphaned branch refs (list|prune)
@@ -332,6 +384,11 @@ if ! (return 0 2>/dev/null); then
 	daemon)
 		shift
 		dispatch_daemon "$@"
+		;;
+	# CTL-854: register a project in the execution-core registry.
+	register)
+		shift
+		cmd_register "$@"
 		;;
 	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
 	sessions | worktrees | branches | tidy)

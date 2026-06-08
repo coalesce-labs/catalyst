@@ -46,3 +46,25 @@ catalyst-stack start
 
 See [Post-reboot and updates](/getting-started/reboot-and-updates/) for the day-to-day
 boot and update flow.
+
+## If the daemon dispatches nothing
+
+The execution-core daemon only dispatches work for **registered** projects. On a fresh or
+headless host the project registry (`~/catalyst/execution-core/registry.json`) may never have
+been written — the daemon then starts cleanly, logs normal ticks, and dispatches nothing.
+
+As of CTL-854 the daemon logs a one-time warning at startup when the registry is empty. To
+enroll a project, run from inside its repo:
+
+```bash
+catalyst-execution-core register --team <TEAM> --repo-root "$(git rev-parse --show-toplevel)"
+```
+
+The running daemon picks up the change on its next reconcile — no restart needed. Confirm with:
+
+```bash
+catalyst-execution-core daemon status
+```
+
+See [configuration reference](/reference/configuration/) for details on the registry and
+eligible-query format.
