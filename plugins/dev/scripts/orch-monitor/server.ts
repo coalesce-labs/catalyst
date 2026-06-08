@@ -10,6 +10,7 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
+import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
@@ -768,6 +769,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
         () => collectTicketKeys(buildSnapshot(wtDir, buildOpts)),
         linearRefreshMs,
       );
+    }
+    // CTL-867: surface per-team reconcile health (last successful eligible
+    // refresh age + the `alerting` flag) so the dashboard can show a team whose
+    // eligibleQuery is failing persistently — its eligible set frozen stale,
+    // silently starving. Best-effort: the reader never throws (missing dir →
+    // empty map). Omitted entirely when no team has a marker yet.
+    const reconcileHealth = readReconcileHealth(CATALYST_DIR);
+    if (Object.keys(reconcileHealth).length > 0) {
+      snap.reconcileHealth = reconcileHealth;
     }
     return snap;
   }
