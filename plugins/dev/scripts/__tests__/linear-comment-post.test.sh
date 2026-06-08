@@ -201,6 +201,69 @@ PATH="${BIN_DIR}:$PATH" assert_exit_zero \
   "falls back to OLD per-team catalyst.linear.agent.* via nested projectKey" \
   env HOME="${OLD_HOME}" bash -c "cd '${OLD_HOME}/repo' && bash '$HELPER' CTL-550 body"
 
+# Test 11 (CTL-835): the oauth/token mint request carries the scope param.
+# Without an explicit scope Linear rejects the mint with 400 invalid_scope and
+# the mirror fails open — the comment silently never posts. Stub curl records
+# the args it received for the oauth/token call so we can assert scope is present.
+export CATALYST_LINEAR_AGENT_CLIENT_ID="test-cid"
+export CATALYST_LINEAR_AGENT_CLIENT_SECRET="test-csec"
+
+SCOPE_CAPTURE="${TMPDIR_TEST}/token-args.txt"
+cat >"${BIN_DIR}/curl" <<CURLEOF
+#!/usr/bin/env bash
+ARGS_STR="\$*"
+if printf '%s' "\$ARGS_STR" | grep -q "oauth/token"; then
+  printf '%s\n' "\$ARGS_STR" >"${SCOPE_CAPTURE}"
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "\$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "body" >/dev/null 2>&1 || true
+if grep -q "scope=read,write,comments:create" "${SCOPE_CAPTURE}" 2>/dev/null; then
+  echo "PASS: oauth/token mint request includes scope=read,write,comments:create"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: oauth/token mint request missing scope (got: $(cat "${SCOPE_CAPTURE}" 2>/dev/null))"
+  FAIL=$((FAIL+1))
+fi
+
+# Test 12 (CTL-835): a 400 invalid_scope mint emits EXACTLY ONE diagnostic line,
+# and that line carries the real cause (invalid_scope) — no longer silent.
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  # Emulate `curl -w '\n%{http_code}'`: body + newline + status. -f is NOT used
+  # by the helper, so the body is returned even on a 400.
+  printf '{"error":"invalid_scope","error_description":"missing scope"}\n400'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+STDERR_OUT="$(PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "body" 2>&1 1>/dev/null || true)"
+DIAG_LINES="$(printf '%s' "$STDERR_OUT" | grep -c .)"
+if [[ "$DIAG_LINES" -eq 1 ]]; then
+  echo "PASS: invalid_scope mint emits exactly one diagnostic line"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: invalid_scope mint emitted ${DIAG_LINES} diagnostic line(s), expected 1 (out: ${STDERR_OUT})"
+  FAIL=$((FAIL+1))
+fi
+if printf '%s' "$STDERR_OUT" | grep -q "invalid_scope"; then
+  echo "PASS: diagnostic surfaces the invalid_scope cause"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: diagnostic did not surface invalid_scope (out: ${STDERR_OUT})"
+  FAIL=$((FAIL+1))
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
