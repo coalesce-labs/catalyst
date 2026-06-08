@@ -1983,6 +1983,149 @@ export function schedulerTick(
     );
   }
 
+  // ─── CTL-826: dispatchAndVerify — the shared dispatch→verify core ───
+  //
+  // Collapses the ~240 lines of identical "decide → dispatch → verify the worker
+  // landed → on success clear-cooldown + re-read signal + emit launched / on
+  // failure run the cool-down + circuit-breaker + escalation ladder" skeleton that
+  // recurred VERBATIM across the three scheduler dispatch sweeps:
+  //   • Pass 1   advancement          (advance dispatch)
+  //   • Pass 1.5 resume-after-preempt (reduced failure ladder)
+  //   • Pass 2   new-work pull        (entry-phase dispatch)
+  //
+  // PURE REFACTOR — zero behavior change. It owns ONLY the byte-identical core
+  // (steps 1–4 of the ticket). Every per-site DIVERGENCE stays at the call site,
+  // driven off the returned `{ ok, code, reason, signal }`:
+  //   • success follow-ups (advanced.push / promotedCount++ / emitPredecessorReap /
+  //     applyPhaseStatus+emitStateWrite / applyEstimate / writeWorkerPriority /
+  //     applyAssignee / appendResumedAfterPreemptionEvent / rankedAboveSince.delete /
+  //     resumeSlots--/resumedCount++ / dispatched.push)
+  //   • Pass 1's CTL-695 emitPredecessorReap on the FAILURE branches
+  //
+  // Ordering is preserved exactly: the requested-emit fires first, then the
+  // optional `preDispatch` hook (Pass 1.5's signal reset-to-stalled, which may
+  // abort the iteration), then dispatchTicket → verifyDispatched. The launched
+  // re-read returns the signal so the caller need not re-read it.
+  //
+  // `fullFailureLadder` selects the failure handling: Pass 1 & 2 run the full
+  // ladder (recordDispatchFailure → escalateDispatchExhausted at the retry ceiling
+  // → maybeTripCircuitBreaker → appendDispatchFailedEvent with expiresAt +
+  // consecutiveFailures → maybeEscalateDispatchFailures); Pass 1.5 keeps its
+  // deliberately reduced ladder (recordDispatchFailure → appendDispatchFailedEvent
+  // WITHOUT the counter/cooldown-escalation fields) by passing false.
+  //
+  // Returns: { ok, code, reason, signal } on a real dispatch attempt, or
+  // { aborted: true } when preDispatch vetoed the iteration (caller `continue`s).
+  function dispatchAndVerify(
+    orchDir,
+    ticket,
+    phase,
+    {
+      dispatch,
+      resumeSession, // optional; dispatchTicket only adds the key when truthy
+      requestedReason, // reason field for the dispatch-requested event
+      preDispatch, // optional () => boolean; a false return aborts (→ { aborted: true })
+      fullFailureLadder = true, // Pass 1.5 passes false for its reduced ladder
+      failLogMsg, // optional log.warn message for the rc!=0 branch (omit → no log)
+      failLogIncludePhase = true, // Pass 2's original rc!=0 log omits the phase field
+    }
+  ) {
+    // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
+    safeEmit(
+      appendDispatchRequestedEvent,
+      { orchId: ticket, ticket, target_phase: phase, reason: requestedReason },
+      { ticket, phase }
+    );
+    // Pass 1.5: reset the parked signal to "stalled" before dispatch; a false
+    // return (reset write failed) aborts so the caller can `continue`.
+    if (preDispatch && preDispatch() === false) return { aborted: true };
+
+    const r = dispatchTicket(orchDir, ticket, phase, { dispatch, resumeSession });
+    if (r.code === 0) {
+      // CTL-611: verify the dispatch actually produced a live worker before
+      // declaring success. A --dry-run leak / mark_launch_failed half-write
+      // returns rc=0 with no usable signal; !ok demotes to failure.
+      const v = verifyDispatched(orchDir, ticket, phase);
+      if (v.ok) {
+        clearDispatchCooldown(orchDir, ticket, phase); // CTL-624: success clears any prior cool-down
+        // CTL-660: record the VERIFIED launch. Re-read the signal for the
+        // bg_job_id + worktreePath the launched worker wrote.
+        const signal = readPhaseSignalRaw(orchDir, ticket, phase);
+        safeEmit(
+          appendDispatchLaunchedEvent,
+          {
+            orchId: ticket,
+            ticket,
+            target_phase: phase,
+            bg_job_id: signal?.bg_job_id,
+            worktree_path: signal?.worktreePath,
+          },
+          { ticket, phase }
+        );
+        return { ok: true, code: 0, reason: null, signal };
+      }
+      // CTL-611 Gap 1 demotion: rc=0 but no live bg job. Same on-disk effects as
+      // a real rc!=0 failure so the broker / HUD / operator can see the drop.
+      const reason = `verify_failed:${v.reason}`;
+      const cd = recordDispatchFailure(orchDir, ticket, phase, 0, now());
+      if (fullFailureLadder) {
+        if (cd.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+        maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
+        appendDispatchFailedEvent({
+          orchId: ticket,
+          ticket,
+          target_phase: phase,
+          code: 0,
+          reason,
+          expiresAt: cd.expiresAt,
+          consecutiveFailures: cd.consecutiveFailures,
+        });
+        maybeEscalateDispatchFailures(orchDir, cd, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
+        log.warn({ ticket, phase, verifyReason: v.reason }, "scheduler: dispatched signal verification failed");
+      } else {
+        appendDispatchFailedEvent({
+          orchId: ticket,
+          ticket,
+          target_phase: phase,
+          code: 0,
+          reason,
+        });
+      }
+      return { ok: false, code: 0, reason, signal: null };
+    }
+
+    // rc != 0 — real dispatch failure.
+    const reason = readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
+    const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
+    if (fullFailureLadder) {
+      if (cd.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+      maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
+      // CTL-611 Gap 2: surface the silent drop as an event.
+      appendDispatchFailedEvent({
+        orchId: ticket,
+        ticket,
+        target_phase: phase,
+        code: r.code,
+        reason,
+        expiresAt: cd.expiresAt,
+        consecutiveFailures: cd.consecutiveFailures,
+      });
+      maybeEscalateDispatchFailures(orchDir, cd, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
+      if (failLogMsg) {
+        log.warn(failLogIncludePhase ? { ticket, phase, code: r.code } : { ticket, code: r.code }, failLogMsg);
+      }
+    } else {
+      appendDispatchFailedEvent({
+        orchId: ticket,
+        ticket,
+        target_phase: phase,
+        code: r.code,
+        reason,
+      });
+    }
+    return { ok: false, code: r.code, reason, signal: null };
+  }
+
   // CTL-671: compute the eligible set ONCE per tick. Consumed by the phantom
   // validity sweep (Pass 0a, below) and the new-work pull (Pass 2). readEligible
   // is the test injection seam; production reads all per-project eligible
@@ -2646,113 +2789,52 @@ export function schedulerTick(
     // CTL-671: circuit breaker — once consecutiveFailures has crossed the
     // threshold, quarantine to terminal `stalled` and stop re-dispatching.
     if (maybeTripCircuitBreaker(orchDir, ticket, next)) continue;
-    // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
-    safeEmit(
-      appendDispatchRequestedEvent,
-      { orchId: ticket, ticket, target_phase: next, reason: "advance" },
-      { ticket, phase: next }
-    );
-    const r = dispatchTicket(orchDir, ticket, next, { dispatch });
-    if (r.code === 0) {
-      // CTL-611: verify the dispatch actually produced a live worker before
-      // declaring success. A --dry-run leak / mark_launch_failed half-write
-      // returns rc=0 with no usable signal, which used to silently leave the
-      // pipeline wedged. !ok demotes to failure (cool-down + event).
-      const v = verifyDispatched(orchDir, ticket, next);
-      if (v.ok) {
-        clearDispatchCooldown(orchDir, ticket, next); // CTL-624: success clears any prior cool-down
-        // CTL-660: record the VERIFIED launch. Re-read the signal for the
-        // bg_job_id + worktreePath the launched worker wrote.
-        const sig = readPhaseSignalRaw(orchDir, ticket, next);
-        safeEmit(
-          appendDispatchLaunchedEvent,
-          {
-            orchId: ticket,
+    // CTL-826: the dispatch→verify core is shared (requested-emit, dispatch,
+    // verify, success cooldown-clear + launched-emit, full failure ladder). The
+    // advance-specific follow-ups stay here, keyed off the returned result.
+    const dv = dispatchAndVerify(orchDir, ticket, next, {
+      dispatch,
+      requestedReason: "advance",
+      failLogMsg: "scheduler: advance dispatch failed",
+    });
+    if (dv.ok) {
+      advanced.push({ ticket, phase: next });
+      // CTL-755: a verified triage→research promotion consumed a slot this tick.
+      // liveCount was read at the top of the tick (before this dispatch), so the
+      // promotion has not yet incremented it — STEP C subtracts promotedCount
+      // from sweep-2 freeSlots to stop over-admitting into the just-taken slots.
+      if (next === NEW_WORK_ENTRY_PHASE) promotedCount++;
+      // CTL-657 / CTL-661: stop the predecessor worker now that its successor
+      // is live. resolveReapPredecessor reads the PRE-reset signals so the
+      // verify⇄remediate detour edges name the correct just-finished worker;
+      // remediateRaw supplies the bg_job_id the reset already deleted.
+      emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
+      // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
+      // (linear-transition.sh read-compares first); never aborts the tick.
+      safeWrite(
+        () => {
+          // CTL-757: capture the writer result so emitStateWrite can audit the
+          // before/after pair. The write itself stays best-effort inside
+          // safeWrite; the emit is a separate best-effort step.
+          const wr = writeStatus.applyPhaseStatus({ ticket, phase: next, cache });
+          emitStateWrite({ writerResult: wr, ticket, phase: next, source: "scheduler-advance", orchId: ticket });
+        },
+        { ticket, phase: next }
+      );
+      // CTL-751: on triage→research advance, write the reference-class
+      // estimate to Linear if triage.json carries a valid numeric `.estimate`.
+      if (next === "research") {
+        const est = readTriageEstimate(orchDir, ticket);
+        if (est !== null) {
+          safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
             ticket,
-            target_phase: next,
-            bg_job_id: sig?.bg_job_id,
-            worktree_path: sig?.worktreePath,
-          },
-          { ticket, phase: next }
-        );
-        advanced.push({ ticket, phase: next });
-        // CTL-755: a verified triage→research promotion consumed a slot this tick.
-        // liveCount was read at the top of the tick (before this dispatch), so the
-        // promotion has not yet incremented it — STEP C subtracts promotedCount
-        // from sweep-2 freeSlots to stop over-admitting into the just-taken slots.
-        if (next === NEW_WORK_ENTRY_PHASE) promotedCount++;
-        // CTL-657 / CTL-661: stop the predecessor worker now that its successor
-        // is live. resolveReapPredecessor reads the PRE-reset signals so the
-        // verify⇄remediate detour edges name the correct just-finished worker;
-        // remediateRaw supplies the bg_job_id the reset already deleted.
-        emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
-        // CTL-558: write the dispatched phase's mapped Linear status. Idempotent
-        // (linear-transition.sh read-compares first); never aborts the tick.
-        safeWrite(
-          () => {
-            // CTL-757: capture the writer result so emitStateWrite can audit the
-            // before/after pair. The write itself stays best-effort inside
-            // safeWrite; the emit is a separate best-effort step.
-            const wr = writeStatus.applyPhaseStatus({ ticket, phase: next, cache });
-            emitStateWrite({ writerResult: wr, ticket, phase: next, source: "scheduler-advance", orchId: ticket });
-          },
-          { ticket, phase: next }
-        );
-        // CTL-751: on triage→research advance, write the reference-class
-        // estimate to Linear if triage.json carries a valid numeric `.estimate`.
-        if (next === "research") {
-          const est = readTriageEstimate(orchDir, ticket);
-          if (est !== null) {
-            safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
-              ticket,
-              phase: next,
-            });
-          }
+            phase: next,
+          });
         }
-      } else {
-        // CTL-611 Gap 1 demotion: rc=0 but no live bg job. Same on-disk
-        // effects as a real rc!=0 failure so the broker / HUD / operator can
-        // see the drop.
-        const cd1 = recordDispatchFailure(orchDir, ticket, next, 0, now());
-        if (cd1.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
-        maybeTripCircuitBreaker(orchDir, ticket, next); // CTL-671: trip same tick if at threshold
-        appendDispatchFailedEvent({
-          orchId: ticket,
-          ticket,
-          target_phase: next,
-          code: 0,
-          reason: `verify_failed:${v.reason}`,
-          expiresAt: cd1.expiresAt,
-          consecutiveFailures: cd1.consecutiveFailures,
-        });
-        maybeEscalateDispatchFailures(orchDir, cd1, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
-        log.warn(
-          { ticket, phase: next, verifyReason: v.reason },
-          "scheduler: dispatched signal verification failed"
-        );
-        // CTL-695: reap the just-finished predecessor even though its successor
-        // did not come up — the failed dispatch leaves the predecessor alive.
-        emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
       }
     } else {
-      const cd2 = recordDispatchFailure(orchDir, ticket, next, r.code, now()); // CTL-624: arm the cool-down window
-      if (cd2.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, next); // CTL-712 terminal stop
-      maybeTripCircuitBreaker(orchDir, ticket, next); // CTL-671: trip same tick if at threshold
-      // CTL-611 Gap 2: surface the silent drop as an event so the broker /
-      // HUD / operator can react. Best-effort; failure is logged inside.
-      appendDispatchFailedEvent({
-        orchId: ticket,
-        ticket,
-        target_phase: next,
-        code: r.code,
-        reason: readDispatchFailureReason(orchDir, ticket, next) ?? "dispatch_nonzero_exit",
-        expiresAt: cd2.expiresAt,
-        consecutiveFailures: cd2.consecutiveFailures,
-      });
-      maybeEscalateDispatchFailures(orchDir, cd2, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
-      log.warn({ ticket, phase: next, code: r.code }, "scheduler: advance dispatch failed");
-      // CTL-695: reap the just-finished predecessor even though its successor
-      // did not come up — the failed dispatch leaves the predecessor alive.
+      // CTL-695: reap the just-finished predecessor even though its successor did
+      // not come up — the failed dispatch (verify-failed OR rc!=0) leaves it alive.
       emitPredecessorReap(orchDir, ticket, preResetSignals, next, { remediateRaw });
     }
   }
@@ -2795,69 +2877,55 @@ export function schedulerTick(
         const bgJobId = signalRaw?.bg_job_id;
 
         const resumeSession = resolveSession(bgJobId) ?? undefined;
-        safeEmit(
-          appendDispatchRequestedEvent,
-          { orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase, reason: "resume-after-preemption" },
-          { ticket: pd.identifier, phase: parkedPhase }
-        );
 
-        // Reset the signal to "stalled" so phase-agent-dispatch's idempotency
-        // guard does not block re-dispatch (mirrors defaultReviveDispatch).
-        const signalPath = join(orchDir, "workers", pd.identifier, `phase-${parkedPhase}.json`);
-        try {
-          const tmp = `${signalPath}.tmp.${process.pid}`;
-          writeFileSync(tmp, JSON.stringify({
-            ...(signalRaw ?? {}),
-            status: "stalled",
-            attentionReason: "resume-after-preemption",
-            updatedAt: new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z"),
-          }));
-          renameSync(tmp, signalPath);
-        } catch (err) {
-          log.warn({ ticket: pd.identifier, phase: parkedPhase, err: err.message }, "scheduler: resume signal reset failed");
-          continue;
-        }
-
-        const r = dispatchTicket(orchDir, pd.identifier, parkedPhase, { dispatch, resumeSession });
-        if (r.code === 0) {
-          const v = verifyDispatched(orchDir, pd.identifier, parkedPhase);
-          if (v.ok) {
-            clearDispatchCooldown(orchDir, pd.identifier, parkedPhase);
-            rankedAboveSince.delete(`${pd.identifier}:${pd.identifier}`); // clear any stale hysteresis
-            const sig2 = readPhaseSignalRaw(orchDir, pd.identifier, parkedPhase);
-            safeEmit(
-              appendDispatchLaunchedEvent,
-              { orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase, bg_job_id: sig2?.bg_job_id, worktree_path: sig2?.worktreePath },
-              { ticket: pd.identifier, phase: parkedPhase }
-            );
-            safeEmit(
-              appendResumedAfterPreemptionEvent,
-              { orchId: pd.identifier, ticket: pd.identifier, phase: parkedPhase, resumeSession: resumeSession ?? null },
-              { ticket: pd.identifier, phase: parkedPhase }
-            );
-            safeWrite(
-              () => {
-                // CTL-757: audit the resume-after-preemption status write.
-                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
-                emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
-              },
-              { ticket: pd.identifier, phase: parkedPhase }
-            );
-            resumeSlots--;
-            resumedCount++;
-          } else {
-            recordDispatchFailure(orchDir, pd.identifier, parkedPhase, 0, now());
-            appendDispatchFailedEvent({
-              orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase,
-              code: 0, reason: `verify_failed:${v.reason}`,
-            });
-          }
-        } else {
-          recordDispatchFailure(orchDir, pd.identifier, parkedPhase, r.code, now());
-          appendDispatchFailedEvent({
-            orchId: pd.identifier, ticket: pd.identifier, target_phase: parkedPhase,
-            code: r.code, reason: readDispatchFailureReason(orchDir, pd.identifier, parkedPhase) ?? "dispatch_nonzero_exit",
-          });
+        // CTL-826: shared dispatch→verify core, with the RESUME divergences kept
+        // here. preDispatch performs the signal reset-to-stalled BEFORE dispatch
+        // (returning false on a failed reset aborts → `continue`); the reduced
+        // failure ladder (fullFailureLadder:false) preserves this sweep's lighter
+        // failure handling (no escalation/circuit-breaker/cooldown-escalation).
+        const dv = dispatchAndVerify(orchDir, pd.identifier, parkedPhase, {
+          dispatch,
+          resumeSession,
+          requestedReason: "resume-after-preemption",
+          fullFailureLadder: false,
+          preDispatch: () => {
+            // Reset the signal to "stalled" so phase-agent-dispatch's idempotency
+            // guard does not block re-dispatch (mirrors defaultReviveDispatch).
+            const signalPath = join(orchDir, "workers", pd.identifier, `phase-${parkedPhase}.json`);
+            try {
+              const tmp = `${signalPath}.tmp.${process.pid}`;
+              writeFileSync(tmp, JSON.stringify({
+                ...(signalRaw ?? {}),
+                status: "stalled",
+                attentionReason: "resume-after-preemption",
+                updatedAt: new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+              }));
+              renameSync(tmp, signalPath);
+            } catch (err) {
+              log.warn({ ticket: pd.identifier, phase: parkedPhase, err: err.message }, "scheduler: resume signal reset failed");
+              return false;
+            }
+            return true;
+          },
+        });
+        if (dv.aborted) continue; // reset write failed — skip this parked ticket
+        if (dv.ok) {
+          rankedAboveSince.delete(`${pd.identifier}:${pd.identifier}`); // clear any stale hysteresis
+          safeEmit(
+            appendResumedAfterPreemptionEvent,
+            { orchId: pd.identifier, ticket: pd.identifier, phase: parkedPhase, resumeSession: resumeSession ?? null },
+            { ticket: pd.identifier, phase: parkedPhase }
+          );
+          safeWrite(
+            () => {
+              // CTL-757: audit the resume-after-preemption status write.
+              const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
+              emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
+            },
+            { ticket: pd.identifier, phase: parkedPhase }
+          );
+          resumeSlots--;
+          resumedCount++;
         }
       }
     }
@@ -3020,102 +3088,47 @@ export function schedulerTick(
         continue;
       }
     }
-    // CTL-660: record the new-work dispatch DECISION before the spawn.
-    safeEmit(
-      appendDispatchRequestedEvent,
-      {
-        orchId: t.identifier,
-        ticket: t.identifier,
-        target_phase: NEW_WORK_ENTRY_PHASE,
-        reason: "new-work",
-      },
-      { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
-    );
-    const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
-    if (r.code === 0) {
-      // CTL-611: same Gap 1 verifier as the advancement sweep — a rc=0
-      // without a live successor signal must be demoted.
-      const v = verifyDispatched(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE);
-      if (v.ok) {
-        clearDispatchCooldown(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-624: success clears any prior cool-down
-        // CTL-660: record the VERIFIED launch for the new ticket's entry phase.
-        const sig = readPhaseSignalRaw(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE);
-        safeEmit(
-          appendDispatchLaunchedEvent,
-          {
-            orchId: t.identifier,
+    // CTL-826: shared dispatch→verify core (requested-emit "new-work", dispatch,
+    // verify, success cooldown-clear + launched-emit, full failure ladder). The
+    // new-work-specific success follow-ups stay here. Pass 2's original rc!=0 log
+    // omits the phase field (failLogIncludePhase:false) to stay byte-identical.
+    const dv = dispatchAndVerify(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, {
+      dispatch,
+      requestedReason: "new-work",
+      failLogMsg: "scheduler: dispatch failed",
+      failLogIncludePhase: false,
+    });
+    if (dv.ok) {
+      dispatched.push(t.identifier);
+      // CTL-705: persist priority + createdAt for the global rank, so
+      // preemption decisions need no per-tick Linear API calls.
+      writeWorkerPriority(orchDir, t.identifier, {
+        priority: t.priority,
+        createdAt: t.createdAt ?? null,
+      });
+      // CTL-558: write the entry-phase (`research`) status for the new ticket.
+      // CTL-757: audit it as a scheduler-advance state write (new work entering
+      // the pipeline is the entry-phase forward advance).
+      safeWrite(
+        () => {
+          const wr = writeStatus.applyPhaseStatus({
             ticket: t.identifier,
-            target_phase: NEW_WORK_ENTRY_PHASE,
-            bg_job_id: sig?.bg_job_id,
-            worktree_path: sig?.worktreePath,
-          },
-          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
-        );
-        dispatched.push(t.identifier);
-        // CTL-705: persist priority + createdAt for the global rank, so
-        // preemption decisions need no per-tick Linear API calls.
-        writeWorkerPriority(orchDir, t.identifier, {
-          priority: t.priority,
-          createdAt: t.createdAt ?? null,
-        });
-        // CTL-558: write the entry-phase (`research`) status for the new ticket.
-        // CTL-757: audit it as a scheduler-advance state write (new work entering
-        // the pipeline is the entry-phase forward advance).
+            phase: NEW_WORK_ENTRY_PHASE,
+            cache,
+          });
+          emitStateWrite({ writerResult: wr, ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, source: "scheduler-advance", orchId: t.identifier });
+        },
+        { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
+      );
+      // CTL-781: self-assign the Catalyst bot so the claim is visible in
+      // Linear. Best-effort (safeWrite) — an assignment failure never blocks
+      // the pipeline; the read-back inside applyAssignee logs the gap.
+      if (botWriteId) {
         safeWrite(
-          () => {
-            const wr = writeStatus.applyPhaseStatus({
-              ticket: t.identifier,
-              phase: NEW_WORK_ENTRY_PHASE,
-              cache,
-            });
-            emitStateWrite({ writerResult: wr, ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, source: "scheduler-advance", orchId: t.identifier });
-          },
-          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
-        );
-        // CTL-781: self-assign the Catalyst bot so the claim is visible in
-        // Linear. Best-effort (safeWrite) — an assignment failure never blocks
-        // the pipeline; the read-back inside applyAssignee logs the gap.
-        if (botWriteId) {
-          safeWrite(
-            () => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }),
-            { ticket: t.identifier, phase: "assignment" }
-          );
-        }
-      } else {
-        const cd3 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, 0, now());
-        if (cd3.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
-        maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-671
-        appendDispatchFailedEvent({
-          orchId: t.identifier,
-          ticket: t.identifier,
-          target_phase: NEW_WORK_ENTRY_PHASE,
-          code: 0,
-          reason: `verify_failed:${v.reason}`,
-          expiresAt: cd3.expiresAt,
-          consecutiveFailures: cd3.consecutiveFailures,
-        });
-        maybeEscalateDispatchFailures(orchDir, cd3, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
-        log.warn(
-          { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, verifyReason: v.reason },
-          "scheduler: dispatched signal verification failed"
+          () => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }),
+          { ticket: t.identifier, phase: "assignment" }
         );
       }
-    } else {
-      const cd4 = recordDispatchFailure(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, r.code, now()); // CTL-624: arm the cool-down window
-      if (cd4.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-712 terminal stop
-      maybeTripCircuitBreaker(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE); // CTL-671
-      // CTL-611: Gap 2 entry-phase silent-drop event.
-      appendDispatchFailedEvent({
-        orchId: t.identifier,
-        ticket: t.identifier,
-        target_phase: NEW_WORK_ENTRY_PHASE,
-        code: r.code,
-        reason: readDispatchFailureReason(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE) ?? "dispatch_nonzero_exit",
-        expiresAt: cd4.expiresAt,
-        consecutiveFailures: cd4.consecutiveFailures,
-      });
-      maybeEscalateDispatchFailures(orchDir, cd4, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
-      log.warn({ ticket: t.identifier, code: r.code }, "scheduler: dispatch failed");
     }
   }
 

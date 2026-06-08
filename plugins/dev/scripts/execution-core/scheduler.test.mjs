@@ -7296,3 +7296,187 @@ describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
     expect(ws.applyLabel.calls).toHaveLength(2);
   });
 });
+
+// ── CTL-826: dispatchAndVerify shared dispatch→verify core ────────────────
+//
+// dispatchAndVerify is a closure inside schedulerTick (it needs the per-tick
+// safeEmit/safeWrite/emitStateWrite + injected emitters), so it is exercised
+// through the public schedulerTick API. This block pins the three-branch
+// contract the helper now owns for ALL THREE sweeps it deduplicated, and —
+// critically — the FULL-vs-REDUCED failure-ladder divergence that drove the
+// `fullFailureLadder` parameter (advance + new-work run the full ladder with
+// escalation/circuit-breaker; resume-after-preemption keeps its reduced one).
+describe("dispatchAndVerify shared core (CTL-826)", () => {
+  // A dispatch fake that writes a runnable signal so the default
+  // verifyDispatchedSignal returns ok AND the launched re-read sees bg fields.
+  function dispatchWritesSignal({ bgJobId = "bg-826", worktreePath = "/wt/826" } = {}) {
+    const calls = [];
+    const fn = ({ orchDir: od, ticket, phase }) => {
+      calls.push({ ticket, phase });
+      const dir = join(od, "workers", ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "running", bg_job_id: bgJobId, worktreePath })
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    fn.calls = calls;
+    return fn;
+  }
+
+  function seedPreempted(ticket, phase, bgJobId, priority) {
+    writeSignalRaw(ticket, phase, {
+      ticket, phase, status: "preempted", parkedFrom: phase, bg_job_id: bgJobId,
+      attentionReason: "preempted-by-priority",
+    });
+    writeWorkerPriority(orchDir, ticket, { priority, createdAt: "2026-05-01T00:00:00Z" });
+  }
+
+  function spy() {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return true; };
+    fn.calls = calls;
+    return fn;
+  }
+
+  // ─── Branch 1: v.ok success ───
+  test("v.ok branch: clears cooldown, re-reads the signal, emits launched with bg fields, returns ok", () => {
+    writeSignal("CTL-826A", "research", "done"); // FSM owes plan
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Pre-arm a cooldown marker (failedAt=1 → expiresAt=60_001) so we can prove
+    // the success path clears it. The tick runs at now=70_000, PAST the 60s
+    // window, so inDispatchCooldown does not suppress the dispatch.
+    recordDispatchFailure(orchDir, "CTL-826A", "plan", 1, 1);
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-826A", "plan"))).toBe(true);
+
+    const dispatch = dispatchWritesSignal({ bgJobId: "live-a", worktreePath: "/wt/CTL-826A" });
+    const launched = spy();
+    const r = schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 70_000,
+      appendDispatchLaunchedEvent: launched,
+    });
+
+    expect(r.advanced).toContainEqual({ ticket: "CTL-826A", phase: "plan" });
+    // Success clears any prior cool-down (CTL-624).
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-826A", "plan"))).toBe(false);
+    // launched carries the re-read signal's bg_job_id + worktree_path.
+    expect(launched.calls).toHaveLength(1);
+    expect(launched.calls[0]).toMatchObject({
+      ticket: "CTL-826A", target_phase: "plan", bg_job_id: "live-a", worktree_path: "/wt/CTL-826A",
+    });
+    // No failure event on the success branch.
+    expect(dispatchFailedEvents("CTL-826A")).toHaveLength(0);
+  });
+
+  // ─── Branch 2: verify-failed (rc=0, no live signal) ───
+  test("verify-failed branch (full ladder): demotes rc=0+no-signal to failure with consecutiveFailures", () => {
+    writeSignal("CTL-826B", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 }); // rc=0 but writes NO signal → verifier !ok
+
+    const r = schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    expect(r.advanced ?? []).not.toContainEqual({ ticket: "CTL-826B", phase: "plan" });
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-826B", "plan"))).toBe(true);
+    const events = dispatchFailedEvents("CTL-826B");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({ target_phase: "plan", code: 0, consecutiveFailures: 1 });
+    expect(events[0].body.payload.reason).toMatch(/^verify_failed:/);
+  });
+
+  // ─── Branch 3: rc!=0 (real dispatch failure) ───
+  test("rc!=0 branch (full ladder): arms cooldown + emits failure with dispatch_nonzero_exit + counter", () => {
+    writeSignal("CTL-826C", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1 });
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    expect(existsSync(dispatchCooldownPath(orchDir, "CTL-826C", "plan"))).toBe(true);
+    const events = dispatchFailedEvents("CTL-826C");
+    expect(events).toHaveLength(1);
+    expect(events[0].body.payload).toMatchObject({
+      target_phase: "plan", code: 1, reason: "dispatch_nonzero_exit", consecutiveFailures: 1,
+    });
+  });
+
+  // ─── Reduced ladder: resume-after-preemption keeps the lighter failure path ───
+  test("reduced ladder (resume sweep): failed event omits consecutiveFailures/expiresAt; no escalation at the ceiling", () => {
+    seedPreempted("CTL-826D", "research", "bg-826d", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 1 }); // resume re-dispatch fails
+
+    // Drive far past getMaxDispatchRetries() (default 5) so the FULL ladder
+    // WOULD have escalateDispatchExhausted-stalled the signal by now. The reduced
+    // ladder must NOT: the signal stays "preempted" and never carries the counter.
+    for (let i = 0; i < 7; i++) {
+      // re-seed each tick: the reduced ladder's reset-to-stalled mutates the signal,
+      // and a stalled signal would drop out of the parked set on the next tick.
+      seedPreempted("CTL-826D", "research", "bg-826d", 2);
+      schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        now: () => 1_000 + i, // distinct clock so a new cooldown marker can arm
+        liveBackgroundCount: () => 1, // 1 free slot → resume sweep fires
+        reclaimDeadWork: () => "noop",
+        resolveSession: () => null,
+      });
+    }
+
+    const events = dispatchFailedEvents("CTL-826D");
+    expect(events.length).toBeGreaterThan(0);
+    // Reduced ladder: the failed event is the lighter shape — NO counter/expiry.
+    for (const e of events) {
+      expect(e.body.payload).toMatchObject({ target_phase: "research", code: 1 });
+      expect(e.body.payload.consecutiveFailures).toBeUndefined();
+      expect(e.body.payload.expiresAt).toBeUndefined();
+    }
+    // No needs-human escalation marker (full ladder's escalateDispatchExhausted
+    // would have written a `stalled` signal; the reduced ladder never does).
+    const sig = JSON.parse(readFileSync(
+      join(orchDir, "workers", "CTL-826D", "phase-research.json"), "utf8"
+    ));
+    expect(sig.stalledReason).toBeUndefined();
+  });
+
+  // ─── preDispatch abort: a failed signal reset short-circuits with no dispatch ───
+  test("resume preDispatch abort: a parked ticket with no worker dir still drives the reset path", () => {
+    // The resume sweep's preDispatch writes the reset signal; the dispatch fake
+    // then writes the runnable signal. With resolveSession→null and verifyOk, a
+    // verified resume advances and emits the resumed-after-preemption event,
+    // proving the requested→preDispatch(reset)→dispatch ordering is preserved.
+    seedPreempted("CTL-826E", "research", "bg-826e", 2);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const calls = [];
+    const dispatch = ({ orchDir: od, ticket, phase }) => {
+      // Capture the signal state AT dispatch time — preDispatch must have reset it
+      // to "stalled" before this fake runs (ordering guarantee).
+      const pre = JSON.parse(readFileSync(join(od, "workers", ticket, `phase-${phase}.json`), "utf8"));
+      calls.push({ ticket, phase, preStatus: pre.status });
+      const dir = join(od, "workers", ticket);
+      writeFileSync(join(dir, `phase-${phase}.json`),
+        JSON.stringify({ ticket, phase, status: "running", bg_job_id: "resumed-bg" }));
+      return { code: 0 };
+    };
+    const resumed = spy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      now: () => 1_000,
+      liveBackgroundCount: () => 1,
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => null,
+      appendResumedAfterPreemptionEvent: resumed,
+      verifyDispatched: verifyOk,
+    });
+
+    expect(calls).toHaveLength(1);
+    // Ordering: requested → preDispatch reset-to-stalled → dispatchTicket.
+    expect(calls[0]).toMatchObject({ ticket: "CTL-826E", phase: "research", preStatus: "stalled" });
+    expect(resumed.calls).toHaveLength(1);
+    expect(resumed.calls[0].ticket).toBe("CTL-826E");
+  });
+});
