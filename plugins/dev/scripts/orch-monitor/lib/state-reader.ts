@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join, basename } from "path";
+import { hostName } from "./canonical-event-shared"; // CTL-859: host attribution
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
 import { readWorkerActivity, type WorkerActivity } from "./stream-reader";
@@ -158,6 +159,15 @@ export interface MonitorSnapshot {
   orchestrators: OrchestratorState[];
   sessions: SessionState[];
   sessionStoreAvailable: boolean;
+  /**
+   * CTL-859: the host that produced this snapshot, resolved via the shared
+   * host-identity primitive (CATALYST_HOST_NAME env, else os.hostname() minus
+   * ".local") — the same resolution as execution-core's getHostName() and the
+   * resource["host.name"] stamped on canonical events. Optional/additive so a
+   * future cluster dashboard can attribute snapshots by host; existing
+   * single-host consumers ignore it.
+   */
+  hostName?: string;
 }
 
 export interface BuildSnapshotOptions {
@@ -688,6 +698,7 @@ export function buildSnapshot(
     orchestrators,
     sessions,
     sessionStoreAvailable: storeAvailable,
+    hostName: hostName(), // CTL-859: attribute the snapshot to its producing host
   };
 }
 
