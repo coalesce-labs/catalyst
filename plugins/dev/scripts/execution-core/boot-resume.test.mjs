@@ -8,7 +8,7 @@
 // dispatch/agents/appendEvent/report.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,9 @@ import {
   activePhaseForTicket,
   selectBootResumeCandidates,
   reconcileBootResume,
+  isCheapPhase,
+  bootResumePendingPath,
+  bootResumeApprovedPath,
 } from "./boot-resume.mjs";
 
 let orchDir;
@@ -269,7 +272,8 @@ describe("reconcileBootResume", () => {
   });
 
   test("happy path: dispatches once with expectedWorktreePath and resets the signal to stalled", () => {
-    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1", status: "running" });
+    // Uses 'plan' (cheap phase) so dispatch is not gated.
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running" });
     const dispatched = [];
     const events = [];
     const dispatch = (a) => {
@@ -289,23 +293,23 @@ describe("reconcileBootResume", () => {
     expect(dispatched[0]).toMatchObject({
       orchDir,
       ticket: "CTL-1",
-      phase: "implement",
+      phase: "plan",
       expectedWorktreePath: "/wt/CTL-1",
     });
     // Went through defaultReviveDispatch: the signal on disk is reset to stalled.
     const sig = JSON.parse(
-      readFileSync(join(orchDir, "workers", "CTL-1", "phase-implement.json"), "utf8")
+      readFileSync(join(orchDir, "workers", "CTL-1", "phase-plan.json"), "utf8")
     );
     expect(sig.status).toBe("stalled");
     // One audit event routed through the injected appendEvent.
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ ticket: "CTL-1", phase: "implement" });
+    expect(events[0]).toMatchObject({ ticket: "CTL-1", phase: "plan" });
   });
 
   test("slot bound end-to-end: maxParallel=1, 2 no-live tickets ⇒ exactly 1 dispatch + 1 event", () => {
     writeMaxParallel(orchDir, 1);
-    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
-    writeSignal(orchDir, "CTL-2", "implement", { worktreePath: "/wt/CTL-2" });
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1" });
+    writeSignal(orchDir, "CTL-2", "plan", { worktreePath: "/wt/CTL-2" });
     const dispatched = [];
     const events = [];
     const res = reconcileBootResume({
@@ -325,7 +329,7 @@ describe("reconcileBootResume", () => {
 
   test("skip-when-live: a ticket WITH a live bg worker is never dispatched", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-LIVE", "implement", { worktreePath: "/wt/CTL-LIVE" });
+    writeSignal(orchDir, "CTL-LIVE", "plan", { worktreePath: "/wt/CTL-LIVE" });
     const dispatched = [];
     const res = reconcileBootResume({
       orchDir,
@@ -343,8 +347,8 @@ describe("reconcileBootResume", () => {
 
   test("dispatch failure is isolated: ticket B still attempted, failure counted, no throw", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-A", "implement", { worktreePath: "/wt/CTL-A" });
-    writeSignal(orchDir, "CTL-B", "implement", { worktreePath: "/wt/CTL-B" });
+    writeSignal(orchDir, "CTL-A", "plan", { worktreePath: "/wt/CTL-A" });
+    writeSignal(orchDir, "CTL-B", "research", { worktreePath: "/wt/CTL-B" });
     const attempted = [];
     const events = [];
     const dispatch = (a) => {
@@ -368,7 +372,7 @@ describe("reconcileBootResume", () => {
 
   test("missing-signal safety: a reviveDispatch signal-missing return is a failure, not a throw", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1" });
     const res = reconcileBootResume({
       orchDir,
       report: { coldStart: true },
@@ -382,7 +386,7 @@ describe("reconcileBootResume", () => {
 
   test("a throwing reviveDispatch is contained and counted as a failure", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-1", "implement", { worktreePath: "/wt/CTL-1" });
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1" });
     const res = reconcileBootResume({
       orchDir,
       report: { coldStart: true },
@@ -407,7 +411,8 @@ describe("reconcileBootResume", () => {
   // fallback path.
   test("forwards resumeSession to reviveDispatch when resolveSession returns a UUID (CTL-690)", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-1", "implement", {
+    // Uses 'plan' (cheap phase) so dispatch is not gated.
+    writeSignal(orchDir, "CTL-1", "plan", {
       worktreePath: "/wt/CTL-1",
       bg_job_id: "abc12345",
     });
@@ -431,7 +436,7 @@ describe("reconcileBootResume", () => {
     expect(calls[0]).toMatchObject({
       orchDir,
       ticket: "CTL-1",
-      phase: "implement",
+      phase: "plan",
       resumeSession: "uuid-1111",
     });
   });
@@ -439,7 +444,7 @@ describe("reconcileBootResume", () => {
   test("falls back to fresh dispatch (resumeSession=null) when resolveSession returns null (CTL-690)", () => {
     writeMaxParallel(orchDir, 3);
     // bg_job_id is recorded but the transcript is gone → resolveSession → null.
-    writeSignal(orchDir, "CTL-1", "implement", {
+    writeSignal(orchDir, "CTL-1", "research", {
       worktreePath: "/wt/CTL-1",
       bg_job_id: "nope9999",
     });
@@ -461,14 +466,14 @@ describe("reconcileBootResume", () => {
     expect(calls[0]).toMatchObject({
       orchDir,
       ticket: "CTL-1",
-      phase: "implement",
+      phase: "research",
       resumeSession: null,
     });
   });
 
   test("legacy signal with no bg_job_id skips resolveSession and falls back to fresh dispatch (CTL-690)", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-1", "implement", {
+    writeSignal(orchDir, "CTL-1", "triage", {
       worktreePath: "/wt/CTL-1",
       bg_job_id: null,
     });
@@ -496,7 +501,7 @@ describe("reconcileBootResume", () => {
 
   test("a throwing resolveSession is contained and treated as unresumable (CTL-690)", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-1", "implement", {
+    writeSignal(orchDir, "CTL-1", "plan", {
       worktreePath: "/wt/CTL-1",
       bg_job_id: "boom",
     });
@@ -522,15 +527,16 @@ describe("reconcileBootResume", () => {
 
   test("mixed batch: some resume, some fresh, all dispatch (CTL-690)", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-A", "implement", {
+    // All cheap phases (plan/research/triage) so none are gated.
+    writeSignal(orchDir, "CTL-A", "plan", {
       worktreePath: "/wt/CTL-A",
       bg_job_id: "aaa",
     });
-    writeSignal(orchDir, "CTL-B", "implement", {
+    writeSignal(orchDir, "CTL-B", "research", {
       worktreePath: "/wt/CTL-B",
       bg_job_id: "bbb",
     });
-    writeSignal(orchDir, "CTL-C", "implement", {
+    writeSignal(orchDir, "CTL-C", "triage", {
       worktreePath: "/wt/CTL-C",
       bg_job_id: null,
     });
@@ -562,7 +568,8 @@ describe("reconcileBootResume", () => {
 describe("reconcileBootResume — turn-cap-exhausted is terminal (CTL-830)", () => {
   test("does NOT relaunch turn-cap-exhausted on cold start", () => {
     writeMaxParallel(orchDir, 3);
-    writeSignal(orchDir, "CTL-TCE", "implement", {
+    // Uses 'plan' (cheap phase) so dispatch is not gated by CTL-644.
+    writeSignal(orchDir, "CTL-TCE", "plan", {
       worktreePath: "/wt/CTL-TCE",
       bg_job_id: "tce-abc",
       status: "turn-cap-exhausted",
@@ -638,5 +645,163 @@ describe("selectBootResumeCandidates — needs-input guard (CTL-549)", () => {
     const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 4 });
     expect(out.map((c) => c.ticket)).not.toContain("CTL-1");
     expect(out.map((c) => c.ticket)).toContain("CTL-2");
+  });
+});
+
+// ─── CTL-644: isCheapPhase classifier ───
+
+describe("isCheapPhase (CTL-644)", () => {
+  test("returns true for cheap phases (triage, research, plan) and false for all expensive phases", () => {
+    expect(isCheapPhase("triage")).toBe(true);
+    expect(isCheapPhase("research")).toBe(true);
+    expect(isCheapPhase("plan")).toBe(true);
+
+    expect(isCheapPhase("implement")).toBe(false);
+    expect(isCheapPhase("verify")).toBe(false);
+    expect(isCheapPhase("review")).toBe(false);
+    expect(isCheapPhase("pr")).toBe(false);
+    expect(isCheapPhase("monitor-merge")).toBe(false);
+    expect(isCheapPhase("monitor-deploy")).toBe(false);
+    expect(isCheapPhase("remediate")).toBe(false);
+  });
+});
+
+// ─── CTL-644: reconcileBootResume cheap/expensive branching ───
+
+describe("reconcileBootResume — cheap/expensive classification (CTL-644)", () => {
+  // Shared cold-start report used across tests in this block.
+  const coldReport = { coldStart: true };
+
+  function makeDispatch(code = 0) {
+    const calls = [];
+    const fn = (...args) => { calls.push(args); return { code }; };
+    fn.calls = calls;
+    return fn;
+  }
+
+  function makeAppendEvent() {
+    const calls = [];
+    const fn = (...args) => { calls.push(args); return true; };
+    fn.calls = calls;
+    return fn;
+  }
+
+  test("cheap phases (triage/research/plan) auto-dispatch — reviveDispatch called, no pending marker", () => {
+    writeSignal(orchDir, "CTL-10", "triage", { worktreePath: "/wt/CTL-10" });
+    writeSignal(orchDir, "CTL-11", "research", { worktreePath: "/wt/CTL-11" });
+    writeSignal(orchDir, "CTL-12", "plan", { worktreePath: "/wt/CTL-12" });
+    writeMaxParallel(orchDir, 10);
+
+    const reviveDispatch = makeDispatch(0);
+    const appendEvent = makeAppendEvent();
+    const appendGatedEvent = makeAppendEvent();
+
+    const result = reconcileBootResume({
+      orchDir,
+      report: coldReport,
+      agents: [],
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent,
+      appendGatedEvent,
+      resolveSession: () => null,
+    });
+
+    expect(reviveDispatch.calls.length).toBe(3);
+    expect(result.dispatched).toBe(3);
+    expect(result.gated).toBe(0);
+
+    // No pending markers written for cheap phases
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-10"))).toBe(false);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-11"))).toBe(false);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-12"))).toBe(false);
+  });
+
+  test("expensive phases are gated — reviveDispatch not called, pending marker written, gated event emitted", () => {
+    writeSignal(orchDir, "CTL-20", "implement", { worktreePath: "/wt/CTL-20" });
+    writeSignal(orchDir, "CTL-21", "verify", { worktreePath: "/wt/CTL-21" });
+    writeSignal(orchDir, "CTL-22", "pr", { worktreePath: "/wt/CTL-22" });
+    writeMaxParallel(orchDir, 10);
+
+    const reviveDispatch = makeDispatch(0);
+    const appendGatedEvent = makeAppendEvent();
+
+    const result = reconcileBootResume({
+      orchDir,
+      report: coldReport,
+      agents: [],
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: makeAppendEvent(),
+      appendGatedEvent,
+      resolveSession: () => null,
+    });
+
+    expect(reviveDispatch.calls.length).toBe(0);
+    expect(result.dispatched).toBe(0);
+    expect(result.gated).toBe(3);
+    expect(appendGatedEvent.calls.length).toBe(3);
+
+    // Pending markers written for each expensive ticket
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-20"))).toBe(true);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-21"))).toBe(true);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-22"))).toBe(true);
+  });
+
+  test("mixed set — cheap auto-dispatched, expensive gated, done phases skipped", () => {
+    writeSignal(orchDir, "CTL-30", "plan", { worktreePath: "/wt/CTL-30" });
+    writeSignal(orchDir, "CTL-31", "implement", { worktreePath: "/wt/CTL-31" });
+    // CTL-32 is at terminal done — selectBootResumeCandidates will skip it
+    writeSignal(orchDir, "CTL-32", "monitor-deploy", {
+      status: "done",
+      worktreePath: "/wt/CTL-32",
+    });
+    writeMaxParallel(orchDir, 10);
+
+    const reviveDispatch = makeDispatch(0);
+    const appendGatedEvent = makeAppendEvent();
+
+    const result = reconcileBootResume({
+      orchDir,
+      report: coldReport,
+      agents: [],
+      reviveDispatch,
+      dispatch: () => {},
+      appendEvent: makeAppendEvent(),
+      appendGatedEvent,
+      resolveSession: () => null,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(result.gated).toBe(1);
+    expect(reviveDispatch.calls.length).toBe(1);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-30"))).toBe(false);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-31"))).toBe(true);
+  });
+
+  test("idempotent re-gate — second call with pending marker already present skips gated event", () => {
+    writeSignal(orchDir, "CTL-40", "review", { worktreePath: "/wt/CTL-40" });
+    writeMaxParallel(orchDir, 10);
+
+    const appendGatedEvent = makeAppendEvent();
+    const opts = {
+      orchDir,
+      report: coldReport,
+      agents: [],
+      reviveDispatch: makeDispatch(0),
+      dispatch: () => {},
+      appendEvent: makeAppendEvent(),
+      appendGatedEvent,
+      resolveSession: () => null,
+    };
+
+    // First call — marker created + event emitted
+    reconcileBootResume(opts);
+    expect(appendGatedEvent.calls.length).toBe(1);
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-40"))).toBe(true);
+
+    // Second call — marker already exists, no re-emit
+    reconcileBootResume({ ...opts, reviveDispatch: makeDispatch(0), appendGatedEvent });
+    expect(appendGatedEvent.calls.length).toBe(1); // still 1, not 2
   });
 });

@@ -8,6 +8,7 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
+import { hostName, hostId } from "./lib/host-identity.mjs";
 
 // defaultAppend — writes a JSONL line to the canonical event log.
 function defaultAppend(line) {
@@ -40,6 +41,8 @@ export function buildTriageTransitionEvent({
       resource: {
         "service.name": "catalyst.execution-core",
         "service.namespace": "catalyst",
+        "host.name": hostName(),
+        "host.id": hostId(),
       },
       attributes: {
         "event.name": `phase.triage.linear-transition.${ticket}`,

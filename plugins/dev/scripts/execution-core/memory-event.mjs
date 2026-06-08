@@ -11,6 +11,7 @@ import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import { getEventLogPath, log } from "./config.mjs";
+import { hostName, hostId } from "./lib/host-identity.mjs";
 
 export const MEMORY_EVENT_SAMPLED = "worker.memory.sampled";
 export const MEMORY_EVENT_WARN = "worker.memory.warn";
@@ -55,6 +56,8 @@ export function buildMemoryEnvelope(name, payload = {}, { now } = {}) {
     resource: {
       "service.name": "catalyst.execution-core",
       "service.namespace": "catalyst",
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     attributes: {
       "event.name": name,

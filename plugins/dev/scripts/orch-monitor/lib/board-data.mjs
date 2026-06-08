@@ -29,10 +29,10 @@ const WORKERS_DIR = join(EC, "workers");
 const ELIGIBLE_DIR = join(EC, "eligible");
 const DB = join(HOME, "catalyst", "catalyst.db");
 
-// Canonical 9-phase pipeline order + which statuses are terminal for a phase.
+// Canonical 10-phase pipeline order + which statuses are terminal for a phase.
 export const PHASE_ORDER = [
   "triage", "research", "plan", "implement", "verify",
-  "review", "pr", "monitor-merge", "monitor-deploy",
+  "review", "pr", "monitor-merge", "monitor-deploy", "teardown",
 ];
 // Single source of truth for which phase statuses are terminal (no longer
 // running). Exported so the UI's PhaseStrip terminal-status list can be guarded
@@ -70,7 +70,7 @@ export function heldFor(labels) {
 export const PHASE_TO_LINEAR = {
   triage: "Triage", research: "Research", plan: "Plan", implement: "Implement",
   verify: "Validate", review: "Validate", pr: "PR", "monitor-merge": "PR",
-  "monitor-deploy": "Done", done: "Done",
+  "monitor-deploy": "Done", teardown: "Done", done: "Done",
   queued: "Todo",  // synthetic phase for eligible-queue board cards (CTL-767)
 };
 

@@ -286,12 +286,14 @@ describe("tickUsage — email resolution", () => {
     expect(resolveCalls.map((c) => c.token).sort()).toEqual([TOKEN_A, TOKEN_B].sort());
   });
 
-  test("a null-resolving profile still emits with email null + label 'unknown'", async () => {
+  test("a null-resolving profile skips the account — no unlabeled emit (CTL-812 ghost-row fix)", async () => {
+    // Pre-fix this emitted with email=null / label "unknown", which rendered
+    // as a blank Account row in the per-account scoreboard. Account-keyed
+    // samples are unusable without their key, so the account is skipped.
+    delete process.env.OTEL_RESOURCE_ATTRIBUTES;
     const { promise, emitted } = harness({ resolveEmail: async () => null });
     await promise;
-    expect(emitted.length).toBe(1);
-    expect(emitted[0].spec.attrs["account.email"]).toBe(null);
-    expect(emitted[0].spec.label).toBe("unknown");
+    expect(emitted.length).toBe(0);
   });
 
   test("an account with no token is skipped (no resolve, no fetch, no emit)", async () => {
@@ -474,5 +476,75 @@ describe("tickUsage — secrets hygiene", () => {
     expect(all).not.toContain(SECRET);
     // Sanity: the branches DID log (so the assertion above is meaningful).
     expect(all).toContain("usage:");
+  });
+});
+
+// ─── email unresolvable ⇒ skip (CTL-812 ghost-row fix) ───────────────────────
+import { parseOtelEmail } from "./usage.mjs";
+
+describe("tickUsage — unresolvable email skips the account", () => {
+  const ACCOUNT = { source: "backup", token: "tok-backup-FAKE" };
+
+  test("null resolveEmail → no usage fetch, no emit (ghost-row prevention)", async () => {
+    const emitted = [];
+    const fetchCalls = [];
+    delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+    const n = await tickUsage({
+      accounts: [ACCOUNT],
+      resolveEmail: async () => null,
+      fetchUsage: async (...a) => {
+        fetchCalls.push(a);
+        return { status: 200, body: usageBody() };
+      },
+      emit: (name, spec) => emitted.push({ name, spec }),
+    });
+    expect(n).toBe(0);
+    expect(emitted.length).toBe(0);
+    expect(fetchCalls.length).toBe(0); // skipped BEFORE burning a rate-limited call
+  });
+
+  test("active account falls back to OTEL_RESOURCE_ATTRIBUTES user.email", async () => {
+    const emitted = [];
+    process.env.OTEL_RESOURCE_ATTRIBUTES = "project=x,user.email=env@example.com,branch=main";
+    try {
+      const n = await tickUsage({
+        accounts: [{ source: "active", token: "tok-active-FAKE" }],
+        resolveEmail: async () => null,
+        fetchUsage: async () => ({ status: 200, body: usageBody() }),
+        emit: (name, spec) => emitted.push({ name, spec }),
+      });
+      expect(n).toBe(1);
+      expect(emitted[0].spec.attrs["account.email"]).toBe("env@example.com");
+    } finally {
+      delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+    }
+  });
+
+  test("backup account does NOT use the ambient env fallback", async () => {
+    const emitted = [];
+    process.env.OTEL_RESOURCE_ATTRIBUTES = "user.email=env@example.com";
+    try {
+      const n = await tickUsage({
+        accounts: [ACCOUNT],
+        resolveEmail: async () => null,
+        fetchUsage: async () => ({ status: 200, body: usageBody() }),
+        emit: (name, spec) => emitted.push({ name, spec }),
+      });
+      expect(n).toBe(0);
+      expect(emitted.length).toBe(0);
+    } finally {
+      delete process.env.OTEL_RESOURCE_ATTRIBUTES;
+    }
+  });
+});
+
+describe("parseOtelEmail", () => {
+  test("extracts user.email from the k=v list", () => {
+    expect(parseOtelEmail({ OTEL_RESOURCE_ATTRIBUTES: "a=b,user.email=x@y.z" })).toBe("x@y.z");
+  });
+  test("absent var / absent key / empty value → null", () => {
+    expect(parseOtelEmail({})).toBe(null);
+    expect(parseOtelEmail({ OTEL_RESOURCE_ATTRIBUTES: "a=b" })).toBe(null);
+    expect(parseOtelEmail({ OTEL_RESOURCE_ATTRIBUTES: "user.email=" })).toBe(null);
   });
 });

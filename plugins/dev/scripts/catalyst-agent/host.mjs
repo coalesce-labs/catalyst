@@ -24,7 +24,8 @@
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { cpus, loadavg, totalmem, freemem, hostname } from "node:os";
+import { cpus, loadavg, totalmem, freemem } from "node:os";
+import { shortHostname } from "./emit.mjs";
 import { buildAgentEnvelope, emitEnvelope } from "./emit.mjs";
 import { readAgentConfig, log } from "./config.mjs";
 
@@ -242,7 +243,7 @@ function defaultReadLoad() {
  * @param {Function} [opts.readLoad] → number (load1) | null
  * @param {Function} [opts.emit]     (name, spec, opts) → emit the envelope
  * @param {Function} [opts.now]      injectable ISO-timestamp fn (passed to emit)
- * @param {string}   [opts.label]    event.label override (defaults to hostname())
+ * @param {string}   [opts.label]    event.label override (defaults to shortHostname())
  * @returns {Promise<object>} the emitted envelope (also useful for assertions)
  */
 export async function sampleHost({
@@ -252,7 +253,7 @@ export async function sampleHost({
   readLoad = defaultReadLoad,
   emit = defaultEmit,
   now,
-  label = hostname(),
+  label = shortHostname(),
 } = {}) {
   // Read every probe defensively — one throwing probe must not sink the others
   // or the whole event. `await` is a no-op on a sync return value.

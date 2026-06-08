@@ -162,7 +162,8 @@ catalyst-execution-core restart
           "review":         "sonnet",
           "pr":             "sonnet",
           "monitor-merge":  "sonnet",
-          "monitor-deploy": "sonnet"
+          "monitor-deploy": "sonnet",
+          "teardown":       "sonnet"
         },
         "turnCaps": {
           "triage":         10,
@@ -173,7 +174,8 @@ catalyst-execution-core restart
           "review":         40,
           "pr":             10,
           "monitor-merge":  20,
-          "monitor-deploy": 20
+          "monitor-deploy": 20,
+          "teardown":       15
         }
       }
     }
@@ -184,7 +186,7 @@ catalyst-execution-core restart
 **`dispatchMode`**
 
 - `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase
-  (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy).
+  (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
 - `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket.
   Preserved as a fallback; not recommended for new setups.
 
@@ -352,6 +354,13 @@ export NODE_EXTRA_CA_CERTS=$HOME/.mitmproxy/mitmproxy-ca-cert.pem
 # 3. Apply it
 catalyst-execution-core restart
 ```
+
+> **Do not `source` `execution-core.env` in an interactive shell or shell profile.** It is sourced
+> by `catalyst-execution-core start` for the daemon only. Sourcing it in your terminal pins
+> `HTTP(S)_PROXY` onto every process you launch (including interactive `claude`); when mitmproxy is
+> down, those calls fail with `connection refused`. Always apply changes with
+> `catalyst-execution-core restart`. The daemon liveness-gates the proxy and degrades to direct mode
+> if mitmproxy is unreachable (CTL-846); an interactive shell gets no such protection.
 
 **Why `NODE_USE_ENV_PROXY=1` is required.** Node 20+/24+ native `fetch` (undici) **ignores**
 `HTTPS_PROXY`/`HTTP_PROXY` unless `NODE_USE_ENV_PROXY=1` is also set. Omit it and the daemon's

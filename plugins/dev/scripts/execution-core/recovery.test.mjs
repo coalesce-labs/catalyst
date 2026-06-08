@@ -41,6 +41,7 @@ import {
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
+import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
 let orchDir;
 
@@ -3593,5 +3594,160 @@ describe("defaultReviveDispatch — CTL-761 attempt passthrough", () => {
       { dispatch },
     );
     expect("attempt" in dispatch.calls[0][0]).toBe(false);
+  });
+});
+
+// --- CTL-663: partial-commit implement is resumed, not reclaimed ------------
+// These tests lock the regression class discovered in CTL-661: a dead implement
+// worker whose worktree has fewer commits than its plan has phases must be
+// REVIVED (branch C), never RECLAIMED-AS-DONE (branch B). Uses the REAL
+// implementProbe wired with fake git/fs seams through the `probes` injection.
+
+describe("reclaimDeadWorkIfPossible — CTL-663 partial-commit implement is resumed, not reclaimed", () => {
+  const orch = "/orch-663"; // hermetic fake orchDir (no disk writes succeed)
+
+  // Local helpers (duplicated from work-done-probes.test.mjs for test clarity).
+  function porcelainFor663(ticket, wt) {
+    return [
+      "worktree /repo",
+      "HEAD abcdef0",
+      "branch refs/heads/main",
+      "",
+      `worktree ${wt}`,
+      "HEAD 1234567",
+      `branch refs/heads/${ticket}`,
+      "",
+    ].join("\n");
+  }
+  function makeRunGit663(responses) {
+    return (args) => {
+      const key = args.join(" ");
+      if (responses[key]) return responses[key];
+      for (const [k, v] of Object.entries(responses)) {
+        if (key.endsWith(k)) return v;
+      }
+      return { code: 1, stdout: "", stderr: `fake runGit: no match for ${key}` };
+    };
+  }
+
+  // Five-phase plan fixture (>200 bytes, 5 ## Phase headers).
+  const FIVE_PHASE_PLAN_BODY_663 = `# Plan: CTL-9
+
+${"Overview and context for the five-phase implementation plan. ".repeat(5)}
+
+## Phase 1: Setup
+
+Establish the foundation and initial scaffolding.
+
+## Phase 2: Core Logic
+
+Implement the main business logic and algorithms.
+
+## Phase 3: Integration
+
+Wire up all components and integration points.
+
+## Phase 4: Tests
+
+Write comprehensive test coverage for all paths.
+
+## Phase 5: Cleanup
+
+Final polish, documentation, and code cleanup.
+
+### Success Criteria
+- [ ] All five phases land as discrete commits on the branch
+`;
+
+  // Minimal seam set for the revive/reclaim paths; override via the spread.
+  function makeSeams663(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(undefined),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      progressMark: () => 1,      // 1 commit ahead → has forward progress
+      readProgressMark: () => 0,  // watermark 0 → progress advanced
+      writeProgressMark: recorder(undefined),
+      ...extra,
+    };
+  }
+
+  // Factory: real implementProbe with fake git/fs at a given commit count.
+  function makeRealProbe(commitCount) {
+    const wt = "/wt/CTL-9";
+    return (args) =>
+      WORK_DONE_PROBES.implement(args, {
+        runGit: makeRunGit663({
+          "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor663("CTL-9", wt), stderr: "" },
+          [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: `${commitCount}\n`, stderr: "" },
+          [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+        }),
+        listArtifacts: () => ["2026-06-07-ctl-9.md"],
+        readArtifact: () => FIVE_PHASE_PLAN_BODY_663,
+      });
+  }
+
+  test("dead worker, 1-of-5 commits → 'revived' (branch C), emitComplete NEVER called", () => {
+    const emit = recorder({ code: 0 });
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: makeRealProbe(1) },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(emit.calls.length).toBe(0);
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("dead worker, 5-of-5 commits → 'reclaimed' (branch B still works at true completion)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: makeRealProbe(5) },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+    }));
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("dead worker, 1 commit, NO plan doc → 'reclaimed' (backward-compatible planless path)", () => {
+    const wt = "/wt/CTL-9";
+    const emit = recorder({ code: 0 });
+    const noPlanProbe = (args) =>
+      WORK_DONE_PROBES.implement(args, {
+        runGit: makeRunGit663({
+          "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor663("CTL-9", wt), stderr: "" },
+          [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "1\n", stderr: "" },
+          [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+        }),
+        listArtifacts: () => [], // no plan doc → gate skipped
+        readArtifact: () => "",
+      });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: noPlanProbe },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+    }));
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
   });
 });

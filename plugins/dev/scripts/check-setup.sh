@@ -44,6 +44,9 @@ TOOLS=(
     "git:Git"
     "jq:jq"
     "sqlite3:SQLite"
+    "node:Node.js"
+    "npm:npm"
+    "bun:Bun runtime"
     "gh:GitHub CLI"
     "humanlayer:HumanLayer CLI"
     "linearis:Linearis CLI"
@@ -63,9 +66,9 @@ header "Optional Tools"
 OPT_TOOLS=(
     "agent-browser:agent-browser"
     "sentry-cli:Sentry CLI"
-    "bun:Bun runtime"
     "direnv:direnv"
     "smee:smee-client (webhook tunnel)"
+    "mitmproxy:mitmproxy (optional — only needed for catalyst-stack --proxy)"
 )
 
 for spec in "${OPT_TOOLS[@]}"; do
@@ -82,7 +85,7 @@ done
 header "Catalyst CLI Install"
 
 CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
-CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
+CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack)
 
 if [[ -d "$CLI_BIN_DIR" ]]; then
     pass "Bin dir exists: $CLI_BIN_DIR"
@@ -338,6 +341,21 @@ else
     warn "No Linear bot user IDs configured — execution-core comms won't filter bot self-echo"
     info "NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json"
     info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-foundry:setup-catalyst"
+fi
+
+# Orchestrator Linear OAuth app (CTL-785) — the daemon mints its app-actor token
+# from these creds at start; absent/partial creds silently fall back to the
+# personal LINEAR_API_TOKEN (re-pinning the shared 2,500/hr bucket).
+_ORCH_CID=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_ORCH_CSEC=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+if [[ -n "$_ORCH_CID" && -n "$_ORCH_CSEC" ]]; then
+    pass "Orchestrator Linear app credentials configured (clientId ${_ORCH_CID:0:8}…)"
+elif [[ -n "$_ORCH_CID" || -n "$_ORCH_CSEC" ]]; then
+    warn "Orchestrator Linear app credentials incomplete — need BOTH clientId and clientSecret"
+    info "Set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
+else
+    warn "Orchestrator Linear app not configured — daemon will fall back to the personal LINEAR_API_TOKEN (CTL-785)"
+    info "Create a 'Catalyst Orchestrator' OAuth app in Linear, then set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
 fi
 
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────

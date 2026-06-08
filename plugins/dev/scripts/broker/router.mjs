@@ -69,6 +69,8 @@ import {
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
+  hostName,
+  hostId,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
@@ -183,6 +185,8 @@ export function buildCanonicalEnvelope(legacy) {
       "service.name": "catalyst.broker",
       "service.namespace": "catalyst",
       "service.version": pluginVersion(),
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     attributes,
     body: { payload: legacy.detail ?? null },

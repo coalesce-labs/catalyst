@@ -21,6 +21,8 @@ import { dirname, resolve } from "node:path";
 import {
   type Severity,
   generateEventId,
+  hostId,
+  hostName,
   severityNumber,
 } from "./canonical-event-shared";
 
@@ -33,12 +35,17 @@ export {
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
+  hostName,
+  hostId,
 } from "./canonical-event-shared";
 
 export interface Resource {
   "service.name": string;
   "service.namespace": "catalyst";
   "service.version": string;
+  // CTL-852: host identity fields, always present on canonical events.
+  "host.name": string;
+  "host.id": string;
   // CTL-636: optional orchestration-context resource keys. Present only when
   // the event carries the corresponding data; omitted otherwise so external
   // (webhook / broker-daemon) events keep the bare 3-key block.
@@ -193,6 +200,8 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
     "service.name": input.resource["service.name"],
     "service.namespace": "catalyst",
     "service.version": version,
+    "host.name": hostName(),
+    "host.id": hostId(),
   };
   // CTL-636: promote orchestration context into resource. Explicit resource
   // input wins; otherwise fall back to the matching attribute (TS emitters

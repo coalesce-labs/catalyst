@@ -142,12 +142,20 @@ TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
 # ── Test 1: init-or-repair on fresh project, humanlayer configured ────────
+# CTL-845: Case C now uses the vendored worktree-thoughts-init.sh. Seed a fake
+# HOME with a valid humanlayer.json so the vendored script can resolve, and
+# assert the resulting thoughts/shared is a correct symlink (not that humanlayer
+# was directly invoked — the shim is present but no longer the init mechanism).
 
-run_test "init-or-repair invokes humanlayer when configured"
+run_test "init-or-repair creates thoughts/shared via vendored init when configured"
 
 TEST_DIR="$TMPDIR/test1"
 FAKE_REPO="$TMPDIR/test1-thoughts"
-mkdir -p "$TEST_DIR"
+FAKEHOME="$TMPDIR/test1-home"
+mkdir -p "$TEST_DIR" "$FAKE_REPO" "$FAKEHOME/.config/humanlayer"
+# Seed a minimal humanlayer.json for the vendored script to resolve.
+printf '{"thoughts":{"thoughtsRepo":"%s","reposDir":"repos","globalDir":"global","user":"ryan","profiles":{"test-profile":{"thoughtsRepo":"%s","reposDir":"repos","globalDir":"global"}}}}\n' \
+	"$FAKE_REPO" "$FAKE_REPO" >"$FAKEHOME/.config/humanlayer/humanlayer.json"
 (
 	cd "$TEST_DIR"
 	write_catalyst_config ".catalyst/config.json" "test-profile" "test-dir"
@@ -155,6 +163,7 @@ mkdir -p "$TEST_DIR"
 	HL_JSON=$(humanlayer_config_json "$TEST_DIR" "test-dir" "test-profile")
 	make_humanlayer_shim "$TEST_DIR/bin" "$SHIM_LOG" "$FAKE_REPO" "$HL_JSON"
 	export PATH="$TEST_DIR/bin:$PATH"
+	export HOME="$FAKEHOME"
 
 	if bash "$SUT" init-or-repair >/dev/null 2>&1; then
 		pass "init-or-repair exited 0"
@@ -162,15 +171,8 @@ mkdir -p "$TEST_DIR"
 		fail "init-or-repair exit non-zero"
 	fi
 
-	if grep -q "thoughts init --force --directory test-dir --profile test-profile" "$SHIM_LOG"; then
-		pass "humanlayer invoked with correct --directory and --profile"
-	else
-		fail "humanlayer was not invoked with expected args. Log contents:"
-		cat "$SHIM_LOG" | sed 's/^/    /'
-	fi
-
 	if [[ -L "thoughts/shared" ]]; then
-		pass "thoughts/shared is a symlink after repair"
+		pass "thoughts/shared is a symlink after vendored repair"
 	else
 		fail "thoughts/shared is not a symlink"
 	fi

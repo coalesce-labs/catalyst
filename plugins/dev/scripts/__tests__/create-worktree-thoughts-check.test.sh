@@ -28,9 +28,11 @@ assert_contains() {
 #   $1 INIT_MODE: fail | noop-ok | real
 #   $2 SETUP_JSON: optional catalyst.worktree.setup array (selects config-driven path)
 #   $3 HOOKS_JSON: optional --hooks-json array (exercises the orchestration-hooks path)
+#   $4 WITH_HL_JSON: if non-empty, seed a valid humanlayer.json + thoughtsRepo so the
+#      vendored worktree-thoughts-init.sh can resolve config (CTL-845).
 # Sets globals: OUTPUT, EXIT, WT_PATH, SRC, SCRATCH
 run_create_worktree() {
-	local INIT_MODE="$1" SETUP_JSON="${2-}" HOOKS_JSON="${3-}"
+	local INIT_MODE="$1" SETUP_JSON="${2-}" HOOKS_JSON="${3-}" WITH_HL_JSON="${4-}"
 	SCRATCH="$(mktemp -d -t cwt-ctl513-XXXXXX)"
 	SRC="$SCRATCH/src"
 	local WT="$SCRATCH/wt" BIN="$SCRATCH/bin" FAKEHOME="$SCRATCH/home"
@@ -43,6 +45,14 @@ run_create_worktree() {
 			>"$SRC/.catalyst/config.json"
 	else
 		printf '{"catalyst":{"projectKey":"t"}}\n' >"$SRC/.catalyst/config.json"
+	fi
+	# CTL-845: optionally seed a valid humanlayer.json so the vendored
+	# worktree-thoughts-init.sh can resolve config (used by Cases 3 and 7).
+	if [[ -n "$WITH_HL_JSON" ]]; then
+		local TR="$SCRATCH/tr"
+		mkdir -p "$TR" "$FAKEHOME/.config/humanlayer"
+		printf '{"thoughts":{"thoughtsRepo":"%s","reposDir":"repos","globalDir":"global","user":"testuser"}}\n' \
+			"$TR" >"$FAKEHOME/.config/humanlayer/humanlayer.json"
 	fi
 	cat >"$BIN/humanlayer" <<STUB
 #!/usr/bin/env bash
@@ -69,6 +79,7 @@ STUB
 }
 
 # Case 1 — auto-detected path, init FAILS → exit 1 + worktree torn down.
+# With CTL-845 fix, no humanlayer.json is seeded so the vendored script fails.
 echo "Test 1: auto-detected path, failed thoughts init fails fast"
 run_create_worktree fail ""
 assert_eq "1" "$EXIT" "exits 1 when auto-detected thoughts init fails"
@@ -86,8 +97,9 @@ if [[ ! -d $WT_PATH ]]; then pass "worktree removed"; else fail "worktree not re
 rm -rf "$SCRATCH"
 
 # Case 3 — auto-detected path, init SUCCEEDS → exit 0, worktree + thoughts/shared present.
+# CTL-845: now uses the vendored script; WITH_HL_JSON=1 seeds valid config for it.
 echo "Test 3: successful thoughts init still succeeds"
-run_create_worktree real ""
+run_create_worktree real "" "" 1
 assert_eq "0" "$EXIT" "exits 0 on successful init"
 if [[ -d "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared present"; else fail "thoughts/shared missing"; fi
 rm -rf "$SCRATCH"
@@ -100,6 +112,7 @@ if [[ -d $WT_PATH ]]; then pass "worktree created"; else fail "worktree missing"
 rm -rf "$SCRATCH"
 
 # Case 5 — regression guard: existing auto-detected check still catches init-OK-but-empty.
+# With CTL-845 fix, no humanlayer.json seeded → vendored script fails → guard fires.
 echo "Test 5: existing thoughts/shared check still fires on noop-ok init"
 run_create_worktree noop-ok ""
 assert_eq "1" "$EXIT" "exits 1 when init reports OK but creates nothing"
@@ -116,6 +129,29 @@ assert_eq "1" "$EXIT" "exits 1 when --hooks-json thoughts init fails"
 assert_contains "$OUTPUT" "thoughts/shared" "error names thoughts/shared"
 if [[ ! -d $WT_PATH ]]; then pass "worktree removed"; else fail "worktree not removed"; fi
 rm -rf "$SCRATCH"
+
+# Case 7 — CTL-845: auto-detected path uses the vendored script (not humanlayer thoughts init).
+# Stub exits 1 for 'thoughts init', but create-worktree now calls scripts/worktree-thoughts-init.sh
+# instead. WITH_HL_JSON=1 seeds a valid humanlayer.json + thoughtsRepo so the vendored script
+# resolves. Result: exit 0 + thoughts/shared present as a symlink, even on a "fresh" host where
+# humanlayer thoughts init is broken.
+echo "Test 7: vendored thoughts-init succeeds where humanlayer init is broken"
+run_create_worktree fail "" "" 1
+assert_eq "0" "$EXIT" "exits 0 via vendored init even when humanlayer init fails"
+if [[ -d "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared present"; else fail "thoughts/shared missing"; fi
+if [[ -L "$WT_PATH/thoughts/shared" ]]; then pass "thoughts/shared is a symlink"; else fail "not a symlink"; fi
+rm -rf "$SCRATCH"
+
+# CTL-845 Phase 4: guard against re-committing a machine-local worktree.setup script.
+# The committed .catalyst/config.json must never reference an absolute /Users/ path
+# so the repo remains portable across machines.
+echo "Test: committed config has no machine-local worktree.setup"
+if jq -e '.catalyst.worktree.setup // [] | map(select(test("^bash /Users/"))) | length > 0' \
+	"$REPO_ROOT/.catalyst/config.json" >/dev/null 2>&1; then
+	fail "config.json still references a machine-local worktree setup script"
+else
+	pass "config.json worktree.setup is portable"
+fi
 
 echo ""
 echo "Passed: $PASSES  Failed: $FAILURES"

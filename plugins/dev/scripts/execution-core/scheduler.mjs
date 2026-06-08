@@ -63,10 +63,11 @@ import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
-// CTL-791: the terminal-Done sweep removes a worktree ONLY through the evidence
-// gate (GitHub-merged + clean + no-live-session + orchestrator-provenance,
-// archive-first, never --force); an unsafe tree is flagged, not deleted.
-import { gatedTeardownWorktree as defaultTeardownWorktree } from "./worktree-safety.mjs";
+// CTL-703: worktree teardown is now handled by the dedicated phase-teardown
+// phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
+// The gatedTeardownWorktree import is removed; the teardown phase agent
+// re-implements the gate in bash (merge-confirmation evidence + worktree
+// presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
@@ -125,16 +126,20 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // labelOnce here would force recovery.mjs → scheduler.mjs to import it, but
 // scheduler.mjs already imports reclaimDeadWorkIfPossible from recovery.mjs —
 // a cycle. label-guard.mjs is the leaf module both can import.
-import { labelOnce } from "./label-guard.mjs";
+import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
+import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } from "./config.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
+import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
+import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
 // occupies a slot (the ticket is mid-pipeline), so isTicketInFlight checks the
 // phase, not just the status.
-// TERMINAL_PHASE ("monitor-deploy") is imported from workflow-descriptor.mjs (above).
+// TERMINAL_PHASE ("teardown") is imported from workflow-descriptor.mjs (above).
+// CTL-703: teardown is the 10th phase; monitor-deploy now advances to teardown.
 
 // New work enters the pipeline at `research`: a Ready ticket has already been
 // triaged (the →Triage watcher dispatched its triage agent — monitor.mjs). The
@@ -974,7 +979,17 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
   const sig = signals ?? {};
   let latest = null;
   for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
-  if (latest === null || sig[latest] !== "done") return null;
+  // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
+  // monitor-deploy `skipped` must advance to teardown (just as `done` does),
+  // so the pipeline can reach the dedicated teardown phase even when no deploy
+  // event arrived before the timeout. Every OTHER phase keeps the
+  // isTicketInFlight invariant: a stray mid-pipeline `skipped` holds the slot
+  // (does NOT advance) so a producer bug can't silently leak past a phase.
+  const latestStatus = sig[latest];
+  const advanceEligible =
+    latestStatus === "done" ||
+    (latestStatus === "skipped" && latest === "monitor-deploy");
+  if (latest === null || !advanceEligible) return null;
 
   // CTL-653: verdict routing at verify. A verdict-fail detours to remediate
   // (until the cycle cap); pass/null/undefined falls through to the normal
@@ -990,7 +1005,7 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
     { phase: latest, reviveCount: 0, parkedFrom: null },
     { type: "complete" }
   );
-  if (isTerminal(next)) return null; // pipeline reached monitor-deploy → done
+  if (isTerminal(next)) return null; // pipeline reached teardown → done (CTL-703)
   if (next.phase in sig) return null; // successor already dispatched
   return next.phase;
 }
@@ -1171,13 +1186,27 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // convergeHeldLabel — apply/remove the held-indicator labels (blocked/waiting)
 // on a DIFF so a steady-state held tick makes ZERO Linear writes (CTL-755
 // ADDENDUM). `current` is the ticket's fresh label set (from fetchRelations);
-// `desired` is one of HELD_LABEL_BLOCKED | HELD_LABEL_WAITING | null. Writes are
-// best-effort via safeWrite — applyLabel adds, removeLabel removes. Returns the
-// number of write calls issued (0 == idempotent no-op) so tests can pin the
-// steady-state-zero-writes invariant. removeLabel is async (linear-write.mjs:175)
-// but called fire-and-forget inside safeWrite — the write still happens and its
-// own try/catch swallows any failure, matching the best-effort convention.
-function convergeHeldLabel(ticket, current, desired, writeStatus) {
+// `desired` is one of HELD_LABEL_BLOCKED | HELD_LABEL_WAITING | null.
+//
+// CTL-834: the apply is COOL-DOWN-GATED. The prior version re-issued the
+// remove+apply every ~22s tick; when the apply failed UNRECOVERABLY (the desired
+// label is in an exclusive Linear group whose sibling is already on the ticket —
+// "not exclusive child"), the label never landed, the diff was never satisfied,
+// and the write re-fired forever (observed: 218 fails / 44 min, burning the
+// Linear write quota — CTL-838 blocked↔needs-human, ADV-1295 blocked↔waiting).
+// Now: if a recent apply of `desired` failed unrecoverably, inLabelCooldown
+// short-circuits the whole convergence until LABEL_COOLDOWN_MS elapses
+// (time-boxed, so it self-heals once the conflict clears — mirrors the CTL-624
+// dispatch cool-down). The apply's {applied, reason} is captured directly (NOT
+// via the result-discarding safeWrite) so the cool-down can arm. Returns the
+// number of write calls issued (0 == idempotent no-op OR cooled-down). `orchDir`/
+// `now` are optional so legacy callers / bare unit ticks keep the prior
+// best-effort-every-tick behavior (the cool-down simply never arms).
+export function convergeHeldLabel(ticket, current, desired, writeStatus, { orchDir, now = Date.now } = {}) {
+  // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
+  if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
+    return 0;
+  }
   const have = new Set(current ?? []);
   let writes = 0;
   // Remove any held label that is present but not desired.
@@ -1187,12 +1216,53 @@ function convergeHeldLabel(ticket, current, desired, writeStatus) {
       writes++;
     }
   }
-  // Apply the desired label if it is not already present.
+  // Apply the desired label if it is not already present. Capture the result so
+  // an unrecoverable failure arms the cool-down (applyLabel is sync + never
+  // throws, returning {applied, reason}; a throw from a test fake is swallowed).
   if (desired && !have.has(desired)) {
-    safeWrite(() => writeStatus.applyLabel({ ticket, label: desired }), { ticket, phase: "admission" });
+    let res;
+    try {
+      res = writeStatus.applyLabel({ ticket, label: desired });
+    } catch (err) {
+      log.warn({ ticket, label: desired, err: err.message }, "convergeHeldLabel: applyLabel threw — continuing tick");
+    }
     writes++;
+    if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
+      recordLabelCooldown(orchDir, ticket, desired, now());
+      log.warn(
+        { ticket, label: desired, reason: res.reason },
+        "ctl-834: held-label apply unrecoverable — backing off (cool-down)"
+      );
+    }
   }
   return writes;
+}
+
+// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
+// daemon lifetime, so convergeHeldLabel arms a cool-down instead of re-issuing
+// the write every tick (CTL-834). Mirrors label-guard.labelOnce's .skipped set.
+const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
+
+// CTL-834 held-label apply cool-down — the same time-boxed-marker shape as the
+// CTL-624 dispatch cool-down: a per-(ticket,label) JSON marker carrying failedAt,
+// kept OUTSIDE workers/<T>/ so it survives worker-dir GC (see dispatchCooldownPath
+// + memory project_scheduler_marker_under_workers_excludes_ticket). The window
+// self-heals so an exclusive conflict that later clears lets the label re-apply.
+export function labelCooldownPath(orchDir, ticket, label) {
+  return join(orchDir, ".label-cooldowns", `${ticket}-${label}.json`);
+}
+function inLabelCooldown(orchDir, ticket, label, now) {
+  try {
+    const marker = JSON.parse(readFileSync(labelCooldownPath(orchDir, ticket, label), "utf8"));
+    return typeof marker.failedAt === "number" && now - marker.failedAt < LABEL_COOLDOWN_MS;
+  } catch {
+    return false;
+  }
+}
+function recordLabelCooldown(orchDir, ticket, label, now) {
+  const p = labelCooldownPath(orchDir, ticket, label);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ failedAt: now }));
 }
 
 // CTL-624: dispatch cool-down marker. Conceptually mirrors the labelOnce
@@ -1581,36 +1651,11 @@ function defaultPreflightExec(cmd, args) {
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-// teardownWorktreeOnce — remove a ticket's git worktree once it reaches
-// terminal Done (CTL-582 Phase 4). The terminal sweep revisits every started
-// ticket each tick, so a once-marker at workers/<T>/.worktree-removed makes
-// teardown fire a single time. repoRoot is resolved from the central registry
-// by the ticket's team. Best-effort: an unresolvable team or a thrown teardown
-// is swallowed — never aborts the tick. The marker is written only on a
-// confirmed teardown (worktree gone), so a transient git failure retries.
-function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
-  const marker = join(orchDir, "workers", ticket, ".worktree-removed");
-  if (existsSync(marker)) return;
-  const entry = getProjectConfig(teamOf(ticket));
-  if (!entry?.repoRoot) {
-    // The codebase favors loud failures: a Done ticket whose team is absent
-    // from the registry can never have its worktree resolved here — surface it
-    // rather than silently leaking the worktree. No marker is written, so a
-    // restored registry entry is retried on a later tick.
-    log.warn(
-      { ticket },
-      "scheduler: worktree teardown deferred — ticket's team has no registry entry"
-    );
-    return;
-  }
-  try {
-    if (teardownWorktree({ repoRoot: entry.repoRoot, ticket })) {
-      writeFileSync(marker, "");
-    }
-  } catch (err) {
-    log.warn({ ticket, err: err.message }, "scheduler: worktree teardown threw — continuing tick");
-  }
-}
+// CTL-703: teardownWorktreeOnce is REMOVED. Worktree removal is now handled by
+// the dedicated phase-teardown phase agent (the 10th pipeline phase). The
+// scheduler no longer calls gatedTeardownWorktree directly; the teardown phase
+// worker runs after monitor-deploy completes and performs the evidence-gated
+// teardown as part of the normal phase-agent pipeline.
 
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
 // most once for the run's lifetime (CTL-597). The terminal sweep revisits every
@@ -1619,7 +1664,7 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
 // already matches — so without a guard every terminal dir burns one Linear API
 // read per tick, exhausting the rate-limit cap. A once-marker at
 // workers/<T>/.terminal-done.applied (restart-safe — persists with the worker
-// dir) records a confirmed apply, mirroring labelOnce / teardownWorktreeOnce.
+// dir) records a confirmed apply, mirroring labelOnce.
 // Best-effort: any throw is logged and swallowed, never aborting the tick.
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
@@ -1711,11 +1756,11 @@ function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitSta
 }
 
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
-// (3) terminal-Done sweep (CTL-558) + worktree teardown (CTL-582). Idempotent
-// and restart-safe — derives every action from filesystem state. `exec` is the
-// injectable seam for the D5 out-of-set blocker-state fetch; `writeStatus` is
-// the injectable Linear-write seam (CTL-558); `teardownWorktree` is the
-// injectable worktree-teardown seam (CTL-582) — both default to the real module.
+// (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
+// every action from filesystem state. `exec` is the injectable seam for the
+// D5 out-of-set blocker-state fetch; `writeStatus` is the injectable Linear-
+// write seam (CTL-558). CTL-703: worktree teardown is now handled by the
+// dedicated phase-teardown phase agent, not the scheduler sweep.
 export function schedulerTick(
   orchDir,
   {
@@ -1723,7 +1768,6 @@ export function schedulerTick(
     dispatch = defaultDispatch,
     exec,
     writeStatus = linearWrite,
-    teardownWorktree = defaultTeardownWorktree,
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
@@ -1834,8 +1878,27 @@ export function schedulerTick(
     // for hermetic unit assertions.
     countTicketEvents = countTicketEventsInWindow,
     appendRunawayEvent = defaultAppendRunawayEvent,
+    // CTL-850: cross-host coordination seams. `hosts` is the cluster roster and
+    // `hostName` this host's coordination name; left undefined they resolve to
+    // the real getClusterHosts()/getHostName() (a single-host fallback when
+    // .catalyst/hosts.json is absent), so every existing single-host install +
+    // bare unit tick is unaffected. `claimDispatch` is the synchronous soft-CAS
+    // claim seam — a spawnSync bridge over cluster-claim.mjs — invoked ONLY when
+    // the roster has >1 host. Tests inject a fixed roster + a recorder to drive
+    // the multi-host HRW-filter and claim-lost paths without touching Linear.
+    hosts = undefined,
+    hostName = undefined,
+    claimDispatch = claimDispatchSync,
   } = {}
 ) {
+  // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
+  // readFileSync; a per-tick read lets `hosts.json` edits take effect without a
+  // daemon restart). multiHost gates the Linear-touching claim: a single-host
+  // roster makes the HRW filter an identity AND skips the claim entirely, so the
+  // coordination wiring is an exact no-op until a 2nd host joins the roster.
+  const roster = hosts ?? getClusterHosts();
+  const self = hostName ?? getHostName();
+  const multiHost = roster.length > 1;
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -1913,6 +1976,12 @@ export function schedulerTick(
       );
     }
   }
+
+  // CTL-644: per-tick approval poll — dispatch any gated tickets that now have an
+  // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
+  // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
+  // can advance in the same tick it's dispatched.
+  processApprovedResumes({ orchDir });
 
   // (0) Reclaim-dead-work sweep (CTL-574) — close phase signals whose bg worker
   // died but whose work was committed before the death. Runs BEFORE the
@@ -2216,7 +2285,7 @@ export function schedulerTick(
           // Cycle member → owned by needs-human (labelOnce above). Clear any
           // stale held label so it doesn't double-signal, and drop its held
           // emit-state so a future non-cycle hold re-emits.
-          convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus);
+          convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, { orchDir, now });
           lastHeldEmitState.delete(ticket);
           continue;
         }
@@ -2242,7 +2311,7 @@ export function schedulerTick(
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
 
-        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus);
+        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, { orchDir, now });
 
         if (desired) {
           // Only-on-state-change emission: skip if the same held class already
@@ -2754,7 +2823,15 @@ export function schedulerTick(
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
-  const ready = computeReadyTickets(eligible, { blockerStates });
+  // CTL-850: HRW ownership filter — keep only the tickets THIS host owns under
+  // the cluster roster so freeSlots + per-project caps compute over owned work
+  // only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds` drives
+  // the phantom-quarantine sweep above — narrowing that would mis-quarantine a
+  // sibling host's worker dirs). Identity filter for a single-host roster
+  // (ownedBy is always true), so this is an exact no-op until a 2nd host joins.
+  const ready = computeReadyTickets(eligible, { blockerStates }).filter((t) =>
+    ownedBy(t.identifier, roster, self),
+  );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
   // but process alive) still consumes a slot; a duplicate spawn is counted.
@@ -2860,6 +2937,28 @@ export function schedulerTick(
         log.debug(
           { ticket: t.identifier, assignee: a.assignee },
           "ctl-781: candidate assigned to a non-bot — skipping (respect-assignment)"
+        );
+        continue;
+      }
+    }
+    // CTL-850: claim-on-dispatch — the cross-host soft-CAS mutex, the actual
+    // serializer behind the HRW pre-filter. Runs ONLY when the roster has >1 host
+    // (a single-host install never touches Linear here). A LOST claim means
+    // another host won the read-back — NOT a dispatch failure, so `continue` with
+    // NO cooldown/failure marker and the ticket is simply reconsidered next tick.
+    // Fail-closed: claimDispatch returns won:false on any error (never
+    // double-dispatch on a transient Linear hiccup). Placed before the
+    // dispatch-requested emit so a lost claim never emits a phantom "requested".
+    if (multiHost) {
+      const claim = claimDispatch({
+        ticket: t.identifier,
+        hostName: self,
+        phase: NEW_WORK_ENTRY_PHASE,
+      });
+      if (!claim.won) {
+        log.debug(
+          { ticket: t.identifier, host: self },
+          "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
         );
         continue;
       }
@@ -2979,18 +3078,18 @@ export function schedulerTick(
   }
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
-    // CTL-589 (CTL-512 followup): `skipped` is the second terminal status for
-    // monitor-deploy — emitted when no GitHub Deployments arrive within the
-    // probe timeout (the skipDeployVerification path). It must trigger the
-    // same Linear Done write + worktree teardown as `done`, matching the
-    // isTicketInFlight gate at line ~93. Without this, the ticket lingers
-    // at `PR` in Linear and the worktree leaks on disk indefinitely.
-    if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
-      // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
-      // CTL-757: thread emitStateWrite so the terminal Done write is audited.
+    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
+    // read via the descriptor's TERMINAL_PHASE so a future pipeline change
+    // can't silently bypass this sweep (redispatch research F2).
+    // When the terminal phase completes, the pipeline is done — write Linear Done.
+    // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
+    // CTL-757: thread emitStateWrite so the terminal Done write is audited.
+    if (signals[TERMINAL_PHASE] === "done") {
       terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
-      // CTL-582: the ticket reached terminal Done — tear down its worktree.
-      teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
+      // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
+      // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
+      // removed) — only the label clear remains inline here.
+      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
@@ -3003,10 +3102,18 @@ export function schedulerTick(
     });
     if (Object.values(signals).some((s) => s === "stalled")) {
       labelOnce(orchDir, ticket, "needs-human", writeStatus);
+    } else {
+      // CTL-646: no phase stalled → clear the ratchet if the marker exists.
+      // Guard on marker presence so a no-stall, no-marker tick fires zero
+      // removeLabel API calls (steady-state-zero-writes invariant).
+      const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
+      if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
+        clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+      }
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:
-    // self-exited failed/stalled workers and the final monitor-deploy worker.
+    // self-exited failed/stalled workers and the final teardown worker.
     // Intermediate `done` phases are excluded — those advance, and the existing
     // emitPredecessorReap (section 1, advance-success) owns their reap. The
     // reaper's _inflight 60s dedup + the per-phase marker make any overlap benign.
@@ -3058,6 +3165,9 @@ const TICK_DEBOUNCE_MS = Number(process.env.SCHEDULER_DEBOUNCE_MS) || 2_000;
 // (ticket,phase) to one attempt per window. Time-based (not a permanent
 // .skipped marker like labelOnce) so it self-heals once the artifact appears.
 const DISPATCH_COOLDOWN_MS = Number(process.env.SCHEDULER_DISPATCH_COOLDOWN_MS) || 60_000;
+// CTL-834: held-label apply cool-down window (convergeHeldLabel). Same default as
+// the dispatch cool-down; overridable for tests / quieter quota budgets.
+const LABEL_COOLDOWN_MS = Number(process.env.SCHEDULER_LABEL_COOLDOWN_MS) || 60_000;
 // CTL-713: permanent-failure cooldown. code=2 (prior_artifact_missing,
 // phase-agent-dispatch exit 2) is a structural refusal — back it off longer than
 // the 60s transient window. GC reaps the marker once the ticket leaves the eligible set.
@@ -3151,7 +3261,6 @@ function runTick() {
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
-      teardownWorktree: runningOpts.teardownWorktree,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
       concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
       // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
@@ -3212,17 +3321,17 @@ function scheduleDebouncedTick(debounceMs) {
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
 // start the event-log fast path. `dispatch` / `readEligible` / `exec` /
-// `writeStatus` / `teardownWorktree` are injectable so a test drives a hermetic
-// daemon (`exec` is the D5 blocker-state fetch seam, CTL-565; `writeStatus` is
-// the CTL-558 Linear-write seam; `teardownWorktree` is the CTL-582 worktree
-// seam — each undefined here defaults to the real module in schedulerTick).
+// `writeStatus` are injectable so a test drives a hermetic daemon (`exec` is
+// the D5 blocker-state fetch seam, CTL-565; `writeStatus` is the CTL-558
+// Linear-write seam — each undefined here defaults to the real module in
+// schedulerTick). CTL-703: teardownWorktree removed; worktree teardown now
+// happens in the phase-teardown agent.
 export function startScheduler({
   orchDir,
   dispatch,
   readEligible,
   exec,
   writeStatus,
-  teardownWorktree,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
   concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
   // `configPath` is also set (production wiring), runTick re-reads the live
@@ -3239,7 +3348,7 @@ export function startScheduler({
   liveBackgroundCount, // CTL-676: optional test-only seam, forwarded to
   // schedulerTick where it defaults to countBackgroundAgents (the live
   // `claude agents --json` count). Symmetric with the existing dispatch /
-  // exec / writeStatus / teardownWorktree seams on schedulerTick.
+  // exec / writeStatus seams on schedulerTick.
   livenessIsFresh, // CTL-731: optional override; runTick defaults to getAgentsCached().isFresh.
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
@@ -3281,7 +3390,6 @@ export function startScheduler({
     readEligible,
     exec,
     writeStatus,
-    teardownWorktree,
     cache,
     concurrency,
     configPath, // CTL-676: per-tick Layer-1 re-read source

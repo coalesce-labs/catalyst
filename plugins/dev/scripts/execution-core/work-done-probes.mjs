@@ -19,6 +19,12 @@ import { parseWorktreeForBranch } from "./worktree.mjs";
 // rather than advanced on a partial doc (unsafe).
 const MIN_ARTIFACT_BYTES = 200;
 
+// PLAN_PHASE_HEADER_RE — anchored multiline regex matching the `## Phase ` marker
+// that create-plan writes at the start of each implementation phase section. Must
+// stay in lockstep with the `"## Phase "` marker planProbe uses (below) — both
+// derive phaseCount from the same schema element.
+const PLAN_PHASE_HEADER_RE = /^## Phase /gm;
+
 // defaultRunGit — `git <args>` with stdout/stderr captured. Returns
 // { code, stdout, stderr }; never throws.
 export function defaultRunGit(args, { spawn = spawnSync } = {}) {
@@ -214,13 +220,14 @@ function monitorMergeProbe({ ticket, orchDir } = {}, { readFile = defaultReadFil
   return ghPullRest({ number, url }, runGh)?.merged === true;
 }
 
-// implementProbe — commits-ahead>0 vs origin/main + clean tree on the worktree
+// commitProbe — commits-ahead>0 vs origin/main + clean tree on the worktree
 // bound to refs/heads/<ticket>. The worktree path is resolved from `git worktree
 // list --porcelain` (not reconstructed from projectKey config) so it's correct
 // regardless of any per-team config drift — same precedent as teardownWorktree.
 // Returns false on any git failure (safe default — missing worktree, stale ref,
-// permission error, etc.).
-function implementProbe({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = {}) {
+// permission error, etc.). Shared by implementProbe (CTL-574) and remediateProbe
+// (CTL-653); implement strengthens this core with a plan-completeness gate (CTL-663).
+function commitProbe({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = {}) {
   if (!ticket || !repoRoot) return false;
 
   const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
@@ -233,6 +240,60 @@ function implementProbe({ ticket, repoRoot } = {}, { runGit = defaultRunGit } = 
   const status = runGit(["-C", worktreePath, "status", "--porcelain"]);
   if (status.code !== 0) return false;
   return status.stdout.trim() === "";
+}
+
+// implementProbe — strengthened (CTL-663 Option A): commitProbe's commits-ahead>0
+// + clean-tree core, PLUS — when a plan doc exists for the ticket — a
+// plan-completeness gate requiring commitCount >= the number of `## Phase `
+// headers (at least one commit per plan phase; implement-plan commits each phase
+// as it lands). A 1-of-5 partial branch therefore probes FALSE and is routed to
+// the CTL-658 resume path (recovery branch C) instead of being reclaimed-as-done
+// (branch B) — the CTL-661 premature-advance class. No plan doc / short doc /
+// zero headers → gate skipped (backward compatible with planless tickets).
+// remediateProbe NEVER gets this gate (Option A1) — remediate fixes 1–2 findings,
+// not N plan phases; gating it would cause revive loops on short remediations.
+function implementProbe(
+  { ticket, repoRoot } = {},
+  {
+    runGit = defaultRunGit,
+    listArtifacts = defaultListArtifacts,
+    readArtifact = defaultReadArtifact,
+  } = {},
+) {
+  if (!ticket || !repoRoot) return false;
+
+  const worktreePath = resolveWorktree({ ticket, repoRoot }, { runGit });
+  if (!worktreePath) return false;
+
+  const ahead = runGit(["-C", worktreePath, "rev-list", "--count", "origin/main..HEAD"]);
+  if (ahead.code !== 0) return false;
+  const commitCount = Number(ahead.stdout.trim() || "0");
+  if (commitCount <= 0) return false;
+
+  const status = runGit(["-C", worktreePath, "status", "--porcelain"]);
+  if (status.code !== 0) return false;
+  if (status.stdout.trim() !== "") return false;
+
+  // Plan-completeness gate: if a plan doc exists, all phases must have landed.
+  const planDir = `${worktreePath}/thoughts/shared/plans`;
+  let planFiles;
+  try {
+    planFiles = listArtifacts(planDir);
+  } catch {
+    planFiles = [];
+  }
+  if (Array.isArray(planFiles) && planFiles.length > 0) {
+    const match = planFiles.find((f) => matchesTicket(f, ticket));
+    if (match) {
+      const body = readArtifact(`${planDir}/${match}`);
+      if (body && body.length >= MIN_ARTIFACT_BYTES) {
+        const phaseCount = (body.match(PLAN_PHASE_HEADER_RE) || []).length;
+        if (phaseCount > 0 && commitCount < phaseCount) return false;
+      }
+    }
+  }
+
+  return true;
 }
 
 // matchesTicket — true when `filename` is a markdown file naming `ticket`. Mirrors
@@ -301,11 +362,13 @@ const planProbe = artifactProbe("thoughts/shared/plans", {
 
 // CTL-653: remediateProbe — remediate is fix-capable (like implement), so its
 // work-done signal is the same: a commit landed on the ticket branch + a clean
-// tree. It reuses implementProbe's commit-state check verbatim. Registering ANY
-// probe is the real point (research §9): without it, a false-dead during
-// remediate hits CTL-587's branch-(A) "no-probe-for-phase" escalation →
-// needs-human, defeating the very autonomy CTL-653 adds.
-const remediateProbe = implementProbe;
+// tree. It reuses commitProbe's commit-state check (NOT implementProbe) so that
+// the CTL-663 plan-completeness gate never applies to remediate — remediate fixes
+// 1–2 findings, not N plan phases, and gating it would cause revive loops on
+// short remediations (Option A1). Registering ANY probe is the real point
+// (research §9): without it, a false-dead during remediate hits CTL-587's
+// branch-(A) "no-probe-for-phase" escalation → needs-human.
+const remediateProbe = commitProbe;
 
 // WORK_DONE_PROBES — phase → probe. Adding a probe is the entire opt-in for a
 // phase to participate in the CTL-574 reclaim sweep. All nine pipeline phases
@@ -338,7 +401,7 @@ export function hasProbe(phase) {
 // (probe_checked) so an operator reading the event/HUD knows what evidence the
 // daemon used to declare the dead worker's work complete.
 export const WORK_DONE_PROBE_DESCRIPTIONS = {
-  implement: "commits ahead of origin/main + clean worktree",
+  implement: "commits ahead of origin/main + clean worktree + all plan phases landed (commits >= ## Phase count when a plan doc exists)",
   remediate: "commits ahead of origin/main + clean worktree",
   research: "≥200-byte research md naming the ticket with ## Summary / ## Code References",
   plan: "≥200-byte plan with ## Phase and Success Criteria",

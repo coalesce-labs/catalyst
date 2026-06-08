@@ -828,3 +828,233 @@ describe("defaultProgressMark (CTL-736 Phase 3)", () => {
     expect(defaultProgressMark({ ticket: "CTL-9", phase: "mystery", orchDir: "/orch" })).toBe(0);
   });
 });
+
+// --- CTL-663: implementProbe plan-completeness gate -------------------------
+
+// FIVE_PHASE_PLAN_BODY: >200 bytes, five ## Phase N: headers at line-start,
+// a Success Criteria line — shared by Phase 1 (remediate) and Phase 2 (implement) tests.
+const FIVE_PHASE_PLAN_BODY = `# Plan: CTL-1
+
+${"Overview and context for the five-phase implementation plan. ".repeat(5)}
+
+## Phase 1: Setup
+
+Establish the foundation and initial scaffolding.
+
+## Phase 2: Core Logic
+
+Implement the main business logic and algorithms.
+
+## Phase 3: Integration
+
+Wire up all components and integration points.
+
+## Phase 4: Tests
+
+Write comprehensive test coverage for all paths.
+
+## Phase 5: Cleanup
+
+Final polish, documentation, and code cleanup.
+
+### Success Criteria
+- [ ] All five phases land as discrete commits on the branch
+- [ ] All targeted tests pass
+`;
+
+describe("CTL-663: remediate is decoupled from the plan-count gate", () => {
+  test("remediate: 1 commit + clean tree + 5-phase plan doc → true (no plan gate)", () => {
+    const wt = "/wt/CTL-1";
+    const runGit = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "1\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+    const listArtifacts = makeListArtifacts({ "thoughts/shared/plans": ["2026-06-07-ctl-1.md"] });
+    const readArtifact = makeReadArtifact({ "2026-06-07-ctl-1.md": FIVE_PHASE_PLAN_BODY });
+    expect(
+      WORK_DONE_PROBES.remediate({ ticket: "CTL-1", repoRoot: "/repo" }, { runGit, listArtifacts, readArtifact }),
+    ).toBe(true);
+  });
+});
+
+describe("WORK_DONE_PROBES.implement — plan-completeness gate (CTL-663)", () => {
+  const wt = "/wt/CTL-1";
+  const runGitWith = (commitCount) =>
+    makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: `${commitCount}\n`, stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+    });
+  const fivePhasePlan = makeListArtifacts({ "thoughts/shared/plans": ["2026-06-07-ctl-1.md"] });
+  const readFivePhase = makeReadArtifact({ "2026-06-07-ctl-1.md": FIVE_PHASE_PLAN_BODY });
+
+  test("1-of-5: commitCount(1) < phaseCount(5) → false (the CTL-661 class)", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: fivePhasePlan, readArtifact: readFivePhase },
+      ),
+    ).toBe(false);
+  });
+
+  test("5-of-5: commitCount(5) >= phaseCount(5) → true", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(5), listArtifacts: fivePhasePlan, readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+
+  test("6 commits, 5 phases (fixup overshoot) → true", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(6), listArtifacts: fivePhasePlan, readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+
+  test("no plan doc for ticket → true on 1 commit (backward compatible)", () => {
+    const noMatch = makeListArtifacts({ "thoughts/shared/plans": ["2026-06-07-ctl-999.md"] });
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: noMatch, readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+
+  test("plan dir missing/empty (listArtifacts → []) → true on 1 commit", () => {
+    const empty = makeListArtifacts({ "thoughts/shared/plans": [] });
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: empty, readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+
+  test("plan doc below MIN_ARTIFACT_BYTES → gate skipped → true on 1 commit", () => {
+    const shortBody = "## Phase 1:\n## Phase 2:\n## Phase 3:\n## Phase 4:\n## Phase 5:\n";
+    const readShort = makeReadArtifact({ "2026-06-07-ctl-1.md": shortBody });
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: fivePhasePlan, readArtifact: readShort },
+      ),
+    ).toBe(true);
+  });
+
+  test("plan doc ≥200B but zero '## Phase ' headers → gate skipped → true on 1 commit", () => {
+    const noPhases = "# Plan: CTL-1\n\n" + "Overview text without any phase headers. ".repeat(7) + "\n### Success Criteria\n- [ ] done\n";
+    const readNoPhases = makeReadArtifact({ "2026-06-07-ctl-1.md": noPhases });
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: fivePhasePlan, readArtifact: readNoPhases },
+      ),
+    ).toBe(true);
+  });
+
+  test("'## Phase ' must be anchored: indented/inline mentions don't count as phases", () => {
+    // 3 proper "^## Phase " lines + inline/subheading noise that must NOT be counted.
+    const mixedBody = `# Plan: CTL-1
+
+${"Context for the plan. ".repeat(9)}
+
+## Phase 1: First
+
+See ## Phase 2 inline — this should not be counted by the anchored regex.
+And ### Phase 3 is not a match either.
+
+## Phase 2: Second
+
+More details. Mention of ## Phase 3 inline does not count.
+
+## Phase 3: Third
+
+### Phase 4 (subheading — not a match)
+    ## Phase 4: indented (not at line-start — not a match)
+
+### Success Criteria
+- [ ] All three phases done
+`;
+    const readMixed = makeReadArtifact({ "2026-06-07-ctl-1.md": mixedBody });
+    // phaseCount = 3; 2 commits < 3 → false
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(2), listArtifacts: fivePhasePlan, readArtifact: readMixed },
+      ),
+    ).toBe(false);
+    // 3 commits >= 3 → true
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(3), listArtifacts: fivePhasePlan, readArtifact: readMixed },
+      ),
+    ).toBe(true);
+  });
+
+  test("listArtifacts throwing seam → gate skipped (never throws) → true on 1 commit", () => {
+    const throwSeam = () => { throw new Error("readdir blew up"); };
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: throwSeam, readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+
+  test("commit-state floor still applies: 0 commits + 5-phase plan → false", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(0), listArtifacts: fivePhasePlan, readArtifact: readFivePhase },
+      ),
+    ).toBe(false);
+  });
+
+  test("dirty tree still fails even when commitCount >= phaseCount", () => {
+    const runGitDirty = makeRunGit({
+      "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-1", wt), stderr: "" },
+      [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "5\n", stderr: "" },
+      [`-C ${wt} status --porcelain`]: { code: 0, stdout: " M plugins/dev/foo.mjs\n", stderr: "" },
+    });
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitDirty, listArtifacts: fivePhasePlan, readArtifact: readFivePhase },
+      ),
+    ).toBe(false);
+  });
+
+  test("readArtifact returning null → gate skipped (falsy body) → true on 1 commit", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: fivePhasePlan, readArtifact: () => null },
+      ),
+    ).toBe(true);
+  });
+
+  test("listArtifacts returning a non-array → gate skipped (Array.isArray guard) → true on 1 commit", () => {
+    expect(
+      WORK_DONE_PROBES.implement(
+        { ticket: "CTL-1", repoRoot: "/repo" },
+        { runGit: runGitWith(1), listArtifacts: () => "not-an-array", readArtifact: readFivePhase },
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("CTL-663: probe descriptions updated for plan-phase gate", () => {
+  test("implement description names the plan-phase gate", () => {
+    expect(WORK_DONE_PROBE_DESCRIPTIONS.implement).toContain("plan");
+  });
+  test("remediate description is unchanged (commit-only)", () => {
+    expect(WORK_DONE_PROBE_DESCRIPTIONS.remediate).toBe("commits ahead of origin/main + clean worktree");
+  });
+});

@@ -42,6 +42,7 @@ import {
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
+import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import {
   recoverStartup,
   startMonitor,
@@ -57,7 +58,12 @@ import {
   startWorktreeRefreshTimer,
   readWorktreeRefreshConfig,
 } from "./worktree-refresh-timer.mjs";
-import { reconcileBootResume } from "./boot-resume.mjs";
+import {
+  startStalePrRescueTimer,
+  readStalePrRescueConfig,
+} from "./stale-pr-rescue-timer.mjs";
+import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
+import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
 // main() can resolve the slot-ceiling config once and thread it into the
@@ -93,12 +99,16 @@ let _reaper = null;
 let _orphanTimer = null;
 // CTL-707: periodic background worktree refresh timer.
 let _refreshTimer = null;
+// CTL-782: periodic stale/conflicting-PR rescue timer.
+let _stalePrRescueTimer = null;
 // CTL-650: the push-based session wait-state watcher handle.
 let _waitWatcher = null;
 // CTL-685: per-worker memory sampler handle.
 let _memorySampler = null;
 // CTL-787: account-level rate-limit usage poller handle.
 let _ratelimitPoller = null;
+// CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
+let _heartbeat = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -320,6 +330,8 @@ export function startDaemon({
   orphanReaperConfig = null,
   // CTL-707: worktree refresh timer config (catalyst.orchestration.worktreeRefresh).
   worktreeRefreshConfig = null,
+  // CTL-782: stale/conflicting-PR rescue timer config (catalyst.orchestration.stalePrRescue).
+  stalePrRescueConfig = null,
   // CTL-650: the session wait-state watcher. Injectable for tests; gated by a
   // config knob (default-on, CATALYST_WAIT_WATCHER=0 disables) like the reaper.
   startWaitWatcher = realStartWaitWatcher,
@@ -333,6 +345,12 @@ export function startDaemon({
   // memory sampler.
   startRatelimitPoller = realStartRatelimitPoller,
   enableRatelimitPoller = readRatelimitPollerConfig().enabled,
+  // CTL-859: node-heartbeat emitter. Injectable for tests; default-on, gated by
+  // CATALYST_HEARTBEAT=0 (the test/opt-out knob, mirroring the other timers).
+  // ADDITIVE/dormant — the heartbeat only appends observability events; nothing
+  // in dispatch/claim consumes them in PR1.
+  startHeartbeat = realStartHeartbeat,
+  enableHeartbeat = process.env.CATALYST_HEARTBEAT !== "0",
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -416,6 +434,9 @@ export function startDaemon({
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
     reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
+    // (operator may have dropped the sentinel while the daemon was down).
+    processApprovedResumes({ orchDir });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -510,7 +531,7 @@ export function startDaemon({
     }
 
     if (enableReaper) {
-      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, debounceMs, pollMs, orchDir, makeReaper });
+      startReaperAndTimer({ orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, debounceMs, pollMs, orchDir, makeReaper });
     }
 
     // CTL-650: start the push-based session wait-state watcher. Inside the same
@@ -529,6 +550,15 @@ export function startDaemon({
     // try/catch so a throw triggers PID-file cleanup via stopDaemon.
     if (enableRatelimitPoller) {
       _ratelimitPoller = startRatelimitPoller();
+    }
+
+    // CTL-859: start the node-heartbeat emitter. Appends a node.heartbeat event
+    // to the unified event log every HEARTBEAT_INTERVAL_MS so a future liveness
+    // reader (readClusterHeartbeats) can detect a dead node by heartbeat
+    // silence. ADDITIVE/dormant — pure observability, no behavior consumes it
+    // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
+    if (enableHeartbeat) {
+      _heartbeat = startHeartbeat();
     }
   } catch (err) {
     stopDaemon();
@@ -549,6 +579,7 @@ export function startDaemon({
 function startReaperAndTimer({
   orphanReaperConfig,
   worktreeRefreshConfig,
+  stalePrRescueConfig,
   debounceMs,
   orchDir,
   // CTL-769: poll-fallback interval. Defaults to TAILER_POLL_INTERVAL_MS
@@ -626,6 +657,21 @@ function startReaperAndTimer({
       intervalSeconds: refreshCfg.intervalSeconds ?? 300,
       quietSeconds: refreshCfg.quietSeconds ?? 30,
       orchDir,
+    });
+  }
+
+  // CTL-782: start the periodic stale/conflicting-PR rescue timer.
+  // No orchId / linearWrite threading needed: the timer derives the per-ticket
+  // orchestrator id from the phase signal's `.orchestrator` (orchId === ticket
+  // convention — the daemon has no global orch id), and defaults linearWrite
+  // to the real linear-write module so escalations reach the needs-human queue.
+  const rescueCfg = stalePrRescueConfig ?? {};
+  if (rescueCfg.enabled !== false) {
+    _stalePrRescueTimer = startStalePrRescueTimer({
+      enabled: true,
+      intervalSeconds: rescueCfg.intervalSeconds ?? RESCUE_DEFAULTS.intervalSeconds,
+      orchDir,
+      config: rescueCfg,
     });
   }
 }
@@ -788,6 +834,14 @@ export function stopDaemon() {
     }
     _refreshTimer = null;
   }
+  if (_stalePrRescueTimer) {
+    try {
+      _stalePrRescueTimer.stop();
+    } catch {
+      /* timer already stopped */
+    }
+    _stalePrRescueTimer = null;
+  }
   _reaper = null;
   // CTL-650: stop the wait-state watcher.
   if (_waitWatcher) {
@@ -815,6 +869,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: ratelimit-poller stop failed");
     }
     _ratelimitPoller = null;
+  }
+  // CTL-859: stop the node-heartbeat emitter.
+  if (_heartbeat) {
+    try {
+      _heartbeat.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: heartbeat stop failed");
+    }
+    _heartbeat = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {
@@ -863,6 +926,8 @@ function main() {
   const orphanReaperConfig = readOrphanReaperConfig(configPath);
   // CTL-707: read the worktree-refresh config from the same config file.
   const worktreeRefreshConfig = readWorktreeRefreshConfig(configPath);
+  // CTL-782: read the stale-PR-rescue config from the same config file.
+  const stalePrRescueConfig = readStalePrRescueConfig(configPath);
   // CTL-665 / CTL-678: resolve the executionCore concurrency knobs once here
   // and thread them into startDaemon → scheduler + boot-resume. The
   // machine-canonical Layer-2 file (~/.config/catalyst/config.json) wins
@@ -889,7 +954,7 @@ function main() {
   process.on("unhandledRejection", fatal("unhandled rejection"));
 
   try {
-    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707
+    startDaemon({ pidFile, orphanReaperConfig, worktreeRefreshConfig, stalePrRescueConfig, concurrency, configPath, layer2Path }); // CTL-676 + CTL-678 + CTL-707 + CTL-782
   } catch (err) {
     log.error({ err }, "execution-core daemon: failed to start");
     process.exit(1);

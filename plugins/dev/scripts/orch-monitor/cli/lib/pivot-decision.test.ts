@@ -14,7 +14,7 @@ function mkEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
     severityNumber: 9,
     traceId: "trace-abc-1234567890abcdef",
     spanId: null,
-    resource: { "service.name": "test", "service.namespace": "catalyst", "service.version": "0.0.0" },
+    resource: { "service.name": "test", "service.namespace": "catalyst", "service.version": "0.0.0", "host.name": "test-host", "host.id": "0000000000000000" },
     attributes: {
       "event.name": "test",
       "catalyst.orchestrator.id": "o-ctl-388",

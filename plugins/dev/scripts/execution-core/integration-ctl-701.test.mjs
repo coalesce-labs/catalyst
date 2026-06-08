@@ -15,10 +15,10 @@
 // Run: bun test plugins/dev/scripts/execution-core/integration-ctl-701.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reconcileBootResume } from "./boot-resume.mjs";
+import { reconcileBootResume, bootResumePendingPath } from "./boot-resume.mjs";
 import { detectColdStart, classifyWorker } from "./recovery.mjs";
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 
@@ -98,9 +98,11 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
     expect(coldReport.coldStart).toBe(true);
     expect(coldReport.epochSource).toBe("exec-core");
 
-    // reconcileBootResume should dispatch the 3 non-terminal tickets (CTL-D is terminal)
+    // CTL-830 + CTL-644: CTL-D (implement/turn-cap-exhausted) is terminal → excluded from
+    // candidates entirely (not gated). CTL-A/B (pr) + CTL-C (monitor-deploy) are expensive
+    // phases → gated behind operator approval, NOT auto-dispatched on cold start.
     const dispatched = [];
-    const events = [];
+    const gatedEvents = [];
     const res = reconcileBootResume({
       orchDir,
       report: { coldStart: true },
@@ -109,20 +111,24 @@ describe("CTL-701 incident integration (2026-05-28 scenario)", () => {
         dispatched.push({ ticket: a.ticket, phase: a.phase });
         return { code: 0 };
       },
-      resolveSession: () => null, // no resume UUIDs available
-      appendEvent: (e) => events.push(e),
+      resolveSession: () => null,
+      appendEvent: () => {},
+      appendGatedEvent: (e) => gatedEvents.push(e),
     });
 
-    expect(res.dispatched).toBe(3);
+    // CTL-A/B/C are expensive → gated; CTL-D is terminal → excluded (3 gated, not 4).
+    expect(res.dispatched).toBe(0);
+    expect(res.gated).toBe(3);
     expect(res.failed).toBe(0);
+    expect(dispatched).toHaveLength(0);
+    expect(gatedEvents).toHaveLength(3);
 
-    const tickets = dispatched.map((d) => d.ticket).sort();
-    expect(tickets).toEqual(["CTL-A", "CTL-B", "CTL-C"]);
-
-    // Monitor-deploy must be in the dispatch list; turn-cap-exhausted must be excluded
-    const phases = Object.fromEntries(dispatched.map((d) => [d.ticket, d.phase]));
-    expect(phases["CTL-C"]).toBe("monitor-deploy");
-    expect(phases["CTL-D"]).toBeUndefined();
+    // Pending markers exist for the 3 gated (non-terminal) tickets — CTL-A/B (pr) + CTL-C
+    // (monitor-deploy). CTL-D (turn-cap-exhausted) is terminal → excluded, no marker.
+    for (const ticket of ["CTL-A", "CTL-B", "CTL-C"]) {
+      expect(existsSync(bootResumePendingPath(orchDir, ticket))).toBe(true);
+    }
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-D"))).toBe(false);
   });
 
   test("per-tick reclaim sweep does NOT short-circuit monitor-deploy; turn-cap-exhausted IS terminal (CTL-830)", () => {

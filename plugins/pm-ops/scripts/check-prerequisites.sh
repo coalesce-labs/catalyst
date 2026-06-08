@@ -10,8 +10,7 @@ echo "Checking PM plugin prerequisites..."
 if ! command -v humanlayer &>/dev/null; then
 	echo "❌ HumanLayer CLI not found (required for thoughts system)"
 	echo "Install with:"
-	echo "  pip install humanlayer"
-	echo "  # or: pipx install humanlayer"
+	echo "  npm install -g humanlayer"
 	exit 1
 fi
 

@@ -36,12 +36,21 @@ In Claude Code:
 
 Restart Claude Code after installing.
 
+On a headless or SSH-only host, install from the shell instead:
+
+```bash
+claude plugin marketplace add coalesce-labs/catalyst
+claude plugin install catalyst-dev@catalyst
+```
+
 ## 3. Install the command-line tools
 
 Several Catalyst features call shell tools by name (`catalyst-monitor`, `catalyst-hud`, `catalyst-events`, and more). Install them onto your PATH:
 
 ```bash
-bash ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh
+shopt -s nullglob
+_cli=( ~/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts/install-cli.sh )
+[ ${#_cli[@]} -gt 0 ] && bash "${_cli[0]}" || echo "catalyst-dev plugin not installed — run step 2 first"
 ```
 
 They install to `$HOME/.catalyst/bin`. If that folder isn't on your PATH, the installer adds it to your shell's startup file. Open a new terminal to pick up the change, then check it worked:
@@ -51,20 +60,39 @@ which catalyst-events
 catalyst-events help
 ```
 
-## 4. Add Catalyst to your project
+## 4. Start the stack
+
+Bring the three core Catalyst services up in dependency order (broker → monitor → execution-core), plus the opt-in mitmproxy capture service if you pass `--proxy`:
+
+```bash
+catalyst-stack start
+```
+
+Run this once after each reboot or after pulling new code. See [catalyst-stack reference](/reference/catalyst-stack/) for flags including `--hotpatch` (apply an update without reinstalling) and `--proxy` (opt-in Linear traffic capture via mitmproxy).
+
+The stack is three long-running services (plus an opt-in proxy):
+
+- **`catalyst-broker`** — the event bus every agent and the executor read and write through.
+- **`catalyst-monitor`** — watches your GitHub PRs and CI status and emits events.
+- **`catalyst-execution-core`** — the scheduler: it picks up Todo tickets and dispatches the phase-agent workers.
+- **`mitmproxy`** *(opt-in, `--proxy` only)* — logs Linear API traffic.
+
+See the [catalyst-stack reference](/reference/catalyst-stack/) for the full command set.
+
+## 5. Add Catalyst to your project
 
 Copy the Catalyst snippet into your project's `CLAUDE.md` so Claude Code knows the available workflows:
 
 ```bash
-cat plugins/dev/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
+cat ~/.claude/plugins/cache/catalyst/catalyst-dev/*/templates/CLAUDE_SNIPPET.md >> .claude/CLAUDE.md
 ```
 
-## 5. Try it
+## 6. Try it
 
 Start a Claude Code session and run:
 
 ```
-/research-codebase
+/catalyst-dev:research-codebase
 ```
 
 Follow the prompts. Catalyst spawns helper agents, documents what your code does, and saves the findings to `thoughts/shared/research/`.
@@ -97,3 +125,4 @@ Check your installed versions any time with `/plugins`.
 
 - [How Catalyst works](/getting-started/how-catalyst-works/) — the autonomous loop, end to end
 - [Configuration](/reference/configuration/) — the settings Catalyst reads
+- [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/) — set up on a headless Mac reached over SSH

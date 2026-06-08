@@ -672,6 +672,19 @@ describe("isBatchRateLimited (CTL-784)", () => {
   });
 });
 
+// ── CTL-785: isBatchAuthError re-export contract ──
+// linear-query.mjs re-exports isBatchAuthError from linear-remint.mjs so
+// callers already depending on this module need no direct linear-remint
+// import. Pin the re-export so an accidental removal fails a test.
+describe("isBatchAuthError re-export (CTL-785)", () => {
+  test("is importable from linear-query.mjs and detects AUTHENTICATION_ERROR", async () => {
+    const { isBatchAuthError } = await import("./linear-query.mjs");
+    expect(typeof isBatchAuthError).toBe("function");
+    expect(isBatchAuthError([{ extensions: { code: "AUTHENTICATION_ERROR" } }])).toBe(true);
+    expect(isBatchAuthError([{ extensions: { code: "RATELIMITED" } }])).toBe(false);
+  });
+});
+
 // ── CTL-671 Phase 2: 3-valued phantom-resolution classifier ──
 describe("classifyTicketResolution (CTL-671)", () => {
   test("resolvable ticket → exists", () => {
