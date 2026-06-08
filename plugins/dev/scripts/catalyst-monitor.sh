@@ -165,8 +165,13 @@ bootstrap() {
     errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-foundry:setup-catalyst first")
   fi
 
-  if [[ ! -d "$CATALYST_DIR/wt" ]]; then
-    errors+=("Worktree directory missing: $CATALYST_DIR/wt/ — run /catalyst-foundry:setup-catalyst first")
+  # CTL-841: a missing wt/ dir is a fresh-host normal, not a fatal error. A daemon
+  # start script should mkdir -p its own runtime dirs and start, rather than dead-end
+  # a headless-host operator at an interactive Claude skill. Self-heal instead of
+  # hard-failing. (cmd_start also runs `mkdir -p "$CATALYST_DIR/wt"`, but bootstrap's
+  # `return 1` made that line unreachable — proving the auto-create was always intended.)
+  if [[ ! -d "$CATALYST_DIR/wt" ]] && [[ -d "$CATALYST_DIR" ]]; then
+    mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
   fi
 
   if [[ ${#errors[@]} -gt 0 ]]; then
