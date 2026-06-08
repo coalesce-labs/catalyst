@@ -1522,29 +1522,45 @@ assert_eq "true" "$(echo "$STDOUT" | jq -r '.idempotent // false')" \
 	"claim-with-signal dispatch reports idempotent (bows out, no new work)"
 
 echo ""
-echo "Test 43c2 (CTL-837): in-block signal-present guard — stalled signal + aged claim at revive gen still bows out"
-fresh_env t43c2_signal_guard
-# Drive the claim block directly (not the pre-claim status short-circuit): a
-# `stalled` signal falls THROUGH the status guard, so the revive targets
-# generation 2 (signal.generation + 1). Pre-seed an aged orphan claim at gen 2.
-# The claim is old, but the SIGNAL is present → a worker exists / is being
-# revived for this phase → the in-block `[[ ! -e $SIGNAL_FILE ]]` guard is false,
-# so the dispatch must bow out as claim-lost and must NOT reap the gen-2 claim.
+echo "Test 43c2 (CTL-837): REVIVE-gen pre-spawn orphan (stalled signal at gen<TARGET + aged claim, no live worker) is reaped → proceeds"
+fresh_env t43c2_revive_orphan
+# A revive: a `stalled` signal at gen 1 falls THROUGH the status short-circuit, so
+# the revive targets generation 2. The gen-2 worker created triage.claim.2 then
+# DIED before writing its own (gen-2) signal — so the only signal on disk is the
+# OLD stalled gen-1 one. The review found the original signal-absent guard wedged
+# this forever (signal-present was wrongly read as a live worker). The fix: the
+# signal's generation (1) < TARGET (2) AND the claim is aged ⇒ a pre-spawn orphan
+# at the revive generation ⇒ reap + re-dispatch gen 2 (NOT claim-lost).
 printf '%s\n' '{"ticket":"CTL-100","phase":"triage","status":"stalled","generation":1}' \
 	>"${WORKER_DIR}/phase-triage.json"
 printf '{"generation":2,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.2"
 touch -t 202001010000 "${WORKER_DIR}/triage.claim.2"
 STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
 RC43C2=$?
-assert_eq "0" "$RC43C2" "stalled+aged-claim dispatch exits 0"
-assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" \
-	"stalled+aged-claim bows out as claim-lost (signal present → not a pre-spawn orphan)"
-assert_eq "2" "$(echo "$STDOUT" | jq -r '.generation')" \
-	"stalled+aged-claim reports the contested revive generation = 2"
-assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
-	"stalled+aged-claim did NOT spawn claude --bg (single-flight)"
-assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.2" ]] && echo yes || echo no)" \
-	"stalled+aged-claim: gen-2 claim survives (signal present blocks the orphan reap)"
+assert_eq "0" "$RC43C2" "revive-orphan dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
+	"revive-orphan is reaped → dispatch proceeds (status=running, NOT claim-lost)"
+assert_eq "yes" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+	"revive-orphan dispatch DID spawn claude --bg (the gen-2 wedge is cleared)"
+assert_eq "2" "$(jq -r '.generation' "${WORKER_DIR}/phase-triage.json")" \
+	"revive-orphan: signal rewritten at the revive generation 2 (authoritative source)"
+
+echo ""
+echo "Test 43e (CTL-837): CONCURRENT dispatch on one aged orphan → exactly ONE spawns (atomic reap, single-flight)"
+fresh_env t43e_concurrent_reap
+# Two dispatchers race the SAME aged pre-spawn orphan (no signal, claim > grace).
+# The reap MUST be atomic (rename-to-private): exactly one wins the mv + recreates
+# the claim + spawns; the other's mv fails (source gone) → it bows out claim-lost.
+# A non-atomic rm+create would let BOTH pass the read-only guard and both spawn —
+# the TOCTOU double-spawn the review caught (re-opening the CTL-736 race).
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out1" 2>/dev/null &
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out2" 2>/dev/null &
+wait
+RUNNING=$(cat "${ORCH_DIR}/cc_out1" "${ORCH_DIR}/cc_out2" | jq -r '.status' | grep -c '^running$' || true)
+assert_eq "1" "$RUNNING" \
+	"concurrent reap: exactly ONE dispatcher spawns (running); the other bows out (no double-spawn)"
 
 echo ""
 echo "Test 43d (CTL-837): YOUNG orphan claim within grace → loser bows out (don't reap a just-won claim)"
