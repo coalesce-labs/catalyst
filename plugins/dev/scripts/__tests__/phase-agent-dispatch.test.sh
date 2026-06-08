@@ -1756,6 +1756,39 @@ assert_eq "true" "$T58_HAS_ODIR" "CATALYST_ORCHESTRATOR_DIR still present when s
 assert_eq "yes" "$T58_VALID" "settings JSON valid with a context var omitted"
 
 echo ""
+echo "Test 59 (CTL-703): teardown dispatches with turnCap 15 + phase-monitor-deploy.json prior gate"
+fresh_env t59_teardown
+# teardown's prior artifact is phase-monitor-deploy.json — create it so the gate passes.
+printf '%s\n' '{"ticket":"CTL-100","status":"done","deployUrl":"https://example.com"}' \
+	>"${WORKER_DIR}/phase-monitor-deploy.json"
+"$DISPATCH" --phase teardown --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL_TD="${WORKER_DIR}/phase-teardown.json"
+if [[ ! -f $SIGNAL_TD ]]; then
+	fail "teardown signal file created: $SIGNAL_TD"
+else
+	pass "teardown signal file created"
+	assert_eq "teardown" "$(jq -r '.phase' "$SIGNAL_TD")" "signal.phase = teardown"
+	assert_eq "opus" "$(jq -r '.model' "$SIGNAL_TD")" "signal.model = opus (default)"
+	assert_eq "15" "$(jq -r '.turnCap' "$SIGNAL_TD")" "signal.turnCap = 15 (teardown default)"
+fi
+
+echo ""
+echo "Test 60 (CTL-703): teardown refuses when phase-monitor-deploy.json (prior artifact) is missing"
+fresh_env t60_teardown
+# No phase-monitor-deploy.json → the prior-artifact gate must refuse (exit 2, no signal).
+"$DISPATCH" --phase teardown --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/teardown_refused.out" 2>/dev/null
+RC_TD=$?
+assert_eq "2" "$RC_TD" "exit code 2 when teardown's phase-monitor-deploy.json is missing"
+assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/teardown_refused.out" 2>/dev/null || echo "")" \
+	"teardown stdout JSON status = refused"
+assert_eq "prior_artifact_missing" \
+	"$(jq -r '.reason' "${TEST_DIR}/teardown_refused.out" 2>/dev/null || echo "")" \
+	"teardown stdout JSON reason = prior_artifact_missing"
+[[ -f "${WORKER_DIR}/phase-teardown.json" ]] && SIG_TD_EXISTS="yes" || SIG_TD_EXISTS="no"
+assert_eq "no" "$SIG_TD_EXISTS" "no teardown signal written when refused"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

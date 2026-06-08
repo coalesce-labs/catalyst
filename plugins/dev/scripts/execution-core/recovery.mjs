@@ -34,6 +34,7 @@ import {
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
 } from "./config.mjs";
+import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
@@ -407,6 +408,24 @@ export function defaultAppendBootResumeEvent({ phase, ticket, orchId }) {
       reason: "cold-start-no-live-worker",
     }),
     "boot-resume",
+  );
+}
+
+// defaultAppendBootResumeGatedEvent — phase.<phase>.boot-resume-gated.<ticket>.
+// CTL-644: emitted once when an expensive phase is gated behind operator approval.
+// Deliberately distinct from boot-resume so the broker ignores it (audit-only,
+// like defaultAppendBootResumeEvent). Exported so boot-resume.mjs imports it as
+// the default appendGatedEvent seam.
+export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume-gated",
+      reason: "cold-start-expensive-phase-awaiting-approval",
+    }),
+    "boot-resume-gated",
   );
 }
 
@@ -1965,4 +1984,44 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
     workers,
     coldStart,
   };
+}
+
+// readClusterHeartbeats — CTL-859. Scan the unified event log for
+// `node.heartbeat` events and return the most-recent ISO timestamp seen for
+// each host: { [hostName]: lastSeenISO }. DORMANT for now — no caller consumes
+// this in PR1; later PRs (takeover/healing) use it to decide "dead" = no
+// heartbeat for a generous grace window (see the design doc: 5–10 min).
+//
+// Reads the host name from the event payload (body.payload["host.name"]),
+// falling back to the resource block (resource["host.name"]). Best-effort:
+// missing log, unreadable file, and malformed lines are skipped, never thrown.
+// `logPath` is injectable for tests; defaults to the same getEventLogPath()
+// every emitter uses.
+export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
+  const lastSeen = {};
+  let raw;
+  try {
+    raw = readFileSync(logPath, "utf8");
+  } catch {
+    return lastSeen; // no event log yet
+  }
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      continue; // partial/garbage line
+    }
+    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
+    const host =
+      evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+    const ts = evt?.ts;
+    if (typeof host !== "string" || host.length === 0) continue;
+    if (typeof ts !== "string" || ts.length === 0) continue;
+    // Keep the latest ts per host (ISO-8601 sorts lexicographically).
+    if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+  }
+  return lastSeen;
 }

@@ -162,7 +162,8 @@ catalyst-execution-core restart
           "review":         "sonnet",
           "pr":             "sonnet",
           "monitor-merge":  "sonnet",
-          "monitor-deploy": "sonnet"
+          "monitor-deploy": "sonnet",
+          "teardown":       "sonnet"
         },
         "turnCaps": {
           "triage":         10,
@@ -173,7 +174,8 @@ catalyst-execution-core restart
           "review":         40,
           "pr":             10,
           "monitor-merge":  20,
-          "monitor-deploy": 20
+          "monitor-deploy": 20,
+          "teardown":       15
         }
       }
     }
@@ -184,7 +186,7 @@ catalyst-execution-core restart
 **`dispatchMode`**
 
 - `"phase-agents"` (default) — runs one short-lived `claude --bg` job per pipeline phase
-  (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy).
+  (triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown).
 - `"oneshot-legacy"` — runs a single long-lived `claude -p /catalyst-legacy:oneshot` job per ticket.
   Preserved as a fallback; not recommended for new setups.
 

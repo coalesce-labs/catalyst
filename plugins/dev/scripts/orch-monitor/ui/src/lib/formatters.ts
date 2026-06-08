@@ -99,7 +99,7 @@ export const PHASE_COLORS: Record<string, string> = {
   done: "#6b7280",
   failed: "#ef4444",
   stalled: "#eab308",
-  // canonical 9-phase aliases (CTL-754) — keep in lock-step with Board.tsx PHASE_C
+  // canonical 10-phase aliases (CTL-754) — keep in lock-step with Board.tsx PHASE_C
   triage: "#64748b",
   research: "#3b82f6",
   plan: "#a855f7",
@@ -110,6 +110,7 @@ export const PHASE_COLORS: Record<string, string> = {
   pr: "#14b8a6",
   "monitor-merge": "#4ea1ff",
   "monitor-deploy": "#39d07a",
+  teardown: "#6b7280",
 };
 
 const FALLBACK_PHASE_COLOR = "#3b82f6";

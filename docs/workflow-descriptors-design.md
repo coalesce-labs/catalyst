@@ -2,7 +2,7 @@
 # Workflow Descriptors — Design
 
 **Status:** Design proposal. Not implemented. This document specifies a reusable *workflow
-descriptor* that collapses the orchestrator's hardcoded 9-phase pipeline into a single declarative
+descriptor* that collapses the orchestrator's hardcoded 10-phase pipeline into a single declarative
 source of truth, and reserves the seams for non-Linear triggers and off-box executors.
 
 **Why now:** the question that started this — *"do we have a good general way to encode workflow
@@ -107,13 +107,13 @@ A worked example for the current pipeline (abridged — every step shown structu
 
 ```json
 {
-  "$comment": "The default 9-step ticket pipeline. Replaces the ~10 hardcoded phase-list sites.",
+  "$comment": "The default 10-step ticket pipeline. Replaces the ~10 hardcoded phase-list sites.",
   "schemaVersion": "workflow/v1",
   "id": "default",
   "trigger": { "kind": "linear.ready" },
   "linearMirror": true,
   "entryStep": "research",
-  "terminalStep": "monitor-deploy",
+  "terminalStep": "teardown",
   "defaults": { "model": "opus", "effort": "medium", "preemptable": true },
   "steps": [
     { "id": "triage", "rank": 0, "preemptable": false, "linearKey": null,
@@ -144,8 +144,10 @@ A worked example for the current pipeline (abridged — every step shown structu
       "input": { "signal": "review.json" }, "workDoneProbe": "prOpened", "next": "monitor-merge" },
     { "id": "monitor-merge", "rank": 8, "linearKey": "inReview", "turnCap": 50,
       "input": { "signal": "phase-pr.json" }, "workDoneProbe": "merged", "next": "monitor-deploy" },
-    { "id": "monitor-deploy", "rank": 9, "linearKey": "done", "turnCap": 30,
-      "input": { "signal": "phase-monitor-merge.json" }, "workDoneProbe": "deployed", "next": null }
+    { "id": "monitor-deploy", "rank": 9, "linearKey": null, "turnCap": 30,
+      "input": { "signal": "phase-monitor-merge.json" }, "workDoneProbe": "deployed", "next": "teardown" },
+    { "id": "teardown", "rank": 10, "linearKey": "done", "turnCap": 15,
+      "input": { "signal": "phase-monitor-deploy.json" }, "workDoneProbe": "teardownComplete", "next": null }
   ],
   "ancillarySteps": [
     { "id": "remediate", "rank": 4, "linearKey": "remediating", "turnCap": 40,
@@ -629,7 +631,7 @@ reserves it. This is pure v2, gated behind the §10.8 ladder.
 ## 11. Docs & website update plan
 
 (Numbered 11 to sit after the v2 section; produced from a full `website/` audit.) The pipeline is
-documented in ~14 pages that assume a fixed 9-phase list; the descriptor reframes those as *one
+documented in ~14 pages that assume a fixed 10-phase list; the descriptor reframes those as *one
 instance of a descriptor*.
 
 - **New concept page:** `website/src/content/docs/reference/orchestration/workflows.md` — titled
@@ -641,12 +643,12 @@ instance of a descriptor*.
 - **Schema home:** extend `reference/configuration.md` with a `### Workflow descriptor` subsection
   under `## Orchestration Config` (after the `phaseAgents` table). New keys must also land in
   `plugins/dev/templates/config.template.json` or the config drift-checker warns.
-- **Heaviest rewrites:** `reference/orchestration/phase-agents.md` (reframe the fixed 9-phase as *the
+- **Heaviest rewrites:** `reference/orchestration/phase-agents.md` (reframe the fixed 10-phase as *the
   default descriptor*; the per-phase model/turnCap tables move to step fields + the new `effort` /
   preamble levers) and `reference/orchestration/scheduler.md` (stage-rank + non-preemptable set derive
   from descriptor edges).
 - **Prose touch-ups:** `reference/orchestration.md`, `guided-workflows/phases.md`,
-  `getting-started/introduction.mdx` (hard-coded 9-phase list at `:111`), `guided-workflows/index.md`,
+  `getting-started/how-catalyst-works.md` (phase sequence list), `guided-workflows/index.md`,
   and the `phase.*` event-name pages in `observability/`. **Lockstep (repo-root, dev-only):**
   `docs/orchestrator-overview.md` + `docs/architecture.md`.
 - **Conventions:** Starlight frontmatter with `sidebar.order`; mermaid via fenced blocks;
