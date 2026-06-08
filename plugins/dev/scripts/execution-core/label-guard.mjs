@@ -28,10 +28,13 @@ import { log } from "./config.mjs";
 // record terminal outcomes:
 //
 //   .applied — applyLabel returned applied:true. Happy path.
-//   .skipped — applyLabel returned reason:"missing-label". The workspace lacks
-//              the label; retrying inside this daemon's lifetime would just
-//              storm the Linear API (CTL-585). An operator creates the label
-//              in the Linear UI and deletes this marker to re-arm the apply.
+//   .skipped — applyLabel returned an UNRECOVERABLE reason ("missing-label": the
+//              workspace lacks the label; "exclusive-conflict" (CTL-834): the
+//              label's exclusive-group sibling is already on the ticket). Either
+//              way the add can never land this run, so retrying every tick would
+//              just storm the Linear API (CTL-585). An operator fixes the cause
+//              (create the label / clear the sibling) and deletes this marker to
+//              re-arm the apply.
 //
 // Transient failures (reason:"rate-limited", "transient", undefined) write no
 // marker so the next tick retries — CTL-558's recovery contract. CTL-638 pairs
@@ -43,6 +46,12 @@ function labelMarkerBase(orchDir, ticket, label) {
   return join(orchDir, "workers", ticket, `.linear-label-${label}`);
 }
 
+// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
+// daemon lifetime (CTL-834); labelOnce writes its .skipped marker for these to
+// stop the per-tick retry storm. "missing-label": the workspace lacks the label;
+// "exclusive-conflict": the label's exclusive-group sibling is already present.
+const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
+
 export function labelOnce(orchDir, ticket, label, writeStatus) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
@@ -52,11 +61,11 @@ export function labelOnce(orchDir, ticket, label, writeStatus) {
     // the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
       writeFileSync(`${base}.applied`, "");
-    } else if (res?.reason === "missing-label") {
+    } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
       log.warn(
-        { ticket, label },
-        "scheduler: label missing in workspace — skipping retries for this run"
+        { ticket, label, reason: res.reason },
+        "scheduler: label unrecoverable (missing / exclusive-conflict) — skipping retries for this run"
       );
     }
   } catch (err) {

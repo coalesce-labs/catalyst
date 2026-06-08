@@ -194,14 +194,19 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
 //                     Unrecoverable inside one daemon lifetime — callers
 //                     (scheduler.labelOnce) write a .skipped marker and do not
 //                     retry it this run.
+//   "exclusive-conflict" — CTL-834: the label is in an exclusive group whose
+//                     sibling is already on the ticket. Unrecoverable while the
+//                     sibling is present — callers back off (labelOnce writes
+//                     .skipped; convergeHeldLabel arms a cool-down).
 //   "rate-limited"  — Linear write rate-cap hit; retry next tick.
 //   "verify-failed" — write exited 0 but the read-back is missing the label
 //                     (the silent-success case) OR the read-back exec failed;
 //                     retry next tick.
 //   "transient"     — every other failure (network, spawn error, unknown
 //                     stderr, exec threw); retry next tick.
-// All reasons except "missing-label" are retryable next tick: labelOnce only
-// writes its .applied marker when applied: true, so a failure naturally retries.
+// Unrecoverable reasons ("missing-label", "exclusive-conflict") are NOT retried;
+// every other reason is retryable next tick (labelOnce only writes its .applied
+// marker when applied: true, so a failure naturally retries).
 export function applyLabel({ ticket, label, exec = defaultExec }) {
   try {
     const writeRes = exec("linearis", [
@@ -500,10 +505,17 @@ export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }
 //     stops the per-tick retry storm. (Observed on ADV tickets when the daemon
 //     orchestrates a team whose labels share names with the resolver's default
 //     team but have different UUIDs.)
-function classifyLabelFailure(stderr) {
+//   - "not exclusive child" (CTL-834): the label belongs to an EXCLUSIVE Linear
+//     label group and a SIBLING from that group is already on the ticket, so the
+//     add can never land while the sibling is present. Its own unrecoverable
+//     reason ("exclusive-conflict") so callers back off instead of re-issuing it
+//     every ~22s tick (observed: 218 fails / 44 min on the held-label converger —
+//     CTL-838 blocked↔needs-human, ADV-1295 blocked↔waiting).
+export function classifyLabelFailure(stderr) {
   const s = String(stderr ?? "");
   if (s.includes("not found")) return "missing-label";
   if (s.includes("incorrect team")) return "missing-label";
+  if (s.includes("not exclusive")) return "exclusive-conflict";
   if (s.includes("Rate limit")) return "rate-limited";
   return "transient";
 }
