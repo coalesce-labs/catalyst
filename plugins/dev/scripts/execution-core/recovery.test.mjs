@@ -84,28 +84,24 @@ const bgSignal = (status, bgJobId) => ({
 // --- classifyWorker — pure given statJob ----------------------------------
 
 describe("classifyWorker", () => {
-  test("terminal status (done/failed/stalled/skipped) → 'terminal' (CTL-701)", () => {
-    for (const status of ["done", "failed", "stalled", "skipped"]) {
+  test("terminal status (done/failed/stalled/skipped/turn-cap-exhausted) → 'terminal' (CTL-830)", () => {
+    for (const status of ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]) {
       expect(
         classifyWorker(bgSignal(status, "job-x"), { statJob: () => null }),
       ).toBe("terminal");
     }
   });
 
-  test("turn-cap-exhausted is NOT terminal — classified by liveness (CTL-701)", () => {
-    // Live bg job → "running"
-    const live = classifyWorker(
-      bgSignal("turn-cap-exhausted", "alive"),
-      { statJob: () => ({ mtimeMs: Date.now() }) },
-    );
-    expect(live).toBe("running");
-
-    // Dead bg job → "dead" (reclaim-eligible)
-    const dead = classifyWorker(
-      bgSignal("turn-cap-exhausted", "gone"),
-      { statJob: () => null },
-    );
-    expect(dead).toBe("dead");
+  test("turn-cap-exhausted IS terminal — CTL-748 removed turn caps (CTL-830)", () => {
+    // Liveness is irrelevant: terminal short-circuits before the liveness probe.
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "alive"), {
+        statJob: () => ({ mtimeMs: Date.now() }),
+      }),
+    ).toBe("terminal");
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "gone"), { statJob: () => null }),
+    ).toBe("terminal");
   });
 
   test("non-terminal status + bg job dir present → 'running' (re-attached)", () => {
@@ -620,11 +616,12 @@ describe("reclaimDeadWorkIfPossible — monitor-deploy (CTL-701)", () => {
   });
 });
 
-// CTL-701 Phase 2: reclaim/revive for turn-cap-exhausted
-describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
+// CTL-830: turn-cap-exhausted is terminal since CTL-748 removed turn caps —
+// reclaim/revive no longer apply (terminal short-circuits to noop).
+describe("reclaimDeadWorkIfPossible — turn-cap-exhausted is terminal (CTL-830)", () => {
   const orch = "/orch";
 
-  test("reclaims turn-cap-exhausted/dead with commits ahead (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no reclaim probe, no emit", () => {
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
@@ -635,12 +632,12 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       postReclaimMirror: () => {},
       liveness: () => "absent",
     });
-    expect(r).toBe("reclaimed");
-    expect(probe.calls.length).toBe(1);
-    expect(emit.calls.length).toBe(1);
+    expect(r).toBe("noop");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
   });
 
-  test("revives turn-cap-exhausted/dead with --resume when no work done (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no revive dispatch", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
       statJob: () => null,
@@ -657,9 +654,8 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       resolveSession: () => "uuid-resume",
       liveness: () => "absent",
     });
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-    expect(reviveDispatch.calls[0][0].resumeSession).toBe("uuid-resume");
+    expect(r).toBe("noop");
+    expect(reviveDispatch.calls.length).toBe(0);
   });
 });
 

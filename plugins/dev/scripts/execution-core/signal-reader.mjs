@@ -27,11 +27,12 @@ const ARTIFACT_NAMES = new Set([
 // event arrived before the timeout (phase-monitor-deploy SKILL.md). Ranked
 // the same as 'done' by byActivePhase: a skipped terminal must never shadow
 // an in-flight phase.
-// CTL-484 / CTL-701: 'turn-cap-exhausted' is NOT terminal — the worker's bg
-// session ended at the turn cap but the phase awaits continuation; reclaim /
-// revive probes work-done state to decide reclaim-as-done vs
-// `claude --bg --resume`.
-const TERMINAL = new Set(["done", "failed", "stalled", "skipped"]);
+// CTL-484 / CTL-701: 'turn-cap-exhausted' was excluded while orchestrate-revive
+// could dispatch `claude --bg --resume` continuations. CTL-748 (2026-06-02)
+// disabled per-phase turn caps — new workers never emit this status and no
+// continuation path remains — so it is terminal for all consumers (sessions
+// display, boot-resume, reclaim/revive, merge-state, stall-detection). CTL-830.
+const TERMINAL = new Set(["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]);
 
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:

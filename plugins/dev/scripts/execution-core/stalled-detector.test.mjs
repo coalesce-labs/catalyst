@@ -65,8 +65,9 @@ describe("detectStalled", () => {
     expect(out.attention.ticket).toBe("CTL-1");
   });
 
-  test("terminal status (done/failed/stalled) → absorbed as no-op", () => {
-    for (const st of ["done", "failed", "stalled"]) {
+  test("terminal status (done/failed/stalled/turn-cap-exhausted) → absorbed as no-op", () => {
+    // turn-cap-exhausted is terminal since CTL-748 removed turn caps (CTL-830).
+    for (const st of ["done", "failed", "stalled", "turn-cap-exhausted"]) {
       const out = detectStalled(
         makeInputs({
           currentStatus: st,
