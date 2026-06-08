@@ -65,6 +65,9 @@ import {
   buildGlobalRanking,
   // CTL-700 (Item A)
   readDispatchFailureReason,
+  // CTL-834: held-label apply cool-down
+  convergeHeldLabel,
+  labelCooldownPath,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -7203,5 +7206,94 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
     // A lost claim is NOT a dispatch failure, so NO cooldown marker is written
     // (the ticket is simply reconsidered next tick).
     expect(existsSync(dispatchCooldownPath(orchDir, TICKET, "research"))).toBe(false);
+  });
+});
+
+// ── CTL-834: convergeHeldLabel held-label apply cool-down ──
+//
+// The held-label converger re-issued applyLabel(blocked/waiting) every ~22s tick.
+// When the apply failed UNRECOVERABLY (the desired label's exclusive-group
+// sibling is already on the ticket — "not exclusive child"), the label never
+// landed, the diff was never satisfied, and the write re-fired forever (the storm:
+// 218 fails / 44 min, burning the Linear write quota). These pin the time-boxed
+// cool-down that backs the apply off after such a failure (and self-heals).
+describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
+  // makeWs — a writeStatus fake whose applyLabel returns a fixed result and
+  // records calls; removeLabel records calls (fire-and-forget).
+  const makeWs = (applyResult) => {
+    const applyLabel = (...a) => {
+      applyLabel.calls.push(a);
+      return applyResult;
+    };
+    applyLabel.calls = [];
+    const removeLabel = (...a) => {
+      removeLabel.calls.push(a);
+    };
+    removeLabel.calls = [];
+    return { applyLabel, removeLabel };
+  };
+  const cd = (ticket, label) => existsSync(labelCooldownPath(orchDir, ticket, label));
+
+  test("happy path: apply succeeds → 1 write, NO cool-down marker", () => {
+    const ws = makeWs({ applied: true, reason: null });
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(cd("CTL-1", "blocked")).toBe(false);
+  });
+
+  test("unrecoverable apply (exclusive-conflict) → arms the cool-down marker", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(cd("CTL-1", "blocked")).toBe(true);
+  });
+
+  test("WITHIN the window: apply is SUPPRESSED (0 writes, applyLabel not re-called)", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 30_000 });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(1); // NOT re-attempted this tick
+  });
+
+  test("AFTER the window: apply retries (self-heals)", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 61_000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(2); // re-attempted past the window
+  });
+
+  test("transient apply failure → NO cool-down (retries next tick)", () => {
+    const ws = makeWs({ applied: false, reason: "transient" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(cd("CTL-1", "blocked")).toBe(false);
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 + 30_000 });
+    expect(writes).toBe(1); // not suppressed
+    expect(ws.applyLabel.calls).toHaveLength(2);
+  });
+
+  test("steady-state (label already present) → 0 writes (zero-write invariant intact)", () => {
+    const ws = makeWs({ applied: true });
+    const writes = convergeHeldLabel("CTL-1", ["blocked"], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+  });
+
+  test("desired=null with a stale held label → removes it (cool-down path not taken)", () => {
+    const ws = makeWs({ applied: true });
+    const writes = convergeHeldLabel("CTL-1", ["waiting"], null, ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.removeLabel.calls).toHaveLength(1);
+    expect(ws.applyLabel.calls).toHaveLength(0);
+  });
+
+  test("no orchDir (legacy caller) → cool-down never arms, byte-for-byte prior behavior", () => {
+    const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, {}); // no orchDir
+    convergeHeldLabel("CTL-1", [], "blocked", ws, {}); // attempted again — no suppression
+    expect(ws.applyLabel.calls).toHaveLength(2);
   });
 });

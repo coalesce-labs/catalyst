@@ -74,6 +74,34 @@ describe("labelOnce", () => {
     );
   });
 
+  test("CTL-834: exclusive-conflict reason → writes .skipped marker (no retry storm)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      true
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
+  test("transient reason → NO marker (retries next tick)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "transient" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      false
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
   test("rate-limited (any non-applied, non-missing-label) → no marker, next tick retries", () => {
     const ws = { applyLabel: recorder({ applied: false, reason: "rate-limited" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
