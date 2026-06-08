@@ -30,6 +30,7 @@ import {
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendRunawayEvent,
+  defaultAppendOrphanDetectedEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -2727,6 +2728,27 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     // CTL-700 (Item B): regression-lock — abnormal events keep WARN
     expect(env.severityText).toBe("WARN");
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
+  });
+
+  test("CTL-868: defaultAppendOrphanDetectedEvent writes a phase.<phase>.orphan-detected.<ticket> envelope", () => {
+    const ok = defaultAppendOrphanDetectedEvent({
+      phase: "implement",
+      ticket: "CTL-OD-1",
+      orchId: "orch-od",
+      reason: "stalled-no-recovery",
+      stalled_phases: ["implement", "verify"],
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // The real builder output (not a spy) — guards the event.name convention and
+    // the stalled_phases payload the orch-monitor dashboard consumes.
+    expect(env.attributes["event.name"]).toBe("phase.implement.orphan-detected.CTL-OD-1");
+    expect(env.attributes["event.action"]).toBe("orphan-detected");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("orphan-detected");
+    expect(env.body.payload.reason).toBe("stalled-no-recovery");
+    expect(env.body.payload.stalled_phases).toEqual(["implement", "verify"]);
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-od");
   });
 
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {

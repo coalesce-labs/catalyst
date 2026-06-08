@@ -3533,6 +3533,24 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     expect(existsSync(markerPath)).toBe(true);
   });
 
+  test("CTL-868: multiple stalled phases → one canonical event phase + full stalled list preserved", () => {
+    writeSignal("CTL-80", "implement", "stalled");
+    writeSignal("CTL-80", "verify", "stalled");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const orphans = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: { ...noWrites(), applyLabel: () => ({ applied: true }) },
+      appendOrphanDetectedEvent: (e) => { orphans.push(e); return true; },
+    });
+    expect(orphans).toHaveLength(1);
+    // the canonical event phase is ONE of the stalled phases (deterministic single pick)
+    expect(["implement", "verify"]).toContain(orphans[0].phase);
+    // the FULL stalled set is preserved — locks against a truncate-to-one regression
+    expect([...orphans[0].stalled_phases].sort()).toEqual(["implement", "verify"]);
+  });
+
   test("does not re-apply a label once the .applied marker exists", () => {
     writeSignal("CTL-7", "implement", "stalled");
     writeFileSync(join(orchDir, "workers", "CTL-7", ".linear-label-needs-human.applied"), "");
