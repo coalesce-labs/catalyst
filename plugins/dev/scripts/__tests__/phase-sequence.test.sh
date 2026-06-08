@@ -78,16 +78,26 @@ result=$(latest_phase_in_dir "$SCRATCH")
   || fail "out-of-order set → verify" "got: '$result'"
 scratch_teardown
 
-# ─── 5. Terminal tail: monitor-deploy is the max ─────────────────────────────
-echo "test 5: chain ending in monitor-deploy → monitor-deploy"
+# ─── 5. Terminal tail: teardown is the max ───────────────────────────────────
+echo "test 5: chain ending in teardown → teardown"
 scratch_setup
-for p in triage research plan implement verify review pr monitor-merge monitor-deploy; do
+for p in triage research plan implement verify review pr monitor-merge monitor-deploy teardown; do
   : > "$SCRATCH/phase-${p}.json"
 done
 result=$(latest_phase_in_dir "$SCRATCH")
-[ "$result" = "monitor-deploy" ] \
-  && pass "monitor-deploy tail" \
-  || fail "monitor-deploy tail" "got: '$result'"
+[ "$result" = "teardown" ] \
+  && pass "teardown tail" \
+  || fail "teardown tail" "got: '$result'"
+scratch_teardown
+
+# ─── 5b. teardown alone is the max ───────────────────────────────────────────
+echo "test 5b: phase-teardown.json present → teardown"
+scratch_setup
+: > "$SCRATCH/phase-teardown.json"
+result=$(latest_phase_in_dir "$SCRATCH")
+[ "$result" = "teardown" ] \
+  && pass "teardown alone → teardown" \
+  || fail "teardown alone → teardown" "got: '$result'"
 scratch_teardown
 
 # ─── 6. Drift guard: bash PHASES == lib/phase-fsm.mjs PHASES ─────────────────

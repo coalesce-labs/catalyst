@@ -46,10 +46,10 @@ worktree per ticket.
 > **Note (v11.0.0, CTL-726):** The wave-based orchestration skills (`orchestrate`, `oneshot`, etc.)
 > moved to the `catalyst-legacy` plugin. The *current* multi-ticket model is the execution-core
 > daemon — see [architecture.md](architecture.md) for the end-to-end phase-agent pipeline. Phase-agent workers run as `claude --bg` jobs and walk a
-**9-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>`
+**10-phase pipeline** — one `--bg` job per phase — emitting `phase.<name>.complete.<TICKET>`
 events the orchestrator wakes on via the broker. The orchestrator advances each
-ticket through the pipeline, opens a PR, waits for CI and merge, and archives the
-run.
+ticket through the pipeline, opens a PR, waits for CI and merge, runs teardown,
+and archives the run.
 
 ## User flow
 
@@ -129,7 +129,7 @@ i.e. when the daemon mirrors phase-agent output to Linear and wakes on human
 replies (CTL-550 / CTL-549 / CTL-749). Set it via `/catalyst-foundry:setup-catalyst`;
 distributed templates ship `null`.
 
-## The 9-phase pipeline (phase-agents mode)
+## The 10-phase pipeline (phase-agents mode)
 
 Canonical sequence is defined in `plugins/dev/scripts/orchestrate-phase-advance`
 and mirrored in the orchestrate skill's pipeline reference table.
@@ -143,8 +143,24 @@ and mirrored in the orchestrate skill's pipeline reference table.
 | 5 | `verify` | code-reviewer + pr-test-analyzer + silent-failure-hunter sub-agents | `verifying` | `verify.json` | Opus | 20 |
 | 6 | `review` | `/review` (gstack) | `reviewing` | `review.json` + remediation commit | Opus | 25 |
 | 7 | `pr` | `/catalyst-dev:create-pr` | `inReview` | `phase-pr.json` (PR# + URL) | Opus (configurable Sonnet) | 12 |
-| 8 | `monitor-merge` | `catalyst-events wait-for` loop → `gh pr merge --squash --delete-branch` | `done` | `phase-monitor-merge.json` | Opus | 50 |
+| 8 | `monitor-merge` | `catalyst-events wait-for` loop → `gh pr merge --squash` | — | `phase-monitor-merge.json` | Opus | 50 |
 | 9 | `monitor-deploy` | `/canary` (gstack) | — | `phase-monitor-deploy.json` | Haiku | 30 |
+| 10 | `teardown` | `/catalyst-dev:teardown` | `done` | `phase-teardown.json` | Sonnet | 15 |
+
+**Teardown is the terminal phase.** It owns all end-of-ticket housekeeping that
+previously had no clear owner:
+
+- Posts the final Linear comment summarising the completed run.
+- Transitions the Linear ticket to `Done`.
+- Removes the git worktree (non-force `git worktree remove`, gated on a
+  merge-confirmation check + worktree presweep liveness check).
+- Deletes the local branch (`git branch -D`; the remote branch was already
+  deleted by monitor-merge's `gh pr merge --delete-branch`).
+- Archives the worker directory under `~/catalyst/archives/<TICKET>/`.
+
+**monitor-merge no longer writes Done or removes the worktree.** It merges the PR
+and emits `phase.monitor-merge.complete`, then hands off to monitor-deploy and
+subsequently teardown for all cleanup.
 
 **Ancillary phase — `remediate` (CTL-653).** Not a member of the linear
 sequence: it is a *router-orchestrated conditional detour* the scheduler takes
@@ -185,8 +201,8 @@ rebase falls through to the normal launch; a textual **conflict** aborts, parks
 the ticket (`status:"stalled"` + `failureReason:"rebase_conflict_with_origin_main"`,
 `phase.<phase>.failed` emitted) and routes it to `needs-human` without launching a
 worker — conflicts are never auto-resolved. Resume dispatches (CTL-658) and the
-non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`) skip
-the rebase; the `monitor-*` phases operate on the PR / merged SHA and keep their
+non-build phases (`triage`/`pr`/`remediate`/`monitor-merge`/`monitor-deploy`/`teardown`) skip
+the rebase; the `monitor-*` and `teardown` phases operate on the PR / merged SHA and keep their
 own `BEHIND` handling. Git logic lives in `lib/worktree-rebase.sh`; the build-phase
 set is `is_rebase_phase` in `lib/phase-sequence.sh`.
 
@@ -206,7 +222,8 @@ stateDiagram-v2
   review --> pr: phase.review.complete
   pr --> monitor_merge: phase.pr.complete
   monitor_merge --> monitor_deploy: phase.monitor-merge.complete
-  monitor_deploy --> [*]: phase.monitor-deploy.complete
+  monitor_deploy --> teardown: phase.monitor-deploy.complete
+  teardown --> [*]: phase.teardown.complete
 
   triage --> revived_triage: phase.triage.failed (≤1)
   research --> revived_research: phase.research.failed (≤1)
@@ -238,7 +255,7 @@ back as `filter.wake.<ORCH_NAME>` so the orchestrator only watches one event str
 | `${ORCH_NAME}-comms-lifecycle` | `comms_lifecycle` | 1 per orchestrator | always |
 | `${ORCH_NAME}-phase-lifecycle-<TICKET>` | `phase_lifecycle` | 1 per ticket | only when `dispatchMode = "phase-agents"` |
 
-The `phase_lifecycle` interest carries `{ticket, phase_names[9]}`. The broker's
+The `phase_lifecycle` interest carries `{ticket, phase_names[10]}`. The broker's
 `tryPhaseLifecycleRoute` function in `plugins/dev/scripts/broker/index.mjs` matches
 incoming events against
 `^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$`
@@ -488,9 +505,9 @@ whatever inventory it exposes.
 
 | | Before | After |
 |---|---|---|
-| Worker spawn | one `claude -p /oneshot <TICKET>` per ticket (long-lived, streaming JSON) | nine `claude --bg /phase-<name>` jobs per ticket (short-lived) — when `dispatchMode = "phase-agents"` |
+| Worker spawn | one `claude -p /oneshot <TICKET>` per ticket (long-lived, streaming JSON) | ten `claude --bg /phase-<name>` jobs per ticket (short-lived) — when `dispatchMode = "phase-agents"` |
 | Signal layout | flat `workers/<TICKET>.json` | flat top-level + per-phase `workers/<TICKET>/phase-<name>.json` |
-| Phase advance | wait for `orchestrator.worker.status_terminal` from long oneshot | wait for `phase.<name>.complete.<TICKET>` → `orchestrate-phase-advance` walks canonical 9-step sequence |
+| Phase advance | wait for `orchestrator.worker.status_terminal` from long oneshot | wait for `phase.<name>.complete.<TICKET>` → `orchestrate-phase-advance` walks canonical 10-step sequence |
 | Broker interests | 3 (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`) | 4 (above + `phase_lifecycle` per ticket — gated on `dispatchMode`) |
 | Healthcheck | PID liveness only | PID liveness + `~/.claude/jobs/<bg>/state.json` mtime (`--stale-bg-seconds`, default 900s) |
 | Linear states | Backlog / In Progress / In Review / Done / Canceled | + intermediate `triaged`, `researching`, `planning`, `verifying`, `reviewing`, `inReview` (CTL-454) |

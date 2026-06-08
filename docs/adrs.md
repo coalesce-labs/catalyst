@@ -584,9 +584,9 @@ window. Three problems compounded:
 
 **Decision**: Dispatch workers as `claude --bg --resume
 /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` — one short-lived
-`--bg` job per phase. The orchestrator walks the canonical 9-phase sequence
+`--bg` job per phase. The orchestrator walks the canonical 10-phase sequence
 (`triage` → `research` → `plan` → `implement` → `verify` → `review` → `pr` →
-`monitor-merge` → `monitor-deploy`) via `orchestrate-phase-advance`, waking on
+`monitor-merge` → `monitor-deploy` → `teardown`) via `orchestrate-phase-advance`, waking on
 `phase.<name>.complete.<TICKET>` events routed by a new deterministic broker
 interest type, `phase_lifecycle` (CTL-447). Selected by
 `.catalyst/config.json → catalyst.orchestration.dispatchMode` —
@@ -608,7 +608,7 @@ model) is the runtime fallback when the key is missing.
   (`broker/index.mjs:1299-1335`) against
   `^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` — no Groq
   classification, no semantic ambiguity, one interest per ticket carrying
-  `{ticket, phase_names[9]}`. All four orchestrator interests
+  `{ticket, phase_names[10]}`. All four orchestrator interests
   (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`)
   fire back as `filter.wake.<ORCH_NAME>`, so the orchestrator watches a single
   event stream.

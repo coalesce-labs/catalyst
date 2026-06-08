@@ -29,7 +29,7 @@ const LIVE = "#5be0ff"; // reserved "in-loop" color — deliberately not green/p
 const PHASE_C: Record<string, string> = {
   triage: "#64748b", research: "#3b82f6", plan: "#a855f7", implement: "#10b981",
   verify: "#f59e0b", remediate: "#f472b6", review: "#eab308", pr: "#14b8a6",
-  "monitor-merge": "#4ea1ff", "monitor-deploy": "#39d07a", merge: "#4ea1ff", deploy: "#39d07a", done: "#6b7280",
+  "monitor-merge": "#4ea1ff", "monitor-deploy": "#39d07a", teardown: "#6b7280", merge: "#4ea1ff", deploy: "#39d07a", done: "#6b7280",
 };
 const LINEAR_COLS = [
   { key: "Todo",     c: "#94a3b8" }, { key: "Triage",   c: "#64748b" },
@@ -41,7 +41,7 @@ const PHASE_COLS = [
   { key: "plan", label: "Plan", c: "#a855f7" }, { key: "implement", label: "Implement", c: "#10b981" },
   { key: "verify", label: "Verify", c: "#f59e0b" }, { key: "review", label: "Review", c: "#eab308" },
   { key: "pr", label: "PR", c: "#14b8a6" }, { key: "monitor-merge", label: "Merge", c: "#4ea1ff" },
-  { key: "monitor-deploy", label: "Deploy", c: "#39d07a" },
+  { key: "monitor-deploy", label: "Deploy", c: "#39d07a" }, { key: "teardown", label: "Teardown", c: "#6b7280" },
 ];
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },

@@ -36,15 +36,23 @@ for skill in phase-research phase-plan phase-implement phase-verify phase-review
   fi
 done
 
-echo "Test: phase-monitor-merge KEEPS its terminal --transition done writer"
-# Plan Phase 4 §2 'Keep' — in phase-agents mode this is the terminal-Done
-# writer (orchestrate-phase-advance never advances past monitor-deploy).
+echo "Test: phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)"
+# CTL-703: terminal Done write moved from monitor-merge to the new phase-teardown (10th phase).
 MM="${SKILLS_DIR}/phase-monitor-merge/SKILL.md"
 if grep -qE "linear-transition.*--transition done|--transition done" "$MM"; then
-  pass "phase-monitor-merge keeps --transition done (terminal writer)"
+  fail "phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)" \
+    "phase-monitor-merge must NOT transition to done — that is phase-teardown's sole responsibility"
 else
-  fail "phase-monitor-merge keeps --transition done (terminal writer)" \
-    "the phase-agents-mode terminal Done writer must NOT be removed"
+  pass "phase-monitor-merge does NOT write --transition done (CTL-703: teardown owns it)"
+fi
+
+echo "Test: phase-teardown is the terminal --transition done writer (CTL-703)"
+TD="${SKILLS_DIR}/phase-teardown/SKILL.md"
+if grep -qE "linear-transition.*--transition done|--transition done" "$TD"; then
+  pass "phase-teardown is the terminal --transition done writer (CTL-703)"
+else
+  fail "phase-teardown is the terminal --transition done writer (CTL-703)" \
+    "phase-teardown must contain the sole --transition done call"
 fi
 
 echo "Test: create-pr / describe-pr gate the inReview transition on CATALYST_PHASE"

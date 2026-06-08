@@ -196,13 +196,18 @@ describe("isTicketInFlight", () => {
   test("plan done + no later signal (advance window) is still in-flight", () => {
     expect(isTicketInFlight({ triage: "done", research: "done", plan: "done" })).toBe(true);
   });
-  test("monitor-deploy done is terminal success → NOT in-flight", () => {
-    expect(isTicketInFlight({ "monitor-deploy": "done" })).toBe(false);
+  test("monitor-deploy done with teardown pending is still in-flight (CTL-703)", () => {
+    // monitor-deploy done no longer ends the pipeline; teardown still pending
+    expect(isTicketInFlight({ "monitor-deploy": "done" })).toBe(true);
   });
-  test("monitor-deploy skipped is terminal success → NOT in-flight (CTL-512)", () => {
-    expect(isTicketInFlight({ "monitor-deploy": "skipped" })).toBe(false);
+  test("monitor-deploy skipped with teardown pending is still in-flight (CTL-703)", () => {
+    // monitor-deploy skipped advances to teardown; teardown still pending
+    expect(isTicketInFlight({ "monitor-deploy": "skipped" })).toBe(true);
   });
-  test("monitor-deploy skipped with earlier phases done → NOT in-flight (CTL-512)", () => {
+  test("teardown done is terminal success → NOT in-flight (CTL-703)", () => {
+    expect(isTicketInFlight({ "teardown": "done" })).toBe(false);
+  });
+  test("teardown done with all earlier phases done → NOT in-flight (CTL-703)", () => {
     expect(
       isTicketInFlight({
         triage: "done",
@@ -213,7 +218,8 @@ describe("isTicketInFlight", () => {
         review: "done",
         pr: "done",
         "monitor-merge": "done",
-        "monitor-deploy": "skipped",
+        "monitor-deploy": "done",
+        teardown: "done",
       })
     ).toBe(false);
   });
@@ -237,7 +243,7 @@ describe("isTicketInFlight", () => {
 describe("listInFlightTickets / readMaxParallel / computeFreeSlots", () => {
   test("counts only in-flight worker dirs", () => {
     writeSignal("CTL-1", "implement", "running");
-    writeSignal("CTL-2", "monitor-deploy", "done");
+    writeSignal("CTL-2", "teardown", "done"); // CTL-703: teardown done is terminal (not monitor-deploy)
     writeSignal("CTL-3", "triage", "failed");
     expect([...listInFlightTickets(orchDir)]).toEqual(["CTL-1"]);
   });
@@ -1394,8 +1400,19 @@ describe("deriveAdvancement", () => {
     expect(deriveAdvancement({ triage: "done", research: "running" })).toBeNull();
     expect(deriveAdvancement({ research: "done", plan: "dispatched" })).toBeNull();
   });
-  test("monitor-deploy done → null (pipeline terminal)", () => {
-    expect(deriveAdvancement({ "monitor-deploy": "done" })).toBeNull();
+  test("monitor-deploy done → teardown (CTL-703: teardown is 10th phase)", () => {
+    expect(deriveAdvancement({ "monitor-deploy": "done" })).toBe("teardown");
+  });
+  test("monitor-deploy skipped → teardown (CTL-703: skipped is advancement-eligible for non-terminal phase)", () => {
+    expect(deriveAdvancement({ "monitor-deploy": "skipped" })).toBe("teardown");
+  });
+  test("skipped on any OTHER phase does NOT advance (holds the slot — isTicketInFlight producer-bug guard)", () => {
+    expect(deriveAdvancement({ implement: "skipped" })).toBeNull();
+    expect(deriveAdvancement({ triage: "done", research: "skipped" })).toBeNull();
+    expect(deriveAdvancement({ verify: "skipped" })).toBeNull();
+  });
+  test("teardown done → null (pipeline terminal after CTL-703)", () => {
+    expect(deriveAdvancement({ "teardown": "done" })).toBeNull();
   });
   test("latest phase failed → null (nothing owed — revive is another owner's job)", () => {
     expect(deriveAdvancement({ implement: "failed" })).toBeNull();
@@ -1893,7 +1910,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => ({ applied: true }) },
-      teardownWorktree: () => true,
+
       cache: sharedCache,
       prAdapter: fakePr,
       reclaimDeadWork: (_orch, _sig, opts) => {
@@ -1920,7 +1937,7 @@ describe("schedulerTick — new-work pull", () => {
       readEligible: () => [],
       dispatch: fakeDispatch(),
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {}, applyLabel: () => ({ applied: true }) },
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "terminal-short-circuit",
     });
     expect(result.reclaimed).toEqual([{ ticket: "CTL-8", phase: "implement" }]);
@@ -1931,11 +1948,11 @@ describe("schedulerTick — new-work pull", () => {
   // PR + non-terminal live state; idempotent (no write) when already Done.
   describe("CTL-758: reconcile backstop", () => {
     function mdDoneWithPr(ticket, prNumber) {
-      // monitor-deploy done so the terminal sweep visits the ticket, and the PR
-      // is carried on the signal raw for the merged check.
-      writeSignalRaw(ticket, "monitor-deploy", {
+      // CTL-703: teardown done triggers the terminal sweep; PR is on the teardown
+      // signal so reconcileTerminalBackstop can find it via signal.raw.pr.
+      writeSignalRaw(ticket, "teardown", {
         ticket,
-        phase: "monitor-deploy",
+        phase: "teardown",
         status: "done",
         pr: { number: prNumber, repo: "o/r" },
       });
@@ -1952,7 +1969,6 @@ describe("schedulerTick — new-work pull", () => {
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch: fakeDispatch(),
-        teardownWorktree: () => true,
         writeStatus: {
           applyPhaseStatus: () => {},
           applyTerminalDone: ({ ticket }) => { doneCalls.push(ticket); return { applied: true, from_state: "PR", to_state: "Done" }; },
@@ -1975,7 +1991,6 @@ describe("schedulerTick — new-work pull", () => {
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch: fakeDispatch(),
-        teardownWorktree: () => true,
         writeStatus: {
           applyPhaseStatus: () => {},
           // terminalDoneOnce already wrote the marker, so it won't call again;
@@ -1993,15 +2008,13 @@ describe("schedulerTick — new-work pull", () => {
 
     test("no .terminal-done.applied marker ⇒ backstop does NOT fire (gate 1)", () => {
       mdDoneWithPr("CTL-32", 32);
-      // NO marker written: but monitor-deploy done means terminalDoneOnce will
-      // write it this tick. Use a prAdapter that would say merged + drifted state;
-      // the backstop runs AFTER terminalDoneOnce in the loop, so to isolate gate 1
+      // NO marker written: teardown done means terminalDoneOnce fires this tick.
+      // The backstop runs AFTER terminalDoneOnce in the loop, so to isolate gate 1
       // we assert no SECOND (reconcile) write beyond terminalDoneOnce's own.
       const stateWrites = [];
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch: fakeDispatch(),
-        teardownWorktree: () => true,
         writeStatus: {
           applyPhaseStatus: () => {},
           applyTerminalDone: () => ({ applied: true, from_state: "PR", to_state: "Done" }),
@@ -2026,7 +2039,6 @@ describe("schedulerTick — new-work pull", () => {
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch: fakeDispatch(),
-        teardownWorktree: () => true,
         writeStatus: {
           applyPhaseStatus: () => {},
           applyTerminalDone: () => ({ applied: true }),
@@ -2943,8 +2955,9 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
   });
 
   // Test 2 (in-flight safety) — lowering the ceiling does NOT kill the
-  // already-dispatched worker; it gates only the next selectDispatchable
-  // result. teardownWorktree is the seam that would tear down a worker.
+  // already-dispatched worker; it gates only the next selectDispatchable result.
+  // CTL-703: the teardownWorktree seam is removed; lowering the ceiling never
+  // ran teardown in the scheduler anyway — that is now the teardown phase agent.
   test("lowering the ceiling does not kill in-flight workers", async () => {
     const configPath = join(orchDir, "config.json");
     writeFileSync(
@@ -2955,10 +2968,6 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
     );
     appendToEventLog("");
     const dispatch = fakeDispatch();
-    const teardownCalls = [];
-    const teardownWorktree = (args) => {
-      teardownCalls.push(args);
-    };
     const tk = (id, priority) => ({
       identifier: id,
       priority,
@@ -2970,7 +2979,6 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
     startScheduler({
       orchDir,
       dispatch,
-      teardownWorktree,
       readEligible: () => [tk("CTL-A", 1), tk("CTL-B", 2)],
       configPath,
       liveBackgroundCount: () => 0, // CTL-676
@@ -2980,20 +2988,19 @@ describe("startScheduler — per-tick concurrency re-read (CTL-676)", () => {
     expect(dispatch.calls.length).toBe(2);
 
     // Drop the ceiling below the in-flight count. The next tick must not
-    // tear down or re-dispatch anything.
+    // re-dispatch anything.
     writeFileSync(
       configPath,
       JSON.stringify({
         catalyst: { orchestration: { executionCore: { maxParallel: 1 } } },
       }),
     );
-    // Burn a few wake cycles so a hypothetical teardown would have fired.
+    // Burn a few wake cycles so a hypothetical re-dispatch would have fired.
     for (let i = 0; i < 5; i++) {
       appendToEventLog('{"event":"wake.CTL-676.b"}\n');
       await new Promise((r) => setTimeout(r, 30));
     }
-    expect(teardownCalls.length).toBe(0);
-    // No additional dispatches were issued either (no new eligible tickets,
+    // No additional dispatches were issued (no new eligible tickets,
     // and the in-flight ones gate themselves out of the pull).
     expect(dispatch.calls.length).toBe(2);
   });
@@ -3381,8 +3388,8 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
     expect(writes).toHaveLength(0);
   });
 
-  test("writes terminal Done when a ticket's monitor-deploy signal is done", () => {
-    writeSignal("CTL-4", "monitor-deploy", "done");
+  test("writes terminal Done when a ticket's teardown signal is done (CTL-703)", () => {
+    writeSignal("CTL-4", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
     const writeStatus = {
@@ -3395,8 +3402,8 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
   });
 
   // CTL-757: the terminal Done write is audited with source=terminal-sweep.
-  test("CTL-757: terminal Done write emits source=terminal-sweep state.write", () => {
-    writeSignal("CTL-4", "monitor-deploy", "done");
+  test("CTL-757: terminal Done write emits source=terminal-sweep state.write (CTL-703: gated on teardown)", () => {
+    writeSignal("CTL-4", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const stateWrites = [];
     const writeStatus = {
@@ -3421,11 +3428,9 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
     });
   });
 
-  test("writes terminal Done when a ticket's monitor-deploy signal is skipped (CTL-589)", () => {
-    // CTL-512 fixed isTicketInFlight to treat `skipped` as terminal; this is
-    // the matching half — the terminal-Done sweep must also fire on `skipped`
-    // so the Linear ticket actually lands at Done (not stale at PR).
-    writeSignal("CTL-4", "monitor-deploy", "skipped");
+  test("does NOT write terminal Done when monitor-deploy done but teardown not yet done (CTL-703)", () => {
+    // monitor-deploy done advances to teardown; Done is only written when teardown completes
+    writeSignal("CTL-4", "monitor-deploy", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
     const writeStatus = {
@@ -3434,7 +3439,7 @@ describe("schedulerTick — Linear status write-back (CTL-558)", () => {
       applyLabel: () => {},
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: okDispatch, writeStatus });
-    expect(dones).toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
+    expect(dones).not.toContainEqual(expect.objectContaining({ ticket: "CTL-4" }));
   });
 
   test("a status-write throw never aborts the tick", () => {
@@ -3632,7 +3637,9 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 
   test("terminal Done clears needs-human unconditionally (CTL-646)", () => {
-    writeSignal("CTL-16", "monitor-deploy", "done");
+    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`),
+    // so the terminal-Done sweep keys off a `teardown` done signal.
+    writeSignal("CTL-16", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const removed = [];
     const writeStatus = {
@@ -3646,145 +3653,55 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
   });
 });
 
-// ── CTL-582: worktree teardown on terminal Done ──
+// ── CTL-582 / CTL-703: worktree teardown moved to dedicated teardown phase ──
+// CTL-703: teardownWorktreeOnce and the teardownWorktree injectable are REMOVED
+// from schedulerTick. Worktree removal is now handled by the phase-teardown
+// phase agent, not the scheduler's sweep. These tests verify that monitor-deploy
+// done/skipped does NOT trigger teardown (that belongs to the teardown phase).
 
-describe("schedulerTick — worktree teardown on Done (CTL-582)", () => {
-  // teardownWorktreeOnce resolves repoRoot from the registry; write a fixture
-  // under the test's CATALYST_DIR so the resolution succeeds.
-  function writeRegistry(team, repoRoot) {
-    const ecDir = join(catalystDir, "execution-core");
-    mkdirSync(ecDir, { recursive: true });
-    writeFileSync(
-      join(ecDir, "registry.json"),
-      JSON.stringify({ projects: [{ team, repoRoot, eligibleQuery: {} }] })
-    );
-  }
+describe("schedulerTick — worktree teardown removed from sweep (CTL-703)", () => {
   const noStatusWrites = () => ({
     applyPhaseStatus() {},
     applyTerminalDone() {},
     applyLabel() {},
   });
-  const markerPath = (ticket) => join(orchDir, "workers", ticket, ".worktree-removed");
 
-  test("calls teardownWorktree with { repoRoot, ticket } when monitor-deploy is done", () => {
+  test("monitor-deploy done advances to a teardown phase dispatch, not a sweep-side removal (CTL-703)", () => {
     writeSignal("CTL-4", "monitor-deploy", "done");
-    writeRegistry("CTL", "/repo/ctl");
-    const calls = [];
+    const dispatch = fakeDispatch();
     schedulerTick(orchDir, {
       readEligible: () => [],
-      dispatch: fakeDispatch(),
+      dispatch,
       writeStatus: noStatusWrites(),
-      teardownWorktree: (a) => {
-        calls.push(a);
-        return true;
-      },
+      verifyDispatched: verifyOk,
     });
-    expect(calls).toEqual([{ repoRoot: "/repo/ctl", ticket: "CTL-4" }]);
+    // The teardown work is a dispatched phase — the sweep itself removes nothing.
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-4", phase: "teardown" });
   });
 
-  test("calls teardownWorktree when monitor-deploy is skipped (CTL-589)", () => {
-    // CTL-512 followup — `skipped` is the second terminal status for
-    // monitor-deploy; without this, the worktree leaks on disk forever for
-    // tickets whose deploy verification was skipped.
+  test("monitor-deploy skipped advances to a teardown phase dispatch (CTL-703)", () => {
     writeSignal("CTL-4", "monitor-deploy", "skipped");
-    writeRegistry("CTL", "/repo/ctl");
-    const calls = [];
+    const dispatch = fakeDispatch();
     schedulerTick(orchDir, {
       readEligible: () => [],
-      dispatch: fakeDispatch(),
+      dispatch,
       writeStatus: noStatusWrites(),
-      teardownWorktree: (a) => {
-        calls.push(a);
-        return true;
-      },
+      verifyDispatched: verifyOk,
     });
-    expect(calls).toEqual([{ repoRoot: "/repo/ctl", ticket: "CTL-4" }]);
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0]).toMatchObject({ ticket: "CTL-4", phase: "teardown" });
   });
 
-  test("a once-marker makes teardown fire a single time across ticks", () => {
+  test("tick does not throw when monitor-deploy is done and no teardown injectable (CTL-703)", () => {
     writeSignal("CTL-4", "monitor-deploy", "done");
-    writeRegistry("CTL", "/repo/ctl");
-    let count = 0;
-    const opts = {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      writeStatus: noStatusWrites(),
-      teardownWorktree: () => {
-        count += 1;
-        return true;
-      },
-    };
-    schedulerTick(orchDir, opts);
-    schedulerTick(orchDir, opts);
-    expect(count).toBe(1);
-    expect(existsSync(markerPath("CTL-4"))).toBe(true);
-  });
-
-  test("a teardown that returns false is retried — no once-marker written", () => {
-    writeSignal("CTL-4", "monitor-deploy", "done");
-    writeRegistry("CTL", "/repo/ctl");
-    let count = 0;
-    const opts = {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      writeStatus: noStatusWrites(),
-      teardownWorktree: () => {
-        count += 1;
-        return false; // git failure — not yet torn down
-      },
-    };
-    schedulerTick(orchDir, opts);
-    schedulerTick(orchDir, opts);
-    expect(count).toBe(2);
-    expect(existsSync(markerPath("CTL-4"))).toBe(false);
-  });
-
-  test("a thrown teardown never aborts the tick", () => {
-    writeSignal("CTL-4", "monitor-deploy", "done");
-    writeRegistry("CTL", "/repo/ctl");
     expect(() =>
       schedulerTick(orchDir, {
         readEligible: () => [],
         dispatch: fakeDispatch(),
         writeStatus: noStatusWrites(),
-        teardownWorktree: () => {
-          throw new Error("boom");
-        },
       })
     ).not.toThrow();
-  });
-
-  test("no teardown when the ticket has not reached terminal Done", () => {
-    writeSignal("CTL-5", "implement", "done"); // mid-pipeline, not monitor-deploy
-    writeRegistry("CTL", "/repo/ctl");
-    let called = false;
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      writeStatus: noStatusWrites(),
-      teardownWorktree: () => {
-        called = true;
-        return true;
-      },
-    });
-    expect(called).toBe(false);
-  });
-
-  test("no teardown + no marker when the ticket's team has no registry entry", () => {
-    writeSignal("CTL-4", "monitor-deploy", "done");
-    // deliberately no writeRegistry — getProjectConfig("CTL") resolves to null
-    let called = false;
-    schedulerTick(orchDir, {
-      readEligible: () => [],
-      dispatch: fakeDispatch(),
-      writeStatus: noStatusWrites(),
-      teardownWorktree: () => {
-        called = true;
-        return true;
-      },
-    });
-    expect(called).toBe(false);
-    expect(existsSync(markerPath("CTL-4"))).toBe(false); // retryable — no marker
   });
 });
 
@@ -3811,7 +3728,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-      teardownWorktree: () => true,
+
       reclaimDeadWork,
     });
     expect(reclaimDeadWork.calls.length).toBe(2);
@@ -3852,7 +3769,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
       readEligible: () => [],
       dispatch,
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork,
       verifyDispatched: verifyOk, // CTL-611: not testing dispatch verification
     });
@@ -3879,7 +3796,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
       readEligible: () => [],
       dispatch,
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-      teardownWorktree: () => true,
+
       reclaimDeadWork,
     });
     expect(dispatch.calls.length).toBe(0);
@@ -3896,7 +3813,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
         readEligible: () => [],
         dispatch: () => ({ code: 0 }),
         writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-        teardownWorktree: () => true,
+  
       })
     ).not.toThrow();
   });
@@ -3986,7 +3903,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "revived",
     });
     expect(result.revived).toEqual([{ ticket: "CTL-7", phase: "implement" }]);
@@ -4001,7 +3918,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "revive-suppressed",
     });
     expect(result.reviveSuppressed).toEqual([{ ticket: "CTL-8", phase: "implement" }]);
@@ -4014,7 +3931,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "escalated",
     });
     expect(result.escalated).toEqual([{ ticket: "CTL-9", phase: "pr" }]);
@@ -4034,7 +3951,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork,
     });
     expect(result.revived).toEqual([{ ticket: "CTL-7", phase: "implement" }]);
@@ -4055,7 +3972,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "alive-quiet-suppressed",
     });
     expect(result.revived).toEqual([]);
@@ -4069,7 +3986,7 @@ describe("schedulerTick — CTL-587 Step 0 multi-result shape", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork: () => "noop",
     });
     expect(result.revived).toEqual([]);
@@ -4100,7 +4017,7 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
 
   test("reclaimDeadWork is called for in-flight tickets only, never for terminal ones", () => {
     writeNestedSignal("CTL-A", "implement", { status: "running", bg_job_id: "bg-a" });
-    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+    writeNestedSignal("CTL-B", "teardown", { status: "done" }); // CTL-703: teardown done is terminal
     writeNestedSignal("CTL-C", "verify", { status: "failed" });
 
     const reclaimDeadWork = recorder("noop");
@@ -4108,7 +4025,6 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
       reclaimDeadWork,
     });
 
@@ -4121,13 +4037,12 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
 
   test("preserves the existing result shape (reclaimed/revived/reviveSuppressed/escalated)", () => {
     writeNestedSignal("CTL-A", "implement", { status: "running", bg_job_id: "bg-a" });
-    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+    writeNestedSignal("CTL-B", "teardown", { status: "done" }); // CTL-703: teardown done is terminal
 
     const r = schedulerTick(orchDir, {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
       reclaimDeadWork: () => "noop",
     });
 
@@ -4138,7 +4053,7 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
   });
 
   test("skips the loop entirely when no tickets are in-flight (all terminal)", () => {
-    writeNestedSignal("CTL-B", "monitor-deploy", { status: "done" });
+    writeNestedSignal("CTL-B", "teardown", { status: "done" }); // CTL-703: teardown done is terminal
     writeNestedSignal("CTL-C", "verify", { status: "failed" });
 
     const reclaimDeadWork = recorder("noop");
@@ -4146,7 +4061,6 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
       reclaimDeadWork,
     });
 
@@ -4163,7 +4077,7 @@ describe("schedulerTick — CTL-643 terminal-ticket reclaim filter", () => {
       readEligible: () => [],
       dispatch: () => ({ code: 0 }),
       writeStatus,
-      teardownWorktree: () => true,
+
       reclaimDeadWork,
     });
 
@@ -4312,8 +4226,8 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     return { applyPhaseStatus() {}, applyLabel() {} };
   }
 
-  test("does not re-write terminal Done once the .terminal-done.applied marker exists", () => {
-    writeSignal("CTL-20", "monitor-deploy", "done");
+  test("does not re-write terminal Done once the .terminal-done.applied marker exists (CTL-703: teardown)", () => {
+    writeSignal("CTL-20", "teardown", "done");
     writeFileSync(join(orchDir, "workers", "CTL-20", ".terminal-done.applied"), "");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dones = [];
@@ -4326,8 +4240,8 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(dones).toHaveLength(0);
   });
 
-  test("writes the .terminal-done.applied marker only after applyTerminalDone reports applied:true", () => {
-    writeSignal("CTL-21", "monitor-deploy", "done");
+  test("writes the .terminal-done.applied marker only after applyTerminalDone reports applied:true (CTL-703: teardown)", () => {
+    writeSignal("CTL-21", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const markerPath = join(orchDir, "workers", "CTL-21", ".terminal-done.applied");
     // applied:false → no marker → retried next tick.
@@ -4348,8 +4262,8 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(existsSync(markerPath)).toBe(true);
   });
 
-  test("fires applyTerminalDone once across ticks (skipped is also terminal, CTL-589)", () => {
-    writeSignal("CTL-22", "monitor-deploy", "skipped");
+  test("fires applyTerminalDone once across ticks (teardown done — CTL-703)", () => {
+    writeSignal("CTL-22", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     let count = 0;
     const writeStatus = {
@@ -4365,8 +4279,8 @@ describe("schedulerTick — terminal-Done once-marker (CTL-597)", () => {
     expect(existsSync(join(orchDir, "workers", "CTL-22", ".terminal-done.applied"))).toBe(true);
   });
 
-  test("a terminal-Done write throw never aborts the tick", () => {
-    writeSignal("CTL-23", "monitor-deploy", "done");
+  test("a terminal-Done write throw never aborts the tick (CTL-703: teardown)", () => {
+    writeSignal("CTL-23", "teardown", "done");
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const writeStatus = {
       ...terminalNoWrites(),
@@ -4903,7 +4817,7 @@ describe("STAGE_RANK (CTL-705)", () => {
     expect(Object.keys(STAGE_RANK)).toEqual(expected);
   });
 
-  test("order: triage=0, research=1, plan=2, implement=3, remediate=4, verify=5, review=6, pr=7, monitor-merge=8, monitor-deploy=9", () => {
+  test("order: triage=0, research=1, plan=2, implement=3, remediate=4, verify=5, review=6, pr=7, monitor-merge=8, monitor-deploy=9, teardown=10", () => {
     expect(STAGE_RANK.triage).toBe(0);
     expect(STAGE_RANK.research).toBe(1);
     expect(STAGE_RANK.plan).toBe(2);
@@ -4914,6 +4828,8 @@ describe("STAGE_RANK (CTL-705)", () => {
     expect(STAGE_RANK.pr).toBe(7);
     expect(STAGE_RANK["monitor-merge"]).toBe(8);
     expect(STAGE_RANK["monitor-deploy"]).toBe(9);
+    // CTL-703: teardown is the 10th pipeline phase
+    expect(STAGE_RANK.teardown).toBe(10);
   });
 });
 
@@ -4950,13 +4866,23 @@ describe("stageRankForTicket (CTL-705)", () => {
     expect(stageRankForTicket({ plan: "aborted" })).toBe(-1);
   });
 
-  test("monitor-deploy done is terminal — excluded", () => {
-    expect(stageRankForTicket({ "monitor-deploy": "done" })).toBe(-1);
-    expect(stageRankForTicket({ "monitor-deploy": "skipped" })).toBe(-1);
+  test("teardown done is terminal — excluded (CTL-703: teardown is now TERMINAL_PHASE)", () => {
+    expect(stageRankForTicket({ "teardown": "done" })).toBe(-1);
+    expect(stageRankForTicket({ "teardown": "skipped" })).toBe(-1);
+  });
+
+  test("monitor-deploy done is NOT terminal anymore — included as rank 9 (CTL-703)", () => {
+    // monitor-deploy done is now an intermediate phase (advances to teardown)
+    expect(stageRankForTicket({ "monitor-deploy": "done" })).toBe(9);
+    expect(stageRankForTicket({ "monitor-deploy": "skipped" })).toBe(9);
   });
 
   test("monitor-deploy running is NOT terminal — included", () => {
     expect(stageRankForTicket({ "monitor-deploy": "running" })).toBe(9);
+  });
+
+  test("teardown running is NOT terminal — included as rank 10 (CTL-703)", () => {
+    expect(stageRankForTicket({ "teardown": "running" })).toBe(10);
   });
 
   test("remediate running → 4", () => {
@@ -5038,8 +4964,8 @@ describe("buildGlobalRanking (CTL-705)", () => {
     expect(result[1].identifier).toBe("CTL-B");
   });
 
-  test("terminal in-flight tickets are excluded", () => {
-    seedInFlight("CTL-X", "monitor-deploy", "done", "dead", undefined, undefined);
+  test("terminal in-flight tickets are excluded (CTL-703: teardown done is terminal)", () => {
+    seedInFlight("CTL-X", "teardown", "done", "dead", undefined, undefined);
     const result = buildGlobalRanking(orchDir, []);
     expect(result.find((d) => d.identifier === "CTL-X")).toBeUndefined();
   });
@@ -5518,9 +5444,9 @@ describe("schedulerTick — terminal-worker reap sweep (CTL-695)", () => {
     expect(evts[0].phase).toBe("implement");
   });
 
-  test("emits for stalled worker and for terminal monitor-deploy done/skipped", () => {
+  test("emits for stalled worker and for terminal teardown done (CTL-703: teardown is TERMINAL_PHASE)", () => {
     writeSignalRaw("CTL-2", "review", { status: "stalled", bg_job_id: "stl12345" });
-    writeSignalRaw("CTL-3", "monitor-deploy", { status: "done", bg_job_id: "fin12345" });
+    writeSignalRaw("CTL-3", "teardown", { status: "done", bg_job_id: "fin12345" });
     schedulerTick(orchDir, { readEligible: () => [], dispatch: () => ({ code: 0 }) });
     const evts = readEventLog();
     expect(evts.some((e) => e.event === "phase.terminal.reap-requested" && e.bg_job_id === "stl12345")).toBe(true);
@@ -7048,7 +6974,6 @@ Final polish, documentation, and code cleanup.
       readEligible: () => [],
       dispatch,
       writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-      teardownWorktree: () => true,
       reclaimDeadWork: (od, sig, opts) =>
         reclaimDeadWorkIfPossible(od, sig, {
           ...opts,

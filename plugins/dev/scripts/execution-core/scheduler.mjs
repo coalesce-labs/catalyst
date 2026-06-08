@@ -63,10 +63,11 @@ import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
 import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
-// CTL-791: the terminal-Done sweep removes a worktree ONLY through the evidence
-// gate (GitHub-merged + clean + no-live-session + orchestrator-provenance,
-// archive-first, never --force); an unsafe tree is flagged, not deleted.
-import { gatedTeardownWorktree as defaultTeardownWorktree } from "./worktree-safety.mjs";
+// CTL-703: worktree teardown is now handled by the dedicated phase-teardown
+// phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
+// The gatedTeardownWorktree import is removed; the teardown phase agent
+// re-implements the gate in bash (merge-confirmation evidence + worktree
+// presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
@@ -137,7 +138,8 @@ import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
 // occupies a slot (the ticket is mid-pipeline), so isTicketInFlight checks the
 // phase, not just the status.
-// TERMINAL_PHASE ("monitor-deploy") is imported from workflow-descriptor.mjs (above).
+// TERMINAL_PHASE ("teardown") is imported from workflow-descriptor.mjs (above).
+// CTL-703: teardown is the 10th phase; monitor-deploy now advances to teardown.
 
 // New work enters the pipeline at `research`: a Ready ticket has already been
 // triaged (the →Triage watcher dispatched its triage agent — monitor.mjs). The
@@ -977,7 +979,17 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
   const sig = signals ?? {};
   let latest = null;
   for (const p of PHASES) if (p in sig) latest = p; // remediate ∉ PHASES → invisible here
-  if (latest === null || sig[latest] !== "done") return null;
+  // CTL-703: `skipped` is advancement-eligible for monitor-deploy ONLY.
+  // monitor-deploy `skipped` must advance to teardown (just as `done` does),
+  // so the pipeline can reach the dedicated teardown phase even when no deploy
+  // event arrived before the timeout. Every OTHER phase keeps the
+  // isTicketInFlight invariant: a stray mid-pipeline `skipped` holds the slot
+  // (does NOT advance) so a producer bug can't silently leak past a phase.
+  const latestStatus = sig[latest];
+  const advanceEligible =
+    latestStatus === "done" ||
+    (latestStatus === "skipped" && latest === "monitor-deploy");
+  if (latest === null || !advanceEligible) return null;
 
   // CTL-653: verdict routing at verify. A verdict-fail detours to remediate
   // (until the cycle cap); pass/null/undefined falls through to the normal
@@ -993,7 +1005,7 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
     { phase: latest, reviveCount: 0, parkedFrom: null },
     { type: "complete" }
   );
-  if (isTerminal(next)) return null; // pipeline reached monitor-deploy → done
+  if (isTerminal(next)) return null; // pipeline reached teardown → done (CTL-703)
   if (next.phase in sig) return null; // successor already dispatched
   return next.phase;
 }
@@ -1639,36 +1651,11 @@ function defaultPreflightExec(cmd, args) {
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
 }
 
-// teardownWorktreeOnce — remove a ticket's git worktree once it reaches
-// terminal Done (CTL-582 Phase 4). The terminal sweep revisits every started
-// ticket each tick, so a once-marker at workers/<T>/.worktree-removed makes
-// teardown fire a single time. repoRoot is resolved from the central registry
-// by the ticket's team. Best-effort: an unresolvable team or a thrown teardown
-// is swallowed — never aborts the tick. The marker is written only on a
-// confirmed teardown (worktree gone), so a transient git failure retries.
-function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
-  const marker = join(orchDir, "workers", ticket, ".worktree-removed");
-  if (existsSync(marker)) return;
-  const entry = getProjectConfig(teamOf(ticket));
-  if (!entry?.repoRoot) {
-    // The codebase favors loud failures: a Done ticket whose team is absent
-    // from the registry can never have its worktree resolved here — surface it
-    // rather than silently leaking the worktree. No marker is written, so a
-    // restored registry entry is retried on a later tick.
-    log.warn(
-      { ticket },
-      "scheduler: worktree teardown deferred — ticket's team has no registry entry"
-    );
-    return;
-  }
-  try {
-    if (teardownWorktree({ repoRoot: entry.repoRoot, ticket })) {
-      writeFileSync(marker, "");
-    }
-  } catch (err) {
-    log.warn({ ticket, err: err.message }, "scheduler: worktree teardown threw — continuing tick");
-  }
-}
+// CTL-703: teardownWorktreeOnce is REMOVED. Worktree removal is now handled by
+// the dedicated phase-teardown phase agent (the 10th pipeline phase). The
+// scheduler no longer calls gatedTeardownWorktree directly; the teardown phase
+// worker runs after monitor-deploy completes and performs the evidence-gated
+// teardown as part of the normal phase-agent pipeline.
 
 // terminalDoneOnce — write the terminal `Done` Linear state for a ticket at
 // most once for the run's lifetime (CTL-597). The terminal sweep revisits every
@@ -1677,7 +1664,7 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
 // already matches — so without a guard every terminal dir burns one Linear API
 // read per tick, exhausting the rate-limit cap. A once-marker at
 // workers/<T>/.terminal-done.applied (restart-safe — persists with the worker
-// dir) records a confirmed apply, mirroring labelOnce / teardownWorktreeOnce.
+// dir) records a confirmed apply, mirroring labelOnce.
 // Best-effort: any throw is logged and swallowed, never aborting the tick.
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
@@ -1769,11 +1756,11 @@ function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitSta
 }
 
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
-// (3) terminal-Done sweep (CTL-558) + worktree teardown (CTL-582). Idempotent
-// and restart-safe — derives every action from filesystem state. `exec` is the
-// injectable seam for the D5 out-of-set blocker-state fetch; `writeStatus` is
-// the injectable Linear-write seam (CTL-558); `teardownWorktree` is the
-// injectable worktree-teardown seam (CTL-582) — both default to the real module.
+// (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
+// every action from filesystem state. `exec` is the injectable seam for the
+// D5 out-of-set blocker-state fetch; `writeStatus` is the injectable Linear-
+// write seam (CTL-558). CTL-703: worktree teardown is now handled by the
+// dedicated phase-teardown phase agent, not the scheduler sweep.
 export function schedulerTick(
   orchDir,
   {
@@ -1781,7 +1768,6 @@ export function schedulerTick(
     dispatch = defaultDispatch,
     exec,
     writeStatus = linearWrite,
-    teardownWorktree = defaultTeardownWorktree,
     reclaimDeadWork = defaultReclaimDeadWork,
     now = Date.now, // CTL-624: injectable clock for the dispatch cool-down
     cache, // CTL-634: opt-in out-of-set blocker state cache
@@ -3092,19 +3078,17 @@ export function schedulerTick(
   }
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
-    // CTL-589 (CTL-512 followup): `skipped` is the second terminal status for
-    // monitor-deploy — emitted when no GitHub Deployments arrive within the
-    // probe timeout (the skipDeployVerification path). It must trigger the
-    // same Linear Done write + worktree teardown as `done`, matching the
-    // isTicketInFlight gate at line ~93. Without this, the ticket lingers
-    // at `PR` in Linear and the worktree leaks on disk indefinitely.
-    if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
-      // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
-      // CTL-757: thread emitStateWrite so the terminal Done write is audited.
+    // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
+    // read via the descriptor's TERMINAL_PHASE so a future pipeline change
+    // can't silently bypass this sweep (redispatch research F2).
+    // When the terminal phase completes, the pipeline is done — write Linear Done.
+    // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
+    // CTL-757: thread emitStateWrite so the terminal Done write is audited.
+    if (signals[TERMINAL_PHASE] === "done") {
       terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
-      // CTL-582: the ticket reached terminal Done — tear down its worktree.
-      teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
+      // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
+      // removed) — only the label clear remains inline here.
       clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
@@ -3129,7 +3113,7 @@ export function schedulerTick(
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:
-    // self-exited failed/stalled workers and the final monitor-deploy worker.
+    // self-exited failed/stalled workers and the final teardown worker.
     // Intermediate `done` phases are excluded — those advance, and the existing
     // emitPredecessorReap (section 1, advance-success) owns their reap. The
     // reaper's _inflight 60s dedup + the per-phase marker make any overlap benign.
@@ -3277,7 +3261,6 @@ function runTick() {
       dispatch: runningOpts.dispatch,
       exec: runningOpts.exec,
       writeStatus: runningOpts.writeStatus,
-      teardownWorktree: runningOpts.teardownWorktree,
       cache: runningOpts.cache, // CTL-634: shared out-of-set blocker state cache
       concurrency, // CTL-665 + CTL-676: per-tick re-read, then threaded into readMaxParallel
       // CTL-676: forward the optional liveBackgroundCount seam (test-only) so
@@ -3338,17 +3321,17 @@ function scheduleDebouncedTick(debounceMs) {
 
 // startScheduler — immediate authoritative tick, arm the periodic timer, then
 // start the event-log fast path. `dispatch` / `readEligible` / `exec` /
-// `writeStatus` / `teardownWorktree` are injectable so a test drives a hermetic
-// daemon (`exec` is the D5 blocker-state fetch seam, CTL-565; `writeStatus` is
-// the CTL-558 Linear-write seam; `teardownWorktree` is the CTL-582 worktree
-// seam — each undefined here defaults to the real module in schedulerTick).
+// `writeStatus` are injectable so a test drives a hermetic daemon (`exec` is
+// the D5 blocker-state fetch seam, CTL-565; `writeStatus` is the CTL-558
+// Linear-write seam — each undefined here defaults to the real module in
+// schedulerTick). CTL-703: teardownWorktree removed; worktree teardown now
+// happens in the phase-teardown agent.
 export function startScheduler({
   orchDir,
   dispatch,
   readEligible,
   exec,
   writeStatus,
-  teardownWorktree,
   cache, // CTL-634: shared out-of-set blocker state cache (from startDaemon)
   concurrency = {}, // CTL-665 + CTL-676: boot-captured executionCore knobs. When
   // `configPath` is also set (production wiring), runTick re-reads the live
@@ -3365,7 +3348,7 @@ export function startScheduler({
   liveBackgroundCount, // CTL-676: optional test-only seam, forwarded to
   // schedulerTick where it defaults to countBackgroundAgents (the live
   // `claude agents --json` count). Symmetric with the existing dispatch /
-  // exec / writeStatus / teardownWorktree seams on schedulerTick.
+  // exec / writeStatus seams on schedulerTick.
   livenessIsFresh, // CTL-731: optional override; runTick defaults to getAgentsCached().isFresh.
   checkSequencing, // CTL-537: optional override; runTick defaults to defaultCheckSequencing.
   fetchBatch, // CTL-755/784: optional override; schedulerTick defaults to fetchTicketsBatch.
@@ -3407,7 +3390,6 @@ export function startScheduler({
     readEligible,
     exec,
     writeStatus,
-    teardownWorktree,
     cache,
     concurrency,
     configPath, // CTL-676: per-tick Layer-1 re-read source
