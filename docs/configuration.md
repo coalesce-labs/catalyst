@@ -361,6 +361,13 @@ catalyst-execution-core restart
 > down, those calls fail with `connection refused`. Always apply changes with
 > `catalyst-execution-core restart`. The daemon liveness-gates the proxy and degrades to direct mode
 > if mitmproxy is unreachable (CTL-846); an interactive shell gets no such protection.
+>
+> Concretely: never add a line like `source ~/.config/catalyst/execution-core.env` to `~/.zshrc`,
+> `~/.zshenv`, `~/.zprofile`, `~/.bashrc`, `~/.bash_profile`, or `~/.profile`, and never `export
+> HTTPS_PROXY=…` from those files. `check-setup.sh` has a **Proxy Leak Into Interactive Shells**
+> section (CTL-869) that scans these profiles plus the live shell env, fails if it finds such a leak,
+> and prints the exact line to delete. If you already have one, remove it and open a fresh terminal —
+> the daemon still routes through the proxy because it sources the file itself at launch.
 
 **Why `NODE_USE_ENV_PROXY=1` is required.** Node 20+/24+ native `fetch` (undici) **ignores**
 `HTTPS_PROXY`/`HTTP_PROXY` unless `NODE_USE_ENV_PROXY=1` is also set. Omit it and the daemon's
