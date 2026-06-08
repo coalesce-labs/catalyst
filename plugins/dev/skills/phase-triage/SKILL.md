@@ -272,6 +272,15 @@ fi
 # 6. Emit the canonical phase event.
 emit_phase_complete --phase triage --ticket "$TICKET" --status complete \
   --payload-json "$(cat "$TRIAGE_FILE")"
+
+# Self-halt after complete to prevent zombie workers (CTL-778 step 2).
+# Read our own bg_job_id from the signal file and ask Claude to stop us.
+# Best-effort: a failed stop is covered by the daemon reaper backstop.
+if [[ -n "${ORCH_DIR:-}" && -f "${ORCH_DIR}/workers/${TICKET}/phase-triage.json" ]]; then
+  _SELF_BG=$(jq -r '.bg_job_id // empty' \
+    "${ORCH_DIR}/workers/${TICKET}/phase-triage.json" 2>/dev/null || true)
+  [[ -n "$_SELF_BG" ]] && claude stop "${_SELF_BG:0:8}" >/dev/null 2>&1 || true
+fi
 exit 0
 ```
 
