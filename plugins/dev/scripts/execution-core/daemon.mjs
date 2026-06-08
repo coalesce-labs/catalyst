@@ -39,7 +39,10 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readRatelimitPollerConfig,
+  getHostName,      // CTL-862
+  getClusterHosts,  // CTL-862
 } from "./config.mjs";
+import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
@@ -77,6 +80,7 @@ import {
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
+  readAllEligibleTickets, // CTL-862: boot-log ownership count
 } from "./scheduler.mjs";
 import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
@@ -376,9 +380,18 @@ export function startDaemon({
   // CTL-854: injectable for the boot empty-registry health check. Tests inject
   // a deterministic fake; production uses the real registry reader.
   listProjects: listProjectsFn = realListProjects,
+  // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
+  // roster and eligible list; production resolves them from the real modules.
+  readAllEligible = readAllEligibleTickets,
+  bootHosts = undefined,
+  bootHostName = undefined,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
+  // CTL-862: write the resolved config path back into the env so downstream
+  // callers (getClusterHosts → getCatalystRepoDir) resolve the right repo
+  // regardless of the daemon's cwd. ||= preserves any launcher-provided value.
+  if (configPath) process.env.CATALYST_CONFIG_FILE ||= configPath;
   // CTL-655: record this daemon process's start time so the first scheduler
   // tick's reclaimDeadWorkIfPossible can window the per-ticket revive budget to
   // the current run (a clean restart resets a budget burned by a prior storm).
@@ -586,7 +599,15 @@ export function startDaemon({
     log.warn({ err }, "execution-core daemon: registry health check failed (continuing)");
   }
 
-  log.info({ orchDir }, "execution-core daemon started");
+  // CTL-862: report HRW ownership at boot for multi-host observability.
+  const bootRoster = bootHosts ?? getClusterHosts();
+  const bootSelf = bootHostName ?? getHostName();
+  const bootEligible = readAllEligible();
+  const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+  log.info(
+    { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
+    "execution-core daemon started"
+  );
 }
 
 // startReaperAndTimer — wire the Reaper (CTL-649 Phase 4) and the periodic

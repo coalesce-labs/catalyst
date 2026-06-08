@@ -33,7 +33,11 @@ import {
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
   log,
+  getHostName,      // CTL-862
+  getClusterHosts,  // CTL-862
 } from "./config.mjs";
+import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
@@ -333,6 +337,10 @@ export function handleStateChangedEvent(
     gateway,
     fetchAssignee = fetchTicketAssignee,
     applyAssignee = defaultApplyAssignee,
+    // CTL-862: cross-host coordination seams.
+    hosts = undefined,
+    hostName = undefined,
+    claimDispatch = claimDispatchSync,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -371,6 +379,7 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
+          hosts, hostName, claimDispatch, // CTL-862
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -422,6 +431,7 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
+          hosts, hostName, claimDispatch, // CTL-862
         });
       } else {
         log.debug(
@@ -498,9 +508,25 @@ function dispatchTriage(identifier, {
   gateway,
   fetchAssignee = fetchTicketAssignee,
   applyAssignee = defaultApplyAssignee,
+  // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
+  hosts = undefined,
+  hostName = undefined,
+  claimDispatch = claimDispatchSync,
 }) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
+    return false;
+  }
+  // CTL-862: HRW ownership filter. Resolve roster/self lazily per call so hot
+  // roster reloads need no restart. Single-host roster → ownedBy is identity.
+  const roster = hosts ?? getClusterHosts();
+  const self = hostName ?? getHostName();
+  const multiHost = roster.length > 1;
+  if (!ownedBy(identifier, roster, self)) {
+    log.debug(
+      { identifier, self, roster },
+      "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
+    );
     return false;
   }
   if (budget && budget.remaining <= 0) {
@@ -520,6 +546,18 @@ function dispatchTriage(identifier, {
       log.info(
         { identifier, known: a.known, assignee: a.known ? (a.assignee ?? null) : undefined },
         "monitor: triage dispatch skipped — respect-assignment (CTL-781)"
+      );
+      return false;
+    }
+  }
+  // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
+  // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
+  if (multiHost) {
+    const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
+    if (!claim.won) {
+      log.debug(
+        { identifier, self },
+        "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
       return false;
     }
@@ -594,6 +632,10 @@ export function sweepMissingTriage({
   gateway,
   fetchAssignee = fetchTicketAssignee,
   applyAssignee = defaultApplyAssignee,
+  // CTL-862: cross-host coordination seams.
+  hosts = undefined,
+  hostName = undefined,
+  claimDispatch = claimDispatchSync,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -617,6 +659,7 @@ export function sweepMissingTriage({
         gateway,
         fetchAssignee,
         applyAssignee,
+        hosts, hostName, claimDispatch, // CTL-862
       });
     }
   }

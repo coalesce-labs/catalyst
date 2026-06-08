@@ -6,6 +6,7 @@
 // per-repo enrollment records are gone.
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1816,5 +1817,125 @@ describe("sweepMissingTriage — CTL-781 threading", () => {
     } finally {
       rmSync(orchDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── CTL-862: HRW ownership filter + claim-on-dispatch (monitor dispatchTriage) ──
+//
+// Mirrors scheduler.test.mjs:7092-7206 but drives dispatchTriage through the
+// exported handleStateChangedEvent (→Triage branch) and sweepMissingTriage,
+// since dispatchTriage is not exported. The entry phase asserted in the claim
+// payload is "triage" (not "research" as in the scheduler). Safe-by-construction:
+// a single-host roster is an exact no-op until a 2nd host joins.
+describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "ENG-1";
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+  const OTHER = ROSTER.find((h) => h !== OWNER);
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  const fakeOrchDir = "/fake-orch-862";
+
+  test("single-host roster is an exact no-op: claim NEVER attempted, dispatch proceeds", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(claimDispatch.calls).toHaveLength(0);
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+  });
+
+  test("multi-host: a ticket OWNED by this host is dispatched + claim ran with phase 'triage'", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: OWNER, phase: "triage" });
+  });
+
+  test("multi-host: a ticket owned by ANOTHER host is filtered — no claim, no dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OTHER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+
+  test("multi-host: a LOST claim defers — no dispatch, no triage status write", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: 2 });
+    const applyTriageStatus = mock(() => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }));
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus,
+      appendEvent: () => {},
+    });
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(applyTriageStatus).not.toHaveBeenCalled();
+  });
+
+  test("sweepMissingTriage path: OWNED ticket is dispatched + claim ran with phase 'triage'", () => {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [{ identifier: TICKET, state: "Todo", priority: 1, project: null }]);
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    sweepMissingTriage({
+      orchDir: fakeOrchDir,
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 5,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "triage" });
   });
 });
