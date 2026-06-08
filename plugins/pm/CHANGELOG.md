@@ -1,5 +1,12 @@
 # Changelog
 
+## [7.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.1.0...catalyst-pm-v7.2.0) (2026-06-08)
+
+
+### Features
+
+* **pm:** close the estimation feedback loop — recurring corpus refresh from real actuals (CTL-813) ([#1400](https://github.com/coalesce-labs/catalyst/issues/1400)) ([f066c82](https://github.com/coalesce-labs/catalyst/commit/f066c82b6535574a4a74e279a62ddac7ab429f1f))
+
 ## [7.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-v7.0.0...catalyst-pm-v7.1.0) (2026-06-03)
 
 

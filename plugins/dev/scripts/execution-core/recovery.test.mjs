@@ -3840,3 +3840,103 @@ Final polish, documentation, and code cleanup.
     expect(emit.calls.length).toBe(1);
   });
 });
+
+// CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
+// phase.<phase>.complete AND whose probe passes is reconciled without waiting
+// for it to die. The completeEventSeen seam is the precise disambiguator
+// between "done-but-idle" (reclaim) and "busy fan-out" (suppress).
+describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
+  const orch = "/orch";
+  const STARTED = "2026-06-08T00:00:00Z";
+
+  test("CTL-778: alive + complete event seen + probe done → reclaimed", () => {
+    const emit = recorder({ code: 0 });
+    const reap = recorder(Promise.resolve());
+    const appendEvent = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }), // jobLifecycle → alive
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      emitReapIntent: reap,
+      appendEvent,
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(reap.calls[0][0]).toBe("phase.reclaim.reap-requested");
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("CTL-778: alive + probe done but NO complete event → still alive-suppressed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: probe },
+      completeEventSeen: () => false, // gate closed
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event seen but probe NOT done → alive-suppressed (no false flip)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(false) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event + probe done but emitComplete fails → reclaim-failed, no mirror", () => {
+    const mirror = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: recorder({ code: 1 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: mirror,
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(mirror.calls.length).toBe(0);
+  });
+
+  // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults
+  // to a fn that returns false from an empty/absent log) must still pass unchanged.
+  test("CTL-736 regression: alive worker without complete event is still alive-suppressed, probe never called", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000, state: "working" }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      now: () => 1_000 + 60 * 60 * 1000,
+      // completeEventSeen NOT injected — defaults to hasCompleteEvent({path}) → false (empty log)
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+  });
+});

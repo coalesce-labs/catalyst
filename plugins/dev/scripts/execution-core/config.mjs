@@ -20,15 +20,22 @@ import { readFileSync } from "node:fs";
 let log;
 try {
   const { default: pino } = await import("pino");
-  log = pino({
-    name: "execution-core",
-    level: process.env.LOG_LEVEL ?? "info",
-  });
+  // CTL-854: write to stderr so CLI commands that emit JSON to stdout are not
+  // polluted by log messages (previously pino defaulted to stdout). The daemon
+  // (nohup … >> daemon.log 2>&1) captures both streams; the CLI consumer only
+  // sees stdout, which stays pure JSON.
+  log = pino({ name: "execution-core", level: process.env.LOG_LEVEL ?? "info" }, process.stderr);
 } catch (err) {
   const emit = (level) => (...args) => {
     // pino-style: log.info(obj, msg) OR log.info(msg). Console-shim flattens.
+    // warn/error/fatal → stderr so CLI commands that write JSON to stdout are
+    // not polluted by log messages (CTL-854). info/debug/trace → stdout to
+    // preserve the existing observable behavior for test suites that capture
+    // stdout for informational output.
     const stream =
-      level === "error" || level === "fatal" ? process.stderr : process.stdout;
+      level === "warn" || level === "error" || level === "fatal"
+        ? process.stderr
+        : process.stdout;
     stream.write(
       `[execution-core:${level}] ${args
         .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
