@@ -8,6 +8,7 @@ import {
   CLEANUP_GRACE_MS,
   defaultAgents,
   defaultAssessWorktreeRemoval,
+  defaultReadSignalBgJobId,
 } from "./reaper.mjs";
 import {
   refreshAgents,
@@ -980,5 +981,69 @@ describe("Reaper — CTL-778 complete-event reap backstop", () => {
     });
     await r.handle({ event: "phase.plan.revive.CTL-1", attributes: { "event.name": "phase.plan.revive.CTL-1" } });
     expect(emitted.length).toBe(0);
+  });
+
+  it("emit throwing in _handleCompleteEvent is caught at the outer handle() catch", async () => {
+    const warns = [];
+    const logger = { info: () => {}, warn: (o) => warns.push(o), error: (o) => warns.push(o) };
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock(() => { throw new Error("emit boom"); }),
+      readSignalBgJobId: () => "abc12345",
+      log: logger,
+    });
+    // Should not throw — outer catch in handle() absorbs the error.
+    await expect(r.handle({ event: "phase.plan.complete.CTL-1", attributes: {} })).resolves.toBeUndefined();
+    expect(warns.length).toBeGreaterThan(0); // logged by outer catch
+  });
+});
+
+// CTL-778: defaultReadSignalBgJobId — production signal-file reader.
+describe("defaultReadSignalBgJobId (CTL-778)", () => {
+  it("returns bg_job_id from a valid signal file", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), JSON.stringify({ bg_job_id: "abc12345", status: "running" }));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBe("abc12345");
+  });
+
+  it("returns null when signal file is missing", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when bg_job_id field is absent", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), JSON.stringify({ status: "running" }));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when file content is invalid JSON", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), "not json");
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when called with missing args", () => {
+    expect(defaultReadSignalBgJobId(null, "CTL-1", "plan")).toBeNull();
+    expect(defaultReadSignalBgJobId("/orch", null, "plan")).toBeNull();
+    expect(defaultReadSignalBgJobId("/orch", "CTL-1", null)).toBeNull();
   });
 });

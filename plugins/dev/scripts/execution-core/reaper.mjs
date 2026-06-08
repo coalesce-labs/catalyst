@@ -189,13 +189,13 @@ export class Reaper {
     const key = `${event.event}:${event.bg_job_id ?? event.worktree_path ?? "scan"}`;
     if (this._isDuplicate(key)) return;
 
-    // CTL-778 Step 2B: backstop for workers that emitted complete but missed self-stop.
-    if (isCompleteEvent) {
-      await this._handleCompleteEvent(event);
-      return;
-    }
-
     try {
+      // CTL-778 Step 2B: backstop for workers that emitted complete but missed self-stop.
+      if (isCompleteEvent) {
+        await this._handleCompleteEvent(event);
+        return;
+      }
+
       switch (event.event) {
         case "phase.yield.reap-requested":
         case "phase.predecessor.reap-requested":
@@ -719,7 +719,6 @@ export function groupBackgroundSessionsByTicket(live) {
   return groups;
 }
 
-/**
 /**
  * defaultReadSignalBgJobId — CTL-778 production reader for the complete-event
  * reaper backstop. Reads ${orchDir}/workers/${ticket}/phase-${phase}.json and
