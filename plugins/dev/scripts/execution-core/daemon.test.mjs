@@ -1539,3 +1539,92 @@ describe("readLinearBotWriteId (CTL-781)", () => {
     expect(() => readLinearBotWriteId(bad, bad)).not.toThrow();
   });
 });
+
+// ── CTL-862: daemon.mjs — CATALYST_CONFIG_FILE propagation + ownership boot-log ──
+//
+// Two independent daemon edits: propagate the resolved config path into process.env
+// so getClusterHosts() resolves the right repo regardless of cwd, and replace the
+// bare boot-log line with one reporting owned-vs-eligible ticket counts.
+describe("CTL-862 — daemon CATALYST_CONFIG_FILE propagation", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("propagates configPath into CATALYST_CONFIG_FILE when unset (CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_CONFIG_FILE;
+    const fakeConfigPath = join(catalystDir, "fake-config.json");
+    try {
+      startDaemon({ ...baseOpts(), configPath: fakeConfigPath });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(fakeConfigPath);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+
+  test("does NOT overwrite CATALYST_CONFIG_FILE already set (||= semantics, CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    const preExisting = "/pre-set/catalyst/config.json";
+    process.env.CATALYST_CONFIG_FILE = preExisting;
+    try {
+      startDaemon({ ...baseOpts(), configPath: "/new/config.json" });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(preExisting);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+});
+
+describe("CTL-862 — daemon boot-log ownership context", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("boot log carries host/owns/eligible/roster fields (CTL-862)", () => {
+    const infoSpy = spyOn(log, "info");
+    const ROSTER = ["mini", "mac-studio"];
+    const SELF = "mini";
+    const eligible = [{ identifier: "ENG-1" }, { identifier: "ENG-2" }];
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => eligible,
+        bootHosts: ROSTER,
+        bootHostName: SELF,
+      });
+      const bootCall = infoSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("daemon started")
+      );
+      expect(bootCall).toBeDefined();
+      const obj = bootCall[0];
+      expect(obj.host).toBe(SELF);
+      expect(Array.isArray(obj.roster)).toBe(true);
+      expect(obj.eligible).toBe(eligible.length);
+      expect(typeof obj.owns).toBe("number");
+      expect(obj.owns).toBeGreaterThanOrEqual(0);
+      expect(obj.owns).toBeLessThanOrEqual(eligible.length);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+});
