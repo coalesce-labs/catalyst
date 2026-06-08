@@ -568,20 +568,60 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		#     dispatch here would strand the phase. Log and fall through to spawn
 		#     un-fenced (degraded, matching the no-runtime fallback).
 		if [[ -e $CLAIM_FILE ]]; then
-			jq -nc \
-				--arg ticket "$TICKET" \
-				--arg phase "$PHASE" \
-				--arg model "$MODEL" \
-				--argjson turnCap "$TURN_CAP" \
-				--arg signal "$SIGNAL_FILE" \
-				--argjson generation "$TARGET_GENERATION" \
-				--argjson dryRun "$DRY_RUN" \
-				'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+			# ─── CTL-837: pre-spawn orphan claim GC ─────────────────────────────
+			#
+			# Because TARGET_GENERATION is FIXED (1 for a fresh dispatch — see the
+			# CTL-736 invariant above; it must NOT be derived from the claim-file
+			# high-water mark), a claim file orphaned by a dispatcher that DIED
+			# after the O_EXCL create but BEFORE writing the signal/spawning the
+			# worker wedges the phase forever: every later fresh dispatch recomputes
+			# the SAME generation, re-collides with the tombstone, and bows out as
+			# `claim-lost` — with no live worker behind it to ever finish.
+			#
+			# Detect that pre-spawn orphan and reap it. The signal file is written
+			# (status="dispatched") strictly BEFORE the worker is spawned, so:
+			#   • signal ABSENT ⟹ no worker was ever spawned for this generation —
+			#     there is no live worker to protect.
+			#   • claim OLDER than a grace window ⟹ not a sibling dispatcher that
+			#     just-now won the O_EXCL race and is milliseconds from writing its
+			#     signal (that signal-write window is sub-second; the grace is 2m).
+			# Both must hold. A claim WITH a signal is a live/in-flight worker; a
+			# YOUNG claim is a just-won race still mid-dispatch — either case stays
+			# claim-lost so single-flight (CTL-736) is preserved.
+			#
+			# When both hold: rm the orphan, retry the O_EXCL create ONCE.
+			#   • retry WINS  → fall through to the signal-write + spawn below.
+			#   • retry still EEXISTs → a concurrent dispatcher legitimately re-won
+			#     in the gap → emit claim-lost as before (single-flight holds).
+			# Pure bash (find + rm + the same noclobber create) — no node/bun
+			# startup is added to the dispatch path (cf. the CTL-736 comment above).
+			REAPED_ORPHAN=0
+			if [[ ! -e $SIGNAL_FILE ]] && [[ -n "$(find "$CLAIM_FILE" -mmin +2 2>/dev/null)" ]]; then
+				echo "phase-agent-dispatch: reaping pre-spawn orphan claim ${CLAIM_FILE} (no signal, older than grace) for ${TICKET}/${PHASE}; retrying claim" >&2
+				rm -f "$CLAIM_FILE"
+				if (set -o noclobber && printf '%s\n' "$CLAIM_BODY" >"$CLAIM_FILE") 2>/dev/null; then
+					REAPED_ORPHAN=1 # retry won → fall through to spawn
+				fi
+			fi
+			if [[ $REAPED_ORPHAN -eq 0 ]]; then
+				# A live/in-flight worker (signal present, or young claim), OR a
+				# concurrent dispatcher re-won the reaped generation → bow out.
+				jq -nc \
+					--arg ticket "$TICKET" \
+					--arg phase "$PHASE" \
+					--arg model "$MODEL" \
+					--argjson turnCap "$TURN_CAP" \
+					--arg signal "$SIGNAL_FILE" \
+					--argjson generation "$TARGET_GENERATION" \
+					--argjson dryRun "$DRY_RUN" \
+					'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
           bg_job_id: null, signalFile: $signal, status: "claim-lost", idempotent: true,
           generation: $generation, dryRun: ($dryRun == 1)}'
-			exit 0
+				exit 0
+			fi
+		else
+			echo "phase-agent-dispatch: claim write failed (no claim file at ${CLAIM_FILE}, not a lost race) for ${TICKET}/${PHASE}; proceeding un-fenced (generation=${GENERATION})" >&2
 		fi
-		echo "phase-agent-dispatch: claim write failed (no claim file at ${CLAIM_FILE}, not a lost race) for ${TICKET}/${PHASE}; proceeding un-fenced (generation=${GENERATION})" >&2
 	fi
 fi
 
