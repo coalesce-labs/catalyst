@@ -600,6 +600,81 @@ else
     fi
 fi
 
+# ─── 7d. Proxy leak into interactive shells (CTL-869, CTL-846 regression class) ──
+#
+# The mitmproxy HTTP(S)_PROXY in execution-core.env is DAEMON-launch-scoped only:
+# catalyst-execution-core cmd_start sources the file right before nohup'ing the
+# daemon, so the proxy lives only in the daemon's process tree. If instead a shell
+# profile (~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.bashrc, ~/.bash_profile, ~/.profile)
+# `source`s execution-core.env — or exports HTTP(S)_PROXY directly — the proxy
+# leaks into EVERY interactive shell. A fresh terminal then routes all traffic
+# (including interactive `claude`) through mitmproxy, and when the proxy is down
+# every API call dies with "connection refused". This check catches that leak and
+# prints the exact one-line removal. No repo script writes such a line — it is
+# always a hand-edit — so the fix is to delete it from the profile, never to widen
+# the daemon env's reach.
+header "Proxy Leak Into Interactive Shells (CTL-869)"
+
+# de_proxy is set in section 7c only when the daemon env file exists; default it
+# here so the messages below are safe under `set -u` when the file is absent.
+de_proxy="${de_proxy:-(the daemon proxy)}"
+leak_found=""
+# (a) Any profile that sources the daemon env file directly leaks every export in
+#     it (proxy + CA) into interactive shells. The grep ignores commented lines.
+PROFILE_CANDIDATES=(
+    "$HOME/.zshenv"
+    "$HOME/.zprofile"
+    "$HOME/.zshrc"
+    "$HOME/.bash_profile"
+    "$HOME/.bashrc"
+    "$HOME/.profile"
+)
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    # Match a non-comment line that sources execution-core.env (with or without
+    # the `source`/`.` builtin spelled out, quoted or not).
+    if grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof sources the DAEMON-only env file into every interactive shell (line ${leak_line%%:*})"
+        info "This leaks HTTP(S)_PROXY=$de_proxy into all terminals — fresh shells get 'connection refused' when mitmproxy is down (CTL-846 regression class)"
+        info "REMOVE this line from $prof:"
+        info "    ${leak_line#*:}"
+        info "The daemon already sources this file itself at launch (catalyst-execution-core cmd_start) — the proxy stays daemon-scoped without it."
+    fi
+done
+
+# (b) A profile may also export HTTP(S)_PROXY directly (not via the env file).
+#     Flag any non-comment proxy export in a profile.
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    if grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof exports a proxy var into every interactive shell (line ${leak_line%%:*})"
+        info "REMOVE: ${leak_line#*:}"
+        info "Proxy belongs ONLY in the daemon launch env (execution-core.env, sourced by catalyst-execution-core at start), never in a shell profile."
+    fi
+done
+
+# (c) Live check: this very (interactive) shell already has the proxy set. If so,
+#     SOMETHING in the login chain leaked it — surface it even if the grep above
+#     missed the source (e.g. an indirect include or a Warp/IDE launch config).
+live_proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+if [[ -n "$live_proxy" ]]; then
+    leak_found="yes"
+    fail "HTTP(S)_PROXY is set in THIS shell ($live_proxy) — interactive processes (incl. claude) route through mitmproxy"
+    info "If mitmproxy is down, every API call here fails with 'connection refused'. Find and remove the export/source from your shell profile (see above), then open a fresh terminal."
+fi
+
+if [[ -z "$leak_found" ]]; then
+    pass "No proxy leak into interactive shells (proxy stays daemon-launch-scoped)"
+fi
+
 # ─── 8. direnv ──────────────────────────────────────────────────────────────
 
 header "direnv"
