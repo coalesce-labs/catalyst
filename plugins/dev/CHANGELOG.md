@@ -1,5 +1,23 @@
 # Changelog
 
+## [12.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.1.0...catalyst-dev-v12.2.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-877 gherkin-ticket skill — use-case-first ticket authoring ([#1504](https://github.com/coalesce-labs/catalyst/issues/1504)) ([e379efb](https://github.com/coalesce-labs/catalyst/commit/e379efbabbc77ebe2e97c50fbc292ed2b7347ef8))
+
+
+### Bug Fixes
+
+* **dev:** CTL-835 add scope to linear-comment-post OAuth mint (invalid_scope) ([#1491](https://github.com/coalesce-labs/catalyst/issues/1491)) ([42d20ac](https://github.com/coalesce-labs/catalyst/commit/42d20ac140cc53ec08c81a7f2d9602ce73870925))
+* **dev:** CTL-837 GC pre-spawn orphan phase claim → unwedge claim-lost loop ([#1492](https://github.com/coalesce-labs/catalyst/issues/1492)) ([f437290](https://github.com/coalesce-labs/catalyst/commit/f43729066b5e73fe7d2be4471a9923fd269a3bfc))
+* **dev:** CTL-841 self-heal missing wt/ dir in catalyst-monitor start ([#1497](https://github.com/coalesce-labs/catalyst/issues/1497)) ([a29c5f3](https://github.com/coalesce-labs/catalyst/commit/a29c5f3edd3bb88285286786c9bff91f4f97733c))
+* **dev:** CTL-867 escalate persistent per-team reconcile failure to a visible event ([#1494](https://github.com/coalesce-labs/catalyst/issues/1494)) ([8f57f41](https://github.com/coalesce-labs/catalyst/commit/8f57f4193bcc80cef92d20bc93db956022eb385a))
+* **dev:** CTL-868 — zombie-staleness hardening + orphan-detected sweep event ([#1487](https://github.com/coalesce-labs/catalyst/issues/1487)) ([b34e506](https://github.com/coalesce-labs/catalyst/commit/b34e5068f4570ddcf197b8f4dbdd7c0354c671db))
+* **dev:** CTL-869 detect proxy env leak into interactive shells (CTL-846 regression class) ([#1493](https://github.com/coalesce-labs/catalyst/issues/1493)) ([c604ebe](https://github.com/coalesce-labs/catalyst/commit/c604ebefefc961e76d4d4940a891efe19d98407f))
+* **dev:** CTL-874 preflight queries workspace-scoped labels (not --team) ([#1499](https://github.com/coalesce-labs/catalyst/issues/1499)) ([9d8fd84](https://github.com/coalesce-labs/catalyst/commit/9d8fd84fbb84018db59604b4e5c27e75413e214c))
+
 ## [12.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.0.0...catalyst-dev-v12.1.0) (2026-06-08)
 
 
