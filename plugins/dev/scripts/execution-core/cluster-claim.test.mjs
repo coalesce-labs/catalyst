@@ -16,7 +16,26 @@ import {
   writeClaim,
   claimTicket,
   isFenceCurrent,
+  runCli,
 } from "./cluster-claim.mjs";
+
+// captureStdout — run an async fn with process.stdout.write trapped, returning
+// the concatenated output. The CLI writes its JSON result to stdout (the channel
+// the spawnSync wrapper parses), so the tests assert on captured stdout.
+async function captureStdout(fn) {
+  const chunks = [];
+  const orig = process.stdout.write;
+  process.stdout.write = (s) => {
+    chunks.push(typeof s === "string" ? s : s.toString());
+    return true;
+  };
+  try {
+    const code = await fn();
+    return { code, out: chunks.join("") };
+  } finally {
+    process.stdout.write = orig;
+  }
+}
 
 // makeFakeLinear — an in-memory Linear that honours the three operations
 // cluster-claim issues: identifier→id resolution, attachment read, and the
@@ -187,9 +206,13 @@ describe("writeClaim — upsert the attachment", () => {
 
   it("throws when the identifier resolves to no issue", async () => {
     const { post } = makeFakeLinear({ missingIssues: new Set(["CTL-999"]) });
-    await expect(
-      writeClaim("CTL-999", { owner_host: "mini", generation: 1, phase: "triage" }, { post }),
-    ).rejects.toThrow(/no issue found/);
+    let err;
+    try {
+      await writeClaim("CTL-999", { owner_host: "mini", generation: 1, phase: "triage" }, { post });
+    } catch (e) {
+      err = e;
+    }
+    expect(err?.message).toMatch(/no issue found/);
   });
 });
 
@@ -219,7 +242,7 @@ describe("claimTicket — soft-CAS via read-back", () => {
     // A poster whose read-back always reports a rival owner at our generation,
     // modelling a concurrent host that won the serialized write race.
     let writes = 0;
-    async function post(query, variables) {
+    async function post(query) {
       if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
       if (query.includes("UpsertFence")) {
         writes += 1;
@@ -245,7 +268,7 @@ describe("claimTicket — soft-CAS via read-back", () => {
 
   it("read-back shows a HIGHER generation → won:false (we were leapfrogged)", async () => {
     let writes = 0;
-    async function post(query, variables) {
+    async function post(query) {
       if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
       if (query.includes("UpsertFence")) {
         writes += 1;
@@ -299,5 +322,72 @@ describe("isFenceCurrent — the pre-side-effect fencing check", () => {
   it("false when there is no claim at all (nothing authorises our generation)", async () => {
     const { post } = makeFakeLinear();
     expect(await isFenceCurrent("CTL-842", 1, { post })).toBe(false);
+  });
+});
+
+describe("runCli — the spawnSync CLI surface (CTL-850)", () => {
+  it("claim: prints {won, generation} JSON and exits 0", async () => {
+    const { post } = makeFakeLinear();
+    const { code, out } = await captureStdout(() =>
+      runCli(["claim", "CTL-842", "mini", "triage"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ won: true, generation: 1 });
+  });
+
+  it("claim: a LOST read-back still exits 0 with won:false in stdout (wrapper reads `won`)", async () => {
+    // A rival owns our generation on the read-back → soft-CAS reports won:false,
+    // but the OPERATION succeeded, so the CLI exit stays 0; the sync wrapper
+    // decides not-to-dispatch from the `won:false` it parses out of stdout.
+    let writes = 0;
+    async function post(query) {
+      if (query.includes("ResolveIssueId")) return { issues: { nodes: [{ id: "uuid-CTL-842" }] } };
+      if (query.includes("UpsertFence")) {
+        writes += 1;
+        return { attachmentCreate: { success: true, attachment: {} } };
+      }
+      if (query.includes("ReadFence")) {
+        const metadata =
+          writes === 0
+            ? null
+            : { owner_host: "rival", catalyst_generation: 1, phase: "triage", claimed_at: "x" };
+        const nodes = metadata ? [{ id: "f", url: fenceUrl("CTL-842"), metadata }] : [];
+        return { issue: { attachments: { nodes } } };
+      }
+      throw new Error("unexpected");
+    }
+    const { code, out } = await captureStdout(() =>
+      runCli(["claim", "CTL-842", "mini", "triage"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ won: false, generation: 1 });
+  });
+
+  it("fence-check: exits 0 and prints {current:true} when the generation matches", async () => {
+    const { post } = makeFakeLinear({
+      seed: {
+        "CTL-842": { owner_host: "mini", catalyst_generation: 3, phase: "pr", claimed_at: "x" },
+      },
+    });
+    const { code, out } = await captureStdout(() =>
+      runCli(["fence-check", "CTL-842", "3"], { post }),
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ current: true });
+  });
+
+  it("fence-check: exits 10 (FENCE_STALE_EXIT) and prints {current:false} when stale/missing", async () => {
+    const { post } = makeFakeLinear(); // no claim at all
+    const { code, out } = await captureStdout(() =>
+      runCli(["fence-check", "CTL-842", "3"], { post }),
+    );
+    expect(code).toBe(10);
+    expect(JSON.parse(out)).toEqual({ current: false });
+  });
+
+  it("unknown subcommand: exits 1", async () => {
+    const { post } = makeFakeLinear();
+    const { code } = await captureStdout(() => runCli(["bogus"], { post }));
+    expect(code).toBe(1);
   });
 });

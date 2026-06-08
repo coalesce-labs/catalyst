@@ -127,8 +127,10 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 // a cycle. label-guard.mjs is the leaf module both can import.
 import { labelOnce } from "./label-guard.mjs";
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } from "./config.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
+import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
+import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1834,8 +1836,27 @@ export function schedulerTick(
     // for hermetic unit assertions.
     countTicketEvents = countTicketEventsInWindow,
     appendRunawayEvent = defaultAppendRunawayEvent,
+    // CTL-850: cross-host coordination seams. `hosts` is the cluster roster and
+    // `hostName` this host's coordination name; left undefined they resolve to
+    // the real getClusterHosts()/getHostName() (a single-host fallback when
+    // .catalyst/hosts.json is absent), so every existing single-host install +
+    // bare unit tick is unaffected. `claimDispatch` is the synchronous soft-CAS
+    // claim seam — a spawnSync bridge over cluster-claim.mjs — invoked ONLY when
+    // the roster has >1 host. Tests inject a fixed roster + a recorder to drive
+    // the multi-host HRW-filter and claim-lost paths without touching Linear.
+    hosts = undefined,
+    hostName = undefined,
+    claimDispatch = claimDispatchSync,
   } = {}
 ) {
+  // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
+  // readFileSync; a per-tick read lets `hosts.json` edits take effect without a
+  // daemon restart). multiHost gates the Linear-touching claim: a single-host
+  // roster makes the HRW filter an identity AND skips the claim entirely, so the
+  // coordination wiring is an exact no-op until a 2nd host joins the roster.
+  const roster = hosts ?? getClusterHosts();
+  const self = hostName ?? getHostName();
+  const multiHost = roster.length > 1;
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -2754,7 +2775,15 @@ export function schedulerTick(
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
-  const ready = computeReadyTickets(eligible, { blockerStates });
+  // CTL-850: HRW ownership filter — keep only the tickets THIS host owns under
+  // the cluster roster so freeSlots + per-project caps compute over owned work
+  // only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds` drives
+  // the phantom-quarantine sweep above — narrowing that would mis-quarantine a
+  // sibling host's worker dirs). Identity filter for a single-host roster
+  // (ownedBy is always true), so this is an exact no-op until a 2nd host joins.
+  const ready = computeReadyTickets(eligible, { blockerStates }).filter((t) =>
+    ownedBy(t.identifier, roster, self),
+  );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
   // but process alive) still consumes a slot; a duplicate spawn is counted.
@@ -2860,6 +2889,28 @@ export function schedulerTick(
         log.debug(
           { ticket: t.identifier, assignee: a.assignee },
           "ctl-781: candidate assigned to a non-bot — skipping (respect-assignment)"
+        );
+        continue;
+      }
+    }
+    // CTL-850: claim-on-dispatch — the cross-host soft-CAS mutex, the actual
+    // serializer behind the HRW pre-filter. Runs ONLY when the roster has >1 host
+    // (a single-host install never touches Linear here). A LOST claim means
+    // another host won the read-back — NOT a dispatch failure, so `continue` with
+    // NO cooldown/failure marker and the ticket is simply reconsidered next tick.
+    // Fail-closed: claimDispatch returns won:false on any error (never
+    // double-dispatch on a transient Linear hiccup). Placed before the
+    // dispatch-requested emit so a lost claim never emits a phantom "requested".
+    if (multiHost) {
+      const claim = claimDispatch({
+        ticket: t.identifier,
+        hostName: self,
+        phase: NEW_WORK_ENTRY_PHASE,
+      });
+      if (!claim.won) {
+        log.debug(
+          { ticket: t.identifier, host: self },
+          "ctl-850: lost cross-host claim — another host owns this dispatch, deferring"
         );
         continue;
       }

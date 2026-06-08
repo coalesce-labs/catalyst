@@ -70,6 +70,7 @@ import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
+import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 
 let orchDir;
@@ -7043,5 +7044,121 @@ Final polish, documentation, and code cleanup.
     // No next-phase dispatch fired (implement wasn't declared complete).
     const verifyDispatches = dispatch.calls.filter((args) => args[0]?.phase === "verify");
     expect(verifyDispatches.length).toBe(0);
+  });
+});
+
+// ── CTL-850: HRW ownership filter + claim-on-dispatch (new-work path) ──
+//
+// These exercise the cross-host coordination wiring in schedulerTick. The
+// foundation is safe-by-construction: a single-host roster makes the HRW filter
+// an identity (ownedBy always true) AND gates off the claim, so the wiring is an
+// exact no-op until a 2nd host joins .catalyst/hosts.json. Every test injects a
+// fixed roster + a claimDispatch recorder so nothing touches Linear.
+describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "CTL-850";
+  // Compute the deterministic HRW owner of the fixture under the 2-host roster.
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+  const OTHER = ROSTER.find((h) => h !== OWNER);
+
+  const eligibleOne = (id = TICKET) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  // recordClaim — a claimDispatch seam that records every call and returns a
+  // fixed verdict, so a test asserts both WHETHER the claim ran and with WHAT.
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => {
+      calls.push(arg);
+      return verdict;
+    };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("single-host roster is an exact no-op: claim is NEVER attempted, dispatch proceeds", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: null }); // would block IF called
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(claimDispatch.calls).toHaveLength(0); // multiHost gate skipped the claim
+    expect(dispatch.calls).toHaveLength(1); // HRW identity → dispatched
+    expect(dispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "research" });
+  });
+
+  test("multi-host: a ticket OWNED by this host is dispatched (HRW keeps it)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    // The claim ran with this host + the entry phase before the spawn.
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: OWNER, phase: "research" });
+  });
+
+  test("multi-host: a ticket owned by ANOTHER host is filtered out — no claim, no dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OTHER, // not the HRW owner
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(0); // HRW excluded it before the loop
+    expect(claimDispatch.calls).toHaveLength(0); // never reached the claim
+  });
+
+  test("multi-host: a LOST claim defers WITHOUT a cooldown marker (reconsidered next tick)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: 2 }); // another host won
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(claimDispatch.calls).toHaveLength(1); // the claim was attempted
+    expect(dispatch.calls).toHaveLength(0); // but lost → not dispatched
+    // A lost claim is NOT a dispatch failure, so NO cooldown marker is written
+    // (the ticket is simply reconsidered next tick).
+    expect(existsSync(dispatchCooldownPath(orchDir, TICKET, "research"))).toBe(false);
   });
 });
