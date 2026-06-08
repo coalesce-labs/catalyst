@@ -661,14 +661,38 @@ for prof in "${PROFILE_CANDIDATES[@]}"; do
     fi
 done
 
-# (c) Live check: this very (interactive) shell already has the proxy set. If so,
-#     SOMETHING in the login chain leaked it — surface it even if the grep above
-#     missed the source (e.g. an indirect include or a Warp/IDE launch config).
+# (c) Live check: this very (interactive) shell already has a proxy set. This is
+#     only a *leak* worth hard-failing on if the proxy is the catalyst mitmproxy
+#     audit proxy (matching the daemon env's de_proxy, or the conventional
+#     mitmproxy host:port) — a developer behind a legitimate corporate proxy
+#     (HTTPS_PROXY=http://corp-proxy:…) must NOT get a false-positive failure
+#     (and an untrue "routes through mitmproxy" claim) that flips the whole
+#     health check non-zero. So: fail only on a confirmed mitmproxy match,
+#     otherwise emit an informational note. (CTL-869)
 live_proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
 if [[ -n "$live_proxy" ]]; then
-    leak_found="yes"
-    fail "HTTP(S)_PROXY is set in THIS shell ($live_proxy) — interactive processes (incl. claude) route through mitmproxy"
-    info "If mitmproxy is down, every API call here fails with 'connection refused'. Find and remove the export/source from your shell profile (see above), then open a fresh terminal."
+    # de_proxy is the daemon env's configured proxy when the env file exists; it
+    # is the literal placeholder "(the daemon proxy)" otherwise (set at line ~620
+    # under set -u). Treat the live proxy as the catalyst mitmproxy when it equals
+    # that real de_proxy, or when it points at the conventional mitmproxy host:port
+    # (127.0.0.1:8080 / localhost:8080), the default this repo's tooling uses.
+    is_catalyst_proxy=""
+    if [[ "$de_proxy" != "(the daemon proxy)" && "$live_proxy" == "$de_proxy" ]]; then
+        is_catalyst_proxy="yes"
+    elif [[ "$live_proxy" == *"127.0.0.1:8080"* || "$live_proxy" == *"localhost:8080"* ]]; then
+        is_catalyst_proxy="yes"
+    fi
+
+    if [[ -n "$is_catalyst_proxy" ]]; then
+        leak_found="yes"
+        fail "HTTP(S)_PROXY is set in THIS shell ($live_proxy) — interactive processes (incl. claude) route through the catalyst mitmproxy"
+        info "If mitmproxy is down, every API call here fails with 'connection refused'. Find and remove the export/source from your shell profile (see above), then open a fresh terminal."
+    else
+        # An unrelated proxy (e.g. a corporate HTTP proxy). Do NOT hard-fail the
+        # whole health check on it; just note it in case it is in fact a down
+        # catalyst audit proxy under a non-default address.
+        info "A proxy is set in this shell ($live_proxy) — if it is the catalyst mitmproxy audit proxy and it is down, interactive claude calls will fail with connection refused. If it is an unrelated (e.g. corporate) proxy, this is fine."
+    fi
 fi
 
 if [[ -z "$leak_found" ]]; then

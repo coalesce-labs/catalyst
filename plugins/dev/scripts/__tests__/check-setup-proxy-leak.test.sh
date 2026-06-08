@@ -158,6 +158,30 @@ OUT5="$(
 )"
 assert_grep "live proxy in shell flagged" "$OUT5" "HTTP(S)_PROXY is set in THIS shell"
 
+# ─── Test 7: live shell has a NON-catalyst (e.g. corporate) proxy → no hard fail
+# A developer behind a legitimate corporate proxy must NOT get a false-positive
+# hard failure (which would flip the whole health check non-zero) nor an untrue
+# "routes through mitmproxy" claim. check (c) must only hard-fail when the live
+# proxy matches the catalyst mitmproxy (de_proxy / the conventional :8080
+# host:port); an unrelated proxy gets an informational note only. (CTL-869)
+P7="${SCRATCH}/p7"; H7="${SCRATCH}/h7"
+make_project "$P7"; make_home "$H7"
+echo 'export EDITOR=vim' > "${H7}/.zshrc"
+OUT7="$(
+  cd "$P7" \
+  && env -i HOME="$H7" PATH="$PATH" \
+     XDG_CONFIG_HOME="${H7}/.config" CATALYST_AUTONOMOUS=1 \
+     HTTPS_PROXY="http://corp-proxy.example.com:3128" \
+     bash "$SCRIPT" 2>&1 || true
+)"
+# It MUST NOT hard-fail check (c) on the non-catalyst proxy...
+assert_not_grep "non-catalyst proxy not hard-failed" "$OUT7" "HTTP(S)_PROXY is set in THIS shell"
+# ...and MUST NOT make the untrue "routes through mitmproxy" claim about it.
+assert_not_grep "no false mitmproxy claim for corp proxy" "$OUT7" "route through the catalyst mitmproxy"
+# It still surfaces the proxy as an informational note (so a down catalyst proxy
+# under a non-default address is not silently ignored).
+assert_grep "non-catalyst proxy noted informationally" "$OUT7" "A proxy is set in this shell"
+
 # ─── Test 6: profile sources env file but daemon env file absent → no set -u crash
 # de_proxy is only populated in check-setup.sh's section 7c when the daemon env
 # file exists; the leak section must still run (and detect the source line)
