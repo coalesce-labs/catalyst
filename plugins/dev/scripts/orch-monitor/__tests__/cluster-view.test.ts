@@ -45,6 +45,10 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     updatedAt: "2026-06-08T11:00:00.000Z",
     held: null,
     blockers: [],
+    // CTL-901 (HOME3): per-row duration anchors — null in this fixture (the
+    // cluster view does not read them).
+    heldSince: null,
+    currentPhaseSince: null,
     // BFF10 stamps host:{name,id} + generation on every BoardTicket. The cluster
     // view groups off ownerHostById (the durable fence projection), not this per-
     // entity host, so these default null (single-host identity no-op) and tests

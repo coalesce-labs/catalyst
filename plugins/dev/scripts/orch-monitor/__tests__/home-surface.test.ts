@@ -159,6 +159,53 @@ describe("data plane — read-model SSE, never a synchronous Linear call (CTL-89
   });
 });
 
+// ── CTL-901 (HOME3): reframed groups + per-row durations + collapsed reassurance
+describe("HOME3 — per-row durations are wired honestly into the row (CTL-901)", () => {
+  it("the row computes its duration from the pure rowDurationMs + fmtRelativeDuration", () => {
+    // The row derives the elapsed ms (rowDurationMs) and formats it with the
+    // quiet single-unit formatter — not the dense board's fmtDuration.
+    expect(inboxRowSrc).toContain("rowDurationMs");
+    expect(inboxRowSrc).toContain("fmtRelativeDuration");
+  });
+
+  it("the row OMITS the duration cell when there is no honest backing timestamp", () => {
+    // The "never fabricated" Gherkin: duration is rendered only when non-null;
+    // the absent branch carries the unavailable marker, never a fabricated time.
+    expect(rowCode).toMatch(/duration\s*!=\s*null/);
+    expect(rowCode).toContain("data-row-duration-unavailable");
+  });
+
+  it("the row threads a shared `now` clock (rows agree on one time)", () => {
+    expect(inboxRowSrc).toContain("now");
+  });
+});
+
+describe("HOME3 — reframed groups read in plain operator language (CTL-901)", () => {
+  // The three sections are the plain-language reframe. The labels live in the
+  // pure home-inbox module (SECTION_LABEL); guard them at the source of truth.
+  const homeInboxSrc = read("board/home-inbox.ts");
+  it("titles the sections 'What's blocked' / 'What's waiting' / 'Running on its own'", () => {
+    expect(homeInboxSrc).toContain('"What\'s blocked"');
+    expect(homeInboxSrc).toContain('"What\'s waiting"');
+    expect(homeInboxSrc).toContain('"Running on its own"');
+  });
+});
+
+describe("HOME3 — 'Running on its own' is a collapsed reassurance count by default (CTL-901)", () => {
+  it("the section block collapses the non-needs-you (reassurance) sets by default", () => {
+    // A reassurance section starts collapsed (open === !collapsible) and exposes
+    // a count toggle; needs-you sections (blocked/waiting) stay open.
+    expect(homeSurfaceSrc).toContain("isNeedsYouSection");
+    expect(homeSurfaceSrc).toContain("data-section-toggle");
+    expect(homeSurfaceSrc).toMatch(/data-collapsed/);
+  });
+
+  it("the surface ticks a `now` clock and passes it down to the rows", () => {
+    expect(homeSurfaceSrc).toContain("setNow");
+    expect(homeSurfaceSrc).toMatch(/now=\{now\}/);
+  });
+});
+
 // ── Scenario: App wires Home into the shell's "home" surface ──────────────────
 describe("App wiring — Home mounts into the shell home surface (CTL-899)", () => {
   it("App renders HomeSurface when the active surface is 'home'", () => {

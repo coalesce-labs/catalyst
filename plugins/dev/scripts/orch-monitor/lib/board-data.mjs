@@ -108,6 +108,12 @@ export function synthesizeQueuedTicket(e, linfo) {
     updatedAt: e.createdAt || new Date(0).toISOString(),
     held: heldFor(li.labels),
     blockers: [],
+    // CTL-901 (HOME3): a queued ticket has no worker dir / phase signal, so it
+    // has no current-phase start (null). Its held duration, when held, comes from
+    // the durable ticket_state heldSince the broker projected (BFF11) — honest
+    // null when the cache has no stamp.
+    heldSince: li.heldSince ?? null,
+    currentPhaseSince: null,
     // CTL-922 (BFF10): node attribution. A queued ticket has no worker dir /
     // phase signal, so host + generation come purely from the durable fence
     // projection (li, via the broker's BFF11 ticket_state). team is the
@@ -669,6 +675,22 @@ export async function assembleBoard() {
       // meaningful when held === "blocked"); empty otherwise.
       held: heldFor(linfo[id]?.labels),
       blockers: ticketBlockers(triage),
+      // CTL-901 (HOME3): per-row "how long has this needed me / been running"
+      // durations, sourced from DURABLE read-model timestamps only — never
+      // fabricated. `heldSince` is the applied-at of the held (blocked/waiting)
+      // labels, projected into ticket_state by the broker (BFF11 / CTL-923) and
+      // surfaced through linear-cache-reader; it is the honest "how long has it
+      // been waiting on you" anchor. null when the durable cache has no stamp
+      // (an older filter-state.db, or a not-yet-observed hold) → the UI renders
+      // the duration cell as unavailable rather than inventing one. Only
+      // meaningful while `held` is set; cleared to null on pickup/unblock.
+      heldSince: linfo[id]?.heldSince ?? null,
+      // The wall-clock start of the ticket's CURRENT phase (deriveCurrentPhase
+      // already reads it off the live/last phase signal) — the "how long has it
+      // been running / in its current state" anchor for the running set. null
+      // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
+      // signal) → again rendered unavailable, never now-anchored to a guess.
+      currentPhaseSince: cur.startedAt ?? null,
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
       turns: phaseCostsByTicket[id]
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)

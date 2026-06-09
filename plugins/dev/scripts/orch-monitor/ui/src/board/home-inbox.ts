@@ -277,3 +277,46 @@ export function rowById(model: InboxModel, id: string | null): InboxRow | null {
   if (id == null) return null;
   return model.order.find((r) => r.id === id) ?? null;
 }
+
+// ── CTL-901 (HOME3): per-row "how long" durations ───────────────────────────
+// The page answers "what needs me and for how long". Each row carries a relative
+// duration anchored to a DURABLE read-model timestamp — never a fabricated one:
+//   • blocked / waiting → `heldSince` (the applied-at of the held labels, BFF11)
+//     = how long it has been waiting on you / blocked.
+//   • running           → `currentPhaseSince` (the current phase's startedAt)
+//     = how long it has been running / in its current state.
+//   • done              → no live duration (it is finished) → null.
+// When the chosen anchor is absent or unparseable, the duration is null and the
+// UI omits / marks-unavailable the cell rather than inventing a value (the
+// "honest, never fabricated" Gherkin). PURE + side-effect-free so it is unit-
+// testable from outside the React tree; `now` is injected for the same reason.
+
+/** The ISO timestamp a row's duration is measured FROM, per section. Returns the
+ *  durable anchor (heldSince for held rows, currentPhaseSince for running) or
+ *  null when this section has no live duration OR the anchor was never stamped. */
+export function rowDurationAnchor(row: InboxRow): string | null {
+  switch (row.section) {
+    case "blocked":
+    case "waiting":
+      return row.ticket.heldSince ?? null;
+    case "running":
+      return row.ticket.currentPhaseSince ?? null;
+    case "done":
+      return null;
+  }
+}
+
+/**
+ * The elapsed milliseconds a row has been in its current waiting/blocked/running
+ * state, or null when there is no honest backing timestamp (anchor absent or
+ * unparseable) — in which case the UI MUST omit / mark the cell unavailable
+ * rather than fabricate a value. A clock-skewed anchor in the future clamps to 0
+ * (we never render a negative "−3m"); the anchor itself is never mutated.
+ */
+export function rowDurationMs(row: InboxRow, now: number): number | null {
+  const anchor = rowDurationAnchor(row);
+  if (anchor == null) return null;
+  const t = Date.parse(anchor);
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, now - t);
+}
