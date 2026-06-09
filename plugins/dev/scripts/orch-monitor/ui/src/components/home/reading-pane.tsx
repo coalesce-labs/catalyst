@@ -8,6 +8,9 @@
 // and marks the deeper body as "arriving in HOME4", rather than being inert.
 import { CheckCircle2 } from "lucide-react";
 import { isNeedsYouSection, type InboxRow } from "@/board/home-inbox";
+import { isDoneStatus, isPhase, phaseIndexOf, PHASE_LABEL } from "@/board/phase-model";
+import { StatusIcon } from "./status-icon";
+import { PhaseStrip } from "./phase-strip";
 
 /** Empty-pane state — shown when nothing is selected (a wholly empty inbox).
  *  The relief payoff: calm, not an error. */
@@ -23,6 +26,25 @@ function NothingSelected() {
   );
 }
 
+/** The compact "Where it's at" block (CTL-900 / HOME2) — a small glyph + the
+ *  human phase label + the full done/current/pending phase strip. Flat, no
+ *  nested card (Direction A). */
+function WhereItsAt({ phase, status }: { phase: string; status: string }) {
+  const phaseIndex = phaseIndexOf(phase);
+  const done = isDoneStatus(status);
+  const phaseLabel = done ? "Done" : isPhase(phase) ? PHASE_LABEL[phase] : phase;
+  return (
+    <div className="mt-6">
+      <p className="text-[11px] font-medium uppercase tracking-wide text-muted">Where it's at</p>
+      <div className="mt-2 flex items-center gap-3">
+        <StatusIcon phase={phase} status={status} size={16} />
+        <span className="text-[12px] text-muted">{phaseLabel}</span>
+        <PhaseStrip phaseIndex={phaseIndex} />
+      </div>
+    </div>
+  );
+}
+
 export function ReadingPane({ row }: { row: InboxRow | null }) {
   if (!row) return <NothingSelected />;
 
@@ -30,12 +52,21 @@ export function ReadingPane({ row }: { row: InboxRow | null }) {
 
   return (
     <div data-reading-pane-id={row.id} className="flex h-full flex-col px-6 py-5">
-      {/* Header: the key + the one-line ask (the bright subject of the pane). */}
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-[12px] font-semibold text-accent">{row.id}</span>
-        <span className="text-[11px] text-muted">{row.subLabel}</span>
+      {/* Header: the StatusIcon glyph + the key + the one-line ask (the bright
+          subject of the pane). The glyph carries progress + stage in one slot. */}
+      <div className="flex items-start gap-3">
+        <StatusIcon phase={row.ticket.phase} status={row.ticket.status} size={24} className="mt-0.5" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-[12px] font-semibold text-accent">{row.id}</span>
+            <span className="text-[11px] text-muted">{row.subLabel}</span>
+          </div>
+          <h1 className="mt-1 text-[18px] leading-snug text-fg">{row.title}</h1>
+        </div>
       </div>
-      <h1 className="mt-1 text-[18px] leading-snug text-fg">{row.title}</h1>
+
+      {/* Where it's at — the full phase strip read. */}
+      <WhereItsAt phase={row.ticket.phase} status={row.ticket.status} />
 
       {/* What's needed now — the needs-you cue. The decision options / blocker
           detail + the View-in-Claude deep link are HOME4. */}
