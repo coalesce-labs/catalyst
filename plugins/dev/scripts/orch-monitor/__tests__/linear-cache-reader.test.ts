@@ -40,9 +40,12 @@ describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => 
       linearState: "Implement",
       // ticket_state has no title column → honest null with no eligible row (BFF9)
       title: null,
-      // BFF10: no fence attachment observed → honest null (never fabricated)
+      // BFF10/BFF2: no fence observed → all node-grouping fields honest null.
       ownerHost: null,
       generation: null,
+      fencePhase: null,
+      claimedAt: null,
+      heldSince: null,
     });
   });
 
@@ -150,6 +153,47 @@ describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => 
     // as a thrown error to the assemble loop.
     expect(byId).not.toBe("THREW");
   });
+
+  // CTL-884 (BFF2): the read-model groups by owner_host, which BFF11 projects
+  // into ticket_state. The enrichment map must surface that durable grouping key
+  // (+ the fence companions) so the cluster view never does a live attachment
+  // fetch. Null when no fence has been observed — never fabricated.
+  it("surfaces ownerHost + fence companions from ticket_state (the BFF11 projection)", async () => {
+    const ticketStateReader = () =>
+      Promise.resolve({
+        "CTL-1": {
+          priority: 2,
+          labels: ["feature"],
+          linearState: "Implement",
+          ownerHost: "mini",
+          generation: 3,
+          fencePhase: "implement",
+          claimedAt: "2026-06-08T11:00:00.000Z",
+          heldSince: "2026-06-08T10:00:00.000Z",
+        },
+      });
+    const byId = await readLinearCache({
+      ticketStateReader,
+      eligibleReader: () => Promise.resolve({}),
+    });
+    expect(byId["CTL-1"].ownerHost).toBe("mini");
+    expect(byId["CTL-1"].generation).toBe(3);
+    expect(byId["CTL-1"].fencePhase).toBe("implement");
+    expect(byId["CTL-1"].claimedAt).toBe("2026-06-08T11:00:00.000Z");
+    expect(byId["CTL-1"].heldSince).toBe("2026-06-08T10:00:00.000Z");
+  });
+
+  it("ownerHost + fence companions degrade to null when no fence is in the cache", async () => {
+    const byId = await readLinearCache({
+      ticketStateReader: () => Promise.resolve({ "CTL-2": { priority: 1, labels: [] } }),
+      eligibleReader: () => Promise.resolve({}),
+    });
+    expect(byId["CTL-2"].ownerHost).toBeNull();
+    expect(byId["CTL-2"].generation).toBeNull();
+    expect(byId["CTL-2"].fencePhase).toBeNull();
+    expect(byId["CTL-2"].claimedAt).toBeNull();
+    expect(byId["CTL-2"].heldSince).toBeNull();
+  });
 });
 
 describe("readLinearCache end-to-end against a real filter-state.db", () => {
@@ -171,9 +215,17 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
       assignee: "uuid-a",
     });
     upsertTicketDescriptor({ ticket: "CTL-101", state: "Done", uuid: "u-101" });
-    // BFF10/BFF11: project a fence attachment so the e2e proves ownerHost +
-    // generation flow from ticket_state through the bulk descriptor read.
-    upsertTicketFence({ ticket: "CTL-100", ownerHost: "mac-mini", generation: 7 });
+    // BFF10/BFF11 + CTL-884 (BFF2): project a fence attachment so the e2e proves
+    // ownerHost + generation + the fence companions (phase/claimedAt) flow from
+    // ticket_state through the bulk descriptor read — the durable owner_host
+    // grouping key the cluster view reads (never a live attachment fetch).
+    upsertTicketFence({
+      ticket: "CTL-100",
+      ownerHost: "mini",
+      generation: 2,
+      phase: "implement",
+      claimedAt: "2026-06-08T11:30:00.000Z",
+    });
     closeBrokerStateDb(); // assemble path opens its own handle
     writeFileSync(
       join(eligibleDir, "CTL.json"),
@@ -194,15 +246,18 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
     expect(byId["CTL-100"].labels).toEqual(["monitor", "feature"]);
     expect(byId["CTL-100"].assignee).toBe("uuid-a");
     expect(byId["CTL-100"].linearState).toBe("Implement");
+    // CTL-884: the durable owner_host grouping key flows through the real DB.
+    expect(byId["CTL-100"].ownerHost).toBe("mini");
+    expect(byId["CTL-100"].generation).toBe(2);
+    expect(byId["CTL-100"].fencePhase).toBe("implement");
+    expect(byId["CTL-100"].claimedAt).toBe("2026-06-08T11:30:00.000Z");
+    // CTL-101 has no fence → null grouping key (groups under "unassigned")
+    expect(byId["CTL-101"].ownerHost).toBeNull();
     // queued ticket only in the eligible projection
     expect(byId["CTL-200"].priority).toBe(3);
     expect(byId["CTL-200"].project).toBe("Web UI");
     expect(byId["CTL-200"].title).toBe("queued"); // BFF9: title from eligible
     // BFF10/BFF11: the fence projection flows through the real bulk descriptor read.
-    expect(byId["CTL-100"].ownerHost).toBe("mac-mini");
-    expect(byId["CTL-100"].generation).toBe(7);
-    // a ticket with no fence attachment → honest null
-    expect(byId["CTL-101"].ownerHost).toBeNull();
     expect(byId["CTL-101"].generation).toBeNull();
   });
 });

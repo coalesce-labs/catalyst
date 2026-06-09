@@ -22,10 +22,12 @@ export interface LinearCacheEntry {
    */
   title: string | null;
   /**
-   * CTL-922 (BFF10): the owning host NAME, projected into ticket_state from the
-   * catalyst://fence attachment by the broker (BFF11 / CTL-923). board-data
-   * derives the host {name,id} ref from this for the node-aware surfaces. null
-   * when no fence attachment has been observed.
+   * CTL-922 (BFF10) + CTL-884 (BFF2): the owning host NAME, projected into
+   * ticket_state from the catalyst://fence attachment by the broker (BFF11 /
+   * CTL-923). board-data derives the host {name,id} ref from this for the
+   * node-aware surfaces; the cluster view groups by it. null when no fence
+   * attachment has been observed (the read-model NEVER does a live attachment
+   * fetch). Required on the type — the assembled `.mjs` ALWAYS emits it.
    */
   ownerHost: string | null;
   /**
@@ -34,6 +36,19 @@ export interface LinearCacheEntry {
    * isFenceCurrent without a live attachment fetch. null when no fence.
    */
   generation: number | null;
+  /**
+   * CTL-884 (BFF2) fence companions. OPTIONAL on the type (additive — only the
+   * cluster view consumes them; the BFF9 /api/linear fetcher and its fixtures
+   * pre-date them and never construct them) but the assembled `.mjs` ALWAYS emits
+   * them (null when no fence is cached), so a consumer that reads them gets a
+   * defined value, never `undefined`.
+   */
+  /** The pipeline phase recorded on the fence at claim time, or null. */
+  fencePhase?: string | null;
+  /** ISO timestamp the fence was claimed, or null. */
+  claimedAt?: string | null;
+  /** ISO timestamp the held label was first applied (hold duration source), or null. */
+  heldSince?: string | null;
 }
 
 export type LinearCacheById = Record<string, LinearCacheEntry>;
