@@ -4,7 +4,7 @@
 // UI subset: BoardQueueItem.state is omitted because the board never renders it).
 import type { ConnectionStatus } from "@/lib/types";
 
-export type BoardActiveState = "active" | "stuck" | null;
+export type BoardActiveState = "active" | "needs-human" | "stuck" | null;
 
 export interface BoardWorker {
   name: string;

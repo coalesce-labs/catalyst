@@ -187,10 +187,13 @@ async function transcriptAgeMs(sessionId, now) {
 }
 
 // Top-level state: a live worker is "active" (in its loop — generating OR actively
-// waiting on sub-agents / CI / a merge). Only call out the exceptions: a
-// finished-but-lingering process (terminal markers) or one dead for ~30m → "stuck".
-async function deriveActiveState(ticket, phase, ageMs) {
-  const dir = join(WORKERS_DIR, ticket);
+// waiting on sub-agents / CI / a merge). Exceptions:
+//   "needs-human" — watchdog (CTL-729) or recovery escalated; marker takes priority.
+//   "stuck"       — terminal markers present, or transcript silent for >30min.
+// Exported so it is unit-testable (CTL-729).
+export async function deriveActiveState(ticket, phase, ageMs, dir = join(WORKERS_DIR, ticket)) {
+  // needs-human wins over everything — escalated tickets need operator attention.
+  if (await exists(join(dir, ".linear-label-needs-human.applied"))) return "needs-human";
   if ((await exists(join(dir, ".terminal-done.applied"))) || (await exists(join(dir, ".worktree-removed")))) return "stuck";
   // monitor-merge / monitor-deploy / pr legitimately sit in long event-waits
   // (CI, merge, deploy) — staleness alone isn't stuck for them.

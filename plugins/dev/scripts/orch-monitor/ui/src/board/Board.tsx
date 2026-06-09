@@ -44,7 +44,9 @@ const PHASE_COLS = [
   { key: "monitor-deploy", label: "Deploy", c: "#39d07a" },
 ];
 const WORKER_COLS = [
-  { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
+  { key: "active", label: "Active", c: LIVE },
+  { key: "needs-human", label: "Needs Human", c: C.yellow },
+  { key: "stuck", label: "Stuck", c: C.red },
 ];
 // Phase statuses that mean a phase is no longer running. MUST stay in lock-step
 // with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
@@ -71,6 +73,7 @@ function accentFor(t: { phase: string; repo: string; type: string; activeState: 
   if (by === "repo") return repoColor(t.repo);
   if (by === "type") return TYPE_C[t.type] || C.fgMuted;
   if (t.activeState === "active") return LIVE;
+  if (t.activeState === "needs-human") return C.yellow;
   if (t.activeState === "stuck" || t.status === "failed") return C.red;
   return "#5b6b80";
 }
@@ -120,6 +123,7 @@ function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
 }
 function ActivityDot({ state, fallback }: { state: ActiveState; fallback: string }) {
   if (state === "active") return <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block", flex: "0 0 auto" }} />;
+  if (state === "needs-human") return <Dot color={C.yellow} />;
   if (state === "stuck") return <Dot color={C.red} />;
   return <Dot color={fallback} />;
 }
@@ -238,6 +242,7 @@ function TitleText({ text }: { text: string }) {
 function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onSelect?: (id: string) => void }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
+  const needsHuman = t.activeState === "needs-human";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
   return (
@@ -245,7 +250,7 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
       className={live ? "catalyst-live" : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`,
+        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : needsHuman ? `${C.yellow}66` : C.border}`,
         opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
         cursor: onSelect ? "pointer" : undefined,
       }}
@@ -257,6 +262,7 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
         <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
+        {needsHuman && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.yellow }}>needs human</span>}
         {stuck && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.red }}>stuck</span>}
         <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{t.type}</Badge>
       </div>
@@ -285,13 +291,15 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
 function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
+  const needsHuman = w.activeState === "needs-human";
   const stuck = w.activeState === "stuck";
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
   return (
     <div className={live ? "catalyst-live" : undefined} style={{
       background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-      border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`, opacity: stuck ? 0.7 : 1,
+      border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : needsHuman ? `${C.yellow}66` : C.border}`,
+      opacity: stuck ? 0.7 : 1,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <ActivityDot state={w.activeState} fallback={accent} />
@@ -314,8 +322,8 @@ function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
         {info?.model && <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{info.model}</Badge>}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: live ? LIVE : stuck ? C.red : C.fgDim }}>
-          {live ? (w.working ? "working now" : seen ? `active · ${seen}` : "active") : stuck ? `stuck · ${seen ?? "?"}` : w.status}
+        <span style={{ fontFamily: C.mono, fontSize: 10, color: live ? LIVE : needsHuman ? C.yellow : stuck ? C.red : C.fgDim }}>
+          {live ? (w.working ? "working now" : seen ? `active · ${seen}` : "active") : needsHuman ? `needs human · ${seen ?? "?"}` : stuck ? `stuck · ${seen ?? "?"}` : w.status}
         </span>
         <span style={{ flex: 1 }} />
         <Cost v={w.costUSD} />

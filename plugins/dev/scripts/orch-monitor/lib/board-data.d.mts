@@ -3,7 +3,7 @@
 // Vite config import assembleBoard() without a TS7016 implicit-any error.
 // Keep in sync with the object assembled in board-data.mjs.
 
-export type BoardActiveState = "active" | "stuck" | null;
+export type BoardActiveState = "active" | "needs-human" | "stuck" | null;
 
 export interface BoardWorker {
   name: string;
@@ -114,4 +114,5 @@ export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
 export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
+export function deriveActiveState(ticket: string, phase: string, ageMs: number | null, dir?: string): Promise<BoardActiveState>;
 export function assembleBoard(): Promise<BoardPayload>;
