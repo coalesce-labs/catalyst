@@ -26,7 +26,7 @@ import {
   type SpineNode,
 } from "@/board/ticket-page-model";
 import type { BoardTicket } from "@/board/types";
-import { phaseColor, fmtDuration, fmtClock } from "@/lib/formatters";
+import { phaseColor, fmtDuration, fmtClock, phaseModelLabel } from "@/lib/formatters";
 import { TicketGantt } from "./ticket-gantt";
 import { CommsView } from "./comms-view";
 import { ActivityEventRow } from "./activity-event-row";
@@ -341,9 +341,11 @@ function SpineRow({
         {completed ? `–${completed}` : node.isActive ? "–now" : ""}
       </span>
 
-      {/* model — plumbed (BFF6); dimmed em-dash when the signal carried none */}
-      <span style={{ width: 72, flexShrink: 0, color: node.model ? C.fgMuted : C.fgDim }}>
-        {node.model ? `◆${node.model}` : "—"}
+      {/* model — plumbed (BFF6); dimmed em-dash when the signal carried none.
+          Uses the SAME phaseModelLabel the compact gantt renders (CTL-915), so
+          the spine and gantt show identical per-phase model text. */}
+      <span data-spine-model={node.phase} style={{ width: 72, flexShrink: 0, color: node.model ? C.fgMuted : C.fgDim }}>
+        {phaseModelLabel(node.model)}
       </span>
 
       <span style={{ flex: 1 }} />

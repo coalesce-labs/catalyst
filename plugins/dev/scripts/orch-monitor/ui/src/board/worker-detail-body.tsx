@@ -27,6 +27,7 @@ import {
   readRunPhaseTimestamps,
   readWorkerScalars,
   isWorkerAlive,
+  resolveElapsed,
   type PhaseSignalFields,
   type LivenessLevel,
 } from "./worker-detail-data";
@@ -244,6 +245,20 @@ function fmtTs(ts: number): string {
   );
 }
 
+// CTL-915 (DETAIL4): the header elapsed reads at second precision — `14m02s`,
+// `1h02m`, `48s` — so the exact wall-clock from startedAt is visible to the
+// second (the runtimeMs floor only updates coarsely). null → em-dash, never 0s.
+function fmtElapsed(ms: number | null): string {
+  if (ms == null) return "—";
+  const total = Math.floor(ms / 1000);
+  const s = total % 60;
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  if (h > 0) return `${h}h${String(m).padStart(2, "0")}m`;
+  if (m > 0) return `${m}m${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+
 // ── header strip ─────────────────────────────────────────────────────────────
 function HeaderStrip({
   worker,
@@ -256,6 +271,18 @@ function HeaderStrip({
 }) {
   const model = resolveHeaderModel(signal, worker);
   const status = signal?.status ?? worker?.status ?? "—";
+  // A 1s clock so the wall-clock elapsed stays live while the page is open. It
+  // freezes naturally on death because resolveElapsed is driven by startedAt and
+  // the worker stops advancing — but we keep ticking so a still-alive worker's
+  // elapsed reads to the second.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  // CTL-915 (DETAIL4): exact wall-clock elapsed from BoardWorker.startedAt (BFF6),
+  // falling back to the coarser runtimeMs floor only when startedAt is absent.
+  const elapsed = resolveElapsed(worker?.startedAt, worker?.runtimeMs, now);
   // Ring colour: cyan iff alive, frozen grey on death — the SAME DOM either way
   // (no conditional unmount) so death causes zero layout reflow.
   const ringColor = alive ? LIVE_CYAN : C.fgDim;
@@ -303,6 +330,25 @@ function HeaderStrip({
       </span>
       <span data-worker-gen data-plumbed={signal?.generation != null} style={{ font: `11px ${C.mono}`, color: signal?.generation != null ? C.fg : C.fgDim }}>
         gen {signal?.generation ?? "— ↯"}
+      </span>
+      {/* elapsed: exact wall-clock from startedAt (BFF6); falls back to the
+          runtimeMs floor only when startedAt is absent. `wall-clock` is the
+          plumbed/precise reading; `runtime-floor` is dimmer (coarse fallback);
+          `none` dims to an em-dash, never a fabricated 0s. */}
+      <span
+        data-worker-elapsed
+        data-elapsed-source={elapsed.source}
+        data-plumbed={elapsed.source === "wall-clock"}
+        title={
+          elapsed.source === "wall-clock"
+            ? "exact wall-clock elapsed (from startedAt)"
+            : elapsed.source === "runtime-floor"
+              ? "runtimeMs floor — startedAt not yet on the worker"
+              : "no elapsed source"
+        }
+        style={{ font: `11px ${C.mono}`, color: elapsed.source === "wall-clock" ? C.fg : C.fgDim }}
+      >
+        elapsed {fmtElapsed(elapsed.ms)}
       </span>
     </div>
   );

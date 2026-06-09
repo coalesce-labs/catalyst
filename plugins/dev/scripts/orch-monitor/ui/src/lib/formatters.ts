@@ -56,6 +56,15 @@ export function fmtCost(n: number): string {
   return "$" + n.toFixed(2);
 }
 
+// CTL-915 (DETAIL4): the per-phase model label, shared by the lifecycle spine
+// node and the compact gantt so they render the SAME value off the SAME function
+// (the Gherkin "the compact gantt shows the same per-phase model"). A null model
+// (the phase signal carried none — BFF6 leaves it null, never fabricated) renders
+// a dimmed em-dash; a present model gets the ◆ marker the spine already uses.
+export function phaseModelLabel(model: string | null | undefined): string {
+  return model ? "◆" + model : "—";
+}
+
 export type StatusSemantic = "success" | "info" | "danger" | "warning" | "neutral";
 
 const STATUS_SEMANTIC: Record<string, StatusSemantic> = {

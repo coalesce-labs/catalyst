@@ -1,5 +1,5 @@
 import { BarChart3 } from "lucide-react";
-import { phaseColor, fmtDuration, fmtClock } from "@/lib/formatters";
+import { phaseColor, fmtDuration, fmtClock, phaseModelLabel } from "@/lib/formatters";
 import { EmptyState } from "./ui/empty-state";
 import type { BoardTicket, BoardPhaseTiming } from "@/board/types";
 
@@ -136,16 +136,30 @@ export function TicketGantt({ ticket }: TicketGanttProps) {
           >
             {durationLabel}
           </div>
+
+          {/* Per-phase model (CTL-915 / DETAIL4): the SAME phaseModelLabel the
+              lifecycle spine renders, off this row's BoardPhaseTiming.model
+              (BFF6). Dimmer when the phase signal carried none — never the
+              ticket-level model. */}
+          <div
+            data-gantt-model={row.phase}
+            data-plumbed={row.model != null}
+            title={row.model ? `model ${row.model}` : "no per-phase model in signal"}
+            style={{
+              width: 96,
+              flexShrink: 0,
+              fontSize: 10,
+              opacity: row.model ? 0.6 : 0.35,
+              textAlign: "right",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {phaseModelLabel(row.model)}
+          </div>
         </div>
       ))}
-
-      <div
-        style={{ fontSize: 10, opacity: 0.4, marginTop: 4 }}
-        title="Model used for this ticket"
-      >
-        model: {ticket.model ?? "—"}
-        {/* Per-phase model is not on phaseSummary; only ticket-level model is shown here. */}
-      </div>
     </div>
   );
 }
