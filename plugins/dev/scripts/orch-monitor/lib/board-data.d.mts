@@ -5,6 +5,16 @@
 
 export type BoardActiveState = "active" | "stuck" | null;
 
+/** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
+ *  the node-aware surfaces can attribute/group by host. `name` is the
+ *  configurable host name (CATALYST_HOST_NAME / os.hostname() minus ".local");
+ *  `id` is sha256(name)[:16] — identical across the bash/mjs/ts host-identity
+ *  primitives. Same shape as the read-model contract's HostRef. */
+export interface BoardHostRef {
+  name: string;
+  id: string;
+}
+
 export interface BoardWorker {
   name: string;
   ticket: string;
@@ -26,6 +36,14 @@ export interface BoardWorker {
   pid: number | null;
   /** CTL-888 (BFF6) P7: catalyst `sess_…` id (catalyst.session heartbeat key); null when unknown. */
   catalystSessionId: string | null;
+  /** CTL-922 (BFF10): the node owning this worker, from the phase signal
+   *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
+   *  null when no host is named (single-host resolves to the one node). */
+  host: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation, from the durable fence projection
+   *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
+   *  isFenceCurrent without a live attachment fetch. null when no fence. */
+  generation: number | null;
 }
 
 export interface BoardPhaseCost {
@@ -81,6 +99,14 @@ export interface BoardTicket {
   held: "blocked" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (from triage.json). */
   blockers: string[];
+  /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
+   *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
+   *  null when no host is named (single-host resolves to the one node). */
+  host: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation, from the durable fence projection
+   *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
+   *  isFenceCurrent without a live attachment fetch. null when no fence. */
+  generation: number | null;
 }
 
 export interface BoardQueueItem {
@@ -95,6 +121,9 @@ export interface BoardQueueItem {
   estimate: number | null;
   scope: string | null;
   project: string | null;
+  /** CTL-922 (BFF10): the node owning this queued ticket, from the durable fence
+   *  projection owner_host (BFF11); null when no fence attachment observed. */
+  host: BoardHostRef | null;
 }
 
 export interface BoardConfig {
@@ -123,4 +152,24 @@ export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
 export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
+/** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767). */
+export function synthesizeQueuedTicket(
+  eligible: unknown,
+  linfo: Record<string, unknown>,
+): BoardTicket;
 export function assembleBoard(): Promise<BoardPayload>;
+/** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
+ *  sha256(name)[:16]); null for a null/empty name. */
+export function hostRefFromName(name: unknown): BoardHostRef | null;
+/** CTL-922 (BFF10): resolve an entity's owning host — phase-signal host:{name,id}
+ *  first (CTL-852), else the durable fence projection owner_host (BFF11). */
+export function deriveHost(
+  phaseSigs: unknown[],
+  fence?: { ownerHost?: string | null },
+): BoardHostRef | null;
+/** CTL-922 (BFF10): resolve an entity's fence generation — durable fence
+ *  projection (BFF11) first, else the phase signal generation; null when neither. */
+export function deriveGeneration(
+  phaseSigs: unknown[],
+  fence?: { generation?: number | null },
+): number | null;

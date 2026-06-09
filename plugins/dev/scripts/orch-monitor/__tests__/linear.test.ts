@@ -265,6 +265,8 @@ describe("createCacheBackedLinearFetcher (BFF9 — durable-cache LinearFetcher)"
     assignee: "uuid-bot",
     linearState: "Implement",
     title: "Retire legacy linearis poller",
+    ownerHost: null,
+    generation: null,
   } satisfies LinearCacheById[string];
 
   it("Scenario 1: serves /api/linear shape from the durable cache (no linearis spawn)", async () => {
@@ -353,6 +355,8 @@ describe("createCacheBackedLinearFetcher (BFF9 — durable-cache LinearFetcher)"
         assignee: null,
         linearState: null,
         title: null,
+        ownerHost: null,
+        generation: null,
       },
     });
     const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
