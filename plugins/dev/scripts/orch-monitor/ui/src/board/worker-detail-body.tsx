@@ -17,8 +17,9 @@
 // The live `[● live]` tab and the Burn Strip trail in DETAIL7/DETAIL6 and
 // degrade gracefully — their absence is an honest disabled tab, never a blank.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BoardWorker } from "./types";
+import type { StreamEvent } from "@/lib/types";
 import {
   deriveLiveness,
   deriveStaleBgGate,
@@ -37,6 +38,15 @@ import {
   type WorkerBurnSeries,
   type BurnTile,
 } from "./worker-burn-data";
+import {
+  appendLiveRows,
+  resolvePausedView,
+  deriveFooterCounters,
+  deriveTailDiagnostics,
+  resolveLiveTerminalRows,
+  parseStreamEvent,
+  type TailDiagnostics,
+} from "./live-tail-data";
 import { LIVE_CYAN } from "./detail-chrome";
 import { Sparkline } from "../components/sparkline";
 import { fmtCost, fmtTokens } from "@/lib/formatters";
@@ -172,6 +182,57 @@ function useHistoryTail(sessionId: string | null, enabled: boolean): {
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
   return { state, reload };
+}
+
+// ── the live transcript tail (CTL-918 / DETAIL7) ──────────────────────────────
+// Consumes the BFF live SSE endpoint /api/ec-worker-stream/<sessionId> (BFF5,
+// CTL-887) — a tail of the running agent's ~/.claude/projects/*/<sessionId>.jsonl
+// transcript, framed as `event: stream-event` with a StreamEvent JSON payload
+// (and an `event: open` greeting on connect). Rows accumulate in a rolling
+// buffer via the PURE appendLiveRows (capped, oldest-dropped). The connection
+// status drives the never-blank MVP fallback: while `error`/before the first
+// row, the terminal still renders one derived row (see resolveLiveTerminalRows).
+//
+// PAUSE decouples view from data: the SSE keeps appending to `buffer` regardless
+// of the pause flag — pause only freezes the VISIBLE slice (resolvePausedView),
+// and resume replays the gap. We never tear down the EventSource on pause.
+type LiveConnState = "idle" | "connecting" | "open" | "error";
+
+interface LiveTail {
+  buffer: StreamEvent[];
+  conn: LiveConnState;
+}
+
+function useLiveTail(sessionId: string | null, enabled: boolean): LiveTail {
+  const [buffer, setBuffer] = useState<StreamEvent[]>([]);
+  const [conn, setConn] = useState<LiveConnState>("idle");
+
+  useEffect(() => {
+    // Reset the buffer whenever the session changes or the tab closes so a
+    // different run's transcript never bleeds into this one.
+    setBuffer([]);
+    if (!enabled || !sessionId) {
+      setConn("idle");
+      return;
+    }
+    setConn("connecting");
+    const es = new EventSource(
+      `/api/ec-worker-stream/${encodeURIComponent(sessionId)}`,
+    );
+    // The server greets with `event: open` once the transcript path resolves.
+    es.addEventListener("open", () => setConn("open"));
+    // Each growth poll emits zero or more `event: stream-event` frames.
+    es.addEventListener("stream-event", (ev: MessageEvent<string>) => {
+      const row = parseStreamEvent(ev.data);
+      if (row) setBuffer((prev) => appendLiveRows(prev, [row]));
+    });
+    // EventSource auto-reconnects on transient errors; we surface the error
+    // state so the MVP fallback row renders, then it recovers silently.
+    es.onerror = () => setConn("error");
+    return () => es.close();
+  }, [sessionId, enabled]);
+
+  return { buffer, conn };
 }
 
 /** Fetch the worker Burn Strip's REAL Prometheus sparklines for this run's CC
@@ -409,7 +470,16 @@ function HeaderStrip({
 }
 
 // ── DIAGNOSTICS rail (the reason this is a direct route) ─────────────────────
-function DiagnosticsRail({ worker }: { worker: BoardWorker | undefined }) {
+function DiagnosticsRail({
+  worker,
+  live,
+}: {
+  worker: BoardWorker | undefined;
+  /** CTL-918 (DETAIL7): retries/rate-limit/turn/tool-error counts derived from
+   *  the live tail's received rows. null (no live rows yet) keeps those rows
+   *  dimmed exactly as DETAIL3 left them — never a fabricated count. */
+  live: TailDiagnostics | null;
+}) {
   // A ticking clock so liveness/idle stay fresh while the page is open.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -420,6 +490,9 @@ function DiagnosticsRail({ worker }: { worker: BoardWorker | undefined }) {
   const lastActiveMs = worker?.lastActiveMs ?? null;
   const liveness = deriveLiveness(lastActiveMs, now);
   const gate = deriveStaleBgGate(lastActiveMs, now);
+  // The live rows light up the tail-derived rows; absent the stream they stay
+  // dimmed (plumbed:false) exactly as before — the DETAIL3 honest dim.
+  const plumbed = live?.plumbed ?? false;
 
   return (
     <div data-worker-diagnostics style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}>
@@ -443,12 +516,30 @@ function DiagnosticsRail({ worker }: { worker: BoardWorker | undefined }) {
         value={`${fmtIdle(gate.idleMs)} / ${Math.round(gate.thresholdMs / 1000)}s ${gate.idleMs == null ? "" : gate.tripped ? "TRIPPED" : "ok"}`}
         plumbed={gate.idleMs != null}
       />
-      {/* NEEDS-PLUMBING — derived from the tail / catalyst sess_ id once wired.
-          NEVER a fabricated 2/3. */}
-      <DiagRow label="retries" value={null} plumbed={false} />
-      <DiagRow label="rate-limit" value={null} plumbed={false} />
-      <DiagRow label="tool-errors" value={null} plumbed={false} />
-      <DiagRow label="turn" value={null} plumbed={false} />
+      {/* CTL-918 (DETAIL7): these light up from the SAME live rows the tail shows
+          (previously dimmed NEEDS-PLUMBING in DETAIL3). They stay dimmed until
+          the live stream delivers a row — never a fabricated 2/3. */}
+      <DiagRow
+        label="retries"
+        plumbed={plumbed}
+        accent={live && live.retries > 0 ? C.yellow : undefined}
+        value={live?.retries ?? null}
+      />
+      <DiagRow
+        label="rate-limit"
+        plumbed={plumbed}
+        accent={live && live.rateLimit > 0 ? C.red : undefined}
+        value={live?.rateLimit ?? null}
+      />
+      <DiagRow
+        label="tool-errors"
+        plumbed={plumbed}
+        accent={live && live.toolErrors > 0 ? C.red : undefined}
+        value={live?.toolErrors ?? null}
+      />
+      <DiagRow label="turn" plumbed={plumbed} value={live?.turn ?? null} />
+      {/* revive-budget + heartbeat remain NEEDS-PLUMBING (daemon markers /
+          catalyst sess_ id — not the transcript tail). NEVER fabricated. */}
       <DiagRow label="revive-budget" value={null} plumbed={false} />
       <DiagRow label="heartbeat" value={null} plumbed={false} />
     </div>
@@ -570,39 +661,235 @@ function HistoryRow({ row }: { row: WorkerHistoryRow }) {
   );
 }
 
-function ActivityTail({ sessionId }: { sessionId: string | null }) {
-  // Tabs: [● live] trails in DETAIL7 (disabled here), [history] is REAL today.
-  // Default to history so a dead worker's page is never empty.
-  const [tab, setTab] = useState<"live" | "history">("history");
+// ── live stream row (the harvested StreamEventRow, re-skinned to inline-C) ────
+// One StreamEvent row, the live source's counterpart to HistoryRow. Mirrors the
+// drawer's StreamEventRow (worker-detail-drawer.tsx:76) row-by-row — tool_start,
+// text, reasoning (◌ thinking…), turn, retry, rate_limit — so live + history
+// read identically (design §5.2 "one StreamEventRow renderer, two sources").
+function LiveStreamRow({ event }: { event: StreamEvent }) {
+  const base = {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "2px 0",
+    font: `11px ${C.mono}`,
+  } as const;
+  const dot = (color: string) => (
+    <span style={{ width: 6, height: 6, borderRadius: "50%", background: color, flex: "0 0 auto" }} />
+  );
+  const tsCell = (
+    <span style={{ color: C.fgDim, flex: "0 0 auto" }}>{fmtTs(event.ts)}</span>
+  );
+  switch (event.type) {
+    case "tool_start":
+      return (
+        <div data-live-row="tool_start" style={base}>
+          {tsCell}
+          {dot("#4ea1ff")}
+          <span style={{ color: "#4ea1ff", flex: "0 0 auto" }}>{event.tool ?? "tool"}</span>
+          {event.toolInput && (
+            <span style={{ color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {event.toolInput.slice(0, 80)}
+            </span>
+          )}
+        </div>
+      );
+    case "text":
+      return (
+        <div data-live-row="text" style={base}>
+          {tsCell}
+          {dot(C.green)}
+          <span style={{ color: C.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {event.text?.slice(0, 100) ?? "…"}
+          </span>
+        </div>
+      );
+    case "reasoning":
+      return (
+        <div data-live-row="reasoning" style={base}>
+          {tsCell}
+          <span style={{ color: C.fgMuted, flex: "0 0 auto" }}>◌</span>
+          <span style={{ color: C.fgMuted, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {event.text?.slice(0, 100) ?? "thinking…"}
+          </span>
+        </div>
+      );
+    case "turn":
+      return (
+        <div data-live-row="turn" style={base}>
+          {tsCell}
+          {dot(LIVE_CYAN)}
+          <span style={{ color: C.fg, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {event.turnTools && event.turnTools.length > 0
+              ? event.turnTools.join(", ")
+              : event.text
+                ? event.text.slice(0, 100)
+                : "new turn"}
+          </span>
+        </div>
+      );
+    case "retry":
+      return (
+        <div data-live-row="retry" style={base}>
+          {tsCell}
+          {dot(C.yellow)}
+          <span style={{ color: C.yellow }}>
+            retry {event.retryInfo?.attempt}/{event.retryInfo?.maxRetries}
+          </span>
+        </div>
+      );
+    case "rate_limit":
+      return (
+        <div data-live-row="rate_limit" style={base}>
+          {tsCell}
+          {dot(C.red)}
+          <span style={{ color: C.red }}>rate limited</span>
+        </div>
+      );
+    case "result":
+      return (
+        <div data-live-row="result" style={base}>
+          {tsCell}
+          {dot(C.green)}
+          <span style={{ color: C.green, fontWeight: 600 }}>complete</span>
+        </div>
+      );
+    default:
+      return null;
+  }
+}
+
+function ActivityTail({
+  sessionId,
+  alive,
+  onDiagnostics,
+}: {
+  sessionId: string | null;
+  alive: boolean;
+  /** Lift the diagnostics derived from the live rows up to the DiagnosticsRail
+   *  so its retries/rate-limit/turn/tool-error rows light up from the SAME rows. */
+  onDiagnostics: (d: TailDiagnostics) => void;
+}) {
+  // Tabs: [● live] is REAL now (CTL-918, off the BFF SSE), [history] is the Loki
+  // tail (CTL-914). Default to live for a running worker, history otherwise so a
+  // dead worker's page is never empty.
+  const [tab, setTab] = useState<"live" | "history">(alive ? "live" : "history");
+  const [paused, setPaused] = useState(false);
+  // Buffer length captured at pause-time so the view freezes there while the SSE
+  // keeps buffering behind it (pause decouples view from data).
+  const frozenLenRef = useRef(0);
+
   const { state, reload } = useHistoryTail(sessionId, tab === "history");
+  // The SSE stays subscribed only while the [live] tab is open; pause does NOT
+  // tear it down (data keeps flowing under the frozen view).
+  const live = useLiveTail(sessionId, tab === "live");
+
+  const visible = resolvePausedView(live.buffer, paused, frozenLenRef.current);
+  const footer = useMemo(() => deriveFooterCounters(live.buffer), [live.buffer]);
+
+  // Lift the live DIAGNOSTICS up to the rail whenever the live buffer changes.
+  const diagnostics = useMemo(() => deriveTailDiagnostics(live.buffer), [live.buffer]);
+  useEffect(() => {
+    onDiagnostics(diagnostics);
+  }, [diagnostics, onDiagnostics]);
+
+  const togglePause = useCallback(() => {
+    setPaused((p) => {
+      if (!p) frozenLenRef.current = live.buffer.length; // freeze the view here
+      return !p;
+    });
+  }, [live.buffer.length]);
+
+  // The never-blank rule: while the live buffer is empty (stream momentarily
+  // unavailable / not yet flowing) we still render one derived row so the
+  // terminal is never blank (design §5.2 graceful MVP).
+  const terminal = resolveLiveTerminalRows(
+    visible.rows,
+    // current tool from the latest live tool_start (or null) → the MVP row tool.
+    latestTool(live.buffer),
+    null, // BoardWorker.lastActiveMs is on the rail, not this scalar slice
+    Date.now(),
+  );
+
+  const tabBtn = (id: "live" | "history", label: React.ReactNode) => (
+    <button
+      type="button"
+      data-tail-tab={id}
+      aria-pressed={tab === id}
+      onClick={() => setTab(id)}
+      style={{
+        background: tab === id ? C.s3 : "transparent",
+        border: `1px solid ${C.border}`,
+        borderRadius: 5,
+        color: tab === id ? C.fg : C.fgMuted,
+        cursor: "pointer",
+        font: `10px ${C.mono}`,
+        padding: "2px 8px",
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div data-worker-activity style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <SectionHeading>Activity Tail</SectionHeading>
         <span style={{ flex: 1 }} />
-        {/* [● live] is the DETAIL7 dependency — rendered disabled with a soon tag,
-            never a dead live action. */}
-        <button
-          type="button"
-          disabled
-          data-tail-tab="live"
-          title="live tail lands in DETAIL7"
-          style={{ background: "transparent", border: `1px solid ${C.border}`, borderRadius: 5, color: C.fgDim, cursor: "default", font: `10px ${C.mono}`, padding: "2px 8px" }}
-        >
-          ● live · soon ◌
-        </button>
-        <button
-          type="button"
-          data-tail-tab="history"
-          onClick={() => setTab("history")}
-          style={{ background: tab === "history" ? C.s3 : "transparent", border: `1px solid ${C.border}`, borderRadius: 5, color: tab === "history" ? C.fg : C.fgMuted, cursor: "pointer", font: `10px ${C.mono}`, padding: "2px 8px" }}
-        >
-          history
-        </button>
+        {tabBtn("live", <span>● live</span>)}
+        {tabBtn("history", "history")}
+        {/* pause: freezes the VIEW, not the data (only meaningful on the live tab) */}
+        {tab === "live" && (
+          <button
+            type="button"
+            data-tail-pause
+            aria-pressed={paused}
+            onClick={togglePause}
+            title={paused ? "resume — replays the buffered gap" : "pause — freezes the view; the stream keeps buffering"}
+            style={{ background: paused ? C.s3 : "transparent", border: `1px solid ${C.border}`, borderRadius: 5, color: paused ? LIVE_CYAN : C.fgMuted, cursor: "pointer", font: `10px ${C.mono}`, padding: "2px 8px" }}
+          >
+            {paused ? "▶ resume" : "⏸ pause"}
+          </button>
+        )}
       </div>
 
-      {sessionId == null ? (
+      {tab === "live" ? (
+        sessionId == null ? (
+          <div data-live-empty style={{ font: `11px ${C.mono}`, color: C.fgDim, padding: "8px 0" }}>
+            no session id — live tail unavailable for this run
+          </div>
+        ) : (
+          <>
+            <div data-live-rows style={{ maxHeight: 320, overflow: "auto" }}>
+              {terminal.source === "empty" ? (
+                <div data-live-placeholder style={{ font: `11px ${C.mono}`, color: C.fgDim, padding: "8px 0" }}>
+                  {live.conn === "connecting" ? "connecting to the live stream…" : "stream momentarily unavailable"}
+                </div>
+              ) : (
+                terminal.rows.map((r, i) => <LiveStreamRow key={`${r.ts}-${i}`} event={r} />)
+              )}
+            </div>
+            {/* footer counters — derived CLIENT-SIDE from the received rows */}
+            <div data-live-footer style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 6, font: `10px ${C.mono}`, color: C.fgMuted }}>
+              <span data-footer-events>{footer.events} events</span>
+              <span style={{ color: C.fgDim }}>·</span>
+              <span data-footer-tools>{footer.tools} tools</span>
+              <span style={{ color: C.fgDim }}>·</span>
+              <span data-footer-retries>{footer.retries} retr{footer.retries === 1 ? "y" : "ies"}</span>
+              <span style={{ color: C.fgDim }}>·</span>
+              <span data-footer-stream>stream {fmtBytes(footer.streamBytes)}</span>
+              {paused && (
+                <>
+                  <span style={{ flex: 1 }} />
+                  <span data-footer-buffered style={{ color: LIVE_CYAN }}>
+                    ⏸ {visible.bufferedWhilePaused} buffered
+                  </span>
+                </>
+              )}
+            </div>
+          </>
+        )
+      ) : sessionId == null ? (
         <div data-history-empty style={{ font: `11px ${C.mono}`, color: C.fgDim, padding: "8px 0" }}>
           no session id — history unavailable for this run
         </div>
@@ -632,6 +919,22 @@ function ActivityTail({ sessionId }: { sessionId: string | null }) {
       ) : null}
     </div>
   );
+}
+
+/** The latest tool name from a live buffer (the current tool the agent is on) —
+ *  feeds the never-blank MVP fallback row. */
+function latestTool(rows: StreamEvent[]): string | null {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    if (rows[i].type === "tool_start" && rows[i].tool) return rows[i].tool ?? null;
+  }
+  return null;
+}
+
+/** Compact byte size for the stream-size footer cell (1.2MB / 412k / 87B). */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}k`;
+  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 // ── BURN STRIP (REAL Prometheus sparklines, CC-UUID join) + idle-ratio ───────
@@ -775,6 +1078,10 @@ export function WorkerDetailBody({
   const scalars = readWorkerScalars(worker);
   const alive = isWorkerAlive(worker);
   const burnSeries = useBurnSeries(scalars.sessionId, alive);
+  // CTL-918 (DETAIL7): the live-tail DIAGNOSTICS are derived in ActivityTail (it
+  // owns the SSE buffer) and lifted up here so the DiagnosticsRail's
+  // retries/rate-limit/turn/tool-error rows light up from the SAME received rows.
+  const [liveDiagnostics, setLiveDiagnostics] = useState<TailDiagnostics | null>(null);
 
   return (
     <div data-worker-detail-body data-id={id} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -782,11 +1089,11 @@ export function WorkerDetailBody({
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,320px)", gap: 12, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
           <BurnStrip series={burnSeries} worker={worker} />
-          <ActivityTail sessionId={scalars.sessionId} />
+          <ActivityTail sessionId={scalars.sessionId} alive={alive} onDiagnostics={setLiveDiagnostics} />
           <SignalPanel signal={signal} label={phase ? `phase-${phase}.json` : ""} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
-          <DiagnosticsRail worker={worker} />
+          <DiagnosticsRail worker={worker} live={liveDiagnostics} />
           <PhaseTimestamps signal={signal} currentPhase={phase ?? "—"} />
         </div>
       </div>

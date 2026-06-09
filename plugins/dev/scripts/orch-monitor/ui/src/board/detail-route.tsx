@@ -163,8 +163,11 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
       >
         {/* DETAIL2 (CTL-913): the lifecycle aggregate body — header · PIPELINE rail ·
             HELD banner · LIFECYCLE SPINE + compact gantt · COMMS · ACTIVITY — all
-            off the RESIDENT BoardTicket + phaseSummary (zero new endpoints). */}
-        <TicketDetailPage ticket={ticket} />
+            off the RESIDENT BoardTicket + phaseSummary (zero new endpoints).
+            DETAIL7 (CTL-918): the resident workers are passed so the active spine
+            node can resolve its running phase's sessionId and tail the live
+            stream (the same BFF SSE the worker [live] tab consumes). */}
+        <TicketDetailPage ticket={ticket} workers={payload?.workers ?? []} />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "ticket", id }} />
     </>

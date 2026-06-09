@@ -33,7 +33,15 @@ import {
   type TelemetryTile,
   type BreakdownBars,
 } from "@/board/ticket-telemetry-data";
-import type { BoardTicket } from "@/board/types";
+import {
+  appendLiveRows,
+  deriveActiveNodeTail,
+  resolveActivePhaseSession,
+  parseStreamEvent,
+  type ActiveNodeTail,
+} from "@/board/live-tail-data";
+import type { BoardTicket, BoardWorker } from "@/board/types";
+import type { StreamEvent } from "@/lib/types";
 import { phaseColor, fmtDuration, fmtClock, phaseModelLabel, fmtCost, fmtTokens } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
 import { TicketGantt } from "./ticket-gantt";
@@ -241,16 +249,109 @@ function HeldBanner({ ticket }: { ticket: BoardTicket }) {
   );
 }
 
+// ── active-node live tail (CTL-918 / DETAIL7, design §4.2) ───────────────────
+// The active spine node tails the SAME per-phase live source as the worker
+// [live] tab — the BFF SSE /api/ec-worker-stream/<sessionId>, keyed by the
+// running phase's sessionId (resolved from the resident live workers). It shows
+// `now: <current tool> · turn N · ctx%` plus a 3-line in-loop tail. When there
+// is no running phase (no sessionId) the active node renders its resident cells
+// only — never an empty live tail.
+function useActiveNodeTail(sessionId: string | null): ActiveNodeTail {
+  const [buffer, setBuffer] = useState<StreamEvent[]>([]);
+
+  useEffect(() => {
+    setBuffer([]);
+    if (!sessionId) return;
+    const es = new EventSource(
+      `/api/ec-worker-stream/${encodeURIComponent(sessionId)}`,
+    );
+    es.addEventListener("stream-event", (ev: MessageEvent<string>) => {
+      const row = parseStreamEvent(ev.data);
+      if (row) setBuffer((prev) => appendLiveRows(prev, [row]));
+    });
+    // EventSource auto-reconnects; we don't surface a connection state here (the
+    // node falls back to its resident cells when no rows arrive).
+    return () => es.close();
+  }, [sessionId]);
+
+  return useMemo(() => deriveActiveNodeTail(buffer), [buffer]);
+}
+
+function ActiveNodeTailView({ tail }: { tail: ActiveNodeTail }) {
+  // Never blank: while no rows have arrived the active node keeps its resident
+  // phase/status/duration/model cells (rendered by SpineRow) — this returns null
+  // rather than an empty tail box.
+  if (!tail.hasRows) return null;
+  const ctx = tail.contextPct != null ? `${tail.contextPct}%` : "—";
+  return (
+    <div
+      data-active-node-tail
+      style={{
+        marginTop: 4,
+        marginLeft: 22,
+        paddingLeft: 10,
+        borderLeft: `1px solid ${C.cyan}55`,
+        display: "flex",
+        flexDirection: "column",
+        gap: 2,
+      }}
+    >
+      {/* now: <current tool> · turn N · ctx% — the live "here right now" line. */}
+      <div data-active-node-now style={{ font: `11px ${C.mono}`, color: C.cyan }}>
+        now: <span style={{ color: C.fg }}>{tail.currentTool ?? "…"}</span>
+        <span style={{ color: C.fgDim }}> · turn {tail.turn ?? "—"} · ctx </span>
+        <span data-active-node-ctx style={{ color: tail.contextPct != null ? C.fg : C.fgDim }}>{ctx}</span>
+      </div>
+      {/* the 3-line in-loop tail (the newest rows). */}
+      <div data-active-node-lines style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+        {tail.tail.map((r, i) => (
+          <div key={`${r.ts}-${i}`} style={{ font: `10px ${C.mono}`, color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            <span style={{ color: C.fgDim }}>&gt; </span>
+            {activeNodeRowText(r)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Single-line text for one in-loop tail row (mirrors the live StreamEventRow's
+ *  text choice, condensed for the 3-line spine tail). */
+function activeNodeRowText(r: StreamEvent): string {
+  switch (r.type) {
+    case "tool_start":
+      return `${r.tool ?? "tool"}${r.toolInput ? ` ${r.toolInput.slice(0, 48)}` : ""}`;
+    case "reasoning":
+      return `◌ ${r.text?.slice(0, 56) ?? "thinking…"}`;
+    case "text":
+      return r.text?.slice(0, 64) ?? "…";
+    case "turn":
+      return r.turnTools && r.turnTools.length > 0 ? r.turnTools.join(", ") : "new turn";
+    case "retry":
+      return `retry ${r.retryInfo?.attempt}/${r.retryInfo?.maxRetries}`;
+    case "rate_limit":
+      return "rate limited";
+    default:
+      return r.type;
+  }
+}
+
 // ── LIFECYCLE SPINE ─────────────────────────────────────────────────────────────
 function LifecycleSpine({
   ticket,
   registerNode,
+  activeSession,
 }: {
   ticket: BoardTicket;
   registerNode: (phase: string, el: HTMLDivElement | null) => void;
+  /** The running phase's CC-UUID sessionId (or null) so the active node tails the
+   *  live stream (DETAIL7). */
+  activeSession: string | null;
 }) {
   const [compact, setCompact] = useState(false);
   const nodes = resolveSpineNodes(ticket);
+  // One SSE per ticket page, subscribed only while there IS a running phase.
+  const activeNodeTail = useActiveNodeTail(activeSession);
 
   return (
     <section data-ticket-spine style={{ marginBottom: 16 }}>
@@ -287,7 +388,12 @@ function LifecycleSpine({
       ) : (
         <div data-spine-nodes>
           {nodes.map((node) => (
-            <SpineRow key={node.phase} node={node} registerNode={registerNode} />
+            <SpineRow
+              key={node.phase}
+              node={node}
+              registerNode={registerNode}
+              activeNodeTail={node.isActive ? activeNodeTail : null}
+            />
           ))}
         </div>
       )}
@@ -298,9 +404,13 @@ function LifecycleSpine({
 function SpineRow({
   node,
   registerNode,
+  activeNodeTail,
 }: {
   node: SpineNode;
   registerNode: (phase: string, el: HTMLDivElement | null) => void;
+  /** CTL-918 (DETAIL7): the live tail for THIS node when it is the running phase
+   *  (null otherwise) — renders the `now: …` line + 3-line in-loop tail beneath. */
+  activeNodeTail: ActiveNodeTail | null;
 }) {
   const color = phaseColor(node.phase);
   const started = node.startedAt ? fmtClock(new Date(Date.parse(node.startedAt))) : null;
@@ -310,13 +420,15 @@ function SpineRow({
       ref={(el) => registerNode(node.phase, el)}
       data-spine-row={node.phase}
       {...(node.isActive ? { "data-spine-active": "true" } : {})}
+      style={{ marginBottom: 4 }}
+    >
+    <div
       style={{
         display: "flex",
         alignItems: "center",
         gap: 12,
         padding: "6px 8px",
         borderRadius: 5,
-        marginBottom: 4,
         background: node.isActive ? C.cyan + "12" : C.s1,
         border: `1px solid ${node.isActive ? C.cyan + "55" : C.border}`,
         font: `11px ${C.mono}`,
@@ -365,6 +477,11 @@ function SpineRow({
         {node.runLink === "pending" && <Needs label="run" />}
         {node.artifact === "pending" && <Needs label="artifact" />}
       </span>
+    </div>
+    {/* DETAIL7: the active node's live tail (now: <tool> · turn N · ctx% + 3-line
+        in-loop tail) — renders only when this node is the running phase AND the
+        live stream has delivered rows; never an empty box. */}
+    {node.isActive && activeNodeTail && <ActiveNodeTailView tail={activeNodeTail} />}
     </div>
   );
 }
@@ -627,8 +744,16 @@ function TelemetryStrip({ ticket }: { ticket: BoardTicket }) {
  * slot (DETAIL1). `ticket` is the resident BoardTicket; when it is undefined (a
  * cold-linked Done ticket not in the resident payload) the body shows an honest
  * placeholder rather than a fabricated lifecycle (design §4 — resident-only).
+ * `workers` are the resident live bg workers (DETAIL7) — used to resolve the
+ * running phase's sessionId so the active spine node can tail the live stream.
  */
-export function TicketDetailPage({ ticket }: { ticket: BoardTicket | undefined }) {
+export function TicketDetailPage({
+  ticket,
+  workers = [],
+}: {
+  ticket: BoardTicket | undefined;
+  workers?: BoardWorker[];
+}) {
   // Spine node refs so a PIPELINE segment click smooth-scrolls to its node.
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const registerNode = useCallback((phase: string, el: HTMLDivElement | null) => {
@@ -638,6 +763,18 @@ export function TicketDetailPage({ ticket }: { ticket: BoardTicket | undefined }
   const scrollToPhase = useCallback((phase: string) => {
     nodeRefs.current.get(phase)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, []);
+
+  // DETAIL7: the running phase's session for the active-node live tail. Resolved
+  // from the resident live workers (the same per-phase live source the worker
+  // [live] tab uses). Only the ticket's CURRENT, non-terminal phase has a live
+  // worker; a settled ticket resolves to null (no tail, resident cells only).
+  const activeSession = ticket
+    ? resolveActivePhaseSession(
+        ticket.id,
+        ticket.working && ticket.activeState != null ? ticket.phase : null,
+        workers,
+      )
+    : null;
 
   if (!ticket) {
     return (
@@ -657,7 +794,7 @@ export function TicketDetailPage({ ticket }: { ticket: BoardTicket | undefined }
       <Header ticket={ticket} />
       <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
       <HeldBanner ticket={ticket} />
-      <LifecycleSpine ticket={ticket} registerNode={registerNode} />
+      <LifecycleSpine ticket={ticket} registerNode={registerNode} activeSession={activeSession} />
       <TelemetryStrip ticket={ticket} />
       <CommsSection ticket={ticket} />
       <ActivitySection ticket={ticket} />
