@@ -126,6 +126,10 @@ async function readEligibleById(eligibleDir) {
               (typeof t.project === "string" ? t.project : null) ||
               null,
             relations: t.relations ?? null,
+            // title is only ever in the eligible projection (ticket_state has no
+            // title column). BFF9 surfaces it so the cache-backed LinearFetcher
+            // can serve /api/linear + /api/briefing without a live `linearis`.
+            title: typeof t.title === "string" ? t.title : null,
           };
         }
       }),
@@ -177,6 +181,9 @@ export async function readLinearCache({
       relations: ts?.relations ?? el?.relations ?? null,
       assignee: ts?.assignee ?? null,
       linearState: ts?.linearState ?? null,
+      // title: ticket_state has no title column, so the eligible projection is
+      // the only durable source (BFF9). Honest null when neither cache has it.
+      title: ts?.title ?? el?.title ?? null,
     };
   }
   // breakerOpen is intentionally not consulted to alter output — it cannot block

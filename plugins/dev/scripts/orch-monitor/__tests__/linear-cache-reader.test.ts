@@ -37,7 +37,20 @@ describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => 
       relations: [{ type: "blocks", id: "CTL-2" }],
       assignee: "uuid-bot",
       linearState: "Implement",
+      // ticket_state has no title column → honest null with no eligible row (BFF9)
+      title: null,
     });
+  });
+
+  it("surfaces title from the eligible projection (BFF9 — for the cache-backed /api/linear)", async () => {
+    const ticketStateReader = () =>
+      Promise.resolve({ "CTL-3": { priority: 2, labels: [], linearState: "PR" } });
+    const eligibleReader = () =>
+      Promise.resolve({ "CTL-3": { title: "Retire legacy linearis poller" } });
+    const byId = await readLinearCache({ ticketStateReader, eligibleReader });
+    // ticket_state owns state/priority, eligible owns the title.
+    expect(byId["CTL-3"].linearState).toBe("PR");
+    expect(byId["CTL-3"].title).toBe("Retire legacy linearis poller");
   });
 
   it("fills priority/project/relations from the eligible projection when ticket_state lacks them", async () => {
@@ -144,5 +157,6 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
     // queued ticket only in the eligible projection
     expect(byId["CTL-200"].priority).toBe(3);
     expect(byId["CTL-200"].project).toBe("Web UI");
+    expect(byId["CTL-200"].title).toBe("queued"); // BFF9: title from eligible
   });
 });

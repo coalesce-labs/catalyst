@@ -16,6 +16,11 @@ export interface LinearCacheEntry {
   assignee: string | null;
   /** Linear workflow state name from the descriptor, or null. */
   linearState: string | null;
+  /**
+   * Ticket title — only the eligible projection carries it (ticket_state has no
+   * title column), so null when the ticket has no eligible row (BFF9 / CTL-921).
+   */
+  title: string | null;
 }
 
 export type LinearCacheById = Record<string, LinearCacheEntry>;

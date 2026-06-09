@@ -54,7 +54,7 @@ import {
   type PrStatusFetcher,
 } from "./lib/pr-status";
 import {
-  createLinearFetcher,
+  createCacheBackedLinearFetcher,
   type LinearFetcher,
   type LinearTicket,
 } from "./lib/linear";
@@ -558,10 +558,17 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }));
   let lastPrRefresh = 0;
 
+  // BFF9 / CTL-921: the LinearFetcher behind /api/linear + /api/briefing reads
+  // from the broker's durable filter-state.db ticket_state (via readLinearCache)
+  // instead of polling `linearis issues read` live. This retires the second
+  // surviving live-Linear path (the first, board-data.mjs::linearInfo, was
+  // retired by BFF1/CTL-883) so NO request path spawns linearis or counts
+  // against the 2500/hr cap. Cache-backed by construction: an OPEN linear-breaker
+  // can never be tripped from here.
   const linear: LinearFetcher | null =
     linearFetcher === null
       ? null
-      : (linearFetcher ?? createLinearFetcher());
+      : (linearFetcher ?? createCacheBackedLinearFetcher());
   let linearStarted = false;
 
   const briefingProvider: BriefingProvider | null =
