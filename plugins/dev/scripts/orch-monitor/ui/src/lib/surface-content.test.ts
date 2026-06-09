@@ -22,18 +22,29 @@ describe("surfaceContentKind", () => {
     expect(surfaceContentKind("workers")).toBe("workers");
   });
 
-  it("keeps Home/Queue on the dashboard (no regression)", () => {
-    // Home + Queue must stay exactly what they rendered before — only board +
-    // workers are special-cased now.
-    const onDashboard = SURFACES.filter((s) => s !== "board" && s !== "workers");
-    for (const s of onDashboard) {
+  it("routes the queue surface to its own dedicated queue content (SURF2 / CTL-910)", () => {
+    // Gherkin: "the operator clicks the Queue nav item → the Queue surface
+    // renders edge-to-edge and wide in the SidebarInset" — the queue is its OWN
+    // route now, no longer the SHELL2 dashboard fall-through.
+    expect(surfaceContentKind("queue")).toBe("queue");
+  });
+
+  it("keeps Home on the dashboard (no regression)", () => {
+    // Home must stay exactly what SHELL1/SHELL2 rendered — only board (SHELL2),
+    // workers (SURF1), and queue (SURF2) are special-cased now.
+    const stillDashboard = SURFACES.filter(
+      (s) => s !== "board" && s !== "workers" && s !== "queue",
+    );
+    for (const s of stillDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
     }
   });
 
   it("covers every declared surface (no surface falls through undefined)", () => {
     for (const s of SURFACES as readonly Surface[]) {
-      expect(["board", "workers", "dashboard"]).toContain(surfaceContentKind(s));
+      expect(["board", "workers", "queue", "dashboard"]).toContain(
+        surfaceContentKind(s),
+      );
     }
   });
 });

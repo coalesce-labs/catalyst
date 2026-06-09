@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -33,8 +33,19 @@ import {
   HOST_FILTER_ALL,
   UNATTRIBUTED_HOST,
 } from "./worker-grouping";
+// ── per-node queue grouping (CTL-910 / SURF2) ─────────────────────────────────
+// The waiting table attributes each row to its HRW owner host. queueHostMode is
+// the single-host identity-no-op detector (one/zero distinct host → no node
+// column, zero added noise); groupQueueByHost lifts the ranked queue into ordered
+// per-node buckets WITHOUT disturbing the scheduler's global rank.
+import {
+  queueHostMode,
+  groupQueueByHost,
+  type QueueHostGroup,
+} from "./queue-grouping";
 import type {
   BoardPayload,
+  BoardQueueItem as QueueItem,
   BoardWorker as Worker,
   BoardTicket as Ticket,
   BoardActiveState as ActiveState,
@@ -538,15 +549,99 @@ const td = { fontSize: 12.5, color: C.fg };
 const mono = { fontFamily: C.mono, fontVariantNumeric: "tabular-nums" as const };
 const ellip = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const };
 
-function QueueView({ data }: { data: BoardPayload }) {
+// ── waiting-queue row + grouped body (CTL-910 / SURF2) ───────────────────────
+// One waiting row. `showHost` adds the node column ONLY in a multi-node fleet —
+// single-host collapses it away so the column adds no visual noise (the identity
+// no-op). The host cell renders the owner name, or a dim "—" for an un-attributed
+// row (host:null, e.g. before a fence claim).
+function QueueRow({ q, freeSlots, showHost }: { q: QueueItem; freeSlots: number; showHost: boolean }) {
+  return (
+    <TableRow style={{ background: q.rank <= freeSlots ? "rgba(57,208,122,0.06)" : undefined }}>
+      <TableCell style={{ ...mono, color: C.fgMuted }}>{q.rank}</TableCell>
+      <TableCell><PriorityIcon p={q.priority} /></TableCell>
+      <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{q.id}</TableCell>
+      <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>{q.title}</TableCell>
+      <TableCell><ScopeChip scope={q.scope} estimate={q.estimate} /></TableCell>
+      <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{q.repo}</TableCell>
+      {showHost && (
+        <TableCell style={{ ...mono, fontSize: 11, color: q.host ? C.fgMuted : C.fgDim }}>{q.host?.name ?? "—"}</TableCell>
+      )}
+    </TableRow>
+  );
+}
+
+// The waiting table. `grouped` (only offered in a multi-node fleet) splits the
+// ranked queue into per-node sections so an operator can read per-node depth; the
+// global rank within each section is preserved (groupQueueByHost never re-sorts).
+function WaitingTable({ queue, freeSlots, showHost, grouped }: { queue: QueueItem[]; freeSlots: number; showHost: boolean; grouped: boolean }) {
+  const header = (
+    <TableHeader><TableRow style={{ background: C.s1 }}>
+      <TableHead style={{ ...th, width: 40 }}>#</TableHead><TableHead style={{ ...th, width: 44 }}>Pri</TableHead>
+      <TableHead style={{ ...th, width: 100 }}>Ticket</TableHead><TableHead style={th}>Title</TableHead>
+      <TableHead style={{ ...th, width: 70 }}>Size</TableHead><TableHead style={{ ...th, width: 84 }}>Repo</TableHead>
+      {showHost && <TableHead style={{ ...th, width: 130 }}>Node</TableHead>}
+    </TableRow></TableHeader>
+  );
+  const colSpan = showHost ? 7 : 6;
+  if (!grouped) {
+    return (
+      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+        <Table>
+          {header}
+          <TableBody>
+            {queue.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+          </TableBody>
+        </Table>
+      </div>
+    );
+  }
+  const groups: QueueHostGroup[] = groupQueueByHost(queue);
+  return (
+    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
+      <Table>
+        {header}
+        <TableBody>
+          {groups.map((g) => (
+            <Fragment key={g.host?.id ?? g.label}>
+              <TableRow style={{ background: C.s1 }}>
+                <TableCell colSpan={colSpan} style={{ ...mono, fontSize: 11, color: C.fgMuted, padding: "6px 12px" }}>
+                  <span style={{ color: g.host ? C.fg : C.fgDim, fontWeight: 600 }}>{g.label}</span>
+                  <span style={{ color: C.fgDim }}> · {g.items.length} queued</span>
+                </TableCell>
+              </TableRow>
+              {g.items.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+            </Fragment>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+// CTL-910 / SURF2: the wide, ranked Queue surface. Promoted from the board's
+// internal Queue tab into the shell as its own route (see QueueSurface, which
+// connects the board transport and mounts this embedded). Reused near-verbatim
+// from the original board Queue tab: capacity Stats + SlotBar + an in-flight table
+// + a waiting ranked table. NEW for SURF2: an optional per-node column + a
+// group-by-node toggle, both gated behind queueHostMode so a single-host fleet is
+// an exact identity no-op (no node column, no toggle, no added noise).
+export function QueueView({ data, embedded = false }: { data: BoardPayload; embedded?: boolean }) {
   const { config, queue, workers, tickets } = data;
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   // Order through the SHARED comparator (CTL-882 / FND2): rank(active=0, stuck=2,
   // else=1) then runtimeMs desc — the same order the worker pager + j/k walk
   // resolve via resolveList({kind:"worker"}). Byte-for-byte the prior inline sort.
   const inflight = sortWorkers(workers);
+  // SINGLE-HOST IDENTITY NO-OP: only surface the node column / group affordance
+  // when the queue spans two or more DISTINCT owner hosts. With hosts.json absent
+  // or length 1 every row resolves to one host (or none), so this is "single" and
+  // the table renders exactly as it did pre-SURF2.
+  const multiHost = queueHostMode(queue) === "multi";
+  const [groupByNode, setGroupByNode] = useState(false);
+  // The toggle only makes sense in a multi-node fleet; never grouped single-host.
+  const grouped = multiHost && groupByNode;
   return (
-    <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
+    <div className="cat-scroll" style={{ overflowY: "auto", height: embedded ? "100%" : "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
         <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
           <Stat label="Max parallel" value={String(config.maxParallel)} />
@@ -581,29 +676,21 @@ function QueueView({ data }: { data: BoardPayload }) {
           </Table>
         </div>
 
-        <div style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted, margin: "0 0 8px" }}>Waiting in queue ({queue.length})</div>
-        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
-          <Table>
-            <TableHeader><TableRow style={{ background: C.s1 }}>
-              <TableHead style={{ ...th, width: 40 }}>#</TableHead><TableHead style={{ ...th, width: 44 }}>Pri</TableHead>
-              <TableHead style={{ ...th, width: 100 }}>Ticket</TableHead><TableHead style={th}>Title</TableHead>
-              <TableHead style={{ ...th, width: 70 }}>Size</TableHead><TableHead style={{ ...th, width: 84 }}>Repo</TableHead>
-            </TableRow></TableHeader>
-            <TableBody>
-              {queue.map((q) => (
-                <TableRow key={q.id} style={{ background: q.rank <= config.freeSlots ? "rgba(57,208,122,0.06)" : undefined }}>
-                  <TableCell style={{ ...mono, color: C.fgMuted }}>{q.rank}</TableCell>
-                  <TableCell><PriorityIcon p={q.priority} /></TableCell>
-                  <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{q.id}</TableCell>
-                  <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>{q.title}</TableCell>
-                  <TableCell><ScopeChip scope={q.scope} estimate={q.estimate} /></TableCell>
-                  <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{q.repo}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 0 8px" }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted }}>Waiting in queue ({queue.length})</span>
+          <span style={{ flex: 1 }} />
+          {/* The group-by-node affordance only appears in a multi-node fleet
+              (queueHostMode === "multi"); single-host shows nothing here. */}
+          {multiHost && (
+            <Seg
+              value={groupByNode ? "node" : "rank"}
+              onChange={(v) => setGroupByNode(v === "node")}
+              options={[{ k: "rank", label: "Global rank" }, { k: "node", label: "By node" }]}
+            />
+          )}
         </div>
-        <div style={{ marginTop: 12, fontSize: 11, color: C.fgDim }}>Global rank: priority → pipeline stage → created-at → id. Per-project caps apply after ranking. Highlighted rows dispatch next as slots free.</div>
+        <WaitingTable queue={queue} freeSlots={config.freeSlots} showHost={multiHost} grouped={grouped} />
+        <div style={{ marginTop: 12, fontSize: 11, color: C.fgDim }}>Global rank: priority → pipeline stage → created-at → id. Per-project caps apply after ranking. Highlighted rows dispatch next as slots free.{multiHost ? " Node = the HRW owner host for each queued ticket." : ""}</div>
       </div>
     </div>
   );
