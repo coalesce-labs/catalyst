@@ -2650,6 +2650,33 @@ export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
   return lastSeen;
 }
 
+// phaseAlreadyComplete — true when the unified event log already contains a
+// `phase.<phase>.complete.<ticket>` event. The resume path checks this before
+// re-dispatching so a survivor never re-emits a completion the dead host already
+// emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
+export function phaseAlreadyComplete(
+  ticket,
+  phase,
+  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {},
+) {
+  const needle = `phase.${phase}.complete.${ticket}`;
+  let raw;
+  try {
+    raw = readLog();
+  } catch {
+    return false;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line || !line.includes(needle)) continue;
+    try {
+      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+    } catch {
+      // partial/malformed line — skip
+    }
+  }
+  return false;
+}
+
 // RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
 // STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
 const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
