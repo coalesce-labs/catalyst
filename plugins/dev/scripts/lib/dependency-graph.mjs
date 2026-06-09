@@ -20,12 +20,27 @@ export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 // `linearis` emits only `blocks`; the API-native `blocked_by` form is also
 // accepted for forward-compat.
 //
+// CTL-878: a `blocks` edge whose source is the target's PARENT epic is DROPPED.
+// A Linear parent/child hierarchy link is not a dependency, but triage scrapes a
+// child's body for ticket refs and the scheduler (CTL-755 STEP E) was persisting
+// `child blocked_by parent-epic` durably. Because a tracking epic is never worked
+// (it never reaches a terminal state and the daemon's eligible query is Todo-only),
+// that edge deadlocks the child forever. Each in-set issue carries `parent` (the
+// epic identifier, threaded from linearis) so the drop also fires when the parent
+// is an out-of-set externalId — exactly the deadlock case (CTL-859→863, CTL-718→722).
+//
 // options.externalIds — out-of-set blocker identifiers (D5) that remain valid
 // edge endpoints on the `from` side.
 export function buildDependencyEdges(issues, { externalIds } = {}) {
   const list = issues ?? [];
   const inSet = new Set(list.map((i) => i?.identifier).filter(Boolean));
   const ext = externalIds instanceof Set ? externalIds : new Set(externalIds ?? []);
+  // CTL-878: child identifier → its parent epic identifier, for the parent-edge
+  // drop below. Built from the in-set issues' `parent` field (normalized to a
+  // string id upstream); a missing parent leaves the child absent from the map.
+  const parentOf = new Map(
+    list.filter((i) => i?.identifier && i?.parent).map((i) => [i.identifier, i.parent]),
+  );
   const seen = new Set();
   const edges = [];
 
@@ -35,6 +50,7 @@ export function buildDependencyEdges(issues, { externalIds } = {}) {
     // declared external blocker. A genuinely out-of-set edge is dropped.
     if (!inSet.has(to)) return;
     if (!inSet.has(from) && !ext.has(from)) return;
+    if (parentOf.get(to) === from) return; // CTL-878: parent→child is hierarchy, not a dependency
     const key = `${from} ${to}`;
     if (seen.has(key)) return; // dedup symmetric relations/inverseRelations
     seen.add(key);

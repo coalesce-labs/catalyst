@@ -434,6 +434,35 @@ if [ -f "$TRIAGE_SUBST" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Case: CTL-878 — the parent epic is NEVER scraped into dependencies. A Linear
+# parent/child hierarchy link is not a blocker; emitting it makes the scheduler
+# persist `child blocked_by parent-epic`, deadlocking the child against an epic
+# that is never worked. The parent id is in the ticket JSON, so 2d excludes it.
+
+FIXTURE_PARENT="$TMPROOT/fixture-parent.json"
+cat >"$FIXTURE_PARENT" <<'EOF'
+{
+  "identifier": "CTL-863",
+  "title": "Implement takeover/healing for a downed daemon node",
+  "description": "Part of the CTL-859 multi-host epic. Depends on CTL-850 (HRW claim). When a node dies, the survivor must resume from the draft PR.",
+  "parent": { "identifier": "CTL-859" },
+  "labels": {"nodes": []}
+}
+EOF
+
+CASE_DIR_PARENT="$(run_case parent "$FIXTURE_PARENT" CTL-863)"
+assert_eq "ctl878-parent: exit code 0" 0 "$(cat "$CASE_DIR_PARENT/exit-code")"
+TRIAGE_PARENT="$CASE_DIR_PARENT/worker/triage.json"
+assert_file_exists "ctl878-parent: triage.json created" "$TRIAGE_PARENT"
+if [ -f "$TRIAGE_PARENT" ]; then
+	DEPS_PARENT="$(jq -c '.dependencies' "$TRIAGE_PARENT")"
+	# CTL-859 is the parent epic → excluded. CTL-850 is a real sibling dep → kept.
+	# CTL-863 is self → excluded.
+	EXPECTED_DEPS_PARENT='["CTL-850"]'
+	assert_eq "ctl878-parent: parent epic excluded, sibling dep kept" "$EXPECTED_DEPS_PARENT" "$DEPS_PARENT"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Summary
 
 echo

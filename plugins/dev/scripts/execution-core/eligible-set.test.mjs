@@ -123,6 +123,26 @@ describe("setProjectEligible", () => {
     );
     expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
   });
+
+  test("CTL-878: a parent-only delta DOES rewrite the file (parent is in the content key)", async () => {
+    // A pre-fix projection lacks `parent`; the post-fix reconcile supplies it.
+    // Without parent in contentKey the rewrite is skipped and the read-layer
+    // parent-epic drop silently no-ops for steady-state eligible children.
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, parent: "A-9" }],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
+    const doc = JSON.parse(readFileSync(projFile("alpha"), "utf8"));
+    expect(doc.tickets[0].parent).toBe("A-9"); // parent persisted to disk
+  });
 });
 
 describe("removeTicket", () => {
