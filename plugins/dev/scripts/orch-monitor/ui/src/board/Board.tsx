@@ -361,18 +361,25 @@ function Column({ label, color, count, live = 0, children }: { label: string; co
     </div>
   );
 }
-function BoardScroll({ children, fill }: { children: React.ReactNode; fill: boolean }) {
+// `fillHeight` is the CSS height the board scroll area fills when `fill` is on.
+// Standalone (board.html) it is `calc(100vh - 104px)` — the viewport minus the
+// 48px header + ~56px subhead chrome the standalone Board() renders. Embedded in
+// the app shell (CTL-905 / BOARD1) there is no board-internal header (the shell's
+// top strip lives OUTSIDE the surface), so the surface flexes to `100%` of the
+// SidebarInset content area instead. Defaulting to the standalone value keeps
+// every existing call site byte-identical.
+function BoardScroll({ children, fill, fillHeight = "calc(100vh - 104px)" }: { children: React.ReactNode; fill: boolean; fillHeight?: string }) {
   return (
-    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "calc(100vh - 104px)" : "auto" }}>
+    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? fillHeight : "auto" }}>
       {children}
     </div>
   );
 }
 
-function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Ticket[]; lens: "linear" | "phase"; colorBy: ColorBy; fill: boolean; onSelect?: (id: string) => void }) {
+function TicketBoard({ tickets, lens, colorBy, fill, fillHeight, onSelect }: { tickets: Ticket[]; lens: "linear" | "phase"; colorBy: ColorBy; fill: boolean; fillHeight?: string; onSelect?: (id: string) => void }) {
   const cols = lens === "linear" ? LINEAR_COLS : PHASE_COLS;
   return (
-    <BoardScroll fill={fill}>
+    <BoardScroll fill={fill} fillHeight={fillHeight}>
       {cols.map((c: any) => {
         // Render through resolveList (CTL-882 / FND2) so the on-screen column
         // order is the SAME list the detail-page pager + j/k walk derive. The
@@ -391,11 +398,11 @@ function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Tick
     </BoardScroll>
   );
 }
-function WorkerBoard({ workers, tickets, grouping, fill }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean }) {
+function WorkerBoard({ workers, tickets, grouping, fill, fillHeight }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean; fillHeight?: string }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   const cols = grouping === "phase" ? PHASE_COLS : WORKER_COLS;
   return (
-    <BoardScroll fill={fill}>
+    <BoardScroll fill={fill} fillHeight={fillHeight}>
       {cols.map((c: any) => {
         const items = grouping === "phase"
           ? workers.filter((w) => w.phase === c.key)
@@ -456,7 +463,7 @@ const td = { fontSize: 12.5, color: C.fg };
 const mono = { fontFamily: C.mono, fontVariantNumeric: "tabular-nums" as const };
 const ellip = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const };
 
-function QueueView({ data }: { data: BoardPayload }) {
+function QueueView({ data, fillHeight = "calc(100vh - 104px)" }: { data: BoardPayload; fillHeight?: string }) {
   const { config, queue, workers, tickets } = data;
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   // Order through the SHARED comparator (CTL-882 / FND2): rank(active=0, stuck=2,
@@ -464,7 +471,7 @@ function QueueView({ data }: { data: BoardPayload }) {
   // resolve via resolveList({kind:"worker"}). Byte-for-byte the prior inline sort.
   const inflight = sortWorkers(workers);
   return (
-    <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", padding: "2px 16px 24px" }}>
+    <div className="cat-scroll" style={{ overflowY: "auto", height: fillHeight, padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
         <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
           <Stat label="Max parallel" value={String(config.maxParallel)} />
@@ -538,7 +545,24 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
   );
 }
 
-export function Board() {
+// ── BoardSurface — the dense board body, host-agnostic (CTL-905 / BOARD1) ─────
+// Extracted from the standalone Board() so the SAME proven dense surface (the
+// Linear-anatomy TicketCard, the data-driven Column/BoardScroll/TicketBoard
+// filtered by linearState|phase via resolveList, the reserved-cyan live-ring +
+// red stuck treatment, and the CTL-733 SharedWorker SSE wiring) renders in TWO
+// hosts with ZERO data-layer change:
+//   - standalone  (board.html, via Board()):  embedded={false} → keeps its own
+//     48px logo header + daemon/broker/monitor health dots + LIVE pill, sizes to
+//     the viewport (100vh / `calc(100vh - 104px)`). Byte-identical to before.
+//   - embedded    (the app shell's `board` surface):  embedded → DROPS the
+//     duplicate top chrome (the shell already owns the logo, breadcrumb, ⌘K, and
+//     nav frame) and FLEX-FILLS the SidebarInset edge-to-edge (height:100%), so
+//     the board lanes flow horizontally across the full viewport width — the
+//     dense mode that contrasts the calm capped Home reading column.
+// The lens/colorBy/repo/swimlanes controls + the live-active chip stay in BOTH
+// hosts (they are board state, not chrome). No drag affordance in either host:
+// column membership stays derived from linearState/phase, never a move handler.
+function BoardSurface({ embedded = false }: { embedded?: boolean }) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [view, setView] = useState<View>("tickets");
@@ -579,36 +603,59 @@ export function Board() {
       ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
       : null;
 
+  // Standalone keeps the viewport-minus-chrome math; embedded flex-fills its
+  // parent (the SidebarInset content area) so the surface fills the window
+  // edge-to-edge with no double-scrollbar. `fillHeight` flows down to every
+  // BoardScroll/Lane so the inner column scroll matches the host.
+  const fillHeight = embedded ? "100%" : "calc(100vh - 104px)";
+
   return (
     <TooltipProvider delayDuration={200}>
-      <div style={{ background: C.s0, color: C.fg, height: "100vh", display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" }}>
+      <div style={{ background: C.s0, color: C.fg, height: embedded ? "100%" : "100vh", display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" }}>
         <style>{PULSE_CSS}</style>
-        {/* chrome */}
-        <header style={{ height: 48, display: "flex", alignItems: "center", gap: 18, padding: "0 16px", background: C.s1, borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 600 }}>
-            <span style={{ width: 16, height: 16, borderRadius: 4, background: "linear-gradient(135deg,#4ea1ff,#39d07a)", boxShadow: "0 0 12px rgba(78,161,255,0.45)" }} />Catalyst
-          </div>
-          <div className="cat-nav">
-            <Tabs value={view} onValueChange={(v) => setView(v as View)}>
-              <TabsList>
-                <TabsTrigger value="tickets">Tickets</TabsTrigger>
-                <TabsTrigger value="workers">Workers</TabsTrigger>
-                <TabsTrigger value="queue">Queue</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-          <span style={{ flex: 1 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11.5, color: C.fgMuted }}>
-            {data && <span style={{ display: "flex", alignItems: "center", gap: 6, color: C.fg }}><span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{data.config.active} active{data.config.stuck > 0 ? ` · ${data.config.stuck} stuck` : ""}</span>}
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
-            <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: status === "connected" ? C.green : C.red, border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{status === "connected" ? "LIVE" : "OFFLINE"}</span>
-          </div>
-        </header>
+        {/* standalone-only chrome: the shell already provides the logo, nav, and
+            breadcrumb when embedded, so drop the duplicate top header there. */}
+        {!embedded && (
+          <header style={{ height: 48, display: "flex", alignItems: "center", gap: 18, padding: "0 16px", background: C.s1, borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 600 }}>
+              <span style={{ width: 16, height: 16, borderRadius: 4, background: "linear-gradient(135deg,#4ea1ff,#39d07a)", boxShadow: "0 0 12px rgba(78,161,255,0.45)" }} />Catalyst
+            </div>
+            <div className="cat-nav">
+              <Tabs value={view} onValueChange={(v) => setView(v as View)}>
+                <TabsList>
+                  <TabsTrigger value="tickets">Tickets</TabsTrigger>
+                  <TabsTrigger value="workers">Workers</TabsTrigger>
+                  <TabsTrigger value="queue">Queue</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+            <span style={{ flex: 1 }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11.5, color: C.fgMuted }}>
+              {data && <span style={{ display: "flex", alignItems: "center", gap: 6, color: C.fg }}><span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{data.config.active} active{data.config.stuck > 0 ? ` · ${data.config.stuck} stuck` : ""}</span>}
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
+              <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
+              <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: status === "connected" ? C.green : C.red, border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{status === "connected" ? "LIVE" : "OFFLINE"}</span>
+            </div>
+          </header>
+        )}
 
-        {/* subhead */}
+        {/* subhead — board view + lens/colorBy/repo controls, in BOTH hosts.
+            Embedded, the Tickets/Workers/Queue tabs move here (they live in the
+            standalone header above) so the board view stays switchable without
+            the shell's nav owning sub-surface state. */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
+          {embedded && (
+            <div className="cat-nav">
+              <Tabs value={view} onValueChange={(v) => setView(v as View)}>
+                <TabsList>
+                  <TabsTrigger value="tickets">Tickets</TabsTrigger>
+                  <TabsTrigger value="workers">Workers</TabsTrigger>
+                  <TabsTrigger value="queue">Queue</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            </div>
+          )}
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : view === "workers" ? "Workers" : "Capacity & queue"}</h1>
           <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
           <span style={{ flex: 1 }} />
@@ -627,12 +674,12 @@ export function Board() {
         <div style={{ flex: 1, minHeight: 0 }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {data && view === "tickets" && (combined
-            ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill onSelect={(id) => setSelectedTicketId(id)} />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
+            ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill fillHeight={fillHeight} onSelect={(id) => setSelectedTicketId(id)} />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: fillHeight, paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
-            ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
-          {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
+            ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill fillHeight={fillHeight} />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: fillHeight, paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
+          {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} fillHeight={fillHeight} />}
         </div>
         {selectedTicket && (
           <TicketDetailDrawer
@@ -643,4 +690,20 @@ export function Board() {
       </div>
     </TooltipProvider>
   );
+}
+
+/**
+ * Standalone board (board.html, mounted by the FND1 router at `/`). Renders the
+ * BoardSurface with its own chrome — behavior-identical to the pre-CTL-905 board.
+ */
+export function Board() {
+  return <BoardSurface />;
+}
+
+/**
+ * The dense operator board mounted INSIDE the app shell's `board` surface
+ * (CTL-905 / BOARD1). Same data-driven surface, no duplicate chrome, edge-to-edge.
+ */
+export function EmbeddedBoard() {
+  return <BoardSurface embedded />;
 }

@@ -3,6 +3,7 @@ import { useMonitor } from "./hooks/use-monitor";
 import { useKeyboardNav } from "./hooks/use-keyboard-nav";
 import { useCommsChannels } from "./hooks/use-comms";
 import { AppShell } from "./components/app-shell";
+import { useSurface } from "./lib/surface";
 import { AttentionBar } from "./components/attention-bar";
 import { SessionDetailDrawer } from "./components/session-detail-drawer";
 import { ConnectionBanner } from "./components/ui/connection-banner";
@@ -13,6 +14,14 @@ import {
   type SessionTimeFilter,
   type CommsFilter,
 } from "./lib/types";
+
+// CTL-905 / BOARD1: the real dense Linear-anatomy operator board, mounted as the
+// shell's `board` surface. Lazy so the board transport (SharedWorker + SSE) only
+// boots when the operator actually switches to the Board surface — the calm Home
+// reading column never pays for it.
+const EmbeddedBoard = lazy(() =>
+  import("./board/Board").then((m) => ({ default: m.EmbeddedBoard })),
+);
 
 const Dashboard = lazy(() =>
   import("./components/dashboard").then((m) => ({ default: m.Dashboard })),
@@ -167,91 +176,93 @@ function Monitor() {
   );
 
   return (
-    // CTL-891 / SHELL1: the AppShell is now the app frame — a full-viewport,
+    // CTL-891 / SHELL1: the AppShell is the app frame — a full-viewport,
     // edge-to-edge shadcn Sidebar shell (controlled SidebarProvider + SidebarInset
-    // + OPERATE/OBSERVE nav). The existing dashboard content renders edge-to-edge
-    // inside the inset. Surface→content wiring (Board/Workers/Queue) and live
-    // badges are later SHELL tickets; here the dashboard is the inset content.
+    // + OPERATE/OBSERVE nav). CTL-905 / BOARD1 wires the shell's `board` surface
+    // to the real dense operator board (MonitorInset reads useSurface() inside the
+    // provider and swaps the inset content). Other surfaces keep the dashboard.
     <AppShell>
-      <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
-        {/* Content-level meta row: snapshot timestamp + version. The frame's
-            breadcrumb + collapse live in the AppShell top strip now. */}
-        <div className="flex items-center justify-end gap-3 border-b border-border bg-surface-1 px-5 py-2 text-[12px] text-muted">
-          {snapshot.timestamp && (
-            <span>
-              {new Date(snapshot.timestamp).toLocaleDateString(undefined, {
-                month: "short",
-                day: "numeric",
-                year: "numeric",
-              })}{" "}
-              {new Date(snapshot.timestamp).toLocaleTimeString()}
-            </span>
-          )}
-          {version && <span className="font-mono opacity-50">v{version}</span>}
-        </div>
-
-        <ConnectionBanner status={connectionStatus} className="mx-5 mt-3" />
-        <OtelHealthBanner health={otelHealth} className="mx-5 mt-3" />
-
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">
-          <Suspense fallback={<SkeletonDashboard />}>
-            {topView === "comms" ? (
-              <div className="animate-fade-in">
-                <CommsView initialFilter={commsInitialFilter} />
-              </div>
-            ) : topView === "activity" ? (
-              <div className="animate-fade-in">
-                <ActivityView onPivot={handleActivityPivot} />
-              </div>
-            ) : topView === "god-mode" ? (
-              <div className="animate-fade-in">
-                <GodModeView />
-              </div>
-            ) : effectiveOrch ? (
-              <div key={effectiveOrch.id} className="animate-fade-in flex flex-col gap-4">
-                {attention.filter((a) => a.orchId === effectiveOrch.id)
-                  .length > 0 && (
-                  <AttentionBar
-                    items={attention.filter(
-                      (a) => a.orchId === effectiveOrch.id,
-                    )}
-                    onItemClick={handleAttentionClick}
-                  />
-                )}
-                <OrchestratorView
-                  orch={effectiveOrch}
-                  events={events}
-                  getAnalytics={analytics}
-                  getLinear={linear}
-                  staleThreshold={staleThreshold}
-                  otelHealth={otelHealth}
-                  commsAuthors={commsAuthorsForSelected || undefined}
-                  onCommsLink={handleWorkerCommsLink}
-                  selectedWorker={selectedWorker}
-                  onWorkerSelect={setSelectedWorker}
-                />
-              </div>
-            ) : (
-              <div className="animate-fade-in">
-                <Dashboard
-                  orchestrators={snapshot.orchestrators}
-                  sessions={sessions}
-                  attention={attention}
-                  events={events}
-                  getAnalytics={analytics}
-                  onSelectOrch={(id) => setSelectedOrchId(id)}
-                  selectedSessionId={selectedSession}
-                  onSessionSelect={handleSessionSelect}
-                  timeFilter={timeFilter}
-                  otelConfigured={otelHealth?.configured === true}
-                  otelTools={otelTools}
-                  otelErrors={otelErrors}
-                />
-              </div>
+      <MonitorInset>
+        <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
+          {/* Content-level meta row: snapshot timestamp + version. The frame's
+              breadcrumb + collapse live in the AppShell top strip now. */}
+          <div className="flex items-center justify-end gap-3 border-b border-border bg-surface-1 px-5 py-2 text-[12px] text-muted">
+            {snapshot.timestamp && (
+              <span>
+                {new Date(snapshot.timestamp).toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  year: "numeric",
+                })}{" "}
+                {new Date(snapshot.timestamp).toLocaleTimeString()}
+              </span>
             )}
-          </Suspense>
+            {version && <span className="font-mono opacity-50">v{version}</span>}
+          </div>
+
+          <ConnectionBanner status={connectionStatus} className="mx-5 mt-3" />
+          <OtelHealthBanner health={otelHealth} className="mx-5 mt-3" />
+
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+            <Suspense fallback={<SkeletonDashboard />}>
+              {topView === "comms" ? (
+                <div className="animate-fade-in">
+                  <CommsView initialFilter={commsInitialFilter} />
+                </div>
+              ) : topView === "activity" ? (
+                <div className="animate-fade-in">
+                  <ActivityView onPivot={handleActivityPivot} />
+                </div>
+              ) : topView === "god-mode" ? (
+                <div className="animate-fade-in">
+                  <GodModeView />
+                </div>
+              ) : effectiveOrch ? (
+                <div key={effectiveOrch.id} className="animate-fade-in flex flex-col gap-4">
+                  {attention.filter((a) => a.orchId === effectiveOrch.id)
+                    .length > 0 && (
+                    <AttentionBar
+                      items={attention.filter(
+                        (a) => a.orchId === effectiveOrch.id,
+                      )}
+                      onItemClick={handleAttentionClick}
+                    />
+                  )}
+                  <OrchestratorView
+                    orch={effectiveOrch}
+                    events={events}
+                    getAnalytics={analytics}
+                    getLinear={linear}
+                    staleThreshold={staleThreshold}
+                    otelHealth={otelHealth}
+                    commsAuthors={commsAuthorsForSelected || undefined}
+                    onCommsLink={handleWorkerCommsLink}
+                    selectedWorker={selectedWorker}
+                    onWorkerSelect={setSelectedWorker}
+                  />
+                </div>
+              ) : (
+                <div className="animate-fade-in">
+                  <Dashboard
+                    orchestrators={snapshot.orchestrators}
+                    sessions={sessions}
+                    attention={attention}
+                    events={events}
+                    getAnalytics={analytics}
+                    onSelectOrch={(id) => setSelectedOrchId(id)}
+                    selectedSessionId={selectedSession}
+                    onSessionSelect={handleSessionSelect}
+                    timeFilter={timeFilter}
+                    otelConfigured={otelHealth?.configured === true}
+                    otelTools={otelTools}
+                    otelErrors={otelErrors}
+                  />
+                </div>
+              )}
+            </Suspense>
+          </div>
         </div>
-      </div>
+      </MonitorInset>
 
       {selectedSession &&
         (() => {
@@ -265,4 +276,32 @@ function Monitor() {
         })()}
     </AppShell>
   );
+}
+
+/**
+ * The SidebarInset content gate (CTL-905 / BOARD1). Rendered INSIDE <AppShell> so
+ * it can read the active surface from SurfaceContext (useSurface()). When the
+ * operator is on the `board` surface it mounts the real dense Linear-anatomy
+ * operator board edge-to-edge (filling the inset); every other surface renders
+ * the existing dashboard `children` unchanged — a behavior-preserving default so
+ * Home/Workers/Queue keep today's content until their own surface tickets land.
+ */
+function MonitorInset({ children }: { children: React.ReactNode }) {
+  const { surface } = useSurface();
+  if (surface === "board") {
+    return (
+      <div className="h-full min-h-0">
+        <Suspense
+          fallback={
+            <div className="p-6 text-sm text-muted-foreground">
+              Connecting to execution-core…
+            </div>
+          }
+        >
+          <EmbeddedBoard />
+        </Suspense>
+      </div>
+    );
+  }
+  return <>{children}</>;
 }
