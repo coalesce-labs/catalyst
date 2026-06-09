@@ -18,6 +18,21 @@ import { connectBoard } from "./board-client";
 // detail-page pager (N/total) and the j/k walk read the SAME order. See
 // list-order.ts — the P1 keystone correctness item.
 import { resolveList, sortWorkers } from "./list-order";
+// ── CTL-909 / SURF1: node grouping + node filter (pure, DOM-free) ─────────────
+// The Workers surface adds a "node" grouping axis + a host filter that read the
+// BoardWorker.host {name,id} field (BFF10/CTL-922). The column derivation lives
+// in worker-grouping.ts so the Gherkin scenarios are unit-tested without a DOM;
+// Board.tsx only renders the columns it returns. SINGLE-HOST is an identity
+// no-op there (one node → one column, byte-for-byte the host-unaware order).
+import {
+  type WorkerGrouping,
+  nodeColumns,
+  workerHostNames,
+  filterWorkersByHost,
+  isMultiHost,
+  HOST_FILTER_ALL,
+  UNATTRIBUTED_HOST,
+} from "./worker-grouping";
 import type {
   BoardPayload,
   BoardWorker as Worker,
@@ -84,6 +99,20 @@ const TYPE_C: Record<string, string> = {
 };
 const repoColor = (repo: string) => (repo === "adva" ? "#c084fc" : "#4ea1ff");
 const isActive = (s: ActiveState) => s === "active";
+// CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
+// the host chip on each worker card carry a consistent color. Hashed from the
+// host name (the unattributed bucket reads dim) — deterministic, no palette
+// state, and the single-host case simply gets its one color.
+const NODE_PALETTE = ["#4ea1ff", "#39d07a", "#a855f7", "#eabc3b", "#f472b6", "#5be0ff", "#fb8b3a"];
+const nodeColor = (host: string): string => {
+  if (host === UNATTRIBUTED_HOST) return C.fgDim;
+  let h = 0;
+  for (let i = 0; i < host.length; i++) h = (h * 31 + host.charCodeAt(i)) >>> 0;
+  // `?? C.blue` covers the (unreachable, but type-honest) empty-palette case
+  // without a non-null assertion — noUncheckedIndexedAccess types this as
+  // string | undefined.
+  return NODE_PALETTE[h % NODE_PALETTE.length] ?? C.blue;
+};
 
 function accentFor(t: { phase: string; repo: string; type: string; activeState: ActiveState; status: string }, by: ColorBy): string {
   if (by === "phase") return PHASE_C[t.phase] || C.blue;
@@ -300,18 +329,47 @@ function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onS
   );
 }
 
+// ── host chip — the worker's owning node (CTL-909 / SURF1) ────────────────────
+// Renders the BoardWorker.host.name (BFF10/CTL-922). SINGLE-HOST: with one node
+// every card shows the same name — it reads as a quiet provenance tag, not extra
+// chrome; the moment a second node joins, the per-host color disambiguates them.
+// A worker with no named host shows nothing (we never fabricate a host name).
+function HostChip({ host }: { host: Worker["host"] }) {
+  if (!host?.name) return null;
+  const c = nodeColor(host.name);
+  return (
+    <Tooltip><TooltipTrigger asChild>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 10, color: c, background: `${c}1f`, border: `1px solid ${c}3a`, padding: "0 6px", borderRadius: 5, whiteSpace: "nowrap" }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: c, display: "inline-block" }} />{host.name}
+      </span>
+    </TooltipTrigger><TooltipContent>node {host.name}</TooltipContent></Tooltip>
+  );
+}
+
 // ── worker card (Workers board) ─────────────────────────────────────────────
-function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
+function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?: (name: string) => void }) {
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
   return (
-    <div className={live ? "catalyst-live" : undefined} style={{
-      background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-      border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`, opacity: stuck ? 0.7 : 1,
-    }}>
+    <div
+      className={live ? "catalyst-live" : undefined}
+      // CTL-909 / SURF1: clicking a worker card deep-links to its single-run
+      // detail page (`/worker/$id`, keyed by w.name) via the supplied callback.
+      // When no callback is wired (the legacy embedded mount has no router) the
+      // card stays non-interactive exactly as before — no regression.
+      onClick={onSelect ? () => onSelect(w.name) : undefined}
+      role={onSelect ? "button" : undefined}
+      tabIndex={onSelect ? 0 : undefined}
+      onKeyDown={onSelect ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(w.name); } } : undefined}
+      style={{
+        background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
+        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`, opacity: stuck ? 0.7 : 1,
+        cursor: onSelect ? "pointer" : undefined,
+      }}
+    >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <ActivityDot state={w.activeState} fallback={accent} />
         {info && <PriorityIcon p={info.priority} />}
@@ -329,6 +387,8 @@ function WorkerCard({ w, info }: { w: Worker; info?: Ticket }) {
       {info?.title && <TitleText text={info.title} />}
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
         <PhasePill phase={w.phase} />
+        {/* CTL-909 / SURF1: owning host.name on every worker card. */}
+        <HostChip host={w.host} />
         <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{w.repo}</Badge>
         {info?.model && <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{info.model}</Badge>}
       </div>
@@ -395,8 +455,26 @@ function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Tick
     </BoardScroll>
   );
 }
-function WorkerBoard({ workers, tickets, grouping, fill }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean }) {
+function WorkerBoard({ workers, tickets, grouping, fill, onWorkerSelect }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean; onWorkerSelect?: (name: string) => void }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
+  // CTL-909 / SURF1: "node" grouping lays out one column per host.name via the
+  // pure nodeColumns derivation (single-host → one column, identity no-op). The
+  // status/phase lenses are unchanged.
+  if (grouping === "node") {
+    const cols = nodeColumns(workers);
+    return (
+      <BoardScroll fill={fill}>
+        {cols.map((c) => {
+          const live = c.workers.filter((w) => w.activeState === "active").length;
+          return (
+            <Column key={c.host} label={c.host} color={nodeColor(c.host)} count={c.workers.length} live={live}>
+              {c.workers.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />)}
+            </Column>
+          );
+        })}
+      </BoardScroll>
+    );
+  }
   const cols = grouping === "phase" ? PHASE_COLS : WORKER_COLS;
   return (
     <BoardScroll fill={fill}>
@@ -409,7 +487,7 @@ function WorkerBoard({ workers, tickets, grouping, fill }: { workers: Worker[]; 
         const live = grouping === "phase" ? items.filter((w) => w.activeState === "active").length : 0;
         return (
           <Column key={c.key} label={c.label} color={c.c} count={items.length} live={live}>
-            {items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} />)}
+            {items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />)}
           </Column>
         );
       })}
@@ -533,7 +611,8 @@ function QueueView({ data }: { data: BoardPayload }) {
 
 // ── shell (real shadcn Tabs + ToggleGroup, TooltipProvider) ─────────────────
 type View = "tickets" | "workers" | "queue";
-type WorkerGrouping = "status" | "phase";
+// WorkerGrouping ("status" | "phase" | "node") is now owned by worker-grouping.ts
+// (CTL-909 / SURF1) so the column derivation + the type stay in lock-step.
 function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string }[] }) {
   return (
     <ToggleGroup type="single" value={value} onValueChange={(v) => v && onChange(v as T)} variant="outline" size="sm">
@@ -548,12 +627,26 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
 // difference: it swaps the root height from 100vh → 100% so the dense grid fills
 // the inset's flex slot instead of overflowing the viewport by the strip height.
 // The data path (connectBoard / SharedWorker EventSource) is untouched in both.
-export function Board({ embedded = false }: { embedded?: boolean } = {}) {
+//
+// CTL-909 / SURF1:
+//   - `initialView` lets a host (e.g. the Workers app-shell surface) open the
+//     board straight onto the Workers grid instead of the Tickets default.
+//   - `onWorkerSelect` is the worker-card deep-link: the routed `/` board passes
+//     a `useNavigate`-backed callback to `/worker/$id`; when absent (the embedded
+//     mount has no router) the cards stay non-interactive, exactly as before.
+export function Board({
+  embedded = false,
+  initialView = "tickets",
+  onWorkerSelect,
+}: { embedded?: boolean; initialView?: View; onWorkerSelect?: (name: string) => void } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [view, setView] = useState<View>("tickets");
+  const [view, setView] = useState<View>(initialView);
   const [lens, setLens] = useState<"linear" | "phase">("linear");
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
+  // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
+  // identity no-op) or a specific host.name to scope the grid to one node.
+  const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
   const [repo, setRepo] = useState<string>("all");
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
@@ -581,6 +674,22 @@ export function Board({ embedded = false }: { embedded?: boolean } = {}) {
   const repos = data?.repos ?? [];
   const fWorkers = useMemo(() => (data?.workers ?? []).filter((w) => repo === "all" || w.repo === repo), [data, repo]);
   const fTickets = useMemo(() => (data?.tickets ?? []).filter((t) => repo === "all" || t.repo === repo), [data, repo]);
+  // CTL-909 / SURF1: distinct host names across the (repo-filtered) workers — the
+  // node filter's option list. With one node this is a single entry, so the
+  // filter control hides (isMultiHost === false) and the single-host case stays
+  // chrome-free. The node grid + filter scope `fWorkers` (repo ∧ host).
+  const workerHosts = useMemo(() => workerHostNames(fWorkers), [fWorkers]);
+  const showNodeFilter = useMemo(() => isMultiHost(fWorkers), [fWorkers]);
+  // Drop a stale host filter when the selected node no longer has workers (its
+  // column vanished) so the grid never goes silently empty — fall back to "all".
+  const activeHostFilter =
+    hostFilter !== HOST_FILTER_ALL && !workerHosts.includes(hostFilter)
+      ? HOST_FILTER_ALL
+      : hostFilter;
+  const nodeWorkers = useMemo(
+    () => filterWorkersByHost(fWorkers, activeHostFilter),
+    [fWorkers, activeHostFilter],
+  );
   const ticketLanes = repos.filter((r) => fTickets.some((t) => t.repo === r));
   const workerLanes = repos.filter((r) => fWorkers.some((w) => w.repo === r));
   const combined = !swimlanes || repo !== "all";
@@ -628,9 +737,20 @@ export function Board({ embedded = false }: { embedded?: boolean } = {}) {
             <Seg value={colorBy} onChange={setColorBy} options={[{ k: "phase", label: "Phase" }, { k: "status", label: "Status" }, { k: "repo", label: "Repo" }, { k: "type", label: "Type" }]} />
             <Seg value={swimlanes ? "lanes" : "flat"} onChange={(v) => setSwimlanes(v === "lanes")} options={[{ k: "flat", label: "Combined" }, { k: "lanes", label: "Repo lanes" }]} />
           </>}
-          {view === "workers" && (
-            <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }]} />
-          )}
+          {view === "workers" && <>
+            {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
+            <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
+            {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
+                only for a multi-node fleet — with a single node the filter is
+                inert, so the single-host case stays chrome-free (identity no-op). */}
+            {showNodeFilter && (
+              <Seg
+                value={activeHostFilter}
+                onChange={setHostFilter}
+                options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
+              />
+            )}
+          </>}
         </div>
 
         {/* body */}
@@ -640,8 +760,10 @@ export function Board({ embedded = false }: { embedded?: boolean } = {}) {
             ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill onSelect={(id) => setSelectedTicketId(id)} />
             : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
-            ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
+            // CTL-909 / SURF1: the node filter scopes the combined grid to one
+            // host; "all" is the identity no-op (nodeWorkers === fWorkers).
+            ? <WorkerBoard workers={nodeWorkers} tickets={data.tickets} grouping={workerGrouping} fill onWorkerSelect={onWorkerSelect} />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={filterWorkersByHost(fWorkers.filter((w) => w.repo === r), activeHostFilter)} tickets={data.tickets} grouping={workerGrouping} fill={false} onWorkerSelect={onWorkerSelect} /></Lane>)}</div>)}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
         </div>
         {selectedTicket && (
