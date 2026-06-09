@@ -27,6 +27,7 @@ import {
   createRouter,
   Outlet,
   RouterProvider,
+  useNavigate,
 } from "@tanstack/react-router";
 import { Board } from "./Board";
 import { validateDetailSearch } from "./route-search";
@@ -39,11 +40,24 @@ const rootRoute = createRootRoute({
   component: () => <Outlet />,
 });
 
-// `/` — the existing board, mounted unchanged.
+// `/` — the existing board. CTL-909 / SURF1: a thin wrapper injects the
+// worker-card deep-link (onWorkerSelect → navigate to `/worker/$id`) so the
+// Workers grid's cards open the single-run detail page. The Board itself stays
+// router-free (it also mounts in the embedded, router-less app shell).
+function BoardRoot() {
+  const navigate = useNavigate();
+  return (
+    <Board
+      onWorkerSelect={(name) =>
+        void navigate({ to: "/worker/$id", params: { id: name }, search: { from: "board" } })
+      }
+    />
+  );
+}
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: Board,
+  component: BoardRoot,
 });
 
 // `/ticket/$id` — typed id param + typed search contract. Renders the shared

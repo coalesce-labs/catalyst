@@ -15,22 +15,26 @@ import type { Surface } from "./surface";
 /**
  * The kind of content the SidebarInset renders for a surface.
  *  - "board"     → the dense, full-bleed <Board /> grid (CTL-892).
+ *  - "workers"   → the dense Workers grid: the SAME <Board /> opened on its
+ *                  Workers view, with the node group-by + node filter (CTL-909).
  *  - "dashboard" → the existing monitor dashboard / orchestrator / comms / etc.
  *
- * Workers + Queue still fall through to "dashboard" today; they migrate to their
- * own dense surfaces in later SHELL tickets. Home is the calm dashboard inbox.
+ * Queue still falls through to "dashboard" today; it migrates to its own dense
+ * surface in a later SHELL ticket. Home is the calm dashboard inbox.
  */
-export type SurfaceContentKind = "board" | "dashboard";
+export type SurfaceContentKind = "board" | "workers" | "dashboard";
 
 /**
  * Resolve which content kind the inset should render for the active surface.
- * Only "board" is special-cased in SHELL2; every other surface keeps the
- * dashboard content so this ticket stays behavior-preserving for Home/Workers/
- * Queue (no regression — the Gherkin "no capped reading column" requirement only
- * applies to the board surface).
+ * "board" was special-cased in SHELL2; SURF1 (CTL-909) adds "workers" — the
+ * Workers surface is now its own dense grid instead of the placeholder
+ * dashboard. Every other surface keeps the dashboard content so this stays
+ * behavior-preserving for Home/Queue (no regression).
  */
 export function surfaceContentKind(surface: Surface): SurfaceContentKind {
-  return surface === "board" ? "board" : "dashboard";
+  if (surface === "board") return "board";
+  if (surface === "workers") return "workers";
+  return "dashboard";
 }
 
 /**

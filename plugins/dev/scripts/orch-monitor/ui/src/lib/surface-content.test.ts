@@ -15,18 +15,25 @@ describe("surfaceContentKind", () => {
     expect(surfaceContentKind("board")).toBe("board");
   });
 
-  it("keeps every non-board surface on the dashboard (no regression)", () => {
-    // Home/Workers/Queue must stay exactly what SHELL1 rendered — only the board
-    // surface is newly special-cased in SHELL2.
-    const nonBoard = SURFACES.filter((s) => s !== "board");
-    for (const s of nonBoard) {
+  it("routes the Workers surface to the dense Workers grid (CTL-909 / SURF1)", () => {
+    // Gherkin (SURF1): "the operator clicks the Workers nav item → the Workers
+    // surface renders edge-to-edge in the SidebarInset" — no longer the
+    // placeholder dashboard.
+    expect(surfaceContentKind("workers")).toBe("workers");
+  });
+
+  it("keeps Home/Queue on the dashboard (no regression)", () => {
+    // Home + Queue must stay exactly what they rendered before — only board +
+    // workers are special-cased now.
+    const onDashboard = SURFACES.filter((s) => s !== "board" && s !== "workers");
+    for (const s of onDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
     }
   });
 
   it("covers every declared surface (no surface falls through undefined)", () => {
     for (const s of SURFACES as readonly Surface[]) {
-      expect(["board", "dashboard"]).toContain(surfaceContentKind(s));
+      expect(["board", "workers", "dashboard"]).toContain(surfaceContentKind(s));
     }
   });
 });

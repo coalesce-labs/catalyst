@@ -327,6 +327,20 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
       </Suspense>
     );
   }
+  // CTL-909 / SURF1: the Workers surface is now a first-class dense grid — the
+  // same <Board /> scaffolding (Column/BoardScroll/WorkerCard) opened straight
+  // onto its Workers view, full-bleed in the inset, instead of the placeholder
+  // dashboard. It carries the node group-by + node filter; the single-host case
+  // is an identity no-op. (Worker-card deep-link to /worker/$id is wired in the
+  // routed board entry, which owns the router; the embedded shell has no router,
+  // so cards there stay non-interactive exactly as before — no dead links.)
+  if (surfaceContentKind(surface) === "workers") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <Board embedded initialView="workers" />
+      </Suspense>
+    );
+  }
   if (surfaceContentKind(surface) === "board") {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
