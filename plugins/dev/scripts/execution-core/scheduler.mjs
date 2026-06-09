@@ -100,12 +100,12 @@ import {
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
-  resolvePhaseSessionId as defaultResolveSession,
   defaultAppendCooldownGcEvent,
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendRunawayEvent,
 } from "./recovery.mjs";
+import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
