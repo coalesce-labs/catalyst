@@ -877,6 +877,31 @@ if [[ "${ATTEMPT}" -gt 1 ]]; then
 	SESSION_NAME="${SESSION_NAME} #${ATTEMPT}"
 fi
 
+# ─── Per-host plugin directories (--plugin-dir) ──────────────────────────────
+# Load the catalyst plugin into each worker session directly from a checkout
+# (`claude --plugin-dir`), bypassing the marketplace cache. A local plugin of
+# the same name takes precedence over the marketplace install for that session,
+# so this doubles as a per-dispatch override for testing a fix branch
+# (CATALYST_PLUGIN_DIRS=<worktree>/plugins/dev). Resolution precedence:
+# CATALYST_PLUGIN_DIRS env (colon-separated) > repo .catalyst/config.json
+# `.catalyst.orchestration.pluginDirs` > machine config (the CTL-689 path).
+# Empty (the default) = no flags; marketplace behavior unchanged. Entries that
+# are not directories are skipped loudly — a typo must not silently change
+# which plugin the fleet loads.
+PLUGIN_DIRS_RESOLVED="${CATALYST_PLUGIN_DIRS:-$(config_value '.catalyst.orchestration.pluginDirs | if type=="array" then join(":") else . end' "")}"
+PLUGIN_DIR_ARGS=()
+if [[ -n $PLUGIN_DIRS_RESOLVED ]]; then
+	IFS=':' read -r -a _PDIRS <<<"$PLUGIN_DIRS_RESOLVED"
+	for _PD in "${_PDIRS[@]}"; do
+		[[ -z $_PD ]] && continue
+		if [[ -d $_PD ]]; then
+			PLUGIN_DIR_ARGS+=(--plugin-dir "$_PD")
+		else
+			echo "phase-agent-dispatch: pluginDirs entry is not a directory — skipping: ${_PD}" >&2
+		fi
+	done
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
 	# Dry-run prints the command it would have run without spawning anything.
 	jq -nc \
@@ -889,12 +914,14 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--arg sessionName "$SESSION_NAME" \
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
+		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
 		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,
       resumeSession: (if $resumeSession == "" then null else $resumeSession end),
+      pluginDirs: (if $pluginDirs == "" then [] else ($pluginDirs | split(":")) end),
       env: $env, settings: $settings, status: "dispatched", dryRun: true}'
 	exit 0
 fi
@@ -1032,12 +1059,14 @@ spawn_claude_bg() {
 		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "${_levers[@]}" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" \
+			${PLUGIN_DIR_ARGS[@]+"${PLUGIN_DIR_ARGS[@]}"} "${_levers[@]}" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	else
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" \
+			${PLUGIN_DIR_ARGS[@]+"${PLUGIN_DIR_ARGS[@]}"} "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	fi
 }
