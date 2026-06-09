@@ -32,6 +32,7 @@ import {
   buildDependencyEdges,
   DEFAULT_TERMINAL_STATUSES,
 } from "../lib/dependency-graph.mjs";
+// teamOf (CTL-838 cross-team guard) is imported from ./dispatch.mjs below.
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
 // ("triage") is intentionally NO LONGER the new-work entry phase — new work
 // enters at NEW_WORK_ENTRY_PHASE ("research"), see schedulerTick.
@@ -2615,6 +2616,17 @@ export function schedulerTick(
             log.warn(
               { candidate, dep },
               "ctl-878 step-e: skipping dependency that is the candidate's parent epic",
+            );
+            continue;
+          }
+          if (teamOf(dep) !== teamOf(candidate)) {
+            // CTL-838: the dep is in a DIFFERENT team. This daemon orchestrates one
+            // team and cannot work another team's ticket to terminal, so a
+            // cross-team blocked_by edge can only deadlock the candidate. Never
+            // persist it (the read-layer buildDependencyEdges drop is the backstop).
+            log.warn(
+              { candidate, dep, candidateTeam: teamOf(candidate), depTeam: teamOf(dep) },
+              "ctl-838 step-e: skipping cross-team dependency (daemon cannot work it)",
             );
             continue;
           }

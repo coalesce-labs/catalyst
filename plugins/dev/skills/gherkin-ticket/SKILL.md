@@ -265,6 +265,35 @@ Body:
 - [ ] Bug `Then` describes the CORRECT behavior; `# CURRENTLY:` documents the break.
 - [ ] No vacuous chore scenarios (`Then the code is cleaner`).
 
+Dependencies:
+- [ ] Real prerequisites are set as formal Linear **blocker links**, not narrated in prose.
+- [ ] No "depends on TEAM-123" / "after TEAM-456" sentences in the body expecting something to read them.
+
+---
+
+## Dependencies — link them, don't narrate them
+
+If you know that other work **must finish before this ticket can start**, record it as a first-class
+Linear `blocked_by` **link** at authoring time — you know the prerequisites better than any later
+pass will. **Catalyst does NOT infer dependencies from prose** (CTL-838): writing "depends on
+CTL-123" or "see CTL-456" in the description does nothing — it is not scraped into a blocker, and it
+should not be (a mention is not a dependency).
+
+```bash
+# After the ticket exists, link each genuine prerequisite (see /catalyst-dev:linearis for syntax):
+linearis issues update <NEW-TICKET> --blocked-by <PREREQ-TICKET>
+```
+
+Rules of thumb:
+- Link only **true** prerequisites — work that must reach Done/Canceled first. A shared topic,
+  prior-art reference, or "related" ticket is **not** a blocker.
+- Never link across teams for auto-sequencing (a `CTL` ticket on an `OTL`/`ADV` ticket): the
+  execution-core daemon only works its own team, so a cross-team blocker just deadlocks. Coordinate
+  cross-team work out-of-band.
+- A blocker you miss is fine — `/catalyst-dev:phase-triage` does a semantic second pass over the
+  backlog and can add genuine ones it finds. But a **false** blocker you add stalls real work, so
+  when in doubt, leave it out.
+
 ---
 
 ## Per-project criteria (override hook)

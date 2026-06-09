@@ -156,9 +156,12 @@ if [ -f "$TRIAGE_FILE" ]; then
 	fi
 
 	DEPS="$(jq -c '.dependencies' "$TRIAGE_FILE")"
-	# Expect CTL-447 and CTL-448, but NOT CTL-9999 (self).
-	EXPECTED_DEPS='["CTL-447","CTL-448"]'
-	assert_eq "happy: dependencies match (excludes self)" "$EXPECTED_DEPS" "$DEPS"
+	# CTL-838: the bash body does NOT scrape ticket ids from prose. "See CTL-447 and
+	# CTL-448 for prior art" is a mention, not a dependency — deterministic deps are
+	# always []. Real prerequisites come from author-set blocker links + the Opus
+	# semantic pass, neither of which the bash fallback performs.
+	EXPECTED_DEPS='[]'
+	assert_eq "happy: dependencies are empty (CTL-838: no prose scraping)" "$EXPECTED_DEPS" "$DEPS"
 fi
 
 # Assert: skill ran to completion (comment post is best-effort / fail-open in test)
@@ -434,32 +437,32 @@ if [ -f "$TRIAGE_SUBST" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Case: CTL-878 — the parent epic is NEVER scraped into dependencies. A Linear
-# parent/child hierarchy link is not a blocker; emitting it makes the scheduler
-# persist `child blocked_by parent-epic`, deadlocking the child against an epic
-# that is never worked. The parent id is in the ticket JSON, so 2d excludes it.
+# Case: CTL-838 — the deterministic body NEVER scrapes ticket ids from prose. A
+# description dense with mentions (parent epic, "depends on", sibling ids) must
+# still yield an empty dependency list. Real prerequisites are author-set blocker
+# links + the Opus semantic pass — never a regex over what's written in the body.
 
-FIXTURE_PARENT="$TMPROOT/fixture-parent.json"
-cat >"$FIXTURE_PARENT" <<'EOF'
+FIXTURE_MENTIONS="$TMPROOT/fixture-mentions.json"
+cat >"$FIXTURE_MENTIONS" <<'EOF'
 {
   "identifier": "CTL-863",
   "title": "Implement takeover/healing for a downed daemon node",
-  "description": "Part of the CTL-859 multi-host epic. Depends on CTL-850 (HRW claim). When a node dies, the survivor must resume from the draft PR.",
+  "description": "Part of the CTL-859 multi-host epic. Depends on CTL-850 (HRW claim). See CTL-718 for prior art and OTL-4 for the dashboard. When a node dies, the survivor must resume from the draft PR.",
   "parent": { "identifier": "CTL-859" },
   "labels": {"nodes": []}
 }
 EOF
 
-CASE_DIR_PARENT="$(run_case parent "$FIXTURE_PARENT" CTL-863)"
-assert_eq "ctl878-parent: exit code 0" 0 "$(cat "$CASE_DIR_PARENT/exit-code")"
-TRIAGE_PARENT="$CASE_DIR_PARENT/worker/triage.json"
-assert_file_exists "ctl878-parent: triage.json created" "$TRIAGE_PARENT"
-if [ -f "$TRIAGE_PARENT" ]; then
-	DEPS_PARENT="$(jq -c '.dependencies' "$TRIAGE_PARENT")"
-	# CTL-859 is the parent epic → excluded. CTL-850 is a real sibling dep → kept.
-	# CTL-863 is self → excluded.
-	EXPECTED_DEPS_PARENT='["CTL-850"]'
-	assert_eq "ctl878-parent: parent epic excluded, sibling dep kept" "$EXPECTED_DEPS_PARENT" "$DEPS_PARENT"
+CASE_DIR_MENTIONS="$(run_case mentions "$FIXTURE_MENTIONS" CTL-863)"
+assert_eq "ctl838-noscrape: exit code 0" 0 "$(cat "$CASE_DIR_MENTIONS/exit-code")"
+TRIAGE_MENTIONS="$CASE_DIR_MENTIONS/worker/triage.json"
+assert_file_exists "ctl838-noscrape: triage.json created" "$TRIAGE_MENTIONS"
+if [ -f "$TRIAGE_MENTIONS" ]; then
+	DEPS_MENTIONS="$(jq -c '.dependencies' "$TRIAGE_MENTIONS")"
+	# Five ticket ids appear in the prose (CTL-859 parent, CTL-850 "depends on",
+	# CTL-718/OTL-4 mentions, CTL-863 self) — NONE become dependencies.
+	EXPECTED_DEPS_MENTIONS='[]'
+	assert_eq "ctl838-noscrape: prose mentions are NOT scraped into dependencies" "$EXPECTED_DEPS_MENTIONS" "$DEPS_MENTIONS"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
