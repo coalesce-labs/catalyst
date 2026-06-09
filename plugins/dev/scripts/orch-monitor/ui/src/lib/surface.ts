@@ -46,6 +46,15 @@ export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
 };
 
 /**
+ * Breadcrumb for the Settings surface (CTL-911 / SURF3). Settings is a FOOTER
+ * destination, NOT one of the four OPERATE landing surfaces — so it stays out
+ * of the `Surface` union / `SURFACES` / `SURFACE_CHORD` (which the shell's nav,
+ * the command palette, and the landing-surface preference all iterate). The
+ * shell renders it via a separate open-flag, with this trail in the top strip.
+ */
+export const SETTINGS_BREADCRUMB: string[] = ["Settings"];
+
+/**
  * True when focus is in a text-entry context — the shell's `[` / `g` chord
  * handlers must NOT steal those keystrokes. Pure so it can be unit-tested with a
  * minimal `{ tagName, isContentEditable }` shape rather than a real DOM node.
@@ -64,6 +73,10 @@ export function isTypingTarget(
 interface SurfaceContextValue {
   surface: Surface;
   setSurface: (s: Surface) => void;
+  /** Whether the Settings surface is currently shown (CTL-911 / SURF3). */
+  settingsOpen: boolean;
+  /** Open the Settings surface (the footer Settings nav item calls this). */
+  openSettings: () => void;
 }
 
 export const SurfaceContext = createContext<SurfaceContextValue | null>(null);
