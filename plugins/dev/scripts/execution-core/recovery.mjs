@@ -146,6 +146,26 @@ export function defaultStatJob(bgJobId) {
 // status like done/skipped) — do not conflate the two.
 export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
 
+// CTL-927 — doc/long-fan-out phases whose forward-progress is an artifact-byte
+// progressMark (research/plan/triage/verify/review — see work-done-probes.mjs). Their
+// `claude --bg` state.json legitimately goes untouched for many minutes during an
+// in-process sub-agent fan-out, so the CTL-868 cold-snapshot mtime zombie-floor (2h)
+// would false-kill a LIVE worker on a host where `claude agents --json` is unreliable
+// (CTL-829, the headless mini) — the proximate trigger of a fleet-wide no-progress
+// storm. These phases use BUSY_CEILING_MS (6h) for the cold-snapshot mtime guess; by
+// then the busy-ceiling escalation (escalateOnce "busy-ceiling-exceeded" → needs-human)
+// already bounds a genuinely-stuck doc worker — escalate, never silent kill.
+// implement/remediate are NOT exempt: their commits/state.json churn make a 2h-stale
+// state.json a true corpse. Keep this set in sync with the artifact-byte progressMark
+// phases in work-done-probes.mjs.
+export const MTIME_ZOMBIE_EXEMPT_PHASES = new Set([
+  "research",
+  "plan",
+  "triage",
+  "verify",
+  "review",
+]);
+
 // jobLifecycle — CTL-736 Phase 2's deterministic, LOCAL death verdict from a
 // `claude --bg` job's state.json, replacing the eventually-consistent `claude
 // agents` snapshot (livenessForBgJob) in the reclaim death trigger:
@@ -1719,10 +1739,18 @@ export function reclaimDeadWorkIfPossible(
           // fan-out safe (CTL-662), and this branch only runs when the fresh-agents
           // cross-check cannot — so it never overrides a fresh "present" verdict.
           const job = statJob(prevBgJobId);
-          if (job && Number.isFinite(job.mtimeMs) && now() - job.mtimeMs > zombieStaleFloorMs) {
+          // CTL-927: doc/long-fan-out phases keep state.json untouched during a
+          // multi-minute sub-agent fan-out, so the 2h mtime guess would false-kill a
+          // live worker on this cold-snapshot branch. Give them the 6h busy ceiling
+          // (the busy-ceiling escalation above already routes a genuinely-stuck doc
+          // worker to needs-human at 6h — escalate, never silent kill).
+          const mtimeFloorMs = MTIME_ZOMBIE_EXEMPT_PHASES.has(phase)
+            ? busyCeilingMs
+            : zombieStaleFloorMs;
+          if (job && Number.isFinite(job.mtimeMs) && now() - job.mtimeMs > mtimeFloorMs) {
             ghostAbsent = true;
             log.warn(
-              { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs },
+              { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs, mtimeFloorMs },
               "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)",
             );
           }
