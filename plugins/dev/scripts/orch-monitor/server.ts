@@ -152,6 +152,13 @@ import {
   isValidChannelName,
   type CommsReader,
 } from "./lib/comms-reader";
+// CTL-889 (P8/P9/P12): cache-backed Linear detail / artifacts / search readers.
+// All three read EXCLUSIVELY from durable caches (filter-state.db ticket_state +
+// the local thoughts tree) and NEVER do a synchronous live Linear call per
+// request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
+import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
+import { readTicketArtifacts } from "./lib/ticket-artifacts-reader.mjs";
+import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
@@ -182,6 +189,13 @@ export interface CreateServerOptions {
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
+  /**
+   * Override for the broker's durable filter-state.db (ticket_state cache) used
+   * by the cache-backed Linear detail/search routes (CTL-889, P8/P12). Defaults
+   * to `${catalystDir}/filter-state.db` — the broker's own default. Tests point
+   * this at a seeded temp DB so the routes don't read the live broker cache.
+   */
+  filterStateDbPath?: string;
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
@@ -525,6 +539,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
+    filterStateDbPath,
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
@@ -535,6 +550,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const CATALYST_DIR =
     catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
+  // CTL-889: the broker's durable ticket_state cache the detail/search routes
+  // read (filter-state.db). Defaults to the broker's own default path.
+  const filterStateDb = filterStateDbPath ?? `${CATALYST_DIR}/filter-state.db`;
   try {
     openDb(annDbPath);
   } catch (err) {
@@ -1412,6 +1430,88 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const eventsDir = join(CATALYST_DIR, "events");
           const subSteps = readSubStepEvents(eventsDir, ticketParam);
           return Response.json({ ticket: ticketParam, subSteps });
+        }
+
+        // CTL-889 (P8): cache-backed Linear ticket detail — description (null,
+        // not cached), labels[], the relation graph (forward + reverse
+        // blocks/related edges), assignee, and held classification. Read from
+        // filter-state.db ticket_state, NEVER a live `linearis` call. 404 when
+        // the ticket has no descriptor row.
+        const ticketDetailMatch = url.pathname.match(
+          /^\/api\/ticket-detail\/([^/]+)$/,
+        );
+        if (ticketDetailMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketDetailMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const detail = await readTicketDetail(ticket, {
+            dbPath: filterStateDb,
+          });
+          if (!detail) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json(detail);
+        }
+
+        // CTL-889 (P9): a ticket's research/plan thoughts artifacts for the
+        // spine 📄 links — repo-root-relative paths + a peek preview, read from
+        // the LOCAL thoughts tree. Surfaces the CTL-866 cross-node eventual-
+        // consistency caveat (artifacts authored on another node appear only
+        // after a thoughts-sync push).
+        const ticketArtifactsMatch = url.pathname.match(
+          /^\/api\/ticket-artifacts\/([^/]+)$/,
+        );
+        if (ticketArtifactsMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketArtifactsMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const artifacts = await readTicketArtifacts(ticket);
+          return Response.json(artifacts);
+        }
+
+        // CTL-889 (P12): cache-backed fuzzy ticket search for the ⌘K palette's
+        // "Search all tickets in Linear" action. Fuzzy-matches the durable
+        // ticket_state cache — NO per-keystroke live Linear API call. An empty
+        // ?q= returns an empty result set (the palette renders the row idle).
+        if (url.pathname === "/api/search") {
+          const q = url.searchParams.get("q") ?? "";
+          const limitRaw = url.searchParams.get("limit");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const limit = Number.isFinite(parsedLimit)
+            ? Math.max(1, Math.min(parsedLimit, 100))
+            : 20;
+          if (q.trim() === "") {
+            return Response.json({
+              query: q,
+              results: [],
+              source: "filter-state.db",
+            });
+          }
+          const result = await readTicketSearch(q, {
+            dbPath: filterStateDb,
+            limit,
+          });
+          return Response.json(result);
         }
 
         if (url.pathname === "/api/briefing") {
