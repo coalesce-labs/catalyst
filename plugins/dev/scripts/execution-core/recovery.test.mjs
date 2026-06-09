@@ -1044,6 +1044,113 @@ describe("reclaimDeadWorkIfPossible", () => {
     expect(emit.calls.length).toBe(0);
   });
 
+  // CTL-927 — DOC-PHASE ZOMBIE-FLOOR EXEMPTION. The CTL-868 cold-snapshot mtime
+  // floor fires only when no FRESH `claude agents` snapshot exists (CTL-829, the
+  // headless mini). For long-fan-out doc phases (research/plan/triage/verify/review)
+  // the worker's state.json legitimately ages during a multi-minute in-process
+  // sub-agent fan-out, so the 2h mtime guess false-kills a LIVE worker → the observed
+  // fleet-wide no-progress storm. Doc phases use BUSY_CEILING_MS (6h) instead, where
+  // the busy-ceiling escalation routes to needs-human (escalate, never silent kill).
+  // implement/remediate keep the 2h floor.
+  const BUSY_CEILING = 6 * 60 * 60_000;
+  const docSignal = (phase, { bgJobId = "807b77bd", startedAt = STARTED } = {}) => ({
+    ticket: "CTL-9",
+    phase,
+    status: "running",
+    liveness: { kind: "bg", value: bgJobId },
+    signalPath: `/x/CTL-9/phase-${phase}.json`,
+    raw: {
+      ticket: "CTL-9",
+      phase,
+      orchestrator: "CTL-9",
+      status: "running",
+      bg_job_id: bgJobId,
+      catalystSessionId: "sess_CTL-9_abc",
+      startedAt,
+    },
+  });
+
+  test("CTL-927: research worker, state.json mtime 3h stale, NO fresh snapshot → alive-suppressed (doc phase exempt from the 2h zombie floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      // state=working (jobLifecycle → alive); state.json untouched 3h (sub-agent fan-out)
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) }, // research doc not written yet (artifact-bytes = 0)
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold (CTL-829)
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR, // 2h
+      busyCeilingMs: BUSY_CEILING, // 6h
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h: past the 2h floor, under the 6h ceiling
+    });
+    expect(r).toBe("alive-suppressed"); // pre-fix: the 2h zombie-floor wrongly reclaims it
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: implement worker, mtime 3h stale, NO fresh snapshot, work done → still reclaimed (implement keeps the 2h floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("implement"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-927 regression: research worker mtime 3h stale but PRESENT in a FRESH snapshot → alive-suppressed (fresh-present still wins; ghost-breaker unchanged)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: research worker ABSENT from a FRESH snapshot, past grace, work done → ghost-breaker still reclaims (doc exemption only relaxes the COLD path)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "deadbeef-1111-2222-3333-444444444444" }], // our worker absent
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
   test("'noop' for an unknown signal (no bg_job_id)", () => {
     const sig = implementSignal();
     sig.liveness = { kind: "bg", value: null };
