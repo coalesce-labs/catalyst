@@ -285,7 +285,7 @@ function defaultDispatchRescue(ticket, opts) {
 // linearWrite defaults to the real linear-write module at the
 // startStalePrRescueTimer boundary; a null here means a caller explicitly
 // opted out, which leaves the ticket invisible to humans — say so loudly.
-function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHost = false }) {
+export function defaultEscalate(ticket, detail, { orchDir, linearWrite, multiHost = false }) {
   if (linearWrite) {
     if (fenceGuard({ ticket, orchDir, multiHost })) {
       labelOnce(orchDir, ticket, "needs-human", linearWrite);
