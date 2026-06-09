@@ -173,3 +173,16 @@ export function deriveGeneration(
   phaseSigs: unknown[],
   fence?: { generation?: number | null },
 ): number | null;
+
+/**
+ * CTL-887 (BFF5): cache-only peek of the resident transcript-path cache. Returns
+ * the absolute `~/.claude/projects/<dir>/<sessionId>.jsonl` path if board
+ * assembly has already resolved it, or null on a miss (no directory scan).
+ */
+export function peekTranscriptCache(sessionId: string): string | null;
+
+/**
+ * CTL-733: resolve a sessionId to its transcript `.jsonl` path, caching the hit.
+ * Falls back to a single project-dir scan only on a cache miss.
+ */
+export function resolveTranscript(sessionId: string): Promise<string | null>;
