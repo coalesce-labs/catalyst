@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.1.0...catalyst-pm-ops-v2.1.1) (2026-06-09)
+
+
+### Bug Fixes
+
+* **dev:** CTL-838 stop inferring dependencies from prose — link them, triage analyzes for missed ones ([#1556](https://github.com/coalesce-labs/catalyst/issues/1556)) ([cf29cf0](https://github.com/coalesce-labs/catalyst/commit/cf29cf038905006c9377dcf5095551bc029ed81e))
+
 ## [2.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-pm-ops-v2.0.1...catalyst-pm-ops-v2.1.0) (2026-06-08)
 
 
