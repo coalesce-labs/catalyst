@@ -6603,6 +6603,31 @@ describe("CTL-755: admission gate", () => {
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
   });
 
+  test("CTL-838: a CROSS-TEAM dep is NOT persisted (daemon can't work it)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // ADV-9 is a different team; OTL-2 too. Both non-terminal — absent the CTL-838
+    // guard STEP E would persist them and deadlock CTL-7 against work this daemon
+    // can never run. CTL-100 (same team, non-terminal) IS persisted.
+    writeTriageDeps("CTL-7", ["ADV-9", "OTL-2", "CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch({
+        "CTL-7": relUnblocked(),
+        "ADV-9": descOf("In Progress"),
+        "OTL-2": descOf("Implement"),
+        "CTL-100": descOf("In Progress"),
+      }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
   test("CTL-784: writing a durable edge INVALIDATES the candidate's relations cache (no ≤TTL over-promotion)", () => {
     // After STEP E writes a new blocked_by edge, the candidate's relations
     // descriptor cached THIS tick (by A.3) is stale (no edge). Invalidating it

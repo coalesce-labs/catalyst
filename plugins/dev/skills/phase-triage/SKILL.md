@@ -1,6 +1,6 @@
 ---
 name: phase-triage
-description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies dependencies, estimates scope, writes triage.json, and posts a triage analysis comment to Linear. Triage completion is signaled by that comment plus the local triage.json — there is no `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
+description: Phase agent that triages a Linear ticket — expands acronyms, classifies (feature/bug/docs/refactor/chore), identifies genuine blockers (a semantic second-pass over the backlog — NOT a prose scrape; CTL-838), estimates scope, writes triage.json, and posts a triage analysis comment to Linear. Triage completion is signaled by that comment plus the local triage.json — there is no `triaged` label. Emits phase.triage.complete.<TICKET> on success and phase.triage.failed.<TICKET> on error. Dispatched by the phase-agent orchestrator (CTL-452) via slash command — `user-invocable: true` so the dispatcher's `claude --bg "/catalyst-dev:phase-triage ..."` resolves.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools: Bash, Read, Write, Grep
@@ -172,22 +172,21 @@ ACRONYMS_EXPANDED="$(jq -nc --arg t "$COMBINED" '
   | map({acronym: .a, expansion: .e})
 ')"
 
-# 2d. Dependencies — other CTL-style identifiers referenced in body, excluding self.
-#     Match any TEAM-NNN pattern; dedupe; exclude the ticket itself AND its parent
-#     epic. A Linear parent/child hierarchy link is NOT a dependency: emitting the
-#     parent epic here makes the scheduler (CTL-755 STEP E) persist `child blocked_by
-#     parent-epic`, which deadlocks the child against a tracking epic that is never
-#     worked (CTL-878). The parent identifier is already in the ticket JSON, so the
-#     exclusion costs no extra Linear read. PARENT_TICKET is empty when the ticket
-#     has no parent, in which case the second grep pattern collapses to the self
-#     exclusion (a harmless no-op).
-PARENT_TICKET="$(jq -r '.parent.identifier // .parent // empty' "$TICKET_JSON_FILE" 2>/dev/null)"
-DEPENDENCIES="$(printf '%s\n' "$COMBINED" \
-  | grep -oE '[A-Z][A-Z0-9_]*-[0-9]+' 2>/dev/null \
-  | sort -u \
-  | grep -v -x -e "$TICKET" -e "${PARENT_TICKET:-$TICKET}" \
-  | jq -R . | jq -sc .)"
-DEPENDENCIES="${DEPENDENCIES:-[]}"
+# 2d. Dependencies — DELIBERATELY EMPTY in the deterministic path (CTL-838).
+#     Catalyst does NOT infer dependencies from prose. The old behavior scraped
+#     every TEAM-NNN token out of the title+description and the scheduler (CTL-755
+#     STEP E) persisted each as a durable `blocked_by` edge — turning prior-art
+#     mentions, incident examples, "see also" references and cross-team ids into
+#     FALSE blockers that deadlocked tickets against work they do not depend on.
+#     Real prerequisites are first-class, captured two ways, NEVER by scraping:
+#       1. The ticket AUTHOR sets formal Linear `blocked_by` LINKS at creation time
+#          (see the gherkin-ticket / linear / create-tickets skills). Those are
+#          already durable Linear relations the scheduler honors directly.
+#       2. An Opus-mode triage pass acts as a SECOND PAIR OF EYES — it examines the
+#          backlog and records only GENUINE missed blockers (see "2c" below).
+#     The bash fallback therefore emits an empty list (safe: no false blocks). It
+#     must never reintroduce a regex over mentioned ids.
+DEPENDENCIES="[]"
 
 # 2e. Summary — first paragraph of prose, trimmed.
 #     Skip leading markdown headers (^#+\s+) and bullet markers (^[-*+]\s+) so a
@@ -330,36 +329,46 @@ then skips the Linear estimate write for this ticket (Q4 design decision: no SCO
 fallback for the Linear estimate field). The bash body intentionally does **not** write `estimate`
 (CTL-558 guard).
 
-**2c. Validate the scraped dependencies — READ-ONLY (CTL-755).** The bash body's `2d` step scrapes
-every `TEAM-NNN` token from the body into a flat `dependencies` array but does NOT verify any of them
-resolve to a real ticket. When running in Opus mode, enrich each scraped id using **read-only**
-`linearis issues read <id>` so the richer shape carries existence + the blocker's current state:
+**2c. Identify genuine blockers — semantic second-pass, READ-ONLY (CTL-838).** Catalyst does **not**
+parse or infer dependencies from the description text. The bash body writes an empty `dependencies`
+list by design (CTL-838 killed the old `2d` regex scrape). Real prerequisites come from two places,
+and your job here is the second one:
+
+1. **Formal author links (primary).** The agent that authored the ticket records its real
+   prerequisites as Linear `blocked_by` LINKS at creation time (the gherkin-ticket / linear /
+   create-tickets skills now instruct this). Those are already durable Linear relations and the
+   admission gate honors them directly from the live graph — triage does **not** need to re-derive
+   or re-emit them.
+
+2. **Triage as a SECOND PAIR OF EYES (your job).** You are NOT a parser. Do **not** add a dependency
+   because an id appears in the prose. Instead: read the ticket's intent, then **examine the relevant
+   backlog** — `linearis issues list` for the ticket's team / area (and `linearis issues read <id>`
+   to confirm a candidate) — and judge whether any in-flight or planned work is a **true
+   prerequisite the author may have missed**: work that must reach a terminal state before this
+   ticket can sensibly start (a shared interface not yet built, a migration that must land first,
+   an explicit "must follow" sequencing). Record **only** blockers you can justify, in the rich
+   shape with a `reason`:
 
 ```jsonc
 "dependencies": [
-  { "id": "CTL-447", "exists": true,  "blockerState": "In Progress" },
-  { "id": "CTL-9999", "exists": false, "blockerState": null }
+  { "id": "CTL-123", "exists": true, "blockerState": "Implement", "reason": "defines the API this ticket consumes" }
 ]
 ```
 
-For each id, run `linearis issues read <id>` (the same read the bash body already uses for the
-ticket itself). On a successful read, set `exists: true` and `blockerState` to the ticket's
-`state.name`; on a non-zero exit / unparseable output (a prose token that merely matched the
-`TEAM-NNN` regex but is not a real ticket), set `exists: false`, `blockerState: null`. Re-write
-`triage.json` with the enriched `dependencies`. This is purely advisory metadata — the durable
-ordering edge is written **scheduler-side** (see the hard constraint below), so a missing/extra
-entry here can never deadlock the pipeline.
+   If you find no genuine missed blocker, leave `dependencies` as the empty list the bash body wrote.
+   A mention is not a dependency; a shared topic is not a dependency; "see also / prior art /
+   regression of / example" is not a dependency. When in doubt, leave it out — a false blocker
+   deadlocks real work, a missed one is caught on the next pass.
 
 **Hard constraint — the skill makes ZERO Linear writes for dependencies.** Do NOT call
 `linearis issues update ... --blocked-by` (or any `linearis issues update`) from this skill. The
 admission gate's durable `blocked_by` persistence lives in the execution-core scheduler (CTL-755
-STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates each token via
-`fetchTicketState`, drops unresolvable/terminal/cycle-closing tokens, and writes the durable edge
-with `applyBlockedByRelation`). Keeping the write scheduler-side preserves the CTL-497/CTL-558
-contract — the phase-triage e2e negative guard (`phase-triage-e2e.test.sh:172`) fails the build if
-this skill ever emits a `linearis issues update` call. `linearis issues read` is read-only and is
-fine. Because STEP E tolerates BOTH the flat-string and the rich `{id}` shapes, emitting the rich
-shape here is forward-compatible and changes nothing scheduler-side.
+STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates each id via
+`fetchTicketState`, and drops unresolvable / terminal / cycle-closing / **parent-epic (CTL-878)** /
+**cross-team (CTL-838)** ids before writing the durable edge with `applyBlockedByRelation`). Keeping
+the write scheduler-side preserves the CTL-497/CTL-558 contract — the phase-triage e2e negative guard
+fails the build if this skill ever emits a `linearis issues update` call. `linearis issues read` is
+read-only and is fine. STEP E tolerates BOTH the flat-string and the rich `{id}` shapes.
 
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.

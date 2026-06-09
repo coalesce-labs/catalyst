@@ -234,7 +234,21 @@ When referencing thoughts documents, always provide GitHub links:
    Linearis creates issues in the team's default backlog state. To set specific status or assignee,
    create first then update. Capture the created issue ID from the JSON output with jq.
 
-7. **Post-creation actions:**
+7. **Link genuine prerequisites as formal blockers (CTL-838):** If you know of work that must
+   finish before this ticket can start, set it as a Linear `blocked_by` **link** now — do NOT rely
+   on mentioning the id in the description (Catalyst does not infer dependencies from prose; a
+   mention is not a dependency). See `/catalyst-dev:linearis` for syntax:
+
+   ```bash
+   linearis issues update <NEW-TICKET> --blocked-by <PREREQ-TICKET>
+   ```
+
+   Link only TRUE prerequisites (must reach Done/Canceled first). Do NOT link across teams for
+   auto-sequencing — the daemon only works its own team, so a cross-team blocker only deadlocks.
+   Missing a blocker is fine (phase-triage does a semantic second pass); a FALSE blocker stalls real
+   work, so when in doubt leave it out.
+
+8. **Post-creation actions:**
    - Show the created ticket URL
    - Ask if user wants to:
      - Add a comment with additional implementation details

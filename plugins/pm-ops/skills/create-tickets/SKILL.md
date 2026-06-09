@@ -105,6 +105,9 @@ Tier C = pure chores, Context/Motivation/Outcome prose instead of a vacuous scen
 
 ## Dependencies
 
+<!-- Documentation only. A real prerequisite MUST also be set as a formal Linear
+     blocked_by LINK (see Bulk Creation step 5) — Catalyst does not infer
+     dependencies from this prose (CTL-838). -->
 - Blocked by: [Other ticket]
 - Blocks: [Other ticket]
 
@@ -148,7 +151,12 @@ When creating 5+ tickets:
 2. **Group by component** (Frontend, Backend, Data, etc.)
 3. **Order by dependency** (foundation tickets first)
 4. **Add estimates** (if PM provides sizing)
-5. **Link tickets** (blockers, related work)
+5. **Link tickets as formal Linear blockers** — `linearis issues update <ticket> --blocked-by <prereq>`
+   for each TRUE prerequisite (see `/catalyst-dev:linearis`). Set real `blocked_by` LINKS; do NOT
+   rely on naming the dependency in the description. **Catalyst does not infer dependencies from
+   prose (CTL-838)** — a "Blocked by: X" line in the body is documentation only and is never turned
+   into a blocker. Link only genuine must-finish-first work; never link across teams for
+   auto-sequencing (the daemon only works its own team, so a cross-team blocker deadlocks).
 
 ## Effort Estimation Framework
 

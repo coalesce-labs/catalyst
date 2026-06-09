@@ -9,6 +9,7 @@ import {
   detectCycles,
   analyzeDependencyGraph,
   referencedBlockerIds,
+  teamOf,
 } from "./dependency-graph.mjs";
 
 // issue(id, state, relations[], inverseRelations[]) — terse fixture builder.
@@ -178,6 +179,44 @@ describe("buildDependencyEdges", () => {
       issue("CTL-2", "Todo"),
     ];
     expect(buildDependencyEdges(issues)).toEqual([{ from: "CTL-1", to: "CTL-2" }]);
+  });
+
+  // CTL-838: a cross-team blocker (different identifier prefix) is dropped — the
+  // daemon orchestrates one team and can't work another's ticket to terminal, so
+  // the edge can only deadlock. The blocker is out-of-set, so declare it external
+  // to prove the drop is the CROSS-TEAM rule, not the out-of-set rule.
+  test("CTL-838: a cross-team blocks edge is dropped even when declared as an externalId", () => {
+    const issues = [
+      {
+        identifier: "CTL-838",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "OTL-4")] },
+      },
+    ];
+    expect(buildDependencyEdges(issues, { externalIds: ["OTL-4"] })).toEqual([]);
+  });
+
+  test("CTL-838: a same-team edge is unaffected by the cross-team guard", () => {
+    const issues = [
+      issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]),
+      issue("CTL-2", "Todo"),
+    ];
+    expect(buildDependencyEdges(issues)).toEqual([{ from: "CTL-1", to: "CTL-2" }]);
+  });
+});
+
+describe("teamOf (CTL-838)", () => {
+  test("extracts the team prefix from an identifier", () => {
+    expect(teamOf("CTL-863")).toBe("CTL");
+    expect(teamOf("OTL-4")).toBe("OTL");
+    expect(teamOf("ADV-1278")).toBe("ADV");
+  });
+  test("degrades safely on malformed input", () => {
+    expect(teamOf("")).toBe("");
+    expect(teamOf(null)).toBe("");
+    expect(teamOf(undefined)).toBe("");
+    expect(teamOf("NODASH")).toBe("NODASH");
   });
 });
 
@@ -544,6 +583,23 @@ describe("analyzeDependencyGraph", () => {
     expect(result.ready).toEqual(["CTL-863"]);
     expect(result.blocked).toEqual([]);
     expect(result.anomalies).toEqual([]);
+  });
+
+  // CTL-838 end-to-end: a ticket whose only blocker is a non-terminal CROSS-TEAM
+  // ticket (e.g. CTL-838 ⟵ OTL-4[Implement]) must be ready — the daemon can't work
+  // OTL-4, so honoring the edge would deadlock CTL-838 forever.
+  test("CTL-838: a ticket blocked only by a non-terminal cross-team blocker is ready, not blocked", () => {
+    const issues = [
+      {
+        identifier: "CTL-838",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "OTL-4")] },
+      },
+    ];
+    const result = analyzeDependencyGraph(issues, { blockerStates: { "OTL-4": "Implement" } });
+    expect(result.ready).toEqual(["CTL-838"]);
+    expect(result.blocked).toEqual([]);
   });
 });
 

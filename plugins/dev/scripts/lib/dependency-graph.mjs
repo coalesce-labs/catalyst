@@ -12,6 +12,15 @@
 // never appears in the ready/blocked sets. Override via options.terminalStatuses.
 export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 
+// teamOf — the Linear team key from an issue identifier (the prefix before the
+// first `-`): "CTL-863" → "CTL", "OTL-4" → "OTL". Used by the CTL-838 cross-team
+// edge drop. A malformed/empty id yields "" (never matches a real team key).
+export function teamOf(id) {
+  if (typeof id !== "string") return "";
+  const i = id.indexOf("-");
+  return i === -1 ? id : id.slice(0, i);
+}
+
 // buildDependencyEdges — normalize Linear relations into canonical directed
 // edges (CTL-530). An edge is kept when both endpoints are in-set, OR (CTL-565
 // D5) when `to` is in-set and `from` is a declared external blocker — so an
@@ -28,6 +37,15 @@ export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 // that edge deadlocks the child forever. Each in-set issue carries `parent` (the
 // epic identifier, threaded from linearis) so the drop also fires when the parent
 // is an out-of-set externalId — exactly the deadlock case (CTL-859→863, CTL-718→722).
+//
+// CTL-838: a `blocks` edge that crosses TEAMS is DROPPED. The team is the
+// identifier prefix (CTL-863 → "CTL", OTL-4 → "OTL"). A single daemon orchestrates
+// one team's backlog and cannot work another team's tickets, so a cross-team
+// blocker can never reach a terminal state from the daemon's side — it can only
+// deadlock the dependent forever. Such edges were created by the now-removed
+// prose scrape (a foreign id mentioned in the body, e.g. OTL-4 → CTL-838); a
+// genuine cross-team prerequisite, if one ever exists, is handled out-of-band by
+// a human, not by the daemon's auto-sequencing.
 //
 // options.externalIds — out-of-set blocker identifiers (D5) that remain valid
 // edge endpoints on the `from` side.
@@ -51,6 +69,7 @@ export function buildDependencyEdges(issues, { externalIds } = {}) {
     if (!inSet.has(to)) return;
     if (!inSet.has(from) && !ext.has(from)) return;
     if (parentOf.get(to) === from) return; // CTL-878: parent→child is hierarchy, not a dependency
+    if (teamOf(from) !== teamOf(to)) return; // CTL-838: cross-team blocker can't be worked by this daemon → only deadlocks
     const key = `${from} ${to}`;
     if (seen.has(key)) return; // dedup symmetric relations/inverseRelations
     seen.add(key);
