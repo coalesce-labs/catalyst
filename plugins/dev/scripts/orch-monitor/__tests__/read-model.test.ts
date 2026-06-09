@@ -38,6 +38,8 @@ function worker(ticket: string): BoardWorker {
     startedAt: null,
     pid: null,
     catalystSessionId: null,
+    host: null,
+    generation: null,
   };
 }
 
@@ -69,6 +71,8 @@ function ticket(id: string): BoardTicket {
     updatedAt: "",
     held: null,
     blockers: [],
+    host: null,
+    generation: null,
   };
 }
 
@@ -85,6 +89,7 @@ function queueItem(id: string): BoardQueueItem {
     estimate: null,
     scope: null,
     project: null,
+    host: null,
   };
 }
 

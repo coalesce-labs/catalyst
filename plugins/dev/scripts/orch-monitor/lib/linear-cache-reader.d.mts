@@ -21,6 +21,19 @@ export interface LinearCacheEntry {
    * title column), so null when the ticket has no eligible row (BFF9 / CTL-921).
    */
   title: string | null;
+  /**
+   * CTL-922 (BFF10): the owning host NAME, projected into ticket_state from the
+   * catalyst://fence attachment by the broker (BFF11 / CTL-923). board-data
+   * derives the host {name,id} ref from this for the node-aware surfaces. null
+   * when no fence attachment has been observed.
+   */
+  ownerHost: string | null;
+  /**
+   * CTL-922 (BFF10): the fence generation from the same durable projection — the
+   * value a fence-aware web mutation (BFF8 stop, HOME5 unblock) passes to
+   * isFenceCurrent without a live attachment fetch. null when no fence.
+   */
+  generation: number | null;
 }
 
 export type LinearCacheById = Record<string, LinearCacheEntry>;

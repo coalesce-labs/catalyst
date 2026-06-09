@@ -13,6 +13,7 @@ import {
   openBrokerStateDb,
   closeBrokerStateDb,
   upsertTicketDescriptor,
+  upsertTicketFence,
 } from "../../broker/broker-state.mjs";
 
 describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => {
@@ -39,6 +40,9 @@ describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => 
       linearState: "Implement",
       // ticket_state has no title column → honest null with no eligible row (BFF9)
       title: null,
+      // BFF10: no fence attachment observed → honest null (never fabricated)
+      ownerHost: null,
+      generation: null,
     });
   });
 
@@ -51,6 +55,39 @@ describe("readLinearCache (CTL-883 — durable-cache Linear enrichment)", () => 
     // ticket_state owns state/priority, eligible owns the title.
     expect(byId["CTL-3"].linearState).toBe("PR");
     expect(byId["CTL-3"].title).toBe("Retire legacy linearis poller");
+  });
+
+  it("surfaces ownerHost + generation from the ticket_state fence projection (BFF10/BFF11)", async () => {
+    // The broker projects the catalyst://fence attachment into ticket_state
+    // (BFF11). readLinearCache hands ownerHost + generation to board-data so the
+    // node-aware surfaces and the fence-aware web mutations read them from the
+    // cache, never a live attachment fetch.
+    const ticketStateReader = () =>
+      Promise.resolve({
+        "CTL-9": {
+          priority: 2,
+          labels: [],
+          linearState: "Implement",
+          ownerHost: "mac-mini",
+          generation: 3,
+        },
+      });
+    const byId = await readLinearCache({
+      ticketStateReader,
+      eligibleReader: () => Promise.resolve({}),
+    });
+    expect(byId["CTL-9"].ownerHost).toBe("mac-mini");
+    expect(byId["CTL-9"].generation).toBe(3);
+  });
+
+  it("ownerHost/generation default to null when the fence projection is absent", async () => {
+    const byId = await readLinearCache({
+      ticketStateReader: () => Promise.resolve({ "CTL-10": { labels: [] } }),
+      eligibleReader: () => Promise.resolve({ "CTL-10": { title: "queued" } }),
+    });
+    // the eligible projection carries no fence data — honest null, never fabricated.
+    expect(byId["CTL-10"].ownerHost).toBeNull();
+    expect(byId["CTL-10"].generation).toBeNull();
   });
 
   it("fills priority/project/relations from the eligible projection when ticket_state lacks them", async () => {
@@ -134,6 +171,9 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
       assignee: "uuid-a",
     });
     upsertTicketDescriptor({ ticket: "CTL-101", state: "Done", uuid: "u-101" });
+    // BFF10/BFF11: project a fence attachment so the e2e proves ownerHost +
+    // generation flow from ticket_state through the bulk descriptor read.
+    upsertTicketFence({ ticket: "CTL-100", ownerHost: "mac-mini", generation: 7 });
     closeBrokerStateDb(); // assemble path opens its own handle
     writeFileSync(
       join(eligibleDir, "CTL.json"),
@@ -158,5 +198,11 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
     expect(byId["CTL-200"].priority).toBe(3);
     expect(byId["CTL-200"].project).toBe("Web UI");
     expect(byId["CTL-200"].title).toBe("queued"); // BFF9: title from eligible
+    // BFF10/BFF11: the fence projection flows through the real bulk descriptor read.
+    expect(byId["CTL-100"].ownerHost).toBe("mac-mini");
+    expect(byId["CTL-100"].generation).toBe(7);
+    // a ticket with no fence attachment → honest null
+    expect(byId["CTL-101"].ownerHost).toBeNull();
+    expect(byId["CTL-101"].generation).toBeNull();
   });
 });

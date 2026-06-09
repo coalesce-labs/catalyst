@@ -13,6 +13,15 @@ import type { ReadModelPayload } from "../../../lib/read-model-client";
 
 export type BoardActiveState = "active" | "stuck" | null;
 
+/** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
+ *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
+ *  queue node column) can attribute/group by host. Mirrors the server's
+ *  BoardHostRef (lib/board-data.d.mts) and the read-model contract's HostRef. */
+export interface BoardHostRef {
+  name: string;
+  id: string;
+}
+
 export interface BoardWorker {
   name: string;
   ticket: string;
@@ -37,6 +46,13 @@ export interface BoardWorker {
    *  Loki `catalyst.session` heartbeat / `catalyst.phase-agent` lifecycle
    *  streams. null when catalyst.db has no row for this CC-UUID. */
   catalystSessionId?: string | null;
+  /** CTL-922 (BFF10): the node owning this worker (SURF1 node group/filter),
+   *  from the phase signal host:{name,id} (CTL-852) or the durable fence
+   *  projection owner_host (BFF11). null when no host is named. */
+  host?: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation (BFF8 stop passes it to the
+   *  fence-check). null when no fence. */
+  generation?: number | null;
 }
 
 export interface BoardPhaseCost {
@@ -87,6 +103,13 @@ export interface BoardTicket {
   held?: "blocked" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
+  /** CTL-922 (BFF10): the node owning this ticket (BOARD3 host swimlanes), from
+   *  the phase signals host:{name,id} (CTL-852) or the durable fence projection
+   *  owner_host (BFF11). null when no host is named. */
+  host?: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation (HOME5 unblock passes it to the
+   *  fence-check). null when no fence. */
+  generation?: number | null;
 }
 
 export interface WorkflowSubStep {
@@ -108,6 +131,10 @@ export interface BoardQueueItem {
   estimate: number | null;
   scope: string | null;
   project: string | null;
+  /** CTL-922 (BFF10): the node owning this queued ticket (SURF2 queue node
+   *  column), from the durable fence projection owner_host (BFF11). null when
+   *  no fence attachment has been observed. */
+  host?: BoardHostRef | null;
 }
 
 export interface BoardConfig {

@@ -87,6 +87,15 @@ async function readTicketStateById(dbPath) {
         relations: d.relations ?? null,
         assignee: d.assignee ?? null,
         linearState: d.state ?? null,
+        // CTL-922 (BFF10): the durable fence projection (BFF11 / CTL-923 — the
+        // broker projects the catalyst://fence/<TICKET> attachment into
+        // ticket_state). board-data stamps host:{name,id} + generation onto every
+        // entity from this, so the node-aware surfaces and the fence-aware web
+        // mutations read it from the cache, NEVER a live per-request attachment
+        // fetch. owner_host is the host NAME; the {name,id} ref is derived in
+        // board-data via the canonical sha256(name)[:16] id.
+        ownerHost: typeof d.ownerHost === "string" ? d.ownerHost : null,
+        generation: typeof d.generation === "number" ? d.generation : null,
       };
     }
     return byId;
@@ -143,7 +152,7 @@ async function readEligibleById(eligibleDir) {
 // the unit tests drive it without a real DB or homedir layout.
 //
 // Returns: { [ticketId]: { priority, estimate, project, labels, relations,
-//   assignee, linearState } }
+//   assignee, linearState, title, ownerHost, generation } }
 export async function readLinearCache({
   dbPath = DEFAULT_DB_PATH,
   eligibleDir = DEFAULT_ELIGIBLE_DIR,
@@ -184,6 +193,14 @@ export async function readLinearCache({
       // title: ticket_state has no title column, so the eligible projection is
       // the only durable source (BFF9). Honest null when neither cache has it.
       title: ts?.title ?? el?.title ?? null,
+      // CTL-922 (BFF10): the owning host NAME + fence generation, projected into
+      // ticket_state by the broker (BFF11). The eligible projection carries no
+      // fence data — ticket_state is the sole durable source. board-data uses
+      // ownerHost (host fallback) and generation (the value the web mutations
+      // pass to isFenceCurrent without a live attachment fetch). null when no
+      // fence attachment has been observed for the ticket.
+      ownerHost: ts?.ownerHost ?? null,
+      generation: ts?.generation ?? null,
     };
   }
   // breakerOpen is intentionally not consulted to alter output — it cannot block

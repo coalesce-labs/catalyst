@@ -16,6 +16,7 @@
 // Vite dev middleware.
 
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
@@ -107,6 +108,13 @@ export function synthesizeQueuedTicket(e, linfo) {
     updatedAt: e.createdAt || new Date(0).toISOString(),
     held: heldFor(li.labels),
     blockers: [],
+    // CTL-922 (BFF10): node attribution. A queued ticket has no worker dir /
+    // phase signal, so host + generation come purely from the durable fence
+    // projection (li, via the broker's BFF11 ticket_state). team is the
+    // prefix-derived team (BoardQueueItem also carries it now). All null/identity
+    // for a queued ticket with no fence attachment yet — never fabricated.
+    host: deriveHost([], li),
+    generation: deriveGeneration([], li),
   };
 }
 
@@ -233,6 +241,94 @@ export function deriveCurrentPhase(phaseSigs) {
     return { phase: "done", status: "done", model: lastTerminal.model };
   }
   return lastTerminal;
+}
+
+// ── per-entity node attribution (CTL-922 / BFF10) ────────────────────────────
+// Every BoardTicket / BoardWorker / BoardQueueItem carries its owning
+// host:{name,id} so the node-aware surfaces (BOARD3 host swimlanes, SURF1 worker
+// node group, SURF2 queue node column) bind to a real field, and a per-entity
+// `generation` so the fence-aware web mutations (BFF8 stop, HOME5 unblock) can
+// pass a real value to isFenceCurrent without a live attachment fetch.
+//
+// SINGLE-HOST IDENTITY NO-OP: with one node, every entity resolves to that one
+// host through this SAME code path — there is no separate cluster branch. A
+// multi-node fleet simply yields different hosts per entity from the same
+// derivation, with zero added latency or chrome.
+
+// hostRefFromName — build a {name,id} HostRef from a bare host NAME, deriving the
+// id as sha256(name)[:16] — the canonical host-id shape shared by the bash
+// (lib/host-identity.sh), mjs (execution-core/lib/host-identity.mjs), and ts
+// (lib/canonical-event-shared.ts::hostId) primitives, so a name resolved from
+// the fence projection yields the identical id those producers stamp. null/empty
+// name → null (no host attribution rather than a fabricated id).
+export function hostRefFromName(name) {
+  if (typeof name !== "string" || name.length === 0) return null;
+  return { name, id: createHash("sha256").update(name).digest("hex").slice(0, 16) };
+}
+
+// deriveHost — resolve a {name,id} HostRef for an entity. Precedence:
+//   1. the active phase signal's `host:{name,id}` (CTL-852, stamped at dispatch
+//      by phase-agent-dispatch) — the live, full ref.
+//   2. the durable fence projection owner_host (BFF11 / CTL-923), a host NAME —
+//      its {name,id} is derived via hostRefFromName.
+// Returns null when neither source names a host. `fence` is the linfo entry for
+// the ticket ({ ownerHost } among other fields), already read from the durable
+// cache — NEVER a live attachment fetch.
+export function deriveHost(phaseSigs, fence = {}) {
+  // Walk phase signals using the SAME precedence as deriveCurrentPhase (the
+  // active non-terminal phase first, else the latest terminal phase that has a
+  // host) so the host tracks the entity's current owner.
+  const sigHost = currentSignalHost(phaseSigs);
+  if (sigHost && typeof sigHost.name === "string" && sigHost.name.length > 0) {
+    return {
+      name: sigHost.name,
+      // the dispatch signal already carries the canonical id; only derive it if
+      // a malformed signal somehow omitted it.
+      id:
+        typeof sigHost.id === "string" && sigHost.id.length > 0
+          ? sigHost.id
+          : (hostRefFromName(sigHost.name)?.id ?? null),
+    };
+  }
+  return hostRefFromName(fence?.ownerHost ?? null);
+}
+
+// currentSignalHost — the `host` object off the phase signal that deriveCurrentPhase
+// would surface (active non-terminal phase, else the most-recent terminal one
+// that carries a host). Internal helper — pure, no I/O.
+function currentSignalHost(phaseSigs) {
+  let lastTerminalHost = null;
+  for (let i = 0; i < PHASE_ORDER.length; i++) {
+    const sig = phaseSigs[i];
+    if (!sig) continue;
+    const status = sig.status || "unknown";
+    if (!TERMINAL.has(status)) return sig.host ?? null; // active phase wins
+    if (sig.host) lastTerminalHost = sig.host;
+  }
+  return lastTerminalHost;
+}
+
+// deriveGeneration — the fence generation for an entity. Precedence: the durable
+// fence projection generation (BFF11 / CTL-923, the value the web mutations pass
+// to isFenceCurrent) first, then the phase signal `generation` (stamped by
+// phase-agent-dispatch). null when neither carries it. A literal 0 is a valid
+// generation and must NOT be coerced to null (hence the typeof guard).
+export function deriveGeneration(phaseSigs, fence = {}) {
+  if (typeof fence?.generation === "number") return fence.generation;
+  for (let i = 0; i < PHASE_ORDER.length; i++) {
+    const sig = phaseSigs[i];
+    if (!sig) continue;
+    const status = sig.status || "unknown";
+    if (!TERMINAL.has(status)) {
+      return typeof sig.generation === "number" ? sig.generation : null;
+    }
+  }
+  // No active phase signal — fall back to the latest signal that carries one.
+  for (let i = PHASE_ORDER.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (sig && typeof sig.generation === "number") return sig.generation;
+  }
+  return null;
 }
 
 // CTL-754: per-phase timing for the board progression strip. Pure + exported so
@@ -465,6 +561,21 @@ async function readTicketArtifacts(id) {
   return { phaseSigs, triage, prSigs };
 }
 
+// CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
+// PHASE_ORDER-aligned sparse array so deriveHost / deriveGeneration walk it the
+// same way they walk a full ticket's signals. A live worker's phase is
+// non-terminal, so its host/generation surface as the active phase. Returns []
+// (no host attribution) when the signal is absent — never blocks.
+async function readWorkerPhaseSignals(ticket, phase) {
+  const sig = await readJSON(join(WORKERS_DIR, ticket, `phase-${phase}.json`));
+  if (!sig) return [];
+  const i = PHASE_ORDER.indexOf(phase);
+  if (i < 0) return [];
+  const sigs = PHASE_ORDER.map(() => null);
+  sigs[i] = sig;
+  return sigs;
+}
+
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
   const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid] = await Promise.all([
@@ -486,6 +597,13 @@ export async function assembleBoard() {
     const lastActiveMs = await transcriptAgeMs(a.sessionId, now);
     const activeState = await deriveActiveState(p.ticket, p.phase, lastActiveMs);
     const working = lastActiveMs != null && lastActiveMs < WORKING_MS; // detail-level only
+    // CTL-922 (BFF10): node attribution. host:{name,id} from the worker's own
+    // phase signal (CTL-852, dispatch-stamped) falling back to the durable fence
+    // projection owner_host (BFF11); generation from the fence projection first,
+    // then the signal. SINGLE-HOST: every worker resolves to the one node via
+    // this same path — no separate cluster branch, no live attachment fetch.
+    const workerSigs = await readWorkerPhaseSignals(p.ticket, p.phase);
+    const fence = linfo[p.ticket] ?? {};
     return {
       name: a.name, ticket: p.ticket, tickets: [p.ticket], phase: p.phase,
       status: a.status || "idle", activeState, working, lastActiveMs,
@@ -502,6 +620,9 @@ export async function assembleBoard() {
       // sessionId — surfaces both id spaces (Loki catalyst.session heartbeat
       // joins on this one). null when the db has no row for this CC-UUID.
       catalystSessionId: catalystSessByUuid[a.sessionId] ?? null,
+      // CTL-922 (BFF10): owning host + fence generation (see above).
+      host: deriveHost(workerSigs, fence),
+      generation: deriveGeneration(workerSigs, fence),
     };
   }));
   const inFlightTickets = new Map(workers.map((w) =>
@@ -544,6 +665,13 @@ export async function assembleBoard() {
       phaseSummary,
       pr: prFor(prSigs),
       updatedAt: ticketUpdatedAt(phaseSigs),
+      // CTL-922 (BFF10): node attribution. host:{name,id} from the ticket's phase
+      // signals (CTL-852, dispatch-stamped) falling back to the durable fence
+      // projection owner_host (BFF11); generation from the fence projection first,
+      // then the signal. SINGLE-HOST: resolves to the one node via this same path,
+      // no cluster branch, no live attachment fetch.
+      host: deriveHost(phaseSigs, linfo[id] ?? {}),
+      generation: deriveGeneration(phaseSigs, linfo[id] ?? {}),
     };
   }));
 
@@ -572,10 +700,17 @@ export async function assembleBoard() {
     .map(async (e, i) => {
       const { triage } = await readTicketArtifacts(e.id);
       return {
+        // `...e` already carries `team` (loadEligible stamps teamFor(id)) — the
+        // BoardQueueItem type now declares it so the SURF2 node column / lane
+        // grouping can read it (CTL-922 / BFF10).
         ...e, rank: i + 1,
         priority: linfo[e.id]?.priority ?? e.priority ?? 0,
         estimate: linfo[e.id]?.estimate ?? null, scope: ticketScope(triage),
         project: linfo[e.id]?.project ?? e.project ?? null,
+        // CTL-922 (BFF10): owning host from the durable fence projection (BFF11);
+        // a queued ticket has no phase signal, so [] forces the fence fallback.
+        // null when no fence attachment has been observed — never fabricated.
+        host: deriveHost([], linfo[e.id] ?? {}),
       };
     }));
 
