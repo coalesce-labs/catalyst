@@ -111,6 +111,8 @@ import {
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
 import * as linearWrite from "./linear-write.mjs";
+// CTL-863: zombie-guard for external-write sites on multi-host clusters.
+import { fenceGuard } from "./fence-guard.mjs";
 // CTL-757: the canonical linear.state.write audit emitter. CALLER-EMITS at each
 // scheduler write site (source/phase/reason known only here) — NEVER inside
 // runTransition (would double-audit the triage path, which keeps its own
@@ -1627,9 +1629,13 @@ function teardownWorktreeOnce(orchDir, ticket, teardownWorktree) {
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
 // once-semantics tests that call terminalDoneOnce directly need not supply it.
-function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite) {
+function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost = false } = {}) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
+  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+    log.warn({ ticket }, "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)");
+    return;
+  }
   try {
     const res = writeStatus.applyTerminalDone({ ticket });
     // CTL-757: audit the terminal Done write (source=terminal-sweep). Emit even
@@ -1672,7 +1678,7 @@ function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite) {
 //   - GATE 3: the cached live Linear read must be NON-terminal (else there is
 //     nothing to fix — the common case is a no-op).
 // The applyTerminalDone write itself rides the shared linearBreaker (defaultExec).
-function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitStateWrite, { cache, prAdapter, fetchState = fetchTicketState } = {}) {
+function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitStateWrite, { cache, prAdapter, fetchState = fetchTicketState, multiHost = false } = {}) {
   // GATE 1 — pipeline reached terminal (marker present).
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (!existsSync(marker)) return;
@@ -1695,6 +1701,11 @@ function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitSta
     return; // unreadable → fail-safe, do nothing
   }
   if (state == null || isLinearTerminal(state)) return; // already terminal or unreadable → no-op
+  // CTL-863: zombie guard — a post-takeover paused host must not re-Do a ticket.
+  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+    log.warn({ ticket }, "ctl-863: stale fence — suppressing reconcileTerminalBackstop write (zombie guard)");
+    return;
+  }
   // Drift detected: force the forward Done write (the CTL-758 guard permits it).
   try {
     const res = writeStatus.applyTerminalDone({ ticket, cache });
@@ -2195,7 +2206,11 @@ export function schedulerTick(
         for (const member of anomaly.members) {
           if (triagedWaiting.includes(member)) {
             cycleMembers.add(member);
-            labelOnce(orchDir, member, "needs-human", writeStatus);
+            if (fenceGuard({ ticket: member, orchDir, multiHost })) {
+              labelOnce(orchDir, member, "needs-human", writeStatus);
+            } else {
+              log.warn({ ticket: member }, "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)");
+            }
           }
         }
       }
@@ -2363,10 +2378,14 @@ export function schedulerTick(
           if (depState == null) continue; // unresolvable → drop
           if (ADMISSION_TERMINAL_STATES.has(depState)) continue; // terminal → no durable edge
 
-          safeWrite(
-            () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
-            { ticket: candidate, phase: "triage-deps" },
-          );
+          if (fenceGuard({ ticket: candidate, orchDir, multiHost })) {
+            safeWrite(
+              () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
+              { ticket: candidate, phase: "triage-deps" },
+            );
+          } else {
+            log.warn({ ticket: candidate }, "ctl-863: stale fence — suppressing applyBlockedByRelation(triage-deps) write (zombie guard)");
+          }
           // CTL-784: we just wrote a NEW durable blocked_by edge for this
           // candidate. Its cached relations descriptor (read this tick by A.3)
           // does NOT carry the edge, so without invalidation a freed-slot tick
@@ -2599,10 +2618,14 @@ export function schedulerTick(
         if (next === "research") {
           const est = readTriageEstimate(orchDir, ticket);
           if (est !== null) {
-            safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
-              ticket,
-              phase: next,
-            });
+            if (fenceGuard({ ticket, orchDir, multiHost })) {
+              safeWrite(() => writeStatus.applyEstimate({ ticket, estimate: est }), {
+                ticket,
+                phase: next,
+              });
+            } else {
+              log.warn({ ticket }, "ctl-863: stale fence — suppressing applyEstimate write (zombie guard)");
+            }
           }
         }
       } else {
@@ -2731,14 +2754,18 @@ export function schedulerTick(
               { orchId: pd.identifier, ticket: pd.identifier, phase: parkedPhase, resumeSession: resumeSession ?? null },
               { ticket: pd.identifier, phase: parkedPhase }
             );
-            safeWrite(
-              () => {
-                // CTL-757: audit the resume-after-preemption status write.
-                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
-                emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
-              },
-              { ticket: pd.identifier, phase: parkedPhase }
-            );
+            if (fenceGuard({ ticket: pd.identifier, orchDir, multiHost })) {
+              safeWrite(
+                () => {
+                  // CTL-757: audit the resume-after-preemption status write.
+                  const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
+                  emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
+                },
+                { ticket: pd.identifier, phase: parkedPhase }
+              );
+            } else {
+              log.warn({ ticket: pd.identifier }, "ctl-863: stale fence — suppressing preemption-resume applyPhaseStatus write (zombie guard)");
+            }
             resumeSlots--;
             resumedCount++;
           } else {
@@ -2862,10 +2889,14 @@ export function schedulerTick(
       }
       if (validDeps.length > 0) {
         for (const dep of validDeps) {
-          safeWrite(
-            () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
-            { ticket: dep.candidate, phase: "sequencing" }
-          );
+          if (fenceGuard({ ticket: dep.candidate, orchDir, multiHost })) {
+            safeWrite(
+              () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
+              { ticket: dep.candidate, phase: "sequencing" }
+            );
+          } else {
+            log.warn({ ticket: dep.candidate }, "ctl-863: stale fence — suppressing applyBlockedByRelation(sequencing) write (zombie guard)");
+          }
         }
         continue; // hold — D5 enforces the new edge next tick
       }
@@ -3040,7 +3071,7 @@ export function schedulerTick(
     if (signals["monitor-deploy"] === "done" || signals["monitor-deploy"] === "skipped") {
       // CTL-597: once-marker guards the per-tick Linear read (was safeWrite-only).
       // CTL-757: thread emitStateWrite so the terminal Done write is audited.
-      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite);
+      terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost });
       // CTL-582: the ticket reached terminal Done — tear down its worktree.
       teardownWorktreeOnce(orchDir, ticket, teardownWorktree);
     }
@@ -3052,9 +3083,14 @@ export function schedulerTick(
       cache,
       prAdapter,
       fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
+      multiHost,
     });
     if (Object.values(signals).some((s) => s === "stalled")) {
-      labelOnce(orchDir, ticket, "needs-human", writeStatus);
+      if (fenceGuard({ ticket, orchDir, multiHost })) {
+        labelOnce(orchDir, ticket, "needs-human", writeStatus);
+      } else {
+        log.warn({ ticket }, "ctl-863: stale fence — suppressing labelOnce(needs-human/stalled) write (zombie guard)");
+      }
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:
