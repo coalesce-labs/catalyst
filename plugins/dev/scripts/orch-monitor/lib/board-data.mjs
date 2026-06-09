@@ -272,6 +272,11 @@ export function buildPhaseSummary(phaseSigs, now) {
         durationMs,
         startedAt: sig.startedAt ?? null,
         completedAt,
+        // CTL-888 (BFF6) P5: surface the per-phase model. sig.model is already
+        // read into deriveCurrentPhase's intermediate but was dropped here — the
+        // ticket spine + gantt render ◆sonnet/◆opus per node off this field.
+        // Normalize absent to null so consumers get a clean string-or-null signal.
+        model: sig.model ?? null,
       };
     })
     .filter(Boolean);
@@ -376,6 +381,34 @@ async function costByPhase() {
   return map;
 }
 
+// ── CC-UUID → catalyst sess_ id map (CTL-888 / BFF6 P7) ─────────────────────
+// Two disjoint id spaces ride the worker: the CC-UUID (`claude agents --json
+// .sessionId`, keys Prometheus/Loki claude-code streams) and the catalyst
+// `sess_…` id (keys the catalyst.session/phase-agent heartbeat streams). The
+// catalyst id lives only in catalyst.db `sessions.session_id`, joinable to the
+// CC-UUID we already hold via `sessions.claude_session_id`. Build the map once
+// so the worker assembly can surface BOTH ids. Fail-open: a missing db / column
+// yields an empty map and `catalystSessionId` stays null (never fabricated).
+async function catalystSessionByCcUuid() {
+  const map = {};
+  if (!(await exists(DB))) return map;
+  try {
+    const sql =
+      "SELECT claude_session_id, session_id FROM sessions " +
+      "WHERE claude_session_id IS NOT NULL AND claude_session_id <> '';";
+    const { stdout } = await execFileP("sqlite3", ["-separator", "\t", DB, sql], {
+      encoding: "utf8", timeout: 8000, maxBuffer: 8 * 1024 * 1024,
+    });
+    for (const line of stdout.trim().split("\n")) {
+      if (!line) continue;
+      const [ccUuid, sessId] = line.split("\t");
+      // Last write wins — a CC-UUID maps to a single catalyst session.
+      if (ccUuid && sessId) map[ccUuid] = sessId;
+    }
+  } catch { /* sqlite missing or pre-CTL-374 schema (no claude_session_id) */ }
+  return map;
+}
+
 // ── ranked eligible queue (mirrors scheduler-rank.mjs compareTickets) ───────
 const PRIORITY_RANK = (p) => (p && p >= 1 && p <= 4 ? p : 5); // 1=urgent..4=low, 0/none→5
 function compareQueued(a, b) {
@@ -434,8 +467,9 @@ async function readTicketArtifacts(id) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp] = await Promise.all([
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
+    catalystSessionByCcUuid(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -457,6 +491,17 @@ export async function assembleBoard() {
       status: a.status || "idle", activeState, working, lastActiveMs,
       repo: repoFor(p.ticket), team: teamFor(p.ticket),
       runtimeMs, costUSD: cost, sessionId: a.sessionId,
+      // CTL-888 (BFF6) P6: exact wall-clock start (epoch ms from `claude agents
+      // --json .startedAt`, the same value runtimeMs derives from) so the worker
+      // header can render precise elapsed instead of a floored runtimeMs.
+      startedAt: typeof a.startedAt === "number" ? a.startedAt : null,
+      // CTL-888 (BFF6) P7: the OS pid (read by `claude agents --json` but
+      // previously dropped) drives the worker-rail PID row.
+      pid: typeof a.pid === "number" ? a.pid : null,
+      // CTL-888 (BFF6) P7: the catalyst `sess_…` id alongside the CC-UUID
+      // sessionId — surfaces both id spaces (Loki catalyst.session heartbeat
+      // joins on this one). null when the db has no row for this CC-UUID.
+      catalystSessionId: catalystSessByUuid[a.sessionId] ?? null,
     };
   }));
   const inFlightTickets = new Map(workers.map((w) =>

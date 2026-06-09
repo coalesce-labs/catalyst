@@ -18,7 +18,14 @@ export interface BoardWorker {
   team: string;
   runtimeMs: number | null;
   costUSD: number | null;
+  /** CC-UUID from `claude agents --json .sessionId` (Prometheus/Loki claude-code key). */
   sessionId: string;
+  /** CTL-888 (BFF6) P6: exact wall-clock start (epoch ms) for precise elapsed. */
+  startedAt: number | null;
+  /** CTL-888 (BFF6) P7: OS pid of the bg worker. */
+  pid: number | null;
+  /** CTL-888 (BFF6) P7: catalyst `sess_…` id (catalyst.session heartbeat key); null when unknown. */
+  catalystSessionId: string | null;
 }
 
 export interface BoardPhaseCost {
@@ -33,6 +40,8 @@ export interface BoardPhaseTiming {
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** CTL-888 (BFF6) P5: per-phase model for the spine + gantt; null when absent. */
+  model: string | null;
 }
 
 export interface BoardCurrentPhase {

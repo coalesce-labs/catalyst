@@ -35,6 +35,9 @@ function worker(ticket: string): BoardWorker {
     runtimeMs: 0,
     costUSD: null,
     sessionId: "sess-1",
+    startedAt: null,
+    pid: null,
+    catalystSessionId: null,
   };
 }
 
