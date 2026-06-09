@@ -1,5 +1,29 @@
 # Changelog
 
+## [12.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.3.0...catalyst-dev-v12.4.0) (2026-06-09)
+
+
+### Features
+
+* **dev:** BFF1 cache-backed read-model core (CTL-883) ([#1559](https://github.com/coalesce-labs/catalyst/issues/1559)) ([417271b](https://github.com/coalesce-labs/catalyst/commit/417271b5529c614993e24b071a1aaf83400512f7))
+* **dev:** BFF11 broker fence projection into cache (CTL-923) ([#1563](https://github.com/coalesce-labs/catalyst/issues/1563)) ([de3d6b3](https://github.com/coalesce-labs/catalyst/commit/de3d6b3151659980ab76b7d539adc64aab47e758))
+* **dev:** BFF4 phase runs as run entities + verbatim signal (CTL-886) ([#1564](https://github.com/coalesce-labs/catalyst/issues/1564)) ([55e0bee](https://github.com/coalesce-labs/catalyst/commit/55e0bee3e77a61aeb2e69f0b3d69df14d184985e))
+* **dev:** BFF6 board payload model/startedAt/pid/sess_id (CTL-888) ([#1562](https://github.com/coalesce-labs/catalyst/issues/1562)) ([c234c74](https://github.com/coalesce-labs/catalyst/commit/c234c74017685d0ceb3680a61673623258b9bef8))
+* **dev:** BFF7 cache-backed ticket detail / artifacts / search endpoints (CTL-889) ([#1567](https://github.com/coalesce-labs/catalyst/issues/1567)) ([1179aa1](https://github.com/coalesce-labs/catalyst/commit/1179aa142af4251abb3ffd01619a0900ef538cb3))
+* **dev:** BFF9 retire legacy linearis poller onto durable cache (CTL-921) ([#1566](https://github.com/coalesce-labs/catalyst/issues/1566)) ([d9c050a](https://github.com/coalesce-labs/catalyst/commit/d9c050aeff039a797c41d11a3196abdf0c2585f4))
+* **dev:** FND1 deep-linkable routes (TanStack Router) (CTL-881) ([#1557](https://github.com/coalesce-labs/catalyst/issues/1557)) ([36348c2](https://github.com/coalesce-labs/catalyst/commit/36348c21f09fdefef0fa30dd56401d6d9a87626b))
+* **dev:** FND2 resolveList() + jotai nav store (CTL-882) ([#1565](https://github.com/coalesce-labs/catalyst/issues/1565)) ([633ad43](https://github.com/coalesce-labs/catalyst/commit/633ad43a36b47526115bf1dca38a9d01af2c5e65))
+* **dev:** HUD1 shared read-model client contract (CTL-919) ([#1568](https://github.com/coalesce-labs/catalyst/issues/1568)) ([2eda1de](https://github.com/coalesce-labs/catalyst/commit/2eda1de1d18a6587a9e1c3e60c566a2b44b20cc3))
+* **dev:** SHELL1 edge-to-edge app shell + left nav (CTL-891) ([#1569](https://github.com/coalesce-labs/catalyst/issues/1569)) ([41c1000](https://github.com/coalesce-labs/catalyst/commit/41c1000414fbe2b9d1d4a8712f5105bd79189869))
+
+
+### Bug Fixes
+
+* **dev:** CTL-838 stop inferring dependencies from prose — link them, triage analyzes for missed ones ([#1556](https://github.com/coalesce-labs/catalyst/issues/1556)) ([cf29cf0](https://github.com/coalesce-labs/catalyst/commit/cf29cf038905006c9377dcf5095551bc029ed81e))
+* **dev:** CTL-878 stop self-inflicted epic→child dependency deadlock ([#1510](https://github.com/coalesce-labs/catalyst/issues/1510)) ([5f2e388](https://github.com/coalesce-labs/catalyst/commit/5f2e3885a908a58649780a35fe59b0a66e8edc10))
+* **dev:** CTL-883 keep bun:sqlite out of the Node-loaded vite.config import graph ([#1561](https://github.com/coalesce-labs/catalyst/issues/1561)) ([03537d0](https://github.com/coalesce-labs/catalyst/commit/03537d0a120791c2584b905a4b41d443b01f1364))
+* **dev:** CTL-927 exempt doc-phase workers from the cold-snapshot zombie-floor mtime kill ([#1571](https://github.com/coalesce-labs/catalyst/issues/1571)) ([c3394f8](https://github.com/coalesce-labs/catalyst/commit/c3394f84d7c0285a912063dc27aaf7f28019bfb2))
+
 ## [12.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.2.0...catalyst-dev-v12.3.0) (2026-06-08)
 
 
