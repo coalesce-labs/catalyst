@@ -22,6 +22,12 @@ export interface TicketDescriptor {
   uuid: string | null;
   removed: boolean;
   removedAt: string | null;
+  /** CTL-923 (BFF11): fence projection + held-since, from the durable cache. */
+  ownerHost: string | null;
+  generation: number | null;
+  fencePhase: string | null;
+  claimedAt: string | null;
+  heldSince: string | null;
   updatedAt: string;
 }
 
@@ -56,3 +62,23 @@ export function getTicketDescriptorByUuid(uuid: string): TicketDescriptor | null
 
 /** Stamp a descriptor removed by UUID; returns the resolved identifier or null. */
 export function markTicketRemovedByUuid(uuid: string): { ticket: string } | null;
+
+export interface UpsertTicketFenceInput {
+  ticket: string;
+  ownerHost?: string | null;
+  generation?: number | null;
+  phase?: string | null;
+  claimedAt?: string | null;
+}
+
+/** CTL-923 (BFF11): key-presence projection of the cluster-claim fence
+ *  attachment metadata into ticket_state (absent field = keep, explicit
+ *  null = clear). */
+export function upsertTicketFence(input: UpsertTicketFenceInput): void;
+
+/** CTL-923 (BFF11): stamp the held-label applied-at timestamp (sticky — the
+ *  first observed hold start survives duplicate webhooks; missing = now). */
+export function setTicketHeldSince(ticket: string, heldSince?: string | null): void;
+
+/** CTL-923 (BFF11): clear held_since when the held labels leave the ticket. */
+export function clearTicketHeldSince(ticket: string): void;
