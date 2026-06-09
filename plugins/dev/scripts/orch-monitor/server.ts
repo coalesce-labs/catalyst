@@ -178,6 +178,8 @@ import {
   toolUsageByName,
   apiErrors,
   costValidation,
+  workerHistoryBySession,
+  isValidCcSessionId,
 } from "./lib/otel-queries";
 import {
   openDb,
@@ -1766,6 +1768,44 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const result = await costValidation(prom, signalCosts, range);
           return Response.json({ data: result });
+        }
+
+        // CTL-914 (DETAIL3): the worker-page [history] tail. Queries the
+        // `claude-code` Loki stream for ONE run's transcript by its CC session
+        // UUID — REAL today, no plumbing — so a dead worker's tail is readable
+        // hours later (why the worker page is never empty). The filter is a
+        // `| session_id=\`UUID\`` STRUCTURED-METADATA pipe inside
+        // workerHistoryBySession (a `{session_id=}` label matcher returns 0).
+        // sessionId is UUID-validated before it ever reaches the LogQL, so the
+        // pipe can never be an injection vector. 503 when Loki is not configured
+        // (the UI degrades to the resident-data page), 400 on a bad id.
+        const ecWorkerHistoryMatch = url.pathname.match(
+          /^\/api\/ec-worker-history\/([^/]+)$/,
+        );
+        if (ecWorkerHistoryMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(ecWorkerHistoryMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidCcSessionId(sessionId)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!loki) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "24h";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "500", 10);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(1, rawLimit), 2000)
+            : 500;
+          const rows = await workerHistoryBySession(loki, sessionId, range, limit);
+          if (rows === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: rows });
         }
 
         if (url.pathname === "/api/annotations") {
