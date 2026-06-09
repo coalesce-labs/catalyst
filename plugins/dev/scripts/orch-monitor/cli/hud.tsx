@@ -34,6 +34,10 @@ import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import { readPluginVersion, formatVersionBlock } from "./lib/version.ts";
 import { loadHudConfig } from "../lib/monitor-config.ts";
+// CTL-919 / HUD1: the HUD reads its node identity through the SAME shared
+// read-model contract the web/iPad client uses. Single-host ⇒ one node (identity
+// no-op); the contract is the typed door HUD2's cluster consolidation builds on.
+import { localHostRef } from "./lib/read-model-cluster.ts";
 
 interface AppProps {
   repoFilter: string;
@@ -160,6 +164,12 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-390: plugin version chip. Resolved once at startup — release-please
   // bumps version.txt + commit.txt only between HUD invocations.
   const versionChip = useRef(readPluginVersion()).current;
+
+  // CTL-919 / HUD1: the local node's name via the shared read-model contract.
+  // Resolved once (host identity is stable for the process lifetime). A
+  // single-host fleet shows this one node on the Dashboard's view tabs (identity
+  // no-op); the multi-node HUD groups by host through the same contract.
+  const nodeName = useRef(localHostRef().name).current;
 
   // CTL-473: hoist the Header `version` literal so the memoized Header can
   // short-circuit. `versionChip` is frozen at mount via useRef, so this memo
@@ -515,6 +525,7 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
             visibleRows={visibleRows}
             cols={innerCols}
             brokerState={brokerState}
+            nodeName={nodeName}
             onClose={() => setShowDashboard(false)}
           />
         ) : (

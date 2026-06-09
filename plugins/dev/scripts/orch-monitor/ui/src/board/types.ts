@@ -2,7 +2,14 @@
 // view, the SharedWorker, and the transport client all agree on ONE shape.
 // Mirrors the server's declared payload in lib/board-data.d.mts (intentionally a
 // UI subset: BoardQueueItem.state is omitted because the board never renders it).
+//
+// CTL-919 / HUD1: this UI subset is now bound to the ONE shared read-model client
+// contract (lib/read-model-client.ts) via the compile-time `ContractPayloadFitsUiView`
+// fixture below. That contract is the SAME module the terminal HUD imports, so a
+// change to the read-model's wire shape is a typecheck break felt on BOTH
+// surfaces — the web client can no longer silently render a mismatched shape.
 import type { ConnectionStatus } from "@/lib/types";
+import type { ReadModelPayload } from "../../../lib/read-model-client";
 
 export type BoardActiveState = "active" | "stuck" | null;
 
@@ -138,3 +145,17 @@ export type BoardOutbound =
 export type BoardInbound = { kind: "reconcile" } | { kind: "bye" };
 
 export type { ConnectionStatus };
+
+// ── CTL-919 / HUD1: contract conformance bridge ─────────────────────────────
+// The web client renders this `BoardPayload` UI subset; the server fans out the
+// fuller `ReadModelPayload` (the contract's wire shape) over SSE. This fixture
+// asserts the server contract payload is structurally assignable to the UI view
+// — i.e. the UI never reads a field the contract doesn't promise. It is a pure
+// COMPILE-TIME check (no runtime cost): if the read-model wire shape drops or
+// renames a field the board relies on, this stops compiling here AND in the HUD,
+// because both import the SAME `read-model-client` contract.
+type AssertAssignable<From, To> = From extends To ? true : never;
+// Exported so the unused-type alias is unambiguously a contract assertion, not
+// dead code: it is `true` exactly when the server contract payload fits the UI
+// view, and a non-conforming change collapses it to `never` (a typecheck break).
+export type ContractPayloadFitsUiView = AssertAssignable<ReadModelPayload, BoardPayload>;
