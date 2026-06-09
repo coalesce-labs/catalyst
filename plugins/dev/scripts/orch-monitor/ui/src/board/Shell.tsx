@@ -32,7 +32,12 @@ import {
   type LiveSignal,
   type PagerState,
 } from "./detail-chrome";
-import { listContextAtom, recordRecentAtom } from "./nav-store";
+import {
+  cheatsheetOpenAtom,
+  listContextAtom,
+  paletteOpenAtom,
+  recordRecentAtom,
+} from "./nav-store";
 import type { DetailFrom, DetailLens } from "./route-search";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
 
@@ -344,6 +349,10 @@ export function Shell({
   const navigate = useNavigate();
   const [listContext, setListContext] = useAtom(listContextAtom);
   const recordRecent = useSetAtom(recordRecentAtom);
+  // ── overlay open-state (CTL-916 / DETAIL5): the ⌘K palette + the `?` cheatsheet
+  //    are siblings under one layered-Escape discipline (detail design §3.4). ────
+  const [paletteOpen, setPaletteOpen] = useAtom(paletteOpenAtom);
+  const [cheatsheetOpen, setCheatsheetOpen] = useAtom(cheatsheetOpenAtom);
 
   // Mirror the resolved walk list into the jotai store so peek / palette read the
   // SAME ids. The page resolves `listIds` from the resident payload via
@@ -395,13 +404,49 @@ export function Shell({
   const goNext = useCallback(() => walk(pager.nextId), [walk, pager.nextId]);
   const goRoot = useCallback(() => void navigate({ to: "/" }), [navigate]);
 
+  // ── ⌘K palette toggle (CTL-916 / DETAIL5). The hook reaches `onPalette` even
+  //    while an input is focused (key-nav.ts §1). A caller-supplied `onPalette`
+  //    wins (lets a page save/restore focus around the toggle); otherwise the
+  //    shell toggles the shared atom the <CommandPalette> reads. ───────────────
+  const togglePalette = useCallback(() => {
+    if (onPalette) {
+      onPalette();
+      return;
+    }
+    setPaletteOpen((v) => !v);
+  }, [onPalette, setPaletteOpen]);
+
+  // ── `?` cheatsheet toggle (CTL-916 / DETAIL5). Mutually exclusive with the
+  //    palette so two overlays never stack. ──────────────────────────────────
+  const toggleCheatsheet = useCallback(() => {
+    setCheatsheetOpen((v) => !v);
+    setPaletteOpen(false);
+  }, [setCheatsheetOpen, setPaletteOpen]);
+
+  // ── layered Escape (detail design §3.4): an open overlay eats the first Esc;
+  //    only a clean page Escapes back to the originating list (board root). The
+  //    overlays ALSO stop-propagate their own Escape, but this is the belt-and-
+  //    braces layer for an Esc that reaches the global handler first. ──────────
+  const onEscape = useCallback(() => {
+    if (paletteOpen) {
+      setPaletteOpen(false);
+      return;
+    }
+    if (cheatsheetOpen) {
+      setCheatsheetOpen(false);
+      return;
+    }
+    goRoot();
+  }, [paletteOpen, cheatsheetOpen, setPaletteOpen, setCheatsheetOpen, goRoot]);
+
   // ── keyboard: extend the existing hook IN PLACE (j/k/⌘K/g-chords); the
   //    pre-existing `/`→search + `?` + the input guard are kept by the hook ────
   useKeyboardNav({
     onNext: goNext,
     onPrev: goPrev,
-    onEscape: goRoot, // a clean detail-page Esc returns to the originating list (board root)
-    onPalette: onPalette,
+    onEscape,
+    onPalette: togglePalette,
+    onQuestionMark: toggleCheatsheet,
     onGotoActive: () => {
       document.querySelector("[data-spine-active]")?.scrollIntoView({ block: "center" });
     },

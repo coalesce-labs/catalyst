@@ -75,6 +75,13 @@ export const peekAtom = atom<PeekState>(PEEK_CLOSED);
  *  around the toggle (detail design §3.4); this atom is just the boolean. */
 export const paletteOpenAtom = atom<boolean>(false);
 
+// ── ? cheatsheet ─────────────────────────────────────────────────────────────
+/** Whether the `?` keyboard cheatsheet overlay is open (CTL-916 / DETAIL5,
+ *  detail design §3.4 / §7 `command-menu-keyboard`). Toggled by the shell's `?`
+ *  binding; read by the cheatsheet overlay. A sibling of `paletteOpenAtom` so the
+ *  two overlays share the one layered-Escape discipline. */
+export const cheatsheetOpenAtom = atom<boolean>(false);
+
 // ── recently-viewed (persisted) ─────────────────────────────────────────────
 // The localStorage key, the cap, and the `pushRecent` recency-merge live in the
 // jotai-free `recents.ts` (re-exported above) so the recency Gherkin is unit-

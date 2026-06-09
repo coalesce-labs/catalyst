@@ -13,9 +13,13 @@
 // resident payload (AVAILABLE-NOW); unplumbed rows render dimmed, never faked.
 
 import { useEffect, useState } from "react";
+import { useAtom } from "jotai";
 import { connectBoard } from "./board-client";
 import { resolveListIds } from "./list-order";
 import { Shell, type PropertyRow, type ShellKind, type StreamHealth } from "./Shell";
+import { CommandPalette, KeyCheatsheet } from "./CommandPalette";
+import { cheatsheetOpenAtom } from "./nav-store";
+import type { PaletteFocus } from "./palette-actions";
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
@@ -111,6 +115,28 @@ function fmtDuration(ms: number): string {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+// ── detail overlays (CTL-916 / DETAIL5) ──────────────────────────────────────
+/** Mount the ⌘K palette + the `?` cheatsheet for a detail route. The palette
+ *  reads its open-state off `paletteOpenAtom` (toggled by the shell's ⌘K binding)
+ *  and renders the resident-payload command list scoped to the focused entity; the
+ *  cheatsheet reads `cheatsheetOpenAtom`. Both are fixed-position siblings of the
+ *  Shell, so they render OUTSIDE the shell's scroll region. */
+function DetailOverlays({
+  payload,
+  focus,
+}: {
+  payload: BoardPayload | null;
+  focus: PaletteFocus;
+}) {
+  const [cheatsheetOpen, setCheatsheetOpen] = useAtom(cheatsheetOpenAtom);
+  return (
+    <>
+      <CommandPalette payload={payload} focus={focus} />
+      <KeyCheatsheet open={cheatsheetOpen} onClose={() => setCheatsheetOpen(false)} />
+    </>
+  );
+}
+
 // ── route components ─────────────────────────────────────────────────────────
 export function TicketDetailRoute({ id, search }: { id: string; search: DetailSearch }) {
   const { payload, health } = useBoardPayload();
@@ -119,21 +145,24 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
   const ticket = payload?.tickets.find((t) => t.id === id);
 
   return (
-    <Shell
-      kind={kind}
-      id={id}
-      search={search}
-      listIds={listIds}
-      live={{ working: ticket?.working ?? false, activeState: ticket?.activeState ?? null }}
-      title={ticket?.title ?? id}
-      properties={ticketRows(ticket)}
-      streamHealth={health}
-    >
-      {/* DETAIL2 (CTL-913): the lifecycle aggregate body — header · PIPELINE rail ·
-          HELD banner · LIFECYCLE SPINE + compact gantt · COMMS · ACTIVITY — all
-          off the RESIDENT BoardTicket + phaseSummary (zero new endpoints). */}
-      <TicketDetailPage ticket={ticket} />
-    </Shell>
+    <>
+      <Shell
+        kind={kind}
+        id={id}
+        search={search}
+        listIds={listIds}
+        live={{ working: ticket?.working ?? false, activeState: ticket?.activeState ?? null }}
+        title={ticket?.title ?? id}
+        properties={ticketRows(ticket)}
+        streamHealth={health}
+      >
+        {/* DETAIL2 (CTL-913): the lifecycle aggregate body — header · PIPELINE rail ·
+            HELD banner · LIFECYCLE SPINE + compact gantt · COMMS · ACTIVITY — all
+            off the RESIDENT BoardTicket + phaseSummary (zero new endpoints). */}
+        <TicketDetailPage ticket={ticket} />
+      </Shell>
+      <DetailOverlays payload={payload} focus={{ kind: "ticket", id }} />
+    </>
   );
 }
 
@@ -144,17 +173,20 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
   const worker = payload?.workers.find((w) => w.name === id);
 
   return (
-    <Shell
-      kind={kind}
-      id={id}
-      search={search}
-      listIds={listIds}
-      live={{ working: worker?.working ?? false, activeState: worker?.activeState ?? null }}
-      title={worker?.name ?? id}
-      properties={workerRows(worker)}
-      streamHealth={health}
-    >
-      <WorkerDetailBody id={id} worker={worker} />
-    </Shell>
+    <>
+      <Shell
+        kind={kind}
+        id={id}
+        search={search}
+        listIds={listIds}
+        live={{ working: worker?.working ?? false, activeState: worker?.activeState ?? null }}
+        title={worker?.name ?? id}
+        properties={workerRows(worker)}
+        streamHealth={health}
+      >
+        <WorkerDetailBody id={id} worker={worker} />
+      </Shell>
+      <DetailOverlays payload={payload} focus={{ kind: "worker", id }} />
+    </>
   );
 }
