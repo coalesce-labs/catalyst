@@ -6436,6 +6436,117 @@ describe("CTL-755: admission gate", () => {
     expect(held.events[0].reason).not.toBe("blocked-by-open-dependency");
   });
 
+  // ── CTL-929: zero-dependency tickets must not strand on a failed read ──
+  describe("CTL-929: explicit zero-dep tickets are exempt from the read-failure fail-safe", () => {
+    afterEach(() => __resetForTests());
+
+    function writeTriage(ticket, obj) {
+      writeFileSync(join(orchDir, "workers", ticket, "triage.json"), JSON.stringify(obj));
+    }
+
+    test("null read + triage.json dependencies:[] + free slot → dispatched to research (NOT held)", () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+      writeSignal("CTL-7", "triage", "done");
+      writeTriage("CTL-7", { ticket: "CTL-7", classification: "bug", dependencies: [] });
+      const dispatch = fakeDispatch();
+      const { ws } = labelSpy();
+      const held = heldSpy();
+      const r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchBatch: mkBatch(() => null),
+        appendPhaseAdvanceHeldEvent: held.fn,
+      });
+      expect(dispatch.calls).toEqual([{ orchDir, ticket: "CTL-7", phase: "research" }]);
+      expect(r.advanced).toEqual([{ ticket: "CTL-7", phase: "research" }]);
+      expect(held.events).toEqual([]);
+    });
+
+    test("null read + triage.json dependencies:[] + NO free slot → held 'awaiting-capacity-or-priority' (not 'dependency-state-unknown')", () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+      writeSignal("CTL-7", "triage", "done");
+      writeTriage("CTL-7", { ticket: "CTL-7", dependencies: [] });
+      const dispatch = fakeDispatch();
+      const { ws } = labelSpy();
+      const held = heldSpy();
+      const r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 1,
+        fetchBatch: mkBatch(() => null),
+        appendPhaseAdvanceHeldEvent: held.fn,
+      });
+      expect(dispatch.calls).toEqual([]);
+      expect(r.advanced).toEqual([]);
+      expect(held.events).toHaveLength(1);
+      expect(held.events[0]).toMatchObject({ ticket: "CTL-7", reason: "awaiting-capacity-or-priority" });
+    });
+
+    test("null read + triage.json with a DECLARED dependency → still fail-safe held 'dependency-state-unknown'", () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+      writeSignal("CTL-7", "triage", "done");
+      writeTriage("CTL-7", { ticket: "CTL-7", dependencies: ["CTL-99"] });
+      const dispatch = fakeDispatch();
+      const { ws } = labelSpy();
+      const held = heldSpy();
+      const r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchBatch: mkBatch(() => null),
+        appendPhaseAdvanceHeldEvent: held.fn,
+      });
+      expect(dispatch.calls).toEqual([]);
+      expect(r.advanced).toEqual([]);
+      expect(held.events[0]).toMatchObject({ ticket: "CTL-7", reason: "dependency-state-unknown" });
+    });
+
+    test("null read + NO triage.json → still fail-safe held (unknown picture, conservative default)", () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+      writeSignal("CTL-7", "triage", "done");
+      const dispatch = fakeDispatch();
+      const { ws } = labelSpy();
+      const held = heldSpy();
+      const r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchBatch: mkBatch(() => null),
+        appendPhaseAdvanceHeldEvent: held.fn,
+      });
+      expect(dispatch.calls).toEqual([]);
+      expect(held.events[0]).toMatchObject({ ticket: "CTL-7", reason: "dependency-state-unknown" });
+    });
+
+    test("idempotent: a zero-dep ticket already advanced (research signal present) is not re-dispatched", () => {
+      writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+      writeSignal("CTL-7", "triage", "done");
+      writeSignal("CTL-7", "research", "running");
+      writeTriage("CTL-7", { ticket: "CTL-7", dependencies: [] });
+      const dispatch = fakeDispatch();
+      const { ws } = labelSpy();
+      const r = schedulerTick(orchDir, {
+        readEligible: () => [],
+        dispatch,
+        writeStatus: ws,
+        verifyDispatched: verifyOk,
+        liveBackgroundCount: () => 0,
+        fetchBatch: mkBatch(() => null),
+      });
+      expect(dispatch.calls).toEqual([]);
+      expect(r.advanced).toEqual([]);
+    });
+  });
+
   // ── STEP E: dep persistence (scheduler-side) ──
   //
   // A writeStatus spy that ALSO records applyBlockedByRelation (the durable

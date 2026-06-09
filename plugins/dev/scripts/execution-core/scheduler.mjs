@@ -237,6 +237,23 @@ function readTriageDependencies(orchDir, ticket) {
   return out;
 }
 
+// CTL-929: does triage.json EXPLICITLY declare a zero-dependency picture?
+// A triaged-waiting candidate whose durable signal carries `dependencies: []`
+// has a fully-known, unblocked dependency picture from disk — it needs no live
+// Linear read to confirm it. Contrast readTriageDependencies, which returns []
+// for BOTH an explicit empty array AND a missing/unreadable file; here we must
+// distinguish them so a genuinely-UNKNOWN picture (missing/malformed file, or a
+// non-array `dependencies`) still fails SAFE (held until a read succeeds).
+// Never throws.
+function triageDeclaresZeroDeps(orchDir, ticket) {
+  try {
+    const raw = JSON.parse(readFileSync(join(orchDir, "workers", ticket, "triage.json"), "utf8"));
+    return Array.isArray(raw?.dependencies) && raw.dependencies.length === 0;
+  } catch {
+    return false; // missing / unreadable / malformed → unknown → fail safe
+  }
+}
+
 // Missing or unreadable → {priority: 5, createdAt: null} (safe lowest-band
 // default). Never throws.
 export function readWorkerPriority(orchDir, ticket) {
@@ -2405,7 +2422,15 @@ export function schedulerTick(
       for (const ticket of triagedWaiting) {
         const rel = relByTicket.get(ticket) ?? null;
         const { priority, createdAt } = readWorkerPriority(orchDir, ticket);
-        if (rel === null) readFailedTickets.add(ticket);
+        if (rel === null && !triageDeclaresZeroDeps(orchDir, ticket)) {
+          // CTL-929: a transient Linear read failure (commonly linearBreaker open
+          // from a 429) must NOT strand a ticket whose dependency picture is already
+          // known-empty from the durable triage.json signal. Only apply the fail-safe
+          // hold when the picture is genuinely unknown — i.e. the ticket may have
+          // declared blockers whose state we cannot confirm without the read, OR
+          // triage.json is missing/malformed.
+          readFailedTickets.add(ticket);
+        }
         // missing rel → fail-safe: non-terminal sentinel state, no edges, no labels.
         const stateName = rel?.state ?? UNFETCHED_BLOCKER_STATE;
         labelsByTicket.set(ticket, rel?.labels ?? []);
