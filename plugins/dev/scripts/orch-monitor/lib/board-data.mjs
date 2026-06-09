@@ -20,6 +20,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
+import { readLinearCache } from "./linear-cache-reader.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -310,35 +311,18 @@ function prFor(prSigs) {
   return null;
 }
 
-// ── Linear enrichment: priority / estimate / project, one cached list call per
-// team (60s TTL) so in-flight + board tickets get priority without per-ticket
-// API hits. Graceful: if linearis is unavailable, callers fall back to defaults.
-let _linearCache = { ts: 0, byId: {} };
+// ── Linear enrichment: priority / estimate / project / labels / relations /
+// assignee, read EXCLUSIVELY from the broker's durable caches (CTL-883).
+//
+// This used to shell out to `linearis issues list --team <T>` on a 60s TTL —
+// every refresh counted against Linear's 2500/hr quota and could synchronously
+// block the assemble. That bypass is GONE. Enrichment now comes from
+// filter-state.db → ticket_state (the broker's webhook write-through) plus the
+// scheduler's eligible projections, via lib/linear-cache-reader.mjs::
+// readLinearCache. No request path triggers a synchronous Linear call, and the
+// Linear circuit breaker is honored by construction (nothing is spawned).
 async function linearInfo() {
-  const now = Date.now();
-  if (now - _linearCache.ts < 60_000) return _linearCache.byId;
-  const byId = {};
-  await Promise.all(["CTL", "ADV"].map(async (team) => {
-    try {
-      const { stdout } = await execFileP("linearis", ["issues", "list", "--team", team, "--limit", "100"], {
-        encoding: "utf8", timeout: 15000, maxBuffer: 16 * 1024 * 1024,
-      });
-      for (const n of JSON.parse(stdout)?.nodes || []) {
-        if (!n.identifier) continue;
-        byId[n.identifier] = {
-          priority: typeof n.priority === "number" ? n.priority : 0,
-          estimate: n.estimate ?? null,
-          project: n.project?.name || (typeof n.project === "string" ? n.project : null),
-          // CTL-755: label names for the held indicator (blocked/waiting). The
-          // same cached list call already returns labels.nodes[].name, so this
-          // costs zero extra Linear traffic.
-          labels: (n.labels?.nodes ?? []).map((l) => l?.name).filter(Boolean),
-        };
-      }
-    } catch { /* linearis unavailable — leave this team unenriched */ }
-  }));
-  _linearCache = { ts: now, byId };
-  return byId;
+  return readLinearCache();
 }
 
 // ── cost rollup per ticket (one grouped sqlite query) ───────────────────────

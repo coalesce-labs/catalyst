@@ -600,6 +600,19 @@ export function getTicketDescriptor(ticket) {
   return row ? rowToTicketDescriptor(row) : null;
 }
 
+// getAllTicketDescriptors — bulk read of the whole ticket_state cache in ONE
+// query (CTL-883). The orch-monitor read-model enriches every board ticket from
+// the durable Linear cache; doing that per-ticket would re-prepare/execute a
+// SELECT N times, so it consumes this single pass instead. Removed rows are
+// excluded by default (the board never wants tombstoned tickets); pass
+// `{ includeRemoved: true }` for the reconcile/debug paths that need them.
+export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
+  const sql = includeRemoved
+    ? `SELECT * FROM ticket_state ORDER BY ticket`
+    : `SELECT * FROM ticket_state WHERE removed_at IS NULL ORDER BY ticket`;
+  return ensure().prepare(sql).all().map(rowToTicketDescriptor);
+}
+
 // getTicketDescriptorByUuid — the UUID→identifier index lookup. Linear's
 // `remove` webhook payload carries only the entityId UUID; this resolves it to
 // the descriptor row populated by earlier create/update webhooks.
