@@ -65,3 +65,57 @@ export function claimDispatchSync(
     return { won: false, generation: null };
   }
 }
+
+// FENCE_STALE_EXIT — mirror of cluster-claim.mjs's exit code: the CLI exits 10
+// when the ticket's current claim generation no longer matches the generation we
+// asked about (a stale/partitioned generation). Kept in sync deliberately; the
+// two files are the only places this contract lives.
+const FENCE_STALE_EXIT = 10;
+
+// fenceCheckSync — is `generation` still the CURRENT fence for `ticket`?
+// Synchronously drives `node cluster-claim.mjs fence-check <ticket> <gen>` over
+// spawnSync (the same sync-subprocess convention as claimDispatchSync). Returns a
+// discriminated result the caller can act on WITHOUT a second interpretation pass:
+//   { current: true }              → exit 0: the generation is current, proceed.
+//   { current: false, stale: true } → exit 10 (FENCE_STALE_EXIT): a takeover
+//                                      bumped past us; we are a stale/partitioned
+//                                      generation → the side-effect must be rejected.
+//   { current: false, stale: false }→ ANY other failure (spawn error, timeout,
+//                                      other non-zero exit, unparseable stdout).
+//
+// FAIL-CLOSED for a destructive caller: this returns current:false (NOT current)
+// on every non-success, so the only path that yields current:true is an explicit
+// exit-0 from the fence CLI. A stop-worker caller treats current:false as "do not
+// kill" — the conservative answer when the fence cannot be affirmatively
+// confirmed (we never SIGKILL a worker on an uncertain or errored fence read).
+// `stale` distinguishes the verified-stale rejection (the Gherkin "fenced out"
+// case) from an indeterminate failure for honest UI messaging.
+//
+// `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the unit tests never
+// spawn a real process.
+export function fenceCheckSync(
+  { ticket, generation },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+  } = {},
+) {
+  try {
+    const res = spawn(nodeBin, [cli, "fence-check", ticket, String(generation)], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res) return { current: false, stale: false };
+    if (res.status === 0) return { current: true, stale: false };
+    if (res.status === FENCE_STALE_EXIT) return { current: false, stale: true };
+    // Any other exit / spawn error / timeout: indeterminate → not current, not
+    // verified-stale. Fail-closed for the destructive caller.
+    return { current: false, stale: false };
+  } catch {
+    return { current: false, stale: false };
+  }
+}

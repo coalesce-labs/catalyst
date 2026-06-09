@@ -30,6 +30,13 @@ import {
   resolveTranscriptPath,
   TranscriptTail,
 } from "./lib/ec-worker-stream.mjs";
+// CTL-890 (BFF8): the read-model's ONE destructive endpoint (design P10) —
+// POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
+// behind a typed confirm + a fence-aware guard (single-host no-op pass;
+// multi-host rejects a stale/partitioned generation). Optimistic rollback is a
+// UI-side timer; the endpoint returns the verbatim shortId+ticket+phase identity
+// the client needs to mark `stopping` and arm that timer.
+import { stopWorker, type StopWorkerResult } from "./lib/stop-worker.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -1959,6 +1966,95 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Bad Request", { status: 400 });
           }
           return Response.json(await assembleTicketRuns(ticket));
+        }
+
+        // CTL-890 (BFF8) P10: the redesign's ONE destructive endpoint, gated last.
+        // POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
+        // (pid-file absent on CC 2.1.152). Matched BEFORE the GET verbatim route
+        // and gated on POST so a stop request is never confused with the
+        // signal reader (and "stop" is not a valid phase, so a GET here 404s
+        // harmlessly). Contract (design §3.4):
+        //   • TYPED CONFIRM — body.confirm must equal the ticket id exactly.
+        //   • TARGET RUN    — body.phase selects which run (its phase-<phase>.json
+        //     signal carries the bg_job_id → shortId). The response echoes the
+        //     exact shortId+ticket+phase so the UI shows what it is killing.
+        //   • FENCE-AWARE   — single-host (hosts.json absent/len 1) is a no-op
+        //     pass; multi-host rejects a verified-stale generation (a partitioned
+        //     node) and refuses on an unconfirmable fence.
+        //   • OPTIMISTIC ROLLBACK is a UI-side ~10s timer; on success we return the
+        //     identity + a `stopping` status the client marks optimistically.
+        const ecStopMatch = url.pathname.match(
+          /^\/api\/ec-worker\/([^/]+)\/stop$/,
+        );
+        if (ecStopMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ecStopMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const phase = typeof body.phase === "string" ? body.phase : "";
+          if (!/^[a-z][a-z-]*$/.test(phase)) {
+            return Response.json(
+              { error: "phase is required and must be a valid phase name" },
+              { status: 400 },
+            );
+          }
+          const result: StopWorkerResult = await stopWorker({
+            ticket,
+            phase,
+            confirm: body.confirm,
+          });
+          switch (result.status) {
+            case "not_found":
+              return Response.json(
+                { status: "not_found", error: `no run signal for ${ticket}:${phase}` },
+                { status: 404 },
+              );
+            case "confirm_mismatch":
+              return Response.json(
+                {
+                  status: "confirm_mismatch",
+                  error: "typed confirmation did not match the ticket id",
+                  expected: result.expected,
+                },
+                { status: 400 },
+              );
+            case "no_session":
+              return Response.json(result, { status: 409 });
+            case "fenced":
+              // A stale-generation node is fenced out — the worker is NOT killed.
+              return Response.json(
+                {
+                  ...result,
+                  error: "stop rejected: this node's generation is stale (fenced out)",
+                },
+                { status: 409 },
+              );
+            case "fence_indeterminate":
+              return Response.json(
+                {
+                  ...result,
+                  error: "stop rejected: fence could not be confirmed",
+                },
+                { status: 409 },
+              );
+            case "stop_failed":
+              return Response.json(result, { status: 502 });
+            case "stopping":
+              // Kill issued; the UI marks the worker `stopping` and arms its ~10s
+              // optimistic-rollback timer against the next board frame.
+              return Response.json(result, { status: 200 });
+          }
         }
 
         // CTL-886 (BFF4) companion P3: one phase signal served VERBATIM — the raw
