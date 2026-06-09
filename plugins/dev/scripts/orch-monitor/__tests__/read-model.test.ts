@@ -71,6 +71,9 @@ function ticket(id: string): BoardTicket {
     updatedAt: "",
     held: null,
     blockers: [],
+    // CTL-901 (HOME3): per-row duration anchors (null in this fixture).
+    heldSince: null,
+    currentPhaseSince: null,
     host: null,
     generation: null,
   };

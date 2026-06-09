@@ -22,14 +22,86 @@ import { useEffect, useMemo, useState } from "react";
 import {
   calmHeaderSentence,
   deriveInbox,
+  isNeedsYouSection,
   moveSelection,
   rowById,
+  type InboxSection,
 } from "@/board/home-inbox";
 import { isTypingTarget } from "@/lib/surface";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
+
+/** One inbox section. The needs-you sections (blocked / waiting) render their
+ *  rows OPEN; the reassurance sections (running on its own / done) collapse to a
+ *  quiet count by default (CTL-901 scenario 1 — "a collapsed reassurance count
+ *  by default") and expand on click. */
+function InboxSectionBlock({
+  section,
+  selectedId,
+  onSelect,
+  now,
+}: {
+  section: InboxSection;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  now: number;
+}) {
+  // Needs-you sections are always open (you must see what needs you). The
+  // reassurance sets start collapsed so the page de-alarms by subtraction.
+  const collapsible = !isNeedsYouSection(section.kind);
+  const [open, setOpen] = useState<boolean>(!collapsible);
+
+  return (
+    <section
+      data-inbox-section={section.kind}
+      data-collapsed={collapsible && !open ? "true" : undefined}
+      className="border-b border-border last:border-b-0"
+    >
+      <h2 className="px-4 pt-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
+        {collapsible ? (
+          // A collapsed reassurance section is a count chip you can expand —
+          // "Running on its own  4" — not a wall of rows.
+          <button
+            type="button"
+            data-section-toggle={section.kind}
+            aria-expanded={open}
+            onClick={() => setOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-left uppercase tracking-wide hover:text-fg"
+          >
+            <span aria-hidden className="font-mono text-[10px] text-muted/70">
+              {open ? "▾" : "▸"}
+            </span>
+            {section.label}
+            <span className="font-mono text-muted/70">{section.rows.length}</span>
+          </button>
+        ) : (
+          <>
+            {section.label}
+            <span className="ml-2 font-mono text-muted/70">{section.rows.length}</span>
+          </>
+        )}
+      </h2>
+      {/* Rows are divided by a hairline divider between them (the list is the
+          container; each row is bare). Collapsed reassurance sections render no
+          rows — just the count chip above. */}
+      {open && (
+        <div className="divide-y divide-border-subtle">
+          {section.rows.map((row) => (
+            <InboxRow
+              key={row.id}
+              row={row}
+              selected={row.id === selectedId}
+              onSelect={onSelect}
+              now={now}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
 /** The left list: the calm header sentence + the grouped bare-row sections. */
 function InboxList({
@@ -38,12 +110,14 @@ function InboxList({
   selectedId,
   onSelect,
   status,
+  now,
 }: {
   header: string;
   sections: ReturnType<typeof deriveInbox>["sections"];
   selectedId: string | null;
   onSelect: (id: string) => void;
   status: string;
+  now: number;
 }) {
   return (
     <div className="flex h-full flex-col bg-surface-0">
@@ -65,24 +139,13 @@ function InboxList({
           </p>
         ) : (
           sections.map((section) => (
-            <section key={section.kind} className="border-b border-border last:border-b-0">
-              <h2 className="px-4 pt-4 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted">
-                {section.label}
-                <span className="ml-2 font-mono text-muted/70">{section.rows.length}</span>
-              </h2>
-              {/* Rows are divided by a hairline divider between them (the list is
-                  the container; each row is bare). */}
-              <div className="divide-y divide-border-subtle">
-                {section.rows.map((row) => (
-                  <InboxRow
-                    key={row.id}
-                    row={row}
-                    selected={row.id === selectedId}
-                    onSelect={onSelect}
-                  />
-                ))}
-              </div>
-            </section>
+            <InboxSectionBlock
+              key={section.kind}
+              section={section}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              now={now}
+            />
           ))
         )}
       </div>
@@ -113,6 +176,16 @@ export function HomeSurface() {
   // The selection: null until the operator (or the default-select effect) picks a
   // row. Held in React state so j/k and click both drive the one reading pane.
   const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // CTL-901 (HOME3): one shared "now" clock the row durations measure against,
+  // ticked every 30s so a row reading "4m" advances to "5m" without re-fetching.
+  // 30s cadence keeps the calm page quiet (no per-second churn) while staying
+  // honest for the coarse single-unit display.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(id);
+  }, []);
 
   // Default-select the top item on load, and keep the selection valid as the
   // snapshot reshuffles: if nothing is selected (first paint) OR the current
@@ -155,6 +228,7 @@ export function HomeSurface() {
             selectedId={selectedId}
             onSelect={setSelectedId}
             status={status}
+            now={now}
           />
         }
         reading={<ReadingPane row={selectedRow} />}

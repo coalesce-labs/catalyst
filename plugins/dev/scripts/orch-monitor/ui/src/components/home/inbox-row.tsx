@@ -11,7 +11,12 @@
 // the single primary VERB. Running/Done rows are fully neutral (no accent, no
 // verb) — that's how 90% of the page de-alarms by subtraction.
 import { cn } from "@/lib/utils";
-import { isNeedsYouSection, type InboxRow as InboxRowModel } from "@/board/home-inbox";
+import {
+  isNeedsYouSection,
+  rowDurationMs,
+  type InboxRow as InboxRowModel,
+} from "@/board/home-inbox";
+import { fmtRelativeDuration } from "@/lib/formatters";
 import { StatusIcon } from "./status-icon";
 
 /** Left-accent color per section. Only the needs-you sections carry an accent;
@@ -27,16 +32,28 @@ export function InboxRow({
   row,
   selected,
   onSelect,
+  now,
 }: {
   row: InboxRowModel;
   selected: boolean;
   onSelect: (id: string) => void;
+  /** CTL-901 (HOME3): the "current time" the relative duration is measured
+   *  against, threaded from the surface so all rows agree on one clock (and so
+   *  the cell stays honest under test). */
+  now: number;
 }) {
   const needsYou = isNeedsYouSection(row.section);
   const blockerSuffix =
     row.section === "blocked" && row.blockers.length > 0
       ? ` · ${row.blockers.join(", ")}`
       : "";
+
+  // CTL-901 (HOME3): the quiet relative duration — how long this row has been
+  // waiting on you / blocked (held rows) or running in its current state
+  // (running rows). null when there is no honest backing timestamp → we OMIT the
+  // cell entirely rather than render a fabricated value (the "never fabricated"
+  // Gherkin). The done set carries no live duration.
+  const duration = fmtRelativeDuration(rowDurationMs(row, now));
 
   return (
     <button
@@ -83,6 +100,24 @@ export function InboxRow({
           {blockerSuffix}
         </span>
       </span>
+
+      {/* The quiet relative duration — "how long has this needed me / been
+          running". A muted, right-aligned figure (never an alarm). OMITTED
+          entirely when there is no honest backing timestamp (held/running rows
+          with no durable anchor, and every done row) so the row never shows a
+          fabricated time. The data-* attributes let the headless suite assert
+          the honest present/absent behaviour without a DOM. */}
+      {duration != null ? (
+        <span
+          data-row-duration={duration}
+          title={`${row.subLabel} for ${duration}`}
+          className="mt-0.5 shrink-0 font-mono text-[11px] tabular-nums text-muted"
+        >
+          {duration}
+        </span>
+      ) : (
+        <span data-row-duration-unavailable aria-hidden className="sr-only" />
+      )}
 
       {/* The single primary verb — present only on needs-you rows. Everything
           else (View in Claude / Snooze / Dismiss) is one click deeper (HOME4). */}

@@ -22,6 +22,8 @@ import {
   moveSelection,
   rowById,
   isNeedsYouSection,
+  rowDurationAnchor,
+  rowDurationMs,
   type InboxRow,
 } from "../ui/src/board/home-inbox";
 import type { BoardPayload, BoardTicket } from "../ui/src/board/types";
@@ -264,5 +266,98 @@ describe("calmHeaderSentence — ONE sentence, never a KPI grid (CTL-899)", () =
   it("collapses to the celebratory empty-state line when the inbox is empty", () => {
     const s = calmHeaderSentence({ blocked: 0, waiting: 0, running: 0, done: 0, needsYou: 0 });
     expect(s).toBe("All clear — nothing needs you right now.");
+  });
+});
+
+// ── CTL-901 (HOME3): per-row "how long" durations (honest, never fabricated) ──
+//
+// The acceptance criteria these lock in (the HOME3 Gherkin):
+//   • A waiting/blocked row shows how long it has needed you → anchored to the
+//     DURABLE heldSince (the applied-at of the held labels, BFF11).
+//   • A running row shows how long it has been running / in its current state →
+//     anchored to currentPhaseSince (the current phase's startedAt).
+//   • A duration with no real timestamp is honest, never fabricated → rowDurationMs
+//     returns null (the UI then OMITS / marks-unavailable the cell).
+describe("rowDurationAnchor — picks the right durable timestamp per section (CTL-901)", () => {
+  // Build a row directly (the row carries the underlying ticket).
+  function mkRow(section: InboxRow["section"], over: Partial<BoardTicket> = {}): InboxRow {
+    const t = mkTicket("CTL-901", over);
+    return {
+      id: t.id,
+      title: t.title,
+      section,
+      subLabel: "x",
+      verb: null,
+      blockers: [],
+      ticket: t,
+    };
+  }
+
+  it("a blocked row anchors to heldSince (how long it has been blocked)", () => {
+    const row = mkRow("blocked", { held: "blocked", heldSince: "2026-06-09T08:00:00Z" });
+    expect(rowDurationAnchor(row)).toBe("2026-06-09T08:00:00Z");
+  });
+
+  it("a waiting row anchors to heldSince (how long it has been waiting on you)", () => {
+    const row = mkRow("waiting", { held: "waiting", heldSince: "2026-06-09T07:30:00Z" });
+    expect(rowDurationAnchor(row)).toBe("2026-06-09T07:30:00Z");
+  });
+
+  it("a running row anchors to currentPhaseSince (how long it has been running)", () => {
+    const row = mkRow("running", { currentPhaseSince: "2026-06-09T09:56:00Z" });
+    expect(rowDurationAnchor(row)).toBe("2026-06-09T09:56:00Z");
+  });
+
+  it("a done row has no live duration anchor (null)", () => {
+    const row = mkRow("done", { currentPhaseSince: "2026-06-09T08:00:00Z" });
+    expect(rowDurationAnchor(row)).toBeNull();
+  });
+
+  it("a held row with NO durable heldSince has no anchor (honest null)", () => {
+    const row = mkRow("blocked", { held: "blocked", heldSince: null });
+    expect(rowDurationAnchor(row)).toBeNull();
+  });
+
+  it("a running row with NO currentPhaseSince has no anchor (honest null)", () => {
+    const row = mkRow("running", { currentPhaseSince: null });
+    expect(rowDurationAnchor(row)).toBeNull();
+  });
+});
+
+describe("rowDurationMs — elapsed since the durable anchor, honest about absence (CTL-901)", () => {
+  function mkRow(section: InboxRow["section"], over: Partial<BoardTicket> = {}): InboxRow {
+    const t = mkTicket("CTL-901", over);
+    return { id: t.id, title: t.title, section, subLabel: "x", verb: null, blockers: [], ticket: t };
+  }
+  const now = Date.parse("2026-06-09T10:00:00Z");
+
+  it("a row blocked for 2h reports ~2h of elapsed ms", () => {
+    const row = mkRow("blocked", { held: "blocked", heldSince: "2026-06-09T08:00:00Z" });
+    expect(rowDurationMs(row, now)).toBe(2 * 60 * 60 * 1000);
+  });
+
+  it("a row running for 4m reports ~4m of elapsed ms (the implement-phase case)", () => {
+    const row = mkRow("running", { currentPhaseSince: "2026-06-09T09:56:00Z" });
+    expect(rowDurationMs(row, now)).toBe(4 * 60 * 1000);
+  });
+
+  it("returns null — NOT a fabricated 0 — when the anchor is absent", () => {
+    const row = mkRow("blocked", { held: "blocked", heldSince: null });
+    expect(rowDurationMs(row, now)).toBeNull();
+  });
+
+  it("returns null when the anchor is an unparseable timestamp", () => {
+    const row = mkRow("waiting", { held: "waiting", heldSince: "not-a-date" });
+    expect(rowDurationMs(row, now)).toBeNull();
+  });
+
+  it("clamps a clock-skewed future anchor to 0 (never a negative duration)", () => {
+    const row = mkRow("running", { currentPhaseSince: "2026-06-09T10:05:00Z" });
+    expect(rowDurationMs(row, now)).toBe(0);
+  });
+
+  it("a done row never reports a live duration even with a phase timestamp", () => {
+    const row = mkRow("done", { currentPhaseSince: "2026-06-09T08:00:00Z" });
+    expect(rowDurationMs(row, now)).toBeNull();
   });
 });

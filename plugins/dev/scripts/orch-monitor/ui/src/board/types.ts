@@ -103,6 +103,15 @@ export interface BoardTicket {
   held?: "blocked" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (only meaningful when held === "blocked"). */
   blockers?: string[];
+  /** CTL-901 (HOME3): ISO applied-at of the held labels (durable ticket_state
+   *  held_since, projected by the broker — BFF11). The honest "how long has it
+   *  been waiting on you" anchor; null when no durable stamp exists (rendered
+   *  unavailable, never fabricated). Only meaningful while held is set. */
+  heldSince?: string | null;
+  /** CTL-901 (HOME3): ISO start of the ticket's CURRENT phase — the "how long
+   *  has it been running / in its current state" anchor for the running set.
+   *  null when the surfaced phase carried no startedAt. */
+  currentPhaseSince?: string | null;
   /** CTL-922 (BFF10): the node owning this ticket (BOARD3 host swimlanes), from
    *  the phase signals host:{name,id} (CTL-852) or the durable fence projection
    *  owner_host (BFF11). null when no host is named. */

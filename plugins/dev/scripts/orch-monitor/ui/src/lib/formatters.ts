@@ -17,6 +17,24 @@ export function fmtDuration(ms: number): string {
   return h + "h " + (m % 60) + "m";
 }
 
+// CTL-901 (HOME3): a QUIET, single-coarsest-unit relative duration for the calm
+// inbox rows — "2h", "4m", "30s", "3d" — never the compound "2h 5m" the dense
+// board uses (fmtDuration). One unit keeps the row unalarming and matches the
+// Gherkin "a quiet relative duration like '2h'". A null/negative input (no honest
+// backing timestamp) yields null so the caller OMITS the cell rather than
+// rendering a fabricated "0s" — the "honest, never fabricated" acceptance line.
+export function fmtRelativeDuration(ms: number | null): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  const d = Math.floor(h / 24);
+  return d + "d";
+}
+
 export function fmtTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "—";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
