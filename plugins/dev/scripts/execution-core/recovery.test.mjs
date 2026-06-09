@@ -3854,3 +3854,41 @@ describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
     expect(next).toBe("research");
   });
 });
+
+// ─── CTL-863: phaseAlreadyComplete ───────────────────────────────────────────
+
+import { phaseAlreadyComplete } from "./recovery.mjs";
+
+describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
+  test("true when a matching complete event is in the log", () => {
+    const lines = [
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }),
+    ].join("\n");
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+
+  test("false when no matching event (different ticket)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-999" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false when no matching event (different phase)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false on missing/unreadable log (never throws)", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", {
+      readLog: () => { throw new Error("no file"); },
+    })).toBe(false);
+  });
+
+  test("false when log is empty", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => "" })).toBe(false);
+  });
+
+  test("handles malformed JSON lines gracefully", () => {
+    const lines = "not-json\n" + JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+});

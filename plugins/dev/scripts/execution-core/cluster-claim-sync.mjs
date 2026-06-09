@@ -31,6 +31,37 @@ const CLUSTER_CLAIM_CLI = fileURLToPath(new URL("./cluster-claim.mjs", import.me
 // a tick. Overridable for tests / slow networks.
 const CLAIM_TIMEOUT_MS = Number(process.env.EXECUTION_CORE_CLAIM_TIMEOUT_MS) || 15_000;
 
+// fenceCheckSync — synchronous stale-generation check a side-effect site calls
+// BEFORE writing to Linear/GitHub. Returns { current }. The CLI exits 0 (current)
+// or FENCE_STALE_EXIT=10 (stale) and prints {current} either way, so we read the
+// verdict from stdout and treat any unexpected outcome (spawn error, timeout,
+// unparseable stdout) as current:false — FAIL-CLOSED, so a transient hiccup
+// suppresses the write rather than letting a possible zombie through.
+export function fenceCheckSync(
+  { ticket, generation },
+  {
+    spawn = spawnSync,
+    nodeBin = process.execPath,
+    cli = CLUSTER_CLAIM_CLI,
+    env = process.env,
+    timeout = CLAIM_TIMEOUT_MS,
+  } = {},
+) {
+  try {
+    const res = spawn(nodeBin, [cli, "fence-check", ticket, String(generation)], {
+      encoding: "utf8",
+      env,
+      timeout,
+    });
+    if (!res || typeof res.stdout !== "string") return { current: false };
+    const line = res.stdout.trim().split("\n").filter(Boolean).pop();
+    const parsed = JSON.parse(line);
+    return { current: parsed?.current === true };
+  } catch {
+    return { current: false };
+  }
+}
+
 // claimDispatchSync — soft-CAS claim `ticket` for `hostName` at `phase`,
 // synchronously. Returns { won, generation }. won:false on any failure
 // (fail-closed). `spawn`/`nodeBin`/`cli`/`env`/`timeout` are injectable so the
