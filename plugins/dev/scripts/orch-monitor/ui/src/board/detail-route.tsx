@@ -1,0 +1,150 @@
+// detail-route.tsx — the route container that mounts the shared <Shell> chrome
+// for /ticket/$id and /worker/$id (CTL-912 / DETAIL1). It subscribes to the
+// resident board payload (the SAME `connectBoard` transport the board uses),
+// resolves the walk list + the entity through the SHARED `resolveList` (so the
+// pager order matches the board), maps the entity to the shell's chrome props,
+// and renders the page body in the <DetailBody> slot.
+//
+// SCOPE: this ticket (DETAIL1) owns the CHROME — the breadcrumb, pager, live-dot
+// title, Properties rail skeleton, footer, and keyboard. The page BODIES (ticket
+// spine/telemetry/runs in DETAIL2, worker burn-strip/tail/diagnostics in DETAIL3)
+// drop into the slot later; here the body is an honest "coming in DETAIL2/3"
+// placeholder. The Properties rail already binds the shared cheap rows off the
+// resident payload (AVAILABLE-NOW); unplumbed rows render dimmed, never faked.
+
+import { useEffect, useState } from "react";
+import { connectBoard } from "./board-client";
+import { resolveListIds } from "./list-order";
+import { Shell, type PropertyRow, type ShellKind, type StreamHealth } from "./Shell";
+import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
+import type { DetailSearch } from "./route-search";
+
+// ── resident payload subscription (same transport as Board.tsx) ─────────────
+function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth } {
+  const [payload, setPayload] = useState<BoardPayload | null>(null);
+  const [health, setHealth] = useState<StreamHealth>({ state: "unknown" });
+
+  useEffect(() => {
+    let alive = true;
+    let lastFrameAt: number | null = null;
+    const conn = connectBoard({
+      onSnapshot: (p) => {
+        if (!alive) return;
+        lastFrameAt = Date.now();
+        setPayload(p);
+      },
+      onStatus: (s) => {
+        if (!alive) return;
+        // Map the board transport's connection status to a footer stream-health.
+        // We only ever claim "live" when a frame actually arrived (never fabricate).
+        if (s === "connected" && lastFrameAt != null) {
+          setHealth({ state: "live", lastFrameAgoMs: Date.now() - lastFrameAt });
+        } else if (s === "connected") {
+          setHealth({ state: "unknown" }); // connected but no frame yet — honest dim
+        } else {
+          setHealth({ state: "reconnecting" });
+        }
+      },
+    });
+    return () => {
+      alive = false;
+      conn.close();
+    };
+  }, []);
+
+  return { payload, health };
+}
+
+// ── property-row assembly (shared cheap rows; unplumbed → undefined → dimmed) ─
+function ticketRows(t: BoardTicket | undefined): PropertyRow[] {
+  // Every value is the AVAILABLE-NOW BoardTicket field, or `undefined` (dimmed)
+  // when the entity isn't in the resident payload yet (a cold-linked Done ticket).
+  return [
+    { label: "Status", value: t ? `${t.linearState} · ${activeLabel(t.activeState, t.working)}` : undefined },
+    { label: "Phase", value: t?.phase },
+    { label: "Priority", value: t ? priorityLabel(t.priority) : undefined },
+    { label: "Estimate", value: t?.estimate != null ? `${t.estimate} pts` : t ? null : undefined },
+    { label: "Scope", value: t ? (t.scope ?? null) : undefined },
+    { label: "Project", value: t ? (t.project ?? null) : undefined },
+    { label: "Repo", value: t?.repo },
+    { label: "Team", value: t?.team },
+    { label: "Updated", value: t?.updatedAt },
+    { label: "PR", value: t?.pr != null ? `#${t.pr}` : t ? null : undefined },
+    // `model` is the CURRENT phase's signal model only — labelled honestly.
+    { label: "Model (current phase)", value: t ? (t.model ?? null) : undefined },
+  ];
+}
+
+function workerRows(w: BoardWorker | undefined): PropertyRow[] {
+  return [
+    { label: "Status", value: w ? activeLabel(w.activeState, w.working) : undefined },
+    { label: "Phase", value: w?.phase },
+    { label: "Repo", value: w?.repo },
+    { label: "Team", value: w?.team },
+    { label: "Runtime", value: w?.runtimeMs != null ? fmtDuration(w.runtimeMs) : w ? null : undefined },
+  ];
+}
+
+function activeLabel(state: BoardTicket["activeState"], working: boolean): string {
+  if (state === "active") return working ? "Working" : "Active";
+  if (state === "stuck") return "Stuck";
+  return "Settled";
+}
+
+function priorityLabel(p: number): string {
+  return p > 0 ? `P${p}` : "—";
+}
+
+function fmtDuration(ms: number): string {
+  const m = Math.floor(ms / 60000);
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+// ── route components ─────────────────────────────────────────────────────────
+export function TicketDetailRoute({ id, search }: { id: string; search: DetailSearch }) {
+  const { payload, health } = useBoardPayload();
+  const kind: ShellKind = "ticket";
+  const listIds = payload ? resolveListIds(payload, { kind, lens: search.lens, col: search.col }) : [];
+  const ticket = payload?.tickets.find((t) => t.id === id);
+
+  return (
+    <Shell
+      kind={kind}
+      id={id}
+      search={search}
+      listIds={listIds}
+      live={{ working: ticket?.working ?? false, activeState: ticket?.activeState ?? null }}
+      title={ticket?.title ?? id}
+      properties={ticketRows(ticket)}
+      streamHealth={health}
+    >
+      <div data-detail-body-placeholder="ticket" style={{ color: "#5b626f", font: "12px ui-monospace, monospace" }}>
+        Ticket lifecycle body (spine · telemetry · runs) lands in DETAIL2.
+      </div>
+    </Shell>
+  );
+}
+
+export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSearch }) {
+  const { payload, health } = useBoardPayload();
+  const kind: ShellKind = "worker";
+  const listIds = payload ? resolveListIds(payload, { kind, lens: search.lens, col: search.col }) : [];
+  const worker = payload?.workers.find((w) => w.name === id);
+
+  return (
+    <Shell
+      kind={kind}
+      id={id}
+      search={search}
+      listIds={listIds}
+      live={{ working: worker?.working ?? false, activeState: worker?.activeState ?? null }}
+      title={worker?.name ?? id}
+      properties={workerRows(worker)}
+      streamHealth={health}
+    >
+      <div data-detail-body-placeholder="worker" style={{ color: "#5b626f", font: "12px ui-monospace, monospace" }}>
+        Worker run body (burn-strip · tail · diagnostics) lands in DETAIL3.
+      </div>
+    </Shell>
+  );
+}
