@@ -21,6 +21,7 @@ import {
   writeSidebarOpen,
   shouldToggleSidebar,
 } from "@/lib/sidebar-collapse";
+import { shouldOpenPalette } from "@/lib/command-palette";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -133,13 +134,31 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // ⌘K / Ctrl+K opens the command palette; clicks on the sidebar's search field
-  // (data-cmdk-trigger) open it too.
+  // ⌘K / Ctrl+K and a bare `/` (outside a field) open the command palette — the
+  // SINGLE search affordance for the shell (SHELL5 de-dups the prototype's two
+  // search bars). Clicks on the top-strip search field (data-cmdk-trigger) open
+  // it too. The open contract — including the "'/' never hijacks typing" guard —
+  // lives in lib/command-palette.ts (`shouldOpenPalette`) so it is unit-tested
+  // without a DOM, the same way `[` uses shouldToggleSidebar. ⌘K toggles; `/`
+  // opens (a quick-open shouldn't re-close on a second slash).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+      if (
+        shouldOpenPalette({
+          key: e.key,
+          metaKey: e.metaKey,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+          target: e.target as HTMLElement | null,
+        })
+      ) {
         e.preventDefault();
-        setPaletteOpen((o) => !o);
+        // ⌘K toggles (open ⇄ close); `/` only opens.
+        if (e.key === "k" || e.key === "K") {
+          setPaletteOpen((o) => !o);
+        } else {
+          setPaletteOpen(true);
+        }
       }
     };
     const onClick = (e: MouseEvent) => {

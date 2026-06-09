@@ -7,7 +7,6 @@ import {
   LayoutGridIcon,
   ListOrderedIcon,
   MoonIcon,
-  SearchIcon,
   ServerIcon,
   SettingsIcon,
   SunIcon,
@@ -124,7 +123,12 @@ export function AppSidebar() {
     // an explicit later nicety, not the v1 emphasis; the `group-data-[collapsible=
     // icon]:…` classes below stay as inert documentation of that optional mode.
     <Sidebar variant="inset" collapsible="offcanvas">
-      {/* ── HEADER: chevron mark + wordmark + ⌘K trigger ────────────────────── */}
+      {/* ── HEADER: chevron mark + wordmark ─────────────────────────────────── */}
+      {/* CTL-895 / SHELL5 — the redundant sidebar-header search field was REMOVED
+          here (handoff cosmetic #1: the prototype shipped TWO ⌘K triggers, one in
+          this header and one in the top strip). Search now lives in EXACTLY one
+          place — the top-strip ⌘K trigger (app-shell.tsx) — plus the ⌘K / `/`
+          keyboard openers. Keep the header to the brand only. */}
       <SidebarHeader className="gap-2">
         <div className="flex items-center gap-2 px-1 pt-1">
           {/* The chevron mark stays at every collapse width; only the wordmark
@@ -136,27 +140,6 @@ export function AppSidebar() {
             Catalyst
           </span>
         </div>
-
-        {/* ⌘K search trigger, styled as a muted field. Opens the command palette
-            (the cmd+k handler lives in AppShell). */}
-        <button
-          type="button"
-          data-cmdk-trigger
-          className={cn(
-            "flex h-8 w-full items-center gap-2 rounded-md border border-border bg-secondary/40 px-2 text-sm text-muted-foreground",
-            "transition-colors hover:bg-secondary hover:text-foreground",
-            "group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0",
-          )}
-          aria-label="Search or jump to…"
-        >
-          <SearchIcon className="size-4 shrink-0" />
-          <span className="flex-1 text-left group-data-[collapsible=icon]:hidden">
-            Search…
-          </span>
-          <kbd className="rounded border border-border bg-background/60 px-1 py-0.5 text-[10px] text-muted-foreground group-data-[collapsible=icon]:hidden">
-            ⌘K
-          </kbd>
-        </button>
       </SidebarHeader>
 
       <SidebarContent>
