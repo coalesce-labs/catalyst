@@ -20,11 +20,16 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  ALL_CLEAR_HEADLINE,
+  allClearReassurance,
   calmHeaderSentence,
   deriveInbox,
+  isAllClear,
   isNeedsYouSection,
   moveSelection,
   rowById,
+  shippedWhileAwaySummary,
+  type InboxCounts,
   type InboxSection,
 } from "@/board/home-inbox";
 import { isTypingTarget } from "@/lib/surface";
@@ -32,6 +37,28 @@ import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
+import { AllClearHero } from "./all-clear-hero";
+
+/** The all-clear LIST state (CTL-904 / HOME6): when nothing needs the operator,
+ *  the list reads as everything-handled — the "All clear" headline + how many
+ *  shipped while you were away + the running-on-their-own reassurance — instead of
+ *  the bare alarm-count sections. The relief payoff, designed as a feature. The
+ *  celebratory entrance collapses to instant under prefers-reduced-motion. */
+function AllClearList({ counts }: { counts: InboxCounts }) {
+  const shipped = shippedWhileAwaySummary(counts);
+  return (
+    <div
+      data-all-clear-list
+      className="animate-fade-in motion-reduce:animate-none flex flex-col items-center gap-2 px-6 py-12 text-center"
+    >
+      <p className="text-[14px] font-medium text-fg">{ALL_CLEAR_HEADLINE}</p>
+      {shipped && <p className="text-[12px] text-muted">{shipped}</p>}
+      <p className="mt-1 max-w-xs text-[12px] leading-relaxed text-muted opacity-80">
+        {allClearReassurance(counts)}
+      </p>
+    </div>
+  );
+}
 
 /** One inbox section. The needs-you sections (blocked / waiting) render their
  *  rows OPEN; the reassurance sections (running on its own / done) collapse to a
@@ -107,6 +134,7 @@ function InboxSectionBlock({
 function InboxList({
   header,
   sections,
+  counts,
   selectedId,
   onSelect,
   status,
@@ -114,6 +142,7 @@ function InboxList({
 }: {
   header: string;
   sections: ReturnType<typeof deriveInbox>["sections"];
+  counts: InboxCounts;
   selectedId: string | null;
   onSelect: (id: string) => void;
   status: string;
@@ -121,7 +150,8 @@ function InboxList({
 }) {
   return (
     <div className="flex h-full flex-col bg-surface-0">
-      {/* The calm "state of things" header — ONE sentence, never a KPI grid. */}
+      {/* The calm "state of things" header — ONE sentence, never a KPI grid.
+          In the all-clear state it reads as everything-handled (no alarm count). */}
       <header className="shrink-0 border-b border-border px-4 py-4">
         <p className="text-[13px] text-fg" data-calm-header>
           {header}
@@ -131,12 +161,12 @@ function InboxList({
         )}
       </header>
 
-      {/* Flat bare-row list — sections are hairline-divided groups, NOT cards. */}
+      {/* Flat bare-row list — sections are hairline-divided groups, NOT cards.
+          When nothing needs the operator, the calm all-clear list replaces the
+          sections entirely (the relief payoff). */}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {sections.length === 0 ? (
-          <p className="px-4 py-8 text-center text-[12px] text-muted">
-            All clear — nothing needs you right now.
-          </p>
+        {isAllClear(counts) ? (
+          <AllClearList counts={counts} />
         ) : (
           sections.map((section) => (
             <InboxSectionBlock
@@ -215,7 +245,12 @@ export function HomeSurface() {
     return () => window.removeEventListener("keydown", onKey);
   }, [model.order]);
 
-  const header = calmHeaderSentence(model.counts);
+  // CTL-904 / HOME6: the all-clear gate — nothing needs the operator. When it
+  // holds, the header reads as everything-handled (not an alarm count), the list
+  // shows the celebratory all-clear state, and the reading pane shows the calm
+  // all-clear hero instead of a per-row detail (never a blank pane).
+  const allClear = isAllClear(model.counts);
+  const header = allClear ? ALL_CLEAR_HEADLINE : calmHeaderSentence(model.counts);
   const selectedRow = rowById(model, selectedId);
 
   return (
@@ -225,13 +260,16 @@ export function HomeSurface() {
           <InboxList
             header={header}
             sections={model.sections}
+            counts={model.counts}
             selectedId={selectedId}
             onSelect={setSelectedId}
             status={status}
             now={now}
           />
         }
-        reading={<ReadingPane row={selectedRow} />}
+        reading={
+          allClear ? <AllClearHero counts={model.counts} /> : <ReadingPane row={selectedRow} />
+        }
       />
     </div>
   );
