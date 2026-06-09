@@ -413,3 +413,201 @@ describe("costValidation", () => {
     ).toBeNull();
   });
 });
+
+// ── CTL-917 (DETAIL6): burn metrics off the OTEL pipeline ───────────────────
+import {
+  isValidLinearKey,
+  workerBurnSeries,
+  ticketTelemetrySeries,
+} from "../lib/otel-queries";
+
+/** A Prometheus mock that routes each `queryRange` call to a matrix result by
+ *  matching a substring of the PromQL — so a single helper that fans out four
+ *  different range queries can be asserted series-by-series. A query with no
+ *  registered match resolves to an empty matrix (an honest "no series yet"). */
+function mockPromRange(
+  routes: Array<{ match: string; result: PrometheusQueryResult | null }>,
+  available = true,
+): PrometheusFetcher {
+  const find = (promql: string): PrometheusQueryResult | null => {
+    for (const r of routes) {
+      if (promql.includes(r.match)) return r.result;
+    }
+    return { data: { resultType: "matrix", result: [] } };
+  };
+  return {
+    query: (promql) => Promise.resolve(find(promql)),
+    queryRange: (promql) => Promise.resolve(find(promql)),
+    isAvailable: () => available,
+  };
+}
+
+function matrix(
+  labels: Record<string, string>,
+  values: Array<[number, string]>,
+): PrometheusQueryResult {
+  return { data: { resultType: "matrix", result: [{ metric: labels, values }] } };
+}
+
+describe("isValidLinearKey", () => {
+  it("accepts canonical Linear keys", () => {
+    expect(isValidLinearKey("CTL-917")).toBe(true);
+    expect(isValidLinearKey("ADV-1")).toBe(true);
+    expect(isValidLinearKey("ENG-12345")).toBe(true);
+  });
+  it("rejects PromQL-injection / malformed values", () => {
+    expect(isValidLinearKey('CTL-1"} or up(')).toBe(false);
+    expect(isValidLinearKey("CTL-")).toBe(false);
+    expect(isValidLinearKey("917")).toBe(false);
+    expect(isValidLinearKey("")).toBe(false);
+    expect(isValidLinearKey("CTL 917")).toBe(false);
+  });
+});
+
+describe("workerBurnSeries", () => {
+  it("returns the four sparkline series keyed on the CC session UUID", async () => {
+    const uuid = "7f3a91ab-cdef-4012-89ab-cdef01234567";
+    const prom = mockPromRange([
+      {
+        match: "sum(claude_code_cost_usage_USD_total{session_id",
+        result: matrix({}, [[100, "0.40"], [160, "0.84"]]),
+      },
+      {
+        match: "sum(claude_code_token_usage_tokens_total{session_id",
+        result: matrix({}, [[100, "318000"], [160, "412000"]]),
+      },
+      {
+        match: "sum by (type) (claude_code_token_usage_tokens_total{session_id",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [
+              { metric: { type: "input" }, values: [[160, "318000"]] },
+              { metric: { type: "output" }, values: [[160, "94000"]] },
+            ],
+          },
+        },
+      },
+      {
+        match: "sum(claude_code_active_time_seconds_total{session_id",
+        result: matrix({}, [[100, "600"], [160, "708"]]),
+      },
+    ]);
+    const res = await workerBurnSeries(prom, uuid, "1h");
+    expect(res).not.toBeNull();
+    expect(res!.cost).toEqual([[100, 0.4], [160, 0.84]]);
+    expect(res!.tokens[res!.tokens.length - 1]).toEqual([160, 412000]);
+    expect(res!.tokensByType["input"]).toEqual([[160, 318000]]);
+    expect(res!.tokensByType["output"]).toEqual([[160, 94000]]);
+    expect(res!.activeSeconds[res!.activeSeconds.length - 1]).toEqual([160, 708]);
+  });
+
+  it("returns empty series (not null) for a just-spawned worker with no points", async () => {
+    const uuid = "7f3a91ab-cdef-4012-89ab-cdef01234567";
+    // every query returns an empty matrix → the helper returns empty arrays, and
+    // the UI falls back to the resident BoardWorker scalar (never a blank chart).
+    const prom = mockPromRange([]);
+    const res = await workerBurnSeries(prom, uuid, "1h");
+    expect(res).not.toBeNull();
+    expect(res!.cost).toEqual([]);
+    expect(res!.tokens).toEqual([]);
+    expect(res!.activeSeconds).toEqual([]);
+    expect(res!.tokensByType).toEqual({});
+  });
+
+  it("rejects an invalid session id (no PromQL injection)", async () => {
+    const prom = mockPromRange([]);
+    expect(await workerBurnSeries(prom, 'x"} or up(', "1h")).toBeNull();
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const prom: PrometheusFetcher = {
+      query: () => Promise.resolve(null),
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => false,
+    };
+    expect(
+      await workerBurnSeries(prom, "7f3a91ab-cdef-4012-89ab-cdef01234567", "1h"),
+    ).toBeNull();
+  });
+});
+
+describe("ticketTelemetrySeries", () => {
+  it("returns total series plus cost-by-phase and cost-by-model breakdowns", async () => {
+    const prom = mockPromRange([
+      {
+        match: "sum(claude_code_cost_usage_USD_total{linear_key",
+        result: matrix({}, [[100, "0.6"], [160, "1.14"]]),
+      },
+      {
+        match: "sum(claude_code_token_usage_tokens_total{linear_key",
+        result: matrix({}, [[160, "2500000"]]),
+      },
+      {
+        match: "sum by (type) (claude_code_token_usage_tokens_total{linear_key",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [{ metric: { type: "input" }, values: [[160, "2100000"]] }],
+          },
+        },
+      },
+      {
+        match: "sum by (task_type) (claude_code_cost_usage_USD_total{linear_key",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [
+              { metric: { task_type: "plan" }, values: [[160, "0.38"]] },
+              { metric: { task_type: "implement" }, values: [[160, "0.51"]] },
+            ],
+          },
+        },
+      },
+      {
+        match: "sum by (model) (claude_code_cost_usage_USD_total{linear_key",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [
+              { metric: { model: "opus" }, values: [[160, "0.89"]] },
+              { metric: { model: "sonnet" }, values: [[160, "0.25"]] },
+            ],
+          },
+        },
+      },
+    ]);
+    const res = await ticketTelemetrySeries(prom, "CTL-845", "1h");
+    expect(res).not.toBeNull();
+    expect(res!.cost[res!.cost.length - 1]).toEqual([160, 1.14]);
+    expect(res!.tokens[0]).toEqual([160, 2500000]);
+    expect(res!.tokensByType["input"]).toEqual([[160, 2100000]]);
+    expect(res!.costByPhase["plan"]).toEqual([[160, 0.38]]);
+    expect(res!.costByPhase["implement"]).toEqual([[160, 0.51]]);
+    expect(res!.costByModel["opus"]).toEqual([[160, 0.89]]);
+    expect(res!.costByModel["sonnet"]).toEqual([[160, 0.25]]);
+  });
+
+  it("returns empty series for an instant-paint ticket with no points", async () => {
+    const prom = mockPromRange([]);
+    const res = await ticketTelemetrySeries(prom, "CTL-845", "1h");
+    expect(res).not.toBeNull();
+    expect(res!.cost).toEqual([]);
+    expect(res!.costByPhase).toEqual({});
+    expect(res!.costByModel).toEqual({});
+  });
+
+  it("rejects an invalid linear key", async () => {
+    const prom = mockPromRange([]);
+    expect(await ticketTelemetrySeries(prom, 'CTL-1"} or up(', "1h")).toBeNull();
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const prom: PrometheusFetcher = {
+      query: () => Promise.resolve(null),
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => false,
+    };
+    expect(await ticketTelemetrySeries(prom, "CTL-845", "1h")).toBeNull();
+  });
+});

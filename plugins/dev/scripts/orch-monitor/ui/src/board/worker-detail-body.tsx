@@ -31,7 +31,15 @@ import {
   type PhaseSignalFields,
   type LivenessLevel,
 } from "./worker-detail-data";
+import {
+  buildBurnTiles,
+  deriveIdleRatio,
+  type WorkerBurnSeries,
+  type BurnTile,
+} from "./worker-burn-data";
 import { LIVE_CYAN } from "./detail-chrome";
+import { Sparkline } from "../components/sparkline";
+import { fmtCost, fmtTokens } from "@/lib/formatters";
 
 // ── tokens (mirror Shell.tsx's inline-`C` palette) ──────────────────────────
 const C = {
@@ -164,6 +172,52 @@ function useHistoryTail(sessionId: string | null, enabled: boolean): {
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
   return { state, reload };
+}
+
+/** Fetch the worker Burn Strip's REAL Prometheus sparklines for this run's CC
+ *  session UUID (CTL-917). REAL today — no new plumbing, the same OTEL pipeline
+ *  the board cost strip reads. A 503 (Prometheus not configured) or a null id
+ *  yields `null` series, and the strip falls back to the resident BoardWorker
+ *  scalars — never a blank chart. Polls while the worker is alive so the
+ *  sparkline grows; stops once it dies (the series freezes at its final shape). */
+function useBurnSeries(
+  sessionId: string | null,
+  alive: boolean,
+): WorkerBurnSeries | null {
+  const [series, setSeries] = useState<WorkerBurnSeries | null>(null);
+
+  useEffect(() => {
+    if (!sessionId) {
+      setSeries(null);
+      return;
+    }
+    let stop = false;
+    const load = async () => {
+      try {
+        const res = await fetch(
+          `/api/otel/burn/${encodeURIComponent(sessionId)}?range=1h`,
+        );
+        if (stop) return;
+        if (res.ok) {
+          const body = (await res.json()) as { data: WorkerBurnSeries };
+          setSeries(body.data ?? null);
+        } else {
+          setSeries(null); // 503 / 4xx → resident-scalar fallback
+        }
+      } catch {
+        if (!stop) setSeries(null);
+      }
+    };
+    void load();
+    // Refresh every 30s while alive (matches the Prometheus fetcher cache TTL).
+    const timer = alive ? setInterval(() => void load(), 30_000) : null;
+    return () => {
+      stop = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [sessionId, alive]);
+
+  return series;
 }
 
 // ── small presentational atoms ───────────────────────────────────────────────
@@ -580,6 +634,132 @@ function ActivityTail({ sessionId }: { sessionId: string | null }) {
   );
 }
 
+// ── BURN STRIP (REAL Prometheus sparklines, CC-UUID join) + idle-ratio ───────
+function formatTileValue(tile: BurnTile): string {
+  if (tile.value == null) return "—";
+  switch (tile.label) {
+    case "COST":
+      return fmtCost(tile.value);
+    case "TOKENS":
+      return fmtTokens(tile.value);
+    case "ACTIVE":
+      return fmtIdle(tile.value * 1000); // active seconds → the idle formatter
+    default:
+      return String(tile.value);
+  }
+}
+
+function BurnTileCell({ tile }: { tile: BurnTile }) {
+  const live = tile.source === "sparkline";
+  return (
+    <div
+      data-burn-tile={tile.label}
+      data-source={tile.source}
+      style={{
+        flex: "1 1 0",
+        minWidth: 120,
+        background: C.s3,
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: "8px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      <span style={{ font: `9px ${C.mono}`, letterSpacing: "0.08em", color: C.fgMuted }}>
+        {tile.label}
+      </span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span
+          data-burn-value
+          style={{ font: `13px ${C.mono}`, color: tile.value != null ? C.fg : C.fgDim, fontWeight: 600 }}
+        >
+          {formatTileValue(tile)}
+        </span>
+        {live && tile.points.length > 0 ? (
+          <Sparkline points={tile.points} color={LIVE_CYAN} ariaLabel={`${tile.label} sparkline`} />
+        ) : tile.source === "scalar-fallback" ? (
+          <span data-burn-hint style={{ font: `9px ${C.mono}`, color: C.fgDim }}>
+            ({tile.hint ?? "live soon"})
+          </span>
+        ) : (
+          <span data-burn-needs style={{ font: `9px ${C.mono}`, color: C.fgDim }} title="git-sourced, not telemetry">
+            — ↯
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function IdleRatioBar({
+  activeSeconds,
+  runtimeMs,
+}: {
+  activeSeconds: WorkerBurnSeries["activeSeconds"] | null;
+  runtimeMs: number | null;
+}) {
+  const ratio = deriveIdleRatio(activeSeconds, runtimeMs);
+  const SEGMENTS = 10;
+  const filled = ratio.fraction == null ? 0 : Math.round(ratio.fraction * SEGMENTS);
+  const pct = ratio.fraction == null ? null : Math.round(ratio.fraction * 100);
+  return (
+    <div
+      data-idle-ratio
+      data-fraction={ratio.fraction ?? "none"}
+      style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 2px" }}
+    >
+      <span style={{ font: `10px ${C.mono}`, color: C.fgMuted, flex: "0 0 auto" }}>idle-ratio</span>
+      <span style={{ display: "inline-flex", gap: 2, flex: "0 0 auto" }}>
+        {Array.from({ length: SEGMENTS }).map((_, i) => (
+          <span
+            key={i}
+            style={{
+              width: 7,
+              height: 11,
+              borderRadius: 1,
+              // active fraction filled (cyan), the rest muted — a shrinking
+              // filled span reads as the stuck-tell.
+              background: ratio.fraction == null ? C.s3 : i < filled ? LIVE_CYAN : C.s3,
+              border: `1px solid ${C.border}`,
+            }}
+          />
+        ))}
+      </span>
+      <span style={{ font: `10px ${C.mono}`, color: pct != null ? C.fg : C.fgDim, flex: "0 0 auto" }}>
+        {pct != null
+          ? `active ${fmtIdle((ratio.activeSeconds ?? 0) * 1000)} / wall ${fmtIdle((ratio.wallSeconds ?? 0) * 1000)} · ${pct}%`
+          : "— ↯ (needs active series + runtime)"}
+      </span>
+    </div>
+  );
+}
+
+function BurnStrip({
+  series,
+  worker,
+}: {
+  series: WorkerBurnSeries | null;
+  worker: BoardWorker | undefined;
+}) {
+  const tiles = useMemo(() => buildBurnTiles(series, worker), [series, worker]);
+  return (
+    <div
+      data-worker-burn-strip
+      style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}
+    >
+      <SectionHeading>Burn Strip · Prometheus (session_id)</SectionHeading>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+        {tiles.map((t) => (
+          <BurnTileCell key={t.label} tile={t} />
+        ))}
+      </div>
+      <IdleRatioBar activeSeconds={series?.activeSeconds ?? null} runtimeMs={worker?.runtimeMs ?? null} />
+    </div>
+  );
+}
+
 // ── the page body ─────────────────────────────────────────────────────────────
 export function WorkerDetailBody({
   id,
@@ -594,12 +774,14 @@ export function WorkerDetailBody({
   const fields = useMemo(() => (signal ? readPhaseSignalFields(signal) : null), [signal]);
   const scalars = readWorkerScalars(worker);
   const alive = isWorkerAlive(worker);
+  const burnSeries = useBurnSeries(scalars.sessionId, alive);
 
   return (
     <div data-worker-detail-body data-id={id} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       <HeaderStrip worker={worker} signal={fields} alive={alive} />
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,320px)", gap: 12, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+          <BurnStrip series={burnSeries} worker={worker} />
           <ActivityTail sessionId={scalars.sessionId} />
           <SignalPanel signal={signal} label={phase ? `phase-${phase}.json` : ""} />
         </div>
