@@ -29,10 +29,13 @@ import { hostName, hostId } from "./lib/host-identity.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
+  getClusterHosts,
+  getHostName,
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
+  HEARTBEAT_GRACE_MS,
 } from "./config.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -50,7 +53,10 @@ import {
   defaultProgressMark,
 } from "./work-done-probes.mjs";
 import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
-import { defaultDispatch } from "./dispatch.mjs";
+import { ownerForTicket } from "./hrw.mjs";
+import { claimDispatchSync } from "./cluster-claim-sync.mjs";
+import { dispatchTicket, defaultDispatch } from "./dispatch.mjs";
+import { createWorktree } from "./worktree.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
@@ -2079,4 +2085,107 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
     }
   }
   return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
+}
+
+// defaultOwnedTicketsForHost — scan the local worker signal directory for non-terminal
+// signals dispatched from the given dead host. Local-only (no network). Returns ticket
+// IDs whose most-recent signal has host.name === deadHost and a non-terminal status.
+function defaultOwnedTicketsForHost(deadHost, { orchDir }) {
+  const signals = readWorkerSignals(orchDir);
+  const tickets = new Set();
+  for (const sig of signals) {
+    if (!sig.raw?.host?.name || sig.raw.host.name !== deadHost) continue;
+    // Only include non-terminal tickets — terminal ones are already done.
+    if (TERMINAL.has(sig.status)) continue;
+    tickets.add(sig.ticket);
+  }
+  return [...tickets];
+}
+
+// reclaimDeadHostWork — takeover sweep (CTL-863, Part A).
+//
+// When a host goes silent (heartbeat silence > graceMs), surviving hosts detect it,
+// re-own its tickets via HRW over the surviving roster, claim (gen+1) via CAS, infer
+// the last-completed phase from durable artifacts, and dispatch the next phase —
+// skipping any phase already present in the event log.
+//
+// SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
+// when `roster.length <= 1`. Every new behavior is gated on multiHost.
+//
+// All collaborators are injectable for unit tests (no network, fs, or subprocess
+// in tests — they inject fakes for every seam).
+export async function reclaimDeadHostWork(
+  { orchDir },
+  {
+    readHeartbeats = () => readClusterHeartbeats({}),
+    roster = getClusterHosts(),
+    self = getHostName(),
+    graceMs = HEARTBEAT_GRACE_MS,
+    nowMs = Date.now(),
+    ownedTicketsForHost = (deadHost) => defaultOwnedTicketsForHost(deadHost, { orchDir }),
+    ownerForTicket: ownerFn = ownerForTicket,
+    claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
+    inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
+    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    rebuildWorktree = (ticket) => {
+      const result = defaultRebuildWorktree(ticket, { orchDir });
+      return result;
+    },
+    dispatch = (od, ticket, phase, cwd) =>
+      dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+  } = {},
+) {
+  const taken = [];
+
+  // Single-host no-op (every new behavior gated on multiHost).
+  if (!Array.isArray(roster) || roster.length <= 1) return { taken };
+
+  const lastSeen = readHeartbeats();
+  const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
+  if (dead.length === 0) return { taken };
+
+  const survivors = survivingRoster(roster, dead);
+
+  for (const deadHost of dead) {
+    const tickets = ownedTicketsForHost(deadHost) ?? [];
+    for (const ticket of tickets) {
+      // HRW check: are we the new owner over the surviving roster?
+      if (ownerFn(ticket, survivors) !== self) continue;
+
+      // Soft-CAS claim: bump generation to take ownership.
+      const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
+      if (!claimRes?.won) continue;
+
+      // Rebuild the worktree on the ticket branch.
+      const wt = rebuildWorktree(ticket);
+      if (!wt?.ok) continue;
+
+      // Infer the next phase to dispatch from durable artifacts.
+      const phase = await inferResume(ticket, wt.cwd);
+      if (!phase) continue; // terminal — nothing to resume
+
+      // Dedup: skip if the dead host already emitted this phase's complete event.
+      if (alreadyComplete(ticket, phase)) continue;
+
+      const r = dispatch(orchDir, ticket, phase, wt.cwd);
+      if (r?.code === 0) {
+        taken.push({ ticket, phase, generation: claimRes.generation });
+      }
+    }
+  }
+
+  return { taken };
+}
+
+// defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
+// Best-effort; returns { ok, cwd }. Fail-open: errors produce { ok: false, cwd: null }.
+function defaultRebuildWorktree(ticket, { orchDir }) {
+  try {
+    const repoRoot = join(orchDir, "..", "..");
+    const res = createWorktree({ ticket, repoRoot });
+    if (res?.code === 0 && res.worktreePath) return { ok: true, cwd: res.worktreePath };
+    return { ok: false, cwd: null };
+  } catch {
+    return { ok: false, cwd: null };
+  }
 }
