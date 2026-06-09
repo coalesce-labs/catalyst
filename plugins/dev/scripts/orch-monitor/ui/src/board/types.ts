@@ -11,7 +11,11 @@
 import type { ConnectionStatus } from "@/lib/types";
 import type { ReadModelPayload } from "../../../lib/read-model-client";
 
-export type BoardActiveState = "active" | "stuck" | null;
+// CTL-928: "dead" — a worker whose durable bg-job state.json is terminal
+// (stopped/failed/done/blocked) or whose job dir is gone, even when a phase signal
+// still says `running`. Excluded from in-flight + consumed capacity by the server;
+// the board renders it as a distinct dead/zombie state, not "active".
+export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
@@ -53,6 +57,9 @@ export interface BoardWorker {
   /** CTL-922 (BFF10): the fence generation (BFF8 stop passes it to the
    *  fence-check). null when no fence. */
   generation?: number | null;
+  /** CTL-928: the durable `claude --bg` job id this worker's liveness was derived
+   *  from. null/absent when no signal carried one. */
+  bgJobId?: string | null;
 }
 
 export interface BoardPhaseCost {
@@ -182,6 +189,9 @@ export interface BoardConfig {
   active: number;
   working: number;
   stuck: number;
+  /** CTL-928: dead bg-job workers still listed by `claude agents` but excluded
+   *  from inFlight/freeSlots. Optional so existing config fixtures stay valid. */
+  dead?: number;
 }
 
 export interface BoardPayload {
