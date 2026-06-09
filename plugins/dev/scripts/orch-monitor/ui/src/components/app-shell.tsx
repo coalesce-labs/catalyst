@@ -44,6 +44,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 
 // CTL-891 / SHELL1 — the full-viewport (h-screen, NO outer max-w / mx-auto)
 // frame, ported from the prototype `mockups/home-proto/src/components/AppShell`.
@@ -223,11 +224,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </BreadcrumbList>
             </Breadcrumb>
 
+            {/* CTL-897 / SHELL7 — the workspace switcher, ALSO duplicated into the
+                top strip (handoff cosmetic #6: the earlier "too much" call was
+                reversed — the operator now wants it in the top as well). It shares
+                the SAME active scope as the sidebar-header instance via the FND
+                `repoScopeAtom`, so a selection in one reflects in the other. */}
+            <div className="ml-auto flex items-center">
+              <WorkspaceSwitcher placement="topstrip" />
+            </div>
+
             {/* ⌘K search trigger. */}
             <button
               type="button"
               data-cmdk-trigger
-              className="ml-auto flex h-7 items-center gap-2 rounded-md border border-border bg-secondary/30 px-2 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+              className="ml-2 flex h-7 items-center gap-2 rounded-md border border-border bg-secondary/30 px-2 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
               aria-label="Search or jump to…"
             >
               <SearchIcon className="size-3.5" />

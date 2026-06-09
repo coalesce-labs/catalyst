@@ -18,6 +18,13 @@ import { connectBoard } from "./board-client";
 // detail-page pager (N/total) and the j/k walk read the SAME order. See
 // list-order.ts — the P1 keystone correctness item.
 import { resolveList, sortWorkers } from "./list-order";
+// ── CTL-897 / SHELL7: the SHARED workspace scope ──────────────────────────────
+// The board's repo filter (the in-grid "All / <repo>" Seg) is bound to the SAME
+// FND `repoScopeAtom` the workspace switcher writes, so scoping in the switcher
+// (sidebar or top strip) and scoping in the board grid are ONE state — picking a
+// repo in either reflects in the other and in the other surfaces. Standalone
+// (board.html, no switcher) the board's Seg is simply the only writer.
+import { useRepoScope } from "../hooks/use-repo-scope";
 // ── CTL-909 / SURF1: node grouping + node filter (pure, DOM-free) ─────────────
 // The Workers surface adds a "node" grouping axis + a host filter that read the
 // BoardWorker.host {name,id} field (BFF10/CTL-922). The column derivation lives
@@ -734,7 +741,6 @@ export function Board({
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
   const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
-  const [repo, setRepo] = useState<string>("all");
   const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
   const [colorBy, setColorBy] = useState<ColorBy>("phase");
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
@@ -759,6 +765,11 @@ export function Board({
   }, []);
 
   const repos = data?.repos ?? [];
+  // CTL-897 / SHELL7: the repo filter is the SHARED workspace scope (FND atom),
+  // reconciled against the live repo list (a stale repo → "all"). `repo` /
+  // `setRepo` keep their names so every downstream filter + the in-grid Seg are
+  // unchanged; the value is now shared with the workspace switcher.
+  const { scope: repo, setScope: setRepo } = useRepoScope(repos);
   const fWorkers = useMemo(() => (data?.workers ?? []).filter((w) => repo === "all" || w.repo === repo), [data, repo]);
   const fTickets = useMemo(() => (data?.tickets ?? []).filter((t) => repo === "all" || t.repo === repo), [data, repo]);
   // CTL-909 / SURF1: distinct host names across the (repo-filtered) workers — the

@@ -33,7 +33,10 @@ import {
   type InboxSection,
 } from "@/board/home-inbox";
 import { isTypingTarget } from "@/lib/surface";
-import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+// CTL-897 / SHELL7: the Inbox consumes the workspace-SCOPED snapshot so the
+// switcher's repo selection actually filters the inbox (All = the unfiltered
+// view). The scoped hook wraps the SAME shared board transport (one EventSource).
+import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
@@ -184,7 +187,7 @@ function InboxList({
 }
 
 export function HomeSurface() {
-  const { payload, status } = useBoardSnapshot();
+  const { payload, status } = useScopedBoardSnapshot();
 
   // Derive the whole inbox from the resident snapshot (PURE). When no payload has
   // landed yet, an empty payload yields an empty (but valid) model.
