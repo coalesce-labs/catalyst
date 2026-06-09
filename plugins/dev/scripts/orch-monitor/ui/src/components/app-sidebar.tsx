@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIcon,
   ChevronRightIcon,
@@ -19,6 +19,16 @@ import { useSurface, type Surface } from "@/lib/surface";
 import { useTheme } from "@/lib/theme";
 import { useNavSignal } from "@/hooks/use-nav-signal";
 import { daemonDotClass, daemonLabel } from "@/lib/nav-signal";
+// CTL-898 / SHELL8 — the footer health dot generalizes into a per-node cluster-
+// health indicator + a node filter, fed by the read-model's cluster-signal
+// projection. Single-host is an exact no-op (one dot, no filter).
+import { useClusterSignal } from "@/hooks/use-cluster-signal";
+import {
+  nodeDotClass,
+  nodeStatusLabel,
+  shouldShowNodeFilter,
+} from "@/lib/cluster-signal";
+import { ALL_NODES, resolveNodeScope, useNodeScope } from "@/lib/node-scope";
 import { CatalystLogo } from "@/components/catalyst-logo";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import {
@@ -26,6 +36,15 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Tooltip,
   TooltipContent,
@@ -116,6 +135,26 @@ export function AppSidebar() {
   // This supersedes CTL-910 / SURF2's separate useBoardSnapshot queue-depth
   // badge: the Queue depth is now `nav.queueDepth` from the SAME projection.
   const nav = useNavSignal();
+  // CTL-898 / SHELL8 — the live PER-NODE cluster-health signal. null until the
+  // first frame lands (the footer falls back to the single nav.daemon dot until
+  // then — no flicker, no regression). Single-host ⇒ one node + no filter (the
+  // exact identity no-op); N>1 ⇒ a dot per node + the node filter selector.
+  const cluster = useClusterSignal();
+  const { scope, setScope } = useNodeScope();
+  const showNodeFilter = shouldShowNodeFilter(cluster);
+
+  // CTL-898 / SHELL8 — a node going dark must not strand the operator on an empty
+  // view: if the live signal collapses to single-host (the fleet shrank back to
+  // one node) or the focused host leaves the roster, reset the scope to All-nodes.
+  // `resolveNodeScope` (the shared contract) drops a stale focused scope; this
+  // runs reactively off the cluster SSE frame, so it self-heals without a page
+  // reload (Gherkin: "A node going dark is reflected").
+  useEffect(() => {
+    if (scope === ALL_NODES || !cluster) return;
+    const roster = cluster.singleHost ? [] : cluster.nodes.map((n) => n.host);
+    const resolved = resolveNodeScope(scope, roster);
+    if (resolved !== scope) setScope(resolved);
+  }, [cluster, scope, setScope]);
 
   function go(s: Surface) {
     setSurface(s);
@@ -250,43 +289,126 @@ export function AppSidebar() {
         </Collapsible>
       </SidebarContent>
 
-      {/* ── FOOTER: settings + theme toggle + daemon-health dot ─────────────── */}
+      {/* ── FOOTER: node filter + settings + theme toggle + per-node health ─── */}
       <SidebarFooter>
         <SidebarMenu>
+          {/* CTL-898 / SHELL8 — the NODE FILTER. SINGLE-HOST IDENTITY NO-OP: with
+              one node `showNodeFilter` is false and this item is absent entirely,
+              so the footer is byte-identical to the pre-SHELL8 single-node shell.
+              With N>1 it offers an All-nodes option (restores the cluster-wide
+              view) plus one radio per node; picking a node scopes the shell's
+              surfaces to that node's work via the shared NodeScope store. */}
+          {showNodeFilter && (
+            <SidebarMenuItem>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <SidebarMenuButton
+                    tooltip="Focus a node"
+                    aria-label={
+                      scope === ALL_NODES ? "All nodes" : `Node: ${scope}`
+                    }
+                  >
+                    <ServerIcon />
+                    <span>
+                      {scope === ALL_NODES ? "All nodes" : scope}
+                    </span>
+                  </SidebarMenuButton>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent side="right" align="end" className="min-w-44">
+                  <DropdownMenuLabel>Focus a node</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuRadioGroup
+                    value={scope}
+                    onValueChange={(v) => setScope(v)}
+                  >
+                    {/* All-nodes restores the cluster-wide view. */}
+                    <DropdownMenuRadioItem value={ALL_NODES}>
+                      All nodes
+                    </DropdownMenuRadioItem>
+                    {cluster?.nodes.map((node) => (
+                      <DropdownMenuRadioItem key={node.host} value={node.host}>
+                        <span className="flex items-center gap-2">
+                          <span
+                            aria-hidden
+                            className={cn(
+                              "size-2 rounded-full",
+                              nodeDotClass(node.status),
+                            )}
+                          />
+                          {node.host}
+                        </span>
+                      </DropdownMenuRadioItem>
+                    ))}
+                  </DropdownMenuRadioGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </SidebarMenuItem>
+          )}
+
           <SidebarMenuItem>
             <SidebarMenuButton tooltip="Settings">
               <SettingsIcon />
               <span>Settings</span>
             </SidebarMenuButton>
-            {/* CTL-896 / SHELL6 — daemon-health dot wired to the read-model's
-                local-node liveness (the single-host identity no-op: the one local
-                daemon's own node.heartbeat freshness). Emerald = healthy, amber =
-                degraded, red = offline. The cyan #5be0ff live-signal color is
-                RESERVED and deliberately not used here. Until the first nav frame
-                lands `nav` is null → an unknown (muted) dot, never a fake green. */}
+            {/* CTL-898 / SHELL8 — the footer health dot GENERALIZES from CTL-896 /
+                SHELL6's single local-daemon dot into a PER-NODE cluster-health
+                indicator. Each node's dot derives from the heartbeat-overlay
+                liveness (emerald = live, amber = degraded, red = offline; the cyan
+                #5be0ff live-signal color stays RESERVED). SINGLE-HOST IDENTITY
+                NO-OP: with one node `cluster.nodes` has length 1, so this renders
+                EXACTLY one dot — today's behavior. Until the first cluster frame
+                lands we fall back to the single nav.daemon dot (no flicker, no
+                regression); if neither has arrived the dot is muted/unknown. */}
             <SidebarMenuBadge>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    aria-label={
-                      nav ? daemonLabel(nav.daemon) : "Daemon health unknown"
-                    }
-                    className="flex size-5 cursor-default items-center justify-center"
-                  >
-                    <span
-                      aria-hidden
-                      className={cn(
-                        "size-2 rounded-full",
-                        nav ? daemonDotClass(nav.daemon) : "bg-muted-foreground/40",
-                      )}
-                    />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="right">
-                  {nav ? daemonLabel(nav.daemon) : "Daemon health unknown"}
-                </TooltipContent>
-              </Tooltip>
+              {cluster && cluster.nodes.length > 0 ? (
+                <span className="flex items-center gap-1">
+                  {cluster.nodes.map((node) => (
+                    <Tooltip key={node.host}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={nodeStatusLabel(node.host, node.status)}
+                          className="flex size-5 cursor-default items-center justify-center"
+                        >
+                          <span
+                            aria-hidden
+                            className={cn(
+                              "size-2 rounded-full",
+                              nodeDotClass(node.status),
+                            )}
+                          />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent side="right">
+                        {nodeStatusLabel(node.host, node.status)}
+                      </TooltipContent>
+                    </Tooltip>
+                  ))}
+                </span>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      aria-label={
+                        nav ? daemonLabel(nav.daemon) : "Daemon health unknown"
+                      }
+                      className="flex size-5 cursor-default items-center justify-center"
+                    >
+                      <span
+                        aria-hidden
+                        className={cn(
+                          "size-2 rounded-full",
+                          nav ? daemonDotClass(nav.daemon) : "bg-muted-foreground/40",
+                        )}
+                      />
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right">
+                    {nav ? daemonLabel(nav.daemon) : "Daemon health unknown"}
+                  </TooltipContent>
+                </Tooltip>
+              )}
             </SidebarMenuBadge>
           </SidebarMenuItem>
 
