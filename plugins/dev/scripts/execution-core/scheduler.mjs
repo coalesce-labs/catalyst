@@ -2415,6 +2415,12 @@ export function schedulerTick(
           priority: typeof rel?.priority === "number" ? rel.priority : priority,
           createdAt,
           state: { name: stateName },
+          // CTL-878: carry the parent epic id so buildDependencyEdges (A.7) drops a
+          // parent→child blocks edge AND STEP E skips persisting child blocked_by
+          // parent. This literal cherry-picks fields (it does NOT spread `rel`), so
+          // parent MUST be copied explicitly or the parent-deadlock guard no-ops for
+          // the very triaged-waiting path that holds the epic's children.
+          parent: rel?.parent ?? null,
           relations: rel?.relations ?? { nodes: [] },
           inverseRelations: rel?.inverseRelations ?? { nodes: [] },
         });
@@ -2566,6 +2572,17 @@ export function schedulerTick(
         if (!depIds) continue; // cycle member or no deps
 
         const desc = descriptorByTicket.get(candidate);
+        // CTL-878: the candidate's parent epic. A parent/child hierarchy link is
+        // NOT a dependency — persisting `child blocked_by parent-epic` deadlocks
+        // the child (a tracking epic is never worked → never terminal → the gate
+        // never clears). Triage scrapes the parent id out of the child's body, so
+        // skip the durable write below when a dep IS the parent. This guards only
+        // NEW edges: an ALREADY-durable parent edge is short-circuited earlier by
+        // the existingBlockers idempotency check and is left in Linear — harmless,
+        // because the read-layer buildDependencyEdges drop (the load-bearing fix)
+        // neutralizes it at read time regardless; a one-time operator edge delete
+        // clears the residual UI noise.
+        const candidateParent = desc?.parent ?? null;
         // Already-durable blocked_by blockers for THIS candidate, read from its
         // FRESH inverseRelations ({type:"blocks", issue:<blocker>} ⇒ blocker
         // blocks candidate). The idempotency guard: skip writing an edge we can
@@ -2591,6 +2608,16 @@ export function schedulerTick(
 
         for (const dep of depIds) {
           if (existingBlockers.has(dep)) continue; // idempotent — edge already durable
+          if (dep === candidateParent) {
+            // CTL-878: the dep is the candidate's parent epic. Never persist a
+            // child→parent-epic blocked_by edge — it is a hierarchy link mis-scraped
+            // as a dependency and would deadlock the child against a never-worked epic.
+            log.warn(
+              { candidate, dep },
+              "ctl-878 step-e: skipping dependency that is the candidate's parent epic",
+            );
+            continue;
+          }
           if (candidateBlocks.has(dep)) {
             // Persisting blocked_by(candidate ← dep) while candidate already
             // blocks dep would close a cycle. Drop it (do not deadlock).

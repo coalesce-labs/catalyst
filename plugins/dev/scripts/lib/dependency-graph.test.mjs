@@ -98,6 +98,54 @@ describe("buildDependencyEdges", () => {
       issues: [{ identifier: "CTL-1", state: { name: "Backlog" } }],
       expected: [],
     },
+    {
+      // CTL-878: a child's blocks edge from its own parent epic is hierarchy, not
+      // a dependency — dropped so a never-worked tracking epic can't deadlock it.
+      name: "CTL-878: a `blocks` edge from the target's parent epic is dropped",
+      issues: [
+        {
+          identifier: "CTL-863",
+          state: { name: "Todo" },
+          parent: "CTL-859",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [inv("blocks", "CTL-859")] },
+        },
+        issue("CTL-859", "Backlog"),
+      ],
+      expected: [],
+    },
+    {
+      // CTL-878: only the PARENT edge is dropped — a real sibling dependency on the
+      // same child survives (mirrors CTL-866: parent CTL-859 + sibling CTL-863).
+      name: "CTL-878: parent edge dropped, sibling dependency edge kept",
+      issues: [
+        {
+          identifier: "CTL-866",
+          state: { name: "Todo" },
+          parent: "CTL-859",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [inv("blocks", "CTL-859"), inv("blocks", "CTL-863")] },
+        },
+        issue("CTL-863", "Todo"),
+        issue("CTL-859", "Backlog"),
+      ],
+      expected: [{ from: "CTL-863", to: "CTL-866" }],
+    },
+    {
+      // CTL-878: the drop must also fire when the parent epic is genuinely a child
+      // of a sibling (forward `blocks` direction, parent declared on the child).
+      name: "CTL-878: parent edge dropped via forward `blocks` from the parent node",
+      issues: [
+        {
+          identifier: "CTL-859",
+          state: { name: "Backlog" },
+          relations: { nodes: [rel("blocks", "CTL-863")] },
+          inverseRelations: { nodes: [] },
+        },
+        { identifier: "CTL-863", state: { name: "Todo" }, parent: "CTL-859" },
+      ],
+      expected: [],
+    },
   ];
 
   for (const c of cases) {
@@ -105,6 +153,32 @@ describe("buildDependencyEdges", () => {
       expect(sortEdges(buildDependencyEdges(c.issues))).toEqual(sortEdges(c.expected));
     });
   }
+
+  // CTL-878: the deadlock case is an OUT-OF-SET parent epic — the child is in the
+  // eligible/admission pool but the epic (Backlog, never dispatched) is hydrated
+  // only as an externalId. Without the parent guard the externalId rule keeps the
+  // edge; with it the edge is dropped because the child carries parent === epic.
+  test("CTL-878: parent-epic edge dropped even when the parent is an out-of-set externalId", () => {
+    const issues = [
+      {
+        identifier: "CTL-722",
+        state: { name: "Todo" },
+        parent: "CTL-718",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "CTL-718")] },
+      },
+    ];
+    // CTL-718 is out-of-set but declared as an external blocker (D5 hydration).
+    expect(buildDependencyEdges(issues, { externalIds: ["CTL-718"] })).toEqual([]);
+  });
+
+  test("CTL-878: an issue with no parent field is unaffected (backward compat)", () => {
+    const issues = [
+      issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]),
+      issue("CTL-2", "Todo"),
+    ];
+    expect(buildDependencyEdges(issues)).toEqual([{ from: "CTL-1", to: "CTL-2" }]);
+  });
 });
 
 describe("computeReadySet", () => {
@@ -451,6 +525,25 @@ describe("analyzeDependencyGraph", () => {
   test("acyclic graph → no anomalies", () => {
     const issues = [issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]), issue("CTL-2", "Backlog")];
     expect(analyzeDependencyGraph(issues).anomalies).toEqual([]);
+  });
+
+  // CTL-878 end-to-end: a Todo child whose ONLY blocker is its Backlog parent epic
+  // (an out-of-set, non-terminal blocker) must be READY, not blocked. This is the
+  // exact production deadlock (CTL-859→863, CTL-718→722) the parent guard fixes.
+  test("CTL-878: a child blocked only by its non-terminal parent epic is ready, not blocked", () => {
+    const issues = [
+      {
+        identifier: "CTL-863",
+        state: { name: "Todo" },
+        parent: "CTL-859",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "CTL-859")] },
+      },
+    ];
+    const result = analyzeDependencyGraph(issues, { blockerStates: { "CTL-859": "Backlog" } });
+    expect(result.ready).toEqual(["CTL-863"]);
+    expect(result.blocked).toEqual([]);
+    expect(result.anomalies).toEqual([]);
   });
 });
 

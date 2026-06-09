@@ -6557,6 +6557,52 @@ describe("CTL-755: admission gate", () => {
     expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
   });
 
+  test("CTL-878: a dep that is the candidate's PARENT epic is NOT persisted", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-859 is CTL-7's parent epic, scraped into triage.json deps. It is
+    // non-terminal (Backlog) and not already a durable edge — so absent the
+    // CTL-878 guard STEP E would persist CTL-7 blocked_by CTL-859 (the deadlock).
+    writeTriageDeps("CTL-7", ["CTL-859"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      // CTL-7's descriptor carries parent === CTL-859; CTL-859 hydrates Backlog.
+      fetchBatch: mkBatch({
+        "CTL-7": { ...relUnblocked(), parent: "CTL-859" },
+        "CTL-859": descOf("Backlog"),
+      }),
+    });
+    expect(relations).toEqual([]); // parent epic never persisted as a blocker
+  });
+
+  test("CTL-878: the parent skip is parent-specific — a non-parent non-terminal dep is still persisted", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-859 is the parent (skipped); CTL-100 is a real sibling dep (persisted).
+    writeTriageDeps("CTL-7", ["CTL-859", "CTL-100"]);
+    const dispatch = fakeDispatch();
+    const { ws, relations } = depSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch({
+        "CTL-7": { ...relUnblocked(), parent: "CTL-859" },
+        "CTL-859": descOf("Backlog"),
+        "CTL-100": descOf("In Progress"),
+      }),
+    });
+    expect(relations).toEqual([{ ticket: "CTL-7", blockedBy: "CTL-100" }]);
+  });
+
   test("CTL-784: writing a durable edge INVALIDATES the candidate's relations cache (no ≤TTL over-promotion)", () => {
     // After STEP E writes a new blocked_by edge, the candidate's relations
     // descriptor cached THIS tick (by A.3) is stale (no edge). Invalidating it

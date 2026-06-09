@@ -28,14 +28,21 @@ function byIdentifier(a, b) {
   return String(a.identifier).localeCompare(String(b.identifier));
 }
 
-// Stable content signature - identifiers + states + priorities only. The
+// Stable content signature - identifiers + states + priorities + parent. The
 // projection's updatedAt timestamp always differs between writes, so the
 // skip-when-unchanged check compares ticket content, never the serialized
 // body. JSON.stringify of the tuple list is collision-proof (its escaping
 // disambiguates any separator that could appear inside a field).
+//
+// CTL-878: `parent` is part of the signature so a parent-only delta forces a
+// rewrite. The dependency graph drops a `blocks` edge from a ticket's parent
+// epic, which needs `parent` ON the projected descriptor. Without parent in the
+// key, a pre-fix projection (no parent field) written by an older daemon would
+// survive across a deploy whenever the project's identifier/state/priority set
+// is steady — leaving the parent-epic edge un-dropped and the child deadlocked.
 function contentKey(tickets) {
   return JSON.stringify(
-    tickets.map((t) => [t.identifier, t.state, t.priority]),
+    tickets.map((t) => [t.identifier, t.state, t.priority, t.parent ?? null]),
   );
 }
 

@@ -173,11 +173,19 @@ ACRONYMS_EXPANDED="$(jq -nc --arg t "$COMBINED" '
 ')"
 
 # 2d. Dependencies — other CTL-style identifiers referenced in body, excluding self.
-#     Match any TEAM-NNN pattern; dedupe; exclude the ticket itself.
+#     Match any TEAM-NNN pattern; dedupe; exclude the ticket itself AND its parent
+#     epic. A Linear parent/child hierarchy link is NOT a dependency: emitting the
+#     parent epic here makes the scheduler (CTL-755 STEP E) persist `child blocked_by
+#     parent-epic`, which deadlocks the child against a tracking epic that is never
+#     worked (CTL-878). The parent identifier is already in the ticket JSON, so the
+#     exclusion costs no extra Linear read. PARENT_TICKET is empty when the ticket
+#     has no parent, in which case the second grep pattern collapses to the self
+#     exclusion (a harmless no-op).
+PARENT_TICKET="$(jq -r '.parent.identifier // .parent // empty' "$TICKET_JSON_FILE" 2>/dev/null)"
 DEPENDENCIES="$(printf '%s\n' "$COMBINED" \
   | grep -oE '[A-Z][A-Z0-9_]*-[0-9]+' 2>/dev/null \
   | sort -u \
-  | grep -v -x "$TICKET" \
+  | grep -v -x -e "$TICKET" -e "${PARENT_TICKET:-$TICKET}" \
   | jq -R . | jq -sc .)"
 DEPENDENCIES="${DEPENDENCIES:-[]}"
 
