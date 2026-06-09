@@ -31,7 +31,10 @@ import {
   type Ordering,
   type Swimlane,
 } from "./prefs-store";
-import { SegRow, SwitchRow } from "./display-options-sections";
+import { SegRow, SwitchRow, RadioRow } from "./display-options-sections";
+// BOARD3 / CTL-907: the swimlane axis option set (none|repo|team|project|host),
+// owned alongside the swimlane renderer so the control and the engine cannot drift.
+import { SWIMLANE_OPTIONS } from "./Swimlane";
 
 // The option arrays. Their keys are the STORED pref values, so a drift-guard
 // test (board-display-options-drift.test.ts) asserts each array's key set equals
@@ -141,28 +144,21 @@ export function DisplayOptionsPopover({
           checked={prefs.showEmptyColumns}
           onChange={(v) => patch({ showEmptyColumns: v })}
         />
-        {/* Repo lanes — only meaningful in a multi-repo workspace. BOARD3 folds
-            this into the general Swimlanes radio (repo becomes one value of
-            none|repo|team|project|host); designed adjacent so that's a clean
-            swap, not a re-layout. */}
-        {repos.length > 1 && (
-          <>
-            <Separator style={{ margin: "8px 0", background: "#262d36" }} />
-            <SegRow
-              label="Repo lanes"
-              value={prefs.swimlane === "repo" ? "lanes" : "flat"}
-              onChange={(v) =>
-                patch({ swimlane: (v === "lanes" ? "repo" : "none") as Swimlane })
-              }
-              options={[
-                { k: "flat", label: "Combined" },
-                { k: "lanes", label: "Repo lanes" },
-              ]}
-            />
-          </>
-        )}
-        {/* ── reserved: BOARD3 «Swimlanes radio» / BOARD4 «Layout» / CTL-930
-            «Lens» drop in here without re-architecting the tray. ── */}
+        {/* Swimlanes — BOARD3 (CTL-907) generalizes the former binary "Repo lanes"
+            toggle into one axis: None | (Repo) | Team | Project | Host. The Repo
+            option only appears in a multi-repo workspace (single-repo = no lanes
+            to draw, an identity no-op). Host stays selectable single-node: picking
+            it collapses to one lane, exactly like the SURF1/SURF2 node controls
+            stay inert single-host. Writes straight to `prefs.swimlane`. */}
+        <Separator style={{ margin: "8px 0", background: "#262d36" }} />
+        <RadioRow
+          label="Swimlanes"
+          value={prefs.swimlane}
+          onChange={(v) => patch({ swimlane: v as Swimlane })}
+          options={repos.length > 1 ? SWIMLANE_OPTIONS : SWIMLANE_OPTIONS.filter((o) => o.k !== "repo")}
+        />
+        {/* ── reserved: BOARD4 «Layout» / CTL-930 «Lens» drop in here without
+            re-architecting the tray. ── */}
       </PopoverContent>
     </Popover>
   );

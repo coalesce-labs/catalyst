@@ -62,6 +62,16 @@ describe("BOARD2 — popover option arrays stay in sync with the BoardPrefs unio
       unionMembers(prefs, "Ordering").sort(),
     );
   });
+
+  // BOARD3 / CTL-907: the Swimlanes radio's option set lives in Swimlane.tsx
+  // (owned alongside the renderer); it must stay in lock-step with the Swimlane
+  // union so an axis added to the union without a UI row (or vice-versa) fails.
+  it("SWIMLANE_OPTIONS keys === the Swimlane union", () => {
+    const swimlane = read("board/Swimlane.tsx");
+    expect(keysOfArray(swimlane, "SWIMLANE_OPTIONS").sort()).toEqual(
+      unionMembers(prefs, "Swimlane").sort(),
+    );
+  });
 });
 
 describe("BOARD2 — cyan #5be0ff (the live signal) is never used decoratively in the popover", () => {

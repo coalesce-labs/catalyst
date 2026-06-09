@@ -61,6 +61,15 @@ import {
 import { boardPrefsAtom, type Density } from "./prefs-store";
 import { DisplayOptionsPopover } from "./display-options-popover";
 import { ticketColumns, PHASE_COLUMNS } from "./board-display";
+// ── BOARD3 / CTL-907: row swimlanes (none | repo | team | project | host) ──────
+// The generalized grouping engine (board-grouping.ts) + the presentational
+// <SwimlaneBoard> wrapper that renders one labeled lane per group around the
+// column board, collapsing to the bare flat board for a single lane (the
+// identity no-op). Replaces the repo-only Lane/ticketLanes/combined path. The
+// shared `C` / `LIVE` tokens are hoisted to board-tokens.ts.
+import { C, LIVE } from "./board-tokens";
+import { SwimlaneBoard } from "./Swimlane";
+import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
   BoardPayload,
@@ -72,14 +81,9 @@ import type {
 import type { ConnectionStatus } from "@/lib/types";
 
 // ── tokens (orch-monitor DESIGN.md) ─────────────────────────────────────────
-const C = {
-  s0: "#0b0d10", s1: "#111318", s2: "#16191f", s3: "#1c2028",
-  border: "#262d36", borderSubtle: "#1e242c",
-  fg: "#e6e9ef", fgMuted: "#8b93a1", fgDim: "#5b626f",
-  green: "#39d07a", blue: "#4ea1ff", red: "#ef5d5d", yellow: "#eabc3b",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-};
-const LIVE = "#5be0ff"; // reserved "in-loop" color — deliberately not green/phase
+// BOARD3 / CTL-907 §8.5: the `C` palette + the reserved `LIVE` signal are hoisted
+// to board-tokens.ts so the swimlane chrome (Swimlane.tsx) split out of this file
+// imports the SAME object — one source for the hexes, not two copies.
 const PHASE_C: Record<string, string> = {
   triage: "#64748b", research: "#3b82f6", plan: "#a855f7", implement: "#10b981",
   verify: "#f59e0b", remediate: "#f472b6", review: "#eab308", pr: "#14b8a6",
@@ -521,17 +525,9 @@ function WorkerBoard({ workers, tickets, grouping, fill, onWorkerSelect }: { wor
     </BoardScroll>
   );
 }
-function Lane({ repo, children }: { repo: string; children: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "0 16px 8px" }}>
-        <Dot color={repoColor(repo)} />
-        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.fg }}>{repo}</span>
-      </div>
-      {children}
-    </div>
-  );
-}
+// BOARD3 / CTL-907: the repo-only `Lane` component is replaced by the generalized
+// <Swimlane>/<SwimlaneBoard> (Swimlane.tsx), driven by the pure board-grouping
+// engine over the full none|repo|team|project|host axis.
 
 // ── capacity + queue ────────────────────────────────────────────────────────
 function SlotBar({ capacity, inFlight }: { capacity: number; inFlight: number }) {
@@ -801,13 +797,16 @@ export function Board({
     () => filterWorkersByHost(fWorkers, activeHostFilter),
     [fWorkers, activeHostFilter],
   );
-  const ticketLanes = repos.filter((r) => fTickets.some((t) => t.repo === r));
-  const workerLanes = repos.filter((r) => fWorkers.some((w) => w.repo === r));
-  // BOARD2 / CTL-906: repo-lanes is now `prefs.swimlane === "repo"` (the popover
-  // writes it). BOARD3 generalizes the lane branch to team/project/host; BOARD2
-  // renders only none/repo. A specific repo scope collapses to the combined board
-  // (a single repo has no lanes to draw), exactly as before.
-  const combined = prefs.swimlane === "none" || repo !== "all";
+  // BOARD3 / CTL-907: the generalized row-swimlane axis (none | repo | team |
+  // project | host) the display-options popover writes to `prefs.swimlane`. The
+  // pure board-grouping engine (buildLanes, inside <SwimlaneBoard>) now OWNS lane
+  // resolution — the repo-only ticketLanes/workerLanes/combined derivation is gone.
+  // A specific repo scope collapses to the flat board (a single repo has no lanes
+  // to draw) by mapping the axis to "none" — preserving today's "filter ⇒ flat"
+  // semantic exactly (the conservative R3 default; buildLanes would otherwise still
+  // collapse to one lane for the repo axis, and could show team/host lanes within
+  // one repo — a deliberate, separate product decision, not regressed here).
+  const effectiveGroupBy: GroupBy = repo !== "all" ? "none" : prefs.swimlane;
   const selectedTicket =
     selectedTicketId != null
       ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
@@ -872,14 +871,37 @@ export function Board({
         {/* body */}
         <div style={{ flex: 1, minHeight: 0 }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
-          {data && view === "tickets" && (combined
-            ? <TicketBoard tickets={fTickets} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill onSelect={(id) => setSelectedTicketId(id)} />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
-          {data && view === "workers" && (combined
-            // CTL-909 / SURF1: the node filter scopes the combined grid to one
-            // host; "all" is the identity no-op (nodeWorkers === fWorkers).
-            ? <WorkerBoard workers={nodeWorkers} tickets={data.tickets} grouping={workerGrouping} fill onWorkerSelect={onWorkerSelect} />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={filterWorkersByHost(fWorkers.filter((w) => w.repo === r), activeHostFilter)} tickets={data.tickets} grouping={workerGrouping} fill={false} onWorkerSelect={onWorkerSelect} /></Lane>)}</div>)}
+          {/* BOARD3 / CTL-907: row swimlanes. <SwimlaneBoard> groups the entities
+              through the pure board-grouping engine and renders one labeled lane
+              per group around the SAME column board — collapsing to the bare flat
+              board for a single lane (the identity no-op: none / single-team /
+              single-node / single-repo / single-repo-scope). The TicketBoard /
+              WorkerBoard renderers are unchanged. */}
+          {data && view === "tickets" && (
+            <SwimlaneBoard
+              items={fTickets}
+              groupBy={effectiveGroupBy}
+              fill
+              renderBoard={(laneItems, laneFill) => (
+                <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
+              )}
+            />
+          )}
+          {data && view === "workers" && (
+            // CTL-909 / SURF1: the node FILTER scopes the grid to one host
+            // (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
+            // node filter (scope) are orthogonal: filter first, then group. R3b: when
+            // the HOST swimlane is active the column lens falls back to status/phase
+            // inside each lane so host is not double-encoded (rows AND columns).
+            <SwimlaneBoard
+              items={nodeWorkers}
+              groupBy={effectiveGroupBy}
+              fill
+              renderBoard={(laneItems, laneFill) => (
+                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={effectiveGroupBy === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
+              )}
+            />
+          )}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
         </div>
         {selectedTicket && (
