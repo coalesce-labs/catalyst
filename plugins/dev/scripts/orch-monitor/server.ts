@@ -13,6 +13,12 @@ import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
+// CTL-896 (SHELL6): the dedicated nav-signal projection — worker count, queue
+// depth, board anomaly, and the local daemon-health dot — derived off the SAME
+// reactive board snapshot the board SSE already pushes (never a per-request
+// scan), with the daemon health layered from the local node.heartbeat liveness.
+import { deriveNavSignal } from "./lib/nav-signal.mjs";
+import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
 // queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
 // (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
@@ -237,6 +243,15 @@ export interface CreateServerOptions {
    * this at a seeded temp DB so the routes don't read the live broker cache.
    */
   filterStateDbPath?: string;
+  /**
+   * CTL-896 (SHELL6): override for the local daemon-health reader that feeds the
+   * footer health dot in the nav-signal projection (/api/nav, /api/nav/stream).
+   * Production lazily resolves the local node's last `node.heartbeat` (recovery
+   * .readClusterHeartbeats) and classifies it via node-liveness — the single-host
+   * identity no-op (the one local daemon's own heartbeat IS the health). Tests
+   * inject a deterministic status so the routes don't read the live event log.
+   */
+  daemonHealthReader?: (() => DaemonHealth | Promise<DaemonHealth>) | null;
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
@@ -584,6 +599,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
+    daemonHealthReader: daemonHealthReaderOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -866,6 +882,70 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // (/api/board/stream) — replaces per-tab polling of /api/board. Subscriber-
   // gated, so it does zero work when no board tab is open.
   const boardSnapshot = createBoardSnapshotManager();
+
+  // CTL-896 (SHELL6): the local daemon-health reader for the footer health dot.
+  //
+  // SINGLE-HOST IDENTITY NO-OP: the read-model classifies the ONE local daemon's
+  // own `node.heartbeat` freshness (live/degraded/offline → healthy/degraded/
+  // offline). The heavy execution-core deps (recovery.readClusterHeartbeats reads
+  // the local event log; config.getHostName names the local node) are imported
+  // LAZILY via computed specifiers — the same dependency-hygiene guard cluster-
+  // view.mjs uses so esbuild can't pull pino/bun:sqlite into any browser bundle —
+  // and resolved ONCE under Bun. Every step is best-effort: an import or read
+  // failure degrades to "offline" rather than throwing out of a nav request
+  // (the read-model never fabricates health for a daemon it cannot hear).
+  let daemonDepsPromise: Promise<{
+    readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+    getHostName: () => string;
+    deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
+  } | null> | null = null;
+  const loadDaemonDeps = () => {
+    if (!daemonDepsPromise) {
+      daemonDepsPromise = (async () => {
+        try {
+          const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
+          const configMod = ["..", "execution-core", "config.mjs"].join("/");
+          const [recovery, config, navSignal] = await Promise.all([
+            import(recoveryMod),
+            import(configMod),
+            import("./lib/nav-signal.mjs"),
+          ]);
+          return {
+            readClusterHeartbeats: recovery.readClusterHeartbeats,
+            getHostName: config.getHostName,
+            deriveDaemonHealth: navSignal.deriveDaemonHealth,
+          };
+        } catch {
+          return null; // execution-core unavailable → degrade to offline
+        }
+      })();
+    }
+    return daemonDepsPromise;
+  };
+  const productionDaemonHealth = async (): Promise<DaemonHealth> => {
+    try {
+      const deps = await loadDaemonDeps();
+      if (!deps) return "offline";
+      // Let recovery.readClusterHeartbeats resolve the canonical current-month
+      // event-log path itself (config.getEventLogPath, UTC YYYY-MM) so the read
+      // path matches exactly what the daemon writes — no format drift here.
+      const lastSeen = deps.readClusterHeartbeats({});
+      return deps.deriveDaemonHealth(lastSeen, deps.getHostName());
+    } catch {
+      return "offline";
+    }
+  };
+  const readDaemonHealth: () => Promise<DaemonHealth> =
+    daemonHealthReaderOpt != null
+      ? async () => daemonHealthReaderOpt()
+      : productionDaemonHealth;
+
+  // assembleNavSignal — project the four nav signals off the board snapshot the
+  // read-model already computed, layering the local daemon health. One board read
+  // (the shared, reactively-cached snapshot) + one heartbeat classify; NO
+  // synchronous per-request scan of the source signal files.
+  const assembleNavSignal = async (board: BoardPayload): Promise<NavSignal> =>
+    deriveNavSignal(board, { daemon: await readDaemonHealth() });
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of BUS_BROADCAST_EVENTS) {
@@ -2415,6 +2495,73 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 send(controller, await boardSnapshot.getLatest());
               } catch (err) {
                 console.error(`[server] board stream initial snapshot failed:`, err);
+              }
+            },
+            cancel() {
+              closed = true;
+              unsubscribe?.();
+              unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-896 (SHELL6): the nav-signal projection — worker count, queue depth,
+        // board anomaly, and the daemon-health dot — as a single one-shot read for
+        // the warm paint + the SSE reconcile. Derived off the SAME shared board
+        // snapshot the board endpoints serve plus the local daemon health; NEVER a
+        // synchronous per-request scan of the source signal files.
+        if (url.pathname === "/api/nav") {
+          return Response.json(
+            await assembleNavSignal(await boardSnapshot.getLatest()),
+          );
+        }
+
+        // CTL-896 (SHELL6): SSE push of the nav signal. The rail opens ONE of these
+        // and receives a `nav` event on connect and on every reactive board
+        // recompute — the live badges update without a page reload and WITHOUT
+        // per-tab polling of the source files (Gherkin: "Live without thrash").
+        if (url.pathname === "/api/nav/stream") {
+          let unsubscribe: (() => void) | null = null;
+          let closed = false;
+          const sendNav = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            signal: NavSignal,
+          ) => {
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(`event: nav\ndata: ${JSON.stringify(signal)}\n\n`),
+              );
+            } catch {
+              unsubscribe?.();
+              unsubscribe = null;
+            }
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // subscribe first so no recompute is missed between bootstrap +
+              // subscribe; each board frame is projected into a nav signal (the
+              // daemon health is re-read per frame so the dot tracks heartbeats).
+              unsubscribe = boardSnapshot.subscribe((snap) => {
+                void assembleNavSignal(snap).then((signal) =>
+                  sendNav(controller, signal),
+                );
+              });
+              try {
+                sendNav(
+                  controller,
+                  await assembleNavSignal(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(`[server] nav stream initial signal failed:`, err);
               }
             },
             cancel() {
