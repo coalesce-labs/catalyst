@@ -7,6 +7,10 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 import { fmtDuration } from "../lib/formatters";
+// CTL-892 / SHELL2: the standalone-vs-embedded height token. The board fills the
+// viewport standalone (100vh) and the inset slot embedded (100%); every scroll
+// region below reads it through the --cat-board-vh CSS custom property.
+import { boardRootHeight, BOARD_VH_VAR } from "../lib/surface-content";
 // ── types + transport (hoisted to ./types + ./board-client for CTL-733 PR-2b) ─
 import { connectBoard } from "./board-client";
 // ── single ordering source (CTL-882 / FND2) ──────────────────────────────────
@@ -363,7 +367,7 @@ function Column({ label, color, count, live = 0, children }: { label: string; co
 }
 function BoardScroll({ children, fill }: { children: React.ReactNode; fill: boolean }) {
   return (
-    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "calc(100vh - 104px)" : "auto" }}>
+    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "calc(var(--cat-board-vh, 100vh) - 104px)" : "auto" }}>
       {children}
     </div>
   );
@@ -464,7 +468,7 @@ function QueueView({ data }: { data: BoardPayload }) {
   // resolve via resolveList({kind:"worker"}). Byte-for-byte the prior inline sort.
   const inflight = sortWorkers(workers);
   return (
-    <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", padding: "2px 16px 24px" }}>
+    <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
         <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
           <Stat label="Max parallel" value={String(config.maxParallel)} />
@@ -538,7 +542,13 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
   );
 }
 
-export function Board() {
+// CTL-892 / SHELL2: the board is hosted in TWO places now — the legacy
+// standalone `board.html` entry (full viewport) and, newly, the shared app shell
+// (inside SidebarInset, below the 48px top strip). `embedded` is the ONLY mount
+// difference: it swaps the root height from 100vh → 100% so the dense grid fills
+// the inset's flex slot instead of overflowing the viewport by the strip height.
+// The data path (connectBoard / SharedWorker EventSource) is untouched in both.
+export function Board({ embedded = false }: { embedded?: boolean } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [view, setView] = useState<View>("tickets");
@@ -581,7 +591,7 @@ export function Board() {
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div style={{ background: C.s0, color: C.fg, height: "100vh", display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" }}>
+      <div style={{ [BOARD_VH_VAR]: boardRootHeight(embedded), background: C.s0, color: C.fg, height: `var(${BOARD_VH_VAR})`, display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" } as React.CSSProperties}>
         <style>{PULSE_CSS}</style>
         {/* chrome */}
         <header style={{ height: 48, display: "flex", alignItems: "center", gap: 18, padding: "0 16px", background: C.s1, borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }}>
@@ -628,10 +638,10 @@ export function Board() {
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {data && view === "tickets" && (combined
             ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill onSelect={(id) => setSelectedTicketId(id)} />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
             ? <WorkerBoard workers={fWorkers} tickets={data.tickets} grouping={workerGrouping} fill />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{workerLanes.map((r) => <Lane key={r} repo={r}><WorkerBoard workers={fWorkers.filter((w) => w.repo === r)} tickets={data.tickets} grouping={workerGrouping} fill={false} /></Lane>)}</div>)}
           {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
         </div>
         {selectedTicket && (

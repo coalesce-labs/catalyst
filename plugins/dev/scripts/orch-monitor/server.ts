@@ -1850,10 +1850,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(detail);
         }
 
-        // CTL-730: the CTL-727 Worker/Ticket board is the default monitor page.
-        // The old orchestrator-centric dashboard moves to /legacy during the
-        // transition (index.html still built + served, just not at root).
+        // CTL-892 / SHELL2: the app shell (index.html → App → AppShell, CTL-891)
+        // is now the canonical root. It hosts the dense board as the "board"
+        // surface inside the shared SidebarInset, alongside Home/Workers/Queue —
+        // one shell, two densities — so `/` serves the shell, NOT the shell-less
+        // board page. (Before SHELL2, CTL-730 served board.html raw at `/`.) The
+        // standalone board.html survives as a legacy/fallback entry at /board (it
+        // still carries the FND deep-link router for /ticket/$id + /worker/$id).
         if (url.pathname === "/" || url.pathname === "/index.html") {
+          const file = Bun.file(join(publicDir, "index.html"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
+          return new Response("index.html not found", { status: 500 });
+        }
+
+        // CTL-892 / SHELL2: the standalone board is no longer at root, but stays
+        // reachable as a legacy/fallback entry. It's still built (vite `board`
+        // input) and owns the board deep-link routes until those migrate into the
+        // shell router in a later SHELL/FND ticket.
+        if (url.pathname === "/board" || url.pathname === "/board.html") {
           const file = Bun.file(join(publicDir, "board.html"));
           if (await file.exists()) {
             return new Response(file, {
