@@ -52,6 +52,7 @@ import {
   describeProbe,
   defaultProgressMark,
 } from "./work-done-probes.mjs";
+import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
@@ -2647,4 +2648,49 @@ export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
     if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
   }
   return lastSeen;
+}
+
+// RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
+// STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
+const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
+  .filter(([id]) => id !== "remediate")
+  .sort((a, b) => a[1] - b[1])
+  .map(([id]) => id);
+
+// deadHosts — given last-seen heartbeats, the roster, a grace window, and now,
+// return roster hosts whose newest heartbeat is older than (nowMs - graceMs).
+// A host ABSENT from lastSeen is NOT flagged dead: with per-host local logs the
+// survivor may simply never have seen it (Open Question 1). Conservative: unknown ⇒ alive.
+export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
+  const cutoff = nowMs - graceMs;
+  return roster.filter((h) => {
+    const seen = lastSeen[h];
+    if (!seen) return false;            // never seen here ⇒ not our call to make
+    return Date.parse(seen) < cutoff;   // last heartbeat older than grace ⇒ dead
+  });
+}
+
+// survivingRoster — roster minus the dead hosts. Pure; never mutates the input
+// (dead hosts stay in committed hosts.json; this is a transient in-memory subset).
+export function survivingRoster(roster, dead) {
+  const deadSet = new Set(dead);
+  return roster.filter((h) => !deadSet.has(h));
+}
+
+// inferResumePhase — walk the pipeline in REVERSE; the first probe that returns
+// true is the last completed phase, so resume at the phase after it. Returns the
+// entry phase when nothing is done, and null when every phase is complete (terminal).
+// The `probes` option accepts the same (ticket, opts) signature as WORK_DONE_PROBES;
+// tests inject uniform `async () => bool` fakes.
+export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd } = {}) {
+  for (let i = RESUME_PHASE_ORDER.length - 1; i >= 0; i--) {
+    const phase = RESUME_PHASE_ORDER[i];
+    const probe = probes[phase];
+    if (typeof probe !== "function") continue;
+    if (await probe(ticket, { cwd })) {
+      const next = RESUME_PHASE_ORDER[i + 1];
+      return next ?? null; // last phase done ⇒ terminal
+    }
+  }
+  return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
 }

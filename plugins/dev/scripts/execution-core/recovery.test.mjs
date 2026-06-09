@@ -4147,3 +4147,102 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     expect(emit.calls.length).toBe(0);
   });
 });
+
+// ─── CTL-863: deadHosts, survivingRoster, inferResumePhase ───────────────────
+
+import { deadHosts, survivingRoster, inferResumePhase } from "./recovery.mjs";
+
+describe("deadHosts — grace-window evaluation (CTL-863)", () => {
+  test("flags hosts past the grace window, keeps fresh ones", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-08T19:59:30Z",        // 30s ago — alive
+      "mac-studio": "2026-06-08T19:40:00Z", // 20m ago — dead
+    };
+    const dead = deadHosts({ lastSeen, roster: ["mini", "mac-studio"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual(["mac-studio"]);
+  });
+
+  test("a host absent from lastSeen is not flagged dead (no cross-host visibility)", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const dead = deadHosts({
+      lastSeen: { mini: "2026-06-08T19:59:55Z" },
+      roster: ["mini", "ghost"],
+      graceMs: 600_000,
+      nowMs: now,
+    });
+    expect(dead).toEqual([]);
+  });
+
+  test("empty roster returns empty dead list", () => {
+    const dead = deadHosts({ lastSeen: {}, roster: [], graceMs: 600_000, nowMs: Date.now() });
+    expect(dead).toEqual([]);
+  });
+
+  test("host exactly at the grace boundary (equal) is NOT dead", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const cutoff = now - 600_000; // exactly at boundary
+    const lastSeen = { mini: new Date(cutoff).toISOString() };
+    const dead = deadHosts({ lastSeen, roster: ["mini"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual([]);
+  });
+});
+
+describe("survivingRoster — in-memory dead-host removal (CTL-863)", () => {
+  test("removes dead hosts without mutating the roster", () => {
+    const roster = ["mini", "mac-studio", "laptop"];
+    const survivors = survivingRoster(roster, ["mac-studio"]);
+    expect(survivors).toEqual(["mini", "laptop"]);
+    expect(roster).toEqual(["mini", "mac-studio", "laptop"]); // unchanged
+  });
+
+  test("empty dead list returns a copy of the full roster", () => {
+    const roster = ["mini", "mac-studio"];
+    expect(survivingRoster(roster, [])).toEqual(["mini", "mac-studio"]);
+  });
+
+  test("all dead → empty survivors", () => {
+    expect(survivingRoster(["mini"], ["mini"])).toEqual([]);
+  });
+});
+
+describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
+  const allPhases = [
+    "triage", "research", "plan", "implement", "verify", "review",
+    "pr", "monitor-merge", "monitor-deploy",
+  ];
+
+  test("plan done, implement not → resume at implement", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => {
+      const done = ["triage", "research", "plan"].includes(p);
+      return [p, async () => done];
+    }));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("implement");
+  });
+
+  test("nothing done → resume at entry phase (research)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => false]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+
+  test("all done → null (terminal; nothing to resume)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => true]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBeNull();
+  });
+
+  test("monitor-merge done, monitor-deploy not → resume at monitor-deploy", async () => {
+    const done = new Set(["triage","research","plan","implement","verify","review","pr","monitor-merge"]);
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => done.has(p)]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("monitor-deploy");
+  });
+
+  test("only triage done → resume at research (entry phase)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => p === "triage"]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+});
