@@ -44,10 +44,15 @@ export default defineConfig({
     outDir: resolve(__dirname, "../public"),
     emptyOutDir: false,
     rollupOptions: {
-      // CTL-730: build BOTH entries. `index.html` is the legacy dashboard
-      // (served at /legacy); `board.html` is the CTL-727 board (the default
-      // page at /). Without this, Vite's single-entry default only emits
-      // index.html and the board is never produced for production.
+      // Build BOTH entries.
+      // CTL-892 / SHELL2: `index.html` (→ App → AppShell) is now the canonical
+      // app shell served at `/` AND `/legacy` — it hosts the dense board as the
+      // "board" surface inside the shared SidebarInset (one shell, two densities).
+      // `board.html` survives as the standalone legacy/fallback board entry served
+      // at `/board`; it still carries the FND deep-link router (/ticket/$id,
+      // /worker/$id) until that migrates into the shell. (Before SHELL2, CTL-730
+      // served board.html raw at `/`.) Without both inputs, Vite's single-entry
+      // default only emits index.html and the standalone board is never produced.
       input: {
         main: resolve(__dirname, "index.html"),
         board: resolve(__dirname, "board.html"),

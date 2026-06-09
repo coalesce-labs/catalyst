@@ -1,8 +1,20 @@
-import { useMemo, useState, useCallback, useEffect, lazy, Suspense } from "react";
+import {
+  useMemo,
+  useState,
+  useCallback,
+  useEffect,
+  lazy,
+  Suspense,
+  type ReactNode,
+} from "react";
 import { useMonitor } from "./hooks/use-monitor";
 import { useKeyboardNav } from "./hooks/use-keyboard-nav";
 import { useCommsChannels } from "./hooks/use-comms";
 import { AppShell } from "./components/app-shell";
+// CTL-892 / SHELL2: the surface→content map + the dense board, now hosted inside
+// the shared shell instead of its own shell-less board.html page.
+import { useSurface } from "./lib/surface";
+import { surfaceContentKind } from "./lib/surface-content";
 import { AttentionBar } from "./components/attention-bar";
 import { SessionDetailDrawer } from "./components/session-detail-drawer";
 import { ConnectionBanner } from "./components/ui/connection-banner";
@@ -33,6 +45,12 @@ const ActivityView = lazy(() =>
 );
 const GodModeView = lazy(() =>
   import("./components/god-mode-view").then((m) => ({ default: m.GodModeView })),
+);
+// CTL-892 / SHELL2: the dense board lives in the shell now. Lazy so the calm
+// dashboard's initial chunk doesn't pull the full board grid until the operator
+// first jumps to the Board surface (g b / nav / ⌘K).
+const Board = lazy(() =>
+  import("./board/Board").then((m) => ({ default: m.Board })),
 );
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
@@ -166,14 +184,11 @@ function Monitor() {
     [],
   );
 
-  return (
-    // CTL-891 / SHELL1: the AppShell is now the app frame — a full-viewport,
-    // edge-to-edge shadcn Sidebar shell (controlled SidebarProvider + SidebarInset
-    // + OPERATE/OBSERVE nav). The existing dashboard content renders edge-to-edge
-    // inside the inset. Surface→content wiring (Board/Workers/Queue) and live
-    // badges are later SHELL tickets; here the dashboard is the inset content.
-    <AppShell>
-      <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
+  // CTL-892 / SHELL2: the existing dashboard tree, unchanged. It's the inset
+  // content for every surface EXCEPT "board" (Home/Workers/Queue still render the
+  // dashboard today; they migrate to dense surfaces in later SHELL tickets).
+  const dashboard = (
+    <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
         {/* Content-level meta row: snapshot timestamp + version. The frame's
             breadcrumb + collapse live in the AppShell top strip now. */}
         <div className="flex items-center justify-end gap-3 border-b border-border bg-surface-1 px-5 py-2 text-[12px] text-muted">
@@ -252,6 +267,19 @@ function Monitor() {
           </Suspense>
         </div>
       </div>
+  );
+
+  return (
+    // CTL-891 / SHELL1: the AppShell is the app frame — a full-viewport,
+    // edge-to-edge shadcn Sidebar shell (controlled SidebarProvider + SidebarInset
+    // + OPERATE/OBSERVE nav).
+    // CTL-892 / SHELL2: the inset content is now surface-aware. When the active
+    // surface is "board" the dense <Board /> grid renders full-bleed inside the
+    // SidebarInset (embedded → fills the inset, not the viewport); every other
+    // surface keeps the dashboard. SurfaceSwitch reads SurfaceContext, so it MUST
+    // live inside AppShell (which provides it).
+    <AppShell>
+      <SurfaceSwitch dashboard={dashboard} />
 
       {selectedSession &&
         (() => {
@@ -265,4 +293,23 @@ function Monitor() {
         })()}
     </AppShell>
   );
+}
+
+// CTL-892 / SHELL2: the surface→content switch. A stable top-level component (NOT
+// a closure inside Monitor) so the board's element keeps a fixed position in the
+// tree while the board surface is selected — React reconciles it in place across
+// Monitor re-renders, so the SharedWorker EventSource is NOT torn down and
+// re-created on every snapshot tick ("board updates render without a second
+// EventSource per tab"). The board is full-bleed and dense; the dashboard keeps
+// its own (calmer) layout.
+function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
+  const { surface } = useSurface();
+  if (surfaceContentKind(surface) === "board") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <Board embedded />
+      </Suspense>
+    );
+  }
+  return <>{dashboard}</>;
 }

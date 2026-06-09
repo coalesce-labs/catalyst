@@ -63,9 +63,26 @@ afterAll(() => {
 });
 
 describe("SSE server", () => {
-  // CTL-730: the CTL-727 Worker/Ticket board is the default page at /.
-  it("should serve the board (board.html) at /", async () => {
+  // CTL-892 / SHELL2: the app shell (index.html → App → AppShell) is now the
+  // canonical root. The shell hosts the dense board as the "board" surface inside
+  // the shared SidebarInset, so `/` serves the shell (id="root"), NOT the
+  // shell-less board page (which CTL-730 served here before SHELL2).
+  it("should serve the app shell (index.html) at /", async () => {
     const res = await fetch(`${baseUrl}/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('id="root"');
+    // The board's standalone mount point is NOT the root any more.
+    expect(body).not.toContain("board-root");
+  });
+
+  // CTL-892 / SHELL2: the standalone board survives as a legacy/fallback entry at
+  // /board (it still owns the FND deep-link router until that migrates into the
+  // shell). It must keep its own #board-root mount point.
+  it("should serve the standalone board (board.html) at /board", async () => {
+    const res = await fetch(`${baseUrl}/board`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
