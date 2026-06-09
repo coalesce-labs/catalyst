@@ -13,6 +13,9 @@ import { useCommsChannels } from "./hooks/use-comms";
 import { AppShell } from "./components/app-shell";
 // CTL-892 / SHELL2: the surface→content map + the dense board, now hosted inside
 // the shared shell instead of its own shell-less board.html page.
+// CTL-899 / HOME1: the same switch also mounts the calm Inbox HOME surface for
+// surface === "home" (before the board check), falling through to the dashboard
+// for every other surface.
 import { useSurface } from "./lib/surface";
 import { surfaceContentKind } from "./lib/surface-content";
 import { AttentionBar } from "./components/attention-bar";
@@ -51,6 +54,14 @@ const GodModeView = lazy(() =>
 // first jumps to the Board surface (g b / nav / ⌘K).
 const Board = lazy(() =>
   import("./board/Board").then((m) => ({ default: m.Board })),
+);
+// CTL-899 / HOME1: the calm master-detail Inbox HOME surface. Lazy so its
+// transport (board snapshot SSE) + master-detail tree only load when the operator
+// is on Home — the dashboard surfaces stay untouched.
+const HomeSurface = lazy(() =>
+  import("./components/home/home-surface").then((m) => ({
+    default: m.HomeSurface,
+  })),
 );
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
@@ -184,10 +195,11 @@ function Monitor() {
     [],
   );
 
-  // CTL-892 / SHELL2: the existing dashboard tree, unchanged. It's the inset
-  // content for every surface EXCEPT "board" (Home/Workers/Queue still render the
-  // dashboard today; they migrate to dense surfaces in later SHELL tickets).
-  const dashboard = (
+  // CTL-892 / SHELL2 + CTL-899 / HOME1: the existing dashboard tree, unchanged.
+  // It's the inset content for every surface EXCEPT "home" (calm Inbox) and
+  // "board" (dense grid); Workers/Queue still fall through to the dashboard today
+  // — they migrate to dense surfaces in later SHELL tickets.
+  const dashboardBody = (
     <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
         {/* Content-level meta row: snapshot timestamp + version. The frame's
             breadcrumb + collapse live in the AppShell top strip now. */}
@@ -275,11 +287,12 @@ function Monitor() {
     // + OPERATE/OBSERVE nav).
     // CTL-892 / SHELL2: the inset content is now surface-aware. When the active
     // surface is "board" the dense <Board /> grid renders full-bleed inside the
-    // SidebarInset (embedded → fills the inset, not the viewport); every other
-    // surface keeps the dashboard. SurfaceSwitch reads SurfaceContext, so it MUST
-    // live inside AppShell (which provides it).
+    // SidebarInset (embedded → fills the inset, not the viewport).
+    // CTL-899 / HOME1: when surface === "home" the inset hosts the calm Inbox
+    // master-detail surface; every other surface keeps the dashboard. SurfaceSwitch
+    // reads SurfaceContext, so it MUST live inside AppShell (which provides it).
     <AppShell>
-      <SurfaceSwitch dashboard={dashboard} />
+      <SurfaceSwitch dashboard={dashboardBody} />
 
       {selectedSession &&
         (() => {
@@ -302,8 +315,18 @@ function Monitor() {
 // re-created on every snapshot tick ("board updates render without a second
 // EventSource per tab"). The board is full-bleed and dense; the dashboard keeps
 // its own (calmer) layout.
+// CTL-899 / HOME1: the same switch mounts the calm Inbox HOME surface for
+// surface === "home" (checked first), then the dense board, then falls through to
+// the dashboard for Workers/Queue (no regression until their own SHELL tickets).
 function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
   const { surface } = useSurface();
+  if (surface === "home") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <HomeSurface />
+      </Suspense>
+    );
+  }
   if (surfaceContentKind(surface) === "board") {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
