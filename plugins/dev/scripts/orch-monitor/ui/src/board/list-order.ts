@@ -30,13 +30,24 @@ export type ListKind = "ticket" | "worker";
 export type ListLens = "linear" | "phase";
 
 /**
+ * The BOARD2 (CTL-906) in-column ordering key. Shared by the board columns AND
+ * BOARD4's list view (both order through `resolveList`), so their order can
+ * never drift. `undefined`/absent = the historical payload-array order (no
+ * re-sort) — the FND2 byte-for-byte regression guard.
+ *   - `priority` — P1 (urgent) first; ties broken by `updatedAt` desc.
+ *   - `recent`   — `updatedAt` desc.
+ *   - `live`     — `activeState === "active"` first, then `priority`.
+ */
+export type Ordering = "priority" | "recent" | "live";
+
+/**
  * The context that selects + orders a list. Mirrors the typed search params
  * (`route-search.ts`) the detail shell reconstructs from the URL:
- *   - `kind:"ticket"` + `lens` + `col` → one board column (filter, no re-sort).
+ *   - `kind:"ticket"` + `lens` + `col` (+ optional `order`) → one board column.
  *   - `kind:"worker"` → the in-flight worker queue (rank-sorted).
  */
 export type ListContext =
-  | { kind: "ticket"; lens?: ListLens; col?: string }
+  | { kind: "ticket"; lens?: ListLens; col?: string; order?: Ordering }
   | { kind: "worker"; lens?: ListLens; col?: string };
 
 // ── worker ordering (lifted verbatim from Board.tsx:441-442) ────────────────
@@ -85,6 +96,43 @@ export function filterTickets(
     : tickets.filter((t) => t.phase === col);
 }
 
+// ── ticket in-column ordering (BOARD2 / CTL-906) ────────────────────────────
+// `updatedAt` is an ISO string; `Date.parse` yields NaN for "" / malformed —
+// treat that as 0 (oldest) so a missing timestamp sinks to the bottom of a
+// "recent" sort rather than throwing or sorting unpredictably.
+const updatedAtMs = (t: BoardTicket): number => {
+  const ms = Date.parse(t.updatedAt);
+  return Number.isFinite(ms) ? ms : 0;
+};
+// Linear priority is `0 = No priority, 1 = Urgent … 4 = Low`. For a
+// priority-first sort we want Urgent (1) at the top and "No priority" (0) at the
+// bottom, so map 0 → +Infinity (sinks last) and keep 1..4 ascending.
+const priorityRank = (p: number): number => (p === 0 ? Number.POSITIVE_INFINITY : p);
+const isActiveTicket = (t: BoardTicket): boolean => t.activeState === "active";
+
+/**
+ * The in-column comparator for the BOARD2 (CTL-906) `order` knob. PURE — returns
+ * a `(a, b) => number` and never mutates. Used by `resolveList` (so the board
+ * columns + BOARD4 list view share one order) AND directly in unit tests.
+ *   - `priority` — `priorityRank` asc (Urgent first, No-priority last), ties
+ *     broken by `updatedAt` desc.
+ *   - `recent`   — `updatedAt` desc.
+ *   - `live`     — active-first, then `priority` (same priorityRank).
+ */
+export function compareTickets(order: Ordering): (a: BoardTicket, b: BoardTicket) => number {
+  if (order === "recent") {
+    return (a, b) => updatedAtMs(b) - updatedAtMs(a);
+  }
+  if (order === "live") {
+    return (a, b) =>
+      Number(isActiveTicket(b)) - Number(isActiveTicket(a)) ||
+      priorityRank(a.priority) - priorityRank(b.priority);
+  }
+  // "priority"
+  return (a, b) =>
+    priorityRank(a.priority) - priorityRank(b.priority) || updatedAtMs(b) - updatedAtMs(a);
+}
+
 /**
  * Resolve the ordered list for a board column (tickets) or the in-flight queue
  * (workers) from the resident `BoardPayload` and the navigation context.
@@ -95,7 +143,10 @@ export function filterTickets(
  *
  *   - `kind:"ticket"`: `filterTickets` — column filter on `linearState`
  *     (lens "linear", the default) or `phase` (lens "phase"), payload array
- *     order preserved, NO re-sort.
+ *     order preserved, NO re-sort UNLESS `order` is given (BOARD2 / CTL-906),
+ *     in which case `compareTickets(order)` is applied AFTER the column filter
+ *     so the board columns, the pager `N/total`, and the j/k walk stay
+ *     byte-identical to each other (the FND P1 invariant).
  *   - `kind:"worker"`: `sortWorkers` — rank(active=0, stuck=2, else=1) then
  *     `runtimeMs` descending.
  *
@@ -107,7 +158,7 @@ export function filterTickets(
  */
 export function resolveList(
   payload: BoardPayload,
-  ctx: { kind: "ticket"; lens?: ListLens; col?: string },
+  ctx: { kind: "ticket"; lens?: ListLens; col?: string; order?: Ordering },
 ): BoardTicket[];
 export function resolveList(
   payload: BoardPayload,
@@ -124,7 +175,10 @@ export function resolveList(
   if (ctx.kind === "worker") {
     return sortWorkers(payload.workers);
   }
-  return filterTickets(payload.tickets, ctx.lens ?? "linear", ctx.col);
+  const filtered = filterTickets(payload.tickets, ctx.lens ?? "linear", ctx.col);
+  // BOARD2 / CTL-906: re-sort the column when an `order` is requested. No order
+  // → payload-array order preserved (the FND2 byte-for-byte regression guard).
+  return ctx.order ? filtered.sort(compareTickets(ctx.order)) : filtered;
 }
 
 /**
@@ -137,5 +191,7 @@ export function resolveListIds(payload: BoardPayload, ctx: ListContext): string[
   if (ctx.kind === "worker") {
     return sortWorkers(payload.workers).map((w) => w.name);
   }
-  return filterTickets(payload.tickets, ctx.lens ?? "linear", ctx.col).map((t) => t.id);
+  // Route through resolveList so the optional BOARD2 `order` is applied here too
+  // — the pager + j/k walk read the same ordered ids the board column renders.
+  return (resolveList(payload, ctx) as BoardTicket[]).map((t) => t.id);
 }

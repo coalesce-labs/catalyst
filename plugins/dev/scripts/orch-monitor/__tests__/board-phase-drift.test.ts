@@ -23,14 +23,18 @@
 //                       /…). Its KEYS must cover every pipeline phase; its VALUE
 //                       space defines which Linear columns the board can produce.
 //
-//   UI COLUMNS  — ui/src/board/Board.tsx
-//     • PHASE_COLS      the visual board's phase columns (key + user-facing
+//   UI COLUMNS  — ui/src/board/board-display.ts (BOARD2 / CTL-906: the canonical
+//                 column SETS moved out of Board.tsx into this pure module so the
+//                 DOM-free column-derivation tests can read them; the board now
+//                 imports them from here — ONE definition).
+//     • PHASE_COLUMNS   the visual board's phase columns (key + user-facing
 //                       label). The .key order is the literal column order the
 //                       user sees, so it MUST equal descriptor PHASES exactly.
-//     • LINEAR_COLS     the visual board's Linear-lens columns. Must match the
+//     • LINEAR_COLUMNS  the visual board's Linear-lens columns. Must match the
 //                       value-space the data layer (PHASE_TO_LINEAR) produces —
 //                       every label the data layer emits needs a UI column, and
 //                       no UI column may exist without a data-layer source.
+//   UI COLORS  — ui/src/board/Board.tsx
 //     • PHASE_C         phase → accent color. A SUPERSET of PHASES: it also
 //                       carries ancillary `remediate` plus display aliases
 //                       (merge/deploy/done), so it must at minimum cover every
@@ -72,33 +76,38 @@ import { PHASE_COLORS as FMT_PHASE_COLORS } from "../ui/src/lib/formatters.ts";
 // never silently drift from the real pipeline.
 import { PHASE_LIST, TERMINAL_STATUSES } from "@/board/phase-model";
 
-// ── Board.tsx text extraction ───────────────────────────────────────────────
-// We read Board.tsx as TEXT (never import it) because it pulls in React + CSS +
-// "@/…" path-aliased modules that don't resolve under `bun test`. This mirrors
-// the column-widths.test.ts / event-row.test.tsx precedent of testing against a
-// component's data, not the component itself. The PHASE_C / LINEAR_COLS /
-// PHASE_COLS consts live at the top of the file in plain `const X = …;` form.
+// ── source text extraction ──────────────────────────────────────────────────
+// We read the source as TEXT (never import it) because Board.tsx pulls in React
+// + CSS + "@/…" path-aliased modules that don't resolve under `bun test`. This
+// mirrors the column-widths.test.ts / event-row.test.tsx precedent of testing
+// against a component's data, not the component itself. The PHASE_C /
+// TERMINAL_STATUSES consts live at the top of Board.tsx; the PHASE_COLUMNS /
+// LINEAR_COLUMNS column SETS live in the pure board-display.ts (BOARD2 / CTL-906).
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BOARD_TSX_PATH = join(HERE, "..", "ui", "src", "board", "Board.tsx");
+const BOARD_DISPLAY_PATH = join(HERE, "..", "ui", "src", "board", "board-display.ts");
 const boardSrc = readFileSync(BOARD_TSX_PATH, "utf8");
+const boardDisplaySrc = readFileSync(BOARD_DISPLAY_PATH, "utf8");
 
 /**
- * Slice out the literal initializer of a top-level `const <name> = …` from the
- * Board.tsx text. Returns the substring from the first non-space char after `=`
- * up to (and including) the terminating `;`. Brace/bracket-aware so nested `{…}`
- * / `[…]` (and `;` inside strings/objects) don't truncate early.
+ * Slice out the literal initializer of a top-level `const <name> = …` from a
+ * source text (Board.tsx or board-display.ts). Returns the substring from the
+ * first non-space char after `=` up to (and including) the terminating `;`.
+ * Brace/bracket-aware so nested `{…}` / `[…]` (and `;` inside strings/objects)
+ * don't truncate early. `where` names the file in the drift message.
  */
-function extractConstInitializer(src: string, name: string): string {
+function extractConstInitializer(src: string, name: string, where = BOARD_TSX_PATH): string {
   // Match `const NAME` optionally followed by a TS type annotation, then `=`.
-  // `name` is always a hardcoded literal at the call sites (PHASE_COLS /
-  // LINEAR_COLS / PHASE_C), so this dynamic RegExp is not an injection vector.
+  // `name` is always a hardcoded literal at the call sites (PHASE_COLUMNS /
+  // LINEAR_COLUMNS / PHASE_C / TERMINAL_STATUSES), so this dynamic RegExp is not
+  // an injection vector.
   // eslint-disable-next-line security/detect-non-literal-regexp
   const re = new RegExp(`const\\s+${name}\\b[^=]*=`);
   const m = re.exec(src);
   if (!m) {
     throw new Error(
-      `board-phase-drift: could not locate \`const ${name}\` in Board.tsx ` +
-        `(${BOARD_TSX_PATH}). The board phase-list copies moved or were renamed; ` +
+      `board-phase-drift: could not locate \`const ${name}\` in ${where}. ` +
+        `The board phase-list copies moved or were renamed; ` +
         `update this guard so it keeps tracking them against ${SOT}.`,
     );
   }
@@ -116,7 +125,7 @@ function extractConstInitializer(src: string, name: string): string {
     }
   }
   throw new Error(
-    `board-phase-drift: \`const ${name}\` initializer in Board.tsx was not ` +
+    `board-phase-drift: \`const ${name}\` initializer in ${where} was not ` +
       `terminated by ';' — the file shape changed; update this guard.`,
   );
 }
@@ -181,9 +190,11 @@ function extractKeys(initializer: string, mode: "objectKeys" | "recordKeyField")
   return out;
 }
 
-// Extract the three Board.tsx copies once.
-const phaseColsKeys = extractKeys(extractConstInitializer(boardSrc, "PHASE_COLS"), "recordKeyField");
-const linearColsKeys = extractKeys(extractConstInitializer(boardSrc, "LINEAR_COLS"), "recordKeyField");
+// Extract the copies once. The column SETS now live in board-display.ts
+// (PHASE_COLUMNS / LINEAR_COLUMNS — BOARD2 / CTL-906); the color map stays in
+// Board.tsx (PHASE_C).
+const phaseColsKeys = extractKeys(extractConstInitializer(boardDisplaySrc, "PHASE_COLUMNS", BOARD_DISPLAY_PATH), "recordKeyField");
+const linearColsKeys = extractKeys(extractConstInitializer(boardDisplaySrc, "LINEAR_COLUMNS", BOARD_DISPLAY_PATH), "recordKeyField");
 const phaseCKeys = extractKeys(extractConstInitializer(boardSrc, "PHASE_C"), "objectKeys");
 
 // ── Requirement 3: board-data PHASE_ORDER === descriptor PHASES (exact order) ─
@@ -215,15 +226,15 @@ test("board-data.mjs PHASE_TO_LINEAR keys cover every descriptor PHASE (superset
   expect(missing).toEqual([]);
 });
 
-// ── Requirement 5a: Board.tsx PHASE_COLS .key order === PHASES (exact) ────────
-test("Board.tsx PHASE_COLS keys equal descriptor PHASES exactly (visual column order)", () => {
+// ── Requirement 5a: board-display PHASE_COLUMNS .key order === PHASES (exact) ──
+test("board-display PHASE_COLUMNS keys equal descriptor PHASES exactly (visual column order)", () => {
   if (JSON.stringify(phaseColsKeys) !== JSON.stringify([...PHASES])) {
     throw new Error(
-      `DRIFT: ui/src/board/Board.tsx PHASE_COLS (the visual board columns) ` +
+      `DRIFT: ui/src/board/board-display.ts PHASE_COLUMNS (the visual board columns) ` +
         `diverged from ${SOT}.\n` +
-        `  descriptor PHASES:    ${JSON.stringify([...PHASES])}\n` +
-        `  Board.tsx PHASE_COLS: ${JSON.stringify(phaseColsKeys)}\n` +
-        `Fix PHASE_COLS .key order/membership to match workflow.default.json.`,
+        `  descriptor PHASES:        ${JSON.stringify([...PHASES])}\n` +
+        `  board-display PHASE_COLUMNS: ${JSON.stringify(phaseColsKeys)}\n` +
+        `Fix PHASE_COLUMNS .key order/membership to match workflow.default.json.`,
     );
   }
   expect(phaseColsKeys).toEqual([...PHASES]);
@@ -264,10 +275,10 @@ test("formatters.ts PHASE_COLORS covers every canonical pipeline phase", () => {
   expect(missing).toEqual([]);
 });
 
-// ── Requirement 6: PHASE_TO_LINEAR value-space === Board.tsx LINEAR_COLS keys ─
+// ── Requirement 6: PHASE_TO_LINEAR value-space === board-display LINEAR_COLUMNS ─
 // Every Linear column label the data layer can emit must have a UI column, and
 // every UI Linear column must be backed by a label the data layer emits.
-test("Board.tsx LINEAR_COLS keys equal the value-space of board-data PHASE_TO_LINEAR", () => {
+test("board-display LINEAR_COLUMNS keys equal the value-space of board-data PHASE_TO_LINEAR", () => {
   const dataLayerLabels = new Set(Object.values(PHASE_TO_LINEAR));
   const uiCols = new Set(linearColsKeys);
 
@@ -281,14 +292,14 @@ test("Board.tsx LINEAR_COLS keys equal the value-space of board-data PHASE_TO_LI
         (uiMissing.length
           ? `  board-data.mjs PHASE_TO_LINEAR emits label(s) ${JSON.stringify(
               uiMissing,
-            )} with NO matching column in Board.tsx LINEAR_COLS.\n`
+            )} with NO matching column in board-display.ts LINEAR_COLUMNS.\n`
           : "") +
         (dataMissing.length
-          ? `  Board.tsx LINEAR_COLS has column(s) ${JSON.stringify(
+          ? `  board-display.ts LINEAR_COLUMNS has column(s) ${JSON.stringify(
               dataMissing,
             )} that board-data.mjs PHASE_TO_LINEAR never produces.\n`
           : "") +
-        `Reconcile PHASE_TO_LINEAR values and LINEAR_COLS keys.`,
+        `Reconcile PHASE_TO_LINEAR values and LINEAR_COLUMNS keys.`,
     );
   }
   expect(uiMissing).toEqual([]);
