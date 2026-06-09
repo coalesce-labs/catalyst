@@ -1,12 +1,12 @@
 // fence-guard-integration.test.mjs — per-site coverage: each guarded write is
 // suppressed when fenceGuard returns false (CTL-863 Phase 4).
 //
-// These are the focused per-site tests the plan requires. We test via the
-// public functions that contain the guards, injecting stale-fence conditions.
+// Tests via public functions that contain the guards, injecting stale-fence
+// conditions (no signal file → readSignalGeneration returns null → fail-closed).
 // Run: cd plugins/dev/scripts/execution-core && bun test fence-guard-integration.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,6 +82,103 @@ describe("readSignalGeneration (CTL-863)", () => {
     }));
     expect(readSignalGeneration(dir, "CTL-1")).toBe(5);
   });
+});
+
+// ── Site 1: terminalDoneOnce in schedulerTick suppressed by stale fence ─────────
+//
+// schedulerTick accepts `hosts` as an injection seam (CTL-850) so we can force
+// multiHost=true without touching the filesystem hosts.json. No signal-file
+// generation → readSignalGeneration returns null → fenceGuard returns false
+// (fail-closed) → applyTerminalDone is NOT called.
+
+import { schedulerTick } from "./scheduler.mjs";
+
+describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
+  let orchDir;
+  let catalystDir;
+  let prevCatalystDir;
+
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl863-s1-"));
+    prevCatalystDir = process.env.CATALYST_DIR;
+    catalystDir = mkdtempSync(join(tmpdir(), "ctl863-s1-cat-"));
+    process.env.CATALYST_DIR = catalystDir;
+  });
+  afterEach(() => {
+    rmSync(orchDir, { recursive: true, force: true });
+    rmSync(catalystDir, { recursive: true, force: true });
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  test("single-host: monitor-deploy done → applyTerminalDone called", () => {
+    const workerDir = join(orchDir, "workers", "CTL-S1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
+      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    const doneCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: (a) => { doneCalls.push(a.ticket); return { applied: true }; },
+        applyPhaseStatus: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      hosts: ["single-host"],
+    });
+    expect(doneCalls).toContain("CTL-S1");
+  });
+
+  test("multi-host + stale fence (no generation in signal) → applyTerminalDone suppressed", () => {
+    const workerDir = join(orchDir, "workers", "CTL-S1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
+      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    const doneCalls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: () => ({ code: 0, stdout: "" }),
+      writeStatus: {
+        applyTerminalDone: (a) => { doneCalls.push(a.ticket); return { applied: true }; },
+        applyPhaseStatus: () => {},
+        applyLabel: () => ({ applied: true }),
+      },
+      liveBackgroundCount: () => 0,
+      teardownWorktree: () => true,
+      hosts: ["host-A", "host-B"],
+    });
+    expect(doneCalls).not.toContain("CTL-S1");
+  });
+});
+
+// ── Site 10: defaultEscalate (stale-pr-rescue-timer) suppressed by stale fence ─
+
+import { defaultEscalate } from "./stale-pr-rescue-timer.mjs";
+
+describe("defaultEscalate fence guard (site 10, CTL-863)", () => {
+  let dir;
+  beforeEach(() => { dir = makeTmpDir(); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  test("single-host (multiHost:false) skips fence check and applies label", () => {
+    let labelApplied = false;
+    mkdirSync(join(dir, "workers", "CTL-10"), { recursive: true });
+    const linearWrite = { applyLabel: () => { labelApplied = true; return { applied: true }; } };
+    defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: false });
+    expect(labelApplied).toBe(true);
+  });
+
+  test("multi-host + stale fence (no signal file) → label NOT applied", () => {
+    let labelApplied = false;
+    mkdirSync(join(dir, "workers", "CTL-10"), { recursive: true });
+    const linearWrite = { applyLabel: () => { labelApplied = true; return { applied: true }; } };
+    defaultEscalate("CTL-10", {}, { orchDir: dir, linearWrite, multiHost: true });
+    expect(labelApplied).toBe(false);
+  });
+
 });
 
 // ── Site 9: defaultPostReclaimMirror suppressed by stale fence ───────────────
