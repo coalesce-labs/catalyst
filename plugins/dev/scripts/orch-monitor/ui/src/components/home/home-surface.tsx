@@ -17,7 +17,7 @@
 // with the top item selected by default; the split survives iPad-landscape via
 // the ResizableSplit floors; and the data is the read-model snapshot, never a
 // per-load Linear fetch.
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   ALL_CLEAR_HEADLINE,
@@ -37,6 +37,10 @@ import { isTypingTarget } from "@/lib/surface";
 // switcher's repo selection actually filters the inbox (All = the unfiltered
 // view). The scoped hook wraps the SAME shared board transport (one EventSource).
 import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
+// CTL-903 / HOME5: the WRITE path — the one bright verb records the response +
+// resumes the agent, with optimistic rollback. The hook owns the optimistic
+// state + grace timer; the pure client/fetch live in board/respond-client.ts.
+import { useRespond, type RespondRowStatus } from "@/hooks/use-respond";
 import { ResizableSplit } from "./resizable-split";
 import { InboxRow } from "./inbox-row";
 import { ReadingPane } from "./reading-pane";
@@ -72,11 +76,17 @@ function InboxSectionBlock({
   selectedId,
   onSelect,
   now,
+  onAct,
+  statusFor,
 }: {
   section: InboxSection;
   selectedId: string | null;
   onSelect: (id: string) => void;
   now: number;
+  /** CTL-903 (HOME5): fire a row's bright verb (record + resume). */
+  onAct: (id: string) => void;
+  /** CTL-903 (HOME5): the optimistic write status for a given row id. */
+  statusFor: (id: string) => RespondRowStatus;
 }) {
   // Needs-you sections are always open (you must see what needs you). The
   // reassurance sets start collapsed so the page de-alarms by subtraction.
@@ -125,6 +135,8 @@ function InboxSectionBlock({
               selected={row.id === selectedId}
               onSelect={onSelect}
               now={now}
+              onAct={onAct}
+              respondStatus={statusFor(row.id)}
             />
           ))}
         </div>
@@ -142,6 +154,8 @@ function InboxList({
   onSelect,
   status,
   now,
+  onAct,
+  statusFor,
 }: {
   header: string;
   sections: ReturnType<typeof deriveInbox>["sections"];
@@ -150,6 +164,10 @@ function InboxList({
   onSelect: (id: string) => void;
   status: string;
   now: number;
+  /** CTL-903 (HOME5): fire a row's bright verb (record + resume). */
+  onAct: (id: string) => void;
+  /** CTL-903 (HOME5): the optimistic write status for a given row id. */
+  statusFor: (id: string) => RespondRowStatus;
 }) {
   return (
     <div className="flex h-full flex-col bg-surface-0">
@@ -178,6 +196,8 @@ function InboxList({
               selectedId={selectedId}
               onSelect={onSelect}
               now={now}
+              onAct={onAct}
+              statusFor={statusFor}
             />
           ))
         )}
@@ -248,6 +268,39 @@ export function HomeSurface() {
     return () => window.removeEventListener("keydown", onKey);
   }, [model.order]);
 
+  // CTL-903 / HOME5: the WRITE path. The hook owns the optimistic-resume state +
+  // the grace-window rollback; the verb fires record-response + resume-agent
+  // through the read-model write endpoint (board/respond-client.ts owns the
+  // fetch). The single-node case is an exact pass-through (the endpoint's
+  // identity fence no-op); a multi-node fence rejection arrives as `did-not-take`.
+  const { respond, statusFor, reconcile } = useRespond();
+  const onAct = useCallback(
+    (id: string) => {
+      // The recorded note is empty for the one-click verb — the BFF12 endpoint
+      // records the response (an empty body is a valid acknowledgement) and emits
+      // the resume event regardless; the detail surface can carry a richer note.
+      void respond(id, "");
+    },
+    [respond],
+  );
+
+  // Reconcile the optimistic marks against EVERY new read-model frame: a row that
+  // CLEARED (left the needs-you set) means the resume took (drop the mark); a row
+  // STILL waiting past the grace window means it did not take (roll back → the
+  // verb returns + "it didn't take"). The still-waiting set is the model's
+  // needs-you rows (blocked | waiting) — the exact "still shows the item waiting"
+  // the scenario re-checks.
+  const stillWaitingIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const row of model.order) {
+      if (isNeedsYouSection(row.section)) ids.add(row.id);
+    }
+    return ids;
+  }, [model]);
+  useEffect(() => {
+    reconcile(stillWaitingIds);
+  }, [stillWaitingIds, reconcile]);
+
   // CTL-904 / HOME6: the all-clear gate — nothing needs the operator. When it
   // holds, the header reads as everything-handled (not an alarm count), the list
   // shows the celebratory all-clear state, and the reading pane shows the calm
@@ -268,13 +321,20 @@ export function HomeSurface() {
             onSelect={setSelectedId}
             status={status}
             now={now}
+            onAct={onAct}
+            statusFor={statusFor}
           />
         }
         reading={
           allClear ? (
             <AllClearHero counts={model.counts} />
           ) : (
-            <ReadingPane row={selectedRow} workers={payload?.workers ?? []} />
+            <ReadingPane
+              row={selectedRow}
+              workers={payload?.workers ?? []}
+              onAct={onAct}
+              respondStatus={selectedRow ? statusFor(selectedRow.id) : "idle"}
+            />
           )
         }
       />
