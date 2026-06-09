@@ -28,6 +28,7 @@ const homeSurfaceSrc = read("components/home/home-surface.tsx");
 const inboxRowSrc = read("components/home/inbox-row.tsx");
 const splitSrc = read("components/home/resizable-split.tsx");
 const useBoardSnapshotSrc = read("hooks/use-board-snapshot.ts");
+const allClearHeroSrc = read("components/home/all-clear-hero.tsx");
 
 function stripComments(src: string): string {
   return src
@@ -203,6 +204,62 @@ describe("HOME3 — 'Running on its own' is a collapsed reassurance count by def
   it("the surface ticks a `now` clock and passes it down to the rows", () => {
     expect(homeSurfaceSrc).toContain("setNow");
     expect(homeSurfaceSrc).toMatch(/now=\{now\}/);
+  });
+});
+
+// ── CTL-904 / HOME6: the calm all-clear empty state (the relief payoff) ───────
+const heroCode = stripComments(allClearHeroSrc);
+
+describe("all-clear empty state — the calm relief payoff (CTL-904)", () => {
+  // Scenario: All-clear hero when nothing needs you
+  it("HomeSurface gates the all-clear state on the read-model emptiness (isAllClear)", () => {
+    // The gate is the SAME read-model emptiness the inbox derives — NOT a mock
+    // toggle. isAllClear reads the derived counts (zero blocked + zero waiting).
+    expect(homeSurfaceSrc).toContain("isAllClear");
+    expect(homeSurfaceSrc).toContain("model.counts");
+  });
+
+  it("swaps the calm all-clear HERO into the reading pane (not a blank pane)", () => {
+    expect(homeSurfaceSrc).toContain("AllClearHero");
+    // The reading slot conditionally renders the hero vs. the per-row ReadingPane.
+    expect(homeSurfaceSrc).toMatch(/allClear\s*\?\s*<AllClearHero/);
+    // The hero is keyed by a stable data hook and is NOT an inert blank.
+    expect(allClearHeroSrc).toContain("data-all-clear-hero");
+    expect(allClearHeroSrc).toContain("All clear");
+  });
+
+  it('the list shows an "All clear" message with how many shipped while you were away', () => {
+    expect(homeSurfaceSrc).toContain("AllClearList");
+    expect(homeSurfaceSrc).toContain("data-all-clear-list");
+    // The shipped count flows from the derived counts, never a hardcoded number.
+    expect(homeSurfaceSrc).toContain("shippedWhileAwaySummary");
+  });
+
+  it("the header reads as everything-handled (no alarm count) in the all-clear state", () => {
+    // The all-clear header is the headline constant, NOT the alarm-count sentence.
+    expect(homeSurfaceSrc).toContain("ALL_CLEAR_HEADLINE");
+    expect(homeSurfaceSrc).toMatch(/allClear\s*\?\s*ALL_CLEAR_HEADLINE\s*:\s*calmHeaderSentence/);
+  });
+
+  // Scenario: All-clear still reassures about autonomous work
+  it("reassures that agents are running on their own (allClearReassurance)", () => {
+    expect(homeSurfaceSrc).toContain("allClearReassurance");
+    expect(allClearHeroSrc).toContain("allClearReassurance");
+  });
+
+  // Scenario: Reduced-motion users get the calm state without animation
+  it("the celebratory entrance collapses to instant under prefers-reduced-motion", () => {
+    // The entrance is a CSS fade; motion-reduce: collapses it to none (no library).
+    expect(heroCode).toContain("animate-fade-in");
+    expect(heroCode).toContain("motion-reduce:animate-none");
+    // The all-clear list entrance is honored the same way.
+    expect(stripComments(homeSurfaceSrc)).toContain("motion-reduce:animate-none");
+  });
+
+  it("the all-clear hero does NOT reach for Linear / a per-load fetch (read-model only)", () => {
+    expect(heroCode.toLowerCase()).not.toContain("linearis");
+    expect(heroCode).not.toMatch(/\bnew EventSource\b/);
+    expect(heroCode).not.toMatch(/\bfetch\(/);
   });
 });
 

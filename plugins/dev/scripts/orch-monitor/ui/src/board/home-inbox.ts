@@ -223,6 +223,55 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
 }
 
 /**
+ * THE all-clear gate (CTL-904 / HOME6). The empty state is the relief payoff —
+ * designed as a feature, not a fallback — so it is keyed on the SAME read-model
+ * emptiness the rest of the inbox derives from: zero blocked + zero waiting (i.e.
+ * `needsYou === 0`). When this holds, NOTHING needs the operator, so Home swaps in
+ * the calm all-clear hero even while agents keep running on their own. PURE: reads
+ * only the already-derived counts, reaches for no network/Linear.
+ */
+export function isAllClear(counts: InboxCounts): boolean {
+  return counts.needsYou === 0;
+}
+
+/**
+ * The reassurance line shown in the all-clear hero (CTL-904 / HOME6). Names how
+ * many agents are still running on their own — the structural reassurance that
+ * makes the check-in operator exhale — and always closes with the "check back
+ * whenever" invitation. When nothing at all is in flight it still reassures (the
+ * agents are simply idle, not stalled), so the operator is never left with a bare
+ * blank pane.
+ */
+export function allClearReassurance(counts: InboxCounts): string {
+  if (counts.running > 0) {
+    const verb = counts.running === 1 ? "agent is" : "agents are";
+    const its = counts.running === 1 ? "its" : "their";
+    return `${counts.running} ${verb} running on ${its} own — check back whenever.`;
+  }
+  return "Agents are running on their own — check back whenever.";
+}
+
+/**
+ * The "N shipped while you were away" summary for the all-clear list (CTL-904 /
+ * HOME6). Reads the `done` count (the "Done while you were away" reassurance set
+ * the broker already folded into the snapshot). Returns null when nothing shipped,
+ * so the list shows the bare "All clear" headline without a misleading "0 shipped".
+ */
+export function shippedWhileAwaySummary(counts: InboxCounts): string | null {
+  if (counts.done <= 0) return null;
+  return `${counts.done} shipped while you were away`;
+}
+
+/**
+ * The all-clear list HEADLINE (CTL-904 / HOME6). When nothing needs the operator,
+ * the list header reads as everything-handled — "All clear" — rather than leading
+ * with an alarm count. This is intentionally SEPARATE from calmHeaderSentence (the
+ * normal one-sentence state-of-things header): the all-clear surface owns its own
+ * celebratory copy so the alarm-count sentence never leaks into the relief payoff.
+ */
+export const ALL_CLEAR_HEADLINE = "All clear — nothing needs you right now.";
+
+/**
  * The calm "state of things" header — ONE sentence, never a KPI grid (Direction A
  * non-negotiable #5). Reads e.g.:
  *   "4 running on their own · 2 need you · nothing on fire"

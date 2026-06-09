@@ -24,6 +24,11 @@ import {
   isNeedsYouSection,
   rowDurationAnchor,
   rowDurationMs,
+  isAllClear,
+  allClearReassurance,
+  shippedWhileAwaySummary,
+  ALL_CLEAR_HEADLINE,
+  type InboxCounts,
   type InboxRow,
 } from "../ui/src/board/home-inbox";
 import type { BoardPayload, BoardTicket } from "../ui/src/board/types";
@@ -359,5 +364,87 @@ describe("rowDurationMs — elapsed since the durable anchor, honest about absen
   it("a done row never reports a live duration even with a phase timestamp", () => {
     const row = mkRow("done", { currentPhaseSince: "2026-06-09T08:00:00Z" });
     expect(rowDurationMs(row, now)).toBeNull();
+  });
+});
+
+// ── CTL-904 / HOME6: the calm all-clear empty state (the relief payoff) ───────
+const counts = (over: Partial<InboxCounts> = {}): InboxCounts => ({
+  blocked: 0,
+  waiting: 0,
+  running: 0,
+  done: 0,
+  needsYou: 0,
+  ...over,
+});
+
+describe("isAllClear — the all-clear gate keys on read-model emptiness (CTL-904)", () => {
+  it("is all-clear when nothing needs you (zero blocked + zero waiting)", () => {
+    expect(isAllClear(counts({ running: 5, done: 3, needsYou: 0 }))).toBe(true);
+  });
+
+  it("is all-clear even with agents still running on their own", () => {
+    expect(isAllClear(counts({ running: 4, needsYou: 0 }))).toBe(true);
+  });
+
+  it("is all-clear on a wholly empty inbox", () => {
+    expect(isAllClear(counts())).toBe(true);
+  });
+
+  it("is NOT all-clear when a single item is blocked", () => {
+    expect(isAllClear(counts({ blocked: 1, needsYou: 1 }))).toBe(false);
+  });
+
+  it("is NOT all-clear when a single item is waiting", () => {
+    expect(isAllClear(counts({ waiting: 1, needsYou: 1 }))).toBe(false);
+  });
+
+  it("keys on needsYou, NOT on done/running activity (the relief is about you)", () => {
+    // Lots of running + shipped work is STILL all-clear — none of it needs you.
+    expect(isAllClear(counts({ running: 9, done: 7, needsYou: 0 }))).toBe(true);
+  });
+});
+
+describe("allClearReassurance — agents run on their own, check back whenever (CTL-904)", () => {
+  it("names how many agents are running on their own and invites checking back", () => {
+    expect(allClearReassurance(counts({ running: 4, needsYou: 0 }))).toBe(
+      "4 agents are running on their own — check back whenever.",
+    );
+  });
+
+  it("uses singular grammar for one running agent", () => {
+    expect(allClearReassurance(counts({ running: 1, needsYou: 0 }))).toBe(
+      "1 agent is running on its own — check back whenever.",
+    );
+  });
+
+  it("still reassures (never a bare blank) when nothing is in flight", () => {
+    const s = allClearReassurance(counts());
+    expect(s).toContain("running on their own");
+    expect(s).toContain("check back whenever");
+  });
+});
+
+describe("shippedWhileAwaySummary — N shipped while you were away (CTL-904)", () => {
+  it('reads "N shipped while you were away" when work shipped', () => {
+    expect(shippedWhileAwaySummary(counts({ done: 3, needsYou: 0 }))).toBe(
+      "3 shipped while you were away",
+    );
+  });
+
+  it("uses the same phrasing for a single shipped item", () => {
+    expect(shippedWhileAwaySummary(counts({ done: 1, needsYou: 0 }))).toBe(
+      "1 shipped while you were away",
+    );
+  });
+
+  it("returns null when nothing shipped (no misleading '0 shipped')", () => {
+    expect(shippedWhileAwaySummary(counts({ done: 0, needsYou: 0 }))).toBeNull();
+  });
+});
+
+describe("ALL_CLEAR_HEADLINE — everything-handled, never an alarm count (CTL-904)", () => {
+  it("reads as everything-handled rather than a KPI/alarm count", () => {
+    expect(ALL_CLEAR_HEADLINE).toBe("All clear — nothing needs you right now.");
+    expect(ALL_CLEAR_HEADLINE).not.toMatch(/\d/); // no numbers ⇒ no alarm counts
   });
 });
