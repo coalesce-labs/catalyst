@@ -9,6 +9,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { fmtDuration } from "../lib/formatters";
 // ── types + transport (hoisted to ./types + ./board-client for CTL-733 PR-2b) ─
 import { connectBoard } from "./board-client";
+// ── single ordering source (CTL-882 / FND2) ──────────────────────────────────
+// The board renders ticket columns + the worker queue through resolveList so the
+// detail-page pager (N/total) and the j/k walk read the SAME order. See
+// list-order.ts — the P1 keystone correctness item.
+import { resolveList, sortWorkers } from "./list-order";
 import type {
   BoardPayload,
   BoardWorker as Worker,
@@ -46,6 +51,16 @@ const PHASE_COLS = [
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
 ];
+// Stub payload used to route a ticket column through resolveList (CTL-882) when
+// the caller only holds a (repo-/search-filtered) ticket array: resolveList's
+// ticket branch reads `.tickets` only, so the other fields are inert.
+const EMPTY_BOARD_PAYLOAD: Omit<BoardPayload, "tickets"> = {
+  generatedAt: "",
+  config: { maxParallel: 0, inFlight: 0, freeSlots: 0, active: 0, working: 0, stuck: 0 },
+  repos: [],
+  workers: [],
+  queue: [],
+};
 // Phase statuses that mean a phase is no longer running. MUST stay in lock-step
 // with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
 // board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
@@ -359,7 +374,13 @@ function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Tick
   return (
     <BoardScroll fill={fill}>
       {cols.map((c: any) => {
-        const items = lens === "linear" ? tickets.filter((t) => t.linearState === c.key) : tickets.filter((t) => t.phase === c.key);
+        // Render through resolveList (CTL-882 / FND2) so the on-screen column
+        // order is the SAME list the detail-page pager + j/k walk derive. The
+        // ticket branch is a pure column filter (linearState | phase), payload
+        // array order preserved — byte-for-byte identical to the prior inline
+        // `tickets.filter(...)`. `tickets` here is already the repo-/search-
+        // filtered subset; resolveList only reads `.tickets` for kind:"ticket".
+        const items = resolveList({ ...EMPTY_BOARD_PAYLOAD, tickets }, { kind: "ticket", lens, col: c.key });
         const live = items.filter((t) => t.activeState === "active").length;
         return (
           <Column key={c.key} label={c.label || c.key} color={c.c} count={items.length} live={live}>
@@ -438,8 +459,10 @@ const ellip = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, 
 function QueueView({ data }: { data: BoardPayload }) {
   const { config, queue, workers, tickets } = data;
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
-  const rank = (w: Worker) => (isActive(w.activeState) ? 0 : w.activeState === "stuck" ? 2 : 1);
-  const inflight = [...workers].sort((a, b) => rank(a) - rank(b) || (b.runtimeMs ?? 0) - (a.runtimeMs ?? 0));
+  // Order through the SHARED comparator (CTL-882 / FND2): rank(active=0, stuck=2,
+  // else=1) then runtimeMs desc — the same order the worker pager + j/k walk
+  // resolve via resolveList({kind:"worker"}). Byte-for-byte the prior inline sort.
+  const inflight = sortWorkers(workers);
   return (
     <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(100vh - 104px)", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
