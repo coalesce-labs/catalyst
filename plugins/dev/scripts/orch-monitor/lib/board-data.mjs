@@ -30,6 +30,16 @@ const EC = join(HOME, "catalyst", "execution-core");
 const WORKERS_DIR = join(EC, "workers");
 const ELIGIBLE_DIR = join(EC, "eligible");
 const DB = join(HOME, "catalyst", "catalyst.db");
+// CTL-928: the durable per-`claude --bg`-job state directory. A worker's
+// liveness is proven by its job's state.json HERE, NOT by a phase signal that
+// merely says `running` (on 2026-06-09 four sources disagreed on liveness — the
+// signal file was the least reliable). Mirrors the daemon's recovery.mjs lookup
+// (~/.claude/jobs/<bg_job_id>/state.json) and honours the same
+// CATALYST_REVIVE_JOBS_DIR override. Resolved at call time (like recovery.mjs's
+// getJobsRoot) so a test can point it at a temp dir without an import dance.
+function jobsRoot() {
+  return process.env.CATALYST_REVIVE_JOBS_DIR || join(HOME, ".claude", "jobs");
+}
 
 // Canonical 10-phase pipeline order + which statuses are terminal for a phase.
 export const PHASE_ORDER = [
@@ -43,6 +53,49 @@ export const PHASE_ORDER = [
 export const TERMINAL = new Set([
   "done", "failed", "stalled", "skipped", "signal_corrupt", "superseded", "canceled",
 ]);
+
+// CTL-928 — the authoritative `claude --bg` job-LIFECYCLE terminal states (the
+// `state` value Claude writes into ~/.claude/jobs/<id>/state.json). DISTINCT from
+// the worker-SIGNAL TERMINAL set above (a phase-signal `status` like done/skipped):
+// a signal can say `running` while the durable job state is `stopped`/`failed`/
+// `done` — that disagreement is exactly the dead-worker-shown-active bug. Kept in
+// lock-step with execution-core/recovery.mjs TERMINAL_JOB_STATES (the daemon's
+// dead-detection source); `working` is the sole non-terminal value.
+export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+
+// CTL-928: the FINAL pipeline phases. A ticket whose CURRENT phase (per
+// deriveCurrentPhase) is one of these and is terminal has genuinely finished the
+// pipeline → it belongs in the recent-done tail. deriveCurrentPhase already
+// collapses a terminal monitor-deploy/teardown to the synthetic phase "done"
+// (CTL-745, :258), so "done" is the one true pipeline-done marker. Every OTHER
+// terminal phase (triage/research/plan/verify/review… done) is an INTERMEDIATE
+// completion → the ticket is idle BETWEEN phases, not finished.
+export const PIPELINE_DONE_PHASE = "done";
+
+// bgJobLifecycle — CTL-928 read-model mirror of recovery.mjs::jobLifecycle. PURE
+// given the already-read job state (so it is trivially unit-testable and the
+// async fs read stays at the edge). `jobState` is { state, firstTerminalAt } as
+// read from ~/.claude/jobs/<id>/state.json, or null when the dir is gone.
+//   "dead-gone"     — job dir gone (null): the worker process no longer exists.
+//   "dead-terminal" — firstTerminalAt set OR .state ∈ TERMINAL_JOB_STATES: Claude
+//                     marked the job terminal. Definitive — no grace window.
+//   "alive"         — any other readable state (notably "working", or an
+//                     unreadable state.json whose dir still exists). mtime is NOT
+//                     consulted — a multi-minute in-process sub-agent fan-out keeps
+//                     .state non-terminal while mtime ages (the CTL-662 trap).
+export function bgJobLifecycle(jobState) {
+  if (!jobState) return "dead-gone";
+  if (jobState.firstTerminalAt || TERMINAL_JOB_STATES.has(jobState.state)) return "dead-terminal";
+  return "alive";
+}
+
+// isBgJobDead — convenience predicate over bgJobLifecycle: a job is DEAD when its
+// lifecycle is either dead-gone or dead-terminal. A worker whose bg job is dead
+// must NOT count as in-flight, hold a maxParallel slot, or render "active"
+// (CTL-928). null jobState (no bg_job_id resolvable) → treated as dead-gone.
+export function isBgJobDead(jobState) {
+  return bgJobLifecycle(jobState) !== "alive";
+}
 
 // CTL-755 held-indicator labels (admission-control gate). A triaged-waiting
 // ticket the scheduler holds before the triage→research promotion carries one of
@@ -137,6 +190,47 @@ async function exists(p) {
   try { await stat(p); return true; } catch { return false; }
 }
 
+// CTL-928: read a `claude --bg` job's durable state from
+// ~/.claude/jobs/<bgJobId>/state.json. Returns { state, firstTerminalAt } — the
+// two fields bgJobLifecycle needs — or null when the job dir/file is gone
+// (worker process no longer exists). An UNREADABLE-but-present state.json yields
+// { state: null, firstTerminalAt: null }, which bgJobLifecycle treats as "alive"
+// (dir existence still proves the process is up — same fail-open as recovery.mjs).
+// Fail-open everywhere: a missing bg_job_id or any error never throws. Exported
+// so the CTL-928 liveness read is unit-testable against a temp jobs dir via the
+// CATALYST_REVIVE_JOBS_DIR override (set before import — JOBS_DIR is read once).
+export async function readBgJobState(bgJobId) {
+  if (!bgJobId) return null;
+  const root = jobsRoot();
+  const file = join(root, bgJobId, "state.json");
+  // The dir/file being gone is the death signal — distinguish it from a present
+  // dir whose state.json is merely unparseable.
+  if (!(await exists(file))) {
+    // The file may be absent while the dir still exists (job up, state not yet
+    // written). Treat a present dir as alive; a gone dir as dead.
+    return (await exists(join(root, bgJobId))) ? { state: null, firstTerminalAt: null } : null;
+  }
+  try {
+    const parsed = JSON.parse(await readFile(file, "utf8"));
+    return { state: parsed?.state ?? null, firstTerminalAt: parsed?.firstTerminalAt ?? null };
+  } catch {
+    // Present but unreadable — dir existence still proves liveness.
+    return { state: null, firstTerminalAt: null };
+  }
+}
+
+// CTL-928: a worker maps to a ticket:phase via `claude agents --json`, but the
+// durable bg_job_id lives on the phase SIGNAL (phase-<phase>.json `.bg_job_id`).
+// Resolve it so the board can read the worker's bg-job state. Returns the raw
+// bg_job_id string or null (no signal / no bg_job_id) — null then flows to
+// readBgJobState → null → bgJobLifecycle "dead-gone" only if the job dir is also
+// absent, so an as-yet-unstamped signal does not falsely kill a live worker
+// (readBgJobState falls open on a present dir; a null id with no dir is dead).
+async function workerBgJobId(ticket, phase) {
+  const sig = await readJSON(join(WORKERS_DIR, ticket, `phase-${phase}.json`));
+  return sig?.bg_job_id ?? sig?.bgJobId ?? null;
+}
+
 // ── live workers via `claude agents --json` ─────────────────────────────────
 async function liveAgents() {
   try {
@@ -213,10 +307,30 @@ async function transcriptAgeMs(sessionId, now) {
   return newest ? Math.max(0, now - newest) : null;
 }
 
-// Top-level state: a live worker is "active" (in its loop — generating OR actively
-// waiting on sub-agents / CI / a merge). Only call out the exceptions: a
-// finished-but-lingering process (terminal markers) or one dead for ~30m → "stuck".
-async function deriveActiveState(ticket, phase, ageMs) {
+// CTL-928 — classify a worker's top-level liveness from the DURABLE bg-job state
+// FIRST, transcript age second. A signal file that says `running` is NOT proof of
+// life (the 2026-06-09 evidence: 7 signals said running, the durable job states
+// said 0 working). `jobState` is the worker's bg-job state.json read (or null),
+// passed in (read at the edge) so this stays pure-ish and testable.
+//
+//   "dead"   — the bg job reached a terminal lifecycle (stopped/failed/done/
+//              blocked) OR its job dir is gone. Definitive death — a transcript
+//              touched 8 minutes ago does NOT resurrect it. EXCLUDED from
+//              in-flight / consumed capacity by the caller.
+//   "stuck"  — bg job still alive (or its liveness is unknowable) but a terminal
+//              marker file is present, or the transcript has been silent ~30m
+//              (likely zombie/abandoned, not yet reaped).
+//   "active" — alive and recently generating / legitimately event-waiting.
+//
+// `bgKnown` distinguishes "we positively read a bg-job state" (then a dead verdict
+// is trustworthy) from "no bg_job_id resolvable" (legacy/just-dispatched worker —
+// fall back to transcript age rather than fabricate death, matching the daemon's
+// classifyWorker "unknown" handling).
+export async function deriveActiveState(ticket, phase, ageMs, jobState, bgKnown) {
+  // Durable death wins over everything — but only when we actually read a bg-job
+  // state (bgKnown). Without a resolvable bg_job_id we cannot prove death, so we
+  // do NOT mark a live `claude agents` worker dead on a missing id alone.
+  if (bgKnown && isBgJobDead(jobState)) return "dead";
   const dir = join(WORKERS_DIR, ticket);
   if ((await exists(join(dir, ".terminal-done.applied"))) || (await exists(join(dir, ".worktree-removed")))) return "stuck";
   // monitor-merge / monitor-deploy / pr legitimately sit in long event-waits
@@ -224,6 +338,55 @@ async function deriveActiveState(ticket, phase, ageMs) {
   const waitHeavy = phase === "monitor-merge" || phase === "monitor-deploy" || phase === "pr";
   if (!waitHeavy && ageMs != null && ageMs > STUCK_MS) return "stuck";
   return "active";
+}
+
+// isWorkerDead — CTL-928 single predicate the in-flight/capacity buckets use to
+// decide whether a live `claude agents` worker is actually a corpse. True iff its
+// derived activeState is "dead". A dead worker is excluded from ticketIds,
+// inFlight, freeSlots, and the "active" config count.
+export function isWorkerDead(worker) {
+  return worker?.activeState === "dead";
+}
+
+// deriveCapacity — CTL-928 PURE capacity summary over the assembled worker set,
+// so the freeSlots/inFlight fix is unit-testable without shelling out. Dead
+// bg-workers are EXCLUDED from inFlight and freeSlots (they no longer hold a
+// maxParallel slot) and surfaced as their own `dead` count. `workers` is the
+// full BoardWorker[] (live + dead); `maxParallel` the configured ceiling.
+export function deriveCapacity(workers, maxParallel) {
+  const all = Array.isArray(workers) ? workers : [];
+  const live = all.filter((w) => !isWorkerDead(w));
+  return {
+    maxParallel,
+    inFlight: live.length,
+    freeSlots: Math.max(0, maxParallel - live.length),
+    active: live.filter((w) => w.activeState === "active").length,
+    working: live.filter((w) => w.working).length,
+    stuck: live.filter((w) => w.activeState === "stuck").length,
+    dead: all.filter((w) => isWorkerDead(w)).length,
+  };
+}
+
+// laneFor — CTL-928 single source of truth for which board lane a non-queued
+// ticket belongs to, so every non-terminal ticket lands in EXACTLY one lane and
+// none is silently dropped. PURE + exported for unit tests.
+//   "live"           — a live (non-dead) worker is attached. workerStatus is set
+//                      AND its activeState is not "dead".
+//   "recent-done"    — no live worker AND the ticket's current phase is the
+//                      synthetic pipeline-done phase (monitor-deploy/teardown
+//                      terminal, per deriveCurrentPhase). Genuinely finished.
+//   "between-phases" — no live worker AND a terminal INTERMEDIATE phase (triage/
+//                      research/plan/verify/review… done, or a dead worker whose
+//                      phase never reached pipeline-done). Idle, awaiting its next
+//                      dispatch — visible, not dropped (the invisible-ticket bug).
+// A ticket with a non-terminal status and no live worker (a dead-but-running
+// signal) also lands in between-phases — it is in-flight-on-paper but idle in
+// reality, and must be surfaced rather than vanish.
+export function laneFor(ticket) {
+  const hasLiveWorker = ticket.workerStatus !== null && ticket.activeState !== "dead";
+  if (hasLiveWorker) return "live";
+  if (ticket.phase === PIPELINE_DONE_PHASE) return "recent-done";
+  return "between-phases";
 }
 
 // ── derive a ticket's current phase + status from its signal files ──────────
@@ -613,8 +776,16 @@ export async function assembleBoard() {
     // null (not 0) when there is no metrics row — distinguishes "no data" from "free".
     const cost = costs[p.ticket]?.costUSD ?? null;
     const lastActiveMs = await transcriptAgeMs(a.sessionId, now);
-    const activeState = await deriveActiveState(p.ticket, p.phase, lastActiveMs);
-    const working = lastActiveMs != null && lastActiveMs < WORKING_MS; // detail-level only
+    // CTL-928: resolve the worker's DURABLE bg-job state before classifying. The
+    // bg_job_id lives on the phase signal; the state lives under ~/.claude/jobs.
+    // A null bgJobId means we cannot prove death (bgKnown=false) → fall back to
+    // transcript age rather than fabricate a dead verdict.
+    const bgJobId = await workerBgJobId(p.ticket, p.phase);
+    const jobState = bgJobId ? await readBgJobState(bgJobId) : null;
+    const bgKnown = bgJobId != null;
+    const activeState = await deriveActiveState(p.ticket, p.phase, lastActiveMs, jobState, bgKnown);
+    // A dead bg-job is not "working" however fresh its transcript looks.
+    const working = activeState !== "dead" && lastActiveMs != null && lastActiveMs < WORKING_MS; // detail-level only
     // CTL-922 (BFF10): node attribution. host:{name,id} from the worker's own
     // phase signal (CTL-852, dispatch-stamped) falling back to the durable fence
     // projection owner_host (BFF11); generation from the fence projection first,
@@ -638,22 +809,38 @@ export async function assembleBoard() {
       // sessionId — surfaces both id spaces (Loki catalyst.session heartbeat
       // joins on this one). null when the db has no row for this CC-UUID.
       catalystSessionId: catalystSessByUuid[a.sessionId] ?? null,
+      // CTL-928: the durable bg-job id this worker's liveness was derived from
+      // (from the phase signal). null when no signal carried one — surfaced so the
+      // worker rail and the dead-worker capacity logic share one provenance.
+      bgJobId,
       // CTL-922 (BFF10): owning host + fence generation (see above).
       host: deriveHost(workerSigs, fence),
       generation: deriveGeneration(workerSigs, fence),
     };
   }));
-  const inFlightTickets = new Map(workers.map((w) =>
+  // CTL-928: a worker whose durable bg job is dead is NOT in flight. Partition
+  // the `claude agents` workers into the live set (real consumed capacity) and the
+  // dead set (corpses still listed by `claude agents` / lingering job dirs). Only
+  // the live set feeds inFlight, freeSlots, ticketIds, and the "active" count.
+  const liveWorkers = workers.filter((w) => !isWorkerDead(w));
+  const inFlightTickets = new Map(liveWorkers.map((w) =>
     [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs }]));
 
-  // tickets = in-flight (have a worker dir / live agent) ∪ eligible(queued)
+  // tickets = in-flight (have a LIVE worker dir / live agent) ∪ eligible(queued).
+  // CTL-928: a workers/<T>/ dir whose latest signal is a terminal INTERMEDIATE
+  // phase with NO live worker is between-phases — it still gets a card (read via
+  // its dir below), but it must NOT count toward in-flight capacity, so we exclude
+  // dead-bg worker TICKETS from the in-flight `ticketIds` (used only for the
+  // queue's notInFlight exclusion). Worker dirs remain a card source via tickets.
   let workerDirs = [];
   if (await exists(WORKERS_DIR)) {
     try { workerDirs = (await readdir(WORKERS_DIR)).filter((d) => /^[A-Z]+-\d+$/.test(d)); } catch { /* none */ }
   }
-  const ticketIds = new Set([...workers.map((w) => w.ticket), ...workerDirs]);
+  // Every card we render (live workers, dead-worker dirs, plain worker dirs) — the
+  // union of card sources, so a between-phases ticket still gets a BoardTicket.
+  const cardTicketIds = new Set([...workers.map((w) => w.ticket), ...workerDirs]);
 
-  let tickets = await Promise.all([...ticketIds].map(async (id) => {
+  let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
     const { phaseSigs, triage, prSigs } = await readTicketArtifacts(id);
     const cur = deriveCurrentPhase(phaseSigs);
     const phaseSummary = buildPhaseSummary(phaseSigs, now);
@@ -709,24 +896,32 @@ export async function assembleBoard() {
     };
   }));
 
-  // Keep the board legible: live workers + recently-touched moving tickets +
-  // a recent-done tail. A "moving" signal that's actually stale (dead worker,
-  // old non-terminal signal) is bounded by recency so a fat workers dir can't
-  // render hundreds of cards.
+  // CTL-928 lane assembly — every non-queued ticket lands in EXACTLY one lane via
+  // laneFor (the single source of truth), so a dead-but-running ticket is never
+  // silently dropped and a terminal-intermediate ticket is never mis-bucketed into
+  // recent-done. A "between-phases" bucket (the old `moving`) is bounded by recency
+  // so a fat workers dir can't render hundreds of cards.
+  //   live           — a LIVE worker is attached (dead workers fell out of
+  //                    inFlightTickets above, so their tickets are NOT live here).
+  //   between-phases — terminal-intermediate / dead-but-running, no live worker:
+  //                    idle awaiting its next dispatch. THE FORMERLY-INVISIBLE lane.
+  //   recent-done    — genuinely pipeline-done (phase === "done"), a short tail.
   const byRecent = (a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt));
-  const liveTickets = tickets.filter((t) => t.workerStatus !== null);
-  const moving = tickets
-    .filter((t) => t.workerStatus === null && t.status !== "done")
+  const liveTickets = tickets.filter((t) => laneFor(t) === "live");
+  const betweenPhases = tickets
+    .filter((t) => laneFor(t) === "between-phases")
     .sort(byRecent)
     .slice(0, 30);
   const recentDone = tickets
-    .filter((t) => t.workerStatus === null && t.status === "done")
+    .filter((t) => laneFor(t) === "recent-done")
     .sort(byRecent)
     .slice(0, 12);
-  // eligible queue tickets → thin Todo-column board cards (CTL-767)
-  const notInFlight = eligible.filter((e) => !ticketIds.has(e.id));
+  // eligible queue tickets → thin Todo-column board cards (CTL-767). A ticket with
+  // ANY worker dir is already surfaced as live / between-phases above, so it is
+  // excluded here (cardTicketIds) — it is accounted for, not duplicated.
+  const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
   const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo));
-  tickets = [...liveTickets, ...moving, ...recentDone, ...queuedTickets];
+  tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
   const queue = await Promise.all(notInFlight
@@ -752,12 +947,12 @@ export async function assembleBoard() {
 
   return {
     generatedAt: new Date().toISOString(),
-    config: {
-      maxParallel: mp, inFlight: workers.length, freeSlots: Math.max(0, mp - workers.length),
-      active: workers.filter((w) => w.activeState === "active").length,
-      working: workers.filter((w) => w.working).length,
-      stuck: workers.filter((w) => w.activeState === "stuck").length,
-    },
+    // CTL-928: capacity reflects LIVE workers only. A dead bg-job no longer holds a
+    // maxParallel slot, so inFlight + freeSlots tell the true dispatch picture (e.g.
+    // 6 listed, 3 dead → inFlight 3, freeSlots 3). `dead` is surfaced as its own
+    // count so the operator sees the corpses without them consuming capacity. The
+    // computation lives in the PURE deriveCapacity (unit-tested) — DRY.
+    config: deriveCapacity(workers, mp),
     repos,
     workers: workers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,
