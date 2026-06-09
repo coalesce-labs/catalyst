@@ -29,6 +29,12 @@ const inboxRowSrc = read("components/home/inbox-row.tsx");
 const splitSrc = read("components/home/resizable-split.tsx");
 const useBoardSnapshotSrc = read("hooks/use-board-snapshot.ts");
 const allClearHeroSrc = read("components/home/all-clear-hero.tsx");
+// CTL-903 / HOME5: the write-path wiring lives in the reading pane (the verb's
+// prominent home), the row (the quieter verb + overflow), the surface (the
+// optimistic state + reconcile), and the use-respond hook (the only place the
+// fetch-bearing client is called from).
+const readingPaneSrc = read("components/home/reading-pane.tsx");
+const useRespondSrc = read("hooks/use-respond.ts");
 
 function stripComments(src: string): string {
   return src
@@ -262,6 +268,99 @@ describe("all-clear empty state — the calm relief payoff (CTL-904)", () => {
     expect(heroCode.toLowerCase()).not.toContain("linearis");
     expect(heroCode).not.toMatch(/\bnew EventSource\b/);
     expect(heroCode).not.toMatch(/\bfetch\(/);
+  });
+});
+
+// ── CTL-903 / HOME5: one verb clears the item + resumes the agent ─────────────
+const readingPaneCode = stripComments(readingPaneSrc);
+const useRespondCode = stripComments(useRespondSrc);
+
+describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903)", () => {
+  // Scenario: Answering a decision resumes the agent
+  // Scenario: Unblocking a blocked item resumes the agent
+  it("the surface wires the write path through the useRespond hook (record + resume)", () => {
+    expect(homeSurfaceSrc).toContain("useRespond");
+    // The verb's onClick fires respond(...) — the record-response + resume call.
+    expect(homeSurfaceSrc).toContain("respond(");
+    expect(homeSurfaceSrc).toMatch(/onAct=\{onAct\}/);
+  });
+
+  it("the row's verb is a real ACTION button that fires onAct (not just selects)", () => {
+    // The verb is a <button> carrying the action hook, and clicking it stops
+    // propagation so it acts instead of selecting the row.
+    expect(inboxRowSrc).toContain("data-row-verb");
+    expect(inboxRowSrc).toContain("onAct?.(row.id)");
+    expect(rowCode).toContain("stopPropagation");
+    // The verb word comes from the typed action model, not a re-derivation.
+    expect(inboxRowSrc).toContain("verbActionFor");
+  });
+
+  it("the reading pane carries the PROMINENT primary verb (the verb's home)", () => {
+    expect(readingPaneSrc).toContain("data-pane-verb");
+    expect(readingPaneSrc).toContain("verbActionFor");
+    expect(readingPaneSrc).toContain("onAct");
+  });
+
+  it("the write client targets the BFF12 read-model endpoint (POST .../respond)", () => {
+    // The fetch is isolated in respond-client.ts; the hook calls respondTicket,
+    // which posts to /api/ticket/<ticket>/respond (the resume-loop entry point).
+    const clientSrc = read("board/respond-client.ts");
+    expect(clientSrc).toContain("/api/ticket/");
+    expect(clientSrc).toContain("/respond");
+    expect(clientSrc).toMatch(/method:\s*"POST"/);
+  });
+
+  // Scenario: Exactly one bright verb per row
+  it("exactly ONE bright verb per row; the rest are a hover/overflow `⋯` menu", () => {
+    // ONE primary verb (data-row-verb) + the demoted set behind the overflow
+    // trigger (data-row-overflow) drawn from the closed OVERFLOW_ACTIONS list.
+    expect(inboxRowSrc).toContain("data-row-verb");
+    expect(inboxRowSrc).toContain("data-row-overflow");
+    expect(inboxRowSrc).toContain("OVERFLOW_ACTIONS");
+    expect(inboxRowSrc).toContain("DropdownMenu");
+    // The overflow trigger is hover-revealed (opacity-0 → group-hover:opacity-100),
+    // keeping the row calm with one bright button.
+    expect(inboxRowSrc).toContain("group-hover:opacity-100");
+  });
+
+  // Scenario: The mutation is fence-aware in a cluster
+  it("fence-awareness lives server-side; the surface never reads hosts.json (single-node = no-op)", () => {
+    // HOME5's hot path adds NO cluster code: the fence-check is the endpoint's
+    // job (single-host identity no-op pass), surfaced to the client only as a
+    // rejected outcome. Neither the surface nor the client reaches for the roster.
+    for (const code of [homeCode, useRespondCode, stripComments(read("board/respond-client.ts"))]) {
+      expect(code).not.toContain("hosts.json");
+      expect(code).not.toContain("cluster-claim");
+    }
+  });
+
+  // Scenario: Optimistic action rolls back if the agent does not resume
+  it("the surface reconciles optimistic marks against each frame (rollback after the grace window)", () => {
+    expect(homeSurfaceSrc).toContain("reconcile");
+    // The still-waiting set is the model's needs-you rows (the exact "still shows
+    // the item waiting" the scenario re-checks) — driven off the read-model frame.
+    expect(homeSurfaceSrc).toContain("stillWaitingIds");
+    expect(homeSurfaceSrc).toContain("isNeedsYouSection");
+  });
+
+  it("the row surfaces the optimistic state: resuming… then 'didn't take' on rollback", () => {
+    expect(inboxRowSrc).toContain("resuming…");
+    expect(inboxRowSrc).toContain("data-row-resuming");
+    expect(inboxRowSrc).toContain("data-row-did-not-take");
+    expect(inboxRowSrc).toContain("respondStatus");
+  });
+
+  it("the ONLY place the write client (fetch) is reached is the use-respond hook / its pure client", () => {
+    // The home tree's no-fetch invariant is preserved: home-surface / row / pane
+    // carry NO literal fetch/EventSource — the fetch is isolated in
+    // respond-client.ts and reached only via the use-respond hook.
+    for (const code of [homeCode, rowCode, readingPaneCode]) {
+      expect(code).not.toMatch(/\bfetch\(/);
+      expect(code).not.toMatch(/\bnew EventSource\b/);
+    }
+    // The hook calls the pure client (respondTicket), not a raw fetch of its own.
+    expect(useRespondSrc).toContain("respondTicket");
+    expect(useRespondCode).not.toMatch(/\bfetch\(/);
   });
 });
 

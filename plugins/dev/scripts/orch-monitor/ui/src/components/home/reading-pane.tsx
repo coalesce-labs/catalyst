@@ -35,6 +35,8 @@ import {
   viewInClaudeFor,
   type PaneAccent,
 } from "@/board/reading-pane-model";
+import { verbActionFor } from "@/board/respond-client";
+import type { RespondRowStatus } from "@/hooks/use-respond";
 import type { BoardWorker } from "@/board/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -72,11 +74,67 @@ function accentClasses(accent: PaneAccent): string {
   }
 }
 
+/** The pane's PROMINENT primary verb (CTL-903 / HOME5). The reading pane is the
+ *  verb's home (the row keeps a quieter copy); here it is a full bright button.
+ *  Clicking it fires the read-model write (record the response + resume the
+ *  agent). While the optimistic write is in flight it shows `resuming…`; on a
+ *  resume-that-did-not-take it reinstates the verb + a quiet "didn't take" note. */
+function PaneVerb({
+  row,
+  onAct,
+  respondStatus,
+}: {
+  row: InboxRow;
+  onAct?: (id: string) => void;
+  respondStatus: RespondRowStatus;
+}) {
+  const action = verbActionFor(row);
+  if (!action) return null;
+
+  if (respondStatus === "resuming") {
+    return (
+      <div className="mt-4" data-pane-resuming={row.id}>
+        <span className="inline-flex items-center rounded-md border border-border px-3 py-1.5 text-[13px] font-medium text-muted">
+          Resuming…
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 flex items-center gap-3">
+      <Button
+        type="button"
+        size="sm"
+        data-pane-verb={row.id}
+        data-verb-kind={action.kind}
+        onClick={() => onAct?.(row.id)}
+      >
+        {action.verb}
+      </Button>
+      {respondStatus === "did-not-take" && (
+        <span data-pane-did-not-take={row.id} className="text-[11px] text-muted">
+          The agent did not resume — try again.
+        </span>
+      )}
+    </div>
+  );
+}
+
 /** The hero "What's needed now" block. The bright subject of the pane: the full
- *  ask in plain language, then either the decision OPTIONS or the BLOCKER detail.
- *  Emphasis is tint + left bar (accentClasses), not a card. Any field the
- *  read-model omits is simply not rendered (honest, never fabricated). */
-function WhatsNeededNow({ row }: { row: InboxRow }) {
+ *  ask in plain language, then either the decision OPTIONS or the BLOCKER detail,
+ *  and the ONE prominent primary verb (CTL-903). Emphasis is tint + left bar
+ *  (accentClasses), not a card. Any field the read-model omits is simply not
+ *  rendered (honest, never fabricated). */
+function WhatsNeededNow({
+  row,
+  onAct,
+  respondStatus,
+}: {
+  row: InboxRow;
+  onAct?: (id: string) => void;
+  respondStatus: RespondRowStatus;
+}) {
   const kind = heroKindFor(row);
   if (kind == null) return null; // neutral (running/done) sets carry no hero.
 
@@ -126,6 +184,9 @@ function WhatsNeededNow({ row }: { row: InboxRow }) {
           blocked on: {row.blockers.join(", ")}
         </p>
       )}
+
+      {/* The ONE prominent primary verb (CTL-903) — the payoff of the Inbox. */}
+      <PaneVerb row={row} onAct={onAct} respondStatus={respondStatus} />
     </section>
   );
 }
@@ -174,12 +235,19 @@ function About({ row }: { row: InboxRow }) {
 export function ReadingPane({
   row,
   workers,
+  onAct,
+  respondStatus = "idle",
 }: {
   row: InboxRow | null;
   /** The resident read-model workers — the View-in-Claude session id is the
    *  matching worker's `sessionId`. Defaults to [] so the pane is usable without
    *  a worker set (View-in-Claude is simply hidden then). */
   workers?: readonly BoardWorker[];
+  /** CTL-903 (HOME5): fire the pane's prominent primary verb — record the
+   *  operator's response + resume the agent. */
+  onAct?: (id: string) => void;
+  /** CTL-903 (HOME5): the optimistic write status for the selected row. */
+  respondStatus?: RespondRowStatus;
 }) {
   if (!row) return <NothingSelected />;
 
@@ -229,9 +297,10 @@ export function ReadingPane({
           )}
         </div>
 
-        {/* What's needed now — the hero ask + decision options OR blocker detail.
-            Only present for needs-you items (running/done carry no hero). */}
-        {needsYou && <WhatsNeededNow row={row} />}
+        {/* What's needed now — the hero ask + decision options OR blocker detail
+            + the ONE prominent primary verb (CTL-903). Only present for needs-you
+            items (running/done carry no hero). */}
+        {needsYou && <WhatsNeededNow row={row} onAct={onAct} respondStatus={respondStatus} />}
 
         <Separator className="mt-6" />
 
