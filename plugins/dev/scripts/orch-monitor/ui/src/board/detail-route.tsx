@@ -19,6 +19,8 @@ import { Shell, type PropertyRow, type ShellKind, type StreamHealth } from "./Sh
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
+import { WorkerDetailBody } from "./worker-detail-body";
+import { readWorkerScalars } from "./worker-detail-data";
 
 // ── resident payload subscription (same transport as Board.tsx) ─────────────
 function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth } {
@@ -77,12 +79,20 @@ function ticketRows(t: BoardTicket | undefined): PropertyRow[] {
 }
 
 function workerRows(w: BoardWorker | undefined): PropertyRow[] {
+  // CTL-914 (DETAIL3): the worker rail's BoardWorker scalar fallbacks — every
+  // value is the resident AVAILABLE-NOW field or an honest null/dimmed marker.
+  const scalars = readWorkerScalars(w);
   return [
     { label: "Status", value: w ? activeLabel(w.activeState, w.working) : undefined },
     { label: "Phase", value: w?.phase },
     { label: "Repo", value: w?.repo },
     { label: "Team", value: w?.team },
     { label: "Runtime", value: w?.runtimeMs != null ? fmtDuration(w.runtimeMs) : w ? null : undefined },
+    { label: "Cost", value: scalars.costUSD != null ? `$${scalars.costUSD.toFixed(2)}` : w ? null : undefined },
+    // Both id spaces — the CC-UUID (keys Prometheus/Loki claude-code) and the
+    // catalyst sess_ id (keys the catalyst.session streams; null when no db row).
+    { label: "Session", value: scalars.sessionId ?? (w ? null : undefined) },
+    { label: "Catalyst id", value: scalars.catalystSessionId ?? (w ? null : undefined) },
   ];
 }
 
@@ -144,9 +154,7 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
       properties={workerRows(worker)}
       streamHealth={health}
     >
-      <div data-detail-body-placeholder="worker" style={{ color: "#5b626f", font: "12px ui-monospace, monospace" }}>
-        Worker run body (burn-strip · tail · diagnostics) lands in DETAIL3.
-      </div>
+      <WorkerDetailBody id={id} worker={worker} />
     </Shell>
   );
 }

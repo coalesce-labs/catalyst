@@ -9,6 +9,10 @@ import {
   apiErrors,
   costValidation,
   safeDuration,
+  workerHistoryBySession,
+  workerHistoryLogQL,
+  parseHistoryLine,
+  isValidCcSessionId,
 } from "../lib/otel-queries";
 import type { PrometheusFetcher, PrometheusQueryResult } from "../lib/prometheus";
 import type { LokiFetcher, LokiQueryResult } from "../lib/loki";
@@ -255,6 +259,125 @@ describe("apiErrors", () => {
 
   it("returns null when unavailable", async () => {
     expect(await apiErrors(mockLoki(null), "1h")).toBeNull();
+  });
+});
+
+// CTL-914 (DETAIL3): the worker-page [history] tail — REAL today (no plumbing).
+// The single non-negotiable correctness property is the LogQL shape: a
+// `| session_id=\`UUID\`` STRUCTURED-METADATA pipe, NOT a `{session_id="UUID"}`
+// label matcher (which returns 0). Plus session-id validation so the pipe can
+// never be a LogQL injection vector.
+describe("workerHistoryLogQL", () => {
+  it("filters with a `| session_id` structured-metadata pipe, never a `{session_id=}` matcher", () => {
+    const q = workerHistoryLogQL("11111111-2222-3333-4444-555555555555");
+    expect(q).toContain('{service_name=~"claude-code.*"}');
+    expect(q).toContain("| session_id=`11111111-2222-3333-4444-555555555555`");
+    // The fatal anti-pattern: session_id as a stream-label matcher returns 0.
+    expect(q).not.toMatch(/\{[^}]*session_id\s*=/);
+  });
+});
+
+describe("isValidCcSessionId", () => {
+  it("accepts a UUID and rejects injection / traversal", () => {
+    expect(isValidCcSessionId("11111111-2222-3333-4444-555555555555")).toBe(true);
+    expect(isValidCcSessionId("a".repeat(32))).toBe(true);
+    expect(isValidCcSessionId("not a uuid!")).toBe(false);
+    expect(isValidCcSessionId("../etc/passwd")).toBe(false);
+    expect(isValidCcSessionId("abc`} |= `x")).toBe(false);
+    expect(isValidCcSessionId("short")).toBe(false);
+  });
+});
+
+describe("parseHistoryLine", () => {
+  it("extracts event_name/tool_name/tool_input/duration_ms/cost_usd/tokens/model/success", () => {
+    const row = parseHistoryLine(
+      1713100000000,
+      JSON.stringify({
+        event_name: "claude_code.tool_result",
+        tool_name: "Edit",
+        tool_input: "board-data.mjs",
+        duration_ms: 1100,
+        cost_usd: 0.0042,
+        tokens: 318,
+        model: "claude-opus-4-8",
+        success: true,
+      }),
+    );
+    expect(row.ts).toBe(1713100000000);
+    expect(row.eventName).toBe("claude_code.tool_result");
+    expect(row.toolName).toBe("Edit");
+    expect(row.toolInput).toBe("board-data.mjs");
+    expect(row.durationMs).toBe(1100);
+    expect(row.costUsd).toBeCloseTo(0.0042);
+    expect(row.tokens).toBe(318);
+    expect(row.model).toBe("claude-opus-4-8");
+    expect(row.success).toBe(true);
+  });
+
+  it("never crashes on a non-JSON line — fields stay null", () => {
+    const row = parseHistoryLine(42, "this is not json");
+    expect(row.ts).toBe(42);
+    expect(row.eventName).toBeNull();
+    expect(row.toolName).toBeNull();
+    expect(row.durationMs).toBeNull();
+    expect(row.success).toBeNull();
+  });
+});
+
+describe("workerHistoryBySession", () => {
+  const UUID = "11111111-2222-3333-4444-555555555555";
+
+  it("returns parsed rows newest-first from the Loki stream", async () => {
+    const loki = mockLoki({
+      data: {
+        resultType: "streams",
+        result: [
+          {
+            stream: { service_name: "claude-code" },
+            values: [
+              ["1713100000000000000", '{"event_name":"claude_code.tool_result","tool_name":"Read","duration_ms":200}'],
+              ["1713100005000000000", '{"event_name":"claude_code.tool_result","tool_name":"Edit","duration_ms":1100}'],
+            ],
+          },
+        ],
+      },
+    });
+    const rows = await workerHistoryBySession(loki, UUID, "24h");
+    expect(rows).not.toBeNull();
+    expect(rows!).toHaveLength(2);
+    // newest-first: the later (Edit) timestamp leads.
+    expect(rows![0].toolName).toBe("Edit");
+    expect(rows![0].ts).toBe(1713100005000);
+    expect(rows![1].toolName).toBe("Read");
+  });
+
+  it("returns [] (a real 'no logs' answer) when the stream is empty", async () => {
+    const loki = mockLoki({ data: { resultType: "streams", result: [] } });
+    const rows = await workerHistoryBySession(loki, UUID, "24h");
+    expect(rows).toEqual([]);
+  });
+
+  it("returns null when Loki is unavailable", async () => {
+    expect(await workerHistoryBySession(mockLoki(null), UUID, "24h")).toBeNull();
+  });
+
+  it("returns null (refuses to query) for a malformed session id", async () => {
+    const loki = mockLoki({ data: { resultType: "streams", result: [] } });
+    expect(await workerHistoryBySession(loki, "not a uuid!", "24h")).toBeNull();
+  });
+
+  it("issues the `| session_id` pipe LogQL to Loki", async () => {
+    let captured = "";
+    const loki: LokiFetcher = {
+      queryRange: (logql: string) => {
+        captured = logql;
+        return Promise.resolve({ data: { resultType: "streams", result: [] } });
+      },
+      isAvailable: () => true,
+    };
+    await workerHistoryBySession(loki, UUID, "24h");
+    expect(captured).toContain(`| session_id=\`${UUID}\``);
+    expect(captured).not.toMatch(/\{[^}]*session_id\s*=/);
   });
 });
 

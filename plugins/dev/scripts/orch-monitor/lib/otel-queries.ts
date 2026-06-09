@@ -146,6 +146,126 @@ export async function apiErrors(
   return entries;
 }
 
+// ── CTL-914 (DETAIL3): worker-page [history] tail ───────────────────────────
+// A single phase-agent run's transcript is readable HOURS after the worker died
+// by querying the `claude-code` Loki stream filtered to its CC session UUID. The
+// filter MUST be a `| session_id=\`UUID\`` pipe on STRUCTURED METADATA — a
+// `{session_id="UUID"}` label matcher returns 0 (session_id is not a stream
+// label, it is per-line structured metadata; verified design §5.2). This is the
+// reason the worker page is never empty even with no live worker.
+
+/** One parsed claude-code OTEL log line for the worker history tail. The raw log
+ *  body is a JSON object carrying these fields; absent fields stay `null`/`undefined`
+ *  (never fabricated) so the row renderer can dim them. */
+export interface WorkerHistoryRow {
+  /** Log timestamp (epoch ms, from Loki's nanosecond ts). */
+  ts: number;
+  /** The OTEL event name (e.g. `claude_code.tool_result`, `claude_code.api_request`). */
+  eventName: string | null;
+  toolName: string | null;
+  toolInput: string | null;
+  durationMs: number | null;
+  costUsd: number | null;
+  tokens: number | null;
+  model: string | null;
+  /** Tool/result success flag when the line carries one. */
+  success: boolean | null;
+}
+
+/** A CC session id is a UUID. Reject anything else so an attacker-controlled id
+ *  can never inject LogQL through the `| session_id=\`…\`` pipe. */
+const CC_SESSION_ID_RE = /^[0-9a-fA-F-]{8,64}$/;
+
+export function isValidCcSessionId(id: string): boolean {
+  return CC_SESSION_ID_RE.test(id) && !id.includes("`") && !id.includes("\\");
+}
+
+/** Build the exact LogQL for a worker's history tail. Exported so a test can pin
+ *  the `| session_id` STRUCTURED-METADATA pipe (not a `{session_id=}` matcher). */
+export function workerHistoryLogQL(sessionId: string): string {
+  return `{service_name=~"claude-code.*"} | session_id=\`${sessionId}\``;
+}
+
+function asNum(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function asStr(v: unknown): string | null {
+  if (typeof v === "string" && v !== "") return v;
+  return null;
+}
+
+function asBool(v: unknown): boolean | null {
+  if (typeof v === "boolean") return v;
+  if (v === "true") return true;
+  if (v === "false") return false;
+  return null;
+}
+
+/** Parse one Loki log line (a JSON body) into a WorkerHistoryRow. Tolerant: a
+ *  non-JSON or partial line still yields a row with the fields it could read and
+ *  `null` for the rest — the tail must never crash on a malformed record. */
+export function parseHistoryLine(ts: number, line: string): WorkerHistoryRow {
+  let body: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(line);
+    if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
+  } catch {
+    /* leave body empty; the raw line is unreadable JSON */
+  }
+  return {
+    ts,
+    eventName: asStr(body["event_name"]) ?? asStr(body["event.name"]),
+    toolName: asStr(body["tool_name"]),
+    toolInput: asStr(body["tool_input"]),
+    durationMs: asNum(body["duration_ms"]),
+    costUsd: asNum(body["cost_usd"]),
+    tokens: asNum(body["tokens"]),
+    model: asStr(body["model"]),
+    success: asBool(body["success"]),
+  };
+}
+
+/** Query the `claude-code` Loki stream for one worker run's history, newest-first.
+ *  Returns `null` when Loki is unavailable (caller surfaces a 503), `[]` when the
+ *  stream is empty (a real "no logs" answer, not an error). */
+export async function workerHistoryBySession(
+  loki: LokiFetcher,
+  sessionId: string,
+  range: string,
+  limit = 500,
+): Promise<WorkerHistoryRow[] | null> {
+  if (!isValidCcSessionId(sessionId)) return null;
+  const r = safeDuration(range, "24h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    workerHistoryLogQL(sessionId),
+    start.toISOString(),
+    now.toISOString(),
+    limit,
+  );
+  if (!result) return null;
+  const rows: WorkerHistoryRow[] = [];
+  for (const stream of result.data.result) {
+    const s = stream as LokiStreamValue;
+    if (!s.values) continue;
+    for (const [tsNanos, line] of s.values) {
+      // Loki stream timestamps are nanosecond strings — floor to epoch ms.
+      const tsMs = Math.floor(Number(tsNanos) / 1_000_000);
+      rows.push(parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line));
+    }
+  }
+  // Newest-first so the tail reads like a terminal (most-recent activity on top).
+  rows.sort((a, b) => b.ts - a.ts);
+  return rows;
+}
+
 interface CostValidationEntry {
   ticket: string;
   signalCost: number;
