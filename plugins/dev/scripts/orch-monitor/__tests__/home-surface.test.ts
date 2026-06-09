@@ -222,7 +222,9 @@ describe("all-clear empty state — the calm relief payoff (CTL-904)", () => {
   it("swaps the calm all-clear HERO into the reading pane (not a blank pane)", () => {
     expect(homeSurfaceSrc).toContain("AllClearHero");
     // The reading slot conditionally renders the hero vs. the per-row ReadingPane.
-    expect(homeSurfaceSrc).toMatch(/allClear\s*\?\s*<AllClearHero/);
+    // (HOME4 wrapped the ternary across lines with parens once ReadingPane grew a
+    // `workers` prop, so allow the optional `(` + intervening whitespace/newline.)
+    expect(homeSurfaceSrc).toMatch(/allClear\s*\?\s*\(?\s*<AllClearHero/);
     // The hero is keyed by a stable data hook and is NOT an inert blank.
     expect(allClearHeroSrc).toContain("data-all-clear-hero");
     expect(allClearHeroSrc).toContain("All clear");

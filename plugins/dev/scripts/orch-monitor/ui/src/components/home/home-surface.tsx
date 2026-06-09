@@ -271,7 +271,11 @@ export function HomeSurface() {
           />
         }
         reading={
-          allClear ? <AllClearHero counts={model.counts} /> : <ReadingPane row={selectedRow} />
+          allClear ? (
+            <AllClearHero counts={model.counts} />
+          ) : (
+            <ReadingPane row={selectedRow} workers={payload?.workers ?? []} />
+          )
         }
       />
     </div>

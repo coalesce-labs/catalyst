@@ -119,6 +119,35 @@ export interface BoardTicket {
   /** CTL-922 (BFF10): the fence generation (HOME5 unblock passes it to the
    *  fence-check). null when no fence. */
   generation?: number | null;
+  // ── CTL-902 (HOME4): the reading-pane CONTENT fields ─────────────────────
+  // The "What's needed now" hero + the About block read these. They are NOT in
+  // the board payload today — they derive from the ticket's AI summary + the
+  // decision context and must be served per-item by the BFF inbox endpoint
+  // (NEEDS-PLUMBING there, a separate ticket). Every field is OPTIONAL: the pane
+  // renders any field the read-model omits as ABSENT, never fabricated.
+  /** One-line plain-language summary of the ticket (the About block's lead). */
+  summary?: string | null;
+  /** What the ticket is trying to achieve (the About block's goal line). */
+  goal?: string | null;
+  /** The full ask in plain language — the hero "What's needed now" block. Only
+   *  meaningful for a needs-you (blocked/waiting) item. */
+  ask?: string | null;
+  /** The decision options for a `waiting` item — each a label + a one-line
+   *  trade-off detail. Empty/absent for non-decision items. */
+  options?: DecisionOption[] | null;
+  /** The blocker description for a `blocked` item — plain language, shown in the
+   *  hero instead of decision options. */
+  blocker?: string | null;
+}
+
+/** CTL-902 (HOME4): one decision option in the reading-pane hero — a short label
+ *  plus a one-line trade-off detail. Served by the BFF inbox endpoint per item;
+ *  rendered flat (a labelled line), never as a nested card. */
+export interface DecisionOption {
+  /** The option label (e.g. "Path A" / "Rebase onto main"). */
+  label: string;
+  /** The one-line trade-off for choosing this option. */
+  detail: string;
 }
 
 export interface WorkflowSubStep {
