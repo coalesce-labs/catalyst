@@ -1,9 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import {
   createLinearFetcher,
+  createCacheBackedLinearFetcher,
   parseTicketJson,
+  type LinearCacheReader,
   type Runner,
 } from "../lib/linear";
+import type { LinearCacheById } from "../lib/linear-cache-reader.d.mts";
 
 const validPayload = JSON.stringify({
   identifier: "ADV-214",
@@ -226,5 +229,158 @@ describe("createLinearFetcher — event-driven invalidation (CTL-211)", () => {
     await fetcher.invalidate("ADV-999");
     expect(reads).toEqual([]);
     expect(fetcher.get("ADV-999")).toBeNull();
+  });
+});
+
+// BFF9 / CTL-921 — the cache-backed LinearFetcher that retires the live
+// `linearis issues read` poller behind /api/linear + /api/briefing. It serves
+// every key from the broker's durable filter-state.db ticket_state (via
+// readLinearCache) and spawns NOTHING. These tests assert the three Gherkin
+// scenarios:
+//   1. /api/linear + /api/briefing read from the durable cache (no linearis).
+//   2. The live poller is removed, not merely shadowed (no spawn on start/poll).
+//   3. Cache miss degrades, never blocks (partial/empty, no live fan-out).
+describe("createCacheBackedLinearFetcher (BFF9 — durable-cache LinearFetcher)", () => {
+  // A reader that records its calls and returns a canned durable-cache map. It
+  // stands in for readLinearCache (which reads filter-state.db ticket_state +
+  // the eligible projection); a real `linearis` spawn would NOT route through
+  // it, so counting calls here proves "served from cache, no live call".
+  function makeCacheReader(
+    byId: LinearCacheById,
+  ): { reader: LinearCacheReader; calls: () => number } {
+    let calls = 0;
+    const reader: LinearCacheReader = () => {
+      calls++;
+      return Promise.resolve(byId);
+    };
+    return { reader, calls: () => calls };
+  }
+
+  const cacheEntry = {
+    priority: 2,
+    estimate: null,
+    project: "Web UI",
+    labels: ["monitor", "feature"],
+    relations: null,
+    assignee: "uuid-bot",
+    linearState: "Implement",
+    title: "Retire legacy linearis poller",
+  } satisfies LinearCacheById[string];
+
+  it("Scenario 1: serves /api/linear shape from the durable cache (no linearis spawn)", async () => {
+    const { reader, calls } = makeCacheReader({ "CTL-921": cacheEntry });
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+
+    // Before any refresh the cache is empty → miss.
+    expect(fetcher.get("CTL-921")).toBeNull();
+
+    await fetcher.refreshAll(["CTL-921"]);
+    const t = fetcher.get("CTL-921");
+    expect(t).not.toBeNull();
+    expect(t?.key).toBe("CTL-921");
+    expect(t?.title).toBe("Retire legacy linearis poller");
+    expect(t?.state).toBe("Implement"); // linearState → LinearTicket.state
+    expect(t?.project).toBe("Web UI");
+    expect(t?.labels).toEqual(["monitor", "feature"]);
+    // url is derived from the key (no durable url source).
+    expect(t?.url).toBe("https://linear.app/issue/CTL-921");
+    expect(typeof t?.fetchedAt).toBe("string");
+    // Exactly one durable-cache read satisfied the request — no per-key fan-out.
+    expect(calls()).toBe(1);
+  });
+
+  it("Scenario 2: start() reloads the durable cache on the interval — never spawns linearis", async () => {
+    const { reader, calls } = makeCacheReader({ "CTL-921": cacheEntry });
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+
+    // start() does an immediate bulk reload from the cache (not a linearis poll).
+    fetcher.start(() => ["CTL-921"], 60_000);
+    // Let the immediate void reload() settle.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(fetcher.get("CTL-921")?.state).toBe("Implement");
+    expect(calls()).toBeGreaterThanOrEqual(1);
+    fetcher.stop();
+  });
+
+  it("Scenario 2: invalidate() bulk-reloads the durable cache (webhook freshness, no spawn)", async () => {
+    let state = "Plan";
+    let calls = 0;
+    const reader: LinearCacheReader = () => {
+      calls++;
+      return Promise.resolve({
+        "CTL-921": { ...cacheEntry, linearState: state },
+      });
+    };
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+    await fetcher.refreshAll([]);
+    expect(fetcher.get("CTL-921")?.state).toBe("Plan");
+
+    // Broker wrote the new state into ticket_state; webhook → invalidate reloads.
+    state = "PR";
+    await fetcher.invalidate("CTL-921");
+    expect(fetcher.get("CTL-921")?.state).toBe("PR");
+    expect(calls).toBe(2); // one refreshAll + one invalidate, both cache reads
+  });
+
+  it("invalidate is a no-op for blank keys (parity with legacy contract)", async () => {
+    let calls = 0;
+    const reader: LinearCacheReader = () => {
+      calls++;
+      return Promise.resolve({});
+    };
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+    await fetcher.invalidate("");
+    await fetcher.invalidate("   ");
+    expect(calls).toBe(0);
+  });
+
+  it("Scenario 3: cache miss returns null (partial/empty), never a live fan-out", async () => {
+    const { reader } = makeCacheReader({ "CTL-921": cacheEntry });
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+    await fetcher.refreshAll([]);
+    // A key the broker has not yet seen via webhook → null, no live read.
+    expect(fetcher.get("CTL-999")).toBeNull();
+  });
+
+  it("degrades title/state to empty string when the durable cache lacks them", async () => {
+    const { reader } = makeCacheReader({
+      "CTL-7": {
+        priority: 0,
+        estimate: null,
+        project: null,
+        labels: [],
+        relations: null,
+        assignee: null,
+        linearState: null,
+        title: null,
+      },
+    });
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+    await fetcher.refreshAll([]);
+    const t = fetcher.get("CTL-7");
+    expect(t).not.toBeNull();
+    expect(t?.title).toBe("");
+    expect(t?.state).toBe("");
+    expect(t?.labels).toEqual([]);
+    expect(t?.url).toBe("https://linear.app/issue/CTL-7");
+  });
+
+  it("never throws when the cache reader rejects — keeps the last snapshot (read-model never blocks)", async () => {
+    let ok = true;
+    const reader: LinearCacheReader = () =>
+      ok
+        ? Promise.resolve({ "CTL-921": cacheEntry })
+        : Promise.reject(new Error("db locked"));
+    const fetcher = createCacheBackedLinearFetcher({ cacheReader: reader });
+
+    // First reload succeeds and primes the snapshot.
+    await fetcher.refreshAll([]);
+    expect(fetcher.get("CTL-921")?.state).toBe("Implement");
+
+    // A later reload rejects (locked DB). reload() swallows so refreshAll does
+    // NOT reject and the previous good snapshot survives.
+    ok = false;
+    await expect(fetcher.refreshAll([])).resolves.toBeUndefined();
+    expect(fetcher.get("CTL-921")?.state).toBe("Implement"); // last good snapshot
   });
 });
