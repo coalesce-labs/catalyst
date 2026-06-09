@@ -117,7 +117,13 @@ export function AppSidebar() {
   }
 
   return (
-    <Sidebar variant="inset" collapsible="icon">
+    // CTL-894 / SHELL4 — headline collapse is full↔HIDDEN ("offcanvas"): collapsed
+    // slides the whole rail off-screen so the active surface goes truly full-bleed
+    // and reclaims the ENTIRE nav width (Board gains a full lane; Home re-centers),
+    // per app-shell research §3. The `collapsible="icon"` icon-rail middle state is
+    // an explicit later nicety, not the v1 emphasis; the `group-data-[collapsible=
+    // icon]:…` classes below stay as inert documentation of that optional mode.
+    <Sidebar variant="inset" collapsible="offcanvas">
       {/* ── HEADER: chevron mark + wordmark + ⌘K trigger ────────────────────── */}
       <SidebarHeader className="gap-2">
         <div className="flex items-center gap-2 px-1 pt-1">

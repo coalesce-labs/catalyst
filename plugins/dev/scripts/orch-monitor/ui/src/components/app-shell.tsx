@@ -17,6 +17,11 @@ import {
   type Surface,
 } from "@/lib/surface";
 import {
+  readSidebarOpen,
+  writeSidebarOpen,
+  shouldToggleSidebar,
+} from "@/lib/sidebar-collapse";
+import {
   Breadcrumb,
   BreadcrumbItem,
   BreadcrumbList,
@@ -52,14 +57,6 @@ import { AppSidebar } from "@/components/app-sidebar";
 // Surface→route wiring is the FND stream's concern; this shell only exposes the
 // SurfaceContext contract the nav binds to.
 
-const SIDEBAR_STORAGE_KEY = "catalyst:sidebar-open";
-
-/** Read persisted sidebar-open state (defaults open). */
-function readSidebarOpen(): boolean {
-  if (typeof window === "undefined") return true;
-  return window.localStorage.getItem(SIDEBAR_STORAGE_KEY) !== "false";
-}
-
 const SURFACE_ICON: Record<Surface, typeof InboxIcon> = {
   home: InboxIcon,
   board: LayoutGridIcon,
@@ -73,9 +70,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Persist collapse state across reloads (the controlled provider replaces the
-  // primitive's cookie path; localStorage is the source of truth here).
+  // primitive's cookie path; localStorage is the source of truth here). Logic +
+  // key live in lib/sidebar-collapse.ts so the persistence round-trip is unit-
+  // tested without a DOM (CTL-894 / SHELL4).
   useEffect(() => {
-    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(open));
+    writeSidebarOpen(open);
   }, [open]);
 
   // `[` toggles the rail; `g <key>` chords jump surfaces. Both ignore typing.
@@ -84,14 +83,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     let chordTimer: ReturnType<typeof setTimeout> | undefined;
 
     const onKey = (e: KeyboardEvent) => {
-      if (isTypingTarget(e.target as HTMLElement | null)) return;
-
-      // `[` — primary collapse toggle (Cmd/Ctrl+B handled by the provider).
-      if (e.key === "[" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      // `[` — primary collapse toggle (Cmd/Ctrl+B is handled by the controlled
+      // provider). shouldToggleSidebar owns the full contract: `[` with no
+      // meta/ctrl/alt AND not while typing — see lib/sidebar-collapse.ts. The
+      // DOM `e.target` is the standard HTMLElement cast (same idiom as the
+      // isTypingTarget callers); the predicate only reads tagName/isContentEditable.
+      if (
+        shouldToggleSidebar({
+          key: e.key,
+          metaKey: e.metaKey,
+          ctrlKey: e.ctrlKey,
+          altKey: e.altKey,
+          target: e.target as HTMLElement | null,
+        })
+      ) {
         e.preventDefault();
         setOpen((o) => !o);
         return;
       }
+
+      // The `g`-chord path must not steal typing either (separate concern from
+      // the `[` binding above).
+      if (isTypingTarget(e.target as HTMLElement | null)) return;
 
       // `g` arms a chord; the next key picks the surface (g h / g b / g w / g q).
       if (e.key === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
