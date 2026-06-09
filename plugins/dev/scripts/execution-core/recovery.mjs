@@ -2064,8 +2064,8 @@ export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
   const cutoff = nowMs - graceMs;
   return roster.filter((h) => {
     const seen = lastSeen[h];
-    if (!seen) return false;            // never seen here ⇒ not our call to make
-    return Date.parse(seen) < cutoff;   // last heartbeat older than grace ⇒ dead
+    if (!seen) return false; // never seen here ⇒ not our call to make
+    return Date.parse(seen) < cutoff; // last heartbeat older than grace ⇒ dead
   });
 }
 
