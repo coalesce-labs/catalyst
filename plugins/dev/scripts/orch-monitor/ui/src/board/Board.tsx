@@ -69,6 +69,12 @@ import { ticketColumns, PHASE_COLUMNS } from "./board-display";
 // shared `C` / `LIVE` tokens are hoisted to board-tokens.ts.
 import { C, LIVE } from "./board-tokens";
 import { SwimlaneBoard } from "./Swimlane";
+// ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
+// When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
+// dense BoardList table instead of the column kanban — the SAME resolved entities,
+// flattened into one ordered, sortable, swimlane-sectioned table. BoardList owns
+// its own swimlane sectioning (groupListRows), so it is NOT wrapped in SwimlaneBoard.
+import { BoardList } from "./BoardList";
 import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
@@ -109,7 +115,11 @@ const TERMINAL_STATUSES = ["done", "failed", "stalled", "skipped", "signal_corru
 const HELD_LABEL_BLOCKED = "blocked";
 const HELD_LABEL_WAITING = "waiting";
 
-type ColorBy = "phase" | "status" | "repo" | "type";
+// BOARD4 / CTL-908: the List view (BoardList.tsx) reuses these card atoms +
+// formatters as its table cells, rather than re-implementing the live/priority/
+// phase render (which would let the Board and List drift). They stay module-local
+// to Board.tsx (the single source of truth); BOARD4 imports the named exports.
+export type ColorBy = "phase" | "status" | "repo" | "type";
 const TYPE_C: Record<string, string> = {
   feature: "#4ea1ff", bug: "#ef5d5d", refactor: "#a855f7", chore: "#8b93a1", docs: "#39d07a", test: "#eabc3b",
 };
@@ -130,7 +140,7 @@ const nodeColor = (host: string): string => {
   return NODE_PALETTE[h % NODE_PALETTE.length] ?? C.blue;
 };
 
-function accentFor(t: { phase: string; repo: string; type: string; activeState: ActiveState; status: string }, by: ColorBy): string {
+export function accentFor(t: { phase: string; repo: string; type: string; activeState: ActiveState; status: string }, by: ColorBy): string {
   if (by === "phase") return PHASE_C[t.phase] || C.blue;
   if (by === "repo") return repoColor(t.repo);
   if (by === "type") return TYPE_C[t.type] || C.fgMuted;
@@ -139,12 +149,12 @@ function accentFor(t: { phase: string; repo: string; type: string; activeState: 
   return "#5b6b80";
 }
 
-const fmtRuntime = (ms: number | null) => {
+export const fmtRuntime = (ms: number | null) => {
   if (!ms || !Number.isFinite(ms) || ms < 0) return "";
   const m = Math.floor(ms / 60000);
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
 };
-const fmtAgo = (iso: string) => {
+export const fmtAgo = (iso: string) => {
   if (!iso) return "";
   const ms = Date.now() - new Date(iso).getTime();
   if (!Number.isFinite(ms) || ms < 0) return "";
@@ -155,7 +165,7 @@ const fmtAgo = (iso: string) => {
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
 };
-const fmtMsAgo = (ms: number) => {
+export const fmtMsAgo = (ms: number) => {
   if (!Number.isFinite(ms) || ms < 0) return "";
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s ago`;
@@ -179,15 +189,15 @@ const PULSE_CSS = `
 `;
 
 // ── domain viz (hand-rolled per DESIGN.md) ──────────────────────────────────
-function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
+export function Dot({ color, pulse }: { color: string; pulse?: boolean }) {
   return <span style={{ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", flex: "0 0 auto", boxShadow: pulse ? `0 0 8px ${color}` : undefined }} />;
 }
-function ActivityDot({ state, fallback }: { state: ActiveState; fallback: string }) {
+export function ActivityDot({ state, fallback }: { state: ActiveState; fallback: string }) {
   if (state === "active") return <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block", flex: "0 0 auto" }} />;
   if (state === "stuck") return <Dot color={C.red} />;
   return <Dot color={fallback} />;
 }
-function PhasePill({ phase }: { phase: string }) {
+export function PhasePill({ phase }: { phase: string }) {
   const c = PHASE_C[phase] || C.blue;
   // muted treatment (dark tint bg + colored fg) — keeps phase identity without
   // a wall of fully-saturated pills competing with the status signal.
@@ -221,7 +231,7 @@ function PhaseStrip({ phaseSummary }: { phaseSummary: { phase: string; status: s
   );
 }
 const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
-function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
+export function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
   const icon = p === 1 ? (
     <svg width={size} height={size} viewBox="0 0 14 14" aria-label="Urgent">
       <rect x="0.5" y="0.5" width="13" height="13" rx="3" fill="#fb8b3a" />
@@ -242,7 +252,7 @@ function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
   );
 }
 const SCOPE_ABBR: Record<string, string> = { xs: "XS", small: "S", medium: "M", large: "L", xl: "XL" };
-function ScopeChip({ scope, estimate }: { scope: string | null; estimate: number | null }) {
+export function ScopeChip({ scope, estimate }: { scope: string | null; estimate: number | null }) {
   if (estimate != null) return <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{estimate}pt</Badge>;
   if (!scope) return null;
   return (
@@ -250,7 +260,7 @@ function ScopeChip({ scope, estimate }: { scope: string | null; estimate: number
       <TooltipContent>scope: {scope}</TooltipContent></Tooltip>
   );
 }
-function StatusBadge({ status }: { status: string }) {
+export function StatusBadge({ status }: { status: string }) {
   const meta: Record<string, { label: string; fg: string; bg: string }> = {
     failed: { label: "failed", fg: "#f4a8a8", bg: "rgba(239,93,93,0.14)" },
     stalled: { label: "stalled", fg: "#f4dc8a", bg: "rgba(234,188,59,0.14)" },
@@ -267,7 +277,7 @@ function StatusBadge({ status }: { status: string }) {
 // Linear label. We render a distinct amber "⏸" chip so an operator sees at a
 // glance the ticket is HELD on a dependency (blocked, names the blocker ids) vs
 // merely awaiting capacity/priority (waiting) — NOT silently mid-triage.
-function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
+export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
   if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING) return null;
   const isBlocked = held === HELD_LABEL_BLOCKED;
   const fg = isBlocked ? "#f4a8a8" : "#f4dc8a";
@@ -287,10 +297,10 @@ function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | un
     </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
   );
 }
-function Cost({ v }: { v: number | null }) {
+export function Cost({ v }: { v: number | null }) {
   return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
 }
-function TitleText({ text, clamp = 2 }: { text: string; clamp?: number }) {
+export function TitleText({ text, clamp = 2 }: { text: string; clamp?: number }) {
   return (
     <Tooltip><TooltipTrigger asChild>
       <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px", display: "-webkit-box", WebkitLineClamp: clamp, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
@@ -878,14 +888,34 @@ export function Board({
               single-node / single-repo / single-repo-scope). The TicketBoard /
               WorkerBoard renderers are unchanged. */}
           {data && view === "tickets" && (
-            <SwimlaneBoard
-              items={fTickets}
-              groupBy={effectiveGroupBy}
-              fill
-              renderBoard={(laneItems, laneFill) => (
-                <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
-              )}
-            />
+            // BOARD4 / CTL-908: fork the Tickets body on the Layout toggle. "list"
+            // renders the dense BoardList table (its own swimlane sectioning via
+            // groupListRows, so NOT wrapped in SwimlaneBoard); "board" keeps the
+            // untouched column kanban. Flipping back restores the kanban with the
+            // SAME lens/filters/density/live cards — all live in shared atoms, never
+            // in BoardList. effectiveGroupBy carries the same "scoped-repo => flat"
+            // collapse the kanban lanes use.
+            prefs.layout === "list" ? (
+              <BoardList
+                kind="ticket"
+                tickets={fTickets}
+                lens={lens}
+                order={prefs.order}
+                density={prefs.density}
+                swimlane={effectiveGroupBy}
+                onSelect={(id) => setSelectedTicketId(id)}
+                embedded={embedded}
+              />
+            ) : (
+              <SwimlaneBoard
+                items={fTickets}
+                groupBy={effectiveGroupBy}
+                fill
+                renderBoard={(laneItems, laneFill) => (
+                  <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
+                )}
+              />
+            )
           )}
           {data && view === "workers" && (
             // CTL-909 / SURF1: the node FILTER scopes the grid to one host
