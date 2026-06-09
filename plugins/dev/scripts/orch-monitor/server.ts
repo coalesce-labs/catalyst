@@ -13,6 +13,14 @@ import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
+// CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
+// queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
+// (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
+// live Linear/GitHub call per request.
+import {
+  assembleTicketRuns,
+  readPhaseSignalVerbatim,
+} from "./lib/ticket-runs.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -1814,6 +1822,56 @@ export function createServer(opts: CreateServerOptions): BunServer {
             eventCount24h: stats.eventCount24h,
             eventCount24hByRepo: stats.eventCount24hByRepo,
           });
+        }
+
+        // CTL-886 (BFF4) keystone P2: a ticket's full run history. One run entity
+        // per phase-*.json signal under ~/catalyst/execution-core/workers/<id>/
+        // (model, bg_job_id, attempt, generation, status, timestamps, host{},
+        // pr{} when present). FINISHED runs (no live BoardWorker) included by
+        // construction — we read the on-disk signals, not the live-agent list.
+        // Per-phase cost is JOINED from catalyst.db, never invented onto the
+        // signal. Pure file reads — no live Linear/GitHub call.
+        const ticketRunsMatch = url.pathname.match(/^\/api\/ticket-runs\/([^/]+)$/);
+        if (ticketRunsMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketRunsMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          return Response.json(await assembleTicketRuns(ticket));
+        }
+
+        // CTL-886 (BFF4) companion P3: one phase signal served VERBATIM — the raw
+        // phase-<phase>.json contents (model, bg_job_id, generation, status,
+        // timestamps, host, pr) untransformed, for the worker header / PHASE
+        // TIMESTAMPS / SIGNAL panel. 404 when the phase has no signal on disk.
+        const ecWorkerMatch = url.pathname.match(
+          /^\/api\/ec-worker\/([^/]+)\/([^/]+)$/,
+        );
+        if (ecWorkerMatch) {
+          let ticket: string;
+          let phase: string;
+          try {
+            ticket = decodeURIComponent(ecWorkerMatch[1]);
+            phase = decodeURIComponent(ecWorkerMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            !/^[A-Za-z]+-\d+$/.test(ticket) ||
+            !/^[a-z][a-z-]*$/.test(phase)
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const signal = await readPhaseSignalVerbatim(ticket, phase);
+          if (!signal) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json(signal);
         }
 
         if (url.pathname === "/api/board") {
