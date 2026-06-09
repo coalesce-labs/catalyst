@@ -20,6 +20,7 @@ import { useTheme } from "@/lib/theme";
 import { useNavSignal } from "@/hooks/use-nav-signal";
 import { daemonDotClass, daemonLabel } from "@/lib/nav-signal";
 import { CatalystLogo } from "@/components/catalyst-logo";
+import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import {
   Collapsible,
   CollapsibleContent,
@@ -163,6 +164,14 @@ export function AppSidebar() {
             Catalyst
           </span>
         </div>
+        {/* CTL-897 / SHELL7 — the config-driven workspace switcher in the sidebar
+            header. Single-repo → a bare label; multi-repo → a scoping dropdown
+            (All + per-repo with a scope dot + active checkmark). Shares the active
+            scope with the top-strip instance via the FND `repoScopeAtom`, and
+            collapses to just the active dot under the icon-rail. The handoff
+            cosmetic #6 reversal duplicates this same switcher into the top strip
+            (app-shell.tsx). */}
+        <WorkspaceSwitcher placement="sidebar" />
       </SidebarHeader>
 
       <SidebarContent>

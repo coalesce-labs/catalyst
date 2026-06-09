@@ -18,7 +18,9 @@
 // per-node column + group-by-node affordance, both gated behind the single-host
 // identity no-op — so a single-node fleet reads exactly like today.
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+// CTL-897 / SHELL7: the Queue consumes the workspace-SCOPED snapshot so the
+// switcher's repo selection actually filters the ranked depth (All = unfiltered).
+import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
 import { QueueView } from "@/board/Board";
 
 // The dark Catalyst board surface base color (orch-monitor DESIGN.md `s0`), kept
@@ -27,7 +29,7 @@ import { QueueView } from "@/board/Board";
 const SURFACE_BG = "#0b0d10";
 
 export function QueueSurface() {
-  const { payload, status } = useBoardSnapshot();
+  const { payload, status } = useScopedBoardSnapshot();
 
   return (
     <TooltipProvider delayDuration={200}>

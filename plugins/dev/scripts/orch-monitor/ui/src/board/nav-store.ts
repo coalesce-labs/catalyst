@@ -23,10 +23,31 @@ import { atom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import type { ListKind, ListLens } from "./list-order";
 import { pushRecent, RECENTLY_VIEWED_KEY } from "./recents";
+import { REPO_SCOPE_ALL, type RepoScope } from "../lib/repo-scope";
 
 // Re-export the recents constants/helper so consumers of the store have one
 // import surface; the testable logic itself lives in the jotai-free recents.ts.
 export { pushRecent, RECENTLY_VIEWED_KEY, RECENTLY_VIEWED_CAP } from "./recents";
+
+// ── workspace scope (CTL-897 / SHELL7) ──────────────────────────────────────
+/**
+ * The active workspace scope the operator selected in the config-driven
+ * workspace switcher: the all-repos sentinel (`REPO_SCOPE_ALL`) or a real repo
+ * key (`BoardPayload.repos[n]`). Lifted to the FND store (NOT a per-component
+ * `useState`) so the TWO switcher placements — the sidebar header and the top
+ * strip — share ONE active scope: selecting a repo in either reflects in the
+ * other, and the data surfaces (Home / Board / Workers / Queue) read this SAME
+ * atom to scope-filter their resident snapshot. Persisted via `atomWithStorage`
+ * so the scope survives a reload, the same way `recentlyViewedAtom` does. The
+ * stale-scope reconciliation (a persisted scope no longer in the live config →
+ * fall back to "All") lives in the pure `lib/repo-scope.ts#resolveScope`, applied
+ * by the switcher against the live `BoardPayload.repos`.
+ */
+export const REPO_SCOPE_STORAGE_KEY = "catalyst-repo-scope";
+export const repoScopeAtom = atomWithStorage<RepoScope>(
+  REPO_SCOPE_STORAGE_KEY,
+  REPO_SCOPE_ALL,
+);
 
 // ── list context (the resolved walk list) ───────────────────────────────────
 /**
