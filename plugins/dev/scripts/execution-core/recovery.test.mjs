@@ -4284,3 +4284,142 @@ describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
     expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
   });
 });
+
+// ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
+
+import { reclaimDeadHostWork } from "./recovery.mjs";
+
+const nowISO = () => new Date().toISOString();
+const oldISO = () => new Date(Date.now() - 20 * 60_000).toISOString(); // 20m ago
+
+const makeBaseDeps = (overrides = {}) => ({
+  readHeartbeats: () => ({ mini: nowISO(), dead: oldISO() }),
+  roster: ["mini", "dead"],
+  self: "mini",
+  graceMs: 600_000,
+  nowMs: Date.now(),
+  ownedTicketsForHost: () => ["CTL-900"],
+  ownerForTicket: () => "mini",
+  claim: () => ({ won: true, generation: 5 }),
+  inferResume: async () => "implement",
+  alreadyComplete: () => false,
+  rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-900" }),
+  dispatch: () => ({ code: 0 }),
+  ...overrides,
+});
+
+describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
+  test("single-host roster → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ roster: ["mini"], dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("dead host owns a ticket we re-own → claim+infer+rebuild+dispatch, taken has entry", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(true);
+    expect(r.taken).toEqual([{ ticket: "CTL-900", phase: "implement", generation: 5 }]);
+  });
+
+  test("HRW says another survivor owns it → skip (no claim, no dispatch)", async () => {
+    let claimed = false;
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownerForTicket: () => "other-host",
+        claim: () => { claimed = true; return { won: true, generation: 5 }; },
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(claimed).toBe(false);
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("lost claim (another survivor won the read-back) → no dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        claim: () => ({ won: false, generation: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferred phase already complete in the log → dedup, skip dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        alreadyComplete: () => true,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferResume returns null (terminal) → nothing to resume", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        inferResume: async () => null,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("no dead hosts → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        readHeartbeats: () => ({ mini: nowISO(), dead: nowISO() }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("rebuildWorktree fails → skip dispatch for that ticket", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        rebuildWorktree: () => ({ ok: false, cwd: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("multiple tickets owned by dead host: processes all in taken", async () => {
+    const dispatches = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownedTicketsForHost: () => ["CTL-900", "CTL-901"],
+        dispatch: (od, t) => { dispatches.push(t); return { code: 0 }; },
+      }),
+    );
+    expect(dispatches.sort()).toEqual(["CTL-900", "CTL-901"]);
+    expect(r.taken).toHaveLength(2);
+  });
+});

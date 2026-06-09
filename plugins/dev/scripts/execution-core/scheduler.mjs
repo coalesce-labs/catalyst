@@ -108,6 +108,7 @@ import { emitReapIntent } from "./reap-intent.mjs";
 // derivable from the unified event log.
 import {
   reclaimDeadWorkIfPossible as defaultReclaimDeadWork,
+  reclaimDeadHostWork,
   defaultAppendDispatchFailedEvent,
   defaultAppendDispatchRequestedEvent,
   defaultAppendDispatchLaunchedEvent,
@@ -3885,6 +3886,14 @@ function runTick() {
       // falls back to plain killBgJob in that case, preserving legacy behaviour.
       intentDb: getBeliefsDb(),
     });
+    // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
+    // Skip entirely on single-host installs (no-op inside the function, but the
+    // pre-check avoids the call to stay zero-cost on the common case).
+    if (getClusterHosts().length > 1) {
+      reclaimDeadHostWork({ orchDir: runningOpts.orchDir }).catch((err) => {
+        log.warn({ err: err?.message }, "ctl-863: reclaimDeadHostWork tick failed — continuing");
+      });
+    }
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
     log.error({ err: err.message }, "scheduler: tick failed");
