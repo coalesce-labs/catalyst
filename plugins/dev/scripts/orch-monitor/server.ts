@@ -30,6 +30,19 @@ import {
   resolveTranscriptPath,
   TranscriptTail,
 } from "./lib/ec-worker-stream.mjs";
+// CTL-885 (BFF3): the cross-node live-tail SSE FAN-IN. The /api/ec-worker-stream
+// route is made node-aware: single-host (hosts.json absent/len 1) is an EXACT
+// identity no-op (tail the LOCAL transcript, zero added latency, no owner
+// resolution, no remote hop); multi-host multiplexes the OWNING node's per-host
+// stream keyed by host.name (never a shared/merged log). The owner is resolved
+// from BFF2/BFF10's per-worker host:{name,id} carried on the board snapshot.
+import {
+  readClusterRoster,
+  resolveTailRoute,
+  resolvePeerBaseUrl,
+  proxyRemoteTail,
+} from "./lib/cross-node-stream.mjs";
+import { hostName } from "./lib/canonical-event-shared.ts";
 // CTL-890 (BFF8): the read-model's ONE destructive endpoint (design P10) —
 // POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
 // behind a typed confirm + a fence-aware guard (single-host no-op pass;
@@ -2104,13 +2117,20 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(signal);
         }
 
-        // CTL-887 (BFF5): the live transcript tail. Resolves a CC session UUID
-        // to its ~/.claude/projects/<dir>/<sessionId>.jsonl path (reusing the
-        // resident transcript-path cache — only a cold miss triggers a single
-        // scan) and streams typed StreamEvents over SSE as the file grows. This
-        // is the EC equivalent of the legacy /api/worker-stream (which is empty
-        // for execution-core workers). Host-local + stateless so a cluster
-        // fan-in (BFF3, single-node-descoped) is a clean wrap.
+        // CTL-887 (BFF5) + CTL-885 (BFF3): the live transcript tail, made
+        // NODE-AWARE. BFF5 resolves a CC session UUID to its
+        // ~/.claude/projects/<dir>/<sessionId>.jsonl path and streams typed
+        // StreamEvents over SSE as the file grows (the EC equivalent of the
+        // legacy /api/worker-stream, which is empty for execution-core workers).
+        // BFF3 wraps that host-local tail in the cross-node FAN-IN: the UI
+        // subscribes ONCE and the read-model multiplexes the OWNING node's
+        // per-host stream keyed by host.name.
+        //   • SINGLE-HOST (hosts.json absent/len 1): an EXACT identity no-op —
+        //     tail the LOCAL transcript with zero added latency, no owner
+        //     resolution, no remote hop (resolveTailRoute → { mode: "local" }).
+        //   • MULTI-HOST, owner is a DIFFERENT node: proxy that peer's
+        //     /api/ec-worker-stream/<sessionId> through unchanged (never a
+        //     shared/merged log — only the one owner's per-host stream).
         const ecWorkerStreamMatch = url.pathname.match(
           /^\/api\/ec-worker-stream\/([^/]+)$/,
         );
@@ -2130,6 +2150,83 @@ export function createServer(opts: CreateServerOptions): BunServer {
           ) {
             return new Response("Bad Request", { status: 400 });
           }
+
+          // ── BFF3 fan-in routing (single-host = identity no-op) ──────────────
+          // Read the committed roster ONCE. SINGLE-HOST is the identity no-op:
+          // resolveTailRoute short-circuits to { mode: "local" } before any
+          // owner resolution, so we never even read the board snapshot — zero
+          // added latency. Only the MULTI-HOST branch resolves the owner: we
+          // read the board snapshot's per-worker host:{name,id} (BFF2/BFF10) —
+          // never a live attachment fetch, never a merged log — and pass a
+          // synchronous lookup over that resolved worker list. `hostBaseUrl` is
+          // the cross-node transport seam: no production roster→URL source
+          // exists yet (single-node MVP), so a multi-host owner with no
+          // resolvable base URL is reported unroutable (a 404) rather than
+          // mis-tailed to the wrong node's local file.
+          const roster = readClusterRoster();
+          const workers =
+            roster.length > 1 ? ((await boardSnapshot.getLatest())?.workers ?? []) : [];
+          const route = resolveTailRoute({
+            sessionId,
+            roster,
+            selfHost: hostName(),
+            ownerHostForSession: (sid) =>
+              workers.find((w) => w.sessionId === sid)?.host?.name ?? null,
+            hostBaseUrl: (host) => resolvePeerBaseUrl(host),
+          });
+          if (route.mode === "remote") {
+            // MULTI-HOST: fan in the owning node's per-host stream, keyed by
+            // host.name, by proxying its SSE body straight through (no re-frame
+            // — the client's StreamEventRow renderer consumes the peer's frames
+            // unchanged). A down/unreachable peer → 502 (never a wrong tail).
+            const abort = new AbortController();
+            const body = await proxyRemoteTail({ url: route.url, signal: abort.signal });
+            if (!body) {
+              return new Response("Bad Gateway", { status: 502 });
+            }
+            const proxied = new ReadableStream<Uint8Array>({
+              async start(controller) {
+                const reader = body.getReader();
+                try {
+                  for (;;) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (value) controller.enqueue(value);
+                  }
+                  controller.close();
+                } catch {
+                  // upstream torn down (peer closed / client aborted) — end the
+                  // proxied stream cleanly rather than leaking the reader.
+                  try {
+                    controller.close();
+                  } catch {
+                    /* already closed */
+                  }
+                }
+              },
+              cancel() {
+                // client disconnected → abort the upstream subscription so no
+                // per-host connection leaks.
+                abort.abort();
+              },
+            });
+            return new Response(proxied, {
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+              },
+            });
+          }
+          if (route.mode === "unroutable") {
+            // MULTI-HOST: owner is a different node we can't reach (no transport
+            // address). 404 rather than blindly tailing THIS host's transcript
+            // (which would show the wrong node's session).
+            return new Response("Not Found", { status: 404 });
+          }
+          // route.mode === "local": the identity no-op — tail the LOCAL
+          // transcript exactly as the non-cluster BFF5 path does.
           const transcriptPath = await resolveTranscriptPath(sessionId);
           if (!transcriptPath) {
             return new Response("Not Found", { status: 404 });
