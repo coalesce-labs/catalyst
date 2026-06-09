@@ -50,6 +50,18 @@ import { hostName } from "./lib/canonical-event-shared.ts";
 // UI-side timer; the endpoint returns the verbatim shortId+ticket+phase identity
 // the client needs to mark `stopping` and arm that timer.
 import { stopWorker, type StopWorkerResult } from "./lib/stop-worker.mjs";
+// CTL-924 (BFF12): the read-model's SECOND write endpoint (HOME5's Answer /
+// Unblock verb) — POST /api/ticket/<ticket>/respond records the operator's
+// response, clears the needs-human marker, and emits the resume event that
+// drives CTL-876's loop (the daemon re-dispatches the parked worker). Shares
+// BFF8's typed-confirm + fence-aware scaffolding (single-host no-op pass;
+// multi-host rejects a stale/partitioned generation). Optimistic rollback is a
+// UI-side timer; the endpoint returns the verbatim ticket+phase identity the
+// client needs to mark the row `resuming` and arm that timer.
+import {
+  respondTicket,
+  type RespondTicketResult,
+} from "./lib/respond-ticket.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -2084,6 +2096,88 @@ export function createServer(opts: CreateServerOptions): BunServer {
             case "stopping":
               // Kill issued; the UI marks the worker `stopping` and arms its ~10s
               // optimistic-rollback timer against the next board frame.
+              return Response.json(result, { status: 200 });
+          }
+        }
+
+        // CTL-924 (BFF12): the read-model's SECOND write endpoint — HOME5's Inbox
+        // `Answer / Unblock` verb. POST /api/ticket/<ticket>/respond records the
+        // operator's answer/unblock note, clears the `.linear-label-needs-human`
+        // marker, and emits ONE `linear.comment.created` event into the unified
+        // log — the daemon's handleCommentWake (CTL-549) consumes it, strips the
+        // held label, and re-dispatches the parked worker (CTL-876's resume loop).
+        // Contract mirrors BFF8's stop route:
+        //   • TYPED CONFIRM — body.confirm must equal the ticket id exactly.
+        //   • FENCE-AWARE   — single-host (hosts.json absent/len 1) is a no-op
+        //     pass; multi-host rejects a verified-stale generation (a partitioned
+        //     node) and refuses on an unconfirmable fence. NOTHING is mutated on
+        //     a fence rejection.
+        //   • OPTIMISTIC ROLLBACK is a UI-side timer; on success we return the
+        //     ticket+phase identity + a `resuming` status the client marks
+        //     optimistically (the held row should clear within the window).
+        const respondMatch = url.pathname.match(
+          /^\/api\/ticket\/([^/]+)\/respond$/,
+        );
+        if (respondMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(respondMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const response = typeof body.response === "string" ? body.response : "";
+          const result: RespondTicketResult = respondTicket({
+            ticket,
+            response,
+            confirm: body.confirm,
+          });
+          switch (result.status) {
+            case "not_held":
+              return Response.json(
+                {
+                  status: "not_held",
+                  error: `no parked (needs-input) run for ${ticket} to answer/unblock`,
+                },
+                { status: 404 },
+              );
+            case "confirm_mismatch":
+              return Response.json(
+                {
+                  status: "confirm_mismatch",
+                  error: "typed confirmation did not match the ticket id",
+                  expected: result.expected,
+                },
+                { status: 400 },
+              );
+            case "fenced":
+              // A stale-generation node is fenced out — nothing was mutated.
+              return Response.json(
+                {
+                  ...result,
+                  error: "respond rejected: this node's generation is stale (fenced out)",
+                },
+                { status: 409 },
+              );
+            case "fence_indeterminate":
+              return Response.json(
+                {
+                  ...result,
+                  error: "respond rejected: fence could not be confirmed",
+                },
+                { status: 409 },
+              );
+            case "resuming":
+              // Response recorded + marker cleared + resume event emitted; the UI
+              // marks the row `resuming` and arms its optimistic-rollback timer.
               return Response.json(result, { status: 200 });
           }
         }
