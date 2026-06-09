@@ -15,6 +15,7 @@ import {
   GROUP_BY_OPTIONS,
   COLOR_BY_OPTIONS,
   ORDER_OPTIONS,
+  LAYOUT_OPTIONS,
 } from "./display-options-popover";
 import {
   boardPrefsAtom,
@@ -53,6 +54,12 @@ describe("display-options-popover — the rows it renders", () => {
     // the Density control is labelled Comfortable / Compact (the brief's wording).
     expect(DENSITY_OPTIONS.map((o) => o.label)).toEqual(["Comfortable", "Compact"]);
   });
+
+  // BOARD4 / CTL-908: the Layout (Board ⇄ List) toggle the popover now renders.
+  it("offers the BOARD4 Layout option set (Board | List), labelled for the brief", () => {
+    expect(LAYOUT_OPTIONS.map((o) => o.k)).toEqual(["board", "list"]);
+    expect(LAYOUT_OPTIONS.map((o) => o.label)).toEqual(["Board", "List"]);
+  });
 });
 
 describe("display-options-popover — selecting an option writes the atom (the patch path)", () => {
@@ -82,6 +89,34 @@ describe("display-options-popover — selecting an option writes the atom (the p
     const unsub = store.sub(boardPrefsAtom, () => {});
     store.set(boardPrefsAtom, (p) => patchBoardPrefs(p, { showEmptyColumns: false }));
     expect(store.get(boardPrefsAtom).showEmptyColumns).toBe(false);
+    unsub();
+  });
+
+  // BOARD4 / CTL-908 Gherkin: "Flip to List view" then "Flip back to Board". At the
+  // store layer (this repo's no-DOM convention): selecting List writes layout:"list"
+  // and preserves siblings (the filters/lens live in the same atom → "same filters
+  // and live cards" on flip-back), and selecting Board restores layout:"board".
+  it("selecting 'List' writes layout:'list' and preserves the other prefs (filters survive the flip)", () => {
+    const store = createStore();
+    const unsub = store.sub(boardPrefsAtom, () => {});
+    store.set(boardPrefsAtom, (p) => patchBoardPrefs(p, { groupBy: "phase", swimlane: "project" }));
+    store.set(boardPrefsAtom, (p) => patchBoardPrefs(p, { layout: "list" }));
+    const prefs = store.get(boardPrefsAtom);
+    expect(prefs.layout).toBe("list");
+    // the lens + swimlane the kanban used are untouched, so flipping back restores them.
+    expect(prefs.groupBy).toBe("phase");
+    expect(prefs.swimlane).toBe("project");
+    unsub();
+  });
+
+  it("flipping back to 'Board' restores layout:'board' with the same prefs intact", () => {
+    const store = createStore();
+    const unsub = store.sub(boardPrefsAtom, () => {});
+    store.set(boardPrefsAtom, (p) => patchBoardPrefs(p, { layout: "list", swimlane: "project" }));
+    store.set(boardPrefsAtom, (p) => patchBoardPrefs(p, { layout: "board" }));
+    const prefs = store.get(boardPrefsAtom);
+    expect(prefs.layout).toBe("board");
+    expect(prefs.swimlane).toBe("project");
     unsub();
   });
 });

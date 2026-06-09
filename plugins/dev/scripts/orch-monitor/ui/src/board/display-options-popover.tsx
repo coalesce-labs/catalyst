@@ -30,6 +30,7 @@ import {
   type ColorBy,
   type Ordering,
   type Swimlane,
+  type Layout,
 } from "./prefs-store";
 import { SegRow, SwitchRow, RadioRow } from "./display-options-sections";
 // BOARD3 / CTL-907: the swimlane axis option set (none|repo|team|project|host),
@@ -58,6 +59,13 @@ export const ORDER_OPTIONS: { k: Ordering; label: string }[] = [
   { k: "priority", label: "Priority" },
   { k: "recent", label: "Recent" },
   { k: "live", label: "Live first" },
+];
+// BOARD4 / CTL-908: the Board ⇄ List layout toggle. Keys are the STORED pref
+// values — the drift-guard test asserts this array's key set equals the `Layout`
+// union, exactly like the other option arrays.
+export const LAYOUT_OPTIONS: { k: Layout; label: string }[] = [
+  { k: "board", label: "Board" },
+  { k: "list", label: "List" },
 ];
 
 export function DisplayOptionsPopover({
@@ -157,8 +165,18 @@ export function DisplayOptionsPopover({
           onChange={(v) => patch({ swimlane: v as Swimlane })}
           options={repos.length > 1 ? SWIMLANE_OPTIONS : SWIMLANE_OPTIONS.filter((o) => o.k !== "repo")}
         />
-        {/* ── reserved: BOARD4 «Layout» / CTL-930 «Lens» drop in here without
-            re-architecting the tray. ── */}
+        {/* BOARD4 (CTL-908): the Board ⇄ List layout toggle. Writes straight to
+            `prefs.layout`; Board.tsx forks its Tickets body on it ("board" = the
+            column kanban, "list" = the dense BoardList table). One more SegRow in
+            the reserved slot — no tray re-architecting. CTL-930 «Lens» still drops
+            in below this without further change. */}
+        <Separator style={{ margin: "8px 0", background: "#262d36" }} />
+        <SegRow
+          label="Layout"
+          value={prefs.layout}
+          onChange={(v) => patch({ layout: v })}
+          options={LAYOUT_OPTIONS}
+        />
       </PopoverContent>
     </Popover>
   );
