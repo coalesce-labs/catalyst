@@ -36,6 +36,18 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
+  /* CTL-891 / SHELL1: shadcn `sidebar` primitive tokens, bridged to the
+     orch-monitor surface system below (reconciles the prototype's base-nova
+     drift onto this ui's new-york tokens). */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -63,6 +75,17 @@
   --input: var(--color-border);
   --ring: var(--color-accent);
   --radius: 0.5rem;
+
+  /* CTL-891 / SHELL1: sidebar surface — the rail sits one step up from the
+     base surface so the SidebarInset (background) reads as a raised card. */
+  --sidebar: var(--color-surface-1);
+  --sidebar-foreground: var(--color-fg);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--color-surface-0);
+  --sidebar-accent: var(--color-surface-3);
+  --sidebar-accent-foreground: var(--color-fg);
+  --sidebar-border: var(--color-border);
+  --sidebar-ring: var(--color-accent);
 }
 
 * {

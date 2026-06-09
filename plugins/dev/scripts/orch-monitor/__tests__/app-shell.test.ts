@@ -1,0 +1,176 @@
+// app-shell.test.ts — CTL-891 / SHELL1 acceptance guards.
+//
+// Encodes the three SHELL1 Gherkin scenarios. `bun test` has no DOM, so —
+// matching the existing board-todo-column.test.ts pattern — the structural
+// scenarios are asserted by static source analysis (read the .tsx as text and
+// assert the load-bearing wiring), and the pure surface-contract core
+// (lib/surface.ts) is unit-tested directly.
+import { describe, it, test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import {
+  SURFACES,
+  SURFACE_CHORD,
+  SURFACE_BREADCRUMB,
+  SURFACE_LABEL,
+  isTypingTarget,
+  type Surface,
+} from "../ui/src/lib/surface";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const UI_SRC = join(HERE, "..", "ui", "src");
+const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
+
+const appSrc = read("App.tsx");
+const shellSrc = read("components/app-shell.tsx");
+const sidebarComponentSrc = read("components/app-sidebar.tsx");
+const sidebarPrimitiveSrc = read("components/ui/sidebar.tsx");
+
+/**
+ * Strip JS comments so "edge-to-edge" CLASSNAME assertions can't be tripped by
+ * prose that merely mentions `mx-auto` / `max-w-*` in a code comment. Removes
+ * block comments, JSX `{/* … *​/}` comments, and `//` line comments.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "") // {/* jsx comment */}
+    .replace(/\/\*[\s\S]*?\*\//g, "") // /* block */
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1"); // // line (skip http://)
+}
+
+const appCode = stripComments(appSrc);
+const shellCode = stripComments(shellSrc);
+
+// ── Pure surface contract (lib/surface.ts) ───────────────────────────────────
+describe("surface contract (CTL-891)", () => {
+  it("declares exactly the four OPERATE surfaces in nav order", () => {
+    expect([...SURFACES]).toEqual(["home", "board", "workers", "queue"]);
+  });
+
+  it("maps a g-chord key to every surface (g h / g b / g w / g q)", () => {
+    expect(SURFACE_CHORD).toEqual({
+      h: "home",
+      b: "board",
+      w: "workers",
+      q: "queue",
+    });
+    // Every surface is reachable by some chord, and every chord targets a real surface.
+    const chordTargets = new Set(Object.values(SURFACE_CHORD));
+    for (const s of SURFACES) expect(chordTargets.has(s)).toBe(true);
+  });
+
+  it("has a label and a breadcrumb trail for every surface", () => {
+    for (const s of SURFACES) {
+      expect(SURFACE_LABEL[s]).toBeTruthy();
+      expect(SURFACE_BREADCRUMB[s].length).toBeGreaterThan(0);
+    }
+    // Home is the calm Inbox — its trail reads "Home · Inbox".
+    expect(SURFACE_BREADCRUMB.home).toEqual(["Home", "Inbox"]);
+  });
+
+  it("isTypingTarget guards INPUT/TEXTAREA/contentEditable so chords never steal typing", () => {
+    expect(isTypingTarget({ tagName: "INPUT" })).toBe(true);
+    expect(isTypingTarget({ tagName: "TEXTAREA" })).toBe(true);
+    expect(isTypingTarget({ isContentEditable: true })).toBe(true);
+    expect(isTypingTarget({ tagName: "DIV" })).toBe(false);
+    expect(isTypingTarget(null)).toBe(false);
+  });
+});
+
+// ── Scenario: shadcn Sidebar primitive is the foundation, not the hand-rolled one
+describe("shadcn Sidebar primitive is the foundation (CTL-891)", () => {
+  it("ships a shadcn sidebar primitive exporting the load-bearing parts", () => {
+    for (const sym of [
+      "SidebarProvider",
+      "Sidebar",
+      "SidebarInset",
+      "SidebarMenu",
+      "SidebarTrigger",
+      "SidebarRail",
+      "useSidebar",
+    ]) {
+      expect(sidebarPrimitiveSrc).toContain(sym);
+    }
+  });
+
+  it("the sidebar primitive is built on radix-ui + cva (matches the ui conventions, not base-ui)", () => {
+    expect(sidebarPrimitiveSrc).toContain('from "radix-ui"');
+    expect(sidebarPrimitiveSrc).toContain("class-variance-authority");
+    // base-nova/base-ui drift must be reconciled away — no @base-ui imports leak in.
+    expect(sidebarPrimitiveSrc).not.toContain("@base-ui");
+  });
+
+  it("AppSidebar composes the shadcn primitives (Provider/Inset live in AppShell)", () => {
+    expect(sidebarComponentSrc).toContain("@/components/ui/sidebar");
+    for (const sym of [
+      "Sidebar",
+      "SidebarContent",
+      "SidebarGroup",
+      "SidebarMenu",
+      "SidebarMenuButton",
+      "SidebarRail",
+    ]) {
+      expect(sidebarComponentSrc).toContain(sym);
+    }
+  });
+
+  it("the OPERATE group lists Home, Board, Workers, Queue", () => {
+    for (const label of ["Home", "Board", "Workers", "Queue"]) {
+      expect(sidebarComponentSrc).toContain(label);
+    }
+    expect(sidebarComponentSrc).toMatch(/Operate/i);
+  });
+
+  it("the legacy hand-rolled components/layout/sidebar is no longer the App frame", () => {
+    // App.tsx must not import the hand-rolled layout sidebar as its frame anymore.
+    expect(appSrc).not.toContain("./components/layout/sidebar");
+    expect(appSrc).not.toContain("components/layout/sidebar");
+    // The new shadcn shell is the frame instead.
+    expect(appSrc).toContain("app-shell");
+  });
+});
+
+// ── Scenario: One shell hosts every surface + Edge-to-edge by default ─────────
+describe("one edge-to-edge shell hosts every surface (CTL-891)", () => {
+  it("AppShell uses a CONTROLLED SidebarProvider wrapping SidebarInset", () => {
+    expect(shellSrc).toContain("SidebarProvider");
+    expect(shellSrc).toContain("SidebarInset");
+    // Controlled (owns open + onOpenChange) so BOTH `[` and Cmd/Ctrl+B drive collapse.
+    expect(shellSrc).toMatch(/onOpenChange/);
+  });
+
+  it("the shell is full-viewport (h-screen) with NO centered gutter", () => {
+    expect(shellSrc).toContain("h-screen");
+    // Edge-to-edge: no centered max-w / mx-auto CLASSNAME around the chrome
+    // (comments stripped so prose mentioning the tokens doesn't false-positive).
+    expect(shellCode).not.toMatch(/\bmx-auto\b/);
+    expect(shellCode).not.toMatch(
+      /\bmax-w-(sm|md|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|screen)\b/,
+    );
+    expect(appCode).not.toMatch(/\bmx-auto\b/);
+  });
+
+  it("AppShell binds the `[` collapse toggle and `g`-chord surface jumps", () => {
+    expect(shellSrc).toContain('"["');
+    expect(shellSrc).toContain("isTypingTarget");
+    expect(shellSrc).toContain("SURFACE_CHORD");
+  });
+
+  it("App.tsx renders the active surface INSIDE the shell (edge-to-edge inset)", () => {
+    expect(appSrc).toContain("AppShell");
+  });
+});
+
+// Sanity: the Surface type is exhaustively iterable (compile-time exhaustiveness
+// is also enforced by `satisfies`-free switch usage in App; this is the runtime guard).
+test("SURFACES round-trips the Surface union", () => {
+  const seen: Record<Surface, boolean> = {
+    home: false,
+    board: false,
+    workers: false,
+    queue: false,
+  };
+  for (const s of SURFACES) seen[s] = true;
+  expect(Object.values(seen).every(Boolean)).toBe(true);
+});
