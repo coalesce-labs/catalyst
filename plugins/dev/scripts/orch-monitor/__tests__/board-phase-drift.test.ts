@@ -64,6 +64,14 @@ const SOT = "workflow.default.json (via lib/workflow-descriptor.mjs PHASES)";
 // formatters.ts is pure (no imports) → direct import is safe under bun test.
 import { PHASE_COLORS as FMT_PHASE_COLORS } from "../ui/src/lib/formatters.ts";
 
+// CTL-900 / HOME2: the calm-home StatusIcon/PhaseStrip glyph reads its phase
+// model from ui/src/board/phase-model.ts. bun test resolves the `@/` tsconfig
+// path, so we import the model directly (its only `@/` dep, formatters, is pure)
+// and lock its hand-rolled phase list + terminal-status set to the SAME data-layer
+// source of truth the rest of the board is guarded against — so the glyph can
+// never silently drift from the real pipeline.
+import { PHASE_LIST, TERMINAL_STATUSES } from "@/board/phase-model";
+
 // ── Board.tsx text extraction ───────────────────────────────────────────────
 // We read Board.tsx as TEXT (never import it) because it pulls in React + CSS +
 // "@/…" path-aliased modules that don't resolve under `bun test`. This mirrors
@@ -315,4 +323,48 @@ test("Board.tsx TERMINAL_STATUSES equals board-data.mjs TERMINAL (terminal-bound
     );
   }
   expect(ui).toEqual(data);
+});
+
+// ── CTL-900 / HOME2: phase-model.ts PHASE_LIST === board-data PHASE_ORDER ──────
+// The calm-home StatusIcon glyph + PhaseStrip read their ordered phase list from
+// ui/src/board/phase-model.ts PHASE_LIST. It is a hand-rolled copy of the
+// canonical pipeline (no synthetic "done" step — "done" is a status), so it MUST
+// equal the data-layer PHASE_ORDER exactly or the glyph silently mis-renders the
+// fill fraction / strip dots when a phase is renamed, reordered, added or dropped.
+test("phase-model.ts PHASE_LIST equals board-data.mjs PHASE_ORDER (glyph fraction drift)", () => {
+  // Widen the readonly literal-tuple to string[] so the comparison element type
+  // matches board-data's plain string[] PHASE_ORDER (no cast — a plain copy).
+  const model: string[] = [...PHASE_LIST];
+  if (JSON.stringify(model) !== JSON.stringify(PHASE_ORDER)) {
+    throw new Error(
+      `DRIFT: ui/src/board/phase-model.ts PHASE_LIST diverged from the data-layer ` +
+        `source of truth (lib/board-data.mjs PHASE_ORDER).\n` +
+        `  board-data PHASE_ORDER:   ${JSON.stringify(PHASE_ORDER)}\n` +
+        `  phase-model PHASE_LIST:   ${JSON.stringify(model)}\n` +
+        `The HOME2 StatusIcon fill fraction ((phaseIndex+1)/total) and PhaseStrip ` +
+        `dots are computed off PHASE_LIST; a divergence mis-renders progress. ` +
+        `Reconcile PHASE_LIST to PHASE_ORDER (rooted in workflow.default.json).`,
+    );
+  }
+  expect(model).toEqual(PHASE_ORDER);
+});
+
+// ── CTL-900 / HOME2: phase-model.ts TERMINAL_STATUSES === board-data TERMINAL ──
+// The glyph flips to the done disc+check off a terminal-status check; its
+// TERMINAL_STATUSES set is a hand-rolled copy of the data-layer TERMINAL. Lock
+// them (unordered Set → compare as sorted) so a new terminal status can't make
+// the glyph treat a finished phase as still in-flight (or vice-versa).
+test("phase-model.ts TERMINAL_STATUSES equals board-data.mjs TERMINAL (glyph terminal drift)", () => {
+  const model = [...TERMINAL_STATUSES].sort();
+  const data = [...TERMINAL].sort();
+  if (JSON.stringify(model) !== JSON.stringify(data)) {
+    throw new Error(
+      `DRIFT: ui/src/board/phase-model.ts TERMINAL_STATUSES diverged from the ` +
+        `data-layer source of truth (lib/board-data.mjs TERMINAL).\n` +
+        `  board-data TERMINAL:          ${JSON.stringify(data)}\n` +
+        `  phase-model TERMINAL_STATUSES: ${JSON.stringify(model)}\n` +
+        `Reconcile the two; TERMINAL in board-data.mjs is the source of truth.`,
+    );
+  }
+  expect(model).toEqual(data);
 });

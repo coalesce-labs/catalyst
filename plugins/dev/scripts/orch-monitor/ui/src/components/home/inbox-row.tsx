@@ -3,13 +3,16 @@
 // summary — just a flat row separated from its neighbour by the list's hairline
 // divider (Direction A non-negotiable #1: "No card-in-card. Ever.").
 //
-// Row anatomy (Direction A): a 2px LEFT ACCENT (the only status signal, present
-// only on the needs-you rows — red blocked / amber waiting); the monospace muted
-// KEY; the one-line ASK (the bright line, the ticket title); a muted human
-// SUB-LABEL; and the single primary VERB. Running/Done rows are fully neutral
-// (no accent, no verb) — that's how 90% of the page de-alarms by subtraction.
+// Row anatomy (Direction A): a 2px LEFT ACCENT (the section-meaning signal,
+// present only on the needs-you rows — red blocked / amber waiting); a single
+// Catalyst StatusIcon GLYPH (CTL-900 / HOME2) that encodes BOTH progress + stage,
+// replacing the old text status/label chips; the monospace muted KEY; the
+// one-line ASK (the bright line, the ticket title); a muted human SUB-LABEL; and
+// the single primary VERB. Running/Done rows are fully neutral (no accent, no
+// verb) — that's how 90% of the page de-alarms by subtraction.
 import { cn } from "@/lib/utils";
 import { isNeedsYouSection, type InboxRow as InboxRowModel } from "@/board/home-inbox";
+import { StatusIcon } from "./status-icon";
 
 /** Left-accent color per section. Only the needs-you sections carry an accent;
  *  running/done are intentionally accent-less (transparent). Reserved live cyan
@@ -50,10 +53,20 @@ export function InboxRow({
         selected ? "bg-surface-2" : "hover:bg-surface-1",
       )}
     >
-      {/* 2px left accent — the single status signal, only on needs-you rows. */}
+      {/* 2px left accent — the section-meaning signal, only on needs-you rows. */}
       <span
         aria-hidden
         className={cn("mt-0.5 h-9 w-0.5 shrink-0 rounded-full", accentClass(row.section))}
+      />
+
+      {/* The single Catalyst StatusIcon glyph — encodes progress (ring/pie fill =
+          (phaseIndex+1)/total) AND stage (phase color). This REPLACES any text
+          status badge on the row (Direction A: status is one glyph, not chips). */}
+      <StatusIcon
+        phase={row.ticket.phase}
+        status={row.ticket.status}
+        size={16}
+        className="mt-0.5"
       />
 
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
