@@ -6,15 +6,19 @@ import {
   InboxIcon,
   LayoutGridIcon,
   ListOrderedIcon,
+  MoonIcon,
   SearchIcon,
   ServerIcon,
   SettingsIcon,
+  SunIcon,
   UsersIcon,
   WalletIcon,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useSurface, type Surface } from "@/lib/surface";
+import { useTheme } from "@/lib/theme";
+import { CatalystLogo } from "@/components/catalyst-logo";
 import {
   Collapsible,
   CollapsibleContent,
@@ -47,7 +51,14 @@ import {
 // mock/placeholder badges"). Wire to the unified event log
 // (~/catalyst/events/YYYY-MM.jsonl) the HUD already reads in a later SHELL
 // ticket — that same stream feeds worker count, queue depth, and the Board
-// anomaly dot. The workspace switcher / theme toggle are also later SHELL slots.
+// anomaly dot. The workspace switcher is a later SHELL slot.
+//
+// CTL-893 / SHELL3 — gives the rail its final shape: the brand header now uses
+// the Catalyst chevron mark (`CatalystLogo`, ported from `assets/brand-v2/
+// mark.svg`, inherits currentColor so it recolors per theme) with a wordmark
+// that hides on icon-collapse, and the footer gains a real calm-dark ⇄ warm-light
+// theme toggle wired to `@/lib/theme`'s `useTheme()` next to Settings + the
+// (still MOCK) daemon-health dot.
 
 // ── OPERATE nav — the touch-it-every-minute tier ─────────────────────────────
 type OperateItem = {
@@ -97,6 +108,7 @@ function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
 export function AppSidebar() {
   const { surface, setSurface } = useSurface();
   const { setOpenMobile, isMobile } = useSidebar();
+  const { theme, toggle: toggleTheme } = useTheme();
   const [observeOpen, setObserveOpen] = useState(false);
 
   function go(s: Surface) {
@@ -106,14 +118,14 @@ export function AppSidebar() {
 
   return (
     <Sidebar variant="inset" collapsible="icon">
-      {/* ── HEADER: logo + ⌘K trigger ───────────────────────────────────────── */}
+      {/* ── HEADER: chevron mark + wordmark + ⌘K trigger ────────────────────── */}
       <SidebarHeader className="gap-2">
         <div className="flex items-center gap-2 px-1 pt-1">
-          <img
-            src="/public/favicon.svg"
-            alt="Catalyst"
-            className="size-[22px] shrink-0 group-data-[collapsible=icon]:size-5"
-          />
+          {/* The chevron mark stays at every collapse width; only the wordmark
+              hides on icon-collapse (Gherkin: "only the Catalyst chevron mark
+              remains"). currentColor → it recolors with the calm-dark/warm-light
+              theme for free. */}
+          <CatalystLogo className="size-[22px] text-foreground group-data-[collapsible=icon]:size-5" />
           <span className="text-sm font-medium tracking-tight group-data-[collapsible=icon]:hidden">
             Catalyst
           </span>
@@ -213,7 +225,7 @@ export function AppSidebar() {
         </Collapsible>
       </SidebarContent>
 
-      {/* ── FOOTER: settings + daemon-health dot ────────────────────────────── */}
+      {/* ── FOOTER: settings + theme toggle + daemon-health dot ─────────────── */}
       <SidebarFooter>
         <SidebarMenu>
           <SidebarMenuItem>
@@ -240,6 +252,25 @@ export function AppSidebar() {
                 <TooltipContent side="right">Daemon healthy</TooltipContent>
               </Tooltip>
             </SidebarMenuBadge>
+          </SidebarMenuItem>
+
+          {/* CTL-893 / SHELL3 — calm-dark ⇄ warm-light theme toggle. Stays
+              reachable at every collapse width (the icon is always shown; the
+              label hides on icon-collapse like every other SidebarMenuButton).
+              Wired to the real theme system (`useTheme`), not re-implemented. */}
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={toggleTheme}
+              tooltip={
+                theme === "dark" ? "Switch to warm light" : "Switch to calm dark"
+              }
+              aria-label={
+                theme === "dark" ? "Switch to warm light" : "Switch to calm dark"
+              }
+            >
+              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+              <span>{theme === "dark" ? "Warm light" : "Calm dark"}</span>
+            </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
       </SidebarFooter>
