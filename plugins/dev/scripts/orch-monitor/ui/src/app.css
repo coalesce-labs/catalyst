@@ -57,8 +57,58 @@
 /* shadcn/ui semantic tokens mapped to orch-monitor surface system.
    shadcn treats muted/accent as background-role tokens; our muted/accent
    tokens remain unchanged and continue to resolve text color utilities
-   (text-muted, text-accent) through the @theme inline block above. */
+   (text-muted, text-accent) through the @theme inline block above.
+
+   CTL-893 / SHELL3 — two themes now exist. `:root` is the WARM-LIGHT theme
+   (the default the footer toggle reveals when the `dark` class is absent); the
+   `.dark` block below restores the original CALM-DARK surfaces. The app still
+   boots calm-dark — board.html ships `class="dark"` and lib/theme.ts defaults to
+   applying `dark` — so this adds the light theme WITHOUT regressing the dark
+   default. Removing `dark` from <html> (the toggle) switches to warm light. */
 :root {
+  /* Warm-light surfaces — a paper-warm neutral ramp, not pure white, so the
+     light theme reads "warm" rather than clinical. */
+  --color-light-surface-0: #faf7f2;
+  --color-light-surface-1: #f3efe7;
+  --color-light-surface-2: #ece7dd;
+  --color-light-surface-3: #e3ddd1;
+  --color-light-surface-4: #d8d1c2;
+  --color-light-border: #ddd5c7;
+  --color-light-fg: #2b2722;
+  --color-light-muted: #76705f;
+  --color-light-accent: #1f6feb;
+
+  --background: var(--color-light-surface-0);
+  --foreground: var(--color-light-fg);
+  --card: var(--color-light-surface-1);
+  --card-foreground: var(--color-light-fg);
+  --popover: var(--color-light-surface-1);
+  --popover-foreground: var(--color-light-fg);
+  --primary: var(--color-light-accent);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-light-surface-3);
+  --secondary-foreground: var(--color-light-fg);
+  --muted-foreground: var(--color-light-muted);
+  --accent-foreground: var(--color-light-fg);
+  --destructive: var(--color-red);
+  --input: var(--color-light-border);
+  --ring: var(--color-light-accent);
+  --radius: 0.5rem;
+
+  --sidebar: var(--color-light-surface-1);
+  --sidebar-foreground: var(--color-light-fg);
+  --sidebar-primary: var(--color-light-accent);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--color-light-surface-3);
+  --sidebar-accent-foreground: var(--color-light-fg);
+  --sidebar-border: var(--color-light-border);
+  --sidebar-ring: var(--color-light-accent);
+}
+
+/* CTL-893 / SHELL3 — the CALM-DARK theme (the boot default). These are the
+   exact dark mappings that previously lived on `:root` (CTL-891 / SHELL1),
+   now scoped to `.dark` so the toggle can flip between the two themes. */
+.dark {
   --background: var(--color-surface-0);
   --foreground: var(--color-fg);
   --card: var(--color-surface-1);
@@ -74,7 +124,6 @@
   --destructive: var(--color-red);
   --input: var(--color-border);
   --ring: var(--color-accent);
-  --radius: 0.5rem;
 
   /* CTL-891 / SHELL1: sidebar surface — the rail sits one step up from the
      base surface so the SidebarInset (background) reads as a raised card. */
