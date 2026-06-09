@@ -23,7 +23,7 @@ import { jobLifecycle } from "./recovery.mjs";
 import { labelOnce } from "./label-guard.mjs";
 import { fenceGuard } from "./fence-guard.mjs";
 import { appendFileSync } from "node:fs";
-import { log, getEventLogPath } from "./config.mjs";
+import { log, getEventLogPath, getClusterHosts } from "./config.mjs";
 import { DEFAULTS, classifyMergeTree, decideRescue } from "./stale-pr-rescue.mjs";
 // Default Linear transport for the escalation path. The daemon does not thread
 // a writer (scheduler.mjs threads its own), so without this default every
@@ -326,6 +326,7 @@ export function startStalePrRescueTimer({
   // Real Linear transport by default — the daemon call site passes nothing,
   // and a null default made every escalation a silent no-op (verify finding).
   linearWrite = linearWriteDefault,
+  multiHost = getClusterHosts().length > 1,
   // injectable seams
   jobLifecycle: jobLifecycleFn = jobLifecycle,
   prView = defaultPrView,
@@ -350,7 +351,7 @@ export function startStalePrRescueTimer({
   const handle = clock.setInterval(async () => {
     try {
       await runTick({
-        orchDir, orchId, cfg, linearWrite,
+        orchDir, orchId, cfg, linearWrite, multiHost,
         jobLifecycleFn, prView, compareBehind, mergeTree,
         worktreeExists, dispatchRescue, escalate, emit,
         nowMs: clock.now(),
@@ -365,7 +366,7 @@ export function startStalePrRescueTimer({
 }
 
 async function runTick({
-  orchDir, orchId, cfg, linearWrite,
+  orchDir, orchId, cfg, linearWrite, multiHost,
   jobLifecycleFn, prView, compareBehind, mergeTree,
   worktreeExists, dispatchRescue, escalate, emit, nowMs,
 }) {
@@ -379,7 +380,7 @@ async function runTick({
   for (const ticket of ticketDirs) {
     try {
       await processTicket({
-        ticket, orchDir, orchId, cfg, linearWrite, nowMs,
+        ticket, orchDir, orchId, cfg, linearWrite, multiHost, nowMs,
         jobLifecycleFn, prView, compareBehind, mergeTree,
         worktreeExists, dispatchRescue, escalate, emit,
       });
@@ -390,7 +391,7 @@ async function runTick({
 }
 
 async function processTicket({
-  ticket, orchDir, orchId, cfg, linearWrite, nowMs,
+  ticket, orchDir, orchId, cfg, linearWrite, multiHost, nowMs,
   jobLifecycleFn, prView, compareBehind, mergeTree,
   worktreeExists, dispatchRescue, escalate, emit,
 }) {
@@ -439,7 +440,7 @@ async function processTicket({
         return;
       }
     }
-    escalate(ticket, { reason: "rescue_worker_stalled", ...rescueState }, { orchDir, orchId: effectiveOrchId, linearWrite });
+    escalate(ticket, { reason: "rescue_worker_stalled", ...rescueState }, { orchDir, orchId: effectiveOrchId, linearWrite, multiHost });
     writeRescueState(orchDir, ticket, { ...rescueState, escalatedAt: new Date(nowMs).toISOString() });
     emit(`phase.rescue.escalated.${ticket}`, { ticket, reason: "rescue_worker_stalled" });
     return;
@@ -555,7 +556,7 @@ async function processTicket({
     }
 
     case "escalate": {
-      escalate(ticket, decision.detail ?? {}, { orchDir, orchId: effectiveOrchId, linearWrite });
+      escalate(ticket, decision.detail ?? {}, { orchDir, orchId: effectiveOrchId, linearWrite, multiHost });
       writeRescueState(orchDir, ticket, {
         ...rescueState,
         escalatedAt: new Date(nowMs).toISOString(),
