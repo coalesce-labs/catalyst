@@ -14,7 +14,7 @@
 // channel, activity predicate) live in board/ticket-page-model.ts and are unit-
 // tested without a DOM; this file is the thin React skin over them.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   resolvePipelineRail,
   resolveHeldBanner,
@@ -25,8 +25,17 @@ import {
   type PipelineSegment,
   type SpineNode,
 } from "@/board/ticket-page-model";
+import {
+  buildTelemetryTiles,
+  resolveCostByPhase,
+  resolveCostByModel,
+  type TicketTelemetrySeries,
+  type TelemetryTile,
+  type BreakdownBars,
+} from "@/board/ticket-telemetry-data";
 import type { BoardTicket } from "@/board/types";
-import { phaseColor, fmtDuration, fmtClock, phaseModelLabel } from "@/lib/formatters";
+import { phaseColor, fmtDuration, fmtClock, phaseModelLabel, fmtCost, fmtTokens } from "@/lib/formatters";
+import { Sparkline } from "./sparkline";
 import { TicketGantt } from "./ticket-gantt";
 import { CommsView } from "./comms-view";
 import { ActivityEventRow } from "./activity-event-row";
@@ -448,6 +457,170 @@ function ActivitySection({ ticket }: { ticket: BoardTicket }) {
   );
 }
 
+// ── TELEMETRY strip (CTL-917 / DETAIL6) ─────────────────────────────────────
+/** Fetch the ticket telemetry strip's REAL Prometheus sparklines for this Linear
+ *  key. REAL today — no new plumbing. A 503 (Prometheus not configured) yields
+ *  null series and the strip falls back to BoardTicket.{costUSD,tokens} +
+ *  phaseCosts for an instant no-sparkline paint — never blank. Refreshes while
+ *  the ticket is working so the live series grows. */
+function useTicketTelemetry(id: string, working: boolean): TicketTelemetrySeries | null {
+  const [series, setSeries] = useState<TicketTelemetrySeries | null>(null);
+
+  useEffect(() => {
+    if (!id) {
+      setSeries(null);
+      return;
+    }
+    let stop = false;
+    const load = async () => {
+      try {
+        const res = await fetch(`/api/otel/ticket-telemetry/${encodeURIComponent(id)}?range=1h`);
+        if (stop) return;
+        if (res.ok) {
+          const body = (await res.json()) as { data: TicketTelemetrySeries };
+          setSeries(body.data ?? null);
+        } else {
+          setSeries(null); // 503 / 4xx → resident-scalar + phaseCosts fallback
+        }
+      } catch {
+        if (!stop) setSeries(null);
+      }
+    };
+    void load();
+    const timer = working ? setInterval(() => void load(), 30_000) : null;
+    return () => {
+      stop = true;
+      if (timer) clearInterval(timer);
+    };
+  }, [id, working]);
+
+  return series;
+}
+
+function fmtTelemetryValue(tile: TelemetryTile): string {
+  if (tile.value == null) return "—";
+  if (tile.label === "COST") return fmtCost(tile.value);
+  if (tile.label === "TOKENS") return fmtTokens(tile.value);
+  return String(tile.value);
+}
+
+function TelemetryTileCell({ tile }: { tile: TelemetryTile }) {
+  const live = tile.source === "sparkline";
+  return (
+    <div
+      data-telemetry-tile={tile.label}
+      data-source={tile.source}
+      style={{
+        flex: "1 1 0",
+        minWidth: 110,
+        background: C.s1,
+        border: `1px solid ${C.border}`,
+        borderRadius: 6,
+        padding: "8px 10px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      <span style={{ font: `9px ${C.mono}`, letterSpacing: 1, color: C.fgMuted }}>{tile.label}</span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ font: `13px ${C.mono}`, color: tile.value != null ? C.fg : C.fgDim, fontWeight: 600 }}>
+          {fmtTelemetryValue(tile)}
+        </span>
+        {live && tile.points.length > 0 ? (
+          <Sparkline points={tile.points} color={C.cyan} ariaLabel={`${tile.label} sparkline`} />
+        ) : tile.source === "needs-plumbing" ? (
+          <span title="git-sourced, not telemetry" style={{ font: `9px ${C.mono}`, color: C.fgDim }}>
+            ↯ git
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/** A horizontal bar group (cost-by-phase / cost-by-model). Bars are width-scaled
+ *  to the max value; the unavailable source dims the whole group honestly. */
+function BreakdownBarGroup({
+  title,
+  group,
+  colorFor,
+}: {
+  title: string;
+  group: BreakdownBars;
+  colorFor: (label: string) => string;
+}) {
+  const max = group.bars.reduce((m, b) => Math.max(m, b.value), 0) || 1;
+  return (
+    <div data-breakdown={title} data-source={group.source} style={{ flex: "1 1 0", minWidth: 200 }}>
+      <div style={{ font: `9px ${C.mono}`, letterSpacing: 1, color: C.fgMuted, marginBottom: 6 }}>
+        {title}
+        {group.source === "scalar-fallback" && (
+          <span style={{ color: C.fgDim }}> · resident</span>
+        )}
+      </div>
+      {group.source === "unavailable" || group.bars.length === 0 ? (
+        <span data-breakdown-empty style={{ font: `10px ${C.mono}`, color: C.fgDim }}>
+          ↯ no per-{title.includes("model") ? "model" : "phase"} split
+        </span>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {group.bars.map((b) => (
+            <div key={b.label} data-breakdown-bar={b.label} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ width: 72, flexShrink: 0, font: `10px ${C.mono}`, color: C.fgMuted, textAlign: "right" }}>
+                {b.label}
+              </span>
+              <span
+                style={{
+                  height: 9,
+                  borderRadius: 2,
+                  background: colorFor(b.label),
+                  width: `${Math.max(4, (b.value / max) * 100)}%`,
+                  minWidth: 4,
+                }}
+              />
+              <span style={{ font: `10px ${C.mono}`, color: C.fg, flexShrink: 0 }}>{fmtCost(b.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A small palette for the per-model bars (cost-by-phase reuses phaseColor).
+const MODEL_COLORS: Record<string, string> = {
+  opus: "#a855f7",
+  sonnet: "#3b82f6",
+  haiku: "#10b981",
+};
+function modelColor(model: string): string {
+  const key = Object.keys(MODEL_COLORS).find((k) => model.toLowerCase().includes(k));
+  return key ? MODEL_COLORS[key] : "#64748b";
+}
+
+function TelemetryStrip({ ticket }: { ticket: BoardTicket }) {
+  const series = useTicketTelemetry(ticket.id, ticket.working);
+  const tiles = useMemo(() => buildTelemetryTiles(series, ticket), [series, ticket]);
+  const byPhase = useMemo(() => resolveCostByPhase(series, ticket), [series, ticket]);
+  const byModel = useMemo(() => resolveCostByModel(series), [series]);
+
+  return (
+    <section data-ticket-telemetry style={{ marginBottom: 16 }}>
+      <SectionLabel>Telemetry</SectionLabel>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+        {tiles.map((t) => (
+          <TelemetryTileCell key={t.label} tile={t} />
+        ))}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+        <BreakdownBarGroup title="cost by phase" group={byPhase} colorFor={phaseColor} />
+        <BreakdownBarGroup title="cost by model" group={byModel} colorFor={modelColor} />
+      </div>
+    </section>
+  );
+}
+
 // ── page body ─────────────────────────────────────────────────────────────────
 /**
  * The ticket detail page body. Renders inside the shared <Shell>'s <DetailBody>
@@ -485,6 +658,7 @@ export function TicketDetailPage({ ticket }: { ticket: BoardTicket | undefined }
       <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
       <HeldBanner ticket={ticket} />
       <LifecycleSpine ticket={ticket} registerNode={registerNode} />
+      <TelemetryStrip ticket={ticket} />
       <CommsSection ticket={ticket} />
       <ActivitySection ticket={ticket} />
     </div>

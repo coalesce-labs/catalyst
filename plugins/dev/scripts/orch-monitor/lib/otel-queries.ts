@@ -266,6 +266,170 @@ export async function workerHistoryBySession(
   return rows;
 }
 
+// ── CTL-917 (DETAIL6): burn metrics off the OTEL pipeline ───────────────────
+// The worker Burn Strip and the ticket telemetry strip both ride the SAME
+// already-emitting Prometheus pipeline — no new plumbing, just query wiring on
+// the `/api/otel/*` precedent (server.ts costByTicket/tokensByType routes). The
+// worker strip keys on the CC session UUID (`session_id=$UUID`); the ticket
+// strip keys on the Linear key (`linear_key=$T`). Every series is a `query_range`
+// so the UI gets a sparkline-ready point list (step=60, design §4.2/§5.2). The
+// UI falls back to the resident BoardWorker/BoardTicket scalars when a series is
+// empty (just-spawned / instant paint) so a cell is never blank.
+
+/** A single sparkline series: time-ordered [epochSeconds, value] points. The UI
+ *  renders these as a sparkline; `[]` is an honest "no series yet" (the caller
+ *  falls back to the resident scalar) — NEVER a fabricated point. */
+export type SparklinePoint = [number, number];
+
+/** A `linear_key` is a Linear identifier like `CTL-917`. Reject anything else so
+ *  an attacker-controlled value can never inject PromQL through the
+ *  `{linear_key="…"}` matcher. */
+const LINEAR_KEY_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+
+export function isValidLinearKey(key: string): boolean {
+  return LINEAR_KEY_RE.test(key);
+}
+
+/** Extract ONE matrix series' points from a query_range result. Picks the series
+ *  whose metric label `labelKey` === `labelVal` (or the first series when no key
+ *  is given — used for `sum(...)` queries that collapse to a single series). */
+function extractSeriesPoints(
+  result: { data: { result: PrometheusMetricValue[] } },
+): SparklinePoint[] {
+  // sum(...) collapses to a single series; take the first (and usually only) one.
+  const series = result.data.result[0];
+  if (!series?.values) return [];
+  const out: SparklinePoint[] = [];
+  for (const [t, v] of series.values) {
+    const val = parseFloat(v);
+    if (Number.isFinite(val)) out.push([t, val]);
+  }
+  return out;
+}
+
+/** Extract a map of label → points from a query_range matrix with multiple
+ *  series (e.g. `sum by(type)(...)`), one series per label value. */
+function extractSeriesByLabel(
+  result: { data: { result: PrometheusMetricValue[] } },
+  labelKey: string,
+): Record<string, SparklinePoint[]> {
+  const map: Record<string, SparklinePoint[]> = {};
+  for (const entry of result.data.result) {
+    const key = entry.metric[labelKey];
+    if (!key || !entry.values) continue;
+    const pts: SparklinePoint[] = [];
+    for (const [t, v] of entry.values) {
+      const val = parseFloat(v);
+      if (Number.isFinite(val)) pts.push([t, val]);
+    }
+    map[key] = pts;
+  }
+  return map;
+}
+
+/** Window [start,end] in ISO and the step, derived from a range string. step is
+ *  fixed at 60s (the design's sparkline-ready cadence). */
+function rangeWindow(range: string, fallback: string): { start: string; end: string; step: string } {
+  const r = safeDuration(range, fallback);
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  return { start: start.toISOString(), end: now.toISOString(), step: "60s" };
+}
+
+// ── worker Burn Strip (keyed on the CC session UUID) ────────────────────────
+
+/** The worker Burn Strip's four sparkline series + the by-type token split,
+ *  keyed on the CC session UUID. `null` when Prometheus is unavailable (caller
+ *  surfaces a 503); empty arrays when the series simply has no points yet (the
+ *  UI falls back to the resident BoardWorker scalar). */
+export interface WorkerBurnSeries {
+  /** `sum(claude_code_cost_usage_USD_total{session_id="$UUID"})` cumulative cost. */
+  cost: SparklinePoint[];
+  /** `sum(claude_code_token_usage_tokens_total{session_id="$UUID"})` total tokens. */
+  tokens: SparklinePoint[];
+  /** token split by `type` (input/output/cacheRead/cacheCreation). */
+  tokensByType: Record<string, SparklinePoint[]>;
+  /** `sum(claude_code_active_time_seconds_total{session_id="$UUID"})` active seconds. */
+  activeSeconds: SparklinePoint[];
+}
+
+export async function workerBurnSeries(
+  prom: PrometheusFetcher,
+  sessionId: string,
+  range: string,
+): Promise<WorkerBurnSeries | null> {
+  if (!isValidCcSessionId(sessionId)) return null;
+  const { start, end, step } = rangeWindow(range, "1h");
+  const sel = `{session_id="${sessionId}"}`;
+  const [cost, tokens, tokensByTypeRes, active] = await Promise.all([
+    prom.queryRange(`sum(claude_code_cost_usage_USD_total${sel})`, start, end, step),
+    prom.queryRange(`sum(claude_code_token_usage_tokens_total${sel})`, start, end, step),
+    prom.queryRange(`sum by (type) (claude_code_token_usage_tokens_total${sel})`, start, end, step),
+    prom.queryRange(`sum(claude_code_active_time_seconds_total${sel})`, start, end, step),
+  ]);
+  // If the very first probe failed (all null), Prometheus is unavailable.
+  if (cost === null && tokens === null && tokensByTypeRes === null && active === null) {
+    return null;
+  }
+  return {
+    cost: cost ? extractSeriesPoints(cost) : [],
+    tokens: tokens ? extractSeriesPoints(tokens) : [],
+    tokensByType: tokensByTypeRes ? extractSeriesByLabel(tokensByTypeRes, "type") : {},
+    activeSeconds: active ? extractSeriesPoints(active) : [],
+  };
+}
+
+// ── ticket telemetry strip (keyed on the Linear key) ────────────────────────
+
+/** The ticket telemetry strip's series, keyed on the Linear key. total cost /
+ *  tokens-by-type sparklines + cost-by-phase (`sum by(task_type)`) and
+ *  cost-by-model (`sum by(model)`) breakdown bars. commits/LoC are git-sourced
+ *  (NEEDS-PLUMBING) so they are NOT queried here. `null` on Prometheus
+ *  unavailability; empty when the series has no points (UI falls back to the
+ *  resident BoardTicket scalar + phaseCosts). */
+export interface TicketTelemetrySeries {
+  /** `sum(claude_code_cost_usage_USD_total{linear_key="$T"})` cumulative cost. */
+  cost: SparklinePoint[];
+  /** `sum(claude_code_token_usage_tokens_total{linear_key="$T"})` total tokens. */
+  tokens: SparklinePoint[];
+  /** token split by `type`. */
+  tokensByType: Record<string, SparklinePoint[]>;
+  /** cost split by `task_type` (the phase) — the cost-by-phase bars. */
+  costByPhase: Record<string, SparklinePoint[]>;
+  /** cost split by `model` — the cost-by-model bars. */
+  costByModel: Record<string, SparklinePoint[]>;
+}
+
+export async function ticketTelemetrySeries(
+  prom: PrometheusFetcher,
+  linearKey: string,
+  range: string,
+): Promise<TicketTelemetrySeries | null> {
+  if (!isValidLinearKey(linearKey)) return null;
+  const { start, end, step } = rangeWindow(range, "1h");
+  const sel = `{linear_key="${linearKey}"}`;
+  const [cost, tokens, tokensByTypeRes, byPhase, byModel] = await Promise.all([
+    prom.queryRange(`sum(claude_code_cost_usage_USD_total${sel})`, start, end, step),
+    prom.queryRange(`sum(claude_code_token_usage_tokens_total${sel})`, start, end, step),
+    prom.queryRange(`sum by (type) (claude_code_token_usage_tokens_total${sel})`, start, end, step),
+    prom.queryRange(`sum by (task_type) (claude_code_cost_usage_USD_total${sel})`, start, end, step),
+    prom.queryRange(`sum by (model) (claude_code_cost_usage_USD_total${sel})`, start, end, step),
+  ]);
+  if (
+    cost === null && tokens === null && tokensByTypeRes === null &&
+    byPhase === null && byModel === null
+  ) {
+    return null;
+  }
+  return {
+    cost: cost ? extractSeriesPoints(cost) : [],
+    tokens: tokens ? extractSeriesPoints(tokens) : [],
+    tokensByType: tokensByTypeRes ? extractSeriesByLabel(tokensByTypeRes, "type") : {},
+    costByPhase: byPhase ? extractSeriesByLabel(byPhase, "task_type") : {},
+    costByModel: byModel ? extractSeriesByLabel(byModel, "model") : {},
+  };
+}
+
 interface CostValidationEntry {
   ticket: string;
   signalCost: number;

@@ -189,6 +189,9 @@ import {
   costValidation,
   workerHistoryBySession,
   isValidCcSessionId,
+  workerBurnSeries,
+  ticketTelemetrySeries,
+  isValidLinearKey,
 } from "./lib/otel-queries";
 import {
   openDb,
@@ -1852,6 +1855,68 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return Response.json({ error: "Loki unavailable" }, { status: 503 });
           }
           return Response.json({ data: rows });
+        }
+
+        // CTL-917 (DETAIL6): the worker Burn Strip's REAL Prometheus sparklines.
+        // Four query_range series keyed on the CC session UUID (cost / tokens /
+        // tokens-by-type / active-seconds) — no new plumbing, the same already-
+        // emitting OTEL pipeline the `/api/otel/*` routes read. The UUID is
+        // UUID-validated before it reaches the PromQL `{session_id=…}` matcher,
+        // so the matcher can never be an injection vector. 503 when Prometheus is
+        // not configured (the UI falls back to the resident BoardWorker scalar),
+        // 400 on a bad id.
+        const otelBurnMatch = url.pathname.match(
+          /^\/api\/otel\/burn\/([^/]+)$/,
+        );
+        if (otelBurnMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(otelBurnMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidCcSessionId(sessionId)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!prom) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "1h";
+          const series = await workerBurnSeries(prom, sessionId, range);
+          if (series === null) {
+            // Prometheus probe failed mid-flight — honest 503, never a fake series.
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: series });
+        }
+
+        // CTL-917 (DETAIL6): the ticket telemetry strip's REAL Prometheus
+        // sparklines keyed on the Linear key (total cost / tokens-by-type +
+        // cost-by-phase `sum by(task_type)` + cost-by-model `sum by(model)`).
+        // commits/LoC stay git-sourced (NEEDS-PLUMBING) so they are NOT queried
+        // here. The linear_key is validated before it reaches the PromQL matcher.
+        const otelTicketTelemetryMatch = url.pathname.match(
+          /^\/api\/otel\/ticket-telemetry\/([^/]+)$/,
+        );
+        if (otelTicketTelemetryMatch) {
+          let linearKey: string;
+          try {
+            linearKey = decodeURIComponent(otelTicketTelemetryMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidLinearKey(linearKey)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!prom) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "1h";
+          const series = await ticketTelemetrySeries(prom, linearKey, range);
+          if (series === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: series });
         }
 
         if (url.pathname === "/api/annotations") {
