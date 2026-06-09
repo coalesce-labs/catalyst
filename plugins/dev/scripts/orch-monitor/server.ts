@@ -21,6 +21,15 @@ import {
   assembleTicketRuns,
   readPhaseSignalVerbatim,
 } from "./lib/ticket-runs.mjs";
+// CTL-887 (BFF5): the live transcript tail for execution-core workers. The
+// legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
+// is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
+// emits typed StreamEvents over SSE for the worker [● live] tab + reasoning
+// rows + footer counters + the ticket active-node live tail.
+import {
+  resolveTranscriptPath,
+  TranscriptTail,
+} from "./lib/ec-worker-stream.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -1979,6 +1988,93 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Not Found", { status: 404 });
           }
           return Response.json(signal);
+        }
+
+        // CTL-887 (BFF5): the live transcript tail. Resolves a CC session UUID
+        // to its ~/.claude/projects/<dir>/<sessionId>.jsonl path (reusing the
+        // resident transcript-path cache — only a cold miss triggers a single
+        // scan) and streams typed StreamEvents over SSE as the file grows. This
+        // is the EC equivalent of the legacy /api/worker-stream (which is empty
+        // for execution-core workers). Host-local + stateless so a cluster
+        // fan-in (BFF3, single-node-descoped) is a clean wrap.
+        const ecWorkerStreamMatch = url.pathname.match(
+          /^\/api\/ec-worker-stream\/([^/]+)$/,
+        );
+        if (ecWorkerStreamMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(ecWorkerStreamMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // A CC session id is a UUID — reject anything else so no arbitrary
+          // path ever reaches the filesystem.
+          if (
+            !/^[0-9a-fA-F-]{8,64}$/.test(sessionId) ||
+            sessionId.includes("..") ||
+            sessionId.includes("/")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const transcriptPath = await resolveTranscriptPath(sessionId);
+          if (!transcriptPath) {
+            return new Response("Not Found", { status: 404 });
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const tail = new TranscriptTail(transcriptPath);
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const pump = () => {
+                if (inFlight || closed) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const events = await tail.poll();
+                    if (closed) return;
+                    for (const ev of events) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: stream-event\ndata: ${JSON.stringify(ev)}\n\n`,
+                        ),
+                      );
+                    }
+                  } catch {
+                    // client likely went away mid-enqueue; stop pumping
+                    closed = true;
+                    if (timer) clearInterval(timer);
+                    timer = null;
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              // Open frame so a cold connection paints the tail immediately,
+              // then poll for growth on a fixed cadence.
+              controller.enqueue(
+                encoder.encode(
+                  `event: open\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+                ),
+              );
+              pump();
+              timer = setInterval(pump, 750);
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
         }
 
         if (url.pathname === "/api/board") {

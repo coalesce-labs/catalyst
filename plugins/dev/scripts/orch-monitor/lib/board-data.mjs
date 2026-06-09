@@ -160,7 +160,19 @@ const STUCK_MS = 1_800_000;    // no transcript activity for 30m → likely aban
 // (expensive) ~1.5k-project-dir scan. Only cache HITS — a brand-new worker whose
 // transcript dir is created after a miss must still be found on a later pass.
 const _transcriptPathCache = new Map(); // sessionId -> absolute path
-async function resolveTranscript(sessionId) {
+
+// CTL-887 (BFF5): cache-only peek so the live-tail SSE endpoint resolves a
+// running worker's transcript without ever triggering the ~1.5k-dir scan —
+// board assembly has already populated the cache for every live session.
+// Returns the cached absolute path, or null on a miss (the caller decides
+// whether a single fallback scan is warranted).
+export function peekTranscriptCache(sessionId) {
+  if (!sessionId) return null;
+  return _transcriptPathCache.get(sessionId) ?? null;
+}
+
+export async function resolveTranscript(sessionId) {
+  if (!sessionId) return null;
   const cached = _transcriptPathCache.get(sessionId);
   if (cached) return cached;
   const projectsDir = join(HOME, ".claude", "projects");
