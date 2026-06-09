@@ -93,8 +93,13 @@ function workerRows(w: BoardWorker | undefined): PropertyRow[] {
     { label: "Team", value: w?.team },
     { label: "Runtime", value: w?.runtimeMs != null ? fmtDuration(w.runtimeMs) : w ? null : undefined },
     { label: "Cost", value: scalars.costUSD != null ? `$${scalars.costUSD.toFixed(2)}` : w ? null : undefined },
+    // CTL-915 (DETAIL4 / BFF6 P7): the OS pid of the bg worker. null when the
+    // worker carries none (dimmed, never fabricated).
+    { label: "PID", value: scalars.pid != null ? String(scalars.pid) : w ? null : undefined },
     // Both id spaces — the CC-UUID (keys Prometheus/Loki claude-code) and the
     // catalyst sess_ id (keys the catalyst.session streams; null when no db row).
+    // Surfaced together so the Loki heartbeat + catalyst lifecycle joins key off
+    // the right id space (design §5.2 id-split).
     { label: "Session", value: scalars.sessionId ?? (w ? null : undefined) },
     { label: "Catalyst id", value: scalars.catalystSessionId ?? (w ? null : undefined) },
   ];

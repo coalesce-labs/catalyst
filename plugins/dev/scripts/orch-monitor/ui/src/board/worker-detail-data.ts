@@ -179,6 +179,10 @@ export interface WorkerScalars {
   sessionId: string | null;
   /** The catalyst sess_ id (second id space) — null when catalyst.db has no row. */
   catalystSessionId: string | null;
+  /** CTL-915 (DETAIL4) P6: exact wall-clock start (epoch ms) for precise elapsed. */
+  startedAt: number | null;
+  /** CTL-915 (DETAIL4) P7: OS pid of the bg worker — the worker-rail PID row. */
+  pid: number | null;
 }
 
 export function readWorkerScalars(worker: BoardWorker | undefined): WorkerScalars {
@@ -187,7 +191,41 @@ export function readWorkerScalars(worker: BoardWorker | undefined): WorkerScalar
     runtimeMs: worker?.runtimeMs ?? null,
     sessionId: worker?.sessionId ?? null,
     catalystSessionId: worker?.catalystSessionId ?? null,
+    startedAt: worker?.startedAt ?? null,
+    pid: worker?.pid ?? null,
   };
+}
+
+// ── elapsed: exact wall-clock from startedAt, runtimeMs floor as fallback ─────
+// CTL-915 (DETAIL4): the worker-header `elapsed` field. BFF6 now persists the
+// worker's exact wall-clock `startedAt` (epoch ms from `claude agents --json
+// .startedAt`), so when it is present the header reads the precise `now −
+// startedAt` rather than the coarser, possibly-stale `runtimeMs` floor (design
+// §5.2 "elapsed = runtimeMs floor now; exact wall-clock startedAt ↯" — that ↯ is
+// now closed). When startedAt is absent we fall back to the runtimeMs floor; when
+// neither exists we report `none` so the caller dims the field, never fabricating
+// a 0s elapsed.
+export type ElapsedSource = "wall-clock" | "runtime-floor" | "none";
+
+export interface ElapsedState {
+  /** Elapsed milliseconds, or null when neither source is available. */
+  ms: number | null;
+  source: ElapsedSource;
+}
+
+export function resolveElapsed(
+  startedAt: number | null | undefined,
+  runtimeMs: number | null | undefined,
+  now: number,
+): ElapsedState {
+  if (startedAt != null && Number.isFinite(startedAt)) {
+    // Exact wall-clock; clamp a future start to 0 so we never show negative time.
+    return { ms: Math.max(0, now - startedAt), source: "wall-clock" };
+  }
+  if (runtimeMs != null && Number.isFinite(runtimeMs)) {
+    return { ms: Math.max(0, runtimeMs), source: "runtime-floor" };
+  }
+  return { ms: null, source: "none" };
 }
 
 // ── death-freeze: ring grey, status flips, NO layout reflow ──────────────────

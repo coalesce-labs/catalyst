@@ -13,6 +13,7 @@ import {
   readRunPhaseTimestamps,
   readWorkerScalars,
   isWorkerAlive,
+  resolveElapsed,
 } from "../ui/src/board/worker-detail-data";
 import type { BoardWorker } from "../ui/src/board/types";
 
@@ -165,6 +166,48 @@ describe("readWorkerScalars (resident fallbacks)", () => {
     const s = readWorkerScalars(undefined);
     expect(s.costUSD).toBeNull();
     expect(s.sessionId).toBeNull();
+  });
+  // CTL-915 (DETAIL4) P7: the OS pid + P6 startedAt now ride the scalar fallbacks.
+  it("reads pid and startedAt off the BoardWorker (BFF6 P6/P7)", () => {
+    const s = readWorkerScalars(worker({ pid: 4242, startedAt: 1_700_000_000_000 }));
+    expect(s.pid).toBe(4242);
+    expect(s.startedAt).toBe(1_700_000_000_000);
+  });
+  it("pid/startedAt are null when the worker carries none (never fabricated)", () => {
+    const s = readWorkerScalars(worker({ pid: null, startedAt: null }));
+    expect(s.pid).toBeNull();
+    expect(s.startedAt).toBeNull();
+    const u = readWorkerScalars(undefined);
+    expect(u.pid).toBeNull();
+    expect(u.startedAt).toBeNull();
+  });
+});
+
+describe("resolveElapsed (CTL-915 — exact wall-clock from startedAt, runtimeMs floor fallback)", () => {
+  const NOW = 1_700_000_842_000; // 842s after the start below
+  it("prefers exact wall-clock (now − startedAt) when startedAt is populated", () => {
+    // The Gherkin: "the header elapsed reads exact wall-clock, not a runtimeMs floor".
+    // runtimeMs is a coarser, possibly-stale floor (839s); startedAt gives the
+    // precise 842s the operator should read.
+    const e = resolveElapsed(NOW - 842_000, 839_000, NOW);
+    expect(e.ms).toBe(842_000);
+    expect(e.source).toBe("wall-clock");
+  });
+  it("falls back to the runtimeMs floor when startedAt is absent", () => {
+    const e = resolveElapsed(null, 839_000, NOW);
+    expect(e.ms).toBe(839_000);
+    expect(e.source).toBe("runtime-floor");
+    expect(resolveElapsed(undefined, 839_000, NOW).source).toBe("runtime-floor");
+  });
+  it("yields none (null) when neither startedAt nor runtimeMs is available", () => {
+    const e = resolveElapsed(null, null, NOW);
+    expect(e.ms).toBeNull();
+    expect(e.source).toBe("none");
+  });
+  it("clamps a future startedAt to 0 (never a negative elapsed)", () => {
+    const e = resolveElapsed(NOW + 5_000, 0, NOW);
+    expect(e.ms).toBe(0);
+    expect(e.source).toBe("wall-clock");
   });
 });
 
