@@ -34,6 +34,12 @@ const HOME = homedir();
 const DEFAULT_DB_PATH = join(HOME, "catalyst", "filter-state.db");
 const DEFAULT_ELIGIBLE_DIR = join(HOME, "catalyst", "execution-core", "eligible");
 
+// broker-state.mjs carries a top-level `import { Database } from "bun:sqlite"`.
+// We reach it ONLY through the lazy `import()` in readTicketStateById, but the
+// specifier MUST be computed (not a string literal) — see the long note there.
+// Kept as a module constant so the path lives in one place and reads cleanly.
+const BROKER_STATE_MODULE = ["..", "..", "broker", "broker-state.mjs"].join("/");
+
 // Normalize a stored ticket_state descriptor priority to the 0..4 Linear scale.
 // ticket_state stores it as an INTEGER (0 = no priority, 1 = urgent .. 4 = low);
 // a null/NaN means "cache has no priority for this ticket" → defer to eligible.
@@ -52,8 +58,22 @@ async function readTicketStateById(dbPath) {
     // orch-monitor server + vite middleware both run under Bun). Import lazily
     // so a non-Bun import of this module (e.g. a node-run tooling pass) fails
     // soft to {} instead of crashing at module load.
+    //
+    // CTL-883: the specifier is the COMPUTED `BROKER_STATE_MODULE` constant, NOT
+    // a string literal — and that is load-bearing, not stylistic. board-data.mjs
+    // (which statically imports this module) is itself statically imported by
+    // ui/vite.config.ts. When Vite loads that config it esbuild-bundles the
+    // config + its RELATIVE import graph, and esbuild follows relative dynamic
+    // imports too — but ONLY when the argument is a plain string literal. A
+    // literal `import("../../broker/broker-state.mjs")` would pull broker-state
+    // (and its top-level `bun:sqlite`) into the Node-evaluated config bundle,
+    // and Node throws ERR_UNSUPPORTED_ESM_URL_SCHEME on `bun:`, breaking
+    // `vite build` (the monitor's deploy path). A computed specifier stays an
+    // opaque runtime `import()` esbuild can't follow, so bun:sqlite never enters
+    // the config graph. Under Bun at runtime the string resolves identically.
+    // DO NOT inline this back to a literal.
     const [{ openBrokerStateDb, getAllTicketDescriptors }] = await Promise.all([
-      import("../../broker/broker-state.mjs"),
+      import(BROKER_STATE_MODULE),
     ]);
     openBrokerStateDb(dbPath);
     const byId = {};
