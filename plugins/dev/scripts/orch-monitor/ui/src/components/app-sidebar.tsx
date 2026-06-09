@@ -71,6 +71,11 @@ type OperateItem = {
   icon: typeof InboxIcon;
 };
 
+// The OPERATE array carries ONLY the static IA (surface/label/icon). Every
+// badge/dot is DERIVED per-render from the live nav signal (CTL-896 / SHELL6) —
+// including the Queue depth badge that CTL-910 / SURF2 introduced (now fed by the
+// read-model nav-signal projection `nav.queueDepth` instead of a second snapshot
+// subscription). No mock literals here.
 const OPERATE: OperateItem[] = [
   { surface: "home", label: "Home", icon: InboxIcon },
   { surface: "board", label: "Board", icon: LayoutGridIcon },
@@ -107,6 +112,8 @@ export function AppSidebar() {
   // CTL-896 / SHELL6 — the live nav signal off the read-model SSE projection.
   // null until the first frame lands; the badges/dots simply don't render until
   // then (no mock placeholder), then go live and update without a page reload.
+  // This supersedes CTL-910 / SURF2's separate useBoardSnapshot queue-depth
+  // badge: the Queue depth is now `nav.queueDepth` from the SAME projection.
   const nav = useNavSignal();
 
   function go(s: Surface) {

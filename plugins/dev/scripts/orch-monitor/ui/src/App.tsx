@@ -63,6 +63,14 @@ const HomeSurface = lazy(() =>
     default: m.HomeSurface,
   })),
 );
+// CTL-910 / SURF2: the dedicated wide Queue surface. Lazy so its transport (the
+// shared board snapshot SSE) + the ranked depth table only load when the operator
+// is on the Queue surface — the dashboard + home surfaces stay untouched.
+const QueueSurface = lazy(() =>
+  import("./components/queue/queue-surface").then((m) => ({
+    default: m.QueueSurface,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -327,6 +335,7 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
       </Suspense>
     );
   }
+  const kind = surfaceContentKind(surface);
   // CTL-909 / SURF1: the Workers surface is now a first-class dense grid — the
   // same <Board /> scaffolding (Column/BoardScroll/WorkerCard) opened straight
   // onto its Workers view, full-bleed in the inset, instead of the placeholder
@@ -334,17 +343,28 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
   // is an identity no-op. (Worker-card deep-link to /worker/$id is wired in the
   // routed board entry, which owns the router; the embedded shell has no router,
   // so cards there stay non-interactive exactly as before — no dead links.)
-  if (surfaceContentKind(surface) === "workers") {
+  if (kind === "workers") {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <Board embedded initialView="workers" />
       </Suspense>
     );
   }
-  if (surfaceContentKind(surface) === "board") {
+  if (kind === "board") {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <Board embedded />
+      </Suspense>
+    );
+  }
+  // CTL-910 / SURF2: the Queue surface is its OWN dedicated route now (no longer
+  // the SHELL2 dashboard fall-through). Like the board it is a stable top-level
+  // branch so its element keeps a fixed tree position and the shared board
+  // EventSource is reconciled in place, not torn down on every snapshot tick.
+  if (kind === "queue") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <QueueSurface />
       </Suspense>
     );
   }

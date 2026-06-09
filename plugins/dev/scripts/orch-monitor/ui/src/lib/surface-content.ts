@@ -17,23 +17,26 @@ import type { Surface } from "./surface";
  *  - "board"     → the dense, full-bleed <Board /> grid (CTL-892).
  *  - "workers"   → the dense Workers grid: the SAME <Board /> opened on its
  *                  Workers view, with the node group-by + node filter (CTL-909).
+ *  - "queue"     → the dedicated wide ranked-depth Queue surface (CTL-910 / SURF2):
+ *                  capacity strip + on-the-plate table + waiting ranked table with
+ *                  the optional per-node column.
  *  - "dashboard" → the existing monitor dashboard / orchestrator / comms / etc.
  *
- * Queue still falls through to "dashboard" today; it migrates to its own dense
- * surface in a later SHELL ticket. Home is the calm dashboard inbox.
+ * Home is the calm dashboard inbox; every other surface falls through to it.
  */
-export type SurfaceContentKind = "board" | "workers" | "dashboard";
+export type SurfaceContentKind = "board" | "workers" | "queue" | "dashboard";
 
 /**
  * Resolve which content kind the inset should render for the active surface.
- * "board" was special-cased in SHELL2; SURF1 (CTL-909) adds "workers" — the
- * Workers surface is now its own dense grid instead of the placeholder
- * dashboard. Every other surface keeps the dashboard content so this stays
- * behavior-preserving for Home/Queue (no regression).
+ * "board" was special-cased in SHELL2; SURF1 (CTL-909) adds "workers" and
+ * SURF2 (CTL-910) adds "queue" — each is now its own dense, edge-to-edge
+ * surface instead of the placeholder dashboard. Every other surface keeps the
+ * dashboard content so this stays behavior-preserving for Home (no regression).
  */
 export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   if (surface === "board") return "board";
   if (surface === "workers") return "workers";
+  if (surface === "queue") return "queue";
   return "dashboard";
 }
 
