@@ -19,6 +19,15 @@ import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
 // scan), with the daemon health layered from the local node.heartbeat liveness.
 import { deriveNavSignal } from "./lib/nav-signal.mjs";
 import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
+// CTL-898 (SHELL8): the footer health dot generalizes into a PER-NODE cluster-
+// health indicator + node filter. The /api/cluster routes assemble the BFF2
+// cluster view (cluster-view.mjs) off the SAME reactive board snapshot, then
+// project it to the tiny per-node footer signal (cluster-signal.mjs). Single-host
+// is an exact identity no-op (one node — the local daemon).
+import { createClusterEntity } from "./lib/cluster-view.mjs";
+import type { ClusterView } from "./lib/cluster-view.mjs";
+import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
+import type { ClusterSignal } from "./lib/cluster-signal.mjs";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
 // queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
 // (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
@@ -254,6 +263,17 @@ export interface CreateServerOptions {
    * inject a deterministic status so the routes don't read the live event log.
    */
   daemonHealthReader?: (() => DaemonHealth | Promise<DaemonHealth>) | null;
+  /**
+   * CTL-898 (SHELL8): override for the per-node cluster-health reader that feeds
+   * the footer's generalized per-node indicator + node filter (/api/cluster,
+   * /api/cluster/stream). Given the board snapshot it returns the assembled
+   * ClusterView (cluster-view.mjs::assembleClusterView), projected to the tiny
+   * footer signal by deriveClusterSignal. Production lazily resolves the roster
+   * (config.getClusterHosts) + heartbeats (recovery.readClusterHeartbeats) — the
+   * single-host identity no-op yields ONE node (the local daemon). Tests inject a
+   * deterministic ClusterView so the routes don't read the live event log/roster.
+   */
+  clusterReader?: ((board: BoardPayload) => ClusterView | Promise<ClusterView>) | null;
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
@@ -602,6 +622,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     webhookConfig,
     linearWebhookConfig,
     daemonHealthReader: daemonHealthReaderOpt,
+    clusterReader: clusterReaderOpt,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -948,6 +969,31 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // synchronous per-request scan of the source signal files.
   const assembleNavSignal = async (board: BoardPayload): Promise<NavSignal> =>
     deriveNavSignal(board, { daemon: await readDaemonHealth() });
+
+  // CTL-898 (SHELL8): the per-node cluster-health projection for the footer +
+  // node filter. The cluster VIEW (owner_host grouping + heartbeat liveness
+  // overlay) is assembled off the SAME shared board snapshot via the BFF2
+  // read-model entity — it spawns nothing and degrades to the single-host
+  // identity no-op when the execution-core roster/recovery deps are unavailable.
+  // The view is then projected to the tiny footer signal. Tests inject
+  // `clusterReaderOpt` so the routes don't touch the live event log/roster.
+  const clusterEntity = createClusterEntity();
+  const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {
+    if (clusterReaderOpt != null) return clusterReaderOpt(board);
+    return clusterEntity.project(board);
+  };
+  const assembleClusterSignal = async (
+    board: BoardPayload,
+  ): Promise<ClusterSignal> => {
+    try {
+      return deriveClusterSignal(await readClusterView(board));
+    } catch (err) {
+      // Never throw out of a cluster request — degrade to the empty single-host
+      // signal (the footer keeps its muted/unknown dot) rather than 500.
+      console.error(`[server] cluster signal assemble failed:`, err);
+      return deriveClusterSignal(null);
+    }
+  };
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of BUS_BROADCAST_EVENTS) {
@@ -2602,6 +2648,81 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 );
               } catch (err) {
                 console.error(`[server] nav stream initial signal failed:`, err);
+              }
+            },
+            cancel() {
+              closed = true;
+              unsubscribe?.();
+              unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-898 (SHELL8): the per-node cluster-health signal — one {host,status}
+        // per running node + the single-host flag — as a one-shot read for the
+        // footer's warm paint + the SSE reconcile. Projected off the SAME shared
+        // board snapshot the board/nav endpoints serve plus the cluster view's
+        // owner_host grouping + heartbeat liveness; NEVER a per-request scan.
+        // Single-host is the exact identity no-op (one node, the local daemon).
+        if (url.pathname === "/api/cluster") {
+          return Response.json(
+            await assembleClusterSignal(await boardSnapshot.getLatest()),
+          );
+        }
+
+        // CTL-898 (SHELL8): SSE push of the cluster signal. The footer opens ONE
+        // of these and receives a `cluster` event on connect and on every reactive
+        // board recompute — a node going dark past its grace window flips its dot
+        // to offline WITHOUT a page reload and WITHOUT per-tab polling of the
+        // source files (Gherkin: "A node going dark is reflected").
+        if (url.pathname === "/api/cluster/stream") {
+          let unsubscribe: (() => void) | null = null;
+          let closed = false;
+          const sendCluster = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            signal: ClusterSignal,
+          ) => {
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  `event: cluster\ndata: ${JSON.stringify(signal)}\n\n`,
+                ),
+              );
+            } catch {
+              unsubscribe?.();
+              unsubscribe = null;
+            }
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // subscribe first so no recompute is missed between bootstrap +
+              // subscribe; each board frame is projected into a cluster signal
+              // (the heartbeat liveness is re-classified per frame so a node going
+              // dark surfaces without a reload).
+              unsubscribe = boardSnapshot.subscribe((snap) => {
+                void assembleClusterSignal(snap).then((signal) =>
+                  sendCluster(controller, signal),
+                );
+              });
+              try {
+                sendCluster(
+                  controller,
+                  await assembleClusterSignal(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(
+                  `[server] cluster stream initial signal failed:`,
+                  err,
+                );
               }
             },
             cancel() {

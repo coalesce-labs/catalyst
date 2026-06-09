@@ -16,6 +16,11 @@ import {
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
+// CTL-898 / SHELL8 — the shell owns the NODE-SCOPE store (All-nodes by default).
+// Single-host is an identity no-op: the filter affordance is absent (the sidebar
+// gates it on the live cluster signal) so the scope stays All-nodes and nothing
+// changes on today's single-node deployment.
+import { ALL_NODES, NodeScopeContext, type NodeScope } from "@/lib/node-scope";
 import {
   readSidebarOpen,
   writeSidebarOpen,
@@ -70,6 +75,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState<boolean>(readSidebarOpen);
   const [surface, setSurface] = useState<Surface>("home");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // CTL-898 / SHELL8 — the active node scope. Defaults to ALL_NODES (the cluster-
+  // wide view); the sidebar's node filter sets it when N>1, and the sidebar also
+  // resolves a stale focused scope back to ALL_NODES when its host leaves the
+  // roster (a node going dark never strands the operator on an empty view).
+  const [nodeScope, setNodeScope] = useState<NodeScope>(ALL_NODES);
 
   // Persist collapse state across reloads (the controlled provider replaces the
   // primitive's cookie path; localStorage is the source of truth here). Logic +
@@ -183,11 +193,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, []);
 
   const surfaceCtx = useMemo(() => ({ surface, setSurface }), [surface]);
+  const nodeScopeCtx = useMemo(
+    () => ({ scope: nodeScope, setScope: setNodeScope }),
+    [nodeScope],
+  );
 
   const crumbs = SURFACE_BREADCRUMB[surface];
 
   return (
     <SurfaceContext.Provider value={surfaceCtx}>
+      <NodeScopeContext.Provider value={nodeScopeCtx}>
       {/* Controlled provider → Cmd/Ctrl+B still fires through onOpenChange, so
           `[` and Cmd/Ctrl+B both work with no vendoring. h-screen, edge-to-edge:
           no outer max-w / mx-auto container around the chrome. */}
@@ -275,6 +290,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </CommandGroup>
         </CommandList>
       </CommandDialog>
+      </NodeScopeContext.Provider>
     </SurfaceContext.Provider>
   );
 }
