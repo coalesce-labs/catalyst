@@ -9,14 +9,17 @@
 //                    board stream in board-client.ts is untouched — routing wraps
 //                    the tree, it never touches data flow).
 //   /ticket/$id    → typed `id` param + typed `?from&lens&col&cursor` search;
-//                    renders a placeholder detail container (body filled later by
-//                    the DETAIL stream — out of scope for FND1).
+//                    renders the shared detail-page <Shell> chrome (CTL-912 /
+//                    DETAIL1) with a ticket-body placeholder slot (the body itself
+//                    is DETAIL2).
 //   /worker/$id    → same shape; `id` is e.g. "CTL-845:2" (a colon is legal
 //                    inside a single path segment, so the run-id resolves whole).
+//                    Renders the shared <Shell> with a worker-body slot (DETAIL3).
 //
-// Detail-page bodies, the Sidebar nav frame (SHELL stream), and the jotai store
-// are explicitly NOT in this ticket — this is purely the routing skeleton and
-// the typed search-param contract (route-search.ts) everything else binds to.
+// CTL-912 / DETAIL1 wires the shared shell chrome (breadcrumb · pager · live-dot
+// title · Properties rail · footer · keyboard) into these routes; the per-page
+// BODIES (spine/telemetry/runs, burn-strip/tail/diagnostics) drop into the slot in
+// later DETAIL tickets. The Sidebar nav frame (SHELL stream) is still separate.
 import { StrictMode } from "react";
 import {
   createRootRoute,
@@ -27,6 +30,7 @@ import {
 } from "@tanstack/react-router";
 import { Board } from "./Board";
 import { validateDetailSearch } from "./route-search";
+import { TicketDetailRoute, WorkerDetailRoute } from "./detail-route";
 
 // Root route: holds the <Outlet> the matched child renders into. No chrome yet
 // (the Sidebar/SHELL frame is a later ticket) — the root is a bare passthrough
@@ -42,49 +46,35 @@ const boardRoute = createRoute({
   component: Board,
 });
 
-// `/ticket/$id` — typed id param + typed search contract. Body is a placeholder
-// container the DETAIL stream fills in a later ticket; for FND1 the route just
-// has to resolve, expose the typed param, and parse the search params safely.
+// `/ticket/$id` — typed id param + typed search contract. Renders the shared
+// detail-page <Shell> (CTL-912 / DETAIL1) with a ticket-body slot (DETAIL2).
 const ticketRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/ticket/$id",
   validateSearch: validateDetailSearch,
-  component: TicketDetailPlaceholder,
+  component: TicketDetailContainer,
 });
 
-// `/worker/$id` — single-run page. Same typed param + search contract.
+// `/worker/$id` — single-run page. Same typed param + search contract; renders the
+// shared <Shell> with a worker-body slot (DETAIL3).
 const workerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/worker/$id",
   validateSearch: validateDetailSearch,
-  component: WorkerDetailPlaceholder,
+  component: WorkerDetailContainer,
 });
 
-function TicketDetailPlaceholder() {
+function TicketDetailContainer() {
   const { id } = ticketRoute.useParams();
-  return (
-    <div data-detail-kind="ticket" data-detail-id={id} style={PLACEHOLDER_STYLE}>
-      ticket {id}
-    </div>
-  );
+  const search = ticketRoute.useSearch();
+  return <TicketDetailRoute id={id} search={search} />;
 }
 
-function WorkerDetailPlaceholder() {
+function WorkerDetailContainer() {
   const { id } = workerRoute.useParams();
-  return (
-    <div data-detail-kind="worker" data-detail-id={id} style={PLACEHOLDER_STYLE}>
-      worker {id}
-    </div>
-  );
+  const search = workerRoute.useSearch();
+  return <WorkerDetailRoute id={id} search={search} />;
 }
-
-// Minimal, theme-neutral placeholder so the route renders something while the
-// real detail body is out of scope (filled by the DETAIL stream later).
-const PLACEHOLDER_STYLE = {
-  padding: "24px",
-  color: "#8b93a1",
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 const routeTree = rootRoute.addChildren([boardRoute, ticketRoute, workerRoute]);
 
