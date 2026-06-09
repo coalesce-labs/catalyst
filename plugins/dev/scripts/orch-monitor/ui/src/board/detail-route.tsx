@@ -18,6 +18,7 @@ import { resolveListIds } from "./list-order";
 import { Shell, type PropertyRow, type ShellKind, type StreamHealth } from "./Shell";
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
+import { TicketDetailPage } from "../components/ticket-detail-page";
 
 // ── resident payload subscription (same transport as Board.tsx) ─────────────
 function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth } {
@@ -118,9 +119,10 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
       properties={ticketRows(ticket)}
       streamHealth={health}
     >
-      <div data-detail-body-placeholder="ticket" style={{ color: "#5b626f", font: "12px ui-monospace, monospace" }}>
-        Ticket lifecycle body (spine · telemetry · runs) lands in DETAIL2.
-      </div>
+      {/* DETAIL2 (CTL-913): the lifecycle aggregate body — header · PIPELINE rail ·
+          HELD banner · LIFECYCLE SPINE + compact gantt · COMMS · ACTIVITY — all
+          off the RESIDENT BoardTicket + phaseSummary (zero new endpoints). */}
+      <TicketDetailPage ticket={ticket} />
     </Shell>
   );
 }
