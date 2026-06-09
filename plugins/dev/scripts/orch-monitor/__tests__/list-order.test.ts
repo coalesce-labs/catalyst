@@ -18,6 +18,7 @@ import {
   filterTickets,
   sortWorkers,
   rankWorker,
+  compareTickets,
 } from "../ui/src/board/list-order";
 import type {
   BoardPayload,
@@ -202,6 +203,104 @@ describe("resolveList — worker queue (rank-sort preserved through the same fn)
     const snapshot = workers.map((w) => w.name);
     sortWorkers(workers);
     expect(workers.map((w) => w.name)).toEqual(snapshot);
+  });
+});
+
+describe("compareTickets — the BOARD2 (CTL-906) in-column ordering comparator", () => {
+  // BOARD2 adds an `order` knob (priority | recent | live) consumed by the board
+  // columns AND BOARD4's list view through the SAME resolveList, so their order
+  // can never drift. compareTickets is the pure comparator behind it.
+  it("'priority' orders P1 (urgent) before P3, ties broken by updatedAt desc", () => {
+    const ts = [
+      mkTicket("p3", { priority: 3, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("p1", { priority: 1, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("p2-old", { priority: 2, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("p2-new", { priority: 2, updatedAt: "2026-06-09T00:00:00Z" }),
+    ];
+    const got = [...ts].sort(compareTickets("priority")).map((t) => t.id);
+    // P1 first, then the two P2s (newer-updated first on the tie), then P3.
+    expect(got).toEqual(["p1", "p2-new", "p2-old", "p3"]);
+  });
+
+  it("'priority' sinks priority 0 (No priority) below the ranked priorities", () => {
+    const ts = [
+      mkTicket("none", { priority: 0, updatedAt: "2026-06-09T00:00:00Z" }),
+      mkTicket("p4", { priority: 4, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("p1", { priority: 1, updatedAt: "2026-06-01T00:00:00Z" }),
+    ];
+    const got = [...ts].sort(compareTickets("priority")).map((t) => t.id);
+    expect(got).toEqual(["p1", "p4", "none"]);
+  });
+
+  it("'recent' is a pure updatedAt-descending sort", () => {
+    const ts = [
+      mkTicket("old", { priority: 1, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("new", { priority: 4, updatedAt: "2026-06-09T00:00:00Z" }),
+      mkTicket("mid", { priority: 2, updatedAt: "2026-06-05T00:00:00Z" }),
+    ];
+    const got = [...ts].sort(compareTickets("recent")).map((t) => t.id);
+    expect(got).toEqual(["new", "mid", "old"]);
+  });
+
+  it("'live' puts activeState === 'active' first, then falls back to priority", () => {
+    const ts = [
+      mkTicket("idle-p1", { activeState: null, priority: 1, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("live-p3", { activeState: "active", priority: 3, updatedAt: "2026-06-01T00:00:00Z" }),
+      mkTicket("idle-p2", { activeState: null, priority: 2, updatedAt: "2026-06-01T00:00:00Z" }),
+    ];
+    const got = [...ts].sort(compareTickets("live")).map((t) => t.id);
+    // the active ticket leads regardless of its lower priority; idle ones then
+    // order by priority.
+    expect(got).toEqual(["live-p3", "idle-p1", "idle-p2"]);
+  });
+
+  it("is a pure comparator — does not mutate its inputs", () => {
+    const a = mkTicket("a", { priority: 1 });
+    const b = mkTicket("b", { priority: 2 });
+    compareTickets("priority")(a, b);
+    expect(a.id).toBe("a");
+    expect(b.id).toBe("b");
+  });
+});
+
+describe("resolveList — the optional BOARD2 (CTL-906) `order` param", () => {
+  const tickets = [
+    mkTicket("CTL-845", { linearState: "Implement", priority: 3, activeState: null, updatedAt: "2026-06-01T00:00:00Z" }),
+    mkTicket("CTL-877", { linearState: "Implement", priority: 1, activeState: null, updatedAt: "2026-06-02T00:00:00Z" }),
+    mkTicket("CTL-880", { linearState: "Implement", priority: 2, activeState: "active", updatedAt: "2026-06-03T00:00:00Z" }),
+  ];
+  const payload = mkPayload({ tickets });
+
+  it("with NO order is byte-for-byte identical to today (regression guard — payload order preserved)", () => {
+    const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement" });
+    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-845", "CTL-877", "CTL-880"]);
+    expect(got).toEqual(legacyTicketFilter(tickets, "linear", "Implement"));
+  });
+
+  it("with order='priority' applies compareTickets AFTER the column filter", () => {
+    const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "priority" });
+    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-877", "CTL-880", "CTL-845"]);
+  });
+
+  it("with order='live' floats the active ticket to the top", () => {
+    const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "live" });
+    expect((got[0] as BoardTicket).id).toBe("CTL-880"); // the only active one
+  });
+
+  it("with order='recent' sorts by updatedAt desc within the column", () => {
+    const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "recent" });
+    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-880", "CTL-877", "CTL-845"]);
+  });
+
+  it("does not mutate the payload's ticket array when ordering", () => {
+    const snapshot = tickets.map((t) => t.id);
+    resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "priority" });
+    expect(tickets.map((t) => t.id)).toEqual(snapshot);
+  });
+
+  it("resolveListIds honors the order param too (the pager + j/k stay in sync)", () => {
+    const ids = resolveListIds(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "priority" });
+    expect(ids).toEqual(["CTL-877", "CTL-880", "CTL-845"]);
   });
 });
 

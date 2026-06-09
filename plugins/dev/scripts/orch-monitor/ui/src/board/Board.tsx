@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { useAtom } from "jotai";
 import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -17,7 +18,7 @@ import { connectBoard } from "./board-client";
 // The board renders ticket columns + the worker queue through resolveList so the
 // detail-page pager (N/total) and the j/k walk read the SAME order. See
 // list-order.ts — the P1 keystone correctness item.
-import { resolveList, sortWorkers } from "./list-order";
+import { sortWorkers } from "./list-order";
 // ── CTL-897 / SHELL7: the SHARED workspace scope ──────────────────────────────
 // The board's repo filter (the in-grid "All / <repo>" Seg) is bound to the SAME
 // FND `repoScopeAtom` the workspace switcher writes, so scoping in the switcher
@@ -50,6 +51,17 @@ import {
   groupQueueByHost,
   type QueueHostGroup,
 } from "./queue-grouping";
+// ── BOARD2 / CTL-906: the display-options popover + its persisted prefs ────────
+// One toolbar button owns every board display choice (density / grouping /
+// ordering / color / show-empty / repo-lanes). The three scattered subhead Seg
+// toggles (lens, colorBy, repo-lanes) are folded into it; their state moves from
+// local useState into the persisted boardPrefsAtom so the choices survive a
+// reload. The PURE column-derivation (group-by column set + show-empty filter +
+// in-column order) lives in board-display.ts so the Gherkin is DOM-free testable.
+import { boardPrefsAtom, type Density } from "./prefs-store";
+import { DisplayOptionsPopover } from "./display-options-popover";
+import { ticketColumns, PHASE_COLUMNS } from "./board-display";
+import type { Ordering } from "./list-order";
 import type {
   BoardPayload,
   BoardQueueItem as QueueItem,
@@ -73,31 +85,13 @@ const PHASE_C: Record<string, string> = {
   verify: "#f59e0b", remediate: "#f472b6", review: "#eab308", pr: "#14b8a6",
   "monitor-merge": "#4ea1ff", "monitor-deploy": "#39d07a", teardown: "#6b7280", merge: "#4ea1ff", deploy: "#39d07a", done: "#6b7280",
 };
-const LINEAR_COLS = [
-  { key: "Todo",     c: "#94a3b8" }, { key: "Triage",   c: "#64748b" },
-  { key: "Research", c: "#3b82f6" }, { key: "Plan",     c: "#a855f7" }, { key: "Implement", c: "#10b981" },
-  { key: "Validate", c: "#f59e0b" }, { key: "PR",       c: "#14b8a6" }, { key: "Done",      c: "#6b7280" },
-];
-const PHASE_COLS = [
-  { key: "triage", label: "Triage", c: "#64748b" }, { key: "research", label: "Research", c: "#3b82f6" },
-  { key: "plan", label: "Plan", c: "#a855f7" }, { key: "implement", label: "Implement", c: "#10b981" },
-  { key: "verify", label: "Verify", c: "#f59e0b" }, { key: "review", label: "Review", c: "#eab308" },
-  { key: "pr", label: "PR", c: "#14b8a6" }, { key: "monitor-merge", label: "Merge", c: "#4ea1ff" },
-  { key: "monitor-deploy", label: "Deploy", c: "#39d07a" }, { key: "teardown", label: "Teardown", c: "#6b7280" },
-];
+// BOARD2 / CTL-906: the ticket column SETS (linear / phase) now live in the pure
+// board-display.ts (LINEAR_COLUMNS / PHASE_COLUMNS) so there is ONE definition
+// the DOM-free column-derivation tests can read. The Workers phase lens reuses
+// PHASE_COLUMNS from there. The worker status lens keeps its own two columns.
 const WORKER_COLS = [
   { key: "active", label: "Active", c: LIVE }, { key: "stuck", label: "Stuck", c: C.red },
 ];
-// Stub payload used to route a ticket column through resolveList (CTL-882) when
-// the caller only holds a (repo-/search-filtered) ticket array: resolveList's
-// ticket branch reads `.tickets` only, so the other fields are inert.
-const EMPTY_BOARD_PAYLOAD: Omit<BoardPayload, "tickets"> = {
-  generatedAt: "",
-  config: { maxParallel: 0, inFlight: 0, freeSlots: 0, active: 0, working: 0, stuck: 0 },
-  repos: [],
-  workers: [],
-  queue: [],
-};
 // Phase statuses that mean a phase is no longer running. MUST stay in lock-step
 // with the TERMINAL set in lib/board-data.mjs (the data-layer source of truth) —
 // board-phase-drift.test.ts asserts this array equals [...TERMINAL] so a new
@@ -292,57 +286,74 @@ function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | un
 function Cost({ v }: { v: number | null }) {
   return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
 }
-function TitleText({ text }: { text: string }) {
+function TitleText({ text, clamp = 2 }: { text: string; clamp?: number }) {
   return (
     <Tooltip><TooltipTrigger asChild>
-      <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: "7px 0 9px", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
+      <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px", display: "-webkit-box", WebkitLineClamp: clamp, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
     </TooltipTrigger><TooltipContent style={{ maxWidth: 360 }}>{text}</TooltipContent></Tooltip>
   );
 }
 
 // ── Linear-style ticket card ────────────────────────────────────────────────
-function TicketCard({ t, colorBy, onSelect }: { t: Ticket; colorBy: ColorBy; onSelect?: (id: string) => void }) {
+// BOARD2 / CTL-906: `density` is a per-surface knob (default "comfortable" =
+// today's full Linear anatomy). The "compact" path keeps the keystone signals —
+// activity dot (the LIVE cyan), priority, ticket id, phase pill, held + status
+// badges — and folds the secondary chips/strip/footer into ONE trailing meta
+// line (~40% shorter card so more fit per column). The live ring + dim/saturate
+// treatment is IDENTICAL in both densities — the live signal never degrades.
+function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Ticket; colorBy: ColorBy; density?: Density; onSelect?: (id: string) => void }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
+  const compact = density === "compact";
   return (
     <div
       className={live ? "catalyst-live" : undefined}
       style={{
-        background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
+        background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
         border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`,
         opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
         cursor: onSelect ? "pointer" : undefined,
       }}
       onClick={onSelect ? () => onSelect(t.id) : undefined}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
         <PriorityIcon p={t.priority} />
         <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
         {stuck && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.red }}>stuck</span>}
-        <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{t.type}</Badge>
+        {!compact && <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{t.type}</Badge>}
       </div>
-      <TitleText text={t.title} />
-      <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+      <TitleText text={t.title} clamp={compact ? 1 : 2} />
+      <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
         <PhasePill phase={t.phase} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
-        <ScopeChip scope={t.scope} estimate={t.estimate} />
-        {t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
+        {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} />}
+        {!compact && t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
       </div>
-      <PhaseStrip phaseSummary={t.phaseSummary} />
-      <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
-        <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
-          {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
-        </span>
-        <span style={{ flex: 1 }} />
-        {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
-        {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
-      </div>
+      {!compact && <PhaseStrip phaseSummary={t.phaseSummary} />}
+      {compact ? (
+        // one collapsed meta line: age · turns · (PR or cost)
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 6 }}>
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{fmtAgo(t.updatedAt)}</span>
+          <span style={{ flex: 1 }} />
+          {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
+          {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
+          <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>
+            {t.activeState == null && t.status !== "done" ? `idle · ${fmtAgo(t.updatedAt)}` : fmtAgo(t.updatedAt)}
+          </span>
+          <span style={{ flex: 1 }} />
+          {t.turns != null && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }} title="total turns">{t.turns}t</span>}
+          {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
+        </div>
+      )}
     </div>
   );
 }
@@ -451,25 +462,22 @@ function BoardScroll({ children, fill }: { children: React.ReactNode; fill: bool
   );
 }
 
-function TicketBoard({ tickets, lens, colorBy, fill, onSelect }: { tickets: Ticket[]; lens: "linear" | "phase"; colorBy: ColorBy; fill: boolean; onSelect?: (id: string) => void }) {
-  const cols = lens === "linear" ? LINEAR_COLS : PHASE_COLS;
+// BOARD2 / CTL-906: the column derivation (which column SET by `groupBy`, the
+// in-column `order`, and the `showEmpty` reflow filter) is the PURE
+// `ticketColumns` helper (board-display.ts) — TicketBoard renders exactly the
+// columns it returns, so the Gherkin (Column grouping / Ordering / Show empty
+// columns) is unit-tested without a DOM. Each column still resolves its items
+// through the shared `resolveList` inside ticketColumns, so the on-screen order
+// stays the SAME list the detail-page pager + j/k walk derive (FND2 P1).
+function TicketBoard({ tickets, groupBy, colorBy, density, order, showEmpty, fill, onSelect }: { tickets: Ticket[]; groupBy: "linear" | "phase"; colorBy: ColorBy; density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onSelect?: (id: string) => void }) {
+  const cols = ticketColumns(tickets, { groupBy, showEmptyColumns: showEmpty, order });
   return (
     <BoardScroll fill={fill}>
-      {cols.map((c: any) => {
-        // Render through resolveList (CTL-882 / FND2) so the on-screen column
-        // order is the SAME list the detail-page pager + j/k walk derive. The
-        // ticket branch is a pure column filter (linearState | phase), payload
-        // array order preserved — byte-for-byte identical to the prior inline
-        // `tickets.filter(...)`. `tickets` here is already the repo-/search-
-        // filtered subset; resolveList only reads `.tickets` for kind:"ticket".
-        const items = resolveList({ ...EMPTY_BOARD_PAYLOAD, tickets }, { kind: "ticket", lens, col: c.key });
-        const live = items.filter((t) => t.activeState === "active").length;
-        return (
-          <Column key={c.key} label={c.label || c.key} color={c.c} count={items.length} live={live}>
-            {items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} onSelect={onSelect} />)}
-          </Column>
-        );
-      })}
+      {cols.map((c) => (
+        <Column key={c.key} label={c.label} color={c.c} count={c.items.length} live={c.live}>
+          {c.items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} onSelect={onSelect} />)}
+        </Column>
+      ))}
     </BoardScroll>
   );
 }
@@ -493,10 +501,11 @@ function WorkerBoard({ workers, tickets, grouping, fill, onWorkerSelect }: { wor
       </BoardScroll>
     );
   }
-  const cols = grouping === "phase" ? PHASE_COLS : WORKER_COLS;
+  const cols: readonly { key: string; label: string; c: string }[] =
+    grouping === "phase" ? PHASE_COLUMNS : WORKER_COLS;
   return (
     <BoardScroll fill={fill}>
-      {cols.map((c: any) => {
+      {cols.map((c) => {
         const items = grouping === "phase"
           ? workers.filter((w) => w.phase === c.key)
           : workers.filter((w) => (w.activeState ?? "active") === c.key);
@@ -736,13 +745,17 @@ export function Board({
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [view, setView] = useState<View>(initialView);
-  const [lens, setLens] = useState<"linear" | "phase">("linear");
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
   const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
-  const [swimlanes, setSwimlanes] = useState(false); // default Combined (single Linear board)
-  const [colorBy, setColorBy] = useState<ColorBy>("phase");
+  // BOARD2 / CTL-906: the board display prefs (density / groupBy / colorBy /
+  // order / showEmptyColumns / swimlane) now live in the persisted boardPrefsAtom
+  // — the display-options popover is the single writer, and the choices survive a
+  // reload. This replaces the former lens / colorBy / swimlanes local useState.
+  const [prefs] = useAtom(boardPrefsAtom);
+  const lens = prefs.groupBy; // the generalized "Group by" (Status / Pipeline)
+  const colorBy = prefs.colorBy;
   const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
 
   // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
@@ -790,7 +803,11 @@ export function Board({
   );
   const ticketLanes = repos.filter((r) => fTickets.some((t) => t.repo === r));
   const workerLanes = repos.filter((r) => fWorkers.some((w) => w.repo === r));
-  const combined = !swimlanes || repo !== "all";
+  // BOARD2 / CTL-906: repo-lanes is now `prefs.swimlane === "repo"` (the popover
+  // writes it). BOARD3 generalizes the lane branch to team/project/host; BOARD2
+  // renders only none/repo. A specific repo scope collapses to the combined board
+  // (a single repo has no lanes to draw), exactly as before.
+  const combined = prefs.swimlane === "none" || repo !== "all";
   const selectedTicket =
     selectedTicketId != null
       ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
@@ -830,11 +847,12 @@ export function Board({
           <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
           <span style={{ flex: 1 }} />
           {repos.length > 1 && <Seg value={repo} onChange={setRepo} options={[{ k: "all", label: "All" }, ...repos.map((r) => ({ k: r, label: r }))]} />}
-          {view === "tickets" && <>
-            <Seg value={lens} onChange={setLens} options={[{ k: "linear", label: "Linear state" }, { k: "phase", label: "Pipeline" }]} />
-            <Seg value={colorBy} onChange={setColorBy} options={[{ k: "phase", label: "Phase" }, { k: "status", label: "Status" }, { k: "repo", label: "Repo" }, { k: "type", label: "Type" }]} />
-            <Seg value={swimlanes ? "lanes" : "flat"} onChange={(v) => setSwimlanes(v === "lanes")} options={[{ k: "flat", label: "Combined" }, { k: "lanes", label: "Repo lanes" }]} />
-          </>}
+          {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
+              colorBy / repo-lanes) are folded into ONE Display-options popover —
+              "density is a knob". The popover rides along in both the embedded
+              shell mount and the standalone board.html mount (it lives here in
+              Board's own subhead). It reads/writes the persisted boardPrefsAtom. */}
+          {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
           {view === "workers" && <>
             {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
             <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
@@ -855,8 +873,8 @@ export function Board({
         <div style={{ flex: 1, minHeight: 0 }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {data && view === "tickets" && (combined
-            ? <TicketBoard tickets={fTickets} lens={lens} colorBy={colorBy} fill onSelect={(id) => setSelectedTicketId(id)} />
-            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} lens={lens} colorBy={colorBy} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
+            ? <TicketBoard tickets={fTickets} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill onSelect={(id) => setSelectedTicketId(id)} />
+            : <div className="cat-scroll" style={{ overflowY: "auto", height: "calc(var(--cat-board-vh, 100vh) - 104px)", paddingTop: 4 }}>{ticketLanes.map((r) => <Lane key={r} repo={r}><TicketBoard tickets={fTickets.filter((t) => t.repo === r)} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={false} onSelect={(id) => setSelectedTicketId(id)} /></Lane>)}</div>)}
           {data && view === "workers" && (combined
             // CTL-909 / SURF1: the node filter scopes the combined grid to one
             // host; "all" is the identity no-op (nodeWorkers === fWorkers).
