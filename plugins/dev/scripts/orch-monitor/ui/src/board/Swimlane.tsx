@@ -20,6 +20,7 @@
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
 import { Fragment, type ReactNode } from "react";
+import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE } from "./board-tokens";
 import {
@@ -174,7 +175,14 @@ function LaneCardsRow({ cells }: { cells: LaneCell[] }) {
           {cell.count === 0 ? (
             <div style={{ color: C.fgDim, fontSize: 11.5, padding: "10px 0", border: `1px dashed ${C.borderSubtle}`, borderRadius: 8, textAlign: "center" }}>—</div>
           ) : (
-            cell.cards
+            // CTL-952: AnimatePresence enables enter/exit animations on the motion
+            // card elements inside (TicketCard / WorkerCard). Cards moving between
+            // columns use `layoutId` on motion.div so position is animated directly
+            // rather than exit + re-enter. `mode="popLayout"` keeps the column
+            // height stable while a card is mid-exit (does not hold layout open).
+            <AnimatePresence mode="popLayout" initial={false}>
+              {cell.cards}
+            </AnimatePresence>
           )}
         </div>
       ))}
