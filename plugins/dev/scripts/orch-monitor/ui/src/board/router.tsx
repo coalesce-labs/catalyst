@@ -45,20 +45,14 @@ const rootRoute = createRootRoute({
   component: () => <Outlet />,
 });
 
-// `/` — the existing board. CTL-909 / SURF1: a thin wrapper injects the
-// worker-card deep-link (onWorkerSelect → navigate to `/worker/$id`) so the
-// Workers grid's cards open the single-run detail page. The Board itself stays
-// router-free (it also mounts in the embedded, router-less app shell).
+// `/` — the existing board. CTL-951: ticket AND worker cards now open the detail
+// page on a PLAIN click via the Board's OWN `openDetail` (a full-document
+// navigation through the server's SPA fallback) — the SAME path in BOTH entries,
+// so the board needs no per-entry select callback. The wrapper only injects the
+// dep-graph navigate (a genuine in-router push that has no full-doc equivalent).
 function BoardRoot() {
   const navigate = useNavigate();
-  return (
-    <Board
-      onWorkerSelect={(name) =>
-        void navigate({ to: "/worker/$id", params: { id: name }, search: { from: "board" } })
-      }
-      onDepGraph={() => void navigate({ to: "/dep-graph" })}
-    />
-  );
+  return <Board onDepGraph={() => void navigate({ to: "/dep-graph" })} />;
 }
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,

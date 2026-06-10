@@ -71,8 +71,15 @@ export interface BoardListProps {
   density: Density;
   /** the BOARD3 swimlane axis (none | repo | team | project | host). */
   swimlane: Swimlane;
-  /** open a row — parity with the kanban card click (opens the detail drawer). */
-  onSelect?: (id: string) => void;
+  /** CTL-951: open a row — a PLAIN click navigates STRAIGHT to the detail page
+   *  (parity with the kanban card). The Board supplies the seam; BoardList passes
+   *  its on-screen ordered ids (the walk list the pager + j/k inherit) + the list
+   *  origin (`col:"list"`). */
+  onOpen?: (
+    kind: "ticket" | "worker",
+    id: string,
+    ctx: { ids: string[]; lens?: ListLens; col?: string },
+  ) => void;
   /** standalone (board.html, full viewport) vs embedded (the app-shell inset). */
   embedded?: boolean;
 }
@@ -87,7 +94,7 @@ export function BoardList({
   order,
   density,
   swimlane,
-  onSelect,
+  onOpen,
   embedded = false,
 }: BoardListProps) {
   // ── resolve the flattened, kanban-ordered stream (the single resolveList seam) ──
@@ -109,7 +116,7 @@ export function BoardList({
         swimlane={swimlane}
         navKind="worker"
         lens={lens}
-        onSelect={onSelect}
+        onOpen={onOpen}
         embedded={embedded}
       />
     );
@@ -122,7 +129,7 @@ export function BoardList({
       swimlane={swimlane}
       navKind="ticket"
       lens={lens}
-      onSelect={onSelect}
+      onOpen={onOpen}
       embedded={embedded}
     />
   );
@@ -138,7 +145,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
   swimlane,
   navKind,
   lens,
-  onSelect,
+  onOpen,
   embedded,
 }: {
   rows: ListRow<E>[];
@@ -147,7 +154,11 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
   swimlane: Swimlane;
   navKind: "ticket" | "worker";
   lens: ListLens;
-  onSelect?: (id: string) => void;
+  onOpen?: (
+    kind: "ticket" | "worker",
+    id: string,
+    ctx: { ids: string[]; lens?: ListLens; col?: string },
+  ) => void;
   embedded: boolean;
 }) {
   const cols = useMemo(() => visibleColumns(columns, density), [columns, density]);
@@ -244,7 +255,14 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                       cols={cols}
                       density={density}
                       selected={id === cursorId}
-                      onSelect={onSelect}
+                      // CTL-951: a plain row click navigates STRAIGHT to the detail
+                      // page, carrying THIS list's on-screen ordered ids (the walk
+                      // list the pager + j/k inherit) + the list origin (col:"list").
+                      onSelect={
+                        onOpen
+                          ? (rid) => onOpen(navKind, rid, { ids: orderedIds, lens, col: "list" })
+                          : undefined
+                      }
                       onFocus={() => setCursor(orderedIds.indexOf(id))}
                     />
                   );
@@ -280,6 +298,8 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
     <TableRow
       aria-selected={selected}
       data-state={selected ? "selected" : undefined}
+      // CTL-951: the restore hook re-focuses the originating row by this id.
+      data-card-id={id}
       tabIndex={0}
       onClick={open}
       onFocus={onFocus}

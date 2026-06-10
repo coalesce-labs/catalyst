@@ -1,6 +1,5 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
-import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -25,17 +24,28 @@ import { sortWorkers } from "./list-order";
 // repo in either reflects in the other and in the other surfaces. Standalone
 // (board.html, no switcher) the board's Seg is simply the only writer.
 import { useRepoScope } from "../hooks/use-repo-scope";
-// ── CTL-942: card → detail-page deep links ────────────────────────────────────
-// Cmd/Ctrl-click (and middle-click) on a ticket/worker card bypasses the drawer
-// and opens the full /ticket/$id //worker/$id page. Pure helpers — the nav is a
+// ── CTL-942 + CTL-951: card → detail-page deep links ──────────────────────────
+// A PLAIN single-click on a ticket/worker card (kanban OR list) navigates STRAIGHT
+// to the full /ticket/$id // /worker/$id page (the drawer is removed). The nav is a
 // real browser navigation because the Board mounts in BOTH entries and only the
 // board.html entry carries the router (the server's SPA fallback answers it).
+// `openDetail` captures the on-screen list + scroll + originating card into
+// sessionStorage first, so Esc/back restores the board exactly. Cmd/Ctrl-click
+// (and middle-click) still open the page in a NEW tab without disturbing the board.
 import {
   isNewTabClick,
+  openDetail,
   openDetailInNewTab,
   ticketDetailHref,
   workerDetailHref,
+  type DetailKind,
 } from "./detail-nav";
+import type { DetailLens } from "./route-search";
+// CTL-951: the board-restore effect re-applies the persisted scroll offset + the
+// originating-card focus when the operator returns from a detail page;
+// `resolveScrollEl` resolves the SAME `.cat-scroll` overflow container both the
+// capture (on card open) and the restore read, so the offset round-trips.
+import { useBoardRestore, resolveScrollEl } from "../hooks/use-board-restore";
 // ── CTL-909 / SURF1: node grouping + node filter (pure, DOM-free) ─────────────
 // The Workers surface adds a "node" grouping axis + a host filter that read the
 // BoardWorker.host {name,id} field (BFF10/CTL-922). The column derivation lives
@@ -331,38 +341,59 @@ export function TitleText({ text, clamp = 2 }: { text: string; clamp?: number })
 // badges — and folds the secondary chips/strip/footer into ONE trailing meta
 // line (~40% shorter card so more fit per column). The live ring + dim/saturate
 // treatment is IDENTICAL in both densities — the live signal never degrades.
-function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Ticket; colorBy: ColorBy; density?: Density; onSelect?: (id: string) => void }) {
+// CTL-951: the card-open callback the kanban + list cards share. The Board
+// supplies it (resolving the on-screen scroll offset + the originating list ids);
+// `ids` is the ordered id list of the card's own column (the walk list the pager
+// + j/k inherit), `col`/`lens` mark the list-origin in the URL + breadcrumb.
+type OpenDetailFn = (
+  kind: DetailKind,
+  id: string,
+  ctx: { ids: string[]; lens?: DetailLens; col?: string },
+) => void;
+
+function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
   const compact = density === "compact";
+  const open = (newTab: boolean) => {
+    if (newTab) {
+      openDetailInNewTab(ticketDetailHref(t.id));
+      return;
+    }
+    onOpen?.("ticket", t.id, { ids: colIds ?? [t.id], lens, col });
+  };
   return (
     <div
       className={live ? "catalyst-live" : undefined}
+      data-card-id={t.id}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
         border: `1px solid ${stuck ? `${C.red}80` : dim ? C.borderSubtle : C.border}`,
         transition: "background .25s",
-        cursor: onSelect ? "pointer" : undefined,
+        cursor: onOpen ? "pointer" : undefined,
       }}
-      // CTL-942: cmd/ctrl-click deep-links straight to the full ticket page;
-      // plain click keeps today's quick-peek drawer. Middle-click is onAuxClick.
+      // CTL-951: a PLAIN click navigates straight to /ticket/$id (the drawer is
+      // gone). Cmd/Ctrl-click opens it in a new tab; middle-click is onAuxClick.
       onClick={(e) => {
         if (isNewTabClick(e)) {
           e.preventDefault();
           e.stopPropagation();
-          openDetailInNewTab(ticketDetailHref(t.id));
+          open(true);
           return;
         }
-        onSelect?.(t.id);
+        open(false);
       }}
       onAuxClick={(e) => {
         if (e.button === 1) {
           e.preventDefault();
-          openDetailInNewTab(ticketDetailHref(t.id));
+          open(true);
         }
       }}
+      onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
@@ -422,45 +453,52 @@ function HostChip({ host }: { host: Worker["host"] }) {
 }
 
 // ── worker card (Workers board) ─────────────────────────────────────────────
-function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?: (name: string) => void }) {
+function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; colIds?: string[]; onOpen?: OpenDetailFn }) {
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
+  const open = (newTab: boolean) => {
+    if (newTab) {
+      openDetailInNewTab(workerDetailHref(w.name));
+      return;
+    }
+    onOpen?.("worker", w.name, { ids: colIds ?? [w.name] });
+  };
   return (
     <div
       className={live ? "catalyst-live" : undefined}
-      // CTL-909 / SURF1: clicking a worker card deep-links to its single-run
-      // detail page (`/worker/$id`, keyed by w.name) via the supplied callback.
-      // When no callback is wired (the legacy embedded mount has no router) the
-      // card stays non-interactive exactly as before — no regression.
-      // CTL-942: cmd/ctrl-click (and middle-click via onAuxClick) hard-navigates
-      // to the full /worker/$id page in a new tab — works in BOTH entries, with
-      // or without a router, because the server's SPA fallback serves board.html.
+      data-card-id={w.name}
+      // CTL-951: a PLAIN click on a worker card navigates STRAIGHT to its
+      // single-run detail page (`/worker/$id`, keyed by w.name). Cmd/Ctrl-click
+      // (and middle-click via onAuxClick) open it in a NEW tab. The nav is a real
+      // browser navigation — it works in BOTH entries (the server SPA fallback
+      // serves board.html), and `openDetail` stashes the board-restore snapshot
+      // first so Esc/back returns to the exact Workers grid state.
       onClick={(e) => {
         if (isNewTabClick(e)) {
           e.preventDefault();
           e.stopPropagation();
-          openDetailInNewTab(workerDetailHref(w.name));
+          open(true);
           return;
         }
-        onSelect?.(w.name);
+        open(false);
       }}
       onAuxClick={(e) => {
         if (e.button === 1) {
           e.preventDefault();
-          openDetailInNewTab(workerDetailHref(w.name));
+          open(true);
         }
       }}
-      role={onSelect ? "button" : undefined}
-      tabIndex={onSelect ? 0 : undefined}
-      onKeyDown={onSelect ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(w.name); } } : undefined}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
         border: `1px solid ${stuck ? `${C.red}80` : C.border}`,
         boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : undefined,
-        cursor: onSelect ? "pointer" : undefined,
+        cursor: onOpen ? "pointer" : undefined,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
@@ -526,18 +564,26 @@ function sharedHeaderTotals(
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, onSelect,
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, onOpen,
 }: {
   tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
-  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onSelect?: (id: string) => void;
+  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onOpen?: OpenDetailFn;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const deriveLane = (laneItems: Ticket[]): LaneCell[] =>
-    laneColumns(laneItems, defs, { groupBy, order }).map((c) => ({
-      count: c.items.length,
-      live: c.live,
-      cards: c.items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} onSelect={onSelect} />),
-    }));
+    laneColumns(laneItems, defs, { groupBy, order }).map((c) => {
+      // CTL-951: each card carries its COLUMN's ordered ids — the exact walk list
+      // the detail pager + j/k inherit (resolveList order, byte-identical to the
+      // on-screen order). `col` = the column key (the list-origin in the URL).
+      const colIds = c.items.map((t) => t.id);
+      return {
+        count: c.items.length,
+        live: c.live,
+        cards: c.items.map((t) => (
+          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} />
+        )),
+      };
+    });
   // header totals = the lane cells across every lane combined (== the flat set).
   const columns = sharedHeaderTotals(defs, [deriveLane(tickets)]);
   return (
@@ -559,12 +605,18 @@ function TicketSwimlaneBoard({
 // swimlane is active the caller already falls the lens back to status/phase so
 // host is not double-encoded (rows AND columns).
 function WorkerSwimlaneBoard({
-  workers, tickets, swimlane, grouping, fill, onWorkerSelect,
+  workers, tickets, swimlane, grouping, fill, onOpen,
 }: {
   workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
-  fill: boolean; onWorkerSelect?: (name: string) => void;
+  fill: boolean; onOpen?: OpenDetailFn;
 }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
+  // CTL-951: the worker detail pager walks the WHOLE rank-sorted worker queue
+  // (resolveList's worker branch is `sortWorkers(payload.workers)`, NOT per-column
+  // — see list-order.ts), so every worker card carries the SAME full ordered id
+  // list. This keeps the pager's N/total + j/k in lock-step with that single
+  // queue order regardless of which swimlane/column the card is rendered in.
+  const workerIds = sortWorkers(workers).map((w) => w.name);
   // The shared column DEFS (key/label/color), derived over the FULL worker set so
   // every lane lays into the same tracks.
   const defs: BoardColumnDef[] =
@@ -588,7 +640,7 @@ function WorkerSwimlaneBoard({
       return {
         count: items.length,
         live,
-        cards: items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />),
+        cards: items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} colIds={workerIds} onOpen={onOpen} />),
       };
     });
   const columns = sharedHeaderTotals(defs, [deriveLane(workers)]);
@@ -872,9 +924,8 @@ export function Board({
   embedded = false,
   view: viewProp,
   onViewChange,
-  onWorkerSelect,
   onDepGraph,
-}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onWorkerSelect?: (name: string) => void; onDepGraph?: () => void } = {}) {
+}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onDepGraph?: () => void } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [viewInternal, setViewInternal] = useState<View>("tickets");
@@ -895,7 +946,26 @@ export function Board({
   const [prefs] = useAtom(boardPrefsAtom);
   const lens = prefs.groupBy; // the generalized "Group by" (Status / Pipeline)
   const colorBy = prefs.colorBy;
-  const [selectedTicketId, setSelectedTicketId] = useState<string | null>(null);
+  // CTL-951: the board scroll-container. `openDetail` reads its offset into the
+  // sessionStorage snapshot on a card click; `useBoardRestore` re-applies that
+  // offset (+ re-focuses the originating card) when the operator returns. ONE ref
+  // shared by the tickets + workers + list bodies (they all live inside it).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useBoardRestore(scrollRef, data != null);
+  // CTL-951: the single card-open seam. Reads the live board scroll offset off the
+  // `.cat-scroll` overflow container (NOT the flex body wrapper, which never
+  // scrolls — `resolveScrollEl` is the SAME lookup the restore uses, so the offset
+  // round-trips), stashes the restore snapshot + walk-list, then hard-navigates.
+  const onOpen: OpenDetailFn = (kind, id, ctx) => {
+    const el = resolveScrollEl(scrollRef.current);
+    openDetail(kind, id, {
+      ids: ctx.ids,
+      lens: ctx.lens,
+      col: ctx.col,
+      from: "board",
+      scroll: el ? { top: el.scrollTop, left: el.scrollLeft } : { top: 0, left: 0 },
+    });
+  };
 
   // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
   // ONE EventSource (+ an IndexedDB cache) across every tab, with a direct
@@ -945,10 +1015,6 @@ export function Board({
   // within it — swimlane=repo under a single-repo scope collapses naturally to
   // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
   const swimlane: GroupBy = prefs.swimlane;
-  const selectedTicket =
-    selectedTicketId != null
-      ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
-      : null;
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -1002,8 +1068,9 @@ export function Board({
           )}
         </div>
 
-        {/* body */}
-        <div style={{ flex: 1, minHeight: 0 }}>
+        {/* body — CTL-951: the board root the scroll-restore hook resolves the
+            `.cat-scroll` container under (so Esc/back returns to the exact offset). */}
+        <div ref={scrollRef} style={{ flex: 1, minHeight: 0 }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {/* BOARD3 / CTL-907: row swimlanes. <SwimlaneBoard> groups the entities
               through the pure board-grouping engine and renders one labeled lane
@@ -1026,7 +1093,7 @@ export function Board({
                 order={prefs.order}
                 density={prefs.density}
                 swimlane={swimlane}
-                onSelect={(id) => setSelectedTicketId(id)}
+                onOpen={onOpen}
                 embedded={embedded}
               />
             ) : (
@@ -1042,7 +1109,7 @@ export function Board({
                 order={prefs.order}
                 showEmpty={prefs.showEmptyColumns}
                 fill
-                onSelect={(id) => setSelectedTicketId(id)}
+                onOpen={onOpen}
               />
             )
           )}
@@ -1059,18 +1126,14 @@ export function Board({
               swimlane={swimlane}
               grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
               fill
-              onWorkerSelect={onWorkerSelect}
+              onOpen={onOpen}
             />
           )}
           {/* CTL-930: queue view branch removed — Queue is now its own left-nav
               destination (QueueSurface). Board view is narrowed to tickets|workers. */}
         </div>
-        {selectedTicket && (
-          <TicketDetailDrawer
-            ticket={selectedTicket}
-            onClose={() => setSelectedTicketId(null)}
-          />
-        )}
+        {/* CTL-951: the TicketDetailDrawer is removed — a plain card click now
+            navigates STRAIGHT to /ticket/$id (the full detail page). */}
       </div>
     </TooltipProvider>
   );

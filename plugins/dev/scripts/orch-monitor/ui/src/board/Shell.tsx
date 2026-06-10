@@ -39,6 +39,7 @@ import {
   recordRecentAtom,
 } from "./nav-store";
 import type { DetailFrom, DetailLens } from "./route-search";
+import { hardNavigate } from "./detail-nav";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
 
 // ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
@@ -402,7 +403,14 @@ export function Shell({
 
   const goPrev = useCallback(() => walk(pager.prevId), [walk, pager.prevId]);
   const goNext = useCallback(() => walk(pager.nextId), [walk, pager.nextId]);
-  const goRoot = useCallback(() => void navigate({ to: "/" }), [navigate]);
+  // CTL-951: Esc / breadcrumb-root return to the board with a FULL-document
+  // navigation to `/` (NOT a router push). `/` is the canonical shell board
+  // (index.html); the detail routes live in board.html, so only a full-doc nav
+  // crosses back to the shell where the operator started. On that load the board's
+  // `useBoardRestore` reads the sessionStorage snapshot `openDetail` stashed and
+  // re-applies the scroll offset + originating-card focus — the board returns to
+  // the EXACT state it was left in (display-options ride their own persisted atoms).
+  const goRoot = useCallback(() => hardNavigate("/"), []);
 
   // ── ⌘K palette toggle (CTL-916 / DETAIL5). The hook reaches `onPalette` even
   //    while an input is focused (key-nav.ts §1). A caller-supplied `onPalette`
