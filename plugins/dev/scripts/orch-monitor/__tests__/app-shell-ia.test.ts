@@ -222,3 +222,62 @@ describe("theme metadata is exhaustive (CTL-893)", () => {
     for (const t of THEMES) expect(THEME_LABEL[t]).toBeTruthy();
   });
 });
+
+// ── CTL-977: left-nav restyle v2 ─────────────────────────────────────────────
+describe("left-nav restyle v2 (CTL-977)", () => {
+  /** Strip JS/JSX comments so class/token assertions cannot be tripped by prose. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  }
+  const code = stripComments(sidebarSrc);
+
+  it("no uppercase class on group/section trigger labels (CTL-977)", () => {
+    // The GROUP_TRIGGER_BASE constant must NOT include the `uppercase` Tailwind class.
+    // Search the stripped code for the trigger base definition.
+    const triggerBaseIdx = code.indexOf("GROUP_TRIGGER_BASE");
+    expect(triggerBaseIdx).toBeGreaterThan(-1);
+    // Find the end of the GROUP_TRIGGER_BASE assignment (next `);`)
+    const triggerBaseEnd = code.indexOf(");", triggerBaseIdx);
+    const triggerBase = code.slice(triggerBaseIdx, triggerBaseEnd);
+    expect(triggerBase).not.toMatch(/\buppercase\b/);
+  });
+
+  it("collapsible group chevron is right-aligned (ml-auto), not left (mr-*) (CTL-977)", () => {
+    // The twistie ChevronRightIcon inside collapsible triggers must use ml-auto
+    // (right-edge placement), not mr-1.5 or similar left-side gap.
+    // We check that ml-auto appears in the chevron className in the rendered groups.
+    expect(code).toContain("ml-auto");
+    // The old left-side pattern (mr-1.5 on the chevron) must be absent from the
+    // trigger rows. The favicon img may legitimately use mr-1.5 so we check the
+    // ChevronRightIcon className only.
+    const chevronIdx = code.indexOf("ChevronRightIcon");
+    expect(chevronIdx).toBeGreaterThan(-1);
+    // All ChevronRightIcon usages must NOT pair the icon with mr-* for left positioning
+    // (ml-auto is the right-edge pattern). Walk each occurrence.
+    let idx = 0;
+    while (true) {
+      const pos = code.indexOf("ChevronRightIcon", idx);
+      if (pos === -1) break;
+      // Find the enclosing className string (next quoted string after the tag).
+      const classStart = code.indexOf('"', pos);
+      if (classStart === -1) break;
+      const classEnd = code.indexOf('"', classStart + 1);
+      const classStr = code.slice(classStart + 1, classEnd);
+      // If this class string belongs to a ChevronRightIcon, it should use ml-auto.
+      expect(classStr).not.toMatch(/^mr-[0-9]/);
+      idx = pos + 1;
+    }
+  });
+
+  it("active item gets sidebar-primary accent color class (CTL-977)", () => {
+    // The renderOperateItem function must apply sidebar-primary (accent) to active items.
+    const renderFn = sidebarSrc.slice(
+      sidebarSrc.indexOf("function renderOperateItem"),
+      sidebarSrc.indexOf("function groupContainsActive"),
+    );
+    expect(renderFn).toContain("sidebar-primary");
+  });
+});

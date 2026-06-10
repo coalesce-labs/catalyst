@@ -81,13 +81,14 @@ export function loadMonitorConfig(configPath: string): MonitorConfig {
   }
 
   // CTL-961: repoOwners from catalyst.monitor.linear.teams (repo short-name → owner/repo)
+  // CTL-979: key is lowercased so /api/repo-icon/adva resolves vcsRepo "rightsite-cloud/Adva".
   const repoOwners: Record<string, string> = {};
   const linear = monitor.linear;
   if (isRecord(linear) && Array.isArray(linear.teams)) {
     for (const team of linear.teams) {
       if (isRecord(team) && typeof team.vcsRepo === "string" && team.vcsRepo.includes("/")) {
         const shortName = team.vcsRepo.split("/").at(-1);
-        if (shortName) repoOwners[shortName] = team.vcsRepo;
+        if (shortName) repoOwners[shortName.toLowerCase()] = team.vcsRepo;
       }
     }
   }

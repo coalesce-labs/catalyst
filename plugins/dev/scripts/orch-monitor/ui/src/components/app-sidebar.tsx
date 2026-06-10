@@ -77,6 +77,8 @@ import {
 // CTL-898 / SHELL8 — per-node cluster-health dots.
 // CTL-930 / CTL-944 — project-grouped nav: Overall flat + one Collapsible per repo + Observe last.
 // CTL-960 — left-nav polish: project-group headers, consistent twistie, Overall label.
+// CTL-977 — left-nav restyle v2: natural-case headers, quieter labels, rebalanced icon/label,
+//            Linear-style selected state, twistie moved to right.
 
 /** A status dot overlaid on a nav icon (emerald = live, amber = anomaly). */
 function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
@@ -107,6 +109,18 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
   { surface: "workers", label: "Workers", icon: UsersIcon },
   { surface: "queue", label: "Queue", icon: ListOrderedIcon },
 ];
+
+// CTL-977: Shared classes for collapsible group trigger rows.
+// Natural-case (no uppercase), quiet/muted color, twistie on the RIGHT.
+// The favicon and label sit on the left; the chevron is ml-auto on the right.
+const GROUP_TRIGGER_BASE = cn(
+  "flex h-7 w-full shrink-0 items-center rounded-md px-2 outline-hidden",
+  // CTL-977: no uppercase — render names in their natural case.
+  "text-[11px] font-medium text-sidebar-foreground/45",
+  "transition-[margin,opacity,color] duration-200 ease-linear",
+  "cursor-pointer hover:text-sidebar-foreground/70 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+  "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
+);
 
 export function AppSidebar() {
   // CTL-911 / SURF3 — settingsOpen/openSettings drive the footer Settings item.
@@ -185,6 +199,8 @@ export function AppSidebar() {
   // Render a single OPERATE item (used in both Overall and per-project groups).
   // CTL-960: compact=true for per-project sub-items — smaller size reduces visual
   // monotony from four repeated blocks of identical Inbox/Tickets/Workers/Queue.
+  // CTL-977: active item gets sidebar-primary (accent) color on icon + label text,
+  // providing a clear Linear-style selected state beyond the bg fill.
   function renderOperateItem(
     item: (typeof OPERATE_ITEMS)[number],
     scopeVal: string,
@@ -200,6 +216,14 @@ export function AppSidebar() {
           tooltip={item.label}
           size={compact ? "sm" : "default"}
           onClick={() => go(item.surface, scopeVal)}
+          // CTL-977: active item gets accent (sidebar-primary) color treatment on
+          // icon + label so the selected state is unmistakable but quiet.
+          // Inactive icon is muted; label is full-contrast sidebar-foreground.
+          className={cn(
+            active
+              ? "text-sidebar-primary [&>svg]:text-sidebar-primary"
+              : "[&>svg]:text-sidebar-foreground/55 hover:[&>svg]:text-sidebar-foreground/80",
+          )}
         >
           <span className="relative flex items-center justify-center">
             <item.icon />
@@ -239,6 +263,8 @@ export function AppSidebar() {
         {/* ── OVERALL: flat always-expanded group (scope = "all") ──────────── */}
         {/* CTL-960: "Operate" renamed to "Overall" — single term for the all-projects
             scope consistent with the breadcrumb label from breadcrumbFor("*", "all"). */}
+        {/* CTL-977: SidebarGroupLabel renders with natural case; the shadcn label
+            component already uses muted/small styling — no custom overrides needed. */}
         <SidebarGroup>
           <SidebarGroupLabel>Overall</SidebarGroupLabel>
           <SidebarGroupContent>
@@ -249,9 +275,8 @@ export function AppSidebar() {
         </SidebarGroup>
 
         {/* ── PER-PROJECT GROUPS: one collapsible per repo ────────────────── */}
-        {/* CTL-960: group headers styled as quiet section headers (semibold,
-            uppercase tracking); twistie moved LEFT with CSS-class rotation to
-            match Observe's group/observe pattern. */}
+        {/* CTL-977: natural-case repo name, twistie moved to RIGHT (ml-auto),
+            favicon stays LEFT of the label, no uppercase transformation. */}
         {repos.map((repo) => {
           // navGroups has the per-repo group; get its dotColor + iconDataUrl (CTL-961)
           const navGroup = navGroups.find((g) => g.scope === repo);
@@ -274,23 +299,7 @@ export function AppSidebar() {
               className={`group/${groupKey}`}
             >
               <SidebarGroup className="pt-0">
-                <CollapsibleTrigger
-                  className={cn(
-                    "flex h-7 w-full shrink-0 items-center rounded-md px-2 outline-hidden",
-                    "text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/50",
-                    "transition-[margin,opacity,color] duration-200 ease-linear",
-                    "cursor-pointer hover:text-sidebar-foreground/80 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
-                    "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
-                  )}
-                >
-                  {/* CTL-960: chevron on the LEFT; rotates via CSS data-[state=open] — same
-                      mechanism as Observe so both are consistent. */}
-                  <ChevronRightIcon
-                    className={cn(
-                      "mr-1.5 size-3 flex-shrink-0 transition-transform duration-200",
-                      isOpen && "rotate-90",
-                    )}
-                  />
+                <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
                   {/* CTL-961: favicon takes priority over the color dot; only show dot
                       when no favicon is available. Never show a placeholder. */}
                   {iconDataUrl ? (
@@ -298,7 +307,7 @@ export function AppSidebar() {
                       src={iconDataUrl}
                       alt=""
                       aria-hidden
-                      className="mr-1.5 size-3 flex-shrink-0 rounded-sm object-contain"
+                      className="mr-1.5 size-3.5 flex-shrink-0 rounded-sm object-contain"
                     />
                   ) : dotColor ? (
                     <span
@@ -308,6 +317,13 @@ export function AppSidebar() {
                     />
                   ) : null}
                   {repo}
+                  {/* CTL-977: twistie on the RIGHT — ml-auto pushes to far end of row. */}
+                  <ChevronRightIcon
+                    className={cn(
+                      "ml-auto size-3 flex-shrink-0 transition-transform duration-200",
+                      isOpen && "rotate-90",
+                    )}
+                  />
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                   <SidebarGroupContent>
@@ -322,24 +338,17 @@ export function AppSidebar() {
         })}
 
         {/* ── OBSERVE — collapsible, defaults collapsed, "soon" items ──────── */}
-        {/* CTL-960: Observe header matches per-repo header style; twistie on LEFT. */}
+        {/* CTL-977: natural-case "Observe", twistie on RIGHT to match project groups. */}
         <Collapsible
           open={observeOpen}
           onOpenChange={setObserveOpen}
           className="group/observe"
         >
           <SidebarGroup className="pt-0">
-            <CollapsibleTrigger
-              className={cn(
-                "flex h-7 w-full shrink-0 items-center rounded-md px-2 outline-hidden",
-                "text-[11px] font-semibold uppercase tracking-wide text-sidebar-foreground/50",
-                "transition-[margin,opacity,color] duration-200 ease-linear",
-                "cursor-pointer hover:text-sidebar-foreground/80 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
-                "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
-              )}
-            >
-              <ChevronRightIcon className="mr-1.5 size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
+            <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
               Observe
+              {/* CTL-977: twistie on the RIGHT — group-data-[state=open]/observe rotates. */}
+              <ChevronRightIcon className="ml-auto size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
             </CollapsibleTrigger>
             <CollapsibleContent>
               <SidebarGroupContent>
