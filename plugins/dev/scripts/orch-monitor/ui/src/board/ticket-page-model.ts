@@ -194,19 +194,32 @@ export interface SpineNode {
   /** True iff this node IS the ticket's current (active) phase — the skin anchors
    *  the spine scroll + the cyan "here now" treatment on it. */
   isActive: boolean;
-  /** Cells that depend on the BFF run-records endpoint (DETAIL6/DETAIL7) and so
-   *  render DIMMED with a NEEDS-PLUMBING marker until those tickets land. */
-  runLink: SpineCellState;
-  artifact: SpineCellState;
+  /** Per-phase cost in USD from BoardTicket.phaseCosts (CTL-953, AVAILABLE NOW).
+   *  null when phaseCosts is absent or has no entry for this phase — never fabricated. */
+  costUSD: number | null;
+  /** Per-phase token count from BoardTicket.phaseCosts (CTL-953, AVAILABLE NOW).
+   *  null when phaseCosts is absent or has no entry for this phase — never fabricated. */
+  tokens: number | null;
+  /** `plumbed` when costUSD is non-null (real phaseCosts data available);
+   *  `pending` when no per-phase cost exists yet (skin dims it honestly). */
   costSparkline: SpineCellState;
+  /** Artifact plumbing: `pending` always at model level — the skin issues
+   *  the /api/ticket-artifacts/<id> fetch and passes resolved links down. */
+  artifact: SpineCellState;
+  /** Run-link plumbing: `pending` — /api/ticket-runs not yet wired. */
+  runLink: SpineCellState;
 }
 
 /**
  * Resolve the LIFECYCLE SPINE (design §4.2 "LIFECYCLE SPINE"): one node per
  * `phaseSummary[]` entry, carrying the cells that ARE resident-plumbed
- * (phase/status/duration/startedAt/completedAt/model) and the per-node
- * NEEDS-PLUMBING flags for the cells that depend on the BFF run-records endpoint
- * (run-link / artifact / cost-sparkline — DETAIL6/DETAIL7).
+ * (phase/status/duration/timestamps/model/cost/tokens from phaseCosts) and the
+ * NEEDS-PLUMBING flags for cells that still require backend wiring
+ * (artifact = fetch-in-skin; run-link = future endpoint).
+ *
+ * CTL-953: `costUSD` and `tokens` are resolved directly from
+ * `BoardTicket.phaseCosts[phase]` — no new endpoint. `costSparkline` is
+ * `"plumbed"` when the value exists, `"pending"` otherwise.
  *
  * `isActive` is true for the node whose phase === ticket.phase AND that is not
  * terminal — i.e. the live/current node the spine scroll + cyan ring anchor on.
@@ -215,10 +228,13 @@ export interface SpineNode {
  * honest "no phases yet" empty state, never a fabricated row).
  */
 export function resolveSpineNodes(
-  ticket: Pick<BoardTicket, "phase" | "phaseSummary">,
+  ticket: Pick<BoardTicket, "phase" | "phaseSummary" | "phaseCosts">,
 ): SpineNode[] {
   return ticket.phaseSummary.map((row: BoardPhaseTiming): SpineNode => {
     const isActive = row.phase === ticket.phase && !TERMINAL_SPINE_STATUSES.has(row.status);
+    const phaseCost = ticket.phaseCosts?.[row.phase] ?? null;
+    const costUSD = phaseCost && phaseCost.costUSD > 0 ? phaseCost.costUSD : null;
+    const tokens = phaseCost && phaseCost.tokens > 0 ? phaseCost.tokens : null;
     return {
       phase: row.phase,
       label: phaseLabel(row.phase),
@@ -228,11 +244,13 @@ export function resolveSpineNodes(
       completedAt: row.completedAt,
       model: row.model,
       isActive,
-      // All three depend on the BFF run-records endpoint — not yet plumbed
-      // (DETAIL6/DETAIL7). Marked `pending` so the skin dims them honestly.
-      runLink: "pending",
+      costUSD,
+      tokens,
+      costSparkline: costUSD != null ? "plumbed" : "pending",
+      // artifact links are resolved in the skin via /api/ticket-artifacts fetch.
       artifact: "pending",
-      costSparkline: "pending",
+      // run-link depends on /api/ticket-runs (not yet wired) — honest pending.
+      runLink: "pending",
     };
   });
 }
