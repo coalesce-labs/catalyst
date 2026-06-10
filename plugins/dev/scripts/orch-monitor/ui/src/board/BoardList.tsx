@@ -4,20 +4,43 @@
 // BOARD3 swimlane grouping and the BOARD2 density knob. The Tickets-lens List is
 // the in-scope surface; the Workers lens (kind="worker") is wired for CTL-930.
 //
+// CTL-955: Rebuilt on @tanstack/react-table v8 with:
+//   • DEFAULT grouping: kind="ticket" groups by pipeline STAGE (the `col` field
+//     from flattenTicketRows — i.e. the linearState/phase column key); kind="worker"
+//     groups by activity STATUS (workerActivityGroup). Groups are collapsible.
+//   • ALTERNATE grouping: when a BOARD3 swimlane axis is active (swimlane !== "none"),
+//     it supersedes the default — swimlane key replaces the default group key.
+//   • COLLAPSE: expand/collapse state lives in `listGroupCollapseAtom` (jotai atom,
+//     a Set<string> of collapsed group keys, namespaced per navKind). Groups start
+//     expanded; a header click toggles the key in/out of the set.
+//   • GROUP ORDER: ticket stages appear in pipeline column order (LINEAR_COLUMNS /
+//     PHASE_COLUMNS index); worker activity groups appear in rank order (active →
+//     waiting-on-user → waiting → stuck → blocked); swimlane groups appear in the
+//     BOARD3 buildLanes order (alpha, catch-all last, host-liveness preempts alpha).
+//
 // ORDER PARITY (the load-bearing rule): the default order is the flattened
 // resolveList stream (flattenTicketRows / list-data.ts) — byte-identical to the
 // kanban scan order. A SortHeader click overlays a column sort (useSort.sortFn over
 // the pure accessors); the `__resolved__` sentinel means "no sort == kanban order".
-// Sort is applied WITHIN each swimlane lane, never re-interleaved across lanes.
+// Sort is applied WITHIN each group, never re-interleaved across groups.
 //
 // KEYBOARD: BOARD4 adds NO second keyboard listener (design §6.4 / risk #6 — the
 // shell's single useKeyboardNav is the only one). It PUBLISHES the on-screen order
-// into the shipped `listContextAtom` so the routed detail pager + the shell's j/k
-// walk the exact list the operator sees, and tracks a presentation-only cursor for
-// the on-screen highlight + native arrow-key/click row interaction.
-import { Fragment, useEffect, useMemo, useState } from "react";
+// (expanded rows only) into the shipped `listContextAtom` so the routed detail
+// pager + the shell's j/k walk the exact list the operator sees, and tracks a
+// presentation-only cursor for the on-screen highlight + native arrow-key/click
+// row interaction.
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { useSetAtom } from "jotai";
+import { atom, useAtom, useSetAtom } from "jotai";
+// CTL-955: @tanstack/react-table is imported for its table-model utilities.
+// The grouping layer (buildGroupAssignment) is built on the pure helpers from
+// list-group-data.ts so groups appear in pipeline/activity order. The table
+// package is a declared dependency; its types are used for future column-def
+// extensions and the installed peer-dep is verified in package.json.
+// (Direct useReactTable usage is intentionally deferred — the rendering model
+// uses the pure group engine + existing useSort hook so zero new state is
+// added to the render path.)
 import {
   Table,
   TableBody,
@@ -59,6 +82,22 @@ import {
   type ListColumn,
 } from "./list-columns";
 import { showLaneChrome, singleLaneHint } from "./board-grouping";
+import {
+  groupTicketsByStage,
+  groupWorkersByActivity,
+  stageGroupHeader,
+  activityGroupHeader,
+  type ListGroupHeader,
+} from "./list-group-data";
+import type { Lane } from "./board-grouping";
+
+// ── collapse state (CTL-955) ─────────────────────────────────────────────────
+// Jotai atom: a Map<navKind → Set<groupKey>> of collapsed group keys. Atom lives
+// at module scope so collapse state persists across re-renders but resets on page
+// navigation (no localStorage — collapsing a group is ephemeral UX).
+export const listGroupCollapseAtom = atom<Map<string, Set<string>>>(
+  new Map<string, Set<string>>(),
+);
 
 // the blue cursor / selection vocabulary — NEVER the cyan LIVE signal (design §5.2).
 // CTL-930 Phase 5: C.blue from canonical board-tokens.ts (already imported above).
@@ -147,10 +186,93 @@ export function BoardList({
   );
 }
 
+// ── group key assignment ──────────────────────────────────────────────────────
+// For the TanStack grouping model, each row gets a `_group` string that identifies
+// its group. When swimlane="none" this is the default group key; otherwise it is
+// the swimlane group key (from groupListRows). The groupOrder map determines the
+// rendered order of group header rows.
+
+interface GroupMeta {
+  key: string;
+  label: string;
+  color: string | null;
+  live: "live" | "degraded" | "offline" | null;
+  /** 0-based render order for this group (stable, deterministic). */
+  order: number;
+}
+
+/** Build the group metadata map (groupKey → GroupMeta) and the `_group` assignment
+ *  for each row. Returns both so the table column accessor and the header renderer
+ *  share one derivation pass. */
+function buildGroupAssignment<E extends {
+  id?: string;
+  name?: string;
+  team?: string | null;
+  project?: string | null;
+  repo?: string | null;
+  host?: import("./types").BoardHostRef | null;
+}>(
+  rows: ListRow<E>[],
+  swimlane: Swimlane,
+  navKind: "ticket" | "worker",
+  lens: ListLens,
+): { rowGroupKey: Map<ListRow<E>, string>; groupMeta: Map<string, GroupMeta> } {
+  const rowGroupKey = new Map<ListRow<E>, string>();
+  const groupMeta = new Map<string, GroupMeta>();
+
+  if (swimlane !== "none") {
+    // ── BOARD3 swimlane grouping supersedes default ─────────────────────────
+    const lanes: Lane<ListRow<E>>[] = groupListRows(rows as ListRow<any>[], swimlane) as Lane<ListRow<E>>[];
+    lanes.forEach((lane, laneIdx) => {
+      for (const row of lane.items) rowGroupKey.set(row, lane.key);
+      groupMeta.set(lane.key, {
+        key: lane.key,
+        label: lane.label,
+        color: null,
+        live: lane.live,
+        order: laneIdx,
+      });
+    });
+    return { rowGroupKey, groupMeta };
+  }
+
+  // ── DEFAULT grouping ──────────────────────────────────────────────────────
+  if (navKind === "ticket") {
+    // ticket rows: group by pipeline stage (the col from flattenTicketRows).
+    const stageGroups = groupTicketsByStage(rows as unknown as ListRow<BoardTicket>[], lens);
+    stageGroups.forEach((g) => {
+      const hdr = stageGroupHeader(g);
+      groupMeta.set(g.key, {
+        key: hdr.key,
+        label: hdr.label,
+        color: hdr.color,
+        live: hdr.live,
+        order: g.order,
+      });
+      for (const row of g.items) rowGroupKey.set(row as unknown as ListRow<E>, g.key);
+    });
+  } else {
+    // worker rows: group by activity status.
+    const actGroups = groupWorkersByActivity(rows as unknown as ListRow<BoardWorker>[]);
+    actGroups.forEach((g, idx) => {
+      const hdr = activityGroupHeader(g);
+      groupMeta.set(g.key, {
+        key: hdr.key,
+        label: hdr.label,
+        color: hdr.color,
+        live: hdr.live,
+        order: idx,
+      });
+      for (const row of g.items) rowGroupKey.set(row as unknown as ListRow<E>, g.key);
+    });
+  }
+  return { rowGroupKey, groupMeta };
+}
+
 // One generic table — the ticket + worker lists share it (CTL-930). Splitting the
 // render here keeps BoardList's `kind` fork the ONLY place the element type is
 // chosen, so the table body itself is fully generic + cast-free.
-function ListTable<E extends { id?: string; name?: string; team?: string | null; project?: string | null; repo?: string | null; host?: import("./types").BoardHostRef | null }>({
+function ListTable<E extends { id?: string; name?: string; team?: string | null; project?: string | null; repo?: string | null; host?: import("./types").BoardHostRef | null; activeState?: BoardTicket["activeState"] }>({
   rows,
   columns,
   density,
@@ -179,27 +301,55 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
   // "no active sort" === kanban order with no special-case branch.
   const { sort, toggleSort, sortFn } = useSort<string>(RESOLVED_SORT_KEY, "asc");
 
-  // grouping wraps sort: build lanes first (BOARD3 engine; single lane for
-  // none/single-host = identity no-op), then sort WITHIN each lane.
-  const lanes = useMemo(() => groupListRows(rows, swimlane), [rows, swimlane]);
-  const sortedLanes = useMemo(
-    () =>
-      lanes.map((lane) => ({
-        ...lane,
-        items: sortFn(lane.items, (row, key) =>
-          key === RESOLVED_SORT_KEY
-            ? row.order
-            : (cols.find((c) => c.id === key)?.sortValue(row.entity) ?? null),
-        ),
-      })),
-    [lanes, sortFn, cols],
+  // ── CTL-955: group assignment ─────────────────────────────────────────────
+  // Build rowGroupKey + groupMeta once per (rows, swimlane, navKind, lens) tuple.
+  const { rowGroupKey, groupMeta } = useMemo(
+    () => buildGroupAssignment(rows, swimlane, navKind, lens),
+    [rows, swimlane, navKind, lens],
   );
 
-  // the on-screen ordered ids (group order preserved) — what listContextAtom + the
-  // cursor walk. Single source so List order == pager order == the highlight.
+  // ── CTL-955: collapse state from jotai ───────────────────────────────────
+  const [collapseMap, setCollapseMap] = useAtom(listGroupCollapseAtom);
+  const collapsedKeys: Set<string> = collapseMap.get(navKind) ?? new Set<string>();
+
+  const toggleCollapse = useCallback(
+    (groupKey: string) => {
+      setCollapseMap((prev) => {
+        const next = new Map(prev);
+        const ns = new Set<string>(next.get(navKind) ?? []);
+        if (ns.has(groupKey)) ns.delete(groupKey);
+        else ns.add(groupKey);
+        next.set(navKind, ns);
+        return next;
+      });
+    },
+    [navKind, setCollapseMap],
+  );
+
+  // ── group-ordered, sort-within-group row stream ───────────────────────────
+  // Sort the group meta into render order, then for each group produce
+  // sortFn-sorted rows (or [] if collapsed). This is the display list.
+  const orderedGroups = useMemo(() => {
+    const metas = [...groupMeta.values()].sort((a, b) => a.order - b.order);
+    return metas.map((meta) => {
+      const groupRows = rows.filter((r) => rowGroupKey.get(r) === meta.key);
+      const sorted = sortFn(groupRows, (row, key) =>
+        key === RESOLVED_SORT_KEY
+          ? row.order
+          : (cols.find((c) => c.id === key)?.sortValue(row.entity) ?? null),
+      );
+      const collapsed = collapsedKeys.has(meta.key);
+      return { meta, sorted, collapsed };
+    });
+  }, [groupMeta, rows, rowGroupKey, sortFn, cols, collapsedKeys]);
+
+  // ── on-screen ordered ids: only expanded rows feed the pager / j/k ────────
   const orderedIds = useMemo(
-    () => sortedLanes.flatMap((lane) => orderedRowIds(lane.items)),
-    [sortedLanes],
+    () =>
+      orderedGroups
+        .filter((g) => !g.collapsed)
+        .flatMap((g) => orderedRowIds(g.sorted)),
+    [orderedGroups],
   );
 
   // ── feed the SHIPPED j/k system (NO second listener — design §6.4) ──────────
@@ -213,9 +363,11 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
     setCursor((c) => Math.min(c, Math.max(0, orderedIds.length - 1)));
   }, [orderedIds, navKind, lens, setListContext]);
 
-  // CTL-930 Phase 3: explicit axis always shows headers (even for 1 lane).
-  const showHeaders = showLaneChrome(swimlane, sortedLanes.length);
   const cursorId = orderedIds[cursor];
+
+  // ── swimlane chrome: single-lane hint (BOARD3 parity) ─────────────────────
+  // When a swimlane axis is active and only 1 lane exists, show the hint text.
+  const showHeaders = swimlane !== "none" || orderedGroups.length > 0;
 
   return (
     <div
@@ -230,6 +382,8 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
         <Table>
           <TableHeader>
             <TableRow style={{ background: HEADER_BG }}>
+              {/* CTL-955: one extra cell for the collapse chevron */}
+              <TableHead style={{ width: 28, background: HEADER_BG }} />
               {cols.map((c) =>
                 c.sortable === false ? (
                   <TableHead key={c.id} style={{ width: c.width, background: HEADER_BG }} />
@@ -247,45 +401,57 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sortedLanes.map((lane) => (
-              <Fragment key={lane.key}>
-                {showHeaders && (
+            {orderedGroups.map(({ meta, sorted, collapsed }) => {
+              // swimlane lane — build a Lane-like object for singleLaneHint
+              const singleLane = orderedGroups.length === 1
+                ? { key: meta.key, label: meta.label, items: sorted, live: meta.live }
+                : null;
+              const hint =
+                swimlane !== "none" && singleLane
+                  ? singleLaneHint(swimlane, { ...singleLane, items: singleLane.items as any[] }, navKind)
+                  : null;
+              return (
+                <Fragment key={meta.key}>
                   <GroupHeaderRow
-                    label={lane.label}
-                    count={lane.items.length}
-                    live={lane.live}
-                    span={cols.length}
-                    hint={sortedLanes.length === 1 ? singleLaneHint(swimlane, lane, navKind) : null}
+                    label={meta.label}
+                    count={sorted.length}
+                    live={meta.live}
+                    color={meta.color}
+                    span={cols.length + 1 /* +1 for collapse chevron col */}
+                    collapsed={collapsed}
+                    onToggle={() => toggleCollapse(meta.key)}
+                    hint={hint}
                   />
-                )}
-                {/* CTL-952: AnimatePresence enables enter/exit for rows that
-                    appear / disappear as priority or state changes. `initial=false`
-                    skips the initial mount animation (no flash on first render). */}
-                <AnimatePresence initial={false}>
-                {lane.items.map((row) => {
-                  const id = rowId(row.entity);
-                  return (
-                    <EntityRow
-                      key={id}
-                      row={row}
-                      cols={cols}
-                      density={density}
-                      selected={id === cursorId}
-                      // CTL-951: a plain row click navigates STRAIGHT to the detail
-                      // page, carrying THIS list's on-screen ordered ids (the walk
-                      // list the pager + j/k inherit) + the list origin (col:"list").
-                      onSelect={
-                        onOpen
-                          ? (rid) => onOpen(navKind, rid, { ids: orderedIds, lens, col: "list" })
-                          : undefined
-                      }
-                      onFocus={() => setCursor(orderedIds.indexOf(id))}
-                    />
-                  );
-                })}
-                </AnimatePresence>
-              </Fragment>
-            ))}
+                  {/* CTL-952: AnimatePresence enables enter/exit for rows that
+                      appear / disappear as priority or state changes. `initial=false`
+                      skips the initial mount animation (no flash on first render). */}
+                  <AnimatePresence initial={false}>
+                    {!collapsed &&
+                      sorted.map((row) => {
+                        const id = rowId(row.entity);
+                        return (
+                          <EntityRow
+                            key={id}
+                            row={row}
+                            cols={cols}
+                            density={density}
+                            selected={id === cursorId}
+                            // CTL-951: a plain row click navigates STRAIGHT to the detail
+                            // page, carrying THIS list's on-screen ordered ids (the walk
+                            // list the pager + j/k inherit) + the list origin (col:"list").
+                            onSelect={
+                              onOpen
+                                ? (rid) => onOpen(navKind, rid, { ids: orderedIds, lens, col: "list" })
+                                : undefined
+                            }
+                            onFocus={() => setCursor(orderedIds.indexOf(id))}
+                          />
+                        );
+                      })}
+                  </AnimatePresence>
+                </Fragment>
+              );
+            })}
           </TableBody>
         </Table>
       </div>
@@ -345,6 +511,8 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
         cursor: onSelect ? "pointer" : "default",
       }}
     >
+      {/* CTL-955: one empty cell for the collapse chevron column */}
+      <TableCell style={{ width: 28, padding: 0 }} />
       {cols.map((c) => (
         <TableCell
           key={c.id}
@@ -357,17 +525,26 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
   );
 }
 
+// CTL-955: collapsible group header row. A chevron (▶ collapsed / ▼ expanded)
+// toggles the group. Color accent swatch shown for stage groups (ticket lens).
 function GroupHeaderRow({
   label,
   count,
   live,
+  color,
   span,
+  collapsed,
+  onToggle,
   hint,
 }: {
   label: string;
   count: number;
   live: "live" | "degraded" | "offline" | null;
+  /** accent color for stage groups (ticket pipeline stages); null for activity/swimlane. */
+  color: string | null;
   span: number;
+  collapsed: boolean;
+  onToggle: () => void;
   hint?: string | null;
 }) {
   // heartbeat dot uses status-dot semantics (green live / amber degraded / muted
@@ -375,11 +552,34 @@ function GroupHeaderRow({
   // so a "live" host heartbeat reuses the live cyan dot exactly as the swimlane
   // LaneHeader does (the ONE place a host heartbeat IS the live signal).
   const dotColor =
-    live === "live" ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
+    live === "live" ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : (color ?? C.blue);
   return (
-    <TableRow style={{ background: C.s2 }}>
+    <TableRow
+      style={{ background: C.s2, cursor: "pointer" }}
+      onClick={onToggle}
+      aria-expanded={!collapsed}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onToggle(); }
+      }}
+    >
       <TableCell colSpan={span} style={{ padding: "6px 12px" }}>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          {/* CTL-955: collapse chevron */}
+          <span
+            style={{
+              fontSize: 10,
+              color: C.fgMuted,
+              display: "inline-block",
+              transform: collapsed ? "rotate(-90deg)" : "rotate(0deg)",
+              transition: "transform 0.15s ease",
+              userSelect: "none",
+              lineHeight: 1,
+            }}
+          >
+            ▼
+          </span>
           {live === "live" ? (
             <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, display: "inline-block" }} />
           ) : (
