@@ -70,6 +70,8 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 // re-implements the gate in bash (merge-confirmation evidence + worktree
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals } from "./signal-reader.mjs";
+// CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
+import { collectBeliefsTick } from "./beliefs/collector.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
 // the daemon's recovery short-circuit + reconcile backstop run the identical
@@ -3393,6 +3395,9 @@ function runTick() {
     } else {
       concurrency = runningOpts.concurrency;
     }
+    // CTL-933: record this tick's liveness observations BEFORE the decisions run
+    // (write-only shadow; own try/catch inside — never throws, never gates).
+    collectBeliefsTick({ orchDir: runningOpts.orchDir, linearCache: runningOpts.cache });
     schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
