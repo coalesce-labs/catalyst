@@ -1,10 +1,16 @@
-// detail-nav.test.ts — CTL-942 + CTL-951 acceptance guards for the
+// detail-nav.test.ts — CTL-942 + CTL-951 + CTL-989 acceptance guards for the
 // card → detail-page navigation wiring.
 //
-// `bun test` has no DOM, so — matching the established app-shell.test.ts /
-// board-todo-column.test.ts pattern — the pure helpers are unit-tested directly
-// and the load-bearing JSX wiring (cards open the detail page on a PLAIN click;
-// the drawer is removed) is asserted by static source analysis.
+// CTL-989 — the two SPA bundles collapsed into ONE TanStack Router, so opening a
+// detail page is a CLIENT-SIDE `navigate(...)` (no full-document reload, the left
+// nav stays). The sessionStorage list-context bridge + `hardNavigate` are retired
+// (they existed only to survive the full-doc nav the two-entry split forced); the
+// URL search params + native router scroll restoration cover the round-trip now.
+//
+// `bun test` has no DOM, so — matching the established app-shell.test.ts pattern —
+// the pure helpers are unit-tested directly and the load-bearing JSX wiring (cards
+// open the detail page on a PLAIN click via a router navigate) is asserted by
+// static source analysis.
 import { describe, it, expect } from "bun:test";
 import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,10 +19,9 @@ import {
   ticketDetailHref,
   workerDetailHref,
   detailHref,
+  detailNavigateOptions,
+  openDetail,
   isNewTabClick,
-  parseListContext,
-  LIST_CONTEXT_MAX_AGE_MS,
-  type ListContextSnapshot,
 } from "./detail-nav";
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import { laneColumns, visibleColumnDefs } from "./board-display";
@@ -25,6 +30,7 @@ import { resolveListIds, sortWorkers, type Ordering } from "./list-order";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const boardSrc = readFileSync(join(HERE, "Board.tsx"), "utf8");
 const boardListSrc = readFileSync(join(HERE, "BoardList.tsx"), "utf8");
+const detailNavSrc = readFileSync(join(HERE, "detail-nav.ts"), "utf8");
 
 // ── fixtures (the REAL shipped shapes; mirrors list-data.test.ts) ────────────
 const t = (over: Partial<BoardTicket> & { id: string }): BoardTicket => ({
@@ -79,7 +85,7 @@ const payload = (tickets: BoardTicket[], workers: BoardWorker[] = []): BoardPayl
   queue: [],
 });
 
-describe("detail-page hrefs (CTL-942)", () => {
+describe("detail-page hrefs (CTL-942 — kept for the new-tab gesture)", () => {
   it("builds /ticket/$id and /worker/$id paths the server SPA fallback answers", () => {
     expect(ticketDetailHref("CTL-845")).toBe("/ticket/CTL-845");
     expect(workerDetailHref("CTL-845:2")).toBe("/worker/CTL-845%3A2");
@@ -128,98 +134,110 @@ describe("isNewTabClick gesture (CTL-942 / CTL-951)", () => {
   });
 });
 
-describe("list-context snapshot parse/restore (CTL-951 + CTL-971)", () => {
-  const base: ListContextSnapshot = {
-    ids: ["CTL-1", "CTL-2", "CTL-3"],
-    kind: "ticket",
-    lens: "linear",
-    col: "Implement",
-    cursor: 1,
-    focusId: "CTL-2",
-    // CTL-971: BOTH scroll axes are load-bearing (CTL-950 single both-axes scroller).
-    scroll: { top: 420, left: 1400 },
-    surface: "board",
-    scope: "catalyst",
-    savedAt: 1_000,
-  };
-
-  it("round-trips a valid snapshot (board restores ids/scroll BOTH axes/surface/scope/focus)", () => {
-    const parsed = parseListContext(JSON.stringify(base), 1_000);
-    expect(parsed).toEqual(base);
-    // explicit: both axes + the two CTL-971 fields survive the round-trip.
-    expect(parsed?.scroll).toEqual({ top: 420, left: 1400 });
-    expect(parsed?.surface).toBe("board");
-    expect(parsed?.scope).toBe("catalyst");
+// ── CTL-989: openDetail is now a CLIENT-SIDE router navigate ──────────────────
+describe("detailNavigateOptions — the typed router navigate target (CTL-989)", () => {
+  it("targets /ticket/$id with the clicked id as a route param", () => {
+    const opts = detailNavigateOptions("ticket", "CTL-845", {
+      ids: ["CTL-1", "CTL-845", "CTL-9"],
+      lens: "phase",
+      col: "Implement",
+      from: "board",
+    });
+    expect(opts.to).toBe("/ticket/$id");
+    expect((opts.params as { id: string }).id).toBe("CTL-845");
   });
 
-  it("drops a snapshot older than the max age (a stale session never yanks scroll)", () => {
-    const parsed = parseListContext(JSON.stringify(base), base.savedAt + LIST_CONTEXT_MAX_AGE_MS + 1);
-    expect(parsed).toBeNull();
+  it("targets /worker/$id for a worker card (ids carry colons, the router encodes)", () => {
+    const opts = detailNavigateOptions("worker", "CTL-845:2", { ids: ["CTL-845:2"] });
+    expect(opts.to).toBe("/worker/$id");
+    expect((opts.params as { id: string }).id).toBe("CTL-845:2");
   });
 
-  it("returns null on a malformed blob rather than throwing", () => {
-    expect(parseListContext("{not json", 1_000)).toBeNull();
-    expect(parseListContext(JSON.stringify({ ids: "nope" }), 1_000)).toBeNull();
-    expect(parseListContext(JSON.stringify({ ...base, kind: "bogus" }), 1_000)).toBeNull();
-    expect(parseListContext(JSON.stringify({ ...base, focusId: 7 }), 1_000)).toBeNull();
+  it("carries from/lens/col + the clicked cursor index, preserving the inherited ?scope", () => {
+    const opts = detailNavigateOptions("ticket", "CTL-9", {
+      ids: ["CTL-1", "CTL-9", "CTL-3"],
+      lens: "linear",
+      col: "Research",
+      from: "board",
+    });
+    const search = (opts.search as (prev: Record<string, unknown>) => Record<string, unknown>)({
+      scope: "catalyst",
+    });
+    expect(search).toEqual({
+      scope: "catalyst", // the inherited repo scope survives the merge
+      from: "board",
+      lens: "linear",
+      col: "Research",
+      cursor: 1, // index of CTL-9 in ids
+    });
   });
 
-  it("repairs a missing scroll to {0,0} (defensive, never throws)", () => {
-    const { scroll: _omit, ...noScroll } = base;
-    const parsed = parseListContext(JSON.stringify(noScroll), 1_000);
-    expect(parsed?.scroll).toEqual({ top: 0, left: 0 });
+  it("omits the cursor when the clicked id is not in the on-screen list", () => {
+    const opts = detailNavigateOptions("ticket", "CTL-X", { ids: ["CTL-1", "CTL-2"], from: "board" });
+    const search = (opts.search as (prev: Record<string, unknown>) => Record<string, unknown>)({});
+    expect(search).toEqual({ from: "board" });
+    expect("cursor" in search).toBe(false);
   });
 
-  it("preserves a horizontal-only offset (left set, top 0) — the Validate-column case", () => {
-    const parsed = parseListContext(JSON.stringify({ ...base, scroll: { top: 0, left: 2200 } }), 1_000);
-    expect(parsed?.scroll).toEqual({ top: 0, left: 2200 });
-  });
-
-  it("clamps a bad cursor to 0 rather than carrying an out-of-range index", () => {
-    const parsed = parseListContext(JSON.stringify({ ...base, cursor: -4 }), 1_000);
-    expect(parsed?.cursor).toBe(0);
-  });
-
-  // ── CTL-971: surface + scope robustness ──────────────────────────────────────
-  it("CTL-971: an older snapshot with NO surface derives it from kind (ticket→board)", () => {
-    const { surface: _drop, ...noSurface } = base;
-    const parsed = parseListContext(JSON.stringify(noSurface), 1_000);
-    expect(parsed?.surface).toBe("board");
-  });
-
-  it("CTL-971: an older WORKER snapshot with no surface derives workers", () => {
-    const { surface: _drop, ...noSurface } = base;
-    const parsed = parseListContext(
-      JSON.stringify({ ...noSurface, kind: "worker" }),
-      1_000,
-    );
-    expect(parsed?.surface).toBe("workers");
-  });
-
-  it("CTL-971: a bogus surface value falls back to the kind-derived default", () => {
-    const parsed = parseListContext(JSON.stringify({ ...base, surface: "nope" }), 1_000);
-    expect(parsed?.surface).toBe("board");
-  });
-
-  it("CTL-971: a missing/empty scope falls back to the 'all' sentinel (never a wrong scope)", () => {
-    const { scope: _drop, ...noScope } = base;
-    expect(parseListContext(JSON.stringify(noScope), 1_000)?.scope).toBe("all");
-    expect(parseListContext(JSON.stringify({ ...base, scope: "" }), 1_000)?.scope).toBe("all");
-    expect(parseListContext(JSON.stringify({ ...base, scope: 7 }), 1_000)?.scope).toBe("all");
-  });
-
-  it("CTL-971: a real repo-key scope is preserved verbatim", () => {
-    expect(parseListContext(JSON.stringify({ ...base, scope: "adva" }), 1_000)?.scope).toBe("adva");
+  it("defaults `from` to board when the caller omits it", () => {
+    const opts = detailNavigateOptions("ticket", "T", { ids: ["T"] });
+    const search = (opts.search as (prev: Record<string, unknown>) => Record<string, unknown>)({});
+    expect(search.from).toBe("board");
   });
 });
 
-describe("kanban card wiring (static source, CTL-951)", () => {
+describe("openDetail invokes the supplied navigate (CTL-989 — client-side, no reload)", () => {
+  it("calls navigate with the detailNavigateOptions for the click", () => {
+    const calls: unknown[] = [];
+    const navigate = (opts: unknown) => calls.push(opts);
+    openDetail(navigate as never, "ticket", "CTL-845", {
+      ids: ["CTL-845"],
+      lens: "phase",
+      col: "Implement",
+    });
+    expect(calls.length).toBe(1);
+    const opts = calls[0] as { to: string; params: { id: string } };
+    expect(opts.to).toBe("/ticket/$id");
+    expect(opts.params.id).toBe("CTL-845");
+  });
+});
+
+describe("the sessionStorage list-context bridge is fully retired (CTL-989)", () => {
+  it("detail-nav.ts no longer exports the sessionStorage snapshot helpers", () => {
+    for (const sym of [
+      "writeListContext",
+      "readListContext",
+      "parseListContext",
+      "clearListContext",
+      "LIST_CONTEXT_STORAGE_KEY",
+      "ListContextSnapshot",
+    ]) {
+      expect(detailNavSrc).not.toContain(`export function ${sym}`);
+      expect(detailNavSrc).not.toContain(`export const ${sym}`);
+      expect(detailNavSrc).not.toContain(`export interface ${sym}`);
+    }
+  });
+
+  it("hardNavigate (window.location.assign) is gone — navigation is client-side", () => {
+    expect(detailNavSrc).not.toContain("hardNavigate");
+    expect(detailNavSrc).not.toContain("window.location.assign");
+  });
+});
+
+describe("kanban card wiring (static source, CTL-951 + CTL-989)", () => {
   it("ticket + worker cards open the detail page via the shared openDetail seam", () => {
-    // The plain-click handler routes through the Board's `onOpen` (which calls
-    // `openDetail`) — NOT a drawer select. Both card kinds use it.
     expect(boardSrc).toContain("openDetail");
     expect(boardSrc).toContain('onOpen?.("ticket", t.id');
     expect(boardSrc).toContain('onOpen?.("worker", w.name');
+  });
+
+  it("CTL-989: the onOpen seam is a CLIENT-SIDE router navigate (no reload)", () => {
+    // The Board holds useNavigate() and passes it into openDetail; there is no
+    // sessionStorage scroll snapshot and no window.location.assign anymore.
+    expect(boardSrc).toContain("const navigate = useNavigate()");
+    expect(boardSrc).toContain("openDetail(navigate,");
+    expect(boardSrc).not.toContain("hardNavigate");
+    expect(boardSrc).not.toContain("writeListContext");
   });
 
   it("cmd/ctrl-click still opens the page in a new tab (the modified-click gesture)", () => {
@@ -233,23 +251,16 @@ describe("kanban card wiring (static source, CTL-951)", () => {
     expect(auxCount).toBeGreaterThanOrEqual(2);
   });
 
-  it("the originating card is stamped with data-card-id for the restore focus", () => {
+  it("the originating card is stamped with data-card-id (re-focus + accessibility)", () => {
     expect(boardSrc).toContain("data-card-id={t.id}");
     expect(boardSrc).toContain("data-card-id={w.name}");
   });
+});
 
-  it("CTL-971: the onOpen seam captures BOTH scroll axes off the live scroller", () => {
-    // The Board reads scrollTop AND scrollLeft (CTL-950 single both-axes scroller)
-    // off the resolved `.cat-scroll` element, not the never-scrolling flex wrapper.
-    expect(boardSrc).toContain("resolveScrollEl(scrollRef.current)");
-    expect(boardSrc).toContain("top: el.scrollTop, left: el.scrollLeft");
-  });
-
-  it("CTL-971: the onOpen seam stamps the SURFACE + repo SCOPE into the snapshot", () => {
-    // Without the surface the shell reseeds the landing-pref Inbox and the board
-    // never mounts; without the scope the restore can't reseat scope authoritatively.
-    expect(boardSrc).toContain('surface: view === "workers" ? "workers" : "board"');
-    expect(boardSrc).toContain("scope: repo,");
+describe("board scroll restoration is native (CTL-989)", () => {
+  it("the board scroller registers with TanStack Router scroll restoration", () => {
+    const swimlaneSrc = readFileSync(join(HERE, "Swimlane.tsx"), "utf8");
+    expect(swimlaneSrc).toContain('data-scroll-restoration-id="board-scroll"');
   });
 });
 
@@ -334,48 +345,48 @@ describe("pager order == board order (CTL-951 deliverable b — the shared compa
   });
 });
 
-describe("Shell Esc-restore wiring (static source, CTL-951 deliverable c)", () => {
+describe("Shell Esc-restore wiring (static source, CTL-989 — client-side back)", () => {
   const shellSrc = readFileSync(join(HERE, "Shell.tsx"), "utf8");
-  it("Esc / breadcrumb-root returns to the board via a full-document navigation", () => {
-    // A router push can't cross from the board.html detail entry back to the
-    // index.html shell board — only a full-doc nav does (the restore reads
-    // sessionStorage on that load).
-    expect(shellSrc).toContain('hardNavigate("/")');
+  it("Esc / breadcrumb-root returns to the board via a CLIENT-SIDE router navigation", () => {
+    // No full-document hardNavigate anymore — the Board lives in the same router
+    // tree, so goRoot prefers history.back() (replays scroll restoration) and
+    // falls back to a forward navigate for a cold deep-link.
+    expect(shellSrc).not.toContain("hardNavigate");
+    expect(shellSrc).toContain("router.history.back()");
+    expect(shellSrc).toContain("useCanGoBack");
   });
 
-  it("CTL-971: goRoot (the single return target) is wired to BOTH Esc and the breadcrumb", () => {
-    // The breadcrumb root button calls onRoot={goRoot}; the layered-Escape handler
-    // falls through to goRoot() once no overlay is open. Both reach the same full-
-    // doc nav, so all THREE paths (Esc, breadcrumb, browser-back via the assign()
-    // history entry) funnel through the shell-mount restore.
+  it("goRoot is the single return target wired to BOTH Esc and the breadcrumb", () => {
     expect(shellSrc).toContain("onRoot={goRoot}");
-    expect(shellSrc).toContain("const goRoot = useCallback(() => hardNavigate");
+    expect(shellSrc).toContain("const goRoot = useCallback(");
     // The Escape handler ends at goRoot() after exhausting the overlay layers.
     expect(shellSrc).toMatch(/onEscape[\s\S]*goRoot\(\)/);
   });
 });
 
-describe("CTL-971: shell reseats SURFACE + SCOPE on return (static source)", () => {
+// CTL-989 supersedes the CTL-971 surface-restore reseat. The board surface is
+// now a REAL URL path (/board), so browser Back / refresh reconstruct the
+// surface natively from the URL. AppShell DERIVES the active surface from the
+// route (route-surface.ts), and the useSurface() hook reads the router state —
+// there is no SurfaceContext.setSurface and no sessionStorage surface-reseat hack.
+describe("CTL-989: shell derives SURFACE from the route (static source)", () => {
   const appShellSrc = readFileSync(join(HERE, "..", "components", "app-shell.tsx"), "utf8");
-  const surfaceRestoreSrc = readFileSync(
-    join(HERE, "..", "hooks", "use-surface-restore.ts"),
-    "utf8",
-  );
 
-  it("AppShell invokes useSurfaceRestore with a surface setter + the scope setter", () => {
-    // This is the FIX for the dominant bug: the board surface is NOT in the URL, so a
-    // full-doc nav back to `/` reseeds the landing-pref Inbox. The shell-mount restore
-    // reseats the captured surface so the board actually mounts (and its own
-    // useBoardRestore can apply the scroll).
-    expect(appShellSrc).toContain("useSurfaceRestore(restoreSurface, setRepoScope)");
-    // Reseating a surface ALSO leaves Settings (mirrors the g-chord behavior).
-    expect(appShellSrc).toContain("setSettingsOpen(false)");
+  it("AppShell derives the active surface from the route, not a surface-restore reseat", () => {
+    expect(appShellSrc).toContain("pathnameToSurface");
+    expect(appShellSrc).toContain("useRouterState");
+    expect(appShellSrc).toContain("useNavigate");
+    // The legacy surface-restore reseat is no longer wired into the shell.
+    expect(appShellSrc).not.toContain("useSurfaceRestore(");
+    // The retired hook files are gone entirely.
+    expect(existsSync(join(HERE, "..", "hooks", "use-surface-restore.ts"))).toBe(false);
+    expect(existsSync(join(HERE, "..", "hooks", "use-board-restore.ts"))).toBe(false);
   });
 
-  it("useSurfaceRestore PEEKS the snapshot (does not clear it — the board consumes it)", () => {
-    // It must NOT clear: the board-local useBoardRestore clears the snapshot after
-    // applying scroll + focus, so it must still be present when the board mounts.
-    expect(surfaceRestoreSrc).toContain("readListContext()");
-    expect(surfaceRestoreSrc).not.toContain("clearListContext");
+  it("the SurfaceContext.setSurface mechanism is retired (useSurface reads the route)", () => {
+    const surfaceSrc = readFileSync(join(HERE, "..", "lib", "surface.ts"), "utf8");
+    expect(surfaceSrc).not.toContain("setSurface");
+    expect(surfaceSrc).not.toContain("SurfaceContext");
+    expect(surfaceSrc).toContain("useRouterState");
   });
 });

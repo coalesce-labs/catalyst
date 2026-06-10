@@ -78,16 +78,19 @@ describe("SSE server", () => {
     expect(body).not.toContain("board-root");
   });
 
-  // CTL-892 / SHELL2: the standalone board survives as a legacy/fallback entry at
-  // /board (it still owns the FND deep-link router until that migrates into the
-  // shell). It must keep its own #board-root mount point.
-  it("should serve the standalone board (board.html) at /board", async () => {
+  // CTL-989: the standalone board.html bundle is retired. /board is now a normal
+  // surface path of the ONE unified router (index.html → main.tsx → AppShell
+  // layout + the Tickets surface route), so it serves the app shell (id="root"),
+  // NOT the old shell-less #board-root page.
+  it("should serve the unified app shell (index.html) at /board", async () => {
     const res = await fetch(`${baseUrl}/board`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body.toLowerCase()).toContain("<!doctype html");
-    expect(body).toContain("board-root");
+    expect(body).toContain('id="root"');
+    // The retired board bundle's standalone mount point is gone.
+    expect(body).not.toContain("board-root");
   });
 
   // CTL-730: the legacy orchestrator dashboard moves to /legacy.
@@ -812,9 +815,12 @@ describe("React UI legacy dashboard (/legacy)", () => {
   it("serves built CSS asset", async () => {
     const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
-    // The entry's stylesheet is emitted under the `app-` chunk (the bundled CSS
-    // chunk name), or `index-` on a legacy single-entry build. (CTL-754 rebuild.)
-    const match = html.match(/href="(\/assets\/(?:app|index)-[^"]+\.css)"/);
+    // The entry's stylesheet is emitted under the entry-keyed CSS chunk. CTL-989
+    // unified to a SINGLE entry keyed `main`, so the stylesheet is `main-<hash>.css`
+    // (matching the `main-<hash>.js` entry chunk). Accept the historical `app-`
+    // (multi-entry bundled CSS) and `index-` (legacy single-entry) prefixes too so
+    // an older build artifact doesn't re-break this. (CTL-754 / CTL-989 rebuild.)
+    const match = html.match(/href="(\/assets\/(?:main|app|index)-[^"]+\.css)"/);
     expect(match).toBeTruthy();
     if (match) {
       const cssRes = await fetch(`${baseUrl}${match[1]}`);

@@ -6,9 +6,14 @@
 // keeping it free of React makes the keyboard/IA contract unit-testable without a
 // DOM (the same pattern board-logic.ts / route-search.ts follow).
 //
-// Surface switching itself is consumed from the FND routing/store stream — this
-// module only declares the contract the shell binds to; it does NOT own routing.
-import { createContext, useContext } from "react";
+// CTL-989 — the active surface is now DERIVED from the URL (the router is the
+// source of truth for location). `useSurface()` reads `location.pathname` via
+// TanStack Router state and maps it to a surface; there is no React surface
+// state and no surface-mutating context method — nav goes through
+// router.navigate at the call site. The pure pathname↔surface map lives in
+// route-surface.ts.
+import { useRouterState } from "@tanstack/react-router";
+import { pathnameToSurface, SETTINGS_PATH } from "./route-surface";
 
 /** The top-level surfaces the shell can render in SidebarInset.
  *  OBS-5: the five OBSERVE analytics surfaces join the four OPERATE surfaces.
@@ -110,19 +115,39 @@ export function isTypingTarget(
   );
 }
 
-interface SurfaceContextValue {
+/**
+ * The route-derived shell location (CTL-989). The old surface-mutating + settings
+ * context methods are GONE — navigation is `router.navigate` at the call site.
+ * The shape keeps `surface` (the nav-highlight surface) + `settingsOpen` (the
+ * Settings item active flag) so the sidebar's existing `const { surface,
+ * settingsOpen } = useSurface()` destructure keeps compiling.
+ */
+export interface ShellLocation {
+  /** The nav-highlight surface. Settings + detail pages resolve to an OPERATE
+   *  surface here so the left nav keeps a sensible highlight (settingsOpen drives
+   *  the Settings item's own active state separately). */
   surface: Surface;
-  setSurface: (s: Surface) => void;
-  /** Whether the Settings surface is currently shown (CTL-911 / SURF3). */
+  /** Whether the Settings route (`/settings`) is the current location. */
   settingsOpen: boolean;
-  /** Open the Settings surface (the footer Settings nav item calls this). */
-  openSettings: () => void;
 }
 
-export const SurfaceContext = createContext<SurfaceContextValue | null>(null);
-
-export function useSurface(): SurfaceContextValue {
-  const ctx = useContext(SurfaceContext);
-  if (!ctx) throw new Error("useSurface must be used within an AppShell.");
-  return ctx;
+/**
+ * Derive the active shell location from the URL. The router is the source of
+ * truth: `pathnameToSurface` maps `location.pathname` (+ the `?from` search for
+ * detail pages) to a surface or "settings". Settings resolves the nav-highlight
+ * `surface` to the board (it highlights nothing of the four OPERATE items) while
+ * `settingsOpen` separately lights the footer Settings item.
+ */
+export function useSurface(): ShellLocation {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const from = useRouterState({
+    select: (s) => {
+      const search = s.location.search as { from?: unknown };
+      return typeof search.from === "string" ? search.from : undefined;
+    },
+  });
+  const derived = pathnameToSurface(pathname, from ? { from } : undefined);
+  const settingsOpen = pathname === SETTINGS_PATH;
+  const surface: Surface = derived === "settings" ? "board" : derived;
+  return { surface, settingsOpen };
 }

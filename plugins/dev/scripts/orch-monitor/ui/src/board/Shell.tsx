@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useAtom, useSetAtom } from "jotai";
-import { useNavigate } from "@tanstack/react-router";
+import { useCanGoBack, useNavigate, useRouter } from "@tanstack/react-router";
 import {
   breadcrumbText,
   resolveBreadcrumb,
@@ -39,7 +39,6 @@ import {
   recordRecentAtom,
 } from "./nav-store";
 import type { DetailFrom, DetailLens } from "./route-search";
-import { hardNavigate } from "./detail-nav";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
 
 // ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
@@ -348,6 +347,8 @@ export function Shell({
   onPalette,
 }: ShellProps) {
   const navigate = useNavigate();
+  const router = useRouter();
+  const canGoBack = useCanGoBack();
   const [listContext, setListContext] = useAtom(listContextAtom);
   const recordRecent = useSetAtom(recordRecentAtom);
   // ── overlay open-state (CTL-916 / DETAIL5): the ⌘K palette + the `?` cheatsheet
@@ -403,14 +404,22 @@ export function Shell({
 
   const goPrev = useCallback(() => walk(pager.prevId), [walk, pager.prevId]);
   const goNext = useCallback(() => walk(pager.nextId), [walk, pager.nextId]);
-  // CTL-951: Esc / breadcrumb-root return to the board with a FULL-document
-  // navigation to `/` (NOT a router push). `/` is the canonical shell board
-  // (index.html); the detail routes live in board.html, so only a full-doc nav
-  // crosses back to the shell where the operator started. On that load the board's
-  // `useBoardRestore` reads the sessionStorage snapshot `openDetail` stashed and
-  // re-applies the scroll offset + originating-card focus — the board returns to
-  // the EXACT state it was left in (display-options ride their own persisted atoms).
-  const goRoot = useCallback(() => hardNavigate("/"), []);
+  // CTL-989: Esc / breadcrumb-root return to the originating list with a CLIENT-
+  // SIDE router navigation (NO full-document reload — the Board lives in the same
+  // router tree now). Prefer `history.back()` so the prior history entry is reused
+  // and TanStack scroll restoration replays the board scroller's exact offset; if
+  // there is no back entry (a cold deep-link opened directly into the detail page),
+  // navigate forward to the originating surface route (Workers vs the Tickets
+  // board, derived from `?from`). Display-options ride their own persisted atoms.
+  const goRoot = useCallback(() => {
+    if (canGoBack) {
+      router.history.back();
+      return;
+    }
+    // Cold deep-link (no back entry): forward to the originating surface route.
+    // A worker page returns to /workers; a ticket page to the Tickets board.
+    void navigate({ to: kind === "worker" ? "/workers" : "/board" });
+  }, [canGoBack, router, navigate, kind]);
 
   // ── ⌘K palette toggle (CTL-916 / DETAIL5). The hook reaches `onPalette` even
   //    while an input is focused (key-nav.ts §1). A caller-supplied `onPalette`
@@ -466,11 +475,12 @@ export function Shell({
   const footerContext = breadcrumbText(breadcrumbCtx);
 
   return (
-    // CTL-949: `minHeight: "100vh"` is the viewport-fill safety net for deep-links
-    // (where the parent height chain may not be 100%). `height: "100%"` fills the
-    // container when the chain IS wired (board.html establishes html/body/#board-root
-    // at 100%); the two rules together mean the shell always fills at least the
-    // full viewport without capping shorter-than-viewport content.
+    // CTL-949 / CTL-989: `minHeight: "100vh"` is the viewport-fill safety net for
+    // deep-links (where the parent height chain may not be 100%). `height: "100%"`
+    // fills the container when the chain IS wired — the detail Shell now renders
+    // inside AppShell's <Outlet/> (a flex-col content slot), so the height chain is
+    // the AppShell inset. The two rules together mean the shell always fills at
+    // least the full viewport without capping shorter-than-viewport content.
     <div
       data-detail-shell={kind}
       style={{

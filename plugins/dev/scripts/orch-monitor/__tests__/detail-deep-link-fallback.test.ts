@@ -1,19 +1,22 @@
-// detail-deep-link-fallback.test.ts — CTL-942 acceptance guards.
+// detail-deep-link-fallback.test.ts — CTL-942 + CTL-989 acceptance guards.
 //
-// The /ticket/$id + /worker/$id detail routes live in the TanStack router
-// mounted by the BOARD entry (board.html → src/board/main.tsx → AppRouter);
-// index.html's shell App mounts no router. Before CTL-942, server.ts served
-// html ONLY at exactly "/", "/board", "/legacy" and "/history" — a hard
-// navigation to /ticket/CTL-845 404'd, making the merged DETAIL1-7 pages
-// unreachable. These tests pin the SPA fallback: deep-link GETs serve
-// board.html (the entry that carries the router) and nothing else regresses.
+// CTL-989 unifies the two SPA bundles into ONE TanStack Router mounted from
+// index.html. EVERY app route — the flat surface paths (/board, /workers,
+// /queue, the OBSERVE surfaces, /settings) AND the detail/dep-graph deep links
+// (/ticket/$id, /worker/$id, /dep-graph) — is now served by that single entry.
+// A hard navigation / refresh / shared link to any of them must serve
+// index.html (the router boots, reads the URL, lands on the right screen).
+// These tests pin BOTH predicates (isDetailDeepLinkPath, the tight detail-only
+// matcher kept for back-compat; isAppRoute, the full SPA-fallback matcher) and
+// the served fallback (index.html for every app path; API/events/assets stay
+// excluded).
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { createServer, isDetailDeepLinkPath } from "../server";
+import { createServer, isDetailDeepLinkPath, isAppRoute } from "../server";
 
-// ── Pure predicate ───────────────────────────────────────────────────────────
+// ── Pure predicate: isDetailDeepLinkPath (the tight detail-only matcher) ──────
 describe("isDetailDeepLinkPath (CTL-942)", () => {
   it("matches exactly one non-empty segment under /ticket and /worker", () => {
     expect(isDetailDeepLinkPath("/ticket/CTL-845")).toBe(true);
@@ -35,17 +38,18 @@ describe("isDetailDeepLinkPath (CTL-942)", () => {
     expect(isDetailDeepLinkPath("/worker/source.map")).toBe(false);
   });
 
-  it("never matches API, event, or other html-entry paths", () => {
+  it("does not match the flat surface paths (those are isAppRoute's job)", () => {
+    // isDetailDeepLinkPath stays the TIGHT detail-only matcher; the surface
+    // paths are matched by isAppRoute, not this predicate.
     expect(isDetailDeepLinkPath("/")).toBe(false);
     expect(isDetailDeepLinkPath("/board")).toBe(false);
-    expect(isDetailDeepLinkPath("/legacy")).toBe(false);
-    expect(isDetailDeepLinkPath("/history")).toBe(false);
+    expect(isDetailDeepLinkPath("/telemetry")).toBe(false);
     expect(isDetailDeepLinkPath("/api/ticket/CTL-845")).toBe(false);
     expect(isDetailDeepLinkPath("/events")).toBe(false);
     expect(isDetailDeepLinkPath("/tickets/CTL-845")).toBe(false);
   });
 
-  // CTL-959: /dep-graph is a board-entry route (same AppRouter as /ticket, /worker)
+  // CTL-959: /dep-graph is a deep-linkable SPA route.
   it("matches /dep-graph for hard-nav SPA fallback (CTL-959)", () => {
     expect(isDetailDeepLinkPath("/dep-graph")).toBe(true);
   });
@@ -56,13 +60,55 @@ describe("isDetailDeepLinkPath (CTL-942)", () => {
   });
 });
 
+// ── Pure predicate: isAppRoute (the unified SPA-fallback matcher, CTL-989) ─────
+describe("isAppRoute (CTL-989)", () => {
+  it("matches the root + every flat surface path", () => {
+    for (const p of [
+      "/",
+      "/index.html",
+      "/board",
+      "/workers",
+      "/queue",
+      "/telemetry",
+      "/utilization",
+      "/finops",
+      "/fleetops",
+      "/devops",
+      "/settings",
+    ]) {
+      expect(isAppRoute(p)).toBe(true);
+    }
+  });
+
+  it("matches the detail + dep-graph deep links", () => {
+    expect(isAppRoute("/ticket/CTL-845")).toBe(true);
+    expect(isAppRoute("/worker/CTL-845:2")).toBe(true);
+    expect(isAppRoute("/dep-graph")).toBe(true);
+  });
+
+  it("never matches API, event, or asset paths", () => {
+    for (const p of [
+      "/api/board",
+      "/api/ticket/CTL-845",
+      "/events",
+      "/public/favicon.svg",
+      "/assets/main-abc.js",
+      "/mockups/x.png",
+      "/ticket/foo.js",
+      "/board/sub",
+      "/dep-graph/",
+    ]) {
+      expect(isAppRoute(p)).toBe(false);
+    }
+  });
+});
+
 // ── Served fallback (integration through createServer) ──────────────────────
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
 let tmpDir: string;
 
-const BOARD_HTML = "<!doctype html><title>board entry</title>";
-const INDEX_HTML = "<!doctype html><title>shell entry</title>";
+const INDEX_HTML = "<!doctype html><title>app entry</title>";
 const HISTORY_HTML = "<!doctype html><title>history entry</title>";
 
 beforeAll(() => {
@@ -71,7 +117,8 @@ beforeAll(() => {
   const publicDir = join(tmpDir, "public");
   mkdirSync(wtDir, { recursive: true });
   mkdirSync(publicDir, { recursive: true });
-  writeFileSync(join(publicDir, "board.html"), BOARD_HTML);
+  // CTL-989: board.html is retired — the unified router lives in index.html, so
+  // the SPA fallback serves index.html for every app route.
   writeFileSync(join(publicDir, "index.html"), INDEX_HTML);
   writeFileSync(join(publicDir, "history.html"), HISTORY_HTML);
 
@@ -96,20 +143,39 @@ afterAll(() => {
   }
 });
 
-describe("GET /ticket/$id and /worker/$id SPA fallback (CTL-942)", () => {
-  it("serves board.html (the router-carrying entry) for a ticket deep link", async () => {
+describe("GET app-route SPA fallback serves index.html (CTL-989)", () => {
+  it("serves index.html for a ticket deep link", async () => {
     const res = await fetch(`${baseUrl}/ticket/CTL-845`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(await res.text()).toBe(BOARD_HTML);
+    expect(await res.text()).toBe(INDEX_HTML);
   });
 
-  it("serves board.html for a worker deep link (colon-bearing run id)", async () => {
+  it("serves index.html for a worker deep link (colon-bearing run id)", async () => {
     for (const path of ["/worker/CTL-845:2", "/worker/CTL-845%3A2"]) {
       const res = await fetch(`${baseUrl}${path}`);
       expect(res.status).toBe(200);
       expect(res.headers.get("content-type")).toContain("text/html");
-      expect(await res.text()).toBe(BOARD_HTML);
+      expect(await res.text()).toBe(INDEX_HTML);
+    }
+  });
+
+  it("serves index.html for every flat surface path", async () => {
+    for (const path of [
+      "/board",
+      "/workers",
+      "/queue",
+      "/telemetry",
+      "/utilization",
+      "/finops",
+      "/fleetops",
+      "/devops",
+      "/settings",
+    ]) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      expect(await res.text()).toBe(INDEX_HTML);
     }
   });
 
@@ -120,15 +186,14 @@ describe("GET /ticket/$id and /worker/$id SPA fallback (CTL-942)", () => {
     }
   });
 
-  it("only answers GET — a POST to a deep-link path is not the SPA entry", async () => {
+  it("only answers GET — a POST to an app path is not the SPA entry", async () => {
     const res = await fetch(`${baseUrl}/ticket/CTL-845`, { method: "POST" });
-    expect(await res.text()).not.toBe(BOARD_HTML);
+    expect(await res.text()).not.toBe(INDEX_HTML);
   });
 
-  it("does not regress the existing html entries (/, /board, /legacy, /history)", async () => {
+  it("does not regress / and /legacy (index.html) or /history", async () => {
     const cases: Array<[string, string]> = [
       ["/", INDEX_HTML],
-      ["/board", BOARD_HTML],
       ["/legacy", INDEX_HTML],
       ["/history", HISTORY_HTML],
     ];
@@ -141,16 +206,16 @@ describe("GET /ticket/$id and /worker/$id SPA fallback (CTL-942)", () => {
   });
 });
 
-// CTL-959: /dep-graph SPA fallback — hard navigation must serve board.html
-describe("GET /dep-graph SPA fallback (CTL-959)", () => {
-  it("serves board.html for a hard navigation to /dep-graph", async () => {
+// CTL-959 + CTL-989: /dep-graph SPA fallback — hard navigation serves index.html
+describe("GET /dep-graph SPA fallback (CTL-959 / CTL-989)", () => {
+  it("serves index.html for a hard navigation to /dep-graph", async () => {
     const res = await fetch(`${baseUrl}/dep-graph`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    expect(await res.text()).toBe(BOARD_HTML);
+    expect(await res.text()).toBe(INDEX_HTML);
   });
 
-  it("does not serve board.html for /dep-graph/ or /dep-graph/sub", async () => {
+  it("does not serve html for /dep-graph/ or /dep-graph/sub", async () => {
     const trailing = await fetch(`${baseUrl}/dep-graph/`);
     expect(trailing.status).toBe(404);
     const nested = await fetch(`${baseUrl}/dep-graph/sub`);

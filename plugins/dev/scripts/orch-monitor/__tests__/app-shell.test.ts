@@ -22,7 +22,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
 const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
 
-const appSrc = read("App.tsx");
+// CTL-989: App.tsx is retired — the app entry is now main.tsx (mounts the ONE
+// unified router) + app-router.tsx (the rootRoute renders <AppShell><Outlet/>).
+// The SHELL1 "App renders AppShell as the frame" guards now read the router
+// entry, which is where AppShell is mounted.
+const appSrc = read("app-router.tsx") + "\n" + read("main.tsx");
 const shellSrc = read("components/app-shell.tsx");
 const sidebarComponentSrc = read("components/app-sidebar.tsx");
 const sidebarPrimitiveSrc = read("components/ui/sidebar.tsx");

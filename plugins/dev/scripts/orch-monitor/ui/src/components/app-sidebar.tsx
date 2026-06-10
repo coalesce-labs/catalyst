@@ -16,8 +16,14 @@ import {
   WalletIcon,
 } from "lucide-react";
 
+import { useNavigate } from "@tanstack/react-router";
+
 import { cn } from "@/lib/utils";
 import { useSurface, type Surface } from "@/lib/surface";
+// CTL-989 — nav WRITES go through router.navigate (URL = source of truth for
+// location). The active surface + Settings-open are READ from the route via
+// useSurface(); scope is written onto the `?scope` typed search param.
+import { surfaceToPath, SETTINGS_PATH } from "@/lib/route-surface";
 import { useTheme } from "@/lib/theme";
 // CTL-945: consume shared context from AppShell — no additional EventSources.
 import { useNavSignalContext } from "@/hooks/use-nav-signal";
@@ -138,8 +144,10 @@ const GROUP_TRIGGER_BASE = cn(
 );
 
 export function AppSidebar() {
-  // CTL-911 / SURF3 — settingsOpen/openSettings drive the footer Settings item.
-  const { surface, setSurface, settingsOpen, openSettings } = useSurface();
+  // CTL-989 — surface + settingsOpen are READ from the route (useSurface derives
+  // them from location.pathname). Nav WRITES go through router.navigate below.
+  const { surface, settingsOpen } = useSurface();
+  const navigate = useNavigate();
   const { setOpenMobile, isMobile } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
   const [observeOpen, setObserveOpen] = useState(false);
@@ -152,7 +160,10 @@ export function AppSidebar() {
   const showNodeFilter = shouldShowNodeFilter(cluster);
 
   // CTL-944 — the active repo scope and per-group open state.
-  const [repoScope, setRepoScope] = useAtom(repoScopeAtom);
+  // CTL-989: repoScope is READ from the atom (a mirror of the `?scope` URL search
+  // param, synced by AppShell). The active-item check compares against it; scope
+  // CHANGES are written onto the URL via navigate({search:{scope}}) in `go`.
+  const [repoScope] = useAtom(repoScopeAtom);
   const [groupsOpen, setGroupsOpen] = useAtom(navGroupsOpenAtom);
 
   // Get repos from the board snapshot for nav group construction.
@@ -180,9 +191,18 @@ export function AppSidebar() {
     if (resolved !== scope) setScope(resolved);
   }, [cluster, scope, setScope]);
 
+  // CTL-989: navigate to the surface's route (client-side; URL = source of truth)
+  // and, when a scope is supplied, write it onto the `?scope` typed search param
+  // (the "all" sentinel clears the param so the canonical URL has no ?scope). When
+  // no scope is supplied the current scope is preserved.
   function go(s: Surface, scopeVal?: string) {
-    setSurface(s);
-    if (scopeVal !== undefined) setRepoScope(scopeVal);
+    void navigate({
+      to: surfaceToPath(s),
+      search: (prev) =>
+        scopeVal !== undefined
+          ? { ...prev, scope: scopeVal === "all" ? undefined : scopeVal }
+          : prev,
+    });
     if (isMobile) setOpenMobile(false);
   }
 
@@ -504,7 +524,8 @@ export function AppSidebar() {
               tooltip="Settings"
               isActive={settingsOpen}
               onClick={() => {
-                openSettings();
+                // CTL-989: Settings is the /settings route, not an inset takeover.
+                void navigate({ to: SETTINGS_PATH, search: (prev) => prev });
                 if (isMobile) setOpenMobile(false);
               }}
             >

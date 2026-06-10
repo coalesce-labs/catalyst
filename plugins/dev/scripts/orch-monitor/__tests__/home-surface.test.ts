@@ -23,7 +23,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
 const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
 
-const appSrc = read("App.tsx");
+// CTL-989: App.tsx is retired — Home is wired into the unified router. The home
+// route ("/") in app-router.tsx mounts HomeSurface inside the AppShell layout;
+// the rich monitor dashboard moved to dashboard-surface.tsx. The App-wiring
+// guards read those two files.
+const appSrc = read("app-router.tsx") + "\n" + read("components/dashboard-surface.tsx");
 const homeSurfaceSrc = read("components/home/home-surface.tsx");
 const inboxRowSrc = read("components/home/inbox-row.tsx");
 const splitSrc = read("components/home/resizable-split.tsx");
@@ -364,17 +368,23 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
   });
 });
 
-// ── Scenario: App wires Home into the shell's "home" surface ──────────────────
-describe("App wiring — Home mounts into the shell home surface (CTL-899)", () => {
-  it("App renders HomeSurface when the active surface is 'home'", () => {
+// ── Scenario: the router wires Home into the shell's home route ───────────────
+describe("Router wiring — Home mounts into the shell home route (CTL-899 / CTL-989)", () => {
+  it("the home route mounts HomeSurface inside the AppShell layout", () => {
+    // CTL-989: Home is the "/" route; AppShell is the rootRoute layout, so
+    // HomeSurface renders inside the layout's <Outlet/>. Route paths are string
+    // LITERALS (TanStack infers the typed route tree from them) — the home route
+    // is `path: "/"` and honors the persisted landing pref via surfaceToPath.
     expect(appSrc).toContain("HomeSurface");
-    expect(appSrc).toContain("useSurface");
-    expect(appSrc).toMatch(/surface === "home"/);
+    expect(appSrc).toContain("AppShell");
+    expect(appSrc).toMatch(/path:\s*"\/"/);
+    expect(appSrc).toContain("surfaceToPath");
   });
 
-  it("keeps the dashboard as the fall-through for the other surfaces (no regression)", () => {
-    // The dashboard body is still present and still mounts the Dashboard.
-    expect(appSrc).toContain("dashboardBody");
+  it("keeps the rich monitor dashboard reachable (no regression)", () => {
+    // CTL-989: the dashboard body moved out of App.tsx into dashboard-surface.tsx
+    // (the /devops route) — it still mounts the Dashboard.
+    expect(appSrc).toContain("DashboardSurface");
     expect(appSrc).toContain("Dashboard");
   });
 
