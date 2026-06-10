@@ -103,6 +103,51 @@ export async function costByTaskType(
   return extractVectorMap(result, "task_type", true);
 }
 
+// OBS-11 (FINOPS P-D): cost grouped by a native Prometheus dimension — `model`
+// (the model mix) or `agent_name` (the closest real "what machinery costs most"
+// signal: workflow-subagent vs general-purpose vs …, design §3.3 #9b). Both are
+// native labels on the cost counter (verified live: 6 model values, 8 agent_name
+// values, all non-zero over 24h/7d). The dimension is WHITELISTED (never
+// interpolated from caller input) so the PromQL can't be an injection vector, and
+// the OBS-9 zero-series filter is applied so the ranked bar never shows the
+// exact-0 dimensions an `increase()` window always carries.
+
+/** The whitelisted P-D grouping dimensions. `model` and `agent_name` are the only
+ *  native cost labels the by-model/by-agent toggle ever groups on — a fixed map so
+ *  the PromQL label is never derived from caller input. */
+export const COST_DIMENSIONS = {
+  model: "model",
+  agent: "agent_name",
+} as const;
+
+export type CostDimensionKey = keyof typeof COST_DIMENSIONS;
+
+/** True when a string is a known P-D dimension key (route input validation). */
+export function isCostDimension(s: string): s is CostDimensionKey {
+  return s === "model" || s === "agent";
+}
+
+/** Cost grouped by a whitelisted native dimension (`model` / `agent_name`),
+ *  descending-ready + zero-filtered. The label is looked up from COST_DIMENSIONS —
+ *  NEVER interpolated from caller input — so it can't inject PromQL. Returns null
+ *  when Prometheus is unavailable; an empty map when the window had no spend on that
+ *  dimension. */
+export async function costByDimension(
+  prom: PrometheusFetcher,
+  dimension: CostDimensionKey,
+  range: string,
+): Promise<Record<string, number> | null> {
+  const r = safeDuration(range, "24h");
+  const label = COST_DIMENSIONS[dimension];
+  const result = await prom.query(
+    `sum by (${label}) (increase(claude_code_cost_usage_USD_total{${label}=~".+"}[${r}]))`,
+  );
+  if (!result) return null;
+  // OBS-9 zero-series filter — drop dimensions with $0 spend in the window so the
+  // ranked P-D bar never renders the exact-0 models/agents.
+  return extractVectorMap(result, label, true);
+}
+
 export async function toolUsageByName(
   loki: LokiFetcher,
   range: string,

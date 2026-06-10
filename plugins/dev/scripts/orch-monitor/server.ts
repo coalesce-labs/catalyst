@@ -196,6 +196,8 @@ import {
 import {
   costByTicket,
   costByTaskType,
+  costByDimension,
+  isCostDimension,
   tokensByType,
   cacheHitRate,
   costRateByModel,
@@ -1894,6 +1896,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "24h";
           const result = await costByTaskType(prom, range);
+          return Response.json({ data: result });
+        }
+
+        // OBS-11 (FINOPS P-D): cost by model / agent. Groups the cost counter by a
+        // WHITELISTED native dimension (`model` or `agent_name` — never interpolated
+        // from input, so no PromQL injection) with the OBS-9 zero-series filter
+        // applied so the ranked bar never shows the exact-0 models/agents an
+        // increase() window carries. `dim` defaults to model; an unknown dim → 400
+        // (honest, never a silently-empty bar). 503 when Prometheus is off.
+        if (url.pathname === "/api/otel/cost-by-dim") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const dim = url.searchParams.get("dim") ?? "model";
+          if (!isCostDimension(dim)) {
+            return Response.json({ error: "unknown dimension" }, { status: 400 });
+          }
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costByDimension(prom, dim, range);
           return Response.json({ data: result });
         }
 

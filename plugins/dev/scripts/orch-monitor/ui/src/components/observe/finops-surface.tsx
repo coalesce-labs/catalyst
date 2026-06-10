@@ -15,7 +15,7 @@
 // NOW. The hero's "today" number always reads /api/otel/cost-today (anchored to
 // local midnight, independent of the picker); the spend-over-time bars + the
 // cache-ROI follow the picker via TIME_RANGE_TO_PROM.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
 import type {
   OtelHealth,
@@ -23,6 +23,9 @@ import type {
   CostSeriesPoint,
   CacheSavings,
   CostAtHour,
+  CostMap,
+  TokenSplit,
+  CostValidationRow,
 } from "@/lib/types";
 import {
   timeRangeAtom,
@@ -35,7 +38,16 @@ import { ChartCard } from "@/components/observe/chart-card";
 import { FinopsHero } from "@/components/observe/finops-hero";
 import { SpendOverTimePanel } from "@/components/observe/spend-over-time-panel";
 import { SpikeDrillStrip } from "@/components/observe/spike-drill-strip";
+import { ExpensiveTicketsTable } from "@/components/observe/expensive-tickets-table";
+import { CostBreakdownBars } from "@/components/observe/cost-breakdown-bars";
+import { TokenDonutPanel } from "@/components/observe/token-donut-panel";
+import { FinopsFooter } from "@/components/observe/finops-footer";
 import { hourLabel, spikeCount } from "@/components/observe/finops-panels";
+import {
+  rankCostMap,
+  hasTokenData,
+  type CostDimension,
+} from "@/components/observe/finops-breakdowns";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 /** The clicked-spike focus: the hour's epoch second + its label + the fetched
@@ -66,6 +78,20 @@ export function FinopsSurface() {
   const [series, setSeries] = useState<CostSeriesPoint[]>([]);
   const [seriesReachable, setSeriesReachable] = useState(true);
   const [cache, setCache] = useState<CacheSavings | null>(null);
+
+  // OBS-11 breakdown panels — each reads an EXISTING /api/otel/* route. The
+  // `*Reachable` flags carry the route-level 503 over the global probe so a panel
+  // degrades to STALE (not a fabricated empty) when Prometheus drops mid-flight.
+  const [cost, setCost] = useState<CostMap>(null);
+  const [costReachable, setCostReachable] = useState(true);
+  const [byStage, setByStage] = useState<CostMap>(null);
+  const [byStageReachable, setByStageReachable] = useState(true);
+  const [byDim, setByDim] = useState<CostMap>(null);
+  const [byDimReachable, setByDimReachable] = useState(true);
+  const [costDim, setCostDim] = useState<CostDimension>("model");
+  const [tokens, setTokens] = useState<TokenSplit | null>(null);
+  const [tokensReachable, setTokensReachable] = useState(true);
+  const [validation, setValidation] = useState<CostValidationRow[] | null>(null);
 
   const [spike, setSpike] = useState<SpikeFocus | null>(null);
 
@@ -136,19 +162,113 @@ export function FinopsSurface() {
       }
     }
 
+    // OBS-11 P-C (expensive tickets) + footer A4 (concentration) both ride this.
+    async function loadCost() {
+      try {
+        const resp = await fetch(`/api/otel/cost?range=${promRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setCostReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: CostMap };
+        setCost(body.data ?? null);
+        setCostReachable(true);
+      } catch {
+        if (alive) setCostReachable(false);
+      }
+    }
+
+    // OBS-11 P-B (cost by pipeline stage) — the OBS-9-routed costByTaskType.
+    async function loadByStage() {
+      try {
+        const resp = await fetch(`/api/otel/cost-by-stage?range=${promRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setByStageReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: CostMap };
+        setByStage(body.data ?? null);
+        setByStageReachable(true);
+      } catch {
+        if (alive) setByStageReachable(false);
+      }
+    }
+
+    // OBS-11 P-E (token type split) — the 4 buckets + cache hit rate.
+    async function loadTokens() {
+      try {
+        const resp = await fetch(`/api/otel/tokens?range=${promRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setTokensReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: TokenSplit };
+        setTokens(body.data);
+        setTokensReachable(true);
+      } catch {
+        if (alive) setTokensReachable(false);
+      }
+    }
+
+    // OBS-11 footer A8 — signal-vs-OTEL drift. Best-effort (footer shows "—").
+    async function loadValidation() {
+      try {
+        const resp = await fetch(`/api/otel/cost-validation?range=${promRange}`);
+        if (!alive) return;
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: CostValidationRow[] | null };
+        setValidation(body.data ?? null);
+      } catch {
+        /* A8 best-effort: the footer shows "—" rather than blocking. */
+      }
+    }
+
     void loadToday();
     void loadSeries();
     void loadCache();
+    void loadCost();
+    void loadByStage();
+    void loadTokens();
+    void loadValidation();
     const id = setInterval(() => {
       void loadToday();
       void loadSeries();
       void loadCache();
+      void loadCost();
+      void loadByStage();
+      void loadTokens();
+      void loadValidation();
     }, refreshIntervalMs(range));
     return () => {
       alive = false;
       clearInterval(id);
     };
   }, [range]);
+
+  // P-D by-model/agent — separate effect so the model⇄agent toggle re-queries
+  // without re-running the whole panel set. Reads /api/otel/cost-by-dim?dim=…
+  useEffect(() => {
+    let alive = true;
+    const promRange = TIME_RANGE_TO_PROM[range];
+    async function loadByDim() {
+      try {
+        const resp = await fetch(
+          `/api/otel/cost-by-dim?dim=${costDim}&range=${promRange}`,
+        );
+        if (!alive) return;
+        if (resp.status === 503) return setByDimReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: CostMap };
+        setByDim(body.data ?? null);
+        setByDimReachable(true);
+      } catch {
+        if (alive) setByDimReachable(false);
+      }
+    }
+    void loadByDim();
+    const id = setInterval(() => void loadByDim(), refreshIntervalMs(range));
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [range, costDim]);
 
   // Spike-click drill: re-query that hour's by-ticket + by-model split (one
   // re-query with the hour window, layout spec §2 P-A).
@@ -187,6 +307,17 @@ export function FinopsSurface() {
         };
 
   const nSpikes = spikeCount(series);
+
+  // hasData gates for the OBS-11 breakdown ChartCards — true only when the
+  // zero-filtered map / token split carries a real row (else the card shows the
+  // honest empty state, never a fabricated bar).
+  const costHasData = useMemo(() => rankCostMap(cost).length > 0, [cost]);
+  const byStageHasData = useMemo(() => rankCostMap(byStage).length > 0, [byStage]);
+  const byDimHasData = useMemo(() => rankCostMap(byDim).length > 0, [byDim]);
+  const tokensHasData = useMemo(
+    () => hasTokenData(tokens?.tokens ?? null),
+    [tokens],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-0 p-5 text-fg">
@@ -256,6 +387,81 @@ export function FinopsSurface() {
           onClose={() => setSpike(null)}
         />
       )}
+
+      {/* OBS-11 BREAKDOWN GRID — two columns below the hero+P-A (layout spec §2).
+          Left = trend/where-it-went bars (by-stage, by-model/agent); right = the
+          default table (P-C) + the proportional token donut (P-E). */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* P-C — expensive tickets table (the default view, Principle 10). */}
+        <ChartCard
+          title="Expensive tickets"
+          dataSource="[prom]"
+          health={promHealth(costReachable)}
+          hasData={costHasData}
+          bodyClassName="min-h-[300px] h-[340px] p-0"
+        >
+          <ExpensiveTicketsTable data={cost} />
+        </ChartCard>
+
+        {/* P-E — token type split (the ONE sanctioned donut, Principle 9 carve-out). */}
+        <ChartCard
+          title="Token type split"
+          dataSource="[prom]"
+          health={promHealth(tokensReachable)}
+          hasData={tokensHasData}
+          bodyClassName="min-h-[200px] h-[340px] p-4"
+        >
+          <TokenDonutPanel
+            tokens={tokens?.tokens ?? null}
+            cacheHitRate={tokens?.cacheHitRate ?? null}
+          />
+        </ChartCard>
+
+        {/* P-B — cost by pipeline stage (ranked bar, NOT a 12-slice pie). */}
+        <ChartCard
+          title="Cost by pipeline stage"
+          dataSource="[prom]"
+          health={promHealth(byStageReachable)}
+          hasData={byStageHasData}
+          bodyClassName="min-h-[220px] h-[280px] p-2"
+        >
+          <CostBreakdownBars data={byStage} labelHeader="stage" />
+        </ChartCard>
+
+        {/* P-D — cost by model / agent (ranked bar + model⇄agent toggle). */}
+        <ChartCard
+          title="Cost by model / agent"
+          dataSource="[prom]"
+          health={promHealth(byDimReachable)}
+          hasData={byDimHasData}
+          bodyClassName="min-h-[220px] h-[280px] p-2"
+          headerExtra={
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={costDim}
+              onValueChange={(v) => v && setCostDim(v as CostDimension)}
+              aria-label="Group cost by"
+            >
+              <ToggleGroupItem value="model" className="h-6 px-2 text-[10px]">
+                model
+              </ToggleGroupItem>
+              <ToggleGroupItem value="agent" className="h-6 px-2 text-[10px]">
+                agent
+              </ToggleGroupItem>
+            </ToggleGroup>
+          }
+        >
+          <CostBreakdownBars
+            data={byDim}
+            labelHeader={costDim === "model" ? "model" : "agent"}
+          />
+        </ChartCard>
+      </div>
+
+      {/* FOOTER strip — A4 concentration · A8 drift · locked $/story-point. */}
+      <FinopsFooter cost={cost} validation={validation} />
     </div>
   );
 }

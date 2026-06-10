@@ -401,6 +401,38 @@ export interface CostAtHour {
   byModel: Record<string, number>;
 }
 
+// ── OBS-11 (FINOPS breakdown panels): wire shapes for the four breakdown routes ─
+// All four read EXISTING /api/otel/* routes — no new server plumbing (the OBS-9
+// zero-series filter already lives at the query layer for /cost and /cost-by-stage).
+//   P-C expensive tickets → /api/otel/cost           (linear_key → USD, zero-filtered)
+//   P-B by-stage          → /api/otel/cost-by-stage  (task_type → USD, zero-filtered)
+//   P-D by-model/agent    → /api/otel/cost           grouped by model / agent_name
+//   P-E token split       → /api/otel/tokens         (the 4 buckets + cacheHitRate)
+//   footer A8 drift       → /api/otel/cost-validation (signal vs OTEL per ticket)
+
+/** A label→USD cost map (the /api/otel/cost and /cost-by-stage payload `data`).
+ *  null when Prometheus is unavailable (the panel's ChartCard degrades). Every
+ *  value is already zero-filtered server-side, but the UI re-filters belt-and-braces. */
+export type CostMap = Record<string, number> | null;
+
+/** The /api/otel/tokens payload `data`: the four token buckets + the cache hit rate.
+ *  `tokens` keys are exactly input / output / cacheRead / cacheCreation (NEVER
+ *  collapsed). null tokens ⇒ Prometheus unavailable; cacheHitRate is 0..1 or null. */
+export interface TokenSplit {
+  tokens: Record<string, number> | null;
+  cacheHitRate: number | null;
+}
+
+/** One /api/otel/cost-validation row: signal-file cost vs OTEL cost for a ticket.
+ *  The footer A8 strip surfaces the worst absolute drift (best-in-class dashboards
+ *  own their measurement error). discrepancy = |signalCost − otelCost|. */
+export interface CostValidationRow {
+  ticket: string;
+  signalCost: number;
+  otelCost: number;
+  discrepancy: number;
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"
