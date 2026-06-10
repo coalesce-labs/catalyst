@@ -596,6 +596,21 @@ const ticketBlockers = (triage) =>
 // ticket has been triaged; the closest thing to a Linear estimate for CTL.
 const ticketScope = (triage) => triage?.estimated_scope || null;
 
+// CTL-954: estimateMethod from triage.json (set by Opus-mode triage pass).
+const ticketEstimateMethod = (triage) => triage?.estimateMethod || null;
+
+// CTL-954: human-readable estimate display string.
+// When we have a numeric estimate AND the method, format it clearly.
+// Falls back to plain number for unknown methods.
+const TSHIRT_LABELS = { 0: "XS", 1: "S", 2: "M", 3: "L", 5: "XL" };
+function deriveEstimateDisplay(estimate, estimateMethod) {
+  if (estimate === null || estimate === undefined) return null;
+  if (estimateMethod === "tShirt") {
+    return TSHIRT_LABELS[estimate] ?? String(estimate);
+  }
+  return String(estimate);
+}
+
 function prFor(prSigs) {
   for (const sig of prSigs) {
     if (sig?.pr?.number) return sig.pr.number;
@@ -869,7 +884,11 @@ export async function assembleBoard() {
       activeState: live?.activeState || null, working: live?.working || false,
       lastActiveMs: live?.lastActiveMs ?? null,
       priority: linfo[id]?.priority ?? 0,
-      estimate: linfo[id]?.estimate ?? null, scope: ticketScope(triage),
+      estimate: linfo[id]?.estimate ?? null,
+      // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
+      estimateMethod: ticketEstimateMethod(triage),
+      estimateDisplay: deriveEstimateDisplay(linfo[id]?.estimate ?? null, ticketEstimateMethod(triage)),
+      scope: ticketScope(triage),
       project: linfo[id]?.project ?? null,
       // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
       // ticket's Linear labels (the scheduler's admission gate writes them).
@@ -949,7 +968,11 @@ export async function assembleBoard() {
         // grouping can read it (CTL-922 / BFF10).
         ...e, rank: i + 1,
         priority: linfo[e.id]?.priority ?? e.priority ?? 0,
-        estimate: linfo[e.id]?.estimate ?? null, scope: ticketScope(triage),
+        estimate: linfo[e.id]?.estimate ?? null,
+        // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
+        estimateMethod: ticketEstimateMethod(triage),
+        estimateDisplay: deriveEstimateDisplay(linfo[e.id]?.estimate ?? null, ticketEstimateMethod(triage)),
+        scope: ticketScope(triage),
         project: linfo[e.id]?.project ?? e.project ?? null,
         // CTL-922 (BFF10): owning host from the durable fence projection (BFF11);
         // a queued ticket has no phase signal, so [] forces the fence fallback.

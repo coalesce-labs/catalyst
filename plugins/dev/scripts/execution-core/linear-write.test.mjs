@@ -731,12 +731,22 @@ describe("applyEstimate", () => {
     expect(r.reason).toBeTruthy();
   });
 
-  test("invalid estimate 4 → applied:false, reason:invalid-estimate, exec not called", () => {
+  // CTL-954: 4 is now valid (exponential scale). Use 11 (between 10 and 13)
+  // as the canonical "not in any scale" test value.
+  test("invalid estimate 11 → applied:false, reason:invalid-estimate, exec not called", () => {
     const calls = [];
     const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec });
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 11, exec });
     expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
     expect(calls).toHaveLength(0);
+  });
+
+  test("estimate 4 (exponential scale, CTL-954) → accepted, applied:true", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec, fetchLabels: () => [] });
+    expect(r.applied).toBe(true);
+    expect(calls[0].args).toContain("4");
   });
 
   test("null estimate → applied:false, reason:invalid-estimate, exec not called", () => {
@@ -755,8 +765,10 @@ describe("applyEstimate", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("all valid estimate values (1,3,5,8,13) are accepted", () => {
-    for (const est of [1, 3, 5, 8, 13]) {
+  // CTL-954: all scale values across fibonacci, tShirt, exponential, linear.
+  test("all valid estimate values across all scales are accepted (CTL-954)", () => {
+    // Union: fibonacci={1,2,3,5,8,13} tShirt={1,2,3,5} exp={1,2,4,8,16,32} lin={1..10}
+    for (const est of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 16, 32]) {
       const calls = [];
       const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
       const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec, fetchLabels: () => [] });

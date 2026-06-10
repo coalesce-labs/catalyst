@@ -312,7 +312,12 @@ runs this skill, it should:
 2. Read the ticket back, refine the classification + scope estimate with model-quality judgement,
    and re-write `triage.json` if anything changed.
 
-**2b. Anchor a numeric estimate against the reference class (CTL-751).** Run:
+**2b. Anchor a numeric estimate against the reference class (CTL-751, CTL-954).**
+
+The goal is ONE numeric estimate written in the team's configured scale (fibonacci / tShirt /
+exponential / linear — whatever `issueEstimation.type` the team has set in Linear).
+
+**Step 1 (preferred): reference-class lookup.** Run:
 
 ```bash
 bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
@@ -321,13 +326,37 @@ bun "${REPO_ROOT}/plugins/pm/scripts/estimate/reference-class-lookup.ts" \
 ```
 
 where `REPO_ROOT` is the repo root (the worktree's checkout path, e.g. the directory containing
-`plugins/`). Parse `reference_class.points` from the JSON output. If the command succeeds and
-yields a points value in `{1, 3, 5, 8, 13}`, re-write `triage.json` adding
-`"estimate": <points>` alongside the existing `estimated_scope` field. If the lookup errors or
-returns no usable points value, leave `triage.json` without an `estimate` field — the coordinator
-then skips the Linear estimate write for this ticket (Q4 design decision: no SCOPE_POINTS
-fallback for the Linear estimate field). The bash body intentionally does **not** write `estimate`
-(CTL-558 guard).
+`plugins/`). Parse `reference_class.points` from the JSON output.
+
+**Step 2 (fallback when Step 1 errors or returns nothing): scope → method mapping.** Fetch the
+team's estimation method with a single GraphQL call:
+
+```bash
+curl -s -X POST https://api.linear.app/graphql \
+  -H "Authorization: ${LINEAR_API_TOKEN:-$LINEAR_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"query($k:String!){teams(filter:{key:{eq:$k}}){nodes{issueEstimation{type allowZero extended}}}}", "variables":{"k":"<TEAM_KEY>"}}' \
+  | jq -r '.data.teams.nodes[0].issueEstimation.type'
+```
+
+Map the bash-body's `estimated_scope` to the method's scale using this table (select the column
+matching the team's `type`):
+
+| scope   | fibonacci | tShirt | exponential | linear |
+|---------|-----------|--------|-------------|--------|
+| xs      | 1         | 0 (XS) | 1           | 1      |
+| small   | 1         | 1 (S)  | 1           | 1      |
+| medium  | 3         | 2 (M)  | 2           | 2      |
+| large   | 5         | 3 (L)  | 4           | 3      |
+| epic    | 8         | 5 (XL) | 8           | 5      |
+
+Write the result to `triage.json` as **both** `"estimate": <points>` AND
+`"estimateMethod": "<type>"` (e.g. `"estimateMethod": "tShirt"`). The scheduler reads
+`estimateMethod` to validate the value against the correct scale without a second network call.
+
+If both Step 1 and Step 2 fail, leave `triage.json` without an `estimate` field — the coordinator
+skips the Linear estimate write for this ticket (fail-open; forward progress is unaffected).
+The bash body intentionally does **not** write `estimate` (CTL-558 guard).
 
 **2c. Identify genuine blockers — semantic second-pass, READ-ONLY (CTL-838).** Catalyst does **not**
 parse or infer dependencies from the description text. The bash body writes an empty `dependencies`
