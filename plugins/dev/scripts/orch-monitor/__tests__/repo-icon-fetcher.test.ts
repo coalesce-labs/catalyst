@@ -1,6 +1,6 @@
 // repo-icon-fetcher.test.ts — unit tests for CTL-961 repo icon path resolver,
 // cache helpers, and repoOwners config parsing.
-import { describe, it, expect, mock, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { mkdirSync, writeFileSync, rmSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";

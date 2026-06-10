@@ -27,7 +27,7 @@
 // so the UI falls through to the manual-override / lucide fallback.
 
 import { execSync } from "child_process";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "fs";
+import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
