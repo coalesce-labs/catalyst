@@ -7836,3 +7836,112 @@ describe("CTL-936: runTick production wiring — intentDb + appendIntentEvent se
     expect(opts.appendIntentEvent == null).toBe(true);
   });
 });
+
+// ── CTL-925: dependency cycle hardening ──
+//
+// Gap 1: eligible (new-work / sweep-2) ring escalation.
+// Gap 2: STEP E transitive cycle write guard.
+// Gap 3: CTL-537 sequencing seam cycle guard.
+describe("CTL-925: dependency cycle hardening", () => {
+  afterEach(() => __resetForTests());
+
+  // Minimal writeStatus spy tracking label and blockedBy writes.
+  function makeWS() {
+    const applied = [];
+    const blockedByWrites = [];
+    return {
+      ws: {
+        applyPhaseStatus: () => ({ applied: true, reason: null }),
+        applyTerminalDone: () => {},
+        applyEstimate: () => ({ applied: true }),
+        applyLabel: (a) => { applied.push(a); return { applied: true }; },
+        removeLabel: () => ({ removed: true }),
+        applyBlockedByRelation: (a) => { blockedByWrites.push(a); return { applied: true }; },
+      },
+      applied,
+      blockedByWrites,
+    };
+  }
+
+  // Eligible ticket fixture: identifier, state "Todo", optional relations.
+  function elig(identifier, rel = [], inv = []) {
+    return {
+      identifier,
+      priority: 2,
+      createdAt: "x",
+      state: { name: "Todo" },
+      relations: { nodes: rel },
+      inverseRelations: { nodes: inv },
+    };
+  }
+  const blocksRel = (id) => ({ type: "blocks", relatedIssue: { identifier: id } });
+  const blocksInv = (id) => ({ type: "blocks", issue: { identifier: id } });
+
+  // ── Gap 1: eligible ring escalation (sweep-2) ──
+
+  test("Gap 1: 2-node eligible ring → both escalated to needs-human, none dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // CTL-1 blocks CTL-2 AND CTL-2 blocks CTL-1 — a ring. Neither has a worker dir.
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-2")]),
+      elig("CTL-2", [blocksRel("CTL-1")], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+    });
+    expect(dispatch.calls).toEqual([]);
+    const nhLabels = applied.filter((l) => l.label === "needs-human");
+    const nhTickets = nhLabels.map((l) => l.ticket).sort();
+    expect(nhTickets).toContain("CTL-1");
+    expect(nhTickets).toContain("CTL-2");
+  });
+
+  test("Gap 1: 3-node eligible ring → all three escalated to needs-human, none dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // A→B→C→A
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-3")]),
+      elig("CTL-2", [blocksRel("CTL-3")], [blocksInv("CTL-1")]),
+      elig("CTL-3", [blocksRel("CTL-1")], [blocksInv("CTL-2")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+    });
+    expect(dispatch.calls).toEqual([]);
+    const nhTickets = applied.filter((l) => l.label === "needs-human").map((l) => l.ticket).sort();
+    expect(nhTickets).toContain("CTL-1");
+    expect(nhTickets).toContain("CTL-2");
+    expect(nhTickets).toContain("CTL-3");
+  });
+
+  test("Gap 1 control: non-cyclic eligible chain dispatches normally, no needs-human", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // CTL-1 blocks CTL-2 (CTL-2 is blocked by CTL-1). CTL-1 is unblocked → dispatched.
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], []),
+      elig("CTL-2", [], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+    });
+    // CTL-1 has no blockers → dispatched; CTL-2 is blocked by CTL-1 → held.
+    expect(dispatch.calls.map((c) => c.ticket)).toContain("CTL-1");
+    expect(applied.filter((l) => l.label === "needs-human")).toHaveLength(0);
+  });
+});

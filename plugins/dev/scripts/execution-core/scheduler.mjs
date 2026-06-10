@@ -3100,6 +3100,26 @@ export function schedulerTick(
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
+  // CTL-925 Gap 1: a ring among ELIGIBLE tickets (not yet triaged-waiting) lands
+  // all members in `blocked`, none in `ready` — computeReadyTickets would
+  // silently skip them. Surface the anomalies here and escalate each cycle
+  // member to needs-human (labelOnce, apply-once), mirroring STEP A.5.
+  // Pure computeReadyTickets stays unchanged.
+  const eligibleGraph = analyzeDependencyGraph(eligible, { blockerStates });
+  if (eligibleGraph.anomalies.length > 0) {
+    const eligibleIds = new Set(eligible.map((t) => t.identifier).filter(Boolean));
+    for (const anomaly of eligibleGraph.anomalies) {
+      for (const member of anomaly.members) {
+        if (eligibleIds.has(member)) {
+          log.warn(
+            { member, members: anomaly.members },
+            "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human",
+          );
+          labelOnce(orchDir, member, "needs-human", writeStatus);
+        }
+      }
+    }
+  }
   // CTL-850: HRW ownership filter — keep only the tickets THIS host owns under
   // the cluster roster so freeSlots + per-project caps compute over owned work
   // only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds` drives
