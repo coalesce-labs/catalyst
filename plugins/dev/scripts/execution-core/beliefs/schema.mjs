@@ -106,6 +106,28 @@ const DDL = [
     target_ticket  TEXT NOT NULL,
     relation_type  TEXT NOT NULL
   )`,
+  // CTL-966: the verify verdict the advancement router branches on, parsed from
+  // workers/<T>/verify.json exactly as work-done-probes.mjs readVerifyVerdict
+  // does (regression_risk >= 5 OR any severity:"high" finding → "fail", else
+  // "pass"; null/absent verdict = NO ROW). The verify→remediate detour predicate,
+  // captured as a fact so the advance_to belief can mirror deriveAdvancement
+  // without a second disk read at rule-evaluation time.
+  `CREATE TABLE IF NOT EXISTS obs_verdict (
+    fact_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id     INTEGER NOT NULL REFERENCES tick(tick_id),
+    ticket      TEXT NOT NULL,
+    verdict     TEXT
+  )`,
+  // CTL-966: the event-counted remediate-cycle count the procedural
+  // countRemediateCycles derives (phase.remediate.complete.<ticket> envelopes).
+  // Captured as a fact so advance_to / cycle_exhausted can compare against the
+  // REMEDIATE_CYCLE_CAP exactly as deriveAdvancement / maybeEscalateRemediateExhausted do.
+  `CREATE TABLE IF NOT EXISTS obs_cycle (
+    fact_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id          INTEGER NOT NULL REFERENCES tick(tick_id),
+    ticket           TEXT NOT NULL,
+    remediate_count  INTEGER NOT NULL
+  )`,
   // Static-ish facts the rules need.
   `CREATE TABLE IF NOT EXISTS cfg (key TEXT PRIMARY KEY, value_int INTEGER, value_text TEXT)`,
   // IDB: every derived belief, uniform shape, provenance MANDATORY.
@@ -140,6 +162,8 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_obs_linear_tick ON obs_linear (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_relation_tick ON obs_relation (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_relation_source ON obs_relation (source_ticket)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_verdict_tick ON obs_verdict (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_cycle_tick ON obs_cycle (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_heartbeat_ts ON obs_heartbeat (ts_ms)`,
   `CREATE INDEX IF NOT EXISTS idx_intent_tick ON intent (tick_id)`,
 ];

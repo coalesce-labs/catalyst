@@ -17,6 +17,9 @@
 //   S4 escalation ladder             R10 R11 R12   (negation over intent)
 //   S5 recursive dependency beliefs  R13 R14 R15   (read obs_relation + obs_linear
 //                                                   EDB only; intra-stratum reads)
+//   S6 FSM advancement prediction    R16 R17       (read obs_signal + obs_verdict
+//                                                   + obs_cycle EDB + FSM maps;
+//                                                   derive-only — see CTL-966)
 //
 // No recursion crosses a negation. Each stratum's statements read only the
 // strata strictly below it (and the obs_* EDB), so when an S2 rule's NOT EXISTS
@@ -49,11 +52,27 @@
 //   b belief   t tick   i intent
 //   s obs_signal   a obs_agent   j obs_job   r obs_transcript
 //   h obs_heartbeat   l obs_linear   x obs_relation   (x = CTL-965 S5 dep rules)
+//   v obs_verdict   c obs_cycle   (CTL-966 S6 advancement rules)
 // json_array values become these tagged TEXT tokens; why.mjs maps prefix→table.
 //
 // Subject convention:
 //   per-phase beliefs   →  ticket || '/' || phase     (e.g. 'CTL-722/plan')
 //   capacity beliefs    →  'host:' || host            (e.g. 'host:mini')
+//   advancement beliefs →  ticket                     (e.g. 'CTL-722')   (CTL-966)
+
+// CTL-966: the FSM phase-rank + next-phase map + terminal set are imported from
+// phase-fsm.mjs (which derives them from lib/workflow.default.json) so the S6
+// advancement rules share the SINGLE source of truth with deriveAdvancement —
+// never a divergent hardcoded ordering. The maps are compiled to inline SQL
+// VALUES/CASE JOINs below (advance-rules-fsm-drift.test.mjs pins them byte-equal
+// to the live FSM so a descriptor edit can't silently desync the belief).
+import {
+  PHASES,
+  NEXT_PHASE,
+  REMEDIATE_PHASE,
+  REMEDIATE_CYCLE_CAP,
+  TERMINAL_SUCCESS,
+} from "../../lib/phase-fsm.mjs";
 
 // ── Stratum 1: ground correlations ──────────────────────────────────────────
 
@@ -528,6 +547,190 @@ WHERE t.tick_id = :tick
        AND r.relation_type = 'blocks'
        AND r.target_ticket = la.ticket)`;
 
+// ── Stratum 6: FSM advancement prediction (CTL-966) ──────────────────────────
+//
+// DERIVE-ONLY DOCTRINE (the entire point of CTL-966): advance_to is a PREDICTION
+// — the phase the procedural deriveAdvancement WOULD dispatch next. It NEVER
+// dispatches, deletes a signal, resets the verify⇄remediate cycle, or writes
+// Linear. The cycle RESET (maybeResetForRemediateCycle) and the actual dispatch
+// stay PROCEDURAL. The shadow comparator (scheduler.mjs runTick) computes the
+// real oracle and logs any disagreement; it acts on nothing.
+//
+// MIRROR CONTRACT (advance_to ≡ deriveAdvancement, zero disagreement):
+//   1. latest = the obs_signal phase with the highest FSM rank for the ticket,
+//      regardless of status (deriveAdvancement: `for (p of PHASES) if (p in sig)
+//      latest = p`). remediate ∉ PHASES so it is invisible to `latest`, exactly
+//      as the oracle's loop skips it.
+//   2. advance-eligible iff latest's status='done' OR (status='skipped' AND
+//      latest='monitor-deploy') — the CTL-703 carve-out.
+//   3. verify→remediate detour: latest='verify' AND obs_verdict='fail' →
+//        remediate_count >= cap  → NO advance (cycle_exhausted owns the stall)
+//        a remediate obs_signal already exists → NO advance (dispatched this cycle)
+//        else → advance_to = remediate
+//   4. otherwise next = NEXT_PHASE[latest]; fire iff next is non-terminal AND no
+//      obs_signal exists for (ticket, next).
+//
+// This stratum reads obs_signal + obs_verdict + obs_cycle EDB + the FSM maps
+// only. It performs NO negation over any belief (the `next.phase in sig` / latest
+// selection are over the EDB), so there is no negation cycle and it sits safely
+// below S1–S5 (no lower stratum references advance_to/cycle_exhausted). Subject =
+// ticket (not ticket/phase): advancement is a per-ticket prediction.
+//
+// SINGLE SOURCE OF TRUTH: the phase-rank, next-phase, and terminal maps below are
+// COMPILED from phase-fsm.mjs's PHASES / NEXT_PHASE / TERMINAL_SUCCESS at module
+// load — never a divergent literal. advance-rules-fsm-drift.test.mjs pins them
+// byte-equal to the live FSM.
+//
+// Provenance: source_fact_ids cite the latest obs_signal (tag 's'), the verdict
+// fact ('v'), and the cycle fact ('c'). why.mjs resolves 'v'→obs_verdict,
+// 'c'→obs_cycle (added there alongside CTL-965's 'x').
+
+// fsmRankValues — `(phase, rank)` VALUES rows for the FSM-rank map (0-based
+// PHASES index). remediate is intentionally OMITTED: deriveAdvancement's
+// `latest` loop ranges over PHASES only, so a remediate signal must never be
+// picked as `latest` (the rank JOIN simply does not match it).
+const fsmRankValues = PHASES.map((p, i) => `('${p}', ${i})`).join(", ");
+
+// nextPhaseValues — `(cur, next)` VALUES rows for NEXT_PHASE. The terminal step
+// (teardown) maps to TERMINAL_SUCCESS ('done'); the terminal-set check below
+// suppresses the advance when next === TERMINAL_SUCCESS.
+const nextPhaseValues = PHASES.map((p) => `('${p}', '${NEXT_PHASE[p]}')`).join(", ");
+
+// R16 advance_to — the predicted next phase per in-flight ticket. Mirrors
+// deriveAdvancement EXACTLY (see MIRROR CONTRACT above). Two arms UNION'd:
+//   arm A — verify→remediate detour (latest=verify, verdict=fail, budget left,
+//            no remediate signal yet) → to='remediate'.
+//   arm B — the normal FSM edge (latest=done/skipped-carveout, next non-terminal,
+//            successor not yet dispatched) → to=NEXT_PHASE[latest].
+// The arms are mutually exclusive by construction: arm A requires latest=verify
+// AND verdict=fail; arm B's WHERE excludes (latest=verify AND verdict=fail) so a
+// fail-at-verify ticket NEVER takes the normal verify→review edge (the oracle's
+// `if (latest==='verify' && verdict==='fail') return …` short-circuits before the
+// transition()). UNIQUE(tick,name,subject) guarantees one row per ticket.
+const R16_advance_to = `
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ${fsmRankValues}),
+  nxt(cur, nextp) AS (VALUES ${nextPhaseValues}),
+  -- latest(ticket) = the max-FSM-rank phase present in obs_signal this tick.
+  -- remediate is excluded by the rank JOIN (no rank row), matching the oracle's
+  -- PHASES-only latest-selection loop.
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  -- the latest row joined to its signal (for status + provenance) and the verdict
+  -- + cycle facts. There can be >1 obs_signal row for the latest phase only if a
+  -- producer wrote duplicates; the MIN(fact_id) picks one deterministically and
+  -- status is read from that same row.
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+-- arm A: verify→remediate detour
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', '${REMEDIATE_PHASE}'),
+       'R16',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   -- budget left: remediate_count < cap (count==cap-1 advances; count==cap does not)
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) < ${REMEDIATE_CYCLE_CAP}
+   -- remediate not already dispatched this cycle (no remediate signal present)
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = '${REMEDIATE_PHASE}')
+UNION ALL
+-- arm B: normal FSM edge
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', n.nextp),
+       'R16',
+       json_array('s' || ls.sig_fact_id)
+  FROM latest_sig ls
+  JOIN nxt n ON n.cur = ls.phase
+ WHERE ls.tick_id = :tick
+   -- advance-eligible: done, OR monitor-deploy skipped (CTL-703 carve-out)
+   AND ( ls.status = 'done'
+      OR (ls.status = 'skipped' AND ls.phase = 'monitor-deploy') )
+   -- NOT the verify→remediate detour (arm A owns it): a verify ticket with a
+   -- fail verdict short-circuits in the oracle and never takes verify→review.
+   AND NOT ( ls.phase = 'verify'
+             AND EXISTS (SELECT 1 FROM obs_verdict v
+                          WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail') )
+   -- next non-terminal (teardown→done suppresses the advance off teardown)
+   AND n.nextp <> '${TERMINAL_SUCCESS}'
+   -- successor not already dispatched
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)`;
+
+// Exported for the FSM-drift guard (advance-rules.test.mjs): asserts the compiled
+// rank/next-phase maps stay byte-equal to the live phase-fsm.mjs declarations.
+export const R16_advance_to_SQL_FOR_TEST = R16_advance_to;
+
+// R17 cycle_exhausted — the remediate-cycle cap is reached: latest=verify done,
+// verdict=fail, remediate_count >= cap. Mirrors maybeEscalateRemediateExhausted's
+// trigger (signals.verify==='done' && verdict==='fail' && cycleCount >= cap) as a
+// DERIVE-ONLY belief — it does NOT write the stalled signal or apply needs-human;
+// it records the conclusion with provenance. (deriveAdvancement returns null here
+// — no advance_to fires, since arm A's budget guard fails and arm B is excluded
+// by the verify+fail detour predicate. cycle_exhausted is the separate signal that
+// the ticket has run out of remediation budget.) Subject = ticket.
+const R17_cycle_exhausted = `
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ${fsmRankValues}),
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
+       json_object('phase', ls.phase, 'remediate_count',
+         COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                    WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0),
+         'cap', ${REMEDIATE_CYCLE_CAP}),
+       'R17',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= ${REMEDIATE_CYCLE_CAP}`;
+
 // STRATA — the run order. Each inner array is one stratum; statements within a
 // stratum run in array order (R6 after R5; R10b after R10a) so same-stratum
 // negation sees the complete lower set. The tick loop runs strata in order
@@ -562,6 +765,14 @@ export const STRATA = [
     ["R13", R13_blocker_rank],
     ["R14", R14_cycle_detected],
     ["R15", R15_ready],
+  ],
+  // S6 FSM advancement prediction (CTL-966) — reads obs_signal + obs_verdict +
+  // obs_cycle EDB + the FSM maps only; no negation over any belief, independent
+  // of liveness (S1–S5 never reference advance_to/cycle_exhausted), so no
+  // negation cycle. DERIVE-ONLY: a prediction, never a dispatch/reset/Linear write.
+  [
+    ["R16", R16_advance_to],
+    ["R17", R17_cycle_exhausted],
   ],
 ];
 

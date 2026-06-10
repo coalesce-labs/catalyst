@@ -39,7 +39,8 @@ export function traceTicket(db, ticket, { tickId: explicitTick } = {}) {
   // The §5 recursive CTE: start from the ticket's beliefs at this tick, walk
   // source_fact_ids transitively to reach every belief in the chain. Refs are
   // TAGGED (rules.mjs): 'b<id>' belief, 't<id>' tick, 'i<id>' intent, and the
-  // obs_* fact tags (s/a/j/r/h/l, plus 'x' obs_relation from CTL-965) — so the
+  // obs_* fact tags (s/a/j/r/h/l, 'x' obs_relation from CTL-965, plus 'v'
+  // obs_verdict + 'c' obs_cycle from CTL-966) — so the
   // belief edges are exactly the 'b'-prefixed refs (no integer-space collision).
   // Facts are leaves resolved per-table below.
   const beliefRows = db
@@ -126,6 +127,18 @@ export function traceTicket(db, ticket, { tickId: explicitTick } = {}) {
         r.relation_type === "blocks"
           ? `relation ${r.target_ticket} depends_on ${r.source_ticket} (${r.source_ticket} blocks ${r.target_ticket})`
           : `relation ${r.source_ticket} ${r.relation_type} ${r.target_ticket}`,
+    },
+    // CTL-966 — obs_verdict: the verify verdict the advance_to detour branches on.
+    v: {
+      table: "obs_verdict",
+      sql: "SELECT fact_id AS id, ticket, verdict FROM obs_verdict WHERE fact_id = ?",
+      summary: (r) => `verdict ${r.ticket} verdict=${r.verdict}`,
+    },
+    // CTL-966 — obs_cycle: the event-counted remediate-cycle count vs the cap.
+    c: {
+      table: "obs_cycle",
+      sql: "SELECT fact_id AS id, ticket, remediate_count FROM obs_cycle WHERE fact_id = ?",
+      summary: (r) => `cycle ${r.ticket} remediate_count=${r.remediate_count}`,
     },
   };
 

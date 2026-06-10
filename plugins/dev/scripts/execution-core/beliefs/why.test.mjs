@@ -172,3 +172,46 @@ describe("renderTrace / main — human-readable output (the Gherkin trace)", () 
     db.close();
   });
 });
+
+// CTL-966: the advance_to remediate-arm belief traces down to its obs_verdict
+// ('v') + obs_cycle ('c') facts — proving the new REF TAGGING resolvers render.
+describe("traceTicket — CTL-966 advance_to provenance (obs_verdict / obs_cycle)", () => {
+  function seedRemediateArm(dbPath) {
+    const db = openBeliefsDb({ path: dbPath });
+    db.run("INSERT INTO tick (now_ms, host) VALUES (?, 'mini')", [NOW]);
+    const t = db.query("SELECT last_insert_rowid() AS id").get().id;
+    for (const [p, s] of Object.entries({
+      triage: "done",
+      research: "done",
+      plan: "done",
+      implement: "done",
+      verify: "done",
+    })) {
+      db.run("INSERT INTO obs_signal (tick_id, ticket, phase, status) VALUES (?, 'CTL-966', ?, ?)", [t, p, s]);
+    }
+    db.run("INSERT INTO obs_verdict (tick_id, ticket, verdict) VALUES (?, 'CTL-966', 'fail')", [t]);
+    db.run("INSERT INTO obs_cycle (tick_id, ticket, remediate_count) VALUES (?, 'CTL-966', 0)", [t]);
+    // import-free belief eval via the rule module:
+    return { db, t };
+  }
+
+  test("advance_to(remediate) trace renders verdict + cycle facts", async () => {
+    const { evaluateBeliefs } = await import("./rules.mjs");
+    const { db, t } = seedRemediateArm(join(scratch(), "b.db"));
+    evaluateBeliefs(db, t);
+
+    const trace = traceTicket(db, "CTL-966", { tickId: t });
+    const adv = trace.beliefs.find((b) => b.name === "advance_to");
+    expect(adv).toBeTruthy();
+    expect(JSON.parse(adv.value)).toEqual({ from: "verify", to: "remediate" });
+    const tables = adv.sources.map((s) => s.table);
+    expect(tables).toContain("obs_verdict");
+    expect(tables).toContain("obs_cycle");
+
+    const text = renderTrace(trace);
+    expect(text).toContain("advance_to(CTL-966)");
+    expect(text).toContain("verdict CTL-966 verdict=fail");
+    expect(text).toContain("cycle CTL-966 remediate_count=0");
+    db.close();
+  });
+});
