@@ -888,6 +888,10 @@ fi
 # Empty (the default) = no flags; marketplace behavior unchanged. Entries that
 # are not directories are skipped loudly — a typo must not silently change
 # which plugin the fleet loads.
+# NOTE (CTL-940): lib/plugin-dirs.sh mirrors this resolution for update-side
+# consumers (catalyst-stack hotpatch/parity). The jq program and precedence
+# here MUST stay in sync with resolve_plugin_dirs() there — the dir hotpatch
+# updates must be exactly the dir this dispatcher hands to workers.
 PLUGIN_DIRS_RESOLVED="${CATALYST_PLUGIN_DIRS:-$(config_value '.catalyst.orchestration.pluginDirs | if type=="array" then join(":") else . end' "")}"
 PLUGIN_DIR_ARGS=()
 if [[ -n $PLUGIN_DIRS_RESOLVED ]]; then
