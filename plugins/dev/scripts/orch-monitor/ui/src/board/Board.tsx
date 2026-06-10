@@ -360,7 +360,6 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
-        <PriorityIcon p={t.priority} />
         <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
@@ -369,6 +368,7 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
       </div>
       <TitleText text={t.title} clamp={compact ? 1 : 2} />
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
+        <PriorityIcon p={t.priority} />
         <PhasePill phase={t.phase} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
@@ -458,7 +458,6 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <ActivityDot state={w.activeState} fallback={accent} />
-        {info && <PriorityIcon p={info.priority} />}
         <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>{w.ticket}</span>
         {w.sessionId && (
           <Tooltip><TooltipTrigger asChild>
@@ -472,6 +471,7 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
       </div>
       {info?.title && <TitleText text={info.title} />}
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
+        {info && <PriorityIcon p={info.priority} />}
         <PhasePill phase={w.phase} />
         {/* CTL-909 / SURF1: owning host.name on every worker card. */}
         <HostChip host={w.host} />
