@@ -10,8 +10,26 @@
 // dev` the SSE 404s, so a capped-backoff reconcile poll against `/api/nav` is the
 // data source instead — the badges still go live. The nav signal is tiny (four
 // fields), so a per-tab EventSource is fine; no SharedWorker is needed.
-import { useEffect, useState } from "react";
+//
+// CTL-945: AppShell calls useNavSignal() ONCE and distributes the result via
+// NavSignalContext so AppSidebar + AppFooter share the same value without opening
+// a second /api/nav/stream EventSource. Consumers that are inside AppShell should
+// use useNavSignalContext(); call useNavSignal() only at the single provider site.
+import { createContext, useContext, useEffect, useState } from "react";
 import { decodeNavSignalFrame, isNavSignal, type NavSignal } from "../lib/nav-signal";
+
+// ── Shared context (CTL-945) ──────────────────────────────────────────────────
+
+/** Context value: the latest NavSignal from the single AppShell subscription. */
+export const NavSignalContext = createContext<NavSignal | null>(null);
+
+/**
+ * Consume the shared NavSignal from AppShell's context.
+ * Only usable inside components rendered inside AppShell.
+ */
+export function useNavSignalContext(): NavSignal | null {
+  return useContext(NavSignalContext);
+}
 
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
