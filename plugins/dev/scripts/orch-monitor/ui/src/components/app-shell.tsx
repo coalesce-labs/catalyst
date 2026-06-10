@@ -40,6 +40,10 @@ import { shouldOpenPalette } from "@/lib/command-palette";
 import { useAtom } from "jotai";
 import { repoScopeAtom } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+// CTL-971: reseat the board SURFACE + repo SCOPE on return from a detail page so
+// the board actually mounts (else the landing-pref Inbox shows and the scroll/focus
+// snapshot the board would consume is silently ignored).
+import { useSurfaceRestore } from "@/hooks/use-surface-restore";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -101,6 +105,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [nodeScope, setNodeScope] = useState<NodeScope>(ALL_NODES);
   // CTL-944 — the active repo scope for breadcrumbs + palette navigation.
   const [repoScope, setRepoScope] = useAtom(repoScopeAtom);
+  // CTL-971 — on return from a detail page, reseat the surface the card was opened
+  // from (else the landing-pref Inbox shows) + re-apply the saved repo scope. PEEKS
+  // the restore snapshot (the board's own useBoardRestore consumes it for scroll).
+  // Reseating the surface ALSO leaves Settings, mirroring the `g`-chord behavior.
+  const restoreSurface = useCallback((s: Surface) => {
+    setSurface(s);
+    setSettingsOpen(false);
+  }, []);
+  useSurfaceRestore(restoreSurface, setRepoScope);
   // Repos from the board snapshot for palette navigation group construction.
   const { payload } = useBoardSnapshot();
   const repos = payload?.repos ?? [];
