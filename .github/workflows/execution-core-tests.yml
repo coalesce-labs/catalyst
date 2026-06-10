@@ -152,6 +152,7 @@ jobs:
             turn-zero-gate.test.mjs \
             wait-event.test.mjs \
             wait-state-classifier.test.mjs \
+            wait-watcher.test.mjs \
             work-done-probes.test.mjs \
             worktree-refresh-timer.test.mjs \
             worktree-safety.test.mjs \
