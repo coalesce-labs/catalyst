@@ -1,8 +1,10 @@
-// app-sidebar-nav-v3.test.ts — structure smoke-tests for CTL-980 nav proportion v3.
+// app-sidebar-nav-v3.test.ts — structure smoke-tests for CTL-980 nav proportion v3
+// and CTL-981 nav final calibration.
 // Validates that the key presentation constants and class strings satisfy the spec:
 //   - Icon size must be size-4 (16px), NOT size-6 (24px)
 //   - Twistie must NOT use ml-auto (it should be ml-1, beside the label)
-//   - Inactive label muting: text-sidebar-foreground/60 (not near-white)
+//   - Inactive label weight: font-medium (500), NOT weight 400 (CTL-981)
+//   - Inactive label contrast: text-sidebar-foreground/72 (raised from /60, CTL-981)
 //   - "Projects" section heading is referenced in the component source
 //
 // These are pure string-inspection tests against the component source — no DOM needed.
@@ -90,14 +92,39 @@ describe("CTL-980 nav proportion v3 — twistie placement", () => {
 });
 
 describe("CTL-980 nav proportion v3 — label muting", () => {
-  it("inactive nav-item label uses text-sidebar-foreground/60 (muted, not near-white)", () => {
-    // CTL-977 had near-white labels; CTL-980 mutes inactive labels to /60 opacity.
-    expect(src).toContain("text-sidebar-foreground/60");
-  });
-
   it("active nav-item label uses text-sidebar-primary (full contrast)", () => {
     // Active/selected items must be the high-contrast state.
     expect(src).toContain("text-sidebar-primary");
+  });
+});
+
+describe("CTL-981 nav final calibration — inactive label weight + contrast", () => {
+  it("inactive nav-item uses font-medium (weight 500) — primary fix for thin/small appearance", () => {
+    // CTL-981: weight 400→500 gives the text body/presence so it stops reading thin.
+    // This class must appear in the renderOperateItem inactive branch.
+    const renderBlock = src.slice(
+      src.indexOf("function renderOperateItem"),
+      src.indexOf("function groupContainsActive"),
+    );
+    expect(renderBlock).toContain("font-medium");
+  });
+
+  it("inactive nav-item contrast is /72, NOT the old /60", () => {
+    // CTL-981: opacity raised from /60 to /72 so labels read like Linear's lch(60) gray.
+    const renderBlock = src.slice(
+      src.indexOf("function renderOperateItem"),
+      src.indexOf("function groupContainsActive"),
+    );
+    expect(renderBlock).toContain("text-sidebar-foreground/72");
+    expect(renderBlock).not.toContain("text-sidebar-foreground/60");
+  });
+
+  it("active nav-item still uses text-sidebar-primary (high-contrast accent, clearly above /72)", () => {
+    const renderBlock = src.slice(
+      src.indexOf("function renderOperateItem"),
+      src.indexOf("function groupContainsActive"),
+    );
+    expect(renderBlock).toContain("text-sidebar-primary");
   });
 });
 

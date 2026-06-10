@@ -81,6 +81,8 @@ import {
 //            Linear-style selected state, twistie moved to right.
 // CTL-980 — nav proportion v3: icons 16px (size-4), muted inactive labels, icon color = label
 //            color via currentColor, twistie beside label (not far-right), "Projects" heading.
+// CTL-981 — nav final calibration: inactive label weight 400→500 (font-medium) + contrast /60→/72
+//            so labels have body/presence and stop reading thin/small vs Linear's lch(60) baseline.
 
 /** A status dot overlaid on a nav icon (emerald = live, amber = anomaly). */
 function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
@@ -206,6 +208,9 @@ export function AppSidebar() {
   // CTL-980: icon size forced to 16px (size-4) so it reads as ~same size as the 13px
   // label (not 1.7× bigger). Icon color = currentColor so it inherits the label's
   // muted-inactive / bright-active tone automatically. Inactive labels muted to /60.
+  // CTL-981: inactive weight → 500 (font-medium) + contrast /60 → /72 so labels
+  // have body/presence; active stays full-brightness (text-sidebar-primary) so the
+  // selection delta is still clearly visible.
   function renderOperateItem(
     item: (typeof OPERATE_ITEMS)[number],
     scopeVal: string,
@@ -221,13 +226,13 @@ export function AppSidebar() {
           tooltip={item.label}
           size={compact ? "sm" : "default"}
           onClick={() => go(item.surface, scopeVal)}
-          // CTL-980: inactive = muted label + icon (both text-sidebar-foreground/60);
-          // active/hover = full contrast (text-sidebar-primary). Icon inherits via
-          // currentColor — no separate [&>svg]: override needed when icon is inline.
+          // CTL-981: inactive = font-medium (weight 500) + text-sidebar-foreground/72
+          // (raised from /60 for better label presence — matches Linear's lch(60) gray);
+          // active = text-sidebar-primary (full accent, clearly brighter than /72).
           className={cn(
             active
               ? "text-sidebar-primary"
-              : "text-sidebar-foreground/60 hover:text-sidebar-foreground",
+              : "font-medium text-sidebar-foreground/72 hover:text-sidebar-foreground",
           )}
         >
           {/* CTL-980: explicit size-4 because the icon is inside a <span> wrapper
