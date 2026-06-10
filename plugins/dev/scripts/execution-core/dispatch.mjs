@@ -52,6 +52,15 @@ function defaultResolveProject(ticket) {
 // the dead session) instead of a fresh phase-0 `$PROMPT` start. Omitted entirely
 // when null/undefined → today's fresh-start behaviour. `spawn` is injectable so
 // the unit test can assert the built arg array without a real spawn.
+// CTL-990: hard ceiling on the synchronous phase-agent-dispatch spawn. A
+// wedged dispatch (the recreate→rebase-refused exec recursion looped here for
+// hours, invisible — no rc, no failure ladder) must surface as a failed
+// dispatch, not block the daemon. Generous: worktree provisioning (bun
+// install et al) can legitimately take minutes. Read lazily so tests and
+// operators can override at runtime.
+const getDispatchTimeoutMs = () =>
+  Number(process.env.CATALYST_DISPATCH_TIMEOUT_MS) || 15 * 60 * 1000;
+
 export function defaultRunPhaseAgent(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt },
   { spawn = spawnSync } = {},
@@ -61,18 +70,25 @@ export function defaultRunPhaseAgent(
   if (attempt != null) args.push("--attempt", String(attempt)); // CTL-761
   const extraEnv = {};
   if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
+  const env = {
+    ...process.env,
+    CATALYST_ORCHESTRATOR_DIR: orchDir,
+    CATALYST_ORCHESTRATOR_ID: ticket,
+    CATALYST_PHASE: phase,
+    CATALYST_TICKET: ticket,
+    CATALYST_EXECUTION_CORE: "1",
+    ...extraEnv,
+  };
+  // CTL-990: the recreate-once marker is PER DISPATCH CHAIN — only the chain's
+  // own exec may set it. An ambient daemon-env value would pre-spend every
+  // fresh dispatch's single recreate attempt.
+  delete env.CATALYST_RECREATE_ATTEMPTED;
   const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
     cwd: worktreePath,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      CATALYST_ORCHESTRATOR_DIR: orchDir,
-      CATALYST_ORCHESTRATOR_ID: ticket,
-      CATALYST_PHASE: phase,
-      CATALYST_TICKET: ticket,
-      CATALYST_EXECUTION_CORE: "1",
-      ...extraEnv,
-    },
+    timeout: getDispatchTimeoutMs(), // CTL-990
+    killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
+    env,
   });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
