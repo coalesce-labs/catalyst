@@ -78,15 +78,19 @@ import {
 // in-column order) lives in board-display.ts so the Gherkin is DOM-free testable.
 import { boardPrefsAtom, type Density } from "./prefs-store";
 import { DisplayOptionsPopover } from "./display-options-popover";
-import { ticketColumns, PHASE_COLUMNS } from "./board-display";
-// ── BOARD3 / CTL-907: row swimlanes (none | repo | team | project | host) ──────
-// The generalized grouping engine (board-grouping.ts) + the presentational
-// <SwimlaneBoard> wrapper that renders one labeled lane per group around the
-// column board, collapsing to the bare flat board for a single lane (the
-// identity no-op). Replaces the repo-only Lane/ticketLanes/combined path. The
-// shared `C` / `LIVE` tokens are hoisted to board-tokens.ts.
+// CTL-950: shared-header column derivation. `visibleColumnDefs` picks the single
+// column SET the shared header shows (over EVERY lane combined); `laneColumns`
+// distributes ONE lane's tickets across that fixed set (empty cells kept, aligned).
+import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } from "./board-display";
+// ── BOARD3 / CTL-907 + CTL-950: row swimlanes (none | repo | team | project | host) ─
+// The generalized grouping engine (board-grouping.ts) + the shared-header,
+// single-scroll <SwimlaneBoard> (CTL-950): ONE sticky column-header row spanning
+// the full width, the swimlane groups as horizontal bands BELOW it, every group's
+// cards laid into the SAME shared column grid under ONE horizontal scroll axis.
+// axis="none" collapses to the single shared-header column board (one synthetic
+// lane, no group label). The shared `C` / `LIVE` tokens are in board-tokens.ts.
 import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS } from "./board-tokens";
-import { SwimlaneBoard } from "./Swimlane";
+import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
 // dense BoardList table instead of the column kanban — the SAME resolved entities,
@@ -492,93 +496,111 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
   );
 }
 
-// ── column + board scaffolding (wide Linear columns, internal vertical scroll) ──
-function Column({ label, color, count, live = 0, children }: { label: string; color: string; count: number; live?: number; children: React.ReactNode }) {
-  return (
-    <div style={{ flex: "0 0 300px", width: 300, display: "flex", flexDirection: "column", minHeight: 0, maxHeight: "100%" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 4px 12px" }}>
-        <span style={{ width: 9, height: 9, borderRadius: "50%", background: color, flex: "0 0 auto" }} />
-        <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{label}</span>
-        <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{count}</span>
-        {live > 0 && (
-          <span title={`${live} worker${live > 1 ? "s" : ""} live in this phase`} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontFamily: C.mono, fontSize: 11, color: LIVE }}>
-            <span className="catalyst-live-dot" style={{ width: 7, height: 7, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{live} live
-          </span>
-        )}
-      </div>
-      <div className="cat-scroll" style={{ display: "flex", flexDirection: "column", gap: 8, overflowY: "auto", paddingRight: 4, paddingBottom: 12 }}>
-        {count === 0
-          ? <div style={{ color: C.fgDim, fontSize: 11.5, padding: "10px 0", border: `1px dashed ${C.borderSubtle}`, borderRadius: 8, textAlign: "center" }}>—</div>
-          : children}
-      </div>
-    </div>
-  );
+// ── CTL-950 shared-header column derivation (tickets + workers) ───────────────
+// The single-scroll <SwimlaneBoard> wants TWO things from the Board: the SHARED
+// header column set (totals across EVERY lane), and a per-lane `deriveLane` that
+// distributes ONE lane's entities across that fixed set into aligned LaneCells.
+// The pure column logic stays in board-display.ts (tickets) / worker-grouping.ts
+// (workers) so the on-screen order remains the SAME `resolveList` order the
+// detail-page pager + j/k walk read (FND2 P1).
+
+// Roll up per-lane derived columns into the shared header's totals — count + live
+// summed across the lanes (so the top header chip reads the WHOLE board's depth).
+function sharedHeaderTotals(
+  defs: readonly BoardColumnDef[],
+  perLaneCounts: { count: number; live: number }[][],
+): SharedColumn[] {
+  return defs.map((def, i) => {
+    let count = 0;
+    let live = 0;
+    for (const lane of perLaneCounts) {
+      const cell = lane[i];
+      if (cell) { count += cell.count; live += cell.live; }
+    }
+    return { key: def.key, label: def.label, c: def.c, count, live };
+  });
 }
-function BoardScroll({ children, fill }: { children: React.ReactNode; fill: boolean }) {
+
+// The TICKET shared-header board: the column SET is `visibleColumnDefs` over the
+// WHOLE ticket array (so a column the header shows is real in SOME lane); each
+// lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
+// card render + the column order are byte-identical to the legacy TicketBoard.
+function TicketSwimlaneBoard({
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, onSelect,
+}: {
+  tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
+  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onSelect?: (id: string) => void;
+}) {
+  const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
+  const deriveLane = (laneItems: Ticket[]): LaneCell[] =>
+    laneColumns(laneItems, defs, { groupBy, order }).map((c) => ({
+      count: c.items.length,
+      live: c.live,
+      cards: c.items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} onSelect={onSelect} />),
+    }));
+  // header totals = the lane cells across every lane combined (== the flat set).
+  const columns = sharedHeaderTotals(defs, [deriveLane(tickets)]);
   return (
-    <div className="cat-scroll" style={{ display: "flex", gap: 16, overflowX: "auto", alignItems: "flex-start", padding: "2px 16px 8px", height: fill ? "calc(var(--cat-board-vh, 100vh) - 104px)" : "auto" }}>
-      {children}
-    </div>
+    <SwimlaneBoard
+      items={tickets}
+      groupBy={swimlane}
+      fill={fill}
+      entityNoun="ticket"
+      columns={columns}
+      deriveLane={deriveLane}
+    />
   );
 }
 
-// BOARD2 / CTL-906: the column derivation (which column SET by `groupBy`, the
-// in-column `order`, and the `showEmpty` reflow filter) is the PURE
-// `ticketColumns` helper (board-display.ts) — TicketBoard renders exactly the
-// columns it returns, so the Gherkin (Column grouping / Ordering / Show empty
-// columns) is unit-tested without a DOM. Each column still resolves its items
-// through the shared `resolveList` inside ticketColumns, so the on-screen order
-// stays the SAME list the detail-page pager + j/k walk derive (FND2 P1).
-function TicketBoard({ tickets, groupBy, colorBy, density, order, showEmpty, fill, onSelect }: { tickets: Ticket[]; groupBy: "linear" | "phase"; colorBy: ColorBy; density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onSelect?: (id: string) => void }) {
-  const cols = ticketColumns(tickets, { groupBy, showEmptyColumns: showEmpty, order });
-  return (
-    <BoardScroll fill={fill}>
-      {cols.map((c) => (
-        <Column key={c.key} label={c.label} color={c.c} count={c.items.length} live={c.live}>
-          {c.items.map((t) => <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} onSelect={onSelect} />)}
-        </Column>
-      ))}
-    </BoardScroll>
-  );
-}
-function WorkerBoard({ workers, tickets, grouping, fill, onWorkerSelect }: { workers: Worker[]; tickets: Ticket[]; grouping: WorkerGrouping; fill: boolean; onWorkerSelect?: (name: string) => void }) {
+// The WORKER shared-header board. The column SET depends on the lens:
+//   • node  → nodeColumns over ALL workers (so lanes share the same node columns),
+//   • phase → PHASE_COLUMNS,           • status → WORKER_COLS (Active/Stuck).
+// Each lane distributes its workers into that fixed set. R3b: when the HOST
+// swimlane is active the caller already falls the lens back to status/phase so
+// host is not double-encoded (rows AND columns).
+function WorkerSwimlaneBoard({
+  workers, tickets, swimlane, grouping, fill, onWorkerSelect,
+}: {
+  workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
+  fill: boolean; onWorkerSelect?: (name: string) => void;
+}) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
-  // CTL-909 / SURF1: "node" grouping lays out one column per host.name via the
-  // pure nodeColumns derivation (single-host → one column, identity no-op). The
-  // status/phase lenses are unchanged.
-  if (grouping === "node") {
-    const cols = nodeColumns(workers);
-    return (
-      <BoardScroll fill={fill}>
-        {cols.map((c) => {
-          const live = c.workers.filter((w) => w.activeState === "active").length;
-          return (
-            <Column key={c.host} label={c.host} color={nodeColor(c.host)} count={c.workers.length} live={live}>
-              {c.workers.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />)}
-            </Column>
-          );
-        })}
-      </BoardScroll>
-    );
-  }
-  const cols: readonly { key: string; label: string; c: string }[] =
-    grouping === "phase" ? PHASE_COLUMNS : WORKER_COLS;
+  // The shared column DEFS (key/label/color), derived over the FULL worker set so
+  // every lane lays into the same tracks.
+  const defs: BoardColumnDef[] =
+    grouping === "node"
+      ? nodeColumns(workers).map((c) => ({ key: c.host, label: c.host, c: nodeColor(c.host) }))
+      : grouping === "phase"
+        ? PHASE_COLUMNS.map((c) => ({ key: c.key, label: c.label, c: c.c }))
+        : WORKER_COLS.map((c) => ({ key: c.key, label: c.label, c: c.c }));
+  const colWorkers = (laneItems: Worker[], key: string): Worker[] =>
+    grouping === "node"
+      ? sortWorkers(laneItems.filter((w) => (w.host?.name ?? UNATTRIBUTED_HOST) === key))
+      : grouping === "phase"
+        ? laneItems.filter((w) => w.phase === key)
+        : laneItems.filter((w) => (w.activeState ?? "active") === key);
+  const deriveLane = (laneItems: Worker[]): LaneCell[] =>
+    defs.map((def) => {
+      const items = colWorkers(laneItems, def.key);
+      // Status columns are already split by liveness (Active/Stuck), so the "N
+      // live" chip is redundant there; surface it only in the phase / node lens.
+      const live = grouping === "status" ? 0 : items.filter((w) => w.activeState === "active").length;
+      return {
+        count: items.length,
+        live,
+        cards: items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />),
+      };
+    });
+  const columns = sharedHeaderTotals(defs, [deriveLane(workers)]);
   return (
-    <BoardScroll fill={fill}>
-      {cols.map((c) => {
-        const items = grouping === "phase"
-          ? workers.filter((w) => w.phase === c.key)
-          : workers.filter((w) => (w.activeState ?? "active") === c.key);
-        // Status columns are already split by liveness (Active/Stuck), so the
-        // "N live" chip is redundant there; only surface it in the phase lens.
-        const live = grouping === "phase" ? items.filter((w) => w.activeState === "active").length : 0;
-        return (
-          <Column key={c.key} label={c.label} color={c.c} count={items.length} live={live}>
-            {items.map((w) => <WorkerCard key={w.name} w={w} info={infoById[w.ticket]} onSelect={onWorkerSelect} />)}
-          </Column>
-        );
-      })}
-    </BoardScroll>
+    <SwimlaneBoard
+      items={workers}
+      groupBy={swimlane}
+      fill={fill}
+      entityNoun="worker"
+      columns={columns}
+      deriveLane={deriveLane}
+    />
   );
 }
 // BOARD3 / CTL-907: the repo-only `Lane` component is replaced by the generalized
@@ -1008,14 +1030,19 @@ export function Board({
                 embedded={embedded}
               />
             ) : (
-              <SwimlaneBoard
-                items={fTickets}
-                groupBy={swimlane}
+              // CTL-950: ONE sticky shared column-header row + ONE horizontal
+              // scroll across every swimlane group. The column SET is derived once
+              // over fTickets; each lane lays its cards into the SAME grid tracks.
+              <TicketSwimlaneBoard
+                tickets={fTickets}
+                groupBy={lens}
+                swimlane={swimlane}
+                colorBy={colorBy}
+                density={prefs.density}
+                order={prefs.order}
+                showEmpty={prefs.showEmptyColumns}
                 fill
-                entityNoun="ticket"
-                renderBoard={(laneItems, laneFill) => (
-                  <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
-                )}
+                onSelect={(id) => setSelectedTicketId(id)}
               />
             )
           )}
@@ -1025,14 +1052,14 @@ export function Board({
             // node filter (scope) are orthogonal: filter first, then group. R3b: when
             // the HOST swimlane is active the column lens falls back to status/phase
             // inside each lane so host is not double-encoded (rows AND columns).
-            <SwimlaneBoard
-              items={nodeWorkers}
-              groupBy={swimlane}
+            // CTL-950: shared header + single horizontal scroll across the lanes.
+            <WorkerSwimlaneBoard
+              workers={nodeWorkers}
+              tickets={data.tickets}
+              swimlane={swimlane}
+              grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
               fill
-              entityNoun="worker"
-              renderBoard={(laneItems, laneFill) => (
-                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
-              )}
+              onWorkerSelect={onWorkerSelect}
             />
           )}
           {/* CTL-930: queue view branch removed — Queue is now its own left-nav
