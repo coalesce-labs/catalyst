@@ -213,6 +213,79 @@ describe("executeEscalations — enforce mode (enforce=true)", () => {
     expect(events).toHaveLength(1); // STILL exactly one escalate.human event
   });
 
+  test("cooldown RE-ARM: R12 re-fires on a later tick but the event + paged stay bounded to once (CTL-962)", () => {
+    // A persistently-stuck ticket re-derives R12 every cooldown period: the
+    // diagnostician records a FRESH wake intent, it caps, R11/R12 co-occur again.
+    // The intent flip only bounds the immediate-next tick; the cooldown re-arm is
+    // a brand-new escalate_human belief on a brand-new tick with a freshly-capped
+    // intent the flip never touched. Without gating on labelOnce's return, a new
+    // escalate.human event would emit and `paged` would overcount every re-arm.
+    seedCfg("max_attempts", 2);
+
+    // A labelOnce fake that mirrors the REAL marker idempotency: first apply for
+    // (ticket,label) returns true (fresh write); every later apply returns false.
+    const applied = new Set();
+    const labelOnceFn = (_o, ticket, label, writeStatus) => {
+      const key = `${ticket}:${label}`;
+      if (applied.has(key)) return false; // marker exists → no-op (real labelOnce)
+      applied.add(key);
+      writeStatus.applyLabel({ ticket, label });
+      return true; // first application
+    };
+
+    const labelCalls = [];
+    const events = [];
+    const subject = "CTL-1/implement";
+
+    // ── tick 1: first escalation — pages once, emits once ──
+    const t1 = insertTick(NOW);
+    insertEscalateHuman(t1, subject);
+    insertWakeIntent(t1, subject, { attempts: 2, outcome: null });
+    const res1 = executeEscalations(db, t1, {
+      orchDir: scratch(),
+      writeStatus: makeWriteStatus(labelCalls),
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn,
+    });
+    expect(res1.paged).toBe(1);
+    expect(events.filter((e) => e["event.name"] === "escalate.human")).toHaveLength(1);
+    expect(labelCalls).toHaveLength(1);
+
+    // ── tick 2 (RE-ARM): a NEW capped wake intent + a NEW escalate_human belief.
+    // R12 fires again, but needs-human is already applied → NO new event/page. ──
+    const t2 = insertTick(NOW + 10 * MIN);
+    insertEscalateHuman(t2, subject); // R12 re-derived this tick
+    insertWakeIntent(t2, subject, { attempts: 2, outcome: null }); // fresh capped intent
+    const res2 = executeEscalations(db, t2, {
+      orchDir: scratch(),
+      writeStatus: makeWriteStatus(labelCalls),
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn,
+    });
+    // The intent flip still fires (escalated>0) but the page/event are suppressed.
+    expect(res2.paged).toBe(0);
+    expect(res2.escalated).toBeGreaterThanOrEqual(1);
+
+    // ── tick 3 (RE-ARM again): same — still bounded ──
+    const t3 = insertTick(NOW + 20 * MIN);
+    insertEscalateHuman(t3, subject);
+    insertWakeIntent(t3, subject, { attempts: 2, outcome: null });
+    const res3 = executeEscalations(db, t3, {
+      orchDir: scratch(),
+      writeStatus: makeWriteStatus(labelCalls),
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn,
+    });
+    expect(res3.paged).toBe(0);
+
+    // ── exactly-once across ALL THREE ticks: one label write, one event ──
+    expect(labelCalls).toHaveLength(1);
+    expect(events.filter((e) => e["event.name"] === "escalate.human")).toHaveLength(1);
+  });
+
   test("a fresh (uncapped) wake intent is NOT prematurely flipped", () => {
     seedCfg("max_attempts", 2);
     const t = insertTick(NOW);
