@@ -172,9 +172,12 @@ start_daemon() {
     fi
   fi
   if [[ "$use_proxy" == "yes" ]]; then
+    # NO_PROXY keeps Claude/Anthropic API calls direct so a dead mitmdump cannot
+    # kill worker sessions (CTL-946 safety guard — one line, not an allowlist).
     HTTPS_PROXY="$PROXY_HOST" \
     NODE_USE_ENV_PROXY=1 \
     NODE_EXTRA_CA_CERTS="$MITM_CA" \
+    NO_PROXY="api.anthropic.com,.anthropic.com,statsig.anthropic.com,sentry.io,.sentry.io" \
       catalyst-execution-core start 2>&1 | sed 's/^/  /'
   else
     catalyst-execution-core start 2>&1 | sed 's/^/  /'

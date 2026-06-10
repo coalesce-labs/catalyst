@@ -41,17 +41,30 @@ The default repo path is `~/code-repos/github/coalesce-labs/catalyst`. Override 
 CATALYST_REPO_DIR=/path/to/catalyst catalyst-stack restart --hotpatch
 ```
 
-## Linear traffic capture (optional)
+## Debugging Linear API rate-limiting (mitmproxy, opt-in)
 
-To log every Linear API call with rate-limit headers and caller attribution, opt in to the mitmproxy proxy:
+The mitmproxy audit is **off by default** and is a rare diagnostic tool — use it for a short window
+when you need to inspect Linear API traffic or rate-limit headers, then turn it off.
+
+**Turn ON:**
 
 ```bash
-catalyst-stack start --proxy
+catalyst-stack restart --proxy
 ```
 
-On first use, this offers to install mitmproxy via `brew install mitmproxy` if absent, generates the CA cert, and copies the vendored addon to `~/catalyst/mitm_linear_addon.py`. Traffic is written to `~/catalyst/linear-proxy.jsonl`.
+**Turn OFF:**
 
-The proxy is **off by default**. The execution-core daemon runs correctly without it.
+```bash
+catalyst-stack restart
+```
+
+On first use, `catalyst-stack --proxy` installs mitmproxy via `brew install mitmproxy` if absent,
+generates the CA cert, and copies the vendored addon to `~/catalyst/mitm_linear_addon.py`. Traffic
+is written to `~/catalyst/linear-proxy.jsonl`.
+
+The proxy vars (`HTTPS_PROXY`, `NODE_USE_ENV_PROXY`, `NODE_EXTRA_CA_CERTS`, `NO_PROXY`) are
+injected only as an inline env prefix for the daemon process — they are never written to disk and
+disappear on the next plain `catalyst-stack restart`.
 
 ## Boot-resume guarantee
 

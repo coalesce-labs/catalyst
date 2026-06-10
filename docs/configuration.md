@@ -336,30 +336,41 @@ hand.
 | `NODE_EXTRA_CA_CERTS` | Absolute path to a CA cert to trust (e.g. `$HOME/.mitmproxy/mitmproxy-ca-cert.pem`) so a MITM proxy's intercepted TLS validates. |
 | `LINEAR_STATE_CACHE_TTL_MS` | Widen the daemon's in-process Linear workflow-state cache window (milliseconds) to cut per-ticket read volume. Independent of the proxy. |
 
-### Proxy audit (opt-in)
+### Debugging Linear API rate-limiting (mitmproxy — opt-in, default OFF)
 
-The daemon's Linear/GitHub calls go out over Node's native fetch. To observe or record them, run a
-local [mitmproxy](https://mitmproxy.org/) and point the daemon at it:
+The mitmproxy is a **rare diagnostic tool**, not always-on infrastructure. The daemon runs
+correctly without it. Use it for a short window when you need to observe Linear API traffic, inspect
+rate-limit headers, or trace which callers are exhausting the quota. Turn it off again when done.
+
+**Turn ON for a diagnostic session:**
 
 ```bash
-# 1. Start the proxy (its CA is created on first run at ~/.mitmproxy/mitmproxy-ca-cert.pem)
-mitmdump -s "$HOME/catalyst/mitm_linear_addon.py" --listen-port 8080
-
-# 2. In ~/.config/catalyst/execution-core.env:
-export NODE_USE_ENV_PROXY=1
-export HTTPS_PROXY=http://127.0.0.1:8080
-export HTTP_PROXY=http://127.0.0.1:8080
-export NODE_EXTRA_CA_CERTS=$HOME/.mitmproxy/mitmproxy-ca-cert.pem
-
-# 3. Apply it
-catalyst-execution-core restart
+catalyst-stack restart --proxy
 ```
+
+This starts mitmproxy, then restarts the execution-core daemon with `HTTPS_PROXY`,
+`NODE_USE_ENV_PROXY=1`, `NODE_EXTRA_CA_CERTS`, and `NO_PROXY=api.anthropic.com,...` set as an
+inline env prefix (not written to disk). Traffic is logged to `~/catalyst/linear-proxy.jsonl`.
+On first use, `catalyst-stack` installs mitmproxy via `brew install mitmproxy` if absent and
+generates the CA cert.
+
+**Turn OFF:**
+
+```bash
+catalyst-stack restart
+```
+
+Restarts the daemon without any proxy vars. The proxy vars are **never sticky** — they are
+injected only for the lifetime of the `--proxy` daemon process.
+
+**Important:** `NO_PROXY=api.anthropic.com,...` is always included in the `--proxy` prefix so
+Claude worker API calls bypass the proxy even if mitmdump hiccups mid-session.
 
 > **Do not `source` `execution-core.env` in an interactive shell or shell profile.** It is sourced
 > by `catalyst-execution-core start` for the daemon only. Sourcing it in your terminal pins
 > `HTTP(S)_PROXY` onto every process you launch (including interactive `claude`); when mitmproxy is
 > down, those calls fail with `connection refused`. Always apply changes with
-> `catalyst-execution-core restart`. The daemon liveness-gates the proxy and degrades to direct mode
+> `catalyst-stack restart`. The daemon liveness-gates the proxy and degrades to direct mode
 > if mitmproxy is unreachable (CTL-846); an interactive shell gets no such protection.
 >
 > Concretely: never add a line like `source ~/.config/catalyst/execution-core.env` to `~/.zshrc`,
