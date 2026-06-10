@@ -99,6 +99,10 @@ export interface BoardTicket {
   lastActiveMs: number | null;
   priority: number;
   estimate: number | null;
+  /** CTL-954: estimation method from triage.json (fibonacci/tShirt/exponential/linear); null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-954: human-readable estimate (e.g. "M" for tShirt 2, "5" for fibonacci 5); null when estimate is null. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
   costUSD: number | null;
@@ -143,6 +147,10 @@ export interface BoardQueueItem {
   team: string;
   rank: number;
   estimate: number | null;
+  /** CTL-954: estimation method from triage.json; null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-954: human-readable estimate display; null when estimate is null. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
   /** CTL-922 (BFF10): the node owning this queued ticket, from the durable fence

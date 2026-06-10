@@ -5908,6 +5908,126 @@ describe("CTL-751: applyEstimate write-back on triage→research advance", () =>
       })
     ).not.toThrow();
   });
+
+  // ── CTL-954: expanded estimation method support ───────────────────────────
+
+  test("CTL-954: estimate:2 with estimateMethod:tShirt (M) → applyEstimate called with 2", () => {
+    // triage.json carries estimateMethod so no network call is made.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 2, estimateMethod: "tShirt" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 2 });
+  });
+
+  test("CTL-954: estimate:4 with estimateMethod:exponential → applyEstimate called with 4", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "large", estimate: 4, estimateMethod: "exponential" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 4 });
+  });
+
+  test("CTL-954: estimate not in estimateMethod's scale → applyEstimate not called", () => {
+    // tShirt scale is [0,1,2,3,5] — value 4 is NOT in tShirt.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "large", estimate: 4, estimateMethod: "tShirt" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    // 4 is not in tShirt scale → rejected by readTriageEstimate → no write.
+    expect(calls).toHaveLength(0);
+  });
+
+  test("CTL-954: estimateMethod:notUsed → applyEstimate not called (team doesn't use points)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 3, estimateMethod: "notUsed" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("CTL-954: no estimate, estimateMethod:tShirt, scope:medium → derive 2 via mapScopeToEstimate", () => {
+    // No explicit estimate — scheduler derives from scope + method.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimateMethod: "tShirt" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    // medium → tShirt[2] = 2 (M)
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 2 });
+  });
+
+  test("CTL-954: no estimate, estimateMethod:fibonacci, scope:large → derive 5", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "large", estimateMethod: "fibonacci" });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 5 });
+  });
+
+  test("CTL-954: estimate:5 with no estimateMethod → Fibonacci fallback (pre-CTL-954 compat)", () => {
+    // Pre-CTL-954 triage.json: estimate present, no estimateMethod, no team
+    // network (getEstimationMethod fails-open → null → Fibonacci fallback).
+    // Value 5 is in Fibonacci → still accepted.
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeSignal("CTL-1", "triage", "done");
+    writeTriageJson("CTL-1", { estimated_scope: "medium", estimate: 5 });
+    const calls = [];
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: okDispatch,
+      writeStatus: makeWriteStatus(calls),
+      verifyDispatched: verifyOk,
+      ...admit,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual({ ticket: "CTL-1", estimate: 5 });
+  });
 });
 
 // ── CTL-755: admission-control gate (STEP A/B/C) ──

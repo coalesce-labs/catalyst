@@ -140,6 +140,9 @@ import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } fr
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
+// CTL-954: team estimation method — lazy-cached from Linear, used to expand
+// the allowed estimate point set beyond the hard-coded Fibonacci values.
+import { getEstimationMethod, scaleForMethod, mapScopeToEstimate } from "./linear-estimation-method.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -190,15 +193,73 @@ export function stageRankForTicket(signals) {
 
 // readWorkerPriority — read workers/<T>/priority.json → {priority, createdAt}.
 // readTriageEstimate — read workers/<T>/triage.json and return the numeric
-// `.estimate` if it is one of the allowed Fibonacci points {1,3,5,8,13}
-// (CTL-751). Returns null on missing file, unparseable JSON, absent field,
-// or non-allowed value. Never throws.
-const ALLOWED_ESTIMATE_POINTS_SET = new Set([1, 3, 5, 8, 13]);
+// `.estimate` (CTL-751, CTL-954). Validation logic:
+//
+//   1. triage.json has an explicit `.estimate` value:
+//      a. triage.json also carries `.estimateMethod` (set by an Opus-mode pass
+//         that already fetched the team method) → validate against that scale.
+//      b. Otherwise: validate against the live team method from
+//         getEstimationMethod (lazy-cached, fail-open).  If the team method
+//         is unavailable, fall back to the Fibonacci set {1,3,5,8,13} so
+//         pre-CTL-954 triage.json files continue to work unchanged.
+//
+//   2. triage.json has NO `.estimate` but has `.estimateMethod` + `.estimated_scope`:
+//      An Opus-mode pass set the method but didn't compute the numeric estimate —
+//      derive it via mapScopeToEstimate(scope, method).
+//
+//   3. triage.json has `.estimated_scope` only (bash-body path, no Opus):
+//      Attempt lazy derivation via getEstimationMethod + mapScopeToEstimate.
+//      Fail-open: if the team method is unavailable, return null (the scheduler
+//      skips the Linear write for this ticket; forward progress is unaffected).
+//
+// Returns null on missing file, unparseable JSON, absent/invalid estimate,
+// or "notUsed" team method.  Never throws.
+const FIBONACCI_ALLOWED_SET = new Set([1, 3, 5, 8, 13]);
 function readTriageEstimate(orchDir, ticket) {
   try {
     const raw = readFileSync(join(orchDir, "workers", ticket, "triage.json"), "utf8");
-    const { estimate } = JSON.parse(raw);
-    return ALLOWED_ESTIMATE_POINTS_SET.has(estimate) ? estimate : null;
+    const triage = JSON.parse(raw);
+    const { estimate, estimateMethod, estimated_scope } = triage;
+
+    const hasEstimate = estimate !== undefined && estimate !== null;
+
+    if (hasEstimate) {
+      // --- Path 1: explicit estimate value in triage.json ---
+
+      // Resolve method type: from triage.json first (no network), else lazy fetch.
+      let methodType = estimateMethod ?? null;
+      if (!methodType) {
+        const teamKey = teamOf(ticket);
+        const m = teamKey ? getEstimationMethod(teamKey) : null;
+        methodType = m?.type ?? null;
+      }
+
+      if (methodType) {
+        const scale = scaleForMethod(methodType);
+        if (scale.length > 0) {
+          return scale.includes(estimate) ? estimate : null;
+        }
+        // methodType is "notUsed" → team doesn't use estimates → skip.
+        return null;
+      }
+
+      // No method info at all: fall back to Fibonacci (backward-compat).
+      return FIBONACCI_ALLOWED_SET.has(estimate) ? estimate : null;
+    }
+
+    // --- Path 2 / 3: no explicit estimate — attempt scope derivation ---
+    if (!estimated_scope) return null;
+
+    // Use the method recorded in triage.json if present (avoids network).
+    let methodType = estimateMethod ?? null;
+    if (!methodType) {
+      const teamKey = teamOf(ticket);
+      const m = teamKey ? getEstimationMethod(teamKey) : null;
+      methodType = m?.type ?? null;
+    }
+    if (!methodType) return null; // fail-open
+
+    return mapScopeToEstimate(estimated_scope, methodType);
   } catch {
     return null;
   }

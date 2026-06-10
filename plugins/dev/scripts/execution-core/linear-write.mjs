@@ -361,10 +361,18 @@ export function applyTriageStatus({
   }
 }
 
-// ALLOWED_ESTIMATE_POINTS — the Fibonacci-derived points scale used by the
-// reference-class lookup tool (CTL-751). Only these values are accepted by
-// applyEstimate; anything else is rejected without calling linearis.
-const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
+// ALLOWED_ESTIMATE_POINTS — union of all valid point values across every
+// estimation method Linear supports: fibonacci, tShirt, exponential, and
+// linear (CTL-751, CTL-954). Zero is intentionally excluded — Linear's
+// allowZero flag gates whether 0 is a legal input for a given team, but the
+// scheduler never writes 0 (the scope→estimate map starts at xs=1 for all
+// non-tShirt methods).  Any value not in this set is rejected without calling
+// linearis, guarding against garbage writes.
+const ALLOWED_ESTIMATE_POINTS = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // linear + overlapping scales
+  13,                              // fibonacci max
+  16, 32,                          // exponential extended
+]);
 
 // HUMAN_ESTIMATE_LABEL — tickets carrying this label have a hand-set estimate
 // that machine write-backs must never clobber (estimation-methodology.md §6b).
