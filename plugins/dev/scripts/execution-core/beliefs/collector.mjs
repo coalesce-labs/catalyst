@@ -264,6 +264,15 @@ function getModuleDb(env) {
   return _moduleDb;
 }
 
+// getBeliefsDb — expose the shared module-level db handle so adjacent modules
+// (e.g. diagnostician.mjs CTL-937) can read beliefs without opening a second
+// connection. Returns null when the collector has never been initialised
+// (CATALYST_BELIEFS_SHADOW=0 path — the diagnostician gates on its own flag
+// and should skip when this returns null).
+export function getBeliefsDb() {
+  return _moduleDb;
+}
+
 // collectTickFacts — the hermetic core. All sources injectable; returns
 // { ok, tickId, errors } and NEVER throws.
 //
