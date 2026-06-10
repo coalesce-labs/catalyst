@@ -50,6 +50,11 @@ import { getAgentsCached } from "../claude-agents.mjs";
 import { readAllPhaseSignals } from "../signal-reader.mjs";
 import { findTranscript, defaultProjectsDir } from "../session-recency.mjs";
 import { getEventLogPath, getHostName, log } from "../config.mjs";
+// CTL-966: the SAME procedural readers the scheduler's deriveAdvancement reads,
+// captured as facts (obs_verdict / obs_cycle) so the advance_to belief can mirror
+// the oracle with zero new I/O semantics — derive-only, no actuation.
+import { readVerifyVerdict } from "../work-done-probes.mjs";
+import { countRemediateCycles } from "../event-scan.mjs";
 
 const DAY_MS = 86_400_000;
 const OBS_RETENTION_MS = 14 * DAY_MS; // obs_* + tick
@@ -246,7 +251,16 @@ function pruneRetention(db, now) {
   db.run("DELETE FROM intent WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)", [
     beliefCutoff,
   ]);
-  for (const t of ["obs_agent", "obs_job", "obs_signal", "obs_transcript", "obs_linear", "obs_relation"]) {
+  for (const t of [
+    "obs_agent",
+    "obs_job",
+    "obs_signal",
+    "obs_transcript",
+    "obs_linear",
+    "obs_relation",
+    "obs_verdict",
+    "obs_cycle",
+  ]) {
     db.run(`DELETE FROM ${t} WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)`, [
       obsCutoff,
     ]);
@@ -524,6 +538,57 @@ export function collectTickFacts({
             fail("relations", err);
           }
         }
+      }
+
+      // ── obs_verdict — the verify verdict per in-flight ticket (CTL-966) ──
+      // Parsed from workers/<T>/verify.json by the SAME readVerifyVerdict the
+      // scheduler's deriveAdvancement consumes. null/absent verdict → NO ROW
+      // (the absent-is-distinct-from-pass contract is preserved: a missing row
+      // means the advance_to rule sees no verdict and falls through to the
+      // normal verify → review edge, exactly as the oracle does). One row per
+      // distinct ticket. Per-source try/catch; orchDir absent → skipped.
+      try {
+        if (orchDir) {
+          const insV = db.prepare(
+            "INSERT INTO obs_verdict (tick_id, ticket, verdict) VALUES (?, ?, ?)",
+          );
+          const seenV = new Set();
+          for (const s of signals) {
+            if (!s?.ticket || seenV.has(s.ticket)) continue;
+            seenV.add(s.ticket);
+            const verdict = readVerifyVerdict({ ticket: s.ticket, orchDir });
+            if (verdict == null) continue; // null/absent → no row (oracle contract)
+            insV.run(tickId, String(s.ticket), String(verdict));
+          }
+        }
+      } catch (err) {
+        fail("verdict", err);
+      }
+
+      // ── obs_cycle — the event-counted remediate-cycle count (CTL-966) ────
+      // Captured via the SAME countRemediateCycles the scheduler's router uses
+      // (phase.remediate.complete.<ticket> envelopes off the unified event log).
+      // Rides the event-scan module's incremental cursor — no new disk scan
+      // beyond the heartbeat tail the collector already drives. One row per
+      // distinct ticket; a never-remediated ticket records remediate_count=0 so
+      // the cap-boundary comparison (count < cap) is exact. eventLogPath absent
+      // → countRemediateCycles falls back to getEventLogPath() (same default the
+      // scheduler uses). Per-source try/catch.
+      try {
+        const insC = db.prepare(
+          "INSERT INTO obs_cycle (tick_id, ticket, remediate_count) VALUES (?, ?, ?)",
+        );
+        const seenC = new Set();
+        for (const s of signals) {
+          if (!s?.ticket || seenC.has(s.ticket)) continue;
+          seenC.add(s.ticket);
+          const count = eventLogPath
+            ? countRemediateCycles({ ticket: s.ticket, path: eventLogPath })
+            : countRemediateCycles({ ticket: s.ticket });
+          insC.run(tickId, String(s.ticket), Number.isInteger(count) ? count : 0);
+        }
+      } catch (err) {
+        fail("cycle", err);
       }
 
       // ── derive beliefs (CTL-934) — run all four strata over this tick's
