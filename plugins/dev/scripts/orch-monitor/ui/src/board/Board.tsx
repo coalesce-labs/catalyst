@@ -26,6 +26,17 @@ import { sortWorkers } from "./list-order";
 // repo in either reflects in the other and in the other surfaces. Standalone
 // (board.html, no switcher) the board's Seg is simply the only writer.
 import { useRepoScope } from "../hooks/use-repo-scope";
+// ── CTL-942: card → detail-page deep links ────────────────────────────────────
+// Cmd/Ctrl-click (and middle-click) on a ticket/worker card bypasses the drawer
+// and opens the full /ticket/$id //worker/$id page. Pure helpers — the nav is a
+// real browser navigation because the Board mounts in BOTH entries and only the
+// board.html entry carries the router (the server's SPA fallback answers it).
+import {
+  isNewTabClick,
+  openDetailInNewTab,
+  ticketDetailHref,
+  workerDetailHref,
+} from "./detail-nav";
 // ── CTL-909 / SURF1: node grouping + node filter (pure, DOM-free) ─────────────
 // The Workers surface adds a "node" grouping axis + a host filter that read the
 // BoardWorker.host {name,id} field (BFF10/CTL-922). The column derivation lives
@@ -330,7 +341,23 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
         opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
         cursor: onSelect ? "pointer" : undefined,
       }}
-      onClick={onSelect ? () => onSelect(t.id) : undefined}
+      // CTL-942: cmd/ctrl-click deep-links straight to the full ticket page;
+      // plain click keeps today's quick-peek drawer. Middle-click is onAuxClick.
+      onClick={(e) => {
+        if (isNewTabClick(e)) {
+          e.preventDefault();
+          e.stopPropagation();
+          openDetailInNewTab(ticketDetailHref(t.id));
+          return;
+        }
+        onSelect?.(t.id);
+      }}
+      onAuxClick={(e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          openDetailInNewTab(ticketDetailHref(t.id));
+        }
+      }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
@@ -403,7 +430,24 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
       // detail page (`/worker/$id`, keyed by w.name) via the supplied callback.
       // When no callback is wired (the legacy embedded mount has no router) the
       // card stays non-interactive exactly as before — no regression.
-      onClick={onSelect ? () => onSelect(w.name) : undefined}
+      // CTL-942: cmd/ctrl-click (and middle-click via onAuxClick) hard-navigates
+      // to the full /worker/$id page in a new tab — works in BOTH entries, with
+      // or without a router, because the server's SPA fallback serves board.html.
+      onClick={(e) => {
+        if (isNewTabClick(e)) {
+          e.preventDefault();
+          e.stopPropagation();
+          openDetailInNewTab(workerDetailHref(w.name));
+          return;
+        }
+        onSelect?.(w.name);
+      }}
+      onAuxClick={(e) => {
+        if (e.button === 1) {
+          e.preventDefault();
+          openDetailInNewTab(workerDetailHref(w.name));
+        }
+      }}
       role={onSelect ? "button" : undefined}
       tabIndex={onSelect ? 0 : undefined}
       onKeyDown={onSelect ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(w.name); } } : undefined}
