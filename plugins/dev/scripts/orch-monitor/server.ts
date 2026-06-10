@@ -640,6 +640,27 @@ function contentTypeForExt(ext: string): string {
   }
 }
 
+// OBS-7: a Loki query that returns null is NOT necessarily "Loki unavailable".
+// loki.ts collapses both a failed /ready probe AND a non-2xx query response (e.g. a
+// LogQL 400) to null. Distinguish them honestly so a query error is never
+// mislabeled as the backend being down: if the probe passed (isAvailable), Loki is
+// reachable and the null is a query/backend error → 502 "degraded"; only an actual
+// unreachable backend is 503 "unavailable". Either way the ChartCard renders an
+// honest error state — we never suppress the error or fabricate empty data.
+function otelDegradedResponse(loki: LokiFetcher, route: string): Response {
+  if (loki.isAvailable()) {
+    return Response.json(
+      {
+        error: "Loki query failed",
+        detail: `The ${route} query returned no usable result though Loki is reachable (query or backend error).`,
+        degraded: true,
+      },
+      { status: 502 },
+    );
+  }
+  return Response.json({ error: "Loki unavailable" }, { status: 503 });
+}
+
 export function createServer(opts: CreateServerOptions): BunServer {
   const {
     port = DEFAULT_PORT,
@@ -1876,7 +1897,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const range = url.searchParams.get("range") ?? "1h";
           const result = await toolLatency(loki, range);
           if (result === null) {
-            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+            // null means the queryRange came back null. Distinguish HONESTLY: if the
+            // /ready probe passed, Loki IS reachable and this is a QUERY/backend
+            // error (e.g. a LogQL 400), NOT "Loki unavailable" — don't mislabel it.
+            return otelDegradedResponse(loki, "tool-latency");
           }
           return Response.json({ data: result });
         }
@@ -1902,8 +1926,11 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const range = url.searchParams.get("range") ?? "1h";
           const result = await modelLatency(loki, range);
           if (result === null) {
-            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
-            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+            // null means the queryRange came back null. Surface it HONESTLY: a
+            // passing /ready probe means Loki is reachable and this is a query/
+            // backend error (degraded), NOT a fabricated empty or a false
+            // "Loki unavailable".
+            return otelDegradedResponse(loki, "model-latency");
           }
           return Response.json({ data: result });
         }

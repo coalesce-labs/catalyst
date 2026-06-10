@@ -112,14 +112,26 @@ export async function toolUsageByName(
 
 // ── OBS-7 (TELEMETRY P4): per-model request latency + error% ─────────────────
 // Model latency is read off the SAME claude-code Loki stream the tail/errors use,
-// not Prometheus — `api_request` lines carry a `duration_ms` field we can unwrap
-// and aggregate with LogQL's `quantile_over_time`. p50/p95 by `model` answer "is
-// this model slow right now?"; the error% by model (api_error / api_request) is a
+// not Prometheus — `api_request` records carry a `duration_ms` value we unwrap and
+// aggregate with LogQL's `quantile_over_time`. p50/p95 by `model` answer "is this
+// model slow right now?"; the error% by model (api_error / api_request) is a
 // second, complementary axis the P4 bar labels (a model can be fast but erroring).
 //
+// STRUCTURED-METADATA TRUTH (verified live 2026-06-10): catalyst-otel puts
+// `event_name`, `model`, `duration_ms`, … as STRUCTURED-METADATA labels on the
+// `service_name="claude-code"` streams; the log line BODY is just the event-name
+// string (e.g. "claude_code.api_request"). So:
+//   - the event filter MUST be a `| event_name="api_request"` PIPE label-filter,
+//     NOT a `{event_name=…}` stream selector (that returns 0 — the shipped bug),
+//     and NOT a body match `|= "claude_code.api_request"` followed by `| json`
+//     (the body is not JSON → `| json` raises JSONParserErr and Loki 400s, which
+//     surfaces as a false "Loki unavailable").
+//   - `unwrap duration_ms` reads the structured-metadata label directly — no `|
+//     json` stage is needed (or possible).
+//
 // The LogQL is a metric query (queryRange returns a matrix, one series per model):
-//   quantile_over_time(0.95, {…} |= "claude_code.api_request" | json
-//     | unwrap duration_ms [r]) by (model)
+//   quantile_over_time(0.95, {service_name=~"claude-code.*"}
+//     | event_name="api_request" | unwrap duration_ms [r]) by (model)
 // We take the LAST point of each series (the cumulative-window aggregate over the
 // scan), the same "last value" idiom toolUsageByName uses for count_over_time.
 
@@ -139,24 +151,30 @@ export interface ModelLatencyRow {
 }
 
 /** Build the exact LogQL for one latency quantile over unwrapped `duration_ms` on
- *  the `api_request` stream, grouped by model. Exported so a test can pin the
- *  `| json | unwrap duration_ms` pipe + the `by (model)` grouping (a refactor that
- *  drops the unwrap or the json stage silently returns zero series). */
+ *  the `api_request` records, grouped by model. The event filter is a
+ *  `| event_name="api_request"` PIPE label-filter on structured metadata (NOT a
+ *  `{event_name=…}` selector, which returns 0), and `unwrap duration_ms` reads the
+ *  structured-metadata label directly (NO `| json` stage — the body is the
+ *  event-name string, not JSON, so `| json` would 400). Exported so a test can pin
+ *  this shape (a refactor that re-adds `| json` or moves the filter into `{}`
+ *  silently returns zero series). */
 export function modelLatencyLogQL(quantile: number, range: string): string {
   const r = safeDuration(range, "1h");
   return (
     `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
-    `|= "claude_code.api_request" | json | unwrap duration_ms [${r}]) by (model)`
+    `| event_name="api_request" | unwrap duration_ms [${r}]) by (model)`
   );
 }
 
-/** Build the LogQL for an event count by model (api_request or api_error), used
- *  to derive the per-model error rate. Exported for the same pin-the-shape reason. */
-export function modelEventCountLogQL(eventLiteral: string, range: string): string {
+/** Build the LogQL for an event count by model, used to derive the per-model error
+ *  rate. `eventName` is the bare structured-metadata value (e.g. `api_request` /
+ *  `api_error`), filtered via a `| event_name="…"` PIPE label-filter (NOT a body
+ *  match + `| json`). Exported for the same pin-the-shape reason. */
+export function modelEventCountLogQL(eventName: string, range: string): string {
   const r = safeDuration(range, "1h");
   return (
     `sum by (model) (count_over_time({service_name=~"claude-code.*"} ` +
-    `|= "${eventLiteral}" | json [${r}]))`
+    `| event_name="${eventName}" [${r}]))`
   );
 }
 
@@ -202,8 +220,8 @@ export async function modelLatency(
   const [p50Res, p95Res, reqRes, errRes] = await Promise.all([
     loki.queryRange(modelLatencyLogQL(0.5, r), startIso, endIso),
     loki.queryRange(modelLatencyLogQL(0.95, r), startIso, endIso),
-    loki.queryRange(modelEventCountLogQL("claude_code.api_request", r), startIso, endIso),
-    loki.queryRange(modelEventCountLogQL("claude_code.api_error", r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("api_request", r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("api_error", r), startIso, endIso),
   ]);
 
   // Loki unavailable → the very first (and every) probe is null. Distinguish that
@@ -250,6 +268,10 @@ export async function modelLatency(
 // tool used 10× beats a fast tool used 1000× (design §3.1). The counts come from
 // toolUsageByName; this adds the p50/p95 half by unwrapping `duration_ms` on
 // `tool_result`, the SAME LogQL idiom as modelLatency but grouped by `tool_name`.
+// The grouping label is `tool_name` (verified live: `by (tool_name)` → 17 series,
+// `by (tool)` → 1 empty series — `tool` is not a label that exists), and the event
+// filter is a `| event_name="tool_result"` PIPE label-filter on structured
+// metadata (NOT a body match + `| json`, which 400s on the non-JSON body).
 
 /** One tool's p50/p95 latency (ms), null when no unwrappable tool_result samples
  *  fell in the window. Keyed by tool name in the returned map. */
@@ -259,13 +281,17 @@ export interface ToolLatency {
 }
 
 /** Build the LogQL for one latency quantile over unwrapped `duration_ms` on the
- *  `tool_result` stream, grouped by tool_name. Exported so a test can pin the
- *  unwrap pipe + grouping (mirrors modelLatencyLogQL). */
+ *  `tool_result` records, grouped by tool_name. The event filter is a
+ *  `| event_name="tool_result"` PIPE label-filter on structured metadata and
+ *  `unwrap duration_ms` reads the structured-metadata label directly (NO `| json`
+ *  stage — the body is the event-name string, not JSON). Grouped by `tool_name`
+ *  (NOT `tool` — that label does not exist). Exported so a test can pin the shape
+ *  (mirrors modelLatencyLogQL). */
 export function toolLatencyLogQL(quantile: number, range: string): string {
   const r = safeDuration(range, "1h");
   return (
     `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
-    `|= "claude_code.tool_result" | json | unwrap duration_ms [${r}]) by (tool_name)`
+    `| event_name="tool_result" | unwrap duration_ms [${r}]) by (tool_name)`
   );
 }
 
@@ -331,6 +357,17 @@ interface LogEntry {
   labels: Record<string, string>;
 }
 
+/** Build the LogQL for the api_error LOG tail. Uses a `| event_name="api_error"`
+ *  PIPE label-filter on structured metadata. (A body match `|= "claude_code.
+ *  api_error"` ALSO works for a LOG query — the body is exactly that string — but
+ *  the pipe-filter is the canonical structured-metadata pattern and stays correct
+ *  if the body ingest shape ever changes. The error string + model the P2 panel
+ *  clusters on live in the STREAM LABELS, surfaced via LogEntry.labels.) Exported
+ *  so a test can pin the pipe-filter shape. */
+export function apiErrorsLogQL(): string {
+  return `{service_name=~"claude-code.*"} | event_name="api_error"`;
+}
+
 export async function apiErrors(
   loki: LokiFetcher,
   range: string,
@@ -340,7 +377,7 @@ export async function apiErrors(
   const now = new Date();
   const start = new Date(now.getTime() - parseDuration(r));
   const result = await loki.queryRange(
-    '{service_name=~"claude-code.*"} |= "claude_code.api_error"',
+    apiErrorsLogQL(),
     start.toISOString(),
     now.toISOString(),
     limit,
@@ -429,18 +466,21 @@ export async function recentTail(
   for (const stream of result.data.result) {
     const s = stream as LokiStreamValue;
     if (!s.values) continue;
-    // Stream-level labels are a fallback for the grouping keys when the JSON body
-    // omits them (some lines carry session_id only as a stream label).
-    const streamSession = asStr(s.stream?.["session_id"]);
-    const streamLinear = asStr(s.stream?.["linear_key"]);
+    // Every field lives in the STREAM LABELS (structured metadata) — the line body
+    // is just the event-name string. parseHistoryLine reads from the labels; the
+    // grouping keys (session_id / linear_key) come from the SAME labels (with a
+    // body fallback for an older JSON-body ingest shape).
+    const labels = s.stream ?? {};
+    const streamSession = asStr(labels["session_id"]);
+    const streamLinear = asStr(labels["linear_key"]);
     for (const [tsNanos, line] of s.values) {
       const tsMs = Math.floor(Number(tsNanos) / 1_000_000);
-      const base = parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line);
+      const base = parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line, labels);
       const body = safeJsonObject(line);
       rows.push({
         ...base,
-        sessionId: asStr(body["session_id"]) ?? streamSession,
-        linearKey: asStr(body["linear_key"]) ?? streamLinear,
+        sessionId: streamSession ?? asStr(body["session_id"]),
+        linearKey: streamLinear ?? asStr(body["linear_key"]),
       });
     }
   }
@@ -486,6 +526,8 @@ export interface WorkerHistoryRow {
   model: string | null;
   /** Tool/result success flag when the line carries one. */
   success: boolean | null;
+  /** The CC prompt id (`prompt_id` structured-metadata label), or null. */
+  promptId: string | null;
 }
 
 /** A CC session id is a UUID. Reject anything else so an attacker-controlled id
@@ -523,27 +565,44 @@ function asBool(v: unknown): boolean | null {
   return null;
 }
 
-/** Parse one Loki log line (a JSON body) into a WorkerHistoryRow. Tolerant: a
- *  non-JSON or partial line still yields a row with the fields it could read and
- *  `null` for the rest — the tail must never crash on a malformed record. */
-export function parseHistoryLine(ts: number, line: string): WorkerHistoryRow {
+/** Parse one Loki log record into a WorkerHistoryRow. catalyst-otel carries every
+ *  field as a STRUCTURED-METADATA STREAM LABEL (verified live 2026-06-10) — the log
+ *  line BODY is just the event-name string (e.g. "claude_code.tool_result"), so the
+ *  body is NOT JSON and reading fields from it yields all-null ("event — —", the
+ *  shipped bug). We therefore read every field from the passed `labels` map, and
+ *  keep a best-effort JSON-body fallback ONLY for the rare record that does ship a
+ *  JSON body (so this never regresses an older ingest shape). Tolerant: a record
+ *  missing a field yields `null` for it — the tail must never crash. */
+export function parseHistoryLine(
+  ts: number,
+  line: string,
+  labels: Record<string, string> = {},
+): WorkerHistoryRow {
   let body: Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(line) as unknown;
     if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
   } catch {
-    /* leave body empty; the raw line is unreadable JSON */
+    /* body is the event-name string, not JSON — fields come from `labels` */
   }
+  // Labels win (the real source); body is a fallback for an older JSON-body ingest.
+  const pick = (key: string): unknown => labels[key] ?? body[key];
   return {
     ts,
-    eventName: asStr(body["event_name"]) ?? asStr(body["event.name"]),
-    toolName: asStr(body["tool_name"]),
-    toolInput: asStr(body["tool_input"]),
-    durationMs: asNum(body["duration_ms"]),
-    costUsd: asNum(body["cost_usd"]),
-    tokens: asNum(body["tokens"]),
-    model: asStr(body["model"]),
-    success: asBool(body["success"]),
+    eventName:
+      asStr(labels["event_name"]) ??
+      asStr(body["event_name"]) ??
+      asStr(body["event.name"]),
+    toolName: asStr(pick("tool_name")),
+    toolInput: asStr(pick("tool_input")),
+    durationMs: asNum(pick("duration_ms")),
+    // The structured-metadata label is `cost_usd` (verified live); keep `cost` as a
+    // body fallback for an older ingest shape.
+    costUsd: asNum(labels["cost_usd"]) ?? asNum(body["cost_usd"]) ?? asNum(body["cost"]),
+    tokens: asNum(pick("tokens")),
+    model: asStr(pick("model")),
+    success: asBool(pick("success")),
+    promptId: asStr(pick("prompt_id")),
   };
 }
 
@@ -571,10 +630,13 @@ export async function workerHistoryBySession(
   for (const stream of result.data.result) {
     const s = stream as LokiStreamValue;
     if (!s.values) continue;
+    // Fields live in the STREAM LABELS (structured metadata); the line body is the
+    // event-name string. Pass the labels so parseHistoryLine reads the real values.
+    const labels = s.stream ?? {};
     for (const [tsNanos, line] of s.values) {
       // Loki stream timestamps are nanosecond strings — floor to epoch ms.
       const tsMs = Math.floor(Number(tsNanos) / 1_000_000);
-      rows.push(parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line));
+      rows.push(parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line, labels));
     }
   }
   // Newest-first so the tail reads like a terminal (most-recent activity on top).
