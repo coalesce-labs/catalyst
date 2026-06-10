@@ -245,6 +245,13 @@ import {
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
 import { readTicketArtifacts } from "./lib/ticket-artifacts-reader.mjs";
+// CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
+// ticket-detail page. Board title is stale-sourced and the durable cache has no
+// description column, so both must be live-fetched (cached, TTL'd, fail-open).
+import {
+  fillTitleDescriptionFallback,
+  _clearTitleDescCache,
+} from "./lib/linear-title-description-fallback.mjs";
 import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
 type BunServer = ReturnType<typeof Bun.serve>;
@@ -919,6 +926,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           event.ticket !== null
         ) {
           await linear.invalidate(event.ticket);
+        }
+        // CTL-974 pattern: an issue edit changes the live title/description, so
+        // drop that ticket's supplemental cache entry — the next
+        // /api/linear-ticket request re-fetches it in seconds instead of
+        // waiting out the 5-min TTL. Comment/reaction events don't change those
+        // fields, so they skip it. Best-effort; never throws.
+        if (event.kind === "issue" && event.ticket !== null) {
+          _clearTitleDescCache(event.ticket);
         }
       },
       logger: {
@@ -1732,6 +1747,43 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Not Found", { status: 404 });
           }
           return Response.json(detail);
+        }
+
+        // CTL-974 pattern: supplemental cached live Linear {title, description}
+        // fetch for the ticket-detail page. Separate from /api/ticket-detail to
+        // keep its 404-on-no-descriptor contract intact. The board title is
+        // stale-sourced (triage summary can win) and the durable cache has no
+        // description column, so BOTH the real title and the markdown
+        // description are live-fetched from Linear here — cached, TTL'd (5 min),
+        // batched, fail-open, NEVER spawning linearis on a request path.
+        // ALWAYS 200: an absent description is honest-empty, not an error.
+        const linearTicketMatch = url.pathname.match(
+          /^\/api\/linear-ticket\/([^/]+)$/,
+        );
+        if (linearTicketMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(linearTicketMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const map = await fillTitleDescriptionFallback([ticket]);
+          const entry = map[ticket] ?? { title: null, description: null };
+          const available =
+            entry.title !== null || entry.description !== null;
+          return Response.json({
+            id: ticket,
+            title: entry.title,
+            description: entry.description,
+            source: available ? "linear-live" : "unavailable",
+          });
         }
 
         // CTL-889 (P9): a ticket's research/plan thoughts artifacts for the
