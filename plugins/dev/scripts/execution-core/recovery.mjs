@@ -1767,10 +1767,14 @@ export function reclaimDeadWorkIfPossible(
       if (!open) {
         const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
         if (tickRow) {
+          // CTL-936 H1: pin bgJobId so resolvePostcondition can distinguish
+          // the targeted session from a newly-revived worker on the same
+          // subject slot (a revive allocates a new bgJobId, so the old kill
+          // intent does not falsely satisfy against it).
           intentDb.run(
             `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
              VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
-            [tickRow.tick_id, subject, JSON.stringify({ kind: "kill", subject, sessionNotRegistered: true })],
+            [tickRow.tick_id, subject, JSON.stringify({ kind: "kill", subject, bgJobId: killBgJobId, sessionNotRegistered: true })],
           );
         }
       }

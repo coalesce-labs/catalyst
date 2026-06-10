@@ -3416,7 +3416,16 @@ function runTick() {
     }
     // CTL-933: record this tick's liveness observations BEFORE the decisions run
     // (write-only shadow; own try/catch inside — never throws, never gates).
-    const beliefsRes = collectBeliefsTick({ orchDir: runningOpts.orchDir, linearCache: runningOpts.cache });
+    // CTL-936: thread the event-log append seam so reconcileIntents can emit
+    // intent.ineffective operator events when CATALYST_INTENTS_ENFORCE=1.
+    const intentEventAppender = typeof runningOpts.appendIntentEvent === "function"
+      ? runningOpts.appendIntentEvent
+      : null;
+    const beliefsRes = collectBeliefsTick({
+      orchDir: runningOpts.orchDir,
+      linearCache: runningOpts.cache,
+      appendIntentEvent: intentEventAppender,
+    });
     // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
     // Reads wake_diagnostician beliefs for the current tick from the shared beliefs.db
     // handle (same connection — no second db open). Never throws. Only activates
@@ -3497,6 +3506,11 @@ function runTick() {
       // CTL-781: respect-assignment + self-assign seams (undefined = gate off).
       botUserIds: runningOpts.botUserIds,
       botWriteId: runningOpts.botWriteId,
+      // CTL-936: thread the beliefs db handle so intentAwareKill can record /
+      // suppress kill-storm retries. getBeliefsDb() returns null when
+      // CATALYST_BELIEFS_SHADOW=0 (collector never opened it) — intentAwareKill
+      // falls back to plain killBgJob in that case, preserving legacy behaviour.
+      intentDb: getBeliefsDb(),
     });
   } catch (err) {
     // A tick must never crash the daemon — log and let the next tick retry.
@@ -3570,6 +3584,10 @@ export function startScheduler({
   // CTL-781: respect-assignment + self-assign. Undefined → gate off (fail-open).
   botUserIds,
   botWriteId,
+  // CTL-936: operator-event seam for intent.ineffective. When provided AND
+  // CATALYST_INTENTS_ENFORCE=1, reconcileIntents emits events through this fn
+  // instead of logging silently. Null/undefined → legacy shadow-only behavior.
+  appendIntentEvent,
   tickIntervalMs = TICK_INTERVAL_MS,
   debounceMs = TICK_DEBOUNCE_MS,
 } = {}) {
@@ -3594,6 +3612,7 @@ export function startScheduler({
     isBgJobAlive, // CTL-671: optional phantom-sweep bg-liveness seam
     botUserIds, // CTL-781: respect-assignment predicate membership set
     botWriteId, // CTL-781: orchestrator bot UUID to write as assignee on claim
+    appendIntentEvent, // CTL-936: operator-event seam for intent.ineffective
   };
 
   // CTL-585: warn once at startup if the Linear workspace lacks the labels
