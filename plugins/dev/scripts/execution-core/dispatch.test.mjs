@@ -448,3 +448,91 @@ describe("dispatchTicket — attempt thread-through (CTL-761)", () => {
     expect(calls[0].attempt).toBe(2);
   });
 });
+
+// CTL-864: clusterGeneration → CATALYST_CLUSTER_GENERATION env var in spawned process
+describe("defaultRunPhaseAgent — clusterGeneration env injection (CTL-864)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("sets CATALYST_CLUSTER_GENERATION when clusterGeneration provided", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1", clusterGeneration: 7 },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_CLUSTER_GENERATION).toBe("7");
+  });
+
+  test("does NOT set CATALYST_CLUSTER_GENERATION when clusterGeneration absent", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect("CATALYST_CLUSTER_GENERATION" in spawn.calls[0].opts.env).toBe(false);
+  });
+
+  test("does NOT set CATALYST_CLUSTER_GENERATION when clusterGeneration is null", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1", clusterGeneration: null },
+      { spawn },
+    );
+    expect("CATALYST_CLUSTER_GENERATION" in spawn.calls[0].opts.env).toBe(false);
+  });
+});
+
+// CTL-864: dispatchTicket forwards clusterGeneration
+describe("dispatchTicket — clusterGeneration thread-through (CTL-864)", () => {
+  test("backward compat: no clusterGeneration → dispatch receives no clusterGeneration key", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "pr", { dispatch });
+    expect("clusterGeneration" in calls[0]).toBe(false);
+  });
+
+  test("forwards clusterGeneration to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "pr", { dispatch, clusterGeneration: 7 });
+    expect(calls[0].clusterGeneration).toBe(7);
+  });
+});
+
+// CTL-864: defaultDispatch forwards clusterGeneration to runPhaseAgent
+describe("defaultDispatch — clusterGeneration passthrough (CTL-864)", () => {
+  const seams = () => {
+    const calls = [];
+    return {
+      resolveProject: () => ({ repoRoot: "/repo" }),
+      createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
+      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      calls,
+    };
+  };
+
+  test("forwards clusterGeneration to runPhaseAgent when set", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", clusterGeneration: 7 },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].clusterGeneration).toBe(7);
+  });
+
+  test("clusterGeneration is undefined on a cold dispatch (no clusterGeneration)", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].clusterGeneration).toBeUndefined();
+  });
+});

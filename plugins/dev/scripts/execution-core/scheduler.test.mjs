@@ -7161,4 +7161,41 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
     // (the ticket is simply reconsidered next tick).
     expect(existsSync(dispatchCooldownPath(orchDir, TICKET, "research"))).toBe(false);
   });
+
+  // CTL-864: the won claim.generation is forwarded as clusterGeneration to dispatchTicket.
+  test("CTL-864: multi-host dispatch forwards the won claim.generation as clusterGeneration", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0].clusterGeneration).toBe(7);
+  });
+
+  test("CTL-864: single-host dispatch passes no clusterGeneration (no-op)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: null }); // never called
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect("clusterGeneration" in dispatch.calls[0]).toBe(false);
+  });
 });

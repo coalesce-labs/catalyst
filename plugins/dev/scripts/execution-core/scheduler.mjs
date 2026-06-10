@@ -2901,6 +2901,7 @@ export function schedulerTick(
     // Fail-closed: claimDispatch returns won:false on any error (never
     // double-dispatch on a transient Linear hiccup). Placed before the
     // dispatch-requested emit so a lost claim never emits a phantom "requested".
+    let clusterGeneration = null; // CTL-864: forwarded only when a multi-host claim is won
     if (multiHost) {
       const claim = claimDispatch({
         ticket: t.identifier,
@@ -2914,6 +2915,7 @@ export function schedulerTick(
         );
         continue;
       }
+      clusterGeneration = claim.generation; // CTL-864: the fencing token for this worker
     }
     // CTL-660: record the new-work dispatch DECISION before the spawn.
     safeEmit(
@@ -2926,7 +2928,7 @@ export function schedulerTick(
       },
       { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
     );
-    const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch });
+    const r = dispatchTicket(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, { dispatch, clusterGeneration }); // CTL-864
     if (r.code === 0) {
       // CTL-611: same Gap 1 verifier as the advancement sweep — a rc=0
       // without a live successor signal must be demoted.
