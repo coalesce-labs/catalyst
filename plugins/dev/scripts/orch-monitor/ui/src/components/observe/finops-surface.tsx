@@ -352,6 +352,7 @@ export function FinopsSurface() {
         dataSource="[prom]"
         health={promHealth(todayReachable)}
         hasData={today !== null}
+        className="shrink-0"
         bodyClassName="min-h-[120px] p-4"
       >
         <FinopsHero today={today} cache={cache} />
@@ -364,6 +365,7 @@ export function FinopsSurface() {
         dataSource="[prom]"
         health={promHealth(seriesReachable)}
         hasData={series.length > 0}
+        className="shrink-0"
         bodyClassName="min-h-[260px] h-[min(40vh,320px)] p-3"
         headerExtra={
           nSpikes > 0 ? (
@@ -379,19 +381,23 @@ export function FinopsSurface() {
         <SpendOverTimePanel points={series} onSpikeClick={onSpikeClick} />
       </ChartCard>
 
-      {/* Spike drill strip — appears below P-A on a spike click. */}
+      {/* Spike drill strip — appears below P-A on a spike click. Wrapped in a
+          shrink-0 box so it keeps its natural height as a direct child of the
+          scroll column (the column scrolls; the strip never collapses). */}
       {spike && (
-        <SpikeDrillStrip
-          data={spike.data}
-          hourLabel={spike.label}
-          onClose={() => setSpike(null)}
-        />
+        <div className="shrink-0">
+          <SpikeDrillStrip
+            data={spike.data}
+            hourLabel={spike.label}
+            onClose={() => setSpike(null)}
+          />
+        </div>
       )}
 
       {/* OBS-11 BREAKDOWN GRID — two columns below the hero+P-A (layout spec §2).
           Left = trend/where-it-went bars (by-stage, by-model/agent); right = the
           default table (P-C) + the proportional token donut (P-E). */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="grid shrink-0 grid-cols-1 gap-4 lg:grid-cols-2">
         {/* P-C — expensive tickets table (the default view, Principle 10). */}
         <ChartCard
           title="Expensive tickets"
@@ -460,8 +466,12 @@ export function FinopsSurface() {
         </ChartCard>
       </div>
 
-      {/* FOOTER strip — A4 concentration · A8 drift · locked $/story-point. */}
-      <FinopsFooter cost={cost} validation={validation} />
+      {/* FOOTER strip — A4 concentration · A8 drift · locked $/story-point.
+          Wrapped in a shrink-0 box so it keeps its natural height as a direct
+          child of the scroll column. */}
+      <div className="shrink-0">
+        <FinopsFooter cost={cost} validation={validation} />
+      </div>
     </div>
   );
 }
