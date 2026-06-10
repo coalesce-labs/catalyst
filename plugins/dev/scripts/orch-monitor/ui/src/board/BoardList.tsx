@@ -16,6 +16,7 @@
 // walk the exact list the operator sees, and tracks a presentation-only cursor for
 // the on-screen highlight + native arrow-key/click row interaction.
 import { Fragment, useEffect, useMemo, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import { useSetAtom } from "jotai";
 import {
   Table,
@@ -30,6 +31,13 @@ import { useSort } from "@/hooks/use-sort";
 import { cn } from "@/lib/utils";
 import { C, LIVE } from "./board-tokens";
 import { Dot } from "./Board";
+import {
+  useReducedMotion,
+  rowTransition,
+  enterVariants,
+  enterVariantsReduced,
+  reduceTransition,
+} from "./motion-utils";
 import { listContextAtom } from "./nav-store";
 import type { BoardTicket, BoardWorker } from "./types";
 import type { ListLens, Ordering } from "./list-order";
@@ -55,6 +63,10 @@ import { showLaneChrome, singleLaneHint } from "./board-grouping";
 // the blue cursor / selection vocabulary — NEVER the cyan LIVE signal (design §5.2).
 // CTL-930 Phase 5: C.blue from canonical board-tokens.ts (already imported above).
 const CURSOR_BLUE = C.blue;
+
+// CTL-952: motion-enhanced TableRow — preserves all the shadcn tr behaviour
+// (className, data-state, aria-selected) while gaining layout + enter/exit.
+const MotionTableRow = motion.create(TableRow);
 
 export interface BoardListProps {
   /** which lens — selects the column set + the flatten path. */
@@ -246,6 +258,10 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     hint={sortedLanes.length === 1 ? singleLaneHint(swimlane, lane, navKind) : null}
                   />
                 )}
+                {/* CTL-952: AnimatePresence enables enter/exit for rows that
+                    appear / disappear as priority or state changes. `initial=false`
+                    skips the initial mount animation (no flash on first render). */}
+                <AnimatePresence initial={false}>
                 {lane.items.map((row) => {
                   const id = rowId(row.entity);
                   return (
@@ -267,6 +283,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     />
                   );
                 })}
+                </AnimatePresence>
               </Fragment>
             ))}
           </TableBody>
@@ -276,6 +293,8 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
   );
 }
 
+// CTL-952: rows animate enter/exit (fade + slide) when items appear/disappear
+// as priority or state changes. `MotionTableRow` preserves the shadcn tr API.
 function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTicket["activeState"] }>({
   row,
   cols,
@@ -294,8 +313,16 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
   const id = rowId(row.entity);
   const live = row.entity.activeState === "active";
   const open = () => onSelect?.(id);
+  const reduced = useReducedMotion();
+  const variants = reduced ? enterVariantsReduced : enterVariants;
+  const trans = reduceTransition(rowTransition, reduced);
   return (
-    <TableRow
+    <MotionTableRow
+      variants={variants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      transition={trans}
       aria-selected={selected}
       data-state={selected ? "selected" : undefined}
       // CTL-951: the restore hook re-focuses the originating row by this id.
@@ -326,7 +353,7 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
           {c.cell(row.entity, density)}
         </TableCell>
       ))}
-    </TableRow>
+    </MotionTableRow>
   );
 }
 

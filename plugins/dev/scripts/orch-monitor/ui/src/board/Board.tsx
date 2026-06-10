@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { motion, AnimatePresence } from "motion/react";
 import { useAtom } from "jotai";
 import { Badge } from "@/components/ui/badge";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -6,6 +7,14 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 import { fmtDuration } from "../lib/formatters";
+import {
+  useReducedMotion,
+  cardTransition,
+  rowTransition,
+  enterVariants,
+  enterVariantsReduced,
+  reduceTransition,
+} from "./motion-utils";
 // CTL-892 / SHELL2: the standalone-vs-embedded height token. The board fills the
 // viewport standalone (100vh) and the inset slot embedded (100%); every scroll
 // region below reads it through the --cat-board-vh CSS custom property.
@@ -351,12 +360,20 @@ type OpenDetailFn = (
   ctx: { ids: string[]; lens?: DetailLens; col?: string },
 ) => void;
 
+// CTL-952: motion.div gives each card a stable layoutId keyed by ticket id so
+// when it moves between columns (phase change) the browser animates its position
+// rather than jump-cutting. AnimatePresence (in the column container) handles
+// enter/exit. `useReducedMotion` collapses everything to instant when the OS
+// accessibility preference is set.
 function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
   const compact = density === "compact";
+  const reduced = useReducedMotion();
+  const variants = reduced ? enterVariantsReduced : enterVariants;
+  const trans = reduceTransition(cardTransition, reduced);
   const open = (newTab: boolean) => {
     if (newTab) {
       openDetailInNewTab(ticketDetailHref(t.id));
@@ -365,7 +382,14 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
     onOpen?.("ticket", t.id, { ids: colIds ?? [t.id], lens, col });
   };
   return (
-    <div
+    <motion.div
+      layoutId={`ticket-card-${t.id}`}
+      layout="position"
+      variants={variants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      transition={trans}
       className={live ? "catalyst-live" : undefined}
       data-card-id={t.id}
       role={onOpen ? "button" : undefined}
@@ -431,7 +455,7 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
           {t.pr ? <span style={{ fontFamily: C.mono, fontSize: 10.5, color: C.green }}>#{t.pr}</span> : <Cost v={t.costUSD} />}
         </div>
       )}
-    </div>
+    </motion.div>
   );
 }
 
@@ -453,12 +477,18 @@ function HostChip({ host }: { host: Worker["host"] }) {
 }
 
 // ── worker card (Workers board) ─────────────────────────────────────────────
+// CTL-952: motion.div with layoutId keyed by worker name — same layout/enter/exit
+// treatment as TicketCard. Workers move between Active/Stuck columns when their
+// state changes; AnimatePresence in the column container triggers enter/exit.
 function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; colIds?: string[]; onOpen?: OpenDetailFn }) {
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
+  const reduced = useReducedMotion();
+  const variants = reduced ? enterVariantsReduced : enterVariants;
+  const trans = reduceTransition(cardTransition, reduced);
   const open = (newTab: boolean) => {
     if (newTab) {
       openDetailInNewTab(workerDetailHref(w.name));
@@ -467,7 +497,14 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
     onOpen?.("worker", w.name, { ids: colIds ?? [w.name] });
   };
   return (
-    <div
+    <motion.div
+      layoutId={`worker-card-${w.name}`}
+      layout="position"
+      variants={variants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      transition={trans}
       className={live ? "catalyst-live" : undefined}
       data-card-id={w.name}
       // CTL-951: a PLAIN click on a worker card navigates STRAIGHT to its
@@ -530,7 +567,7 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
         <span style={{ flex: 1 }} />
         <Cost v={w.costUSD} />
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -696,9 +733,22 @@ const ellip = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, 
 // single-host collapses it away so the column adds no visual noise (the identity
 // no-op). The host cell renders the owner name, or a dim "—" for an un-attributed
 // row (host:null, e.g. before a fence claim).
+// CTL-952: motion-enhanced TableRow for queue / in-flight animate-presence.
+const MotionTableRow = motion.create(TableRow);
+
 function QueueRow({ q, freeSlots, showHost }: { q: QueueItem; freeSlots: number; showHost: boolean }) {
+  const reduced = useReducedMotion();
+  const variants = reduced ? enterVariantsReduced : enterVariants;
+  const trans = reduceTransition(rowTransition, reduced);
   return (
-    <TableRow style={{ background: q.rank <= freeSlots ? "rgba(57,208,122,0.06)" : undefined }}>
+    <MotionTableRow
+      variants={variants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      transition={trans}
+      style={{ background: q.rank <= freeSlots ? "rgba(57,208,122,0.06)" : undefined }}
+    >
       <TableCell style={{ ...mono, color: C.fgMuted }}>{q.rank}</TableCell>
       <TableCell><PriorityIcon p={q.priority} /></TableCell>
       <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{q.id}</TableCell>
@@ -708,7 +758,7 @@ function QueueRow({ q, freeSlots, showHost }: { q: QueueItem; freeSlots: number;
       {showHost && (
         <TableCell style={{ ...mono, fontSize: 11, color: q.host ? C.fgMuted : C.fgDim }}>{q.host?.name ?? "—"}</TableCell>
       )}
-    </TableRow>
+    </MotionTableRow>
   );
 }
 
@@ -731,7 +781,10 @@ function WaitingTable({ queue, freeSlots, showHost, grouped }: { queue: QueueIte
         <Table>
           {header}
           <TableBody>
-            {queue.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+            {/* CTL-952: AnimatePresence for queue reorder enter/exit */}
+            <AnimatePresence initial={false}>
+              {queue.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+            </AnimatePresence>
           </TableBody>
         </Table>
       </div>
@@ -751,12 +804,54 @@ function WaitingTable({ queue, freeSlots, showHost, grouped }: { queue: QueueIte
                   <span style={{ color: C.fgDim }}> · {g.items.length} queued</span>
                 </TableCell>
               </TableRow>
-              {g.items.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+              {/* CTL-952: AnimatePresence for grouped queue reorder */}
+              <AnimatePresence initial={false}>
+                {g.items.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
+              </AnimatePresence>
             </Fragment>
           ))}
         </TableBody>
       </Table>
     </div>
+  );
+}
+
+// CTL-952: in-flight worker row — extracted from the inline QueueView map so the
+// `useReducedMotion` hook call is valid (hooks must be called from a component).
+function InflightWorkerRow({ w, ticket, blockers }: {
+  w: Worker;
+  ticket: Ticket | undefined;
+  blockers: string[];
+}) {
+  const reduced = useReducedMotion();
+  const variants = reduced ? enterVariantsReduced : enterVariants;
+  const trans = reduceTransition(rowTransition, reduced);
+  return (
+    <MotionTableRow
+      variants={variants}
+      initial="initial"
+      animate="animate"
+      exit="exit"
+      transition={trans}
+      style={{ opacity: w.activeState === "stuck" ? 0.6 : 1 }}
+    >
+      <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
+      <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
+      <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
+      <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>
+        {ticket?.title || ""}
+        {blockers.length > 0 && (
+          <span style={{ marginLeft: 8, fontFamily: C.mono, fontSize: 10, color: C.red }}>
+            blocked on: {blockers.join(", ")}
+          </span>
+        )}
+      </TableCell>
+      <TableCell><PhasePill phase={w.phase} /></TableCell>
+      <TableCell style={{ ...mono, fontSize: 11, color: isActive(w.activeState) ? LIVE : w.activeState === "stuck" ? C.red : w.waitingOnUser ? C.yellow : C.fgDim }}>
+        {workerStatusText(w)}
+      </TableCell>
+      <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</TableCell>
+    </MotionTableRow>
   );
 }
 
@@ -840,33 +935,27 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
                       </TableCell>
                     </TableRow>
                   )}
+                  {/* CTL-952: AnimatePresence for in-flight worker enter/exit
+                      (worker moves working<->waiting<->blocked). */}
+                  <AnimatePresence initial={false}>
                   {section.workers.map((w) => {
                     // CTL-947: blocked rows show the blocker ids inline.
                     const ticket = infoById[w.ticket];
                     const blockers: string[] = section.group === "blocked"
                       ? (ticket?.blockers ?? [])
                       : [];
+                    // per-row reduced-motion is resolved in QueueRow / MotionTableRow
+                    // wrappers; here we create the row inline so we call the hook once.
                     return (
-                      <TableRow key={w.name} style={{ opacity: w.activeState === "stuck" ? 0.6 : 1 }}>
-                        <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
-                        <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
-                        <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
-                        <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>
-                          {ticket?.title || ""}
-                          {blockers.length > 0 && (
-                            <span style={{ marginLeft: 8, fontFamily: C.mono, fontSize: 10, color: C.red }}>
-                              blocked on: {blockers.join(", ")}
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell><PhasePill phase={w.phase} /></TableCell>
-                        <TableCell style={{ ...mono, fontSize: 11, color: isActive(w.activeState) ? LIVE : w.activeState === "stuck" ? C.red : w.waitingOnUser ? C.yellow : C.fgDim }}>
-                          {workerStatusText(w)}
-                        </TableCell>
-                        <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</TableCell>
-                      </TableRow>
+                      <InflightWorkerRow
+                        key={w.name}
+                        w={w}
+                        ticket={ticket}
+                        blockers={blockers}
+                      />
                     );
                   })}
+                  </AnimatePresence>
                 </Fragment>
               ))}
             </TableBody>
