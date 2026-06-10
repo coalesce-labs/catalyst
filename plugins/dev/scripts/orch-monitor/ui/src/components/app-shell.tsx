@@ -27,6 +27,10 @@ import { SettingsSurface } from "@/components/settings-surface";
 // gates it on the live cluster signal) so the scope stays All-nodes and nothing
 // changes on today's single-node deployment.
 import { ALL_NODES, NodeScopeContext, type NodeScope } from "@/lib/node-scope";
+// CTL-945: lift both signal hooks into AppShell so AppSidebar + AppFooter share
+// one EventSource each instead of opening independent duplicate connections.
+import { useNavSignal, NavSignalContext } from "@/hooks/use-nav-signal";
+import { useClusterSignal, ClusterSignalContext } from "@/hooks/use-cluster-signal";
 import {
   readSidebarOpen,
   writeSidebarOpen,
@@ -100,6 +104,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // Repos from the board snapshot for palette navigation group construction.
   const { payload } = useBoardSnapshot();
   const repos = payload?.repos ?? [];
+  // CTL-945: single subscription point for nav + cluster signals. AppSidebar and
+  // AppFooter consume NavSignalContext / ClusterSignalContext instead of calling
+  // these hooks independently, reducing persistent EventSources from 6 → 4.
+  const navSignal = useNavSignal();
+  const clusterSignal = useClusterSignal();
 
   // Persist collapse state across reloads (the controlled provider replaces the
   // primitive's cookie path; localStorage is the source of truth here). Logic +
@@ -232,6 +241,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const crumbs = settingsOpen ? SETTINGS_BREADCRUMB : breadcrumbFor(surface, repoScope);
 
   return (
+    <NavSignalContext.Provider value={navSignal}>
+    <ClusterSignalContext.Provider value={clusterSignal}>
     <SurfaceContext.Provider value={surfaceCtx}>
       <NodeScopeContext.Provider value={nodeScopeCtx}>
       {/* Controlled provider → Cmd/Ctrl+B still fires through onOpenChange, so
@@ -339,5 +350,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </CommandDialog>
       </NodeScopeContext.Provider>
     </SurfaceContext.Provider>
+    </ClusterSignalContext.Provider>
+    </NavSignalContext.Provider>
   );
 }

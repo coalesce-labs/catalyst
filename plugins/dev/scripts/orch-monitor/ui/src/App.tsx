@@ -49,12 +49,16 @@ const ActivityView = lazy(() =>
 const GodModeView = lazy(() =>
   import("./components/god-mode-view").then((m) => ({ default: m.GodModeView })),
 );
-// CTL-892 / SHELL2: the dense board lives in the shell now. Lazy so the calm
-// dashboard's initial chunk doesn't pull the full board grid until the operator
-// first jumps to the Board surface (g b / nav / ⌘K).
-const Board = lazy(() =>
-  import("./board/Board").then((m) => ({ default: m.Board })),
-);
+// CTL-945: Board is eagerly imported (not lazy) to eliminate the HTTP/1.1
+// connection-slot race: with 4 persistent EventSources after the CTL-945 context
+// fix, a lazy chunk fetch would still compete for slots during startup. Eager
+// import guarantees the Board component is in the main bundle — no chunk fetch
+// needed at navigation time. The board-worker SharedWorker is still a separate
+// chunk (Vite compiles it independently), so the incremental bundle cost is only
+// the Board UI code itself. The Suspense boundary in SurfaceSwitch is retained
+// for HomeSurface / QueueSurface which remain lazy.
+// CTL-892 / SHELL2: the dense board lives in the shell.
+import { Board } from "./board/Board";
 // CTL-899 / HOME1: the calm master-detail Inbox HOME surface. Lazy so its
 // transport (board snapshot SSE) + master-detail tree only load when the operator
 // is on Home — the dashboard surfaces stay untouched.

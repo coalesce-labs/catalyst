@@ -19,11 +19,12 @@ import {
 import { cn } from "@/lib/utils";
 import { useSurface, type Surface } from "@/lib/surface";
 import { useTheme } from "@/lib/theme";
-import { useNavSignal } from "@/hooks/use-nav-signal";
+// CTL-945: consume shared context from AppShell — no additional EventSources.
+import { useNavSignalContext } from "@/hooks/use-nav-signal";
 // CTL-898 / SHELL8 — the footer health dot generalizes into a per-node cluster-
 // health indicator + a node filter, fed by the read-model's cluster-signal
 // projection. Single-host is an exact no-op (one dot, no filter).
-import { useClusterSignal } from "@/hooks/use-cluster-signal";
+import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
 import {
   nodeDotClass,
   shouldShowNodeFilter,
@@ -110,10 +111,11 @@ export function AppSidebar() {
   const { setOpenMobile, isMobile } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
   const [observeOpen, setObserveOpen] = useState(false);
+  // CTL-945: consume from AppShell's shared contexts — no new EventSources opened.
   // CTL-896 / SHELL6 — the live nav signal off the read-model SSE projection.
-  const nav = useNavSignal();
+  const nav = useNavSignalContext();
   // CTL-898 / SHELL8 — the live PER-NODE cluster-health signal.
-  const cluster = useClusterSignal();
+  const cluster = useClusterSignalContext();
   const { scope, setScope } = useNodeScope();
   const showNodeFilter = shouldShowNodeFilter(cluster);
 

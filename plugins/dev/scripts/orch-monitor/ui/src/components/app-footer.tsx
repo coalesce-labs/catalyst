@@ -10,8 +10,9 @@
 // hoists them; until then they render without animation on non-board surfaces).
 import { cn } from "@/lib/utils";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
-import { useNavSignal } from "@/hooks/use-nav-signal";
-import { useClusterSignal } from "@/hooks/use-cluster-signal";
+// CTL-945: consume shared context from AppShell — no additional EventSources.
+import { useNavSignalContext } from "@/hooks/use-nav-signal";
+import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
 import { nodeDotClass, nodeStatusLabel } from "@/lib/cluster-signal";
 import { daemonDotClass, daemonLabel } from "@/lib/nav-signal";
 import {
@@ -23,8 +24,8 @@ import { C, LIVE } from "@/board/board-tokens";
 
 export function AppFooter() {
   const { status } = useBoardSnapshot();
-  const nav = useNavSignal();
-  const cluster = useClusterSignal();
+  const nav = useNavSignalContext();
+  const cluster = useClusterSignalContext();
 
   const isLive = status === "connected";
   const config = nav ? { active: nav.workerCount, stuck: 0, queued: nav.queueDepth } : null;

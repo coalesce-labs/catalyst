@@ -15,12 +15,33 @@
 // SINGLE-HOST IDENTITY NO-OP: on a single-node deployment the signal carries one
 // node with `singleHost: true`; the footer collapses to today's single dot and
 // the filter is absent (lib/cluster-signal.ts::shouldShowNodeFilter).
-import { useEffect, useState } from "react";
+//
+// CTL-945: AppShell calls useClusterSignal() ONCE and distributes the result via
+// ClusterSignalContext so AppSidebar + AppFooter share the same value without
+// opening a second /api/cluster/stream EventSource. Consumers inside AppShell
+// should use useClusterSignalContext(); call useClusterSignal() only at the
+// single provider site.
+import { createContext, useContext, useEffect, useState } from "react";
 import {
   decodeClusterSignalFrame,
   isClusterSignal,
   type ClusterSignal,
 } from "../lib/cluster-signal";
+
+// ── Shared context (CTL-945) ──────────────────────────────────────────────────
+
+/** Context value: the latest ClusterSignal from the single AppShell subscription. */
+export const ClusterSignalContext = createContext<ClusterSignal | null>(null);
+
+/**
+ * Consume the shared ClusterSignal from AppShell's context.
+ * Only usable inside components rendered inside AppShell.
+ */
+export function useClusterSignalContext(): ClusterSignal | null {
+  return useContext(ClusterSignalContext);
+}
+
+// ── SSE subscription hook ─────────────────────────────────────────────────────
 
 const INITIAL_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
