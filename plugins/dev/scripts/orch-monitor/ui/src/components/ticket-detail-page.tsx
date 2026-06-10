@@ -78,12 +78,46 @@ function Needs({ label }: { label: string }) {
   return (
     <span
       data-needs-plumbing={label}
-      title={`${label} — NEEDS-PLUMBING (DETAIL6/DETAIL7)`}
+      title={`${label} — NEEDS-PLUMBING`}
       style={{ color: C.fgDim, font: `10px ${C.mono}` }}
     >
       ↯ {label}
     </span>
   );
+}
+
+// ── Ticket artifact links (CTL-953) ─────────────────────────────────────────
+/** One artifact returned by /api/ticket-artifacts/<id>. */
+interface TicketArtifact {
+  kind: "research" | "plan" | string;
+  path: string;
+  peek: string | null;
+}
+
+/** /api/ticket-artifacts/<id> response shape. */
+interface ArtifactsResponse {
+  ticket: string;
+  artifacts: TicketArtifact[];
+  crossNodeCaveat?: string;
+}
+
+/** Fetch the ticket's research/plan artifact links from /api/ticket-artifacts.
+ *  Returns an empty array while loading or on any error — the spine renders a
+ *  dim placeholder when none exist, never a fabricated link. */
+function useTicketArtifacts(ticketId: string): TicketArtifact[] {
+  const [artifacts, setArtifacts] = useState<TicketArtifact[]>([]);
+  useEffect(() => {
+    if (!ticketId) return;
+    let stop = false;
+    fetch(`/api/ticket-artifacts/${encodeURIComponent(ticketId)}`)
+      .then((r) => r.ok ? r.json() as Promise<ArtifactsResponse> : null)
+      .then((body) => {
+        if (!stop && body?.artifacts) setArtifacts(body.artifacts);
+      })
+      .catch(() => {});
+    return () => { stop = true; };
+  }, [ticketId]);
+  return artifacts;
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -350,10 +384,20 @@ function LifecycleSpine({
    *  live stream (DETAIL7). */
   activeSession: string | null;
 }) {
+  // compact = hide per-phase rows; Gantt is ALWAYS prominent.
   const [compact, setCompact] = useState(false);
   const nodes = resolveSpineNodes(ticket);
   // One SSE per ticket page, subscribed only while there IS a running phase.
   const activeNodeTail = useActiveNodeTail(activeSession);
+  // CTL-953: artifact links from /api/ticket-artifacts — keyed by kind.
+  const artifacts = useTicketArtifacts(ticket.id);
+  const artifactsByKind = useMemo<Record<string, TicketArtifact[]>>(() => {
+    const map: Record<string, TicketArtifact[]> = {};
+    for (const a of artifacts) {
+      (map[a.kind] ??= []).push(a);
+    }
+    return map;
+  }, [artifacts]);
 
   return (
     <section data-ticket-spine style={{ marginBottom: 16 }}>
@@ -375,29 +419,33 @@ function LifecycleSpine({
             cursor: "pointer",
           }}
         >
-          ⊟ compact
+          {compact ? "⊞ expand rows" : "⊟ hide rows"}
         </button>
       </div>
 
-      {compact ? (
-        // The [compact] toggle swaps in the existing TicketGantt over the SAME
-        // phaseSummary data (design §4.2 — verified drop-in consumer).
-        <div data-spine-gantt>
-          <TicketGantt ticket={ticket} />
+      {/* CTL-953: Gantt is ALWAYS prominent — shown above the rows, never hidden. */}
+      {ticket.phaseSummary.length > 0 && (
+        <div data-spine-gantt style={{ marginBottom: compact ? 0 : 10 }}>
+          <TicketGantt ticket={ticket} phaseCosts={ticket.phaseCosts} />
         </div>
-      ) : nodes.length === 0 ? (
-        <EmptyState icon={ListTree} message="No phases yet" />
-      ) : (
-        <div data-spine-nodes>
-          {nodes.map((node) => (
-            <SpineRow
-              key={node.phase}
-              node={node}
-              registerNode={registerNode}
-              activeNodeTail={node.isActive ? activeNodeTail : null}
-            />
-          ))}
-        </div>
+      )}
+
+      {!compact && (
+        nodes.length === 0 ? (
+          <EmptyState icon={ListTree} message="No phases yet" />
+        ) : (
+          <div data-spine-nodes>
+            {nodes.map((node) => (
+              <SpineRow
+                key={node.phase}
+                node={node}
+                registerNode={registerNode}
+                activeNodeTail={node.isActive ? activeNodeTail : null}
+                artifactsByKind={artifactsByKind}
+              />
+            ))}
+          </div>
+        )
       )}
     </section>
   );
@@ -407,16 +455,24 @@ function SpineRow({
   node,
   registerNode,
   activeNodeTail,
+  artifactsByKind,
 }: {
   node: SpineNode;
   registerNode: (phase: string, el: HTMLDivElement | null) => void;
   /** CTL-918 (DETAIL7): the live tail for THIS node when it is the running phase
    *  (null otherwise) — renders the `now: …` line + 3-line in-loop tail beneath. */
   activeNodeTail: ActiveNodeTail | null;
+  /** CTL-953: artifact links keyed by kind ("research"/"plan") from
+   *  /api/ticket-artifacts — used to render the artifact link in research/plan rows. */
+  artifactsByKind: Record<string, TicketArtifact[]>;
 }) {
   const color = phaseColor(node.phase);
   const started = node.startedAt ? fmtClock(new Date(Date.parse(node.startedAt))) : null;
   const completed = node.completedAt ? fmtClock(new Date(Date.parse(node.completedAt))) : null;
+  // CTL-953: map spine phase to artifact kind ("research"→"research", "plan"→"plan")
+  const phaseArtifactKind = node.phase === "research" ? "research" : node.phase === "plan" ? "plan" : null;
+  const phaseArtifacts = phaseArtifactKind ? (artifactsByKind[phaseArtifactKind] ?? []) : [];
+
   return (
     <div
       ref={(el) => registerNode(node.phase, el)}
@@ -473,11 +529,44 @@ function SpineRow({
 
       <span style={{ flex: 1 }} />
 
-      {/* run-link / artifact / cost-sparkline — NEEDS-PLUMBING (DETAIL6/DETAIL7) */}
-      <span style={{ display: "inline-flex", gap: 10, flexShrink: 0 }}>
-        {node.costSparkline === "pending" && <Needs label="cost" />}
+      {/* CTL-953: cost (real from phaseCosts), run (dim placeholder), artifact link */}
+      <span style={{ display: "inline-flex", gap: 10, flexShrink: 0, alignItems: "center" }}>
+        {/* cost — real from phaseCosts when available, dim placeholder otherwise */}
+        {node.costSparkline === "plumbed" && node.costUSD != null ? (
+          <span
+            data-spine-cost={node.phase}
+            title={node.tokens != null ? `${fmtTokens(node.tokens)} tokens` : "per-phase cost"}
+            style={{ color: C.fgMuted, font: `10px ${C.mono}`, whiteSpace: "nowrap" }}
+          >
+            {fmtCost(node.costUSD)}
+            {node.tokens != null && (
+              <span style={{ color: C.fgDim }}> · {fmtTokens(node.tokens)}</span>
+            )}
+          </span>
+        ) : (
+          <Needs label="cost" />
+        )}
+        {/* run-link — pending until /api/ticket-runs lands */}
         {node.runLink === "pending" && <Needs label="run" />}
-        {node.artifact === "pending" && <Needs label="artifact" />}
+        {/* artifact — real link when present, dim placeholder otherwise */}
+        {phaseArtifacts.length > 0 ? (
+          <span data-spine-artifact={node.phase} style={{ display: "inline-flex", gap: 4 }}>
+            {phaseArtifacts.map((a) => (
+              <a
+                key={a.path}
+                href={`/api/artifact-raw?path=${encodeURIComponent(a.path)}`}
+                target="_blank"
+                rel="noreferrer noopener"
+                title={a.peek ? a.peek.slice(0, 200) : a.path}
+                style={{ color: "#4ea1ff", font: `10px ${C.mono}`, textDecoration: "none" }}
+              >
+                📄 {a.kind}
+              </a>
+            ))}
+          </span>
+        ) : node.artifact === "pending" && phaseArtifactKind ? (
+          <Needs label="artifact" />
+        ) : null}
       </span>
     </div>
     {/* DETAIL7: the active node's live tail (now: <tool> · turn N · ctx% + 3-line

@@ -233,16 +233,78 @@ describe("Scenario: LIFECYCLE SPINE renders one node per phase with a compact ga
     expect(nodes.find((n) => n.phase === "plan")?.model).toBe("opus");
   });
 
-  it("run-link / artifact / cost-sparkline render PENDING (dimmed, never empty/fabricated)", () => {
+  it("run-link / artifact / cost-sparkline render PENDING when no phaseCosts (dimmed, never fabricated)", () => {
     const t = ticket({
       phase: "implement",
       phaseSummary: [phaseTiming({ phase: "triage", status: "done" })],
+      phaseCosts: null,
     });
     const [node] = resolveSpineNodes(t);
-    // these three depend on the BFF run-records endpoint (DETAIL6/DETAIL7)
+    // run-link and artifact always pending (BFF run-records not yet wired)
     expect(node.runLink).toBe("pending");
     expect(node.artifact).toBe("pending");
+    // costSparkline pending when no phaseCosts (honest dim)
     expect(node.costSparkline).toBe("pending");
+    expect(node.costUSD).toBeNull();
+    expect(node.tokens).toBeNull();
+  });
+
+  // ── CTL-953: per-phase cost/tokens from phaseCosts ──────────────────────────
+  it("CTL-953: costUSD and tokens are resolved from phaseCosts when present (never fabricated)", () => {
+    const t = ticket({
+      phase: "implement",
+      phaseSummary: [
+        phaseTiming({ phase: "research", status: "done" }),
+        phaseTiming({ phase: "plan", status: "done" }),
+        phaseTiming({ phase: "implement", status: "in_progress", completedAt: null }),
+      ],
+      phaseCosts: {
+        research: { costUSD: 0.21, tokens: 400_000, turns: 3 },
+        plan: { costUSD: 0.38, tokens: 750_000, turns: 2 },
+        // implement has no phaseCost yet (still running)
+      },
+    });
+    const nodes = resolveSpineNodes(t);
+    const byPhase = Object.fromEntries(nodes.map((n) => [n.phase, n]));
+
+    // research — plumbed from phaseCosts
+    expect(byPhase.research.costUSD).toBe(0.21);
+    expect(byPhase.research.tokens).toBe(400_000);
+    expect(byPhase.research.costSparkline).toBe("plumbed");
+
+    // plan — plumbed from phaseCosts
+    expect(byPhase.plan.costUSD).toBe(0.38);
+    expect(byPhase.plan.tokens).toBe(750_000);
+    expect(byPhase.plan.costSparkline).toBe("plumbed");
+
+    // implement — no entry yet (still running) → dim placeholder
+    expect(byPhase.implement.costUSD).toBeNull();
+    expect(byPhase.implement.tokens).toBeNull();
+    expect(byPhase.implement.costSparkline).toBe("pending");
+  });
+
+  it("CTL-953: a phase with costUSD=0 is treated as absent (zero is not a fabricated value, but we dim it honestly)", () => {
+    const t = ticket({
+      phaseSummary: [phaseTiming({ phase: "triage", status: "done" })],
+      phaseCosts: { triage: { costUSD: 0, tokens: 0, turns: 1 } },
+    });
+    const [node] = resolveSpineNodes(t);
+    // zero cost = no real cost data (free phase or instrumentation gap) — dim pending
+    expect(node.costUSD).toBeNull();
+    expect(node.tokens).toBeNull();
+    expect(node.costSparkline).toBe("pending");
+  });
+
+  it("CTL-953: tokens can be absent even when costUSD is present (null, never fabricated)", () => {
+    const t = ticket({
+      phaseSummary: [phaseTiming({ phase: "research", status: "done" })],
+      phaseCosts: { research: { costUSD: 0.15, tokens: 0, turns: 2 } },
+    });
+    const [node] = resolveSpineNodes(t);
+    // costUSD present, tokens=0 → tokens null (dim), cost plumbed
+    expect(node.costUSD).toBe(0.15);
+    expect(node.tokens).toBeNull();
+    expect(node.costSparkline).toBe("plumbed");
   });
 
   it("an empty phaseSummary yields no nodes (skin shows an honest empty state)", () => {
