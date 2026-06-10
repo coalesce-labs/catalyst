@@ -372,10 +372,13 @@ describe("HOME5 — the bright verb fires the read-model write + resume (CTL-903
 describe("Router wiring — Home mounts into the shell home route (CTL-899 / CTL-989)", () => {
   it("the home route mounts HomeSurface inside the AppShell layout", () => {
     // CTL-989: Home is the "/" route; AppShell is the rootRoute layout, so
-    // HomeSurface renders inside the layout's <Outlet/>.
+    // HomeSurface renders inside the layout's <Outlet/>. Route paths are string
+    // LITERALS (TanStack infers the typed route tree from them) — the home route
+    // is `path: "/"` and honors the persisted landing pref via surfaceToPath.
     expect(appSrc).toContain("HomeSurface");
     expect(appSrc).toContain("AppShell");
-    expect(appSrc).toMatch(/SURFACE_PATH\.home/);
+    expect(appSrc).toMatch(/path:\s*"\/"/);
+    expect(appSrc).toContain("surfaceToPath");
   });
 
   it("keeps the rich monitor dashboard reachable (no regression)", () => {

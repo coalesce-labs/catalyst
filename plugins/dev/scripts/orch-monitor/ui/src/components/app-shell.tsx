@@ -10,11 +10,8 @@ import {
 } from "lucide-react";
 
 import {
-  SurfaceContext,
   SETTINGS_BREADCRUMB,
   SURFACE_CHORD,
-  SURFACE_LABEL,
-  SURFACES,
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
@@ -265,19 +262,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setPaletteOpen(false);
   }, [navigate]);
 
-  // CTL-989: clicking an OPERATE nav item navigates to that surface's route; the
-  // route change leaves Settings automatically (the path is no longer /settings).
-  const selectSurface = useCallback(
-    (s: Surface) => {
-      void navigate({ to: surfaceToPath(s), search: (prev) => prev });
-    },
-    [navigate],
-  );
-
-  const surfaceCtx = useMemo(
-    () => ({ surface, setSurface: selectSurface, settingsOpen, openSettings }),
-    [surface, selectSurface, settingsOpen, openSettings],
-  );
+  // CTL-989: nav items navigate via router.navigate (AppSidebar uses the router
+  // directly through useSurface()/useNavigate) — there is no SurfaceContext to
+  // provide anymore. The active surface is derived from the route everywhere.
   const nodeScopeCtx = useMemo(
     () => ({ scope: nodeScope, setScope: setNodeScope }),
     [nodeScope],
@@ -289,7 +276,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <NavSignalContext.Provider value={navSignal}>
     <ClusterSignalContext.Provider value={clusterSignal}>
-    <SurfaceContext.Provider value={surfaceCtx}>
       <NodeScopeContext.Provider value={nodeScopeCtx}>
       {/* Controlled provider → Cmd/Ctrl+B still fires through onOpenChange, so
           `[` and Cmd/Ctrl+B both work with no vendoring. h-screen, edge-to-edge:
@@ -397,7 +383,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </CommandList>
       </CommandDialog>
       </NodeScopeContext.Provider>
-    </SurfaceContext.Provider>
     </ClusterSignalContext.Provider>
     </NavSignalContext.Provider>
   );

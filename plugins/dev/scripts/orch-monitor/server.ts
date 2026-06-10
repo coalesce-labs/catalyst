@@ -2473,13 +2473,13 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(detail);
         }
 
-        // CTL-892 / SHELL2: the app shell (index.html → App → AppShell, CTL-891)
-        // is now the canonical root. It hosts the dense board as the "board"
-        // surface inside the shared SidebarInset, alongside Home/Workers/Queue —
-        // one shell, two densities — so `/` serves the shell, NOT the shell-less
-        // board page. (Before SHELL2, CTL-730 served board.html raw at `/`.) The
-        // standalone board.html survives as a legacy/fallback entry at /board (it
-        // still carries the FND deep-link router for /ticket/$id + /worker/$id).
+        // CTL-989: the app shell (index.html → main.tsx → the unified TanStack
+        // Router → AppShell layout) is the SINGLE canonical entry. It hosts every
+        // surface (Home/Tickets/Workers/Queue/Observe) AND every detail page
+        // inside the shared AppShell chrome — so `/` serves the shell. The legacy
+        // standalone board.html bundle is RETIRED; `/board` is now just the
+        // Tickets surface route, served by this same index.html (see the unified
+        // SPA fallback below).
         if (url.pathname === "/" || url.pathname === "/index.html") {
           const file = Bun.file(join(publicDir, "index.html"));
           if (await file.exists()) {

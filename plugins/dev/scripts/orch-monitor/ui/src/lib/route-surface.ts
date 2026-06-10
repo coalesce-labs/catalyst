@@ -12,7 +12,11 @@
 // pathname→surface contract is unit-testable under `bun test` without a DOM.
 // AppShell reads the active surface via `pathnameToSurface(location.pathname)`;
 // the nav writes a surface via `router.navigate({ to: surfaceToPath(s) })`.
-import { SURFACES, type Surface } from "./surface";
+// CTL-989: TYPE-ONLY import of `Surface` (erased at runtime) so this module has
+// NO runtime dependency on surface.ts. surface.ts imports pathnameToSurface from
+// HERE (for useSurface()), so a runtime import back would form an init cycle —
+// PATH_TO_SURFACE is built from SURFACE_PATH's own entries (local) instead.
+import type { Surface } from "./surface";
 
 /** The flat URL path each surface lives at. Home is the literal "/" default;
  *  every other surface is a clean typed segment matching its `surface.ts` key.
@@ -35,9 +39,10 @@ export const SURFACE_PATH: Record<Surface, string> = {
  *  path constant rather than a SURFACE_PATH entry. */
 export const SETTINGS_PATH = "/settings";
 
-/** Reverse map (path → surface), built once from SURFACE_PATH. */
+/** Reverse map (path → surface), built once from SURFACE_PATH's own entries (no
+ *  runtime dependency on surface.ts — see the type-only import note above). */
 const PATH_TO_SURFACE: Record<string, Surface> = Object.fromEntries(
-  (SURFACES as readonly Surface[]).map((s) => [SURFACE_PATH[s], s]),
+  Object.entries(SURFACE_PATH).map(([surface, path]) => [path, surface as Surface]),
 ) as Record<string, Surface>;
 
 /**
@@ -75,7 +80,12 @@ export function pathnameToSurface(
   if (exact) return exact;
   // Detail routes highlight the originating surface so the left nav keeps its
   // selection while a ticket/worker/dep-graph page is open inside the layout.
-  if (isDetailPath(pathname)) return detailPathSurface(opts?.from);
+  // A /worker/$id page is inherently the Workers surface; /ticket/$id + /dep-graph
+  // default to the Tickets (board) surface but honor an explicit `?from`.
+  if (isDetailPath(pathname)) {
+    if (/^\/worker\//.test(pathname)) return "workers";
+    return detailPathSurface(opts?.from);
+  }
   return "home";
 }
 

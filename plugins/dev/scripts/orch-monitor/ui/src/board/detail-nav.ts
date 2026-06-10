@@ -1,36 +1,34 @@
-// detail-nav.ts — CTL-942 + CTL-951: card → detail-page navigation.
+// detail-nav.ts — CTL-942 + CTL-951 + CTL-989: card → detail-page navigation.
 //
-// The /ticket/$id + /worker/$id routes live in the TanStack router mounted by
-// the BOARD entry (board.html → main.tsx → AppRouter); the app shell
-// (index.html → App) mounts NO router. The Board component mounts in BOTH
-// entries, so any "open the detail page" affordance must be a real browser
-// navigation (the server's CTL-942 SPA fallback answers it with board.html) —
-// an in-app router push can't cross entries and the embedded shell has no
-// router to push into.
+// CTL-989 — THE UNIFICATION: the /ticket/$id + /worker/$id + /dep-graph routes
+// now live in the SINGLE app-wide TanStack Router (app-router.tsx, mounted from
+// index.html with AppShell as the rootRoute layout). The Board mounts INSIDE
+// that router tree, so opening a detail page is a real client-side
+// `navigate(...)` — NOT a full-document jump. The left nav stays, no reload
+// fires, and browser back/forward + scroll restoration are native (TanStack
+// Router `scrollRestoration`). The former sessionStorage list-context bridge
+// (which existed ONLY to survive the full-document navigation the two-entry split
+// forced) is retired — the URL search params (`?from&lens&col&cursor`) already
+// carry the list-origin the detail Shell reconstructs, and the router restores
+// the board scroller's offset on back.
 //
-// CTL-951 turns the PLAIN single-click into that navigation (the drawer is
-// removed): one click on a card — kanban OR list — goes straight to the detail
-// page. Before navigating, `openDetail` persists the on-screen list + scroll +
-// originating card into sessionStorage so `Esc`/back restores the board in the
-// EXACT state it was left, even across the full-document navigation the entry
-// split forces. The detail Shell reconstructs the breadcrumb + pager purely from
-// the `?from&lens&col&cursor` search params encoded by `detailHref` (which read
-// through the SAME `resolveList` order — see route-search.ts / detail-chrome.ts).
+// Two click paths remain:
+//   - PLAIN primary click  → `openDetail(navigate, kind, id, args)` does a typed
+//                            client-side `navigate({ to: "/ticket/$id", ... })`.
+//   - Cmd/Ctrl/middle click → `openDetailInNewTab(detailHref(...))` opens a real
+//                            new tab; the server's SPA fallback serves index.html
+//                            for the detail path so the new tab boots the unified
+//                            router and lands correctly. `detailHref` builds the
+//                            href string a new-tab open still needs.
 //
-// Pure helpers (no DOM) are unit-testable directly; the few that DO touch
-// `sessionStorage` / `window` are written defensively so they no-op rather than
-// throw when storage is unavailable (private mode, SSR, the bun test shim).
+// Pure helpers (no DOM) are unit-testable directly; the few that touch `window`
+// are written defensively so they no-op rather than throw when it is unavailable.
 
+import type { NavigateOptions } from "@tanstack/react-router";
 import type { DetailFrom, DetailLens } from "./route-search";
 
 /** The kind of entity a card opens — selects the route + the list-context kind. */
 export type DetailKind = "ticket" | "worker";
-
-/** Which board SURFACE the operator was on when they opened the card (CTL-971).
- *  Persisted in the restore snapshot so the return paths (Esc / breadcrumb /
- *  browser back) reseat the shell on that surface instead of the landing-pref
- *  default. Ticket cards live on "board"; worker cards on "workers". */
-export type RestoreSurface = "board" | "workers";
 
 /** The list-origin context a card carries into the detail page (mirrors the
  *  typed search params the Shell reconstructs). `cursor` is the 0-based index of
@@ -64,6 +62,9 @@ export function workerDetailHref(name: string): string {
  * target) from the URL alone. Omits any absent field (a cold context yields the
  * bare base path). `cursor` is encoded only when it is a finite, non-negative
  * integer — anything else is dropped (route-search coerces defensively too).
+ *
+ * CTL-989: still load-bearing for the new-tab gesture (Cmd/Ctrl/middle-click) —
+ * a real new-tab open needs an href string the in-router navigate can't provide.
  */
 export function detailHref(kind: DetailKind, id: string, ctx: DetailNavContext): string {
   const params = new URLSearchParams();
@@ -77,170 +78,40 @@ export function detailHref(kind: DetailKind, id: string, ctx: DetailNavContext):
   return qs ? `${detailBase(kind, id)}?${qs}` : detailBase(kind, id);
 }
 
-// ── persisted board state (survives the full-document navigation) ─────────────
-
-/** The sessionStorage key the board-restore context is stashed under. One key,
- *  overwritten on every card open — the operator only ever returns to the LAST
- *  list they left. */
-export const LIST_CONTEXT_STORAGE_KEY = "catalyst-list-context-v1";
-
-/** Restore snapshots older than this are ignored on read (a day-old session
- *  shouldn't yank the operator to a stale scroll position). */
-export const LIST_CONTEXT_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
-
 /**
- * The board state captured when a card is opened, so `Esc`/back can restore the
- * board exactly. `ids` + `kind` + `lens` + `col` mirror the resolved walk list
- * (so the restored board's listContextAtom matches the pager); `scroll` is the
- * board scroll-container offset; `focusId` is the originating card to re-focus;
- * `cursor` is its index in `ids`.
- *
- * CTL-971: `surface` + `scope` are now stored too — the original reasoning that
- * "display-options ride their own persisted atoms for free" was only HALF true.
- * The repo SCOPE does persist in localStorage (`repoScopeAtom`), but the active
- * SURFACE does NOT: the return paths are a full-document navigation to `/`, and
- * the shell reseeds the surface from the LANDING preference (default "home"/Inbox)
- * — so without the saved surface the operator lands on the Inbox, the board never
- * mounts, and `useBoardRestore` never runs (the scroll/focus snapshot is silently
- * ignored). Storing the surface lets the shell reseat the board on return; storing
- * the scope makes the restore the single source of truth (it no longer relies on a
- * separately-timed localStorage read). Density/grouping/order STILL ride their own
- * persisted `boardPrefsAtom` and are not duplicated here.
+ * Build the typed TanStack `navigate` options for a card open (CTL-989). The
+ * cursor is the clicked entity's index in the on-screen ordered list; only a
+ * valid (>=0) index is carried (route-search coerces defensively too). The
+ * `?scope` is preserved from the current URL via the search updater so the
+ * detail page stays inside the active repo scope. The route is `/ticket/$id` or
+ * `/worker/$id` with `params.id` carrying the raw id (the router encodes it).
  */
-export interface ListContextSnapshot {
-  ids: string[];
-  kind: DetailKind;
-  lens?: DetailLens;
-  col?: string;
-  /** The 0-based index of the opened entity in `ids` (the restored cursor). */
-  cursor: number;
-  /** The opened entity id — the card the board re-focuses on return. */
-  focusId: string;
-  /** The board scroll-container offset to restore (px). Both axes — CTL-950's
-   *  single both-axes `.cat-scroll` scroller means LEFT matters as much as TOP. */
-  scroll: { top: number; left: number };
-  /** CTL-971: the board surface the card was opened FROM ("board" for ticket
-   *  cards, "workers" for worker cards). The shell reseats this surface on return
-   *  so the board actually mounts (else the landing-pref Inbox shows instead). */
-  surface: RestoreSurface;
-  /** CTL-971: the active repo scope at capture (`REPO_SCOPE_ALL` or a repo key).
-   *  Re-applied to `repoScopeAtom` on restore so the scope round-trips even if the
-   *  persisted localStorage value drifted between the two entries. */
-  scope: string;
-  /** When captured (ms epoch) — a stale snapshot is ignored on restore. */
-  savedAt: number;
-}
-
-/** Safe `sessionStorage` accessor — returns null when storage is unavailable
- *  (SSR / private-mode throw / the bun shim) rather than throwing. */
-function safeSessionStorage(): Storage | null {
-  try {
-    if (typeof window === "undefined") return null;
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Persist a board-restore snapshot to sessionStorage. The only side effect is
- * the storage write; it swallows quota/serialization errors so a card click can
- * never fail to navigate because the stash failed.
- */
-export function writeListContext(snapshot: ListContextSnapshot): void {
-  const store = safeSessionStorage();
-  if (!store) return;
-  try {
-    store.setItem(LIST_CONTEXT_STORAGE_KEY, JSON.stringify(snapshot));
-  } catch {
-    // quota / serialization — non-fatal; navigation proceeds without restore.
-  }
-}
-
-/**
- * Read + validate the persisted board-restore snapshot. Returns null when
- * absent, malformed, or older than `LIST_CONTEXT_MAX_AGE_MS`. Total + never
- * throws — a hand-edited or corrupt blob yields null, never a crash.
- */
-export function readListContext(now: number = Date.now()): ListContextSnapshot | null {
-  const store = safeSessionStorage();
-  if (!store) return null;
-  let raw: string | null;
-  try {
-    raw = store.getItem(LIST_CONTEXT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  return parseListContext(raw, now);
-}
-
-/**
- * Parse + validate a serialized snapshot (split out so it's unit-testable
- * without a storage runtime). Drops anything malformed/stale to null.
- */
-export function parseListContext(
-  raw: string,
-  now: number = Date.now(),
-): ListContextSnapshot | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const o = parsed as Partial<ListContextSnapshot> & Record<string, unknown>;
-  if (!Array.isArray(o.ids) || !o.ids.every((x) => typeof x === "string")) return null;
-  if (o.kind !== "ticket" && o.kind !== "worker") return null;
-  if (typeof o.focusId !== "string") return null;
-  if (typeof o.savedAt !== "number" || !Number.isFinite(o.savedAt)) return null;
-  if (now - o.savedAt > LIST_CONTEXT_MAX_AGE_MS) return null;
-  const scroll =
-    o.scroll && typeof o.scroll === "object"
-      ? {
-          top: typeof (o.scroll as { top?: unknown }).top === "number" ? (o.scroll as { top: number }).top : 0,
-          left: typeof (o.scroll as { left?: unknown }).left === "number" ? (o.scroll as { left: number }).left : 0,
-        }
-      : { top: 0, left: 0 };
-  // CTL-971: surface — accept the stored "board"/"workers", else DERIVE from the
-  // entity kind (a worker card was on the Workers surface; a ticket on the board)
-  // so an older snapshot (pre-CTL-971, no surface field) still reseats correctly.
-  const surface: RestoreSurface =
-    o.surface === "board" || o.surface === "workers"
-      ? o.surface
-      : o.kind === "worker"
-        ? "workers"
-        : "board";
-  // CTL-971: scope — any string is a valid repo key / the "all" sentinel; a
-  // missing/malformed value falls back to "all" (the unfiltered view) rather than
-  // forcing a wrong scope. The shell reconciles a stale scope against live repos.
-  const scope = typeof o.scope === "string" && o.scope !== "" ? o.scope : "all";
-  return {
-    ids: o.ids as string[],
-    kind: o.kind,
-    lens: o.lens === "linear" || o.lens === "phase" ? o.lens : undefined,
-    col: typeof o.col === "string" ? o.col : undefined,
-    cursor:
-      typeof o.cursor === "number" && Number.isInteger(o.cursor) && o.cursor >= 0 ? o.cursor : 0,
-    focusId: o.focusId,
-    scroll,
-    surface,
-    scope,
-    savedAt: o.savedAt,
+export function detailNavigateOptions(
+  kind: DetailKind,
+  id: string,
+  args: {
+    ids: string[];
+    lens?: DetailLens;
+    col?: string;
+    from?: DetailFrom;
+  },
+): NavigateOptions {
+  const idx = args.ids.indexOf(id);
+  const from: DetailFrom = args.from ?? "board";
+  const cursor = idx >= 0 ? idx : undefined;
+  const nextSearch = {
+    from,
+    ...(args.lens ? { lens: args.lens } : {}),
+    ...(args.col ? { col: args.col } : {}),
+    ...(cursor !== undefined ? { cursor } : {}),
   };
-}
-
-/** Clear the persisted board-restore snapshot (called once it's consumed on
- *  restore, so it never re-fires on a later unrelated board visit). */
-export function clearListContext(): void {
-  const store = safeSessionStorage();
-  if (!store) return;
-  try {
-    store.removeItem(LIST_CONTEXT_STORAGE_KEY);
-  } catch {
-    // non-fatal
-  }
+  return {
+    to: kind === "ticket" ? "/ticket/$id" : "/worker/$id",
+    params: { id },
+    // Merge over the previous search so the inherited `?scope` survives, then
+    // overlay the list-origin params for this open.
+    search: (prev: Record<string, unknown>) => ({ ...prev, ...nextSearch }),
+  } as NavigateOptions;
 }
 
 // ── the click → navigate seam (the DOM-touching helpers) ──────────────────────
@@ -265,31 +136,14 @@ export function openDetailInNewTab(href: string): void {
 }
 
 /**
- * The full-document navigation a PLAIN card click performs (CTL-951). The detail
- * routes only exist in the board.html entry's router; a full-doc nav reaches them
- * from BOTH entries because the server's SPA fallback serves board.html for
- * `/ticket/*` and `/worker/*`. We `assign` (not `replace`) so the browser Back
- * button returns to the board — and on that return the board reads the
- * sessionStorage snapshot to restore scroll + focus + list-context.
- */
-export function hardNavigate(href: string): void {
-  if (typeof window === "undefined") return;
-  window.location.assign(href);
-}
-
-/**
- * Open a card's detail page on a plain single-click: capture the board-restore
- * snapshot, then hard-navigate to the deep link. `scroll` is the board
- * scroll-container offset the caller reads (kanban + list own different scroll
- * roots); it defaults to no offset when omitted. `from` defaults to "board".
- *
- * CTL-971: the caller also passes the live `surface` ("board"/"workers") + the
- * active repo `scope` so the snapshot reseats them on return — without the surface
- * the shell would reseed the landing-pref Inbox and the board would never mount.
- * Both default sensibly (surface from kind, scope to "all") when the caller omits
- * them so the seam stays drop-in for any older invoker.
+ * Open a card's detail page on a plain single-click (CTL-989): a CLIENT-SIDE
+ * router navigation — no full-document reload, the left nav stays, browser back
+ * returns to the board and the router restores its scroll offset. `navigate` is
+ * the TanStack `useNavigate()` the Board holds (it lives inside the router tree
+ * now). `from` defaults to "board".
  */
 export function openDetail(
+  navigate: (opts: NavigateOptions) => void,
   kind: DetailKind,
   id: string,
   args: {
@@ -297,30 +151,7 @@ export function openDetail(
     lens?: DetailLens;
     col?: string;
     from?: DetailFrom;
-    scroll?: { top: number; left: number };
-    surface?: RestoreSurface;
-    scope?: string;
   },
 ): void {
-  const cursor = args.ids.indexOf(id);
-  const from: DetailFrom = args.from ?? "board";
-  writeListContext({
-    ids: args.ids,
-    kind,
-    lens: args.lens,
-    col: args.col,
-    cursor: cursor >= 0 ? cursor : 0,
-    focusId: id,
-    scroll: args.scroll ?? { top: 0, left: 0 },
-    surface: args.surface ?? (kind === "worker" ? "workers" : "board"),
-    scope: args.scope ?? "all",
-    savedAt: Date.now(),
-  });
-  const href = detailHref(kind, id, {
-    from,
-    lens: args.lens,
-    col: args.col,
-    cursor: cursor >= 0 ? cursor : undefined,
-  });
-  hardNavigate(href);
+  navigate(detailNavigateOptions(kind, id, args));
 }

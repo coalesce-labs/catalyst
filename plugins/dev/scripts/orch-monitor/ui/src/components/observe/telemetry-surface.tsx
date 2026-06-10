@@ -14,6 +14,9 @@
 // cleanly (neutral, never amber).
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
+// CTL-989: the Telemetry surface is inside the unified router, so the worker
+// drill-down is a client-side navigate (no full-document reload, left nav stays).
+import { useNavigate } from "@tanstack/react-router";
 import type {
   OtelHealth,
   OtelLogEntry,
@@ -68,6 +71,7 @@ function deriveErrorStats(rows: TailRow[]): {
 }
 
 export function TelemetrySurface() {
+  const navigate = useNavigate();
   const [range, setRange] = useAtom(timeRangeAtom);
 
   const [health, setHealth] = useState<OtelHealth | null>(null);
@@ -389,11 +393,16 @@ export function TelemetrySurface() {
             workers={tailWorkers}
             focusFilter={focusFilter}
             onOpenWorker={(workerName) => {
-              // Drill (one click): worker → its history page (/worker/$id). A full-
-              // document navigation hits the server's SPA fallback (the same path
-              // the board's openDetail uses — router.tsx:48). The worker page then
-              // resolves the CC session + its /api/ec-worker-history tail itself.
-              window.location.assign(`/worker/${encodeURIComponent(workerName)}`);
+              // CTL-989: drill (one click) worker → its history page (/worker/$id)
+              // via a CLIENT-SIDE router navigate — the left nav stays, no reload.
+              // The worker page resolves the CC session + its /api/ec-worker-history
+              // tail itself. `from: "board"` is the valid DetailFrom; route-surface
+              // keys the nav highlight off the /worker/ path kind (→ Workers).
+              void navigate({
+                to: "/worker/$id",
+                params: { id: workerName },
+                search: (prev) => ({ ...prev, from: "board" }),
+              });
             }}
           />
         </ChartCard>

@@ -1,4 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+// CTL-989: the Board is now mounted INSIDE the single app-wide router, so card
+// opens + the dep-graph jump are client-side navigations (no full-doc reload).
+import { useNavigate } from "@tanstack/react-router";
 import { motion, AnimatePresence } from "motion/react";
 import { useAtom } from "jotai";
 import { Badge } from "@/components/ui/badge";
@@ -35,12 +38,11 @@ import { sortWorkers } from "./list-order";
 import { useRepoScope } from "../hooks/use-repo-scope";
 // ── CTL-942 + CTL-951: card → detail-page deep links ──────────────────────────
 // A PLAIN single-click on a ticket/worker card (kanban OR list) navigates STRAIGHT
-// to the full /ticket/$id // /worker/$id page (the drawer is removed). The nav is a
-// real browser navigation because the Board mounts in BOTH entries and only the
-// board.html entry carries the router (the server's SPA fallback answers it).
-// `openDetail` captures the on-screen list + scroll + originating card into
-// sessionStorage first, so Esc/back restores the board exactly. Cmd/Ctrl-click
-// (and middle-click) still open the page in a NEW tab without disturbing the board.
+// to the full /ticket/$id // /worker/$id page (the drawer is removed). CTL-989:
+// the Board now mounts INSIDE the single app-wide router, so a plain click is a
+// CLIENT-SIDE `navigate(...)` (no full-document reload, the left nav stays).
+// Cmd/Ctrl-click (and middle-click) still open the page in a NEW tab via the
+// href string (the server's SPA fallback serves index.html for the detail path).
 import {
   isNewTabClick,
   openDetail,
@@ -50,11 +52,6 @@ import {
   type DetailKind,
 } from "./detail-nav";
 import type { DetailLens } from "./route-search";
-// CTL-951: the board-restore effect re-applies the persisted scroll offset + the
-// originating-card focus when the operator returns from a detail page;
-// `resolveScrollEl` resolves the SAME `.cat-scroll` overflow container both the
-// capture (on card open) and the restore read, so the offset round-trips.
-import { useBoardRestore, resolveScrollEl } from "../hooks/use-board-restore";
 // ── CTL-909 / SURF1: node grouping + node filter (pure, DOM-free) ─────────────
 // The Workers surface adds a "node" grouping axis + a host filter that read the
 // BoardWorker.host {name,id} field (BFF10/CTL-922). The column derivation lives
@@ -574,12 +571,11 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       transition={trans}
       className={live ? "catalyst-live" : undefined}
       data-card-id={w.name}
-      // CTL-951: a PLAIN click on a worker card navigates STRAIGHT to its
-      // single-run detail page (`/worker/$id`, keyed by w.name). Cmd/Ctrl-click
-      // (and middle-click via onAuxClick) open it in a NEW tab. The nav is a real
-      // browser navigation — it works in BOTH entries (the server SPA fallback
-      // serves board.html), and `openDetail` stashes the board-restore snapshot
-      // first so Esc/back returns to the exact Workers grid state.
+      // CTL-951 / CTL-989: a PLAIN click on a worker card navigates STRAIGHT to
+      // its single-run detail page (`/worker/$id`, keyed by w.name) via a
+      // CLIENT-SIDE router navigate (no reload, the left nav stays). Cmd/Ctrl-click
+      // (and middle-click via onAuxClick) open it in a NEW tab. Browser back
+      // returns to the exact Workers grid (native router scroll restoration).
       onClick={(e) => {
         if (isNewTabClick(e)) {
           e.preventDefault();
@@ -682,10 +678,10 @@ function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, onOpen,
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen,
 }: {
   tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
-  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onOpen?: OpenDetailFn;
+  density: Density; order: Ordering; showEmpty: boolean; fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const blockedByIdx = buildBlockedByIndex(tickets);
@@ -710,6 +706,7 @@ function TicketSwimlaneBoard({
       items={tickets}
       groupBy={swimlane}
       fill={fill}
+      embedded={embedded}
       entityNoun="ticket"
       columns={columns}
       deriveLane={deriveLane}
@@ -724,10 +721,10 @@ function TicketSwimlaneBoard({
 // swimlane is active the caller already falls the lens back to status/phase so
 // host is not double-encoded (rows AND columns).
 function WorkerSwimlaneBoard({
-  workers, tickets, swimlane, grouping, fill, onOpen,
+  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen,
 }: {
   workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
-  fill: boolean; onOpen?: OpenDetailFn;
+  fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
 }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   // CTL-951: the worker detail pager walks the WHOLE rank-sorted worker queue
@@ -768,6 +765,7 @@ function WorkerSwimlaneBoard({
       items={workers}
       groupBy={swimlane}
       fill={fill}
+      embedded={embedded}
       entityNoun="worker"
       columns={columns}
       deriveLane={deriveLane}
@@ -1096,31 +1094,26 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
   );
 }
 
-// CTL-892 / SHELL2: the board is hosted in TWO places now — the legacy
-// standalone `board.html` entry (full viewport) and, newly, the shared app shell
-// (inside SidebarInset, below the 48px top strip). `embedded` is the ONLY mount
-// difference: it swaps the root height from 100vh → 100% so the dense grid fills
-// the inset's flex slot instead of overflowing the viewport by the strip height.
-// The data path (connectBoard / SharedWorker EventSource) is untouched in both.
+// CTL-892 / SHELL2 / CTL-989: the board is hosted ONLY inside the shared app
+// shell now — the /board (tickets) and /workers routes mount it inside the
+// AppShell SidebarInset (below the 48px top strip). The legacy standalone
+// board.html entry is retired. `embedded` is retained for the height contract:
+// embedded → the board fills the inset's flex slot (flex:1/minHeight:0);
+// `embedded=false` keeps the standalone 100vh root for any future full-viewport
+// mount. The data path (connectBoard / SharedWorker EventSource) is untouched.
 //
-// CTL-930: Board.props changes from `initialView?: View` to `view?: View; onViewChange?`.
-// The SurfaceSwitch collapses to ONE <Board> branch; internal useState is the
-// uncontrolled fallback for standalone board.html mount.
+// CTL-930: Board.props changes from `initialView?: View` to `view?: View`.
+// CTL-989: the board.html standalone entry is retired, so the Board is ALWAYS
+// mounted with a `view` prop by the /board (tickets) and /workers routes — the
+// view is the route's concern, not in-board state. `view` defaults to "tickets".
 export function Board({
   embedded = false,
-  view: viewProp,
-  onViewChange,
+  view = "tickets",
   onDepGraph,
-}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onDepGraph?: () => void } = {}) {
+}: { embedded?: boolean; view?: View; onDepGraph?: () => void } = {}) {
+  const navigate = useNavigate();
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [viewInternal, setViewInternal] = useState<View>("tickets");
-  // Controlled when viewProp is provided; uncontrolled (own state) otherwise.
-  const view = viewProp ?? viewInternal;
-  const setView = (v: View) => {
-    setViewInternal(v);
-    onViewChange?.(v);
-  };
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
@@ -1132,16 +1125,12 @@ export function Board({
   const [prefs] = useAtom(boardPrefsAtom);
   const lens = prefs.groupBy; // the generalized "Group by" (Status / Pipeline)
   const colorBy = prefs.colorBy;
-  // CTL-951: the board scroll-container. `openDetail` reads its offset into the
-  // sessionStorage snapshot on a card click; `useBoardRestore` re-applies that
-  // offset (+ re-focuses the originating card) when the operator returns. ONE ref
-  // shared by the tickets + workers + list bodies (they all live inside it).
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  // CTL-971: restore now reseats the surface + scope too, so it is driven from the
-  // shell (App.tsx) BEFORE the board mounts (the surface must already be "board"
-  // for this component to exist). This board-local hook still re-applies the
-  // SCROLL offset + originating-card focus once the payload has rendered.
-  useBoardRestore(scrollRef, data != null);
+  // CTL-989: board scroll restoration is now NATIVE — the `.cat-board-scroll`
+  // scroller carries `data-scroll-restoration-id="board-scroll"`, so TanStack
+  // Router (scrollRestoration: true) saves + restores its offset (both axes) per
+  // history entry on back-from-detail. The former sessionStorage scroll snapshot
+  // + `useBoardRestore` are retired with the full-document navigation that forced
+  // them.
 
   // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
   // ONE EventSource (+ an IndexedDB cache) across every tab, with a direct
@@ -1192,30 +1181,39 @@ export function Board({
   // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
   const swimlane: GroupBy = prefs.swimlane;
 
-  // CTL-951 + CTL-971: the single card-open seam. Reads the live board scroll
-  // offset off the `.cat-scroll` overflow container (NOT the flex body wrapper,
-  // which never scrolls — `resolveScrollEl` is the SAME lookup the restore uses,
-  // so the offset round-trips on BOTH axes after CTL-950's single both-axes
-  // scroller / CTL-958's overscroll-chaining cells). CTL-971: it ALSO stamps the
-  // current SURFACE ("board"/"workers", derived from the active `view`) + repo
-  // `scope` into the snapshot so the return paths reseat them — without the surface
-  // the shell would reseed the landing-pref Inbox and the board would never mount.
+  // CTL-989: the single card-open seam — a CLIENT-SIDE router navigation to the
+  // detail page (no full-document reload; the left nav stays). The list-origin
+  // (from/lens/col/cursor) rides in the typed search params so the detail Shell
+  // reconstructs the breadcrumb + pager from the URL; the inherited `?scope` is
+  // preserved by the search updater. Browser back returns here and the router
+  // restores the board scroller's offset natively (data-scroll-restoration-id).
+  // A /worker/$id path is intrinsically the Workers surface for nav highlight, so
+  // `from` stays the valid DetailFrom "board" (route-surface keys the highlight
+  // off the path kind for worker pages).
   const onOpen: OpenDetailFn = (kind, id, ctx) => {
-    const el = resolveScrollEl(scrollRef.current);
-    openDetail(kind, id, {
+    openDetail(navigate, kind, id, {
       ids: ctx.ids,
       lens: ctx.lens,
       col: ctx.col,
       from: "board",
-      scroll: el ? { top: el.scrollTop, left: el.scrollLeft } : { top: 0, left: 0 },
-      surface: view === "workers" ? "workers" : "board",
-      scope: repo,
     });
   };
 
   return (
     <TooltipProvider delayDuration={200}>
-      <div style={{ [BOARD_VH_VAR]: boardRootHeight(embedded), background: C.s0, color: C.fg, height: `var(${BOARD_VH_VAR})`, display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" } as React.CSSProperties}>
+      <div style={{
+        [BOARD_VH_VAR]: boardRootHeight(embedded),
+        background: C.s0, color: C.fg,
+        // CTL-989 board-height fix: embedded → fill the AppShell inset content slot
+        // via the flex chain (`flex:1; minHeight:0`) so there is no dead space below
+        // the columns. Standalone (board.html) keeps the 100vh root. The
+        // `--cat-board-vh` var still resolves to 100% (embedded) / 100vh (standalone)
+        // for the QueueView scroller + the standalone Swimlane calc.
+        ...(embedded ? { flex: 1, minHeight: 0 } : { height: `var(${BOARD_VH_VAR})` }),
+        display: "flex", flexDirection: "column", fontSize: 13,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        overflow: "hidden",
+      } as unknown as React.CSSProperties}>
         <style>{PULSE_CSS}</style>
         {/* CTL-930: in-board header (Catalyst swatch + Tabs nav + status cluster)
             DELETED — the left sidebar is now the sole navigation and the app footer
@@ -1241,9 +1239,8 @@ export function Board({
           <span style={{ flex: 1 }} />
           {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
               colorBy / repo-lanes) are folded into ONE Display-options popover —
-              "density is a knob". The popover rides along in both the embedded
-              shell mount and the standalone board.html mount (it lives here in
-              Board's own subhead). It reads/writes the persisted boardPrefsAtom. */}
+              "density is a knob". The popover lives in Board's own subhead and
+              reads/writes the persisted boardPrefsAtom. */}
           {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
           {view === "workers" && <>
             {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
@@ -1259,12 +1256,17 @@ export function Board({
               />
             )}
           </>}
-          {/* CTL-948: dep-graph link — only shown when a navigate callback is
-              wired (BoardRoot in router.tsx injects it; embedded callers that
-              don't mount the router leave it absent, so no broken link). */}
-          {onDepGraph && (
+          {/* CTL-948 / CTL-989: dep-graph link. The Board is always inside the
+              unified router now, so the jump is a client-side navigate to
+              /dep-graph (an `onDepGraph` prop, if supplied, still wins for back-
+              compat callers). */}
+          {(
             <button
-              onClick={onDepGraph}
+              onClick={() =>
+                onDepGraph
+                  ? onDepGraph()
+                  : void navigate({ to: "/dep-graph", search: (prev) => prev })
+              }
               style={{
                 fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
                 background: "transparent", border: `1px solid ${C.border}`,
@@ -1277,9 +1279,12 @@ export function Board({
           )}
         </div>
 
-        {/* body — CTL-951: the board root the scroll-restore hook resolves the
-            `.cat-scroll` container under (so Esc/back returns to the exact offset). */}
-        <div ref={scrollRef} style={{ flex: 1, minHeight: 0 }}>
+        {/* body — CTL-989 board-height fix: a flex COLUMN so the scroller child can
+            `flex:1; minHeight:0` and FILL the remaining space below the subhead
+            (replacing the embedded `100% - 104px` magic subtraction that left dead
+            space below the columns). `minHeight:0` lets it shrink inside the flex
+            parent; `display:flex` is the load-bearing addition. */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
           {!data && <div style={{ color: C.fgMuted, padding: 24 }}>Connecting to execution-core…</div>}
           {/* BOARD3 / CTL-907: row swimlanes. <SwimlaneBoard> groups the entities
               through the pure board-grouping engine and renders one labeled lane
@@ -1318,6 +1323,7 @@ export function Board({
                 order={prefs.order}
                 showEmpty={prefs.showEmptyColumns}
                 fill
+                embedded={embedded}
                 onOpen={onOpen}
               />
             )
@@ -1335,6 +1341,7 @@ export function Board({
               swimlane={swimlane}
               grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
               fill
+              embedded={embedded}
               onOpen={onOpen}
             />
           )}

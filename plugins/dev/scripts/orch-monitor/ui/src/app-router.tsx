@@ -34,7 +34,7 @@ import { AppShell } from "./components/app-shell";
 import { SkeletonDashboard } from "./components/ui/skeleton";
 import { validateDetailSearch } from "./board/route-search";
 import { validateRootSearch } from "./lib/root-search";
-import { SETTINGS_PATH, SURFACE_PATH, surfaceToPath } from "./lib/route-surface";
+import { surfaceToPath } from "./lib/route-surface";
 import { readLandingSurface } from "./lib/prefs";
 
 // ── surface components (the existing surfaces, code-split as before) ──────────
@@ -126,9 +126,15 @@ const rootRoute = createRootRoute({
 });
 
 // ── surface routes ────────────────────────────────────────────────────────────
+// NOTE (CTL-989): route `path`s MUST be string LITERALS — TanStack Router infers
+// the typed route tree (the `to` union for navigate/Link) from literal paths, so
+// a computed `path: SURFACE_PATH.board` would erase the literal and break typed
+// navigation. The literals here are kept byte-identical to SURFACE_PATH in
+// route-surface.ts (the route-surface.test.ts pins that map); a drift would show
+// up as a typed-navigate error at the call site.
 const homeRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.home, // "/"
+  path: "/",
   // CTL-989: honor a persisted non-home landing preference. `readLandingSurface`
   // (lib/prefs.ts — the Settings write path is unchanged) seeds the FIRST screen
   // on a fresh load: if the operator chose a non-home landing surface, a one-shot
@@ -150,11 +156,11 @@ const homeRoute = createRoute({
 
 // Tickets + Workers are the SAME <Board>, opened on their respective view. The
 // board fills the layout's content slot (embedded → fills the inset, not the
-// viewport). onViewChange is a visual-only internal switch in Pass A; Pass B
-// rewires it to navigate between /board and /workers.
+// viewport). The view IS the route (/board vs /workers) — the left nav navigates
+// between them; there is no in-board view toggle.
 const boardRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.board, // "/board"
+  path: "/board",
   component: () => (
     <S>
       <Board embedded view="tickets" />
@@ -164,7 +170,7 @@ const boardRoute = createRoute({
 
 const workersRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.workers, // "/workers"
+  path: "/workers",
   component: () => (
     <S>
       <Board embedded view="workers" />
@@ -174,7 +180,7 @@ const workersRoute = createRoute({
 
 const queueRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.queue, // "/queue"
+  path: "/queue",
   component: () => (
     <S>
       <QueueSurface />
@@ -184,7 +190,7 @@ const queueRoute = createRoute({
 
 const telemetryRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.telemetry,
+  path: "/telemetry",
   component: () => (
     <S>
       <TelemetrySurface />
@@ -194,7 +200,7 @@ const telemetryRoute = createRoute({
 
 const utilizationRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.utilization,
+  path: "/utilization",
   component: () => (
     <S>
       <UtilizationSurface />
@@ -204,7 +210,7 @@ const utilizationRoute = createRoute({
 
 const finopsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.finops,
+  path: "/finops",
   component: () => (
     <S>
       <FinopsSurface />
@@ -214,7 +220,7 @@ const finopsRoute = createRoute({
 
 const fleetopsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.fleetops,
+  path: "/fleetops",
   component: () => (
     <S>
       <FleetOpsSurface />
@@ -226,7 +232,7 @@ const fleetopsRoute = createRoute({
 // activity/god-mode). Kept as its own route so the dashboard stays reachable.
 const devopsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SURFACE_PATH.devops,
+  path: "/devops",
   component: () => (
     <S>
       <DashboardSurface />
@@ -236,7 +242,7 @@ const devopsRoute = createRoute({
 
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: SETTINGS_PATH, // "/settings"
+  path: "/settings",
   component: () => (
     <S>
       <SettingsSurface />

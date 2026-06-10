@@ -412,6 +412,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   items,
   groupBy,
   fill,
+  embedded = false,
   liveness,
   columns,
   deriveLane,
@@ -420,6 +421,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   items: T[];
   groupBy: GroupBy;
   fill: boolean;
+  /** CTL-989: when embedded in the AppShell inset, the scroller fills its flex
+   *  parent (`flex:1; minHeight:0`) instead of the standalone `100vh - 104px`
+   *  magic subtraction — the board-height fix. */
+  embedded?: boolean;
   liveness?: HostLiveness;
   /** the SINGLE shared header column set — same for every lane. */
   columns: SharedColumn[];
@@ -472,6 +477,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
       ref={scrollRef}
       className="cat-scroll cat-board-scroll"
       data-board-scroll="true"
+      // CTL-989: register this scroller with TanStack Router's scroll restoration
+      // (router scrollRestoration:true) so back-from-detail restores its offset
+      // (both axes) per history entry — replacing the retired sessionStorage snapshot.
+      data-scroll-restoration-id="board-scroll"
       style={{
         overflowX: "auto",
         overflowY: "auto",
@@ -481,7 +490,13 @@ export function SwimlaneBoard<T extends GroupableEntity>({
         // is not sufficient — the wheel guard above is the authoritative fix.
         overscrollBehaviorX: BOARD_SCROLL_OVERSCROLL_X,
         overscrollBehaviorY: "auto",
-        height: fill ? "calc(var(--cat-board-vh, 100vh) - 104px)" : "auto",
+        // CTL-989 board-height fix: when EMBEDDED in the AppShell inset, fill the
+        // flex-column body wrapper (`flex:1; minHeight:0`) so the scroller takes
+        // the full remaining height below the subhead — no dead space. Standalone
+        // (board.html, full viewport) keeps the calibrated `100vh - 104px` calc.
+        ...(embedded && fill
+          ? { flex: 1, minHeight: 0 }
+          : { height: fill ? "calc(var(--cat-board-vh, 100vh) - 104px)" : "auto" }),
         position: "relative",
       }}
     >

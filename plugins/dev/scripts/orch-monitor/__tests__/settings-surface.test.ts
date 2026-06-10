@@ -35,11 +35,12 @@ const routerSrc = read("app-router.tsx");
 
 // ── Scenario: Settings nav item opens the preferences surface ─────────────────
 describe("Settings nav item opens the preferences surface (CTL-911)", () => {
-  it("the footer Settings item is wired to openSettings (not a placeholder)", () => {
-    // The footer Settings SidebarMenuButton calls openSettings on click.
-    expect(sidebarSrc).toContain("openSettings");
-    expect(sidebarSrc).toMatch(/onClick=\{\s*\(\)\s*=>\s*\{[\s\S]*?openSettings\(\)/);
-    // It reflects the open state as active.
+  it("the footer Settings item navigates to the /settings route (CTL-989)", () => {
+    // CTL-989: the footer Settings SidebarMenuButton navigates to SETTINGS_PATH
+    // (router.navigate) instead of calling a surface-context openSettings method.
+    expect(sidebarSrc).toContain("SETTINGS_PATH");
+    expect(sidebarSrc).toMatch(/navigate\(\{\s*to:\s*SETTINGS_PATH/);
+    // It reflects the route-derived open state as active.
     expect(sidebarSrc).toContain("isActive={settingsOpen}");
   });
 
@@ -47,10 +48,10 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
     // CTL-989: Settings is the /settings route now — the router renders
     // SettingsSurface into the AppShell layout's <Outlet/> (left nav stays),
     // instead of the old `settingsOpen ? <SettingsSurface/> : children` inset
-    // takeover. The shell's content slot just renders the routed children, and
+    // takeover. The shell's content slot just renders the routed <Outlet/>, and
     // `settingsOpen` is DERIVED from the route (pathname === "/settings").
     expect(routerSrc).toContain("SettingsSurface");
-    expect(routerSrc).toContain("SETTINGS_PATH");
+    expect(routerSrc).toMatch(/path:\s*"\/settings"/);
     expect(shellSrc).toContain("SidebarInset");
     expect(shellSrc).toContain("const settingsOpen = derived === \"settings\"");
   });

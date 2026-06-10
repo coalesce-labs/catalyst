@@ -15,7 +15,9 @@ const UI_SRC = join(HERE, "..", "ui", "src");
 const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
 
 const shellSrc = read("board/Shell.tsx");
-const routerSrc = read("board/router.tsx");
+// CTL-989: the detail routes moved from the retired standalone board/router.tsx
+// into the SINGLE unified app router (app-router.tsx, mounted from index.html).
+const routerSrc = read("app-router.tsx");
 const detailRouteSrc = read("board/detail-route.tsx");
 const keyboardHookSrc = read("hooks/use-keyboard-nav.ts");
 const chromeSrc = read("board/detail-chrome.ts");
