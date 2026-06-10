@@ -53,7 +53,8 @@ import {
 import { showLaneChrome, singleLaneHint } from "./board-grouping";
 
 // the blue cursor / selection vocabulary — NEVER the cyan LIVE signal (design §5.2).
-const CURSOR_BLUE = "#4ea1ff";
+// CTL-930 Phase 5: C.blue from canonical board-tokens.ts (already imported above).
+const CURSOR_BLUE = C.blue;
 
 export interface BoardListProps {
   /** which lens — selects the column set + the flatten path. */
