@@ -23,8 +23,18 @@ import type { Surface } from "./surface";
  *  - "dashboard" → the existing monitor dashboard / orchestrator / comms / etc.
  *
  * Home is the calm dashboard inbox; every other surface falls through to it.
+ *  - "telemetry" → the OBSERVE Telemetry surface shell (OBS-5). The other four
+ *                  OBSERVE surfaces (utilization/finops/fleetops/devops) keep the
+ *                  dashboard fall-through until their content ships in later OBS
+ *                  tickets — they are nav-disabled ("soon") for now, so the kind
+ *                  is never actually reached, but the mapping stays total.
  */
-export type SurfaceContentKind = "board" | "workers" | "queue" | "dashboard";
+export type SurfaceContentKind =
+  | "board"
+  | "workers"
+  | "queue"
+  | "telemetry"
+  | "dashboard";
 
 /**
  * Resolve which content kind the inset should render for the active surface.
@@ -37,6 +47,10 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   if (surface === "board") return "board";
   if (surface === "workers") return "workers";
   if (surface === "queue") return "queue";
+  // OBS-5: Telemetry is the first OBSERVE surface to ship its own content shell.
+  // The other four OBSERVE surfaces stay on the dashboard fall-through (and are
+  // nav-disabled "soon") until their own OBS tickets land.
+  if (surface === "telemetry") return "telemetry";
   return "dashboard";
 }
 

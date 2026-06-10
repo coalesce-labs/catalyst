@@ -81,7 +81,11 @@ import { AppFooter } from "@/components/app-footer";
 // Surface→route wiring is the FND stream's concern; this shell only exposes the
 // SurfaceContext contract the nav binds to.
 
-const SURFACE_ICON: Record<Surface, typeof InboxIcon> = {
+// OBS-5: Partial<> — only the OPERATE surfaces have an icon here. The palette
+// reads each item's icon from the nav-model groups (see paletteEntries below),
+// not this map, so the OBSERVE surfaces don't need an entry; Partial keeps the
+// expanded Surface union total without enumerating them.
+const SURFACE_ICON: Partial<Record<Surface, typeof InboxIcon>> = {
   home: InboxIcon,
   board: LayoutGridIcon,
   workers: UsersIcon,

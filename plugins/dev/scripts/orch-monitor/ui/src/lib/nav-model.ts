@@ -128,7 +128,11 @@ export function buildNavGroups(
 
 // ── breadcrumbFor ─────────────────────────────────────────────────────────────
 
-const SURFACE_LABEL: Record<Surface, string> = {
+// OBS-5: the OPERATE breadcrumb labels. OBSERVE surfaces resolve their crumb via
+// SURFACE_BREADCRUMB in surface.ts, not this scope-aware path, so they fall back
+// to the `?? surface` default below (and never appear under an "Overall"/repo
+// scope). Partial<> keeps this total without enumerating the OBSERVE surfaces.
+const SURFACE_LABEL: Partial<Record<Surface, string>> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",

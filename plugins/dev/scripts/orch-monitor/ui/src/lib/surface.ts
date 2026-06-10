@@ -10,41 +10,79 @@
 // module only declares the contract the shell binds to; it does NOT own routing.
 import { createContext, useContext } from "react";
 
-/** The top-level surfaces the shell can render in SidebarInset. */
-export type Surface = "home" | "board" | "workers" | "queue";
+/** The top-level surfaces the shell can render in SidebarInset.
+ *  OBS-5: the five OBSERVE analytics surfaces join the four OPERATE surfaces.
+ *  Only Telemetry is wired live tonight (its content ships in OBS-6/7/8); the
+ *  other four are declared here so each later surface only needs its own switch
+ *  branch (the four-touch routing pattern, build-plan §2.2). */
+export type Surface =
+  | "home"
+  | "board"
+  | "workers"
+  | "queue"
+  | "telemetry"
+  | "utilization"
+  | "finops"
+  | "fleetops"
+  | "devops";
 
-/** Every surface in nav order — the single source the sidebar + palette iterate. */
+/** Every surface in nav order — the single source the sidebar + palette iterate.
+ *  OBS-5: OBSERVE surfaces follow the OPERATE block (after queue). */
 export const SURFACES: readonly Surface[] = [
   "home",
   "board",
   "workers",
   "queue",
+  "telemetry",
+  "utilization",
+  "finops",
+  "fleetops",
+  "devops",
 ] as const;
 
 /** Human label per surface (sidebar item + command palette).
- *  CTL-930: home → "Inbox", board → "Tickets" (internal union keys unchanged). */
+ *  CTL-930: home → "Inbox", board → "Tickets" (internal union keys unchanged).
+ *  OBS-5: OBSERVE labels (Telemetry/Utilization/FinOps/Fleet Ops/DevOps). */
 export const SURFACE_LABEL: Record<Surface, string> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
   queue: "Queue",
+  telemetry: "Telemetry",
+  utilization: "Utilization",
+  finops: "FinOps",
+  fleetops: "Fleet Ops",
+  devops: "DevOps",
 };
 
-/** The `g <key>` jump keys, kept next to the Surface union so they stay in sync. */
+/** The `g <key>` jump keys, kept next to the Surface union so they stay in sync.
+ *  OBS-5: OBSERVE chords pick keys that don't collide with the existing h/b/w/q —
+ *  t(elemetry) / u(tilization) / f(inops) / o(=fleetOps, f taken) / d(evops). */
 export const SURFACE_CHORD: Record<string, Surface> = {
   h: "home",
   b: "board",
   w: "workers",
   q: "queue",
+  t: "telemetry",
+  u: "utilization",
+  f: "finops",
+  o: "fleetops",
+  d: "devops",
 };
 
 /** Breadcrumb trail per surface — scope-less fallback (used by tests + non-scoped contexts).
- *  CTL-930: scope-aware breadcrumbs use lib/nav-model#breadcrumbFor instead. */
+ *  CTL-930: scope-aware breadcrumbs use lib/nav-model#breadcrumbFor instead.
+ *  OBS-5: OBSERVE surfaces sit under an "Observe" crumb instead of "Overall". */
 export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
   home: ["Overall", "Inbox"],
   board: ["Overall", "Tickets"],
   workers: ["Overall", "Workers"],
   queue: ["Overall", "Queue"],
+  telemetry: ["Observe", "Telemetry"],
+  utilization: ["Observe", "Utilization"],
+  finops: ["Observe", "FinOps"],
+  fleetops: ["Observe", "Fleet Ops"],
+  devops: ["Observe", "DevOps"],
 };
 
 /**

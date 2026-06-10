@@ -75,6 +75,14 @@ const QueueSurface = lazy(() =>
     default: m.QueueSurface,
   })),
 );
+// OBS-5: the OBSERVE Telemetry surface. Lazy/code-split so the chart-kit (recharts
+// pulled in by the observe components) never ships in the home/board main bundle —
+// it only loads when the operator is on the Telemetry surface.
+const TelemetrySurface = lazy(() =>
+  import("./components/observe/telemetry-surface").then((m) => ({
+    default: m.TelemetrySurface,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -366,6 +374,16 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <QueueSurface />
+      </Suspense>
+    );
+  }
+  // OBS-5: the first OBSERVE surface. A lazy/code-split branch like the others so
+  // its chart-kit chunk only loads on this surface. The other four OBSERVE
+  // surfaces are nav-disabled ("soon") and still fall through to the dashboard.
+  if (kind === "telemetry") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <TelemetrySurface />
       </Suspense>
     );
   }
