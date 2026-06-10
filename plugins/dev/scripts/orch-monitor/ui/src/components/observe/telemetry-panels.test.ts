@@ -74,6 +74,36 @@ describe("clusterApiErrors — P2", () => {
     expect(out[0]!.error).toContain("not json");
   });
 
+  it("reads the error string + model FROM THE STREAM LABELS (body is the event-name string)", () => {
+    // The REAL catalyst-otel shape: body is "claude_code.api_error", the error
+    // string + model are STREAM LABELS. Reading the body would cluster every error
+    // under "claude_code.api_error" — the structured-metadata bug.
+    const out = clusterApiErrors([
+      entry({
+        timestamp: "1",
+        line: "claude_code.api_error",
+        labels: { error: "Connection error.", model: "claude-sonnet-4-6" },
+      }),
+      entry({
+        timestamp: "2",
+        line: "claude_code.api_error",
+        labels: { error: "Connection error.", model: "claude-sonnet-4-6", session_id: "s1", linear_key: "CTL-9" },
+      }),
+      entry({
+        timestamp: "3",
+        line: "claude_code.api_error",
+        labels: { error: "529 overloaded", model: "claude-fable-5" },
+      }),
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.error).toBe("Connection error.");
+    expect(out[0]!.model).toBe("claude-sonnet-4-6");
+    expect(out[0]!.count).toBe(2);
+    // metadata lifted from labels too
+    expect(out[0]!.sessionId).toBe("s1");
+    expect(out[0]!.linearKey).toBe("CTL-9");
+  });
+
   it("an empty input is an empty array (the ChartCard shows the empty state)", () => {
     expect(clusterApiErrors([])).toEqual([]);
   });

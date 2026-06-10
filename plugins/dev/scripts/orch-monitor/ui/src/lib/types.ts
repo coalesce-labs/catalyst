@@ -299,6 +299,8 @@ export interface TailRow {
   sessionId: string | null;
   /** Linear key — the human group label. */
   linearKey: string | null;
+  /** CC prompt id (`prompt_id` structured-metadata label), or null. */
+  promptId?: string | null;
 }
 
 /** The /api/otel/tail payload: newest-first rows + fleet-wide freshness (age in

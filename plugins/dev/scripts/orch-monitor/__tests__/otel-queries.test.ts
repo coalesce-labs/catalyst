@@ -12,6 +12,7 @@ import {
   toolLatency,
   toolLatencyLogQL,
   apiErrors,
+  apiErrorsLogQL,
   recentTail,
   recentTailLogQL,
   eventsHeatmap,
@@ -271,6 +272,14 @@ describe("apiErrors", () => {
   it("returns null when unavailable", async () => {
     expect(await apiErrors(mockLoki(null), "1h")).toBeNull();
   });
+
+  it("filters event_name=api_error via a PIPE label-filter (the error string + model live in the labels)", () => {
+    const q = apiErrorsLogQL();
+    expect(q).toContain('{service_name=~"claude-code.*"}');
+    expect(q).toContain('| event_name="api_error"');
+    expect(q).not.toMatch(/\{[^}]*event_name\s*=/); // not a stream-selector matcher
+    expect(q).not.toContain("| json"); // structured metadata, no json stage
+  });
 });
 
 // ── OBS-7 (TELEMETRY P4): per-model latency + error% ─────────────────────────
@@ -305,21 +314,29 @@ function lokiMatrix(
 }
 
 describe("modelLatencyLogQL / modelEventCountLogQL — pin the LogQL shape", () => {
-  it("latency query unwraps duration_ms on api_request and groups by (model)", () => {
+  it("latency query filters event_name via a PIPE label-filter and unwraps duration_ms by (model)", () => {
     const q = modelLatencyLogQL(0.95, "1h");
     expect(q).toContain("quantile_over_time(0.95,");
-    expect(q).toContain('|= "claude_code.api_request"');
-    expect(q).toContain("| json | unwrap duration_ms");
+    // The event filter MUST be a `| event_name="api_request"` PIPE label-filter on
+    // structured metadata — NOT a `{event_name=…}` selector (returns 0) and NOT a
+    // body match `|= "claude_code.api_request"` + `| json` (the body is the
+    // event-name string, not JSON → JSONParserErr 400, the shipped bug).
+    expect(q).toContain('| event_name="api_request"');
+    expect(q).toContain("| unwrap duration_ms");
+    expect(q).not.toContain("| json"); // no json stage — fields are structured metadata
+    expect(q).not.toContain('|= "claude_code.api_request"'); // not a body match
+    expect(q).not.toMatch(/\{[^}]*event_name\s*=/); // not a stream-selector matcher
     expect(q).toContain("by (model)");
   });
 
-  it("error-count query counts the lowercase api_error literal by (model)", () => {
-    const q = modelEventCountLogQL("claude_code.api_error", "1h");
+  it("error-count query filters event_name=api_error via a PIPE label-filter by (model)", () => {
+    const q = modelEventCountLogQL("api_error", "1h");
     expect(q).toContain("sum by (model)");
     expect(q).toContain("count_over_time");
-    // The literal MUST be lowercase — uppercase returns zero rows (verified live).
-    expect(q).toContain('|= "claude_code.api_error"');
+    // The structured-metadata value MUST be the lowercase bare event name.
+    expect(q).toContain('| event_name="api_error"');
     expect(q).not.toContain("API_ERROR");
+    expect(q).not.toContain("| json");
   });
 
   it("a bad range duration falls back, never injected into the LogQL", () => {
@@ -347,14 +364,14 @@ describe("modelLatency", () => {
         ]),
       },
       {
-        match: '|= "claude_code.api_request"',
+        match: '| event_name="api_request"',
         result: lokiMatrix([
           { model: "fable-5", values: [[160, "300"]] },
           { model: "haiku-4.5", values: [[160, "120"]] },
         ]),
       },
       {
-        match: '|= "claude_code.api_error"',
+        match: '| event_name="api_error"',
         result: lokiMatrix([{ model: "fable-5", values: [[160, "3"]] }]),
       },
     ]);
@@ -405,12 +422,16 @@ describe("modelLatency", () => {
 });
 
 describe("toolLatency", () => {
-  it("unwraps duration_ms on tool_result grouped by tool_name", () => {
+  it("filters event_name=tool_result via a PIPE label-filter and unwraps duration_ms by (tool_name)", () => {
     const q = toolLatencyLogQL(0.95, "1h");
     expect(q).toContain("quantile_over_time(0.95,");
-    expect(q).toContain('|= "claude_code.tool_result"');
-    expect(q).toContain("| json | unwrap duration_ms");
+    expect(q).toContain('| event_name="tool_result"');
+    expect(q).toContain("| unwrap duration_ms");
+    expect(q).not.toContain("| json"); // fields are structured metadata, body is not JSON
+    expect(q).not.toContain('|= "claude_code.tool_result"'); // not a body match
+    // The grouping label is `tool_name` (verified live: by(tool)→1 empty series).
     expect(q).toContain("by (tool_name)");
+    expect(q).not.toMatch(/by \(tool\)/);
   });
 
   it("joins p50/p95 into a tool→latency map", async () => {
@@ -487,22 +508,29 @@ describe("isValidCcSessionId", () => {
 });
 
 describe("parseHistoryLine", () => {
-  it("extracts event_name/tool_name/tool_input/duration_ms/cost_usd/tokens/model/success", () => {
+  // catalyst-otel carries every field as a STRUCTURED-METADATA STREAM LABEL; the
+  // line BODY is just the event-name string. The non-negotiable property: fields
+  // come from the LABELS, not the body (reading the body gave all-null → the
+  // "event — —" shipped bug).
+  it("extracts event_name/tool_name/duration_ms/cost_usd/model/prompt_id FROM THE STREAM LABELS", () => {
     const row = parseHistoryLine(
       1713100000000,
-      JSON.stringify({
-        event_name: "claude_code.tool_result",
+      // the BODY is the event-name string, NOT JSON
+      "claude_code.tool_result",
+      {
+        event_name: "tool_result",
         tool_name: "Edit",
         tool_input: "board-data.mjs",
-        duration_ms: 1100,
-        cost_usd: 0.0042,
-        tokens: 318,
+        duration_ms: "1100",
+        cost_usd: "0.0042",
+        tokens: "318",
         model: "claude-opus-4-8",
-        success: true,
-      }),
+        success: "true",
+        prompt_id: "239db6a1-e125-4a2a-b0c1-4f471c0cd8f4",
+      },
     );
     expect(row.ts).toBe(1713100000000);
-    expect(row.eventName).toBe("claude_code.tool_result");
+    expect(row.eventName).toBe("tool_result");
     expect(row.toolName).toBe("Edit");
     expect(row.toolInput).toBe("board-data.mjs");
     expect(row.durationMs).toBe(1100);
@@ -510,15 +538,44 @@ describe("parseHistoryLine", () => {
     expect(row.tokens).toBe(318);
     expect(row.model).toBe("claude-opus-4-8");
     expect(row.success).toBe(true);
+    expect(row.promptId).toBe("239db6a1-e125-4a2a-b0c1-4f471c0cd8f4");
   });
 
-  it("never crashes on a non-JSON line — fields stay null", () => {
+  it("reads the labels even when the body is the bare event-name string (NOT JSON)", () => {
+    // This is the real shape: body is "claude_code.api_request", fields in labels.
+    const row = parseHistoryLine(1713100000000, "claude_code.api_request", {
+      event_name: "api_request",
+      model: "claude-opus-4-8",
+      duration_ms: "28700",
+      cost_usd: "0.08",
+    });
+    // The body is unparseable as JSON, yet every field is populated from labels —
+    // proving we do NOT depend on the body.
+    expect(row.eventName).toBe("api_request");
+    expect(row.model).toBe("claude-opus-4-8");
+    expect(row.durationMs).toBe(28700);
+    expect(row.costUsd).toBeCloseTo(0.08);
+  });
+
+  it("falls back to a JSON body when present and labels omit a field (older ingest)", () => {
+    const row = parseHistoryLine(
+      42,
+      JSON.stringify({ event_name: "claude_code.tool_result", tool_name: "Read", duration_ms: 200 }),
+      {}, // no labels
+    );
+    expect(row.eventName).toBe("claude_code.tool_result");
+    expect(row.toolName).toBe("Read");
+    expect(row.durationMs).toBe(200);
+  });
+
+  it("never crashes when the body is non-JSON and no labels are given — fields stay null", () => {
     const row = parseHistoryLine(42, "this is not json");
     expect(row.ts).toBe(42);
     expect(row.eventName).toBeNull();
     expect(row.toolName).toBeNull();
     expect(row.durationMs).toBeNull();
     expect(row.success).toBeNull();
+    expect(row.promptId).toBeNull();
   });
 });
 
@@ -826,22 +883,33 @@ describe("recentTail", () => {
     return { data: { resultType: "streams", result: [{ stream, values }] } };
   }
 
-  it("parses rows newest-first and derives freshnessMs from the newest line", async () => {
+  it("parses rows newest-first FROM STREAM LABELS and derives freshnessMs (body is the event-name string)", async () => {
     const now = Date.now();
     const newest = now - 4_000; // 4s ago
     const older = now - 60_000;
-    const loki = mockLoki(
-      lokiStream({ service_name: "claude-code" }, [
-        // Loki returns ns timestamps as strings; give them out-of-order to prove sort.
-        [String(older * 1_000_000), JSON.stringify({ event_name: "claude_code.tool_result", tool_name: "Read" })],
-        [String(newest * 1_000_000), JSON.stringify({ event_name: "claude_code.api_request", model: "fable" })],
-      ]),
-    );
+    // REAL shape: each line's fields are STREAM LABELS; the body is the event-name
+    // string. Two separate streams (Loki groups by label set), out-of-order to
+    // prove the newest-first sort.
+    const loki = mockLoki({
+      data: {
+        resultType: "streams",
+        result: [
+          {
+            stream: { service_name: "claude-code", event_name: "tool_result", tool_name: "Read" },
+            values: [[String(older * 1_000_000), "claude_code.tool_result"]],
+          },
+          {
+            stream: { service_name: "claude-code", event_name: "api_request", model: "fable" },
+            values: [[String(newest * 1_000_000), "claude_code.api_request"]],
+          },
+        ],
+      },
+    });
     const res = await recentTail(loki, "15m");
     expect(res).not.toBeNull();
     expect(res!.rows).toHaveLength(2);
-    // newest-first
-    expect(res!.rows[0]!.eventName).toBe("claude_code.api_request");
+    // newest-first — and the fields came from the LABELS, not the (non-JSON) body.
+    expect(res!.rows[0]!.eventName).toBe("api_request");
     expect(res!.rows[0]!.model).toBe("fable");
     // freshness ≈ 4s (allow a little slack for the now() taken inside recentTail)
     expect(res!.freshnessMs).not.toBeNull();
@@ -849,7 +917,33 @@ describe("recentTail", () => {
     expect(res!.freshnessMs!).toBeLessThan(10_000);
   });
 
-  it("lifts session_id / linear_key from the JSON body (the grouping keys)", async () => {
+  it("lifts tool_name / duration_ms / cost_usd / session_id / linear_key FROM THE STREAM LABELS", async () => {
+    const loki = mockLoki(
+      lokiStream(
+        {
+          service_name: "claude-code",
+          event_name: "tool_result",
+          tool_name: "Bash",
+          duration_ms: "296",
+          cost_usd: "0.0042",
+          session_id: "abc-123",
+          linear_key: "CTL-928",
+        },
+        // the body is the event-name string, never JSON
+        [[String(Date.now() * 1_000_000), "claude_code.tool_result"]],
+      ),
+    );
+    const res = await recentTail(loki, "15m");
+    const row = res!.rows[0]!;
+    expect(row.eventName).toBe("tool_result");
+    expect(row.toolName).toBe("Bash");
+    expect(row.durationMs).toBe(296);
+    expect(row.costUsd).toBeCloseTo(0.0042);
+    expect(row.sessionId).toBe("abc-123");
+    expect(row.linearKey).toBe("CTL-928");
+  });
+
+  it("still lifts session_id / linear_key from a JSON body (older ingest fallback)", async () => {
     const loki = mockLoki(
       lokiStream({ service_name: "claude-code" }, [
         [
@@ -865,16 +959,6 @@ describe("recentTail", () => {
     const res = await recentTail(loki, "15m");
     expect(res!.rows[0]!.sessionId).toBe("abc-123");
     expect(res!.rows[0]!.linearKey).toBe("CTL-928");
-  });
-
-  it("falls back to stream labels for session_id when the body omits it", async () => {
-    const loki = mockLoki(
-      lokiStream({ service_name: "claude-code", session_id: "label-sess" }, [
-        [String(Date.now() * 1_000_000), JSON.stringify({ event_name: "claude_code.api_request" })],
-      ]),
-    );
-    const res = await recentTail(loki, "15m");
-    expect(res!.rows[0]!.sessionId).toBe("label-sess");
   });
 
   it("an empty stream is an HONEST result with freshnessMs null (QUIET), NOT null", async () => {
