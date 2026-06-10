@@ -3416,7 +3416,17 @@ function runTick() {
       try {
         const diagDb = getBeliefsDb();
         if (diagDb) {
-          processDiagnosticianWakes(diagDb, beliefsRes.tickId);
+          processDiagnosticianWakes(diagDb, beliefsRes.tickId, {
+            // Wire R12 escalation: apply needs-human via the scheduler's
+            // idempotent labelOnce so the once-marker and Linear label stay
+            // in sync with all other escalation paths. Subject is TICKET/phase.
+            applyNeedsHuman: (subject, _evidence) => {
+              const ticket = subject.split("/")[0];
+              if (ticket) {
+                labelOnce(runningOpts.orchDir, ticket, "needs-human", runningOpts.writeStatus);
+              }
+            },
+          });
         }
       } catch (diagErr) {
         try {
