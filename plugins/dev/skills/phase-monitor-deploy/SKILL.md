@@ -316,6 +316,8 @@ EOF
     [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
 ${MIRROR_FOOTER}"
   fi
+  # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+  "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-monitor-deploy}" --ticket "$TICKET" || exit 10
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
   if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
