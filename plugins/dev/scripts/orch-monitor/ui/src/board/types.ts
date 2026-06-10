@@ -60,6 +60,10 @@ export interface BoardWorker {
   /** CTL-928: the durable `claude --bg` job id this worker's liveness was derived
    *  from. null/absent when no signal carried one. */
   bgJobId?: string | null;
+  /** CTL-947: true when the worker is parked waiting for a human prompt —
+   *  derived from the durable bg-job state "blocked" (Claude Code paused for
+   *  user input / a permission grant). false/absent when not waiting. */
+  waitingOnUser?: boolean;
 }
 
 export interface BoardPhaseCost {

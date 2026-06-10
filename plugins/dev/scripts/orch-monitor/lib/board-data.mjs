@@ -97,6 +97,16 @@ export function isBgJobDead(jobState) {
   return bgJobLifecycle(jobState) !== "alive";
 }
 
+// CTL-947: isBgJobWaitingOnUser — true when the DURABLE bg-job state is
+// "blocked", meaning Claude Code paused the job waiting for user input (a
+// permission grant or interactive prompt). This is DISTINCT from "dead" for
+// display purposes: a blocked worker IS excluded from in-flight capacity
+// (isBgJobDead also returns true) but the operator sees it as "waiting on you"
+// rather than a silent zombie. null/absent bgJobState → false (unknown).
+export function isBgJobWaitingOnUser(jobState) {
+  return jobState?.state === "blocked";
+}
+
 // CTL-755 held-indicator labels (admission-control gate). A triaged-waiting
 // ticket the scheduler holds before the triage→research promotion carries one of
 // these Linear labels: `blocked` (≥1 non-terminal blocked_by dependency) or
@@ -816,6 +826,11 @@ export async function assembleBoard() {
       // CTL-922 (BFF10): owning host + fence generation (see above).
       host: deriveHost(workerSigs, fence),
       generation: deriveGeneration(workerSigs, fence),
+      // CTL-947: a worker whose bg-job state is "blocked" is parked waiting for
+      // user input (a permission grant). Surfaced separately from the dead/active
+      // classification so the operator sees a distinct "waiting on you" group
+      // rather than having it silently merge into the zombie corpse bucket.
+      waitingOnUser: isBgJobWaitingOnUser(jobState),
     };
   }));
   // CTL-928: a worker whose durable bg job is dead is NOT in flight. Partition
