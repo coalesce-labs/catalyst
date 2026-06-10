@@ -12,10 +12,10 @@
 // chrome) — exactly how `queueHostMode === "single"` and `isMultiHost === false`
 // collapse the two sibling surfaces.
 //
-// SINGLE-HOST IDENTITY NO-OP (the hard operator constraint): with one node every
-// entity's `host` is the same single ref (or null when un-stamped today) → one
-// distinct key → buildLanes returns one lane → the caller renders the bare flat
-// board. Same code path as a genuine single-node cluster and as `none`.
+// SINGLE-HOST: with one node every entity's `host` is the same single ref (or null
+// when un-stamped today) → one distinct key → buildLanes returns one lane. The
+// caller (SwimlaneBoard/BoardList) consults showLaneChrome — an explicit axis renders
+// that one labeled lane WITH header. Same structural code path as multi-host.
 import type { BoardHostRef } from "./types";
 // The grouping axes are exactly the persisted BOARD2 Swimlane union — there is ONE
 // definition (prefs-store.ts) the popover writes and this engine groups by, so a
@@ -110,8 +110,9 @@ const LIVE_RANK = { live: 0, degraded: 1, offline: 2 } as const;
  * the entities it is given). "Show empty columns" is a *column*-level concern owned
  * by Column/board-display.ts — orthogonal to swimlanes. There is no empty swimlane.
  *
- * Single-lane collapse: a length-1 result means the caller (SwimlaneBoard) renders
- * the lane body with no header — the identity no-op.
+ * Single-lane policy (CTL-930 Phase 3): an explicit axis always renders chrome for
+ * any lane count ≥ 1 via showLaneChrome. A single lane shows a header + singleLaneHint.
+ * `axis="none"` keeps the classic identity no-op (bare board, no chrome).
  */
 // ── Phase 3 — showLaneChrome + singleLaneHint ────────────────────────────────
 

@@ -11,14 +11,18 @@
 // thin presentational shell over it. Hand-rolled inline styles per DESIGN.md,
 // reusing the shared `C` token object + the `.catalyst-live-dot` pulse.
 //
-// SINGLE-GROUP IDENTITY NO-OP: when buildLanes yields one lane (none, single-team,
-// single-node, single-repo, or all-un-stamped-host today) SwimlaneBoard renders the
-// bare column board with ZERO lane chrome — markup identical to the flat board.
+// CTL-930 Phase 3: the single-lane identity no-op (no chrome for 1 lane) is
+// replaced by showLaneChrome — an explicit axis ALWAYS shows the labeled header
+// even for a single lane (+ a singleLaneHint inline after the count chip).
+// axis="none" stays a pure identity no-op. Picking [Host] on a single-host fleet
+// now shows the one labeled lane + hint instead of silently collapsing.
 import type { ReactNode } from "react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE } from "./board-tokens";
 import {
   buildLanes,
+  showLaneChrome,
+  singleLaneHint,
   type GroupBy,
   type HostLiveness,
   type Lane,
@@ -33,10 +37,12 @@ function LaneHeader({
   label,
   count,
   live,
+  hint,
 }: {
   label: string;
   count: number;
   live: Lane<unknown>["live"];
+  hint?: string | null;
 }) {
   const isLive = live === "live";
   const dotColor = isLive
@@ -84,6 +90,11 @@ function LaneHeader({
       >
         {count}
       </span>
+      {hint && (
+        <span style={{ fontSize: 11, color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {hint}
+        </span>
+      )}
       {live === "offline" && (
         <Tooltip>
           <TooltipTrigger asChild>
@@ -101,9 +112,11 @@ function LaneHeader({
 /**
  * SwimlaneBoard — wraps a column-board renderer in row lanes. Generic over the
  * entity (CTL-930 forward-compat): pass tickets + a TicketBoard renderer, or
- * workers + a WorkerBoard renderer. A single resolved lane renders the body with
- * NO header (the identity no-op to the flat board). `liveness` is the optional
- * host-liveness overlay — omit it and host lanes simply carry no liveness dot.
+ * workers + a WorkerBoard renderer.
+ *
+ * CTL-930 Phase 3: an explicit axis (team/project/repo/host) ALWAYS renders lane
+ * chrome, even for a single lane. axis="none" keeps the classic identity no-op
+ * (bare flat board, no chrome). A single lane shows the header + a singleLaneHint.
  *
  * fill: passed straight through in the one-lane case (the column board owns the
  * shell-var height as it does today); in the N-lane case the outer wrapper scrolls
@@ -116,25 +129,27 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   fill,
   liveness,
   renderBoard,
+  entityNoun = "ticket",
 }: {
   items: T[];
   groupBy: GroupBy;
   fill: boolean;
   liveness?: HostLiveness;
   renderBoard: (laneItems: T[], laneFill: boolean) => ReactNode;
+  entityNoun?: "ticket" | "worker";
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
 
-  // Identity no-op: zero or one lane → the bare flat board, no chrome. (Zero lanes
-  // happens only when `items` is empty on a real axis — render the empty board so
-  // the column scaffolding/empty-state still shows, identical to today.)
-  if (lanes.length <= 1) {
+  // Identity no-op (axis="none" only): render the bare flat board with no chrome.
+  // Zero lanes on a real axis also falls through here (empty entity set — render
+  // the empty board so column scaffolding/empty-state still shows).
+  if (!showLaneChrome(groupBy, lanes.length)) {
     return <>{renderBoard(lanes[0]?.items ?? items, fill)}</>;
   }
 
-  // N lanes → vertically stacked, each header + its own column board. The wrapper
-  // owns the scroll (the shell --cat-board-vh var, minus the chrome offset) so the
-  // sticky lane headers pin while their columns scroll.
+  // Explicit axis → vertically stacked, each header + its own column board. The
+  // wrapper owns the scroll (the shell --cat-board-vh var, minus the chrome offset)
+  // so the sticky lane headers pin while their columns scroll.
   return (
     <div
       className="cat-scroll"
@@ -146,8 +161,13 @@ export function SwimlaneBoard<T extends GroupableEntity>({
     >
       {lanes.map((lane) => (
         <div key={lane.key} style={{ marginBottom: 14 }}>
-          <LaneHeader label={lane.label} count={lane.items.length} live={lane.live} />
-          {renderBoard(lane.items, false /* lanes scroll the page, not each board */)}
+          <LaneHeader
+            label={lane.label}
+            count={lane.items.length}
+            live={lane.live}
+            hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
+          />
+          {renderBoard(lane.items, lanes.length === 1 ? fill : false)}
         </div>
       ))}
     </div>
@@ -159,10 +179,11 @@ export function SwimlaneBoard<T extends GroupableEntity>({
 // labels), owned here alongside the renderer so the control and the grouping
 // engine cannot drift — a drift guard (board-display-options-guard.test.ts) locks
 // these keys to the `Swimlane` union. The display-options popover (BOARD2) renders
-// them in its reserved "Swimlanes" RadioRow, writing straight to `prefs.swimlane`;
-// the Repo axis is dropped in a single-repo workspace (no lanes to draw, an
-// identity no-op), and Host stays selectable single-node (picking it collapses to
-// one lane, exactly like the SURF1/SURF2 node controls stay inert single-host).
+// them in its "Rows" SelectRow, writing straight to `prefs.swimlane`;
+// the Repo axis is dropped in a single-repo workspace (filter narrows the entity
+// set, swimlane=repo collapses naturally to one LABELED repo lane + hint).
+// Host stays selectable single-node: picking [Host] now shows the one labeled
+// lane + hint instead of silently collapsing to a bare board.
 export const SWIMLANE_OPTIONS: { k: GroupBy; label: string }[] = [
   { k: "none", label: "None" },
   { k: "repo", label: "Repo" },

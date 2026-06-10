@@ -856,16 +856,11 @@ export function Board({
     () => filterWorkersByHost(fWorkers, activeHostFilter),
     [fWorkers, activeHostFilter],
   );
-  // BOARD3 / CTL-907: the generalized row-swimlane axis (none | repo | team |
-  // project | host) the display-options popover writes to `prefs.swimlane`. The
-  // pure board-grouping engine (buildLanes, inside <SwimlaneBoard>) now OWNS lane
-  // resolution — the repo-only ticketLanes/workerLanes/combined derivation is gone.
-  // A specific repo scope collapses to the flat board (a single repo has no lanes
-  // to draw) by mapping the axis to "none" — preserving today's "filter ⇒ flat"
-  // semantic exactly (the conservative R3 default; buildLanes would otherwise still
-  // collapse to one lane for the repo axis, and could show team/host lanes within
-  // one repo — a deliberate, separate product decision, not regressed here).
-  const effectiveGroupBy: GroupBy = repo !== "all" ? "none" : prefs.swimlane;
+  // CTL-930 Phase 3: swimlanes engage under any workspace scope. The repo scope
+  // narrows the entity set (fTickets/fWorkers at :841–842) and the axis groups
+  // within it — swimlane=repo under a single-repo scope collapses naturally to
+  // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
+  const swimlane: GroupBy = prefs.swimlane;
   const selectedTicket =
     selectedTicketId != null
       ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
@@ -922,8 +917,7 @@ export function Board({
             // groupListRows, so NOT wrapped in SwimlaneBoard); "board" keeps the
             // untouched column kanban. Flipping back restores the kanban with the
             // SAME lens/filters/density/live cards — all live in shared atoms, never
-            // in BoardList. effectiveGroupBy carries the same "scoped-repo => flat"
-            // collapse the kanban lanes use.
+            // in BoardList.
             prefs.layout === "list" ? (
               <BoardList
                 kind="ticket"
@@ -931,15 +925,16 @@ export function Board({
                 lens={lens}
                 order={prefs.order}
                 density={prefs.density}
-                swimlane={effectiveGroupBy}
+                swimlane={swimlane}
                 onSelect={(id) => setSelectedTicketId(id)}
                 embedded={embedded}
               />
             ) : (
               <SwimlaneBoard
                 items={fTickets}
-                groupBy={effectiveGroupBy}
+                groupBy={swimlane}
                 fill
+                entityNoun="ticket"
                 renderBoard={(laneItems, laneFill) => (
                   <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
                 )}
@@ -954,10 +949,11 @@ export function Board({
             // inside each lane so host is not double-encoded (rows AND columns).
             <SwimlaneBoard
               items={nodeWorkers}
-              groupBy={effectiveGroupBy}
+              groupBy={swimlane}
               fill
+              entityNoun="worker"
               renderBoard={(laneItems, laneFill) => (
-                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={effectiveGroupBy === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
+                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
               )}
             />
           )}
