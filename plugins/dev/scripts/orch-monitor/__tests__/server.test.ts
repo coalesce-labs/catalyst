@@ -452,6 +452,35 @@ describe("OTel API endpoints", () => {
     const res = await fetch(`${baseUrl}/api/otel/cost-rate`);
     expect(res.status).toBe(503);
   });
+
+  // OBS-9: the four new FinOps routes follow the same "503 when Prometheus is not
+  // configured" contract so the FinOps surface degrades via the ChartCard ladder.
+  it("returns 503 for /api/otel/cost-by-stage when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-by-stage`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-today when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-today`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-series when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-series`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cache-savings when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cache-savings`);
+    expect(res.status).toBe(503);
+  });
+
+  // OBS-10: the spike-drill route. Same 503-when-unconfigured contract; it also
+  // 503s before reading `hour` (the not-configured guard runs first).
+  it("returns 503 for /api/otel/cost-at-hour when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-at-hour?hour=1781000000`);
+    expect(res.status).toBe(503);
+  });
 });
 
 describe("OTel health endpoint (/api/health/otel)", () => {

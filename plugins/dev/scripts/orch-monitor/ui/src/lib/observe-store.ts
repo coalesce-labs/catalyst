@@ -71,3 +71,21 @@ export const TIME_RANGE_TO_LOKI: Record<TimeRange, string> = {
 export function refreshIntervalMs(range: TimeRange): number {
   return range === "NOW" ? 15_000 : 60_000;
 }
+
+// ── range → Prometheus increase() window (OBS-10) ────────────────────────────
+// The FinOps spend-over-time series + cache-savings read Prometheus `increase()`
+// over a window. Unlike the Loki tail (which caps at 7d for retention), Prometheus
+// keeps the longer history, so 30D maps to a real 30d window. NOW/TODAY both map
+// to 24h here: the FinOps surface's HERO answers "today" off the dedicated
+// /api/otel/cost-today route (anchored to local midnight, not a rolling window),
+// while the spend-over-time bars want a full 24h of hourly context regardless of
+// where in the day we are — a 15m "NOW" window would render a single near-empty
+// bar. CYCLE maps to 7d as a pragmatic stand-in until the cycle boundary is wired.
+export const TIME_RANGE_TO_PROM: Record<TimeRange, string> = {
+  NOW: "24h",
+  TODAY: "24h",
+  "24H": "24h",
+  "7D": "7d",
+  CYCLE: "7d",
+  "30D": "30d",
+};

@@ -20,6 +20,14 @@ import {
   extractHeatmap,
   HEATMAP_BUCKET_SECONDS,
   costValidation,
+  costToday,
+  costSeries,
+  cacheSavings,
+  costAtHour,
+  scoreSpikes,
+  avgPrior7FullDays,
+  secondsSinceLocalMidnight,
+  inputPricePerToken,
   safeDuration,
   workerHistoryBySession,
   workerHistoryLogQL,
@@ -79,6 +87,32 @@ describe("costByTicket", () => {
     expect(result).not.toBeNull();
     expect(result!["CTL-39"]).toBeCloseTo(1.234);
     expect(result!["CTL-40"]).toBeCloseTo(0.567);
+  });
+
+  // OBS-9: the MANDATORY zero-series filter. increase() returns a series for every
+  // ticket that ever carried the metric, most exact-0 in any window (live: ~24 of
+  // ~36). A topk/bottomk/table on those renders all-zeros garbage — so costByTicket
+  // MUST drop value===0 series at the query layer.
+  it("OBS-9: filters out exact-0 ticket series (the zero-series filter)", async () => {
+    const prom = mockProm({
+      data: {
+        resultType: "vector",
+        result: [
+          { metric: { linear_key: "CTL-850" }, value: [0, "621.0"] },
+          { metric: { linear_key: "CTL-ZERO" }, value: [0, "0"] },
+          { metric: { linear_key: "CTL-696" }, value: [0, "214.0"] },
+          { metric: { linear_key: "CTL-ZERO2" }, value: [0, "0.0"] },
+        ],
+      },
+    });
+    const result = await costByTicket(prom, "24h");
+    expect(result).not.toBeNull();
+    expect(result!["CTL-850"]).toBeCloseTo(621);
+    expect(result!["CTL-696"]).toBeCloseTo(214);
+    // The two exact-0 tickets are GONE, not present-as-0.
+    expect("CTL-ZERO" in result!).toBe(false);
+    expect("CTL-ZERO2" in result!).toBe(false);
+    expect(Object.keys(result!)).toHaveLength(2);
   });
 
   it("returns null when Prometheus is unavailable", async () => {
@@ -222,6 +256,435 @@ describe("costByTaskType", () => {
     expect(capturedQuery).toContain("sum by (task_type)");
     expect(capturedQuery).toContain(`task_type=~".+"`);
     expect(capturedQuery).toContain("claude_code_cost_usage_USD_total");
+  });
+
+  // OBS-9: by-stage gets the same zero-series filter — live, ~5 of 12 task_types
+  // are exact-0 over 24h and must not render as empty phases in the P-B bar.
+  it("OBS-9: filters out exact-0 task_type series", async () => {
+    const prom = mockProm({
+      data: {
+        resultType: "vector",
+        result: [
+          { metric: { task_type: "interactive" }, value: [0, "1382.05"] },
+          { metric: { task_type: "phase-triage" }, value: [0, "0"] },
+          { metric: { task_type: "phase-research" }, value: [0, "39.21"] },
+          { metric: { task_type: "phase-pr" }, value: [0, "0.0"] },
+        ],
+      },
+    });
+    const result = await costByTaskType(prom, "24h");
+    expect(result).not.toBeNull();
+    expect(result!["interactive"]).toBeCloseTo(1382.05);
+    expect(result!["phase-research"]).toBeCloseTo(39.21);
+    expect("phase-triage" in result!).toBe(false);
+    expect("phase-pr" in result!).toBe(false);
+    expect(Object.keys(result!)).toHaveLength(2);
+  });
+});
+
+// ── OBS-9 (FINOPS) ───────────────────────────────────────────────────────────
+
+/** A Prometheus mock that returns DIFFERENT results for `query` vs `queryRange`
+ *  (the today-vs-7d hero fires both), and records every PromQL it sees. */
+function mockPromSplit(opts: {
+  query?: PrometheusQueryResult | null;
+  queryRange?: PrometheusQueryResult | null;
+}): { prom: PrometheusFetcher; queries: string[]; ranges: string[] } {
+  const queries: string[] = [];
+  const ranges: string[] = [];
+  const prom: PrometheusFetcher = {
+    query: (q: string) => {
+      queries.push(q);
+      return Promise.resolve(opts.query ?? null);
+    },
+    queryRange: (q: string) => {
+      ranges.push(q);
+      return Promise.resolve(opts.queryRange ?? null);
+    },
+    isAvailable: () => true,
+  };
+  return { prom, queries, ranges };
+}
+
+describe("secondsSinceLocalMidnight", () => {
+  it("returns whole seconds elapsed since local midnight", () => {
+    const noon = new Date(2026, 5, 10, 12, 0, 0); // local 12:00:00
+    expect(secondsSinceLocalMidnight(noon)).toBe(12 * 3600);
+    const t = new Date(2026, 5, 10, 1, 2, 3); // 01:02:03
+    expect(secondsSinceLocalMidnight(t)).toBe(3723);
+  });
+
+  it("clamps to a 1s floor so the today window is never 0-width", () => {
+    const midnight = new Date(2026, 5, 10, 0, 0, 0);
+    expect(secondsSinceLocalMidnight(midnight)).toBe(1);
+  });
+});
+
+describe("avgPrior7FullDays", () => {
+  it("averages the prior full days, EXCLUDING the current partial day", () => {
+    // 8 daily buckets; the LAST is today (partial) and must be dropped.
+    const pts: Array<[number, number]> = [
+      [1, 600],
+      [2, 300],
+      [3, 300],
+      [4, 300],
+      [5, 380],
+      [6, 600],
+      [7, 340],
+      [8, 9999], // today — partial — EXCLUDED
+    ];
+    // mean of the 7 full days = (600+300+300+300+380+600+340)/7 = 2820/7
+    expect(avgPrior7FullDays(pts)).toBeCloseTo(2820 / 7);
+  });
+
+  it("keeps only the last 7 full days when more are present", () => {
+    const pts: Array<[number, number]> = Array.from({ length: 12 }, (_, i) => [
+      i,
+      i === 11 ? 0 : 100, // last is partial-today=0, the rest are 100
+    ]);
+    // last 7 full days are all 100 → avg 100
+    expect(avgPrior7FullDays(pts)).toBeCloseTo(100);
+  });
+
+  it("returns 0 for empty or single-bucket input", () => {
+    expect(avgPrior7FullDays([])).toBe(0);
+    expect(avgPrior7FullDays([[1, 500]])).toBe(0); // only the partial day
+  });
+});
+
+describe("costToday", () => {
+  it("computes todayUsd, avg7d baseline, delta, and EOD projection", async () => {
+    const noon = new Date(2026, 5, 10, 12, 0, 0); // half the day elapsed
+    const { prom, queries, ranges } = mockPromSplit({
+      query: {
+        data: { resultType: "vector", result: [{ metric: {}, value: [0, "300"] }] },
+      },
+      queryRange: {
+        data: {
+          resultType: "matrix",
+          result: [
+            {
+              metric: {},
+              values: [
+                [1, "200"],
+                [2, "200"],
+                [3, "200"],
+                [4, "200"],
+                [5, "200"],
+                [6, "200"],
+                [7, "200"],
+                [8, "150"], // today partial — excluded from baseline
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const result = await costToday(prom, noon);
+    expect(result).not.toBeNull();
+    expect(result!.todayUsd).toBeCloseTo(300);
+    expect(result!.avg7dUsd).toBeCloseTo(200);
+    // delta = (300 - 200) / 200 = +0.5
+    expect(result!.deltaFraction).toBeCloseTo(0.5);
+    // half a day elapsed → projection ≈ 300 / (43200/86400) = 600
+    expect(result!.projectionEodUsd).toBeCloseTo(600);
+    expect(result!.elapsedTodaySeconds).toBe(12 * 3600);
+    // today is an instant query over the elapsed-today window; baseline is a range.
+    expect(queries[0]).toContain(`increase(claude_code_cost_usage_USD_total[${12 * 3600}s]))`);
+    expect(ranges[0]).toContain("increase(claude_code_cost_usage_USD_total[1d])");
+  });
+
+  it("null delta when there is no 7d baseline (avg===0)", async () => {
+    const { prom } = mockPromSplit({
+      query: {
+        data: { resultType: "vector", result: [{ metric: {}, value: [0, "50"] }] },
+      },
+      queryRange: { data: { resultType: "matrix", result: [] } },
+    });
+    const result = await costToday(prom, new Date(2026, 5, 10, 6, 0, 0));
+    expect(result).not.toBeNull();
+    expect(result!.avg7dUsd).toBe(0);
+    expect(result!.deltaFraction).toBeNull();
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await costToday(mockProm(null));
+    expect(result).toBeNull();
+  });
+});
+
+describe("scoreSpikes", () => {
+  it("flags an hour exceeding both 2× median and μ+2σ", () => {
+    // calm baseline at 10, one big spike at 200.
+    const pts: Array<[number, number]> = [
+      [1, 10],
+      [2, 12],
+      [3, 9],
+      [4, 11],
+      [5, 200], // the spike
+      [6, 10],
+    ];
+    const scored = scoreSpikes(pts);
+    expect(scored.find((p) => p.t === 5)!.isSpike).toBe(true);
+    // every other hour is calm — not a spike.
+    expect(scored.filter((p) => p.isSpike)).toHaveLength(1);
+  });
+
+  it("never flags an all-zero or quiet series", () => {
+    const scored = scoreSpikes([
+      [1, 0],
+      [2, 0],
+      [3, 0],
+    ]);
+    expect(scored.every((p) => !p.isSpike)).toBe(true);
+  });
+
+  it("flags nothing with fewer than 3 points (no distribution)", () => {
+    const scored = scoreSpikes([
+      [1, 1],
+      [2, 1000],
+    ]);
+    expect(scored.every((p) => !p.isSpike)).toBe(true);
+  });
+
+  it("preserves the points and their order", () => {
+    const pts: Array<[number, number]> = [
+      [100, 5],
+      [200, 6],
+      [300, 7],
+    ];
+    const scored = scoreSpikes(pts);
+    expect(scored.map((p) => [p.t, p.usd])).toEqual(pts);
+  });
+});
+
+describe("costSeries", () => {
+  it("returns hourly points with spike flags from a query_range matrix", async () => {
+    const { prom, ranges } = mockPromSplit({
+      queryRange: {
+        data: {
+          resultType: "matrix",
+          result: [
+            {
+              metric: {},
+              values: [
+                [1, "10"],
+                [2, "11"],
+                [3, "9"],
+                [4, "250"], // spike — clears both thresholds against the calm tail
+                [5, "10"],
+                [6, "11"],
+                [7, "9"],
+                [8, "10"],
+                [9, "11"],
+                [10, "10"],
+              ],
+            },
+          ],
+        },
+      },
+    });
+    const result = await costSeries(prom, "24h");
+    expect(result).not.toBeNull();
+    expect(result!).toHaveLength(10);
+    expect(result!.find((p) => p.t === 4)!.isSpike).toBe(true);
+    expect(result!.filter((p) => p.isSpike)).toHaveLength(1);
+    // hourly bars: a 1h window stepped at 1h.
+    expect(ranges[0]).toContain("increase(claude_code_cost_usage_USD_total[1h])");
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await costSeries(mockProm(null), "24h");
+    expect(result).toBeNull();
+  });
+
+  it("returns [] honestly for a reachable-but-empty stack", async () => {
+    const { prom } = mockPromSplit({
+      queryRange: { data: { resultType: "matrix", result: [] } },
+    });
+    const result = await costSeries(prom, "24h");
+    expect(result).toEqual([]);
+  });
+});
+
+describe("inputPricePerToken", () => {
+  it("maps each model family to its per-token input price", () => {
+    expect(inputPricePerToken("claude-opus-4-8")).toBeCloseTo(5.0 / 1e6);
+    expect(inputPricePerToken("claude-opus-4-8[1m]")).toBeCloseTo(5.0 / 1e6);
+    expect(inputPricePerToken("claude-sonnet-4-6")).toBeCloseTo(3.0 / 1e6);
+    expect(inputPricePerToken("claude-haiku-4-5-20251001")).toBeCloseTo(1.0 / 1e6);
+    expect(inputPricePerToken("claude-fable-5")).toBeCloseTo(5.0 / 1e6);
+  });
+
+  it("falls back to the sonnet rate for an unknown model (never zero)", () => {
+    expect(inputPricePerToken("some-future-model")).toBeCloseTo(3.0 / 1e6);
+  });
+});
+
+describe("cacheSavings", () => {
+  it("computes per-model savings = cacheRead × input × 0.9 + the multiplier", async () => {
+    // cacheSavings fires two query() calls — cacheRead-by-model first, total spend
+    // second — so a call-ordered mock returns the right shape per call.
+    let call = 0;
+    const promOrdered: PrometheusFetcher = {
+      query: () => {
+        call += 1;
+        if (call === 1) {
+          return Promise.resolve({
+            data: {
+              resultType: "vector",
+              result: [
+                { metric: { model: "claude-opus-4-8" }, value: [0, "1000000"] },
+                { metric: { model: "claude-sonnet-4-6" }, value: [0, "2000000"] },
+                { metric: { model: "claude-zero" }, value: [0, "0"] }, // dropped
+              ],
+            },
+          } as PrometheusQueryResult);
+        }
+        return Promise.resolve({
+          data: { resultType: "vector", result: [{ metric: {}, value: [0, "100"] }] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    const result = await cacheSavings(promOrdered, "24h");
+    expect(result).not.toBeNull();
+    // opus: 1e6 tokens × 5/1e6 × 0.9 = 4.5 ; sonnet: 2e6 × 3/1e6 × 0.9 = 5.4
+    expect(result!.savedUsd).toBeCloseTo(4.5 + 5.4);
+    expect(result!.cacheReadTokens).toBe(3_000_000);
+    expect(result!.actualSpendUsd).toBeCloseTo(100);
+    expect(result!.multiplier).toBeCloseTo((4.5 + 5.4) / 100);
+    // per-model, descending; the zero-token model is filtered out.
+    expect(result!.byModel.map((m) => m.model)).toEqual([
+      "claude-sonnet-4-6",
+      "claude-opus-4-8",
+    ]);
+  });
+
+  it("null multiplier when actual spend is 0", async () => {
+    let call = 0;
+    const prom: PrometheusFetcher = {
+      query: () => {
+        call += 1;
+        if (call === 1) {
+          return Promise.resolve({
+            data: {
+              resultType: "vector",
+              result: [{ metric: { model: "claude-opus-4-8" }, value: [0, "1000000"] }],
+            },
+          } as PrometheusQueryResult);
+        }
+        return Promise.resolve({
+          data: { resultType: "vector", result: [] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    const result = await cacheSavings(prom, "24h");
+    expect(result).not.toBeNull();
+    expect(result!.actualSpendUsd).toBe(0);
+    expect(result!.multiplier).toBeNull();
+    expect(result!.savedUsd).toBeGreaterThan(0);
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await cacheSavings(mockProm(null), "24h");
+    expect(result).toBeNull();
+  });
+});
+
+describe("costAtHour", () => {
+  it("anchors a 1h window to the target hour via PromQL offset + zero-filters both maps", async () => {
+    const queries: string[] = [];
+    let call = 0;
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        call += 1;
+        // call 1 = by-ticket, call 2 = by-model (the Promise.all order).
+        if (call === 1) {
+          return Promise.resolve({
+            data: {
+              resultType: "vector",
+              result: [
+                { metric: { linear_key: "CTL-928" }, value: [0, "31.7"] },
+                { metric: { linear_key: "CTL-ZERO" }, value: [0, "0"] }, // dropped
+                { metric: { linear_key: "CTL-850" }, value: [0, "14.22"] },
+              ],
+            },
+          } as PrometheusQueryResult);
+        }
+        return Promise.resolve({
+          data: {
+            resultType: "vector",
+            result: [
+              { metric: { model: "claude-opus-4-8[1m]" }, value: [0, "28.84"] },
+              { metric: { model: "claude-zero" }, value: [0, "0"] }, // dropped
+            ],
+          },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    // Fix "now" 2h after the target hour-end → offset = 7200s.
+    const hourEnd = 1781000000;
+    const now = new Date((hourEnd + 7200) * 1000);
+    const result = await costAtHour(prom, hourEnd, now);
+    expect(result).not.toBeNull();
+    expect(result!.hourEndSeconds).toBe(hourEnd);
+    // by-ticket zero-filtered, by-model zero-filtered.
+    expect(result!.byTicket).toEqual({ "CTL-928": 31.7, "CTL-850": 14.22 });
+    expect(result!.byModel).toEqual({ "claude-opus-4-8[1m]": 28.84 });
+    // Both queries carry the computed offset + a 1h increase window.
+    expect(queries[0]).toContain("offset 7200s");
+    expect(queries[0]).toContain("[1h]");
+    expect(queries[0]).toContain("sum by (linear_key)");
+    expect(queries[1]).toContain("offset 7200s");
+    expect(queries[1]).toContain("sum by (model)");
+  });
+
+  it("omits the offset clause when the hour is current (offset 0)", async () => {
+    const queries: string[] = [];
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        return Promise.resolve({
+          data: { resultType: "vector", result: [] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    const now = new Date(1781000000 * 1000);
+    await costAtHour(prom, 1781000000, now);
+    expect(queries[0]).not.toContain("offset");
+  });
+
+  it("clamps a future hour to offset 0 (never a negative-offset 400)", async () => {
+    const queries: string[] = [];
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        return Promise.resolve({
+          data: { resultType: "vector", result: [] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    // hour-end 1h in the FUTURE relative to now → offset clamps to 0.
+    const now = new Date(1781000000 * 1000);
+    await costAtHour(prom, 1781000000 + 3600, now);
+    expect(queries[0]).not.toContain("offset -");
+    expect(queries[0]).not.toContain("offset");
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await costAtHour(mockProm(null), 1781000000);
+    expect(result).toBeNull();
   });
 });
 

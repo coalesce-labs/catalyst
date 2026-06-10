@@ -7,16 +7,28 @@ export function safeDuration(s: string, fallback: string): string {
   return DURATION_RE.test(s) ? s : fallback;
 }
 
+// OBS-9: `increase()` over a fixed window returns a series for EVERY label value
+// that has EVER carried the metric, most with value 0 in any given window (the
+// `/api/otel/cost` route returns ~24 exact-0 tickets out of ~36 live). A topk /
+// bottomk / table built on that renders all-zeros garbage. The ZERO-SERIES FILTER
+// is therefore MANDATORY at the QUERY layer on every cost map (design §1/§2): pass
+// `filterZero: true` to drop value===0 series. Default is false so the
+// cost-VALIDATION path (which legitimately compares signal-vs-otel for tickets that
+// may be 0 on one side) keeps every ticket.
 function extractVectorMap(
   result: { data: { result: PrometheusMetricValue[] } },
   labelKey: string,
+  filterZero = false,
 ): Record<string, number> {
   const map: Record<string, number> = {};
   for (const entry of result.data.result) {
     const key = entry.metric[labelKey];
     if (!key) continue;
     const val = entry.value ? parseFloat(entry.value[1]) : 0;
-    if (Number.isFinite(val)) map[key] = val;
+    if (!Number.isFinite(val)) continue;
+    // Drop exact-0 series so a topk/bottomk/table never renders all-zeros garbage.
+    if (filterZero && val === 0) continue;
+    map[key] = val;
   }
   return map;
 }
@@ -30,7 +42,9 @@ export async function costByTicket(
     `sum by (linear_key) (increase(claude_code_cost_usage_USD_total{linear_key=~".+"}[${r}]))`,
   );
   if (!result) return null;
-  return extractVectorMap(result, "linear_key");
+  // OBS-9: zero-series filter — exclude tickets with $0 spend in the window so the
+  // expensive-tickets table (and any bottomk) only ever shows real cost.
+  return extractVectorMap(result, "linear_key", true);
 }
 
 export async function tokensByType(
@@ -83,7 +97,55 @@ export async function costByTaskType(
     `sum by (task_type) (increase(claude_code_cost_usage_USD_total{task_type=~".+"}[${r}]))`,
   );
   if (!result) return null;
-  return extractVectorMap(result, "task_type");
+  // OBS-9: zero-series filter — drop phases with $0 spend in the window so the
+  // by-stage bar (P-B) doesn't render a forest of empty phases (live: 5 of 12
+  // task_types are exact-0 over 24h).
+  return extractVectorMap(result, "task_type", true);
+}
+
+// OBS-11 (FINOPS P-D): cost grouped by a native Prometheus dimension — `model`
+// (the model mix) or `agent_name` (the closest real "what machinery costs most"
+// signal: workflow-subagent vs general-purpose vs …, design §3.3 #9b). Both are
+// native labels on the cost counter (verified live: 6 model values, 8 agent_name
+// values, all non-zero over 24h/7d). The dimension is WHITELISTED (never
+// interpolated from caller input) so the PromQL can't be an injection vector, and
+// the OBS-9 zero-series filter is applied so the ranked bar never shows the
+// exact-0 dimensions an `increase()` window always carries.
+
+/** The whitelisted P-D grouping dimensions. `model` and `agent_name` are the only
+ *  native cost labels the by-model/by-agent toggle ever groups on — a fixed map so
+ *  the PromQL label is never derived from caller input. */
+export const COST_DIMENSIONS = {
+  model: "model",
+  agent: "agent_name",
+} as const;
+
+export type CostDimensionKey = keyof typeof COST_DIMENSIONS;
+
+/** True when a string is a known P-D dimension key (route input validation). */
+export function isCostDimension(s: string): s is CostDimensionKey {
+  return s === "model" || s === "agent";
+}
+
+/** Cost grouped by a whitelisted native dimension (`model` / `agent_name`),
+ *  descending-ready + zero-filtered. The label is looked up from COST_DIMENSIONS —
+ *  NEVER interpolated from caller input — so it can't inject PromQL. Returns null
+ *  when Prometheus is unavailable; an empty map when the window had no spend on that
+ *  dimension. */
+export async function costByDimension(
+  prom: PrometheusFetcher,
+  dimension: CostDimensionKey,
+  range: string,
+): Promise<Record<string, number> | null> {
+  const r = safeDuration(range, "24h");
+  const label = COST_DIMENSIONS[dimension];
+  const result = await prom.query(
+    `sum by (${label}) (increase(claude_code_cost_usage_USD_total{${label}=~".+"}[${r}]))`,
+  );
+  if (!result) return null;
+  // OBS-9 zero-series filter — drop dimensions with $0 spend in the window so the
+  // ranked P-D bar never renders the exact-0 models/agents.
+  return extractVectorMap(result, label, true);
 }
 
 export async function toolUsageByName(
@@ -950,6 +1012,338 @@ export async function costValidation(
     });
   }
   return entries;
+}
+
+// ── OBS-9 (FINOPS): the hero today-vs-7d + EOD projection ────────────────────
+// The FinOps surface question is "how much did I spend today, and is that normal?"
+// The hero needs THREE numbers off Prometheus: today's spend (since local
+// midnight), the avg of the prior 7 FULL days (the "normal" baseline the delta is
+// vs), and an end-of-day projection (today extrapolated to a full 24h). All three
+// are `increase()` over the SAME cost counter — no new plumbing.
+//
+// "Today" is anchored to the SERVER's local midnight (the operator's wall clock),
+// elapsed as whole seconds, so the window is exactly the part of today that has
+// happened. The 7d baseline is a `query_range` with a 1-DAY window + 1-DAY step
+// over the prior 8 days, taking the 7 fully-elapsed daily buckets and averaging
+// them (the current partial day is excluded — comparing a partial day to full days
+// would always read "under budget", a lie). The projection linearly extrapolates
+// today's run-rate to 24h (the simplest honest "if the rest of today looks like so
+// far" estimate — design §1 Hero-B marks it neutral/informational, never colored).
+
+/** The hero's dollar band: today's spend, the prior-7-full-day average (the delta
+ *  baseline), the delta fraction (today vs avg, or null when avg===0 so the UI
+ *  shows "—" not a divide-by-zero), and the linear EOD projection. `null` ONLY when
+ *  Prometheus is unavailable (caller surfaces a 503); a live-but-quiet stack
+ *  returns zeros honestly. */
+export interface CostTodaySummary {
+  /** `sum(increase(cost[<elapsed-today>]))` — spend since local midnight, USD. */
+  todayUsd: number;
+  /** Mean of the prior 7 FULL days' daily spend (the "normal" baseline), USD. */
+  avg7dUsd: number;
+  /** (today − avg7d) / avg7d, or null when avg7d===0 (no baseline → no delta). */
+  deltaFraction: number | null;
+  /** today extrapolated to a full 24h via the elapsed-fraction run-rate, USD. */
+  projectionEodUsd: number;
+  /** Whole seconds elapsed since local midnight (the today window width). */
+  elapsedTodaySeconds: number;
+}
+
+/** Whole seconds elapsed since LOCAL midnight for a given instant. Exported so a
+ *  test can pin the wall-clock anchoring (the today window is exactly this wide).
+ *  Clamped to a 1s floor so a query fired in the first second of the day never
+ *  produces a 0-width range (`increase(...[0s])` is undefined). */
+export function secondsSinceLocalMidnight(now: Date = new Date()): number {
+  const secs =
+    now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+  return Math.max(1, secs);
+}
+
+/** Pull the single scalar from a `sum(...)`-shaped instant vector (one series, no
+ *  grouping label). Returns 0 for an empty/unparseable result — an honest "no spend
+ *  in window", never null-as-zero confusion (the caller already handles the
+ *  Prometheus-unavailable case separately). */
+function extractScalar(result: {
+  data: { result: PrometheusMetricValue[] };
+}): number {
+  const series = result.data.result[0];
+  if (!series?.value) return 0;
+  const v = parseFloat(series.value[1]);
+  return Number.isFinite(v) ? v : 0;
+}
+
+/** Average of the FULLY-elapsed daily buckets in a 1d-window/1d-step matrix. The
+ *  caller queries the prior 8 days; the LAST point is the current partial day and
+ *  is EXCLUDED (comparing a partial day to full days under-reports "today is
+ *  normal"). Exported for direct unit testing of the partial-day exclusion. */
+export function avgPrior7FullDays(points: SparklinePoint[]): number {
+  if (points.length === 0) return 0;
+  // Drop the final (current, partial) bucket; keep up to the prior 7 full days.
+  const full = points.slice(0, -1).slice(-7);
+  if (full.length === 0) return 0;
+  const sum = full.reduce((acc, [, v]) => acc + v, 0);
+  return sum / full.length;
+}
+
+export async function costToday(
+  prom: PrometheusFetcher,
+  now: Date = new Date(),
+): Promise<CostTodaySummary | null> {
+  const elapsed = secondsSinceLocalMidnight(now);
+  // today: instant query over the elapsed-today window.
+  const todayRes = await prom.query(
+    `sum(increase(claude_code_cost_usage_USD_total[${elapsed}s]))`,
+  );
+  // 7d baseline: 1d window, 1d step, over the prior 8 days (7 full + today partial).
+  const start = new Date(now.getTime() - 8 * 86400_000).toISOString();
+  const end = now.toISOString();
+  const baselineRes = await prom.queryRange(
+    `sum(increase(claude_code_cost_usage_USD_total[1d]))`,
+    start,
+    end,
+    "86400s",
+  );
+  // Prometheus unavailable → both probes null.
+  if (todayRes === null && baselineRes === null) return null;
+
+  const todayUsd = todayRes ? extractScalar(todayRes) : 0;
+  const dailyPoints = baselineRes ? extractSeriesPoints(baselineRes) : [];
+  const avg7dUsd = avgPrior7FullDays(dailyPoints);
+  const deltaFraction = avg7dUsd > 0 ? (todayUsd - avg7dUsd) / avg7dUsd : null;
+  // EOD projection: linear run-rate extrapolation to a full day. elapsed is clamped
+  // ≥1s so this never divides by zero; capped at the day so it never under-projects.
+  const dayFraction = Math.min(1, elapsed / 86400);
+  const projectionEodUsd = dayFraction > 0 ? todayUsd / dayFraction : todayUsd;
+  return {
+    todayUsd,
+    avg7dUsd,
+    deltaFraction,
+    projectionEodUsd,
+    elapsedTodaySeconds: elapsed,
+  };
+}
+
+// ── OBS-9 (FINOPS): spend-over-time series + spike scoring ───────────────────
+// The P-A panel is hourly spend bars with the spiking hours flagged. The series is
+// a `query_range` of `sum(increase(cost[1h]))` stepped at 1h (24h/7d window). Spike
+// scoring is a PURE function over the returned points so it is unit-testable
+// without Prometheus: an hour is a spike when its spend exceeds
+// max(2× the trailing-window median, μ+2σ) of the series (design §2 P-A). Both
+// guards matter — the median guard catches a 2× jump over a calm baseline; the
+// μ+2σ guard catches a genuine statistical outlier on a noisy series — and a spike
+// must clear BOTH (the stricter bar) so a merely-busy hour isn't flagged.
+
+/** One hourly spend point with its spike verdict. `t` is epoch SECONDS (the Loki/
+ *  Prom matrix point ts); `usd` is the hour's spend; `isSpike` drives the
+ *  `--chart-4` dot ON that bar (the one status-color use in P-A). */
+export interface CostSeriesPoint {
+  t: number;
+  usd: number;
+  isSpike: boolean;
+}
+
+/** Median of a numeric array (0 for empty). Pure helper for the spike threshold. */
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const sorted = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+}
+
+/** Score hourly spend points for spikes. PURE + exported so a test pins the rule:
+ *  an hour is a spike iff its spend > max(2× median(series), μ+2σ) AND > 0. With
+ *  fewer than 3 points there is no meaningful distribution → nothing is flagged
+ *  (a 2-hour window can't have a statistical outlier). The `> 0` floor keeps a
+ *  quiet all-zero series from flagging anything. */
+export function scoreSpikes(points: SparklinePoint[]): CostSeriesPoint[] {
+  const values = points.map(([, v]) => v);
+  let threshold = Infinity;
+  if (values.length >= 3) {
+    const med = median(values);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const variance =
+      values.reduce((a, b) => a + (b - mean) ** 2, 0) / values.length;
+    const std = Math.sqrt(variance);
+    threshold = Math.max(2 * med, mean + 2 * std);
+  }
+  return points.map(([t, usd]) => ({
+    t,
+    usd,
+    isSpike: usd > 0 && usd > threshold,
+  }));
+}
+
+/** Hourly spend series with spike flags over the window. `null` ONLY when
+ *  Prometheus is unavailable (caller surfaces a 503); a live-but-quiet stack is an
+ *  honest `[]` (no hours in range → the ChartCard empty state). The window is the
+ *  passed range (24h/7d); the step is fixed at 1h so each bar is one hour. */
+export async function costSeries(
+  prom: PrometheusFetcher,
+  range: string,
+): Promise<CostSeriesPoint[] | null> {
+  const r = safeDuration(range, "24h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r)).toISOString();
+  const end = now.toISOString();
+  const result = await prom.queryRange(
+    `sum(increase(claude_code_cost_usage_USD_total[1h]))`,
+    start,
+    end,
+    "3600s",
+  );
+  if (result === null) return null;
+  const points = extractSeriesPoints(result);
+  return scoreSpikes(points);
+}
+
+// ── OBS-9 (FINOPS): cache-ROI $ (THE HEADLINE) ───────────────────────────────
+// The single most motivating FinOps number (99.8% hit rate live): how many real
+// dollars the prompt cache saved by NOT charging cacheRead tokens at the full input
+// rate. savings = Σ_model cacheRead_tokens(model) × (input_price − cache_read_price)
+// for that model. The catalyst-otel dashboard's "Cache Savings ($)" panel proves a
+// flat `cacheRead × 0.000003` ($3/1M, a sonnet-ish input rate); we improve on it
+// with a PER-MODEL price book so the savings is accurate across the opus/sonnet/
+// haiku/fable mix (each model has a different input price, so a flat rate over- or
+// under-states the win depending on the live model split).
+//
+// Price book (USD per TOKEN) sourced from the /catalyst-dev:claude-api skill price
+// table (per-1M ÷ 1e6). Anthropic prompt-cache pricing: a cache READ costs 0.1× the
+// input price (the standard cache-read discount), so the per-token saving is
+// input_price − cache_read_price = input_price × 0.9.
+
+/** Per-1M-token INPUT price by model family (USD). From the claude-api skill price
+ *  table. We match on a substring of the Prometheus `model` label (which carries
+ *  values like `claude-opus-4-8`, `claude-opus-4-8[1m]`, `claude-sonnet-4-6`,
+ *  `claude-haiku-4-5`, `claude-fable-5`). Fable exceeds opus-tier; we price it at
+ *  the opus rate as a conservative floor rather than fabricate a number the skill
+ *  table doesn't publish. */
+const INPUT_PRICE_PER_1M: Record<string, number> = {
+  opus: 5.0,
+  sonnet: 3.0,
+  haiku: 1.0,
+  fable: 5.0,
+  mythos: 5.0,
+};
+
+/** The cache-read discount: an Anthropic prompt-cache READ is billed at 0.1× the
+ *  input price, so the per-token SAVING (vs paying full input) is input × 0.9. */
+const CACHE_READ_PRICE_MULTIPLIER = 0.1;
+
+/** Default input price (USD/1M) for a model whose family we don't recognise —
+ *  the sonnet rate, matching the dashboard's flat $3/1M assumption so an unknown
+ *  model never zeroes out (it would silently drop savings) nor over-states it. */
+const DEFAULT_INPUT_PRICE_PER_1M = 3.0;
+
+/** Resolve a model label to its per-TOKEN input price (USD). Exported so a test can
+ *  pin the family matching (opus/sonnet/haiku/fable, with the `[1m]` long-context
+ *  suffix and date suffixes tolerated). */
+export function inputPricePerToken(model: string): number {
+  const lower = model.toLowerCase();
+  for (const family of Object.keys(INPUT_PRICE_PER_1M)) {
+    if (lower.includes(family)) return INPUT_PRICE_PER_1M[family] / 1_000_000;
+  }
+  return DEFAULT_INPUT_PRICE_PER_1M / 1_000_000;
+}
+
+/** The cache-ROI payload: the headline savings $ + the multiplier (savings / actual
+ *  spend, i.e. "spend would have been Nx higher without the cache"), the cacheRead
+ *  token total the savings is computed from, and the per-model breakdown for a
+ *  drill. `null` ONLY when Prometheus is unavailable. */
+export interface CacheSavings {
+  /** Σ_model cacheRead_tokens × (input − cache_read) price — USD saved by the cache. */
+  savedUsd: number;
+  /** Actual spend in the SAME window (for the "(Nx)" multiplier), USD. */
+  actualSpendUsd: number;
+  /** savedUsd / actualSpendUsd, or null when actual spend is 0 (no base to multiply). */
+  multiplier: number | null;
+  /** Total cacheRead tokens in the window (the savings driver). */
+  cacheReadTokens: number;
+  /** Per-model saving, USD, descending — the drill behind the headline. */
+  byModel: Array<{ model: string; savedUsd: number; cacheReadTokens: number }>;
+}
+
+export async function cacheSavings(
+  prom: PrometheusFetcher,
+  range: string,
+): Promise<CacheSavings | null> {
+  const r = safeDuration(range, "24h");
+  // cacheRead tokens BY MODEL so we can apply the per-model price; + total spend in
+  // the same window for the multiplier.
+  const [cacheReadRes, spendRes] = await Promise.all([
+    prom.query(
+      `sum by (model) (increase(claude_code_token_usage_tokens_total{type="cacheRead"}[${r}]))`,
+    ),
+    prom.query(`sum(increase(claude_code_cost_usage_USD_total[${r}]))`),
+  ]);
+  if (cacheReadRes === null && spendRes === null) return null;
+
+  const byModelTokens = cacheReadRes
+    ? extractVectorMap(cacheReadRes, "model", true)
+    : {};
+  const byModel: CacheSavings["byModel"] = [];
+  let savedUsd = 0;
+  let cacheReadTokens = 0;
+  for (const [model, tokens] of Object.entries(byModelTokens)) {
+    const perToken =
+      inputPricePerToken(model) * (1 - CACHE_READ_PRICE_MULTIPLIER);
+    const modelSaved = tokens * perToken;
+    savedUsd += modelSaved;
+    cacheReadTokens += tokens;
+    byModel.push({ model, savedUsd: modelSaved, cacheReadTokens: tokens });
+  }
+  byModel.sort((a, b) => b.savedUsd - a.savedUsd);
+
+  const actualSpendUsd = spendRes ? extractScalar(spendRes) : 0;
+  const multiplier = actualSpendUsd > 0 ? savedUsd / actualSpendUsd : null;
+  return { savedUsd, actualSpendUsd, multiplier, cacheReadTokens, byModel };
+}
+
+// ── OBS-10 (FINOPS P-A drill): cost at a single spiking hour ─────────────────
+// Clicking a spiking bar in the P-A spend-over-time chart drills into THAT hour's
+// by-ticket + by-model split (the "one re-query with the hour window", layout spec
+// §2 P-A). The hour window is anchored with PromQL's `offset`: a 1h `increase()`
+// shifted back so the window ENDS at the clicked hour. Both maps reuse the
+// zero-series filter (a past hour has even more exact-0 series than a live window).
+//
+// `offsetSeconds` is whole seconds from NOW back to the END of the target hour
+// (i.e. now − spikeHourEnd). Clamped ≥0 (a future/negative offset would 400 in
+// PromQL); when 0 the `offset 0s` is harmless (window ends at NOW).
+
+/** The per-hour drill payload: the by-ticket and by-model cost split for ONE hour,
+ *  both zero-filtered + descending-ready. `null` when Prometheus is unavailable. */
+export interface CostAtHour {
+  /** Epoch SECONDS of the hour's END (the clicked bar's right edge ≈ its ts). */
+  hourEndSeconds: number;
+  /** linear_key → USD for the hour (zero-filtered). */
+  byTicket: Record<string, number>;
+  /** model → USD for the hour (zero-filtered). */
+  byModel: Record<string, number>;
+}
+
+export async function costAtHour(
+  prom: PrometheusFetcher,
+  hourEndSeconds: number,
+  now: Date = new Date(),
+): Promise<CostAtHour | null> {
+  const nowSec = Math.floor(now.getTime() / 1000);
+  // Whole seconds from now back to the end of the target hour. Clamp ≥0.
+  const offsetSeconds = Math.max(0, nowSec - Math.floor(hourEndSeconds));
+  const off = offsetSeconds > 0 ? ` offset ${offsetSeconds}s` : "";
+  const [ticketRes, modelRes] = await Promise.all([
+    prom.query(
+      `sum by (linear_key) (increase(claude_code_cost_usage_USD_total{linear_key=~".+"}[1h]${off}))`,
+    ),
+    prom.query(
+      `sum by (model) (increase(claude_code_cost_usage_USD_total[1h]${off}))`,
+    ),
+  ]);
+  if (ticketRes === null && modelRes === null) return null;
+  return {
+    hourEndSeconds: Math.floor(hourEndSeconds),
+    byTicket: ticketRes ? extractVectorMap(ticketRes, "linear_key", true) : {},
+    byModel: modelRes ? extractVectorMap(modelRes, "model", true) : {},
+  };
 }
 
 function parseDuration(s: string): number {
