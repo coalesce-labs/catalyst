@@ -12,6 +12,8 @@ import {
   resolvePipelineRail,
   resolveHeldBanner,
   resolveSpineNodes,
+  resolveShippedStatus,
+  resolveTimelineRows,
   linearDeepLink,
   orchChannelFor,
   activityPredicateForTicket,
@@ -333,6 +335,240 @@ describe("Scenario: COMMS and ACTIVITY reuse existing components", () => {
   it("the predicate escapes quotes/backslashes so a crafted id can't break the jq filter", () => {
     const pred = activityPredicateForTicket('a"b\\c');
     expect(pred).toContain('a\\"b\\\\c');
+  });
+});
+
+// ── Scenario: resolveShippedStatus — the PM "is it shipped?" answer ───────────
+describe("resolveShippedStatus", () => {
+  // a 10-phase done fixture: every phase walked, deploy past, Done in Linear.
+  function shippedTicket(over: Partial<BoardTicket> = {}): BoardTicket {
+    return ticket({
+      phase: "done",
+      linearState: "Done",
+      pr: 1496,
+      working: false,
+      activeState: null,
+      phaseSummary: PIPELINE_PHASES.map((p) => phaseTiming({ phase: p, status: "done" })),
+      ...over,
+    });
+  }
+
+  it("a Done ticket (deploy walked-past) reads SHIPPED with the PR in the detail", () => {
+    const s = resolveShippedStatus(shippedTicket());
+    expect(s.state).toBe("shipped");
+    expect(s.isShipped).toBe(true);
+    expect(s.glyph).toBe("✓");
+    expect(s.tone).toBe("success");
+    expect(s.headline).toBe("SHIPPED");
+    expect(s.detail).toContain("merged & deployed");
+    expect(s.detail).toContain("#1496");
+    expect(s.prNumber).toBe(1496);
+  });
+
+  it("monitor-merge past but monitor-deploy current/running reads MERGED — deploying (not shipped)", () => {
+    const t = ticket({
+      phase: "monitor-deploy",
+      linearState: "PR",
+      pr: 1500,
+      working: true,
+      activeState: "active",
+      phaseSummary: [
+        phaseTiming({ phase: "pr", status: "done" }),
+        phaseTiming({ phase: "monitor-merge", status: "done" }),
+        // monitor-deploy IS the current phase and still running (no completedAt)
+        phaseTiming({ phase: "monitor-deploy", status: "running", completedAt: null }),
+      ],
+    });
+    const s = resolveShippedStatus(t);
+    expect(s.state).toBe("merged");
+    expect(s.isShipped).toBe(false);
+    expect(s.glyph).toBe("✓");
+    expect(s.tone).toBe("success");
+    expect(s.headline).toBe("MERGED — deploying");
+    expect(s.detail).toContain("deploy in progress");
+    expect(s.detail).toContain("#1500");
+  });
+
+  it("a working review phase with no PR reads IN REVIEW · no PR", () => {
+    const t = ticket({
+      phase: "review",
+      linearState: "Validate",
+      pr: null,
+      working: true,
+      activeState: "active",
+      estimate: 3,
+      phaseSummary: [
+        phaseTiming({ phase: "verify", status: "done" }),
+        phaseTiming({ phase: "review", status: "in_progress", completedAt: null }),
+      ],
+    });
+    const s = resolveShippedStatus(t);
+    expect(s.state).toBe("in-flight");
+    expect(s.glyph).toBe("●");
+    expect(s.tone).toBe("info");
+    expect(s.headline).toBe("IN REVIEW");
+    expect(s.detail).toContain("phase review");
+    expect(s.detail).toContain("no PR");
+    expect(s.detail).toContain("3pts");
+  });
+
+  it("a blocked hold reads BLOCKED — waiting on <blockers> (warning, never shipped)", () => {
+    const s = resolveShippedStatus(
+      ticket({ held: "blocked", blockers: ["CTL-653"], phase: "implement" }),
+    );
+    expect(s.state).toBe("held");
+    expect(s.glyph).toBe("⚠");
+    expect(s.tone).toBe("warning");
+    expect(s.headline).toBe("BLOCKED");
+    expect(s.detail).toBe("waiting on CTL-653");
+    expect(s.isShipped).toBe(false);
+  });
+
+  it("a waiting hold reads WAITING — deps satisfied · awaiting capacity", () => {
+    const s = resolveShippedStatus(ticket({ held: "waiting", blockers: [] }));
+    expect(s.state).toBe("held");
+    expect(s.headline).toBe("WAITING");
+    expect(s.detail).toBe("deps satisfied · awaiting capacity");
+  });
+
+  it("an on-rail phase that is neither Done, deploy-walked, nor working reads SETTLED", () => {
+    // current phase is on the rail (so monitor-deploy stays 'future', not walked),
+    // linearState is not Done, and the ticket is not working → the settled fallback.
+    const s = resolveShippedStatus(
+      ticket({
+        phase: "implement",
+        linearState: "Implement",
+        working: false,
+        activeState: null,
+        phaseSummary: [phaseTiming({ phase: "implement", status: "in_progress", completedAt: null })],
+      }),
+    );
+    expect(s.state).toBe("settled");
+    expect(s.glyph).toBe("○");
+    expect(s.tone).toBe("neutral");
+    expect(s.headline).toBe("SETTLED");
+  });
+
+  it("an off-rail legacy phase (e.g. 'merged') reads the lifecycle as walked → SHIPPED", () => {
+    // resolvePipelineRail tolerates an off-rail phase by marking every canonical
+    // phase 'past' (the lifecycle is complete) — so deploy is walked-past → shipped.
+    const s = resolveShippedStatus(
+      ticket({ phase: "merged", linearState: "Backlog", working: false, activeState: null, phaseSummary: [] }),
+    );
+    expect(s.state).toBe("shipped");
+    expect(s.isShipped).toBe(true);
+  });
+
+  it("an empty phaseSummary + working ticket still resolves to in-flight (no crash)", () => {
+    const s = resolveShippedStatus(
+      ticket({ phase: "implement", working: true, activeState: "active", phaseSummary: [] }),
+    );
+    expect(s.state).toBe("in-flight");
+    expect(s.headline).toBe("IN IMPLEMENT");
+  });
+
+  it("Done with no PR omits the # tail (honest, never a fabricated PR)", () => {
+    const s = resolveShippedStatus(
+      ticket({ linearState: "Done", pr: null, phase: "done", phaseSummary: [] }),
+    );
+    expect(s.state).toBe("shipped");
+    expect(s.detail).toBe("merged & deployed");
+    expect(s.prNumber).toBeNull();
+  });
+});
+
+// ── Scenario: resolveTimelineRows — geometry + columns from ONE source ────────
+describe("resolveTimelineRows", () => {
+  const NOW = Date.parse("2026-06-08T10:30:00.000Z");
+
+  it("yields one row per phaseSummary entry in source order, columns == resolveSpineNodes", () => {
+    const t = ticket({
+      phase: "implement",
+      phaseSummary: [
+        phaseTiming({ phase: "triage", status: "done", durationMs: 42_000 }),
+        phaseTiming({ phase: "research", status: "done", durationMs: 198_000 }),
+        phaseTiming({ phase: "implement", status: "in_progress", durationMs: null, completedAt: null }),
+      ],
+    });
+    const rows = resolveTimelineRows(t, NOW);
+    const nodes = resolveSpineNodes(t);
+    expect(rows.map((r) => r.phase)).toEqual(["triage", "research", "implement"]);
+    // columns equal the spine-node fields (single source of truth)
+    rows.forEach((r, i) => {
+      const n = nodes[i];
+      expect(r.status).toBe(n.status);
+      expect(r.durationMs).toBe(n.durationMs);
+      expect(r.startedAt).toBe(n.startedAt);
+      expect(r.completedAt).toBe(n.completedAt);
+      expect(r.model).toBe(n.model);
+      expect(r.isActive).toBe(n.isActive);
+      expect(r.costSparkline).toBe(n.costSparkline);
+    });
+  });
+
+  it("a phase with startedAt:null gets leftPct/widthPct === null (columns present, no bar)", () => {
+    const t = ticket({
+      phase: "implement",
+      phaseSummary: [
+        phaseTiming({ phase: "triage", status: "done" }),
+        // a phase that never started — buildBars drops it, the join leaves null geometry.
+        // Constructed directly (the phaseTiming helper coalesces null → its default).
+        { phase: "research", status: "pending", startedAt: null, completedAt: null, durationMs: null, model: null },
+      ],
+    });
+    const rows = resolveTimelineRows(t, NOW);
+    const research = rows.find((r) => r.phase === "research")!;
+    expect(research.leftPct).toBeNull();
+    expect(research.widthPct).toBeNull();
+    // its columns are still present (honest — the row renders without a bar)
+    expect(research.status).toBe("pending");
+    // the started phase DOES carry geometry
+    const triage = rows.find((r) => r.phase === "triage")!;
+    expect(triage.leftPct).not.toBeNull();
+    expect(triage.widthPct).not.toBeNull();
+  });
+
+  it("the active (current, non-terminal) phase is isActive and its geometry isRunning", () => {
+    const t = ticket({
+      phase: "implement",
+      phaseSummary: [
+        phaseTiming({ phase: "triage", status: "done" }),
+        // running: started, no completedAt, non-terminal status. Constructed
+        // directly (the phaseTiming helper coalesces completedAt:null → a default).
+        { phase: "implement", status: "in_progress", startedAt: "2026-06-08T10:10:00.000Z", completedAt: null, durationMs: null, model: null },
+      ],
+    });
+    const rows = resolveTimelineRows(t, NOW);
+    const impl = rows.find((r) => r.phase === "implement")!;
+    expect(impl.isActive).toBe(true);
+    expect(impl.isRunning).toBe(true);
+    const triage = rows.find((r) => r.phase === "triage")!;
+    expect(triage.isActive).toBe(false);
+    expect(triage.isRunning).toBe(false);
+  });
+
+  it("phaseCosts present → costUSD/tokens populated + plumbed; absent → null + pending", () => {
+    const t = ticket({
+      phase: "implement",
+      phaseSummary: [
+        phaseTiming({ phase: "research", status: "done" }),
+        phaseTiming({ phase: "implement", status: "in_progress", completedAt: null }),
+      ],
+      phaseCosts: { research: { costUSD: 0.21, tokens: 400_000, turns: 3 } },
+    });
+    const rows = resolveTimelineRows(t, NOW);
+    const research = rows.find((r) => r.phase === "research")!;
+    expect(research.costUSD).toBe(0.21);
+    expect(research.tokens).toBe(400_000);
+    expect(research.costSparkline).toBe("plumbed");
+    const impl = rows.find((r) => r.phase === "implement")!;
+    expect(impl.costUSD).toBeNull();
+    expect(impl.tokens).toBeNull();
+    expect(impl.costSparkline).toBe("pending");
+  });
+
+  it("an empty phaseSummary yields no rows", () => {
+    expect(resolveTimelineRows(ticket({ phaseSummary: [] }), NOW)).toEqual([]);
   });
 });
 

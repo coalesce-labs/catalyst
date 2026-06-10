@@ -29,6 +29,7 @@
 //     NEEDS-PLUMBING flags for the cells that are not (run-link/artifact/cost).
 
 import type { BoardTicket, BoardPhaseTiming } from "./types";
+import { buildBars } from "../components/ticket-gantt";
 
 // ── canonical phase order ───────────────────────────────────────────────────
 // Mirrors lib/board-data.mjs:35 PHASE_ORDER (the data-layer source of truth) and
@@ -321,4 +322,231 @@ export function activityPredicateForTicket(ticketId: string): string {
     `(.attributes["catalyst.worker.ticket"] == "${esc}"` +
     ` or .attributes["linear.issue.identifier"] == "${esc}")`
   );
+}
+
+// ── SHIPPED status (DETAIL2-v2 §2a — the PM "is it shipped?" answer) ──────────
+//
+// A PURE, tested derivation of the lead-with-the-answer hero. It reads the
+// RESIDENT BoardTicket + the rail it already derives (resolvePipelineRail) — it
+// NEVER calls Linear. The skin renders the glyph/tone/headline/detail verbatim;
+// every branch is honest (no fabricated "2h ago" — there is no merge/deploy
+// timestamp on the resident payload).
+
+export type ShipState = "shipped" | "merged" | "in-flight" | "held" | "settled";
+
+export interface ShippedStatus {
+  state: ShipState;
+  /** the glyph the skin renders: "✓" shipped/merged · "●" in-flight · "⚠" held · "○" settled */
+  glyph: "✓" | "●" | "⚠" | "○";
+  /** semantic tone → skin color (success / info / warning / neutral). */
+  tone: "success" | "info" | "warning" | "neutral";
+  /** the headline, UPPERCASE plain language: "SHIPPED", "MERGED — deploying", "IN REVIEW", "BLOCKED", … */
+  headline: string;
+  /** the muted tail clause: "merged & deployed", "not yet shipped · phase review", "waiting on CTL-653" */
+  detail: string;
+  /** convenience flags for the skin / tests */
+  isShipped: boolean; // merged AND deployed
+  prNumber: number | null;
+}
+
+/** Phase statuses that mean a phase walked to a terminal/walked-past outcome —
+ *  used so a `current` monitor-deploy that is still `running` is NOT read as
+ *  shipped. Mirrors the TERMINAL set the spine + gantt share. */
+const TERMINAL_RAIL_STATUSES = new Set(["done", "complete", "merged"]);
+
+/** A rail segment is "walked past" when it is genuinely behind us: placement
+ *  "past", OR placement "current" with a terminal status (do NOT trust placement
+ *  alone for the current node — a running current monitor-deploy is not shipped). */
+function isWalkedPast(seg: PipelineSegment | undefined): boolean {
+  if (!seg) return false;
+  if (seg.placement === "past") return true;
+  if (seg.placement === "current" && seg.status != null) {
+    return TERMINAL_RAIL_STATUSES.has(seg.status);
+  }
+  return false;
+}
+
+/**
+ * Resolve the SHIPPED hero status (design DETAIL2-v2 §2a). Precedence is
+ * top→bottom, FIRST match wins:
+ *
+ *   1. held  → ⚠ BLOCKED / WAITING (warning)
+ *   2. (compute rail) SHIPPED: linearState==="Done" OR monitor-deploy walked-past → ✓ (success)
+ *   3. MERGED: monitor-merge walked-past (deploy not yet) → ✓ MERGED — deploying (success)
+ *   4. IN-FLIGHT: a current rail phase + working/active → ● IN <PHASE> (info)
+ *   5. SETTLED: off-rail/legacy phase, not done, not working → ○ SETTLED (neutral)
+ *
+ * Pure: no throw on an unknown phase (mirrors resolvePipelineRail's tolerance).
+ * An empty phaseSummary still resolves via branches 1/4/5.
+ */
+export function resolveShippedStatus(
+  ticket: Pick<
+    BoardTicket,
+    | "phase"
+    | "phaseSummary"
+    | "linearState"
+    | "pr"
+    | "held"
+    | "blockers"
+    | "working"
+    | "activeState"
+    | "estimate"
+    | "estimateDisplay"
+  >,
+): ShippedStatus {
+  const prNumber = ticket.pr ?? null;
+
+  // 1. HELD — the strongest "you must act" signal; lead with it.
+  if (ticket.held != null) {
+    const blocked = ticket.held === "blocked";
+    const blockers = blocked ? (ticket.blockers ?? []) : [];
+    return {
+      state: "held",
+      glyph: "⚠",
+      tone: "warning",
+      headline: blocked ? "BLOCKED" : "WAITING",
+      detail: blocked
+        ? blockers.length > 0
+          ? "waiting on " + blockers.join(", ")
+          : "blocked — no blockers named"
+        : "deps satisfied · awaiting capacity",
+      isShipped: false,
+      prNumber,
+    };
+  }
+
+  const rail = resolvePipelineRail(ticket);
+  const deploy = rail.find((s) => s.phase === "monitor-deploy");
+  const merge = rail.find((s) => s.phase === "monitor-merge");
+  const prTail = prNumber != null ? ` · #${prNumber}` : "";
+
+  // 2. SHIPPED — merged AND deployed. linearState Done is the strongest signal.
+  if (ticket.linearState === "Done" || isWalkedPast(deploy)) {
+    return {
+      state: "shipped",
+      glyph: "✓",
+      tone: "success",
+      headline: "SHIPPED",
+      detail: "merged & deployed" + prTail,
+      isShipped: true,
+      prNumber,
+    };
+  }
+
+  // 3. MERGED — merged but deploy not yet walked-past.
+  if (isWalkedPast(merge)) {
+    return {
+      state: "merged",
+      glyph: "✓",
+      tone: "success",
+      headline: "MERGED — deploying",
+      detail: "merged · deploy in progress" + prTail,
+      isShipped: false,
+      prNumber,
+    };
+  }
+
+  // 4. IN-FLIGHT — a current phase exists on the rail and the ticket is working.
+  const current = rail.find((s) => s.placement === "current");
+  const isWorking = ticket.working || ticket.activeState === "active";
+  if (current && isWorking) {
+    const est =
+      ticket.estimate != null
+        ? ` · ${ticket.estimateDisplay ?? `${ticket.estimate}pts`}`
+        : "";
+    return {
+      state: "in-flight",
+      glyph: "●",
+      tone: "info",
+      headline: "IN " + phaseLabel(ticket.phase).toUpperCase(),
+      detail:
+        `not yet shipped · phase ${ticket.phase}` +
+        est +
+        (prNumber != null ? ` · #${prNumber}` : " · no PR"),
+      isShipped: false,
+      prNumber,
+    };
+  }
+
+  // 5. SETTLED — off-rail/legacy phase, not done, not working.
+  return {
+    state: "settled",
+    glyph: "○",
+    tone: "neutral",
+    headline: "SETTLED",
+    detail: "not active",
+    isShipped: false,
+    prNumber,
+  };
+}
+
+// ── CONSOLIDATED LIFECYCLE TIMELINE rows (design DETAIL2-v2 §4a) ─────────────
+//
+// ONE row model that joins the spine COLUMNS (resolveSpineNodes — already
+// plumbed: phase/status/duration/timestamps/model/cost/tokens) onto the bar
+// GEOMETRY (buildBars — same BoardPhaseTiming source). Geometry + columns come
+// from the SAME derivation so they can never drift. A LEFT join: buildBars drops
+// rows with no startedAt, so a phase with no start gets leftPct/widthPct = null
+// (its columns render with a blank bar cell — honest, never a fabricated bar).
+
+export interface TimelineRow {
+  // identity + columns (from resolveSpineNodes — already plumbed)
+  phase: string;
+  label: string;
+  status: string;
+  durationMs: number | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  model: string | null;
+  costUSD: number | null;
+  tokens: number | null;
+  isActive: boolean;
+  costSparkline: SpineCellState;
+  artifact: SpineCellState;
+  runLink: SpineCellState;
+  // bar geometry (from buildBars — same BoardPhaseTiming source)
+  leftPct: number | null; // null when this phase has no startedAt (no bar, columns only)
+  widthPct: number | null;
+  isRunning: boolean;
+}
+
+/**
+ * Resolve the consolidated lifecycle TIMELINE (design DETAIL2-v2 §4a): one row
+ * per phaseSummary entry (source order), each carrying the spine columns AND the
+ * bar geometry from the SAME BoardPhaseTiming source.
+ *
+ * `now` is passed in (mirrors buildBars(rows, now)) so the function stays
+ * pure/testable. Pure: no side effects. An empty phaseSummary yields [] (the
+ * skin renders an honest empty state).
+ */
+export function resolveTimelineRows(
+  ticket: Pick<BoardTicket, "phase" | "phaseSummary" | "phaseCosts">,
+  now: number,
+): TimelineRow[] {
+  const nodes = resolveSpineNodes(ticket);
+  const bars = buildBars(ticket.phaseSummary, now) ?? [];
+  // index geometry by phase (phaseSummary has at most one entry per phase).
+  const geomByPhase = new Map(bars.map((b) => [b.row.phase, b] as const));
+
+  return nodes.map((node): TimelineRow => {
+    const geom = geomByPhase.get(node.phase) ?? null;
+    return {
+      phase: node.phase,
+      label: node.label,
+      status: node.status,
+      durationMs: node.durationMs,
+      startedAt: node.startedAt,
+      completedAt: node.completedAt,
+      model: node.model,
+      costUSD: node.costUSD,
+      tokens: node.tokens,
+      isActive: node.isActive,
+      costSparkline: node.costSparkline,
+      artifact: node.artifact,
+      runLink: node.runLink,
+      leftPct: geom ? geom.leftPct : null,
+      widthPct: geom ? geom.widthPct : null,
+      isRunning: geom ? geom.isRunning : false,
+    };
+  });
 }

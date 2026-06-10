@@ -18,12 +18,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   resolvePipelineRail,
   resolveHeldBanner,
-  resolveSpineNodes,
+  resolveShippedStatus,
   linearDeepLink,
   orchChannelFor,
   activityPredicateForTicket,
   type PipelineSegment,
-  type SpineNode,
+  type ShippedStatus,
 } from "@/board/ticket-page-model";
 import {
   buildTelemetryTiles,
@@ -44,20 +44,16 @@ import type { BoardTicket, BoardWorker } from "@/board/types";
 // CTL-948: per-ticket dependency sub-graph
 import { TicketDepSubGraph } from "@/board/dependency-graph";
 import type { StreamEvent } from "@/lib/types";
-import { phaseColor, fmtDuration, fmtClock, phaseModelLabel, fmtCost, fmtTokens } from "@/lib/formatters";
+import { phaseColor, fmtCost, fmtTokens } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
-import { TicketGantt } from "./ticket-gantt";
+import { LifecycleTimeline } from "./ticket-lifecycle-timeline";
 import { CommsView } from "./comms-view";
 import { ActivityEventRow } from "./activity-event-row";
 import { useActivityStream } from "@/hooks/use-activity";
 import { useRepoColors } from "@/hooks/use-repo-colors";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "./ui/collapsible";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { EmptyState } from "./ui/empty-state";
-import { ListTree, MessageSquare, Radio } from "lucide-react";
+import { Radio } from "lucide-react";
 
 // ── tokens (mirror Shell.tsx / Board.tsx inline-`C` palette; cyan reserved) ──
 const C = {
@@ -68,6 +64,7 @@ const C = {
   fgMuted: "#8b93a1",
   fgDim: "#5b626f",
   cyan: "#5be0ff", // the reserved live signal — current phase / active node only
+  green: "#39d07a", // shipped/merged success tone (NOT cyan — cyan stays "live now")
   red: "#ef5d5d",
   yellow: "#eab308",
   mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
@@ -372,252 +369,108 @@ function activeNodeRowText(r: StreamEvent): string {
   }
 }
 
-// ── LIFECYCLE SPINE ─────────────────────────────────────────────────────────────
-function LifecycleSpine({
-  ticket,
-  registerNode,
-  activeSession,
-}: {
-  ticket: BoardTicket;
-  registerNode: (phase: string, el: HTMLDivElement | null) => void;
-  /** The running phase's CC-UUID sessionId (or null) so the active node tails the
-   *  live stream (DETAIL7). */
-  activeSession: string | null;
-}) {
-  // compact = hide per-phase rows; Gantt is ALWAYS prominent.
-  const [compact, setCompact] = useState(false);
-  const nodes = resolveSpineNodes(ticket);
-  // One SSE per ticket page, subscribed only while there IS a running phase.
-  const activeNodeTail = useActiveNodeTail(activeSession);
-  // CTL-953: artifact links from /api/ticket-artifacts — keyed by kind.
-  const artifacts = useTicketArtifacts(ticket.id);
-  const artifactsByKind = useMemo<Record<string, TicketArtifact[]>>(() => {
-    const map: Record<string, TicketArtifact[]> = {};
-    for (const a of artifacts) {
-      (map[a.kind] ??= []).push(a);
-    }
-    return map;
-  }, [artifacts]);
+// ── SHIPPED hero (DETAIL2-v2 §2 — lead with the answer) ──────────────────────
+/** The hero tone → its skin color. cyan stays RESERVED for the in-flight ● (which
+ *  IS live now); shipped/merged use green so cyan keeps meaning "running now". */
+function heroToneColor(tone: ShippedStatus["tone"]): string {
+  switch (tone) {
+    case "success":
+      return C.green;
+    case "info":
+      return C.cyan;
+    case "warning":
+      return C.yellow;
+    default:
+      return C.fgMuted;
+  }
+}
 
+/** The PM "where is it / is it shipped?" answer — one plain-language line, color =
+ *  meaning only. First body element after the title (never one tab-click away). */
+function ShippedHero({ ticket }: { ticket: BoardTicket }) {
+  const status = resolveShippedStatus(ticket);
+  const tone = heroToneColor(status.tone);
+  const pr = status.prNumber;
   return (
-    <section data-ticket-spine style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <SectionLabel>Lifecycle Spine</SectionLabel>
-        <span style={{ flex: 1 }} />
-        <button
-          type="button"
-          data-spine-compact-toggle
-          aria-pressed={compact}
-          onClick={() => setCompact((v) => !v)}
-          style={{
-            font: `10px ${C.mono}`,
-            color: compact ? C.fg : C.fgMuted,
-            background: compact ? C.s2 : "transparent",
-            border: `1px solid ${C.border}`,
-            borderRadius: 4,
-            padding: "2px 8px",
-            cursor: "pointer",
-          }}
-        >
-          {compact ? "⊞ expand rows" : "⊟ hide rows"}
-        </button>
-      </div>
-
-      {/* CTL-953: Gantt is ALWAYS prominent — shown above the rows, never hidden. */}
-      {ticket.phaseSummary.length > 0 && (
-        <div data-spine-gantt style={{ marginBottom: compact ? 0 : 10 }}>
-          <TicketGantt ticket={ticket} phaseCosts={ticket.phaseCosts} />
-        </div>
-      )}
-
-      {!compact && (
-        nodes.length === 0 ? (
-          <EmptyState icon={ListTree} message="No phases yet" />
-        ) : (
-          <div data-spine-nodes>
-            {nodes.map((node) => (
-              <SpineRow
-                key={node.phase}
-                node={node}
-                registerNode={registerNode}
-                activeNodeTail={node.isActive ? activeNodeTail : null}
-                artifactsByKind={artifactsByKind}
-              />
-            ))}
-          </div>
-        )
+    <section
+      data-ticket-shipped={status.state}
+      data-shipped={status.isShipped}
+      style={{
+        marginBottom: 16,
+        padding: "10px 12px",
+        borderRadius: 8,
+        background: C.s1,
+        border: `1px solid ${tone}55`,
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexWrap: "wrap",
+        font: `13px ${C.mono}`,
+      }}
+    >
+      <span data-shipped-glyph style={{ color: tone, fontWeight: 700, fontSize: 14 }}>
+        {status.glyph}
+      </span>
+      <span data-shipped-headline style={{ color: C.fg, fontWeight: 700, letterSpacing: 0.3 }}>
+        {status.headline}
+      </span>
+      <span style={{ color: C.fgDim }}>—</span>
+      <span data-shipped-detail style={{ color: C.fgMuted }}>
+        {status.detail}
+      </span>
+      <span style={{ flex: 1 }} />
+      {/* PR deep-link: render only when a PR number exists (never a dead ↗). No
+          resident repo→owner URL map, so this is the honest-degraded text form. */}
+      {pr != null && (
+        <span data-shipped-pr={pr} style={{ color: "#4ea1ff", font: `12px ${C.mono}` }}>
+          ↗ PR #{pr}
+        </span>
       )}
     </section>
   );
 }
 
-function SpineRow({
-  node,
-  registerNode,
-  activeNodeTail,
-  artifactsByKind,
-}: {
-  node: SpineNode;
-  registerNode: (phase: string, el: HTMLDivElement | null) => void;
-  /** CTL-918 (DETAIL7): the live tail for THIS node when it is the running phase
-   *  (null otherwise) — renders the `now: …` line + 3-line in-loop tail beneath. */
-  activeNodeTail: ActiveNodeTail | null;
-  /** CTL-953: artifact links keyed by kind ("research"/"plan") from
-   *  /api/ticket-artifacts — used to render the artifact link in research/plan rows. */
-  artifactsByKind: Record<string, TicketArtifact[]>;
-}) {
-  const color = phaseColor(node.phase);
-  const started = node.startedAt ? fmtClock(new Date(Date.parse(node.startedAt))) : null;
-  const completed = node.completedAt ? fmtClock(new Date(Date.parse(node.completedAt))) : null;
-  // CTL-953: map spine phase to artifact kind ("research"→"research", "plan"→"plan")
-  const phaseArtifactKind = node.phase === "research" ? "research" : node.phase === "plan" ? "plan" : null;
-  const phaseArtifacts = phaseArtifactKind ? (artifactsByKind[phaseArtifactKind] ?? []) : [];
-
+// ── COST summary line (DETAIL2-v2 §4c — the Overview money rollup) ───────────
+/** One muted line so the operator sees the cost/tokens/turns rollup on Overview
+ *  without leaving the tab; the full breakdown lives in the Cost tab. Each value
+ *  dims to "—" when null (honest, never fabricated). */
+function CostSummaryLine({ ticket }: { ticket: BoardTicket }) {
   return (
     <div
-      ref={(el) => registerNode(node.phase, el)}
-      data-spine-row={node.phase}
-      {...(node.isActive ? { "data-spine-active": "true" } : {})}
-      style={{ marginBottom: 4 }}
+      data-ticket-cost-summary
+      style={{ font: `11px ${C.mono}`, color: C.fgMuted, marginBottom: 16 }}
     >
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 12,
-        padding: "6px 8px",
-        borderRadius: 5,
-        background: node.isActive ? C.cyan + "12" : C.s1,
-        border: `1px solid ${node.isActive ? C.cyan + "55" : C.border}`,
-        font: `11px ${C.mono}`,
-      }}
-    >
-      {/* phase chip + active ring */}
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, width: 110, flexShrink: 0 }}>
-        <span
-          style={{
-            width: 8,
-            height: 8,
-            borderRadius: "50%",
-            background: node.isActive ? C.cyan : color,
-            flex: "0 0 auto",
-          }}
-        />
-        <span style={{ color: C.fg }}>{node.label}</span>
+      total{" "}
+      <span style={{ color: ticket.costUSD != null ? C.fg : C.fgDim }}>
+        {ticket.costUSD != null ? fmtCost(ticket.costUSD) : "—"}
       </span>
-
-      {/* status */}
-      <span style={{ width: 86, flexShrink: 0, color: C.fgMuted }}>{node.status}</span>
-
-      {/* duration */}
-      <span style={{ width: 64, flexShrink: 0, color: C.fgMuted, textAlign: "right" }}>
-        {node.durationMs != null ? fmtDuration(node.durationMs) : "…"}
-      </span>
-
-      {/* started → completed */}
-      <span style={{ width: 96, flexShrink: 0, color: C.fgDim }}>
-        {started ?? "—"}
-        {completed ? `–${completed}` : node.isActive ? "–now" : ""}
-      </span>
-
-      {/* model — plumbed (BFF6); dimmed em-dash when the signal carried none.
-          Uses the SAME phaseModelLabel the compact gantt renders (CTL-915), so
-          the spine and gantt show identical per-phase model text. */}
-      <span data-spine-model={node.phase} style={{ width: 72, flexShrink: 0, color: node.model ? C.fgMuted : C.fgDim }}>
-        {phaseModelLabel(node.model)}
-      </span>
-
-      <span style={{ flex: 1 }} />
-
-      {/* CTL-953: cost (real from phaseCosts), run (dim placeholder), artifact link */}
-      <span style={{ display: "inline-flex", gap: 10, flexShrink: 0, alignItems: "center" }}>
-        {/* cost — real from phaseCosts when available, dim placeholder otherwise */}
-        {node.costSparkline === "plumbed" && node.costUSD != null ? (
-          <span
-            data-spine-cost={node.phase}
-            title={node.tokens != null ? `${fmtTokens(node.tokens)} tokens` : "per-phase cost"}
-            style={{ color: C.fgMuted, font: `10px ${C.mono}`, whiteSpace: "nowrap" }}
-          >
-            {fmtCost(node.costUSD)}
-            {node.tokens != null && (
-              <span style={{ color: C.fgDim }}> · {fmtTokens(node.tokens)}</span>
-            )}
-          </span>
-        ) : (
-          <Needs label="cost" />
-        )}
-        {/* run-link — pending until /api/ticket-runs lands */}
-        {node.runLink === "pending" && <Needs label="run" />}
-        {/* artifact — real link when present, dim placeholder otherwise */}
-        {phaseArtifacts.length > 0 ? (
-          <span data-spine-artifact={node.phase} style={{ display: "inline-flex", gap: 4 }}>
-            {phaseArtifacts.map((a) => (
-              <a
-                key={a.path}
-                href={`/api/artifact-raw?path=${encodeURIComponent(a.path)}`}
-                target="_blank"
-                rel="noreferrer noopener"
-                title={a.peek ? a.peek.slice(0, 200) : a.path}
-                style={{ color: "#4ea1ff", font: `10px ${C.mono}`, textDecoration: "none" }}
-              >
-                📄 {a.kind}
-              </a>
-            ))}
-          </span>
-        ) : node.artifact === "pending" && phaseArtifactKind ? (
-          <Needs label="artifact" />
-        ) : null}
-      </span>
-    </div>
-    {/* DETAIL7: the active node's live tail (now: <tool> · turn N · ctx% + 3-line
-        in-loop tail) — renders only when this node is the running phase AND the
-        live stream has delivered rows; never an empty box. */}
-    {node.isActive && activeNodeTail && <ActiveNodeTailView tail={activeNodeTail} />}
+      <span style={{ color: C.fgDim }}> · </span>
+      <span style={{ color: ticket.tokens != null ? C.fg : C.fgDim }}>
+        {ticket.tokens != null ? fmtTokens(ticket.tokens) : "—"}
+      </span>{" "}
+      tokens
+      <span style={{ color: C.fgDim }}> · </span>
+      <span style={{ color: ticket.turns != null ? C.fg : C.fgDim }}>
+        {ticket.turns != null ? ticket.turns : "—"}
+      </span>{" "}
+      turns
     </div>
   );
 }
 
-// ── COMMS (collapsed → CommsView) ───────────────────────────────────────────────
+// ── COMMS (the Activity tab is the disclosure — no inner Collapsible) ────────
+// v2: the Collapsible wrapper is dropped — opening the Activity tab IS the
+// disclosure, so Comms renders inline under its sub-label (design DETAIL2-v2 §6).
 function CommsSection({ ticket }: { ticket: BoardTicket }) {
-  const [open, setOpen] = useState(false);
   const channel = orchChannelFor(ticket.id);
   return (
     <section data-ticket-comms style={{ marginBottom: 16 }}>
-      <Collapsible open={open} onOpenChange={setOpen}>
-        <CollapsibleTrigger
-          data-comms-toggle
-          aria-expanded={open}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            width: "100%",
-            font: `10px ${C.mono}`,
-            letterSpacing: 1,
-            color: C.fgMuted,
-            textTransform: "uppercase",
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-            padding: "4px 0",
-          }}
-        >
-          <MessageSquare size={12} />
-          <span>Comms</span>
-          <span style={{ color: C.fgDim }}>{open ? "▾" : "▸"}</span>
-          <span style={{ color: C.fgDim, textTransform: "none" }}>{channel}</span>
-        </CollapsibleTrigger>
-        <CollapsibleContent data-comms-content>
-          {/* Reuses the existing CommsView, keyed to "orch-<id>" (design §4.2). */}
-          {open && (
-            <div style={{ marginTop: 8 }}>
-              <CommsView
-                initialFilter={{ channel, types: null, author: null }}
-              />
-            </div>
-          )}
-        </CollapsibleContent>
-      </Collapsible>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <SectionLabel>Comms</SectionLabel>
+        <span style={{ color: C.fgDim, font: `10px ${C.mono}` }}>{channel}</span>
+      </div>
+      {/* Reuses the existing CommsView, keyed to "orch-<id>" (design §4.2). */}
+      <CommsView initialFilter={{ channel, types: null, author: null }} />
     </section>
   );
 }
@@ -870,6 +723,26 @@ export function TicketDetailPage({
       )
     : null;
 
+  // Hooks must run unconditionally (before the empty-ticket early return). Both
+  // guard an empty/null input internally, so an absent ticket is a no-op.
+  // One SSE per ticket page, subscribed only while there IS a running phase.
+  const activeNodeTail = useActiveNodeTail(activeSession);
+  // CTL-953: artifact links from /api/ticket-artifacts — keyed by kind.
+  const artifacts = useTicketArtifacts(ticket?.id ?? "");
+  const artifactsByKind = useMemo<Record<string, TicketArtifact[]>>(() => {
+    const map: Record<string, TicketArtifact[]> = {};
+    for (const a of artifacts) {
+      (map[a.kind] ??= []).push(a);
+    }
+    return map;
+  }, [artifacts]);
+
+  // CONTROLLED tab selection (mirrors now-panel.tsx:405): until the operator picks,
+  // the tab is "overview" — the consolidated timeline is the default answer to
+  // "where is it at", never gated behind a click.
+  const [picked, setPicked] = useState<"overview" | "cost" | "activity" | null>(null);
+  const value = picked ?? "overview";
+
   if (!ticket) {
     return (
       <div
@@ -885,22 +758,71 @@ export function TicketDetailPage({
 
   return (
     <div data-ticket-page={ticket.id}>
+      {/* ── ABOVE TABS — answers "where / shipped?" (never one click away) ── */}
       <Header ticket={ticket} />
+      <ShippedHero ticket={ticket} />
       <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
       <HeldBanner ticket={ticket} />
-      {/* CTL-948: per-ticket dep sub-graph — backward (blocked_by) + forward
-          (what this ticket blocks) up to 2 hops. Shown only when the resident
-          payload has tickets to cross-reference; honest empty-state otherwise. */}
-      {tickets.length > 0 && (
-        <section data-ticket-deps style={{ marginBottom: 20 }}>
-          <SectionLabel>Dependencies</SectionLabel>
-          <TicketDepSubGraph focusId={ticket.id} tickets={tickets} />
-        </section>
-      )}
-      <LifecycleSpine ticket={ticket} registerNode={registerNode} activeSession={activeSession} />
-      <TelemetryStrip ticket={ticket} />
-      <CommsSection ticket={ticket} />
-      <ActivitySection ticket={ticket} />
+
+      {/* ── TABS — the detail (timeline · money · chatter) ── */}
+      <Tabs
+        value={value}
+        onValueChange={(v) => setPicked(v as "overview" | "cost" | "activity")}
+        data-ticket-tabs
+        data-active-tab={value}
+      >
+        <TabsList className="h-7">
+          <TabsTrigger value="overview" className="text-[11px] px-2">
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="cost" className="text-[11px] px-2">
+            Cost
+          </TabsTrigger>
+          <TabsTrigger value="activity" className="text-[11px] px-2">
+            Activity
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Overview: the consolidated lifecycle timeline + cost rollup + deps */}
+        <TabsContent value="overview">
+          <div data-ticket-overview style={{ paddingTop: 12 }}>
+            <SectionLabel>Lifecycle</SectionLabel>
+            <LifecycleTimeline
+              ticket={ticket}
+              registerNode={registerNode}
+              artifactsByKind={artifactsByKind}
+              renderActiveTail={
+                activeNodeTail.hasRows ? <ActiveNodeTailView tail={activeNodeTail} /> : null
+              }
+            />
+            <CostSummaryLine ticket={ticket} />
+            {/* CTL-948: per-ticket dep sub-graph — backward (blocked_by) + forward
+                (what this ticket blocks) up to 2 hops. It explains WHY a held
+                ticket is where it is, so it belongs on Overview. */}
+            {tickets.length > 0 && (
+              <section data-ticket-deps style={{ marginBottom: 8 }}>
+                <SectionLabel>Dependencies</SectionLabel>
+                <TicketDepSubGraph focusId={ticket.id} tickets={tickets} />
+              </section>
+            )}
+          </div>
+        </TabsContent>
+
+        {/* Cost: the TelemetryStrip charts (tiles + cost-by-phase + cost-by-model) */}
+        <TabsContent value="cost">
+          <div style={{ paddingTop: 12 }}>
+            <TelemetryStrip ticket={ticket} />
+          </div>
+        </TabsContent>
+
+        {/* Activity: the event log + comms (chatter — least-often needed) */}
+        <TabsContent value="activity">
+          <div style={{ paddingTop: 12 }}>
+            <CommsSection ticket={ticket} />
+            <ActivitySection ticket={ticket} />
+          </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
