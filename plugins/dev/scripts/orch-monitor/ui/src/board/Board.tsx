@@ -915,7 +915,8 @@ function InflightWorkerRow({ w, ticket, blockers }: {
       animate="animate"
       exit="exit"
       transition={trans}
-      style={{ opacity: w.activeState === "stuck" ? 0.6 : 1 }}
+      // CTL-978: dead workers are de-emphasized (more so than stuck — they are corpses).
+      style={{ opacity: w.activeState === "dead" ? 0.4 : w.activeState === "stuck" ? 0.6 : 1 }}
     >
       <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
       <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
@@ -945,16 +946,20 @@ function InflightWorkerRow({ w, ticket, blockers }: {
 // group-by-node toggle, both gated behind queueHostMode so a single-host fleet is
 // an exact identity no-op (no node column, no toggle, no added noise).
 // CTL-947: accent color for each activity group section header.
+// CTL-978: "dead" uses fgDim — de-emphasized; these are not in-flight.
 const WORKER_GROUP_C: Record<string, string> = {
   active: LIVE,
   "waiting-on-user": C.yellow,
   waiting: C.fgDim,
   stuck: C.red,
   blocked: C.red,
+  dead: C.fgDim,
 };
 
 // CTL-947: status cell text for a worker row.
+// CTL-978: "dead" surfaces as "dead" so the operator sees the state clearly.
 function workerStatusText(w: Worker): string {
+  if (w.activeState === "dead") return "dead";
   if (isActive(w.activeState)) return w.working ? "working" : "active";
   if (w.activeState === "stuck") return "stuck";
   if (w.waitingOnUser) return "waiting on you";
@@ -970,8 +975,15 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
   // CTL-947: group in-flight workers by activity state. This replaces the flat
   // sortWorkers call — groupWorkersByActivity sorts internally using rankWorker
   // (which now includes waitingOnUser + blocked from the ticket held lookup).
+  // CTL-978: groupWorkersByActivity now routes dead workers (activeState === "dead")
+  // into their own "dead" section. inflightSections includes ALL sections (live +
+  // dead), but the in-flight header count and the capacity stats agree: only live
+  // workers (non-dead) count as in-flight.
   const inflightSections: WorkerActivitySection[] = groupWorkersByActivity(workers, ticketHeld);
-  const inflightCount = workers.length;
+  // CTL-978: in-flight = live workers only (dead excluded). config.inFlight already
+  // reflects this (deriveCapacity excludes dead); mirror it here so the section
+  // header "On the plate — in flight (N)" matches the capacity strip.
+  const inflightCount = workers.filter((w) => w.activeState !== "dead").length;
   // SINGLE-HOST IDENTITY NO-OP: only surface the node column / group affordance
   // when the queue spans two or more DISTINCT owner hosts. With hosts.json absent
   // or length 1 every row resolves to one host (or none), so this is "single" and
@@ -982,7 +994,10 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
   const grouped = multiHost && groupByNode;
   // Whether there are multiple non-empty groups (drives section header visibility:
   // single-group = no chrome, multi-group = show labeled dividers).
-  const multiGroup = inflightSections.length > 1;
+  // CTL-978: always show section headers when a dead section is present — even if
+  // it is the only section — so the operator knows those workers are NOT in-flight.
+  const hasDeadSection = inflightSections.some((s) => s.group === "dead");
+  const multiGroup = inflightSections.length > 1 || hasDeadSection;
   return (
     <div className="cat-scroll" style={{ overflowY: "auto", height: embedded ? "100%" : "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>

@@ -96,6 +96,8 @@ const WORKER_GROUP_META: Record<WorkerActivityGroup, { label: string; rank: numb
   waiting: { label: "Waiting", rank: 2 },
   stuck: { label: "Stuck", rank: 3 },
   blocked: { label: "Blocked", rank: 4 },
+  // CTL-978: dead workers — not in-flight, de-emphasized last group.
+  dead: { label: "Dead / stale", rank: 5 },
 };
 
 /**
