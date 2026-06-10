@@ -344,6 +344,63 @@ export interface EventsHeatmap {
   cells: HeatmapCell[];
 }
 
+// ── OBS-9/OBS-10 (FINOPS): the hero dollar band wire shape ───────────────────
+// Mirrors lib/otel-queries.ts CostTodaySummary. todayUsd is spend since local
+// midnight; avg7dUsd is the prior-7-FULL-day mean baseline (the delta vs);
+// deltaFraction is (today − avg7d)/avg7d, null when avg7d===0 (the UI shows "—",
+// never a divide-by-zero); projectionEodUsd extrapolates today's run-rate to 24h.
+export interface CostTodaySummary {
+  todayUsd: number;
+  avg7dUsd: number;
+  /** (today − avg7d) / avg7d, or null when there is no baseline to compare against. */
+  deltaFraction: number | null;
+  projectionEodUsd: number;
+  elapsedTodaySeconds: number;
+}
+
+// ── OBS-9/OBS-10 (FINOPS P-A): hourly spend-over-time + spike flag ───────────
+// Mirrors lib/otel-queries.ts CostSeriesPoint. `t` is epoch SECONDS (the Prom
+// matrix point ts); `usd` is the hour's spend; `isSpike` drives the `--chart-4`
+// dot ON that bar (the one status-color use in P-A).
+export interface CostSeriesPoint {
+  t: number;
+  usd: number;
+  isSpike: boolean;
+}
+
+// ── OBS-9/OBS-10 (FINOPS HERO-C, THE HEADLINE): cache-ROI $ wire shape ───────
+// Mirrors lib/otel-queries.ts CacheSavings. savedUsd is Σ_model cacheRead_tokens
+// × (input_price − cache_read_price); multiplier is savedUsd/actualSpendUsd, null
+// when actual spend is 0 (no base to multiply — the UI shows the $ without "Nx").
+export interface CacheSavingsModelRow {
+  model: string;
+  savedUsd: number;
+  cacheReadTokens: number;
+}
+
+export interface CacheSavings {
+  savedUsd: number;
+  actualSpendUsd: number;
+  /** savedUsd / actualSpendUsd, or null when actual spend is 0. */
+  multiplier: number | null;
+  cacheReadTokens: number;
+  /** Per-model saving, USD, descending — the drill behind the headline. */
+  byModel: CacheSavingsModelRow[];
+}
+
+// ── OBS-10 (FINOPS P-A drill): per-hour cost split wire shape ────────────────
+// Mirrors lib/otel-queries.ts CostAtHour. Clicking a spiking bar re-queries that
+// hour's by-ticket + by-model split (both zero-filtered) so the operator sees WHO
+// + WHICH MODEL drove the spike — one re-query, no fabricated rows.
+export interface CostAtHour {
+  /** Epoch seconds of the hour's END (the clicked bar's timestamp). */
+  hourEndSeconds: number;
+  /** linear_key → USD for the hour (zero-filtered). */
+  byTicket: Record<string, number>;
+  /** model → USD for the hour (zero-filtered). */
+  byModel: Record<string, number>;
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"

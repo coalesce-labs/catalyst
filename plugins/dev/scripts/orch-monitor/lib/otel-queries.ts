@@ -1254,6 +1254,53 @@ export async function cacheSavings(
   return { savedUsd, actualSpendUsd, multiplier, cacheReadTokens, byModel };
 }
 
+// ── OBS-10 (FINOPS P-A drill): cost at a single spiking hour ─────────────────
+// Clicking a spiking bar in the P-A spend-over-time chart drills into THAT hour's
+// by-ticket + by-model split (the "one re-query with the hour window", layout spec
+// §2 P-A). The hour window is anchored with PromQL's `offset`: a 1h `increase()`
+// shifted back so the window ENDS at the clicked hour. Both maps reuse the
+// zero-series filter (a past hour has even more exact-0 series than a live window).
+//
+// `offsetSeconds` is whole seconds from NOW back to the END of the target hour
+// (i.e. now − spikeHourEnd). Clamped ≥0 (a future/negative offset would 400 in
+// PromQL); when 0 the `offset 0s` is harmless (window ends at NOW).
+
+/** The per-hour drill payload: the by-ticket and by-model cost split for ONE hour,
+ *  both zero-filtered + descending-ready. `null` when Prometheus is unavailable. */
+export interface CostAtHour {
+  /** Epoch SECONDS of the hour's END (the clicked bar's right edge ≈ its ts). */
+  hourEndSeconds: number;
+  /** linear_key → USD for the hour (zero-filtered). */
+  byTicket: Record<string, number>;
+  /** model → USD for the hour (zero-filtered). */
+  byModel: Record<string, number>;
+}
+
+export async function costAtHour(
+  prom: PrometheusFetcher,
+  hourEndSeconds: number,
+  now: Date = new Date(),
+): Promise<CostAtHour | null> {
+  const nowSec = Math.floor(now.getTime() / 1000);
+  // Whole seconds from now back to the end of the target hour. Clamp ≥0.
+  const offsetSeconds = Math.max(0, nowSec - Math.floor(hourEndSeconds));
+  const off = offsetSeconds > 0 ? ` offset ${offsetSeconds}s` : "";
+  const [ticketRes, modelRes] = await Promise.all([
+    prom.query(
+      `sum by (linear_key) (increase(claude_code_cost_usage_USD_total{linear_key=~".+"}[1h]${off}))`,
+    ),
+    prom.query(
+      `sum by (model) (increase(claude_code_cost_usage_USD_total[1h]${off}))`,
+    ),
+  ]);
+  if (ticketRes === null && modelRes === null) return null;
+  return {
+    hourEndSeconds: Math.floor(hourEndSeconds),
+    byTicket: ticketRes ? extractVectorMap(ticketRes, "linear_key", true) : {},
+    byModel: modelRes ? extractVectorMap(modelRes, "model", true) : {},
+  };
+}
+
 function parseDuration(s: string): number {
   const match = /^(\d+)(ms|s|m|h|d)$/.exec(s);
   if (!match) return 3600_000;

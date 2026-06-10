@@ -83,6 +83,13 @@ const TelemetrySurface = lazy(() =>
     default: m.TelemetrySurface,
   })),
 );
+// OBS-10: the OBSERVE FinOps surface. Lazy/code-split like Telemetry so the
+// chart-kit (recharts) chunk only loads when the operator is on FinOps.
+const FinopsSurface = lazy(() =>
+  import("./components/observe/finops-surface").then((m) => ({
+    default: m.FinopsSurface,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -384,6 +391,14 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <TelemetrySurface />
+      </Suspense>
+    );
+  }
+  // OBS-10: the second OBSERVE surface. Same lazy/code-split branch as Telemetry.
+  if (kind === "finops") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <FinopsSurface />
       </Suspense>
     );
   }

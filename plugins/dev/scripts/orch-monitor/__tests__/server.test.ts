@@ -474,6 +474,13 @@ describe("OTel API endpoints", () => {
     const res = await fetch(`${baseUrl}/api/otel/cache-savings`);
     expect(res.status).toBe(503);
   });
+
+  // OBS-10: the spike-drill route. Same 503-when-unconfigured contract; it also
+  // 503s before reading `hour` (the not-configured guard runs first).
+  it("returns 503 for /api/otel/cost-at-hour when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-at-hour?hour=1781000000`);
+    expect(res.status).toBe(503);
+  });
 });
 
 describe("OTel health endpoint (/api/health/otel)", () => {

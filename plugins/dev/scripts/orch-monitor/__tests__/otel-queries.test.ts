@@ -23,6 +23,7 @@ import {
   costToday,
   costSeries,
   cacheSavings,
+  costAtHour,
   scoreSpikes,
   avgPrior7FullDays,
   secondsSinceLocalMidnight,
@@ -590,6 +591,99 @@ describe("cacheSavings", () => {
 
   it("returns null when Prometheus is unavailable", async () => {
     const result = await cacheSavings(mockProm(null), "24h");
+    expect(result).toBeNull();
+  });
+});
+
+describe("costAtHour", () => {
+  it("anchors a 1h window to the target hour via PromQL offset + zero-filters both maps", async () => {
+    const queries: string[] = [];
+    let call = 0;
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        call += 1;
+        // call 1 = by-ticket, call 2 = by-model (the Promise.all order).
+        if (call === 1) {
+          return Promise.resolve({
+            data: {
+              resultType: "vector",
+              result: [
+                { metric: { linear_key: "CTL-928" }, value: [0, "31.7"] },
+                { metric: { linear_key: "CTL-ZERO" }, value: [0, "0"] }, // dropped
+                { metric: { linear_key: "CTL-850" }, value: [0, "14.22"] },
+              ],
+            },
+          } as PrometheusQueryResult);
+        }
+        return Promise.resolve({
+          data: {
+            resultType: "vector",
+            result: [
+              { metric: { model: "claude-opus-4-8[1m]" }, value: [0, "28.84"] },
+              { metric: { model: "claude-zero" }, value: [0, "0"] }, // dropped
+            ],
+          },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    // Fix "now" 2h after the target hour-end → offset = 7200s.
+    const hourEnd = 1781000000;
+    const now = new Date((hourEnd + 7200) * 1000);
+    const result = await costAtHour(prom, hourEnd, now);
+    expect(result).not.toBeNull();
+    expect(result!.hourEndSeconds).toBe(hourEnd);
+    // by-ticket zero-filtered, by-model zero-filtered.
+    expect(result!.byTicket).toEqual({ "CTL-928": 31.7, "CTL-850": 14.22 });
+    expect(result!.byModel).toEqual({ "claude-opus-4-8[1m]": 28.84 });
+    // Both queries carry the computed offset + a 1h increase window.
+    expect(queries[0]).toContain("offset 7200s");
+    expect(queries[0]).toContain("[1h]");
+    expect(queries[0]).toContain("sum by (linear_key)");
+    expect(queries[1]).toContain("offset 7200s");
+    expect(queries[1]).toContain("sum by (model)");
+  });
+
+  it("omits the offset clause when the hour is current (offset 0)", async () => {
+    const queries: string[] = [];
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        return Promise.resolve({
+          data: { resultType: "vector", result: [] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    const now = new Date(1781000000 * 1000);
+    await costAtHour(prom, 1781000000, now);
+    expect(queries[0]).not.toContain("offset");
+  });
+
+  it("clamps a future hour to offset 0 (never a negative-offset 400)", async () => {
+    const queries: string[] = [];
+    const prom: PrometheusFetcher = {
+      query: (q: string) => {
+        queries.push(q);
+        return Promise.resolve({
+          data: { resultType: "vector", result: [] },
+        } as PrometheusQueryResult);
+      },
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => true,
+    };
+    // hour-end 1h in the FUTURE relative to now → offset clamps to 0.
+    const now = new Date(1781000000 * 1000);
+    await costAtHour(prom, 1781000000 + 3600, now);
+    expect(queries[0]).not.toContain("offset -");
+    expect(queries[0]).not.toContain("offset");
+  });
+
+  it("returns null when Prometheus is unavailable", async () => {
+    const result = await costAtHour(mockProm(null), 1781000000);
     expect(result).toBeNull();
   });
 });

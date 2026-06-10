@@ -209,6 +209,7 @@ import {
   costToday,
   costSeries,
   cacheSavings,
+  costAtHour,
   workerHistoryBySession,
   isValidCcSessionId,
   workerBurnSeries,
@@ -1933,6 +1934,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "24h";
           const result = await cacheSavings(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-10 (FINOPS P-A drill): cost at a single spiking hour. Clicking a
+        // spiking bar in the spend-over-time chart re-queries THAT hour's by-ticket
+        // + by-model split (the "one re-query with the hour window"). `hour` is the
+        // clicked bar's epoch-SECOND timestamp; the query anchors a 1h `increase()`
+        // window to it via PromQL `offset`. Both maps are zero-filtered. 503 when
+        // Prometheus is absent; 400 when `hour` is missing/non-numeric (never a
+        // fabricated empty drill).
+        if (url.pathname === "/api/otel/cost-at-hour") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const hourParam = url.searchParams.get("hour");
+          const hour = hourParam !== null ? Number(hourParam) : NaN;
+          if (!Number.isFinite(hour) || hour <= 0) {
+            return Response.json({ error: "hour (epoch seconds) required" }, { status: 400 });
+          }
+          const result = await costAtHour(prom, hour);
           if (result === null) {
             return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
           }
