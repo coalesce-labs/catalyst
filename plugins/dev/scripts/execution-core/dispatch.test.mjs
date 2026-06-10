@@ -254,6 +254,34 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     expect(args).not.toContain("--resume-session");
     expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
   });
+
+  // CTL-990: an exec-looping phase-agent-dispatch (the recreate→rebase-refused
+  // recursion) blocked the daemon's synchronous spawn forever — no rc, no
+  // failure ladder. The spawn must carry a hard timeout + SIGKILL.
+  test("passes a hard timeout + SIGKILL so a wedged dispatch cannot block the daemon (CTL-990)", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    const { opts } = spawn.calls[0];
+    expect(opts.timeout).toBeGreaterThan(0);
+    expect(opts.killSignal).toBe("SIGKILL");
+  });
+
+  test("CATALYST_DISPATCH_TIMEOUT_MS overrides the spawn timeout (CTL-990)", () => {
+    const spawn = spy();
+    process.env.CATALYST_DISPATCH_TIMEOUT_MS = "12345";
+    try {
+      defaultRunPhaseAgent(
+        { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+        { spawn },
+      );
+    } finally {
+      delete process.env.CATALYST_DISPATCH_TIMEOUT_MS;
+    }
+    expect(spawn.calls[0].opts.timeout).toBe(12345);
+  });
 });
 
 describe("dispatchTicket", () => {

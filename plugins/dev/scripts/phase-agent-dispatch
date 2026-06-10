@@ -942,16 +942,25 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 	rebase_onto_base_classified "$BASE_BRANCH"
 	REBASE_RC=$?
 	if [[ $REBASE_RC -eq 2 || $REBASE_RC -eq 3 ]]; then
-		# Determine the stall reason from the rc.
+		# Determine the stall reason from the rc. CTL-990: the rebase lib exports
+		# the TRUE typed reason (rebase_refused_dirty_tree, continue_failed,
+		# source_conflict_ctl708_unavailable, …) in REBASE_LAST_STALL_REASON —
+		# park with that instead of mislabeling every rc=2 as a source conflict.
 		if [[ $REBASE_RC -eq 3 ]]; then
 			STALL_REASON="thoughts_conflict_with_origin_main"
 		else
-			STALL_REASON="source_conflict_ctl708_unavailable"
+			STALL_REASON="${REBASE_LAST_STALL_REASON:-source_conflict_ctl708_unavailable}"
 		fi
 
-		# research/plan + source conflict (rc 2) → destroy+recreate worktree.
-		# thoughts conflict (rc 3) or source on non-research/plan → park as stalled.
-		if [[ $REBASE_RC -eq 2 ]] && { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
+		# research/plan + rc 2 → destroy+recreate worktree, AT MOST ONCE per
+		# dispatch chain (CTL-990): the recreated worktree used to come back
+		# dirty (create-worktree cp -R), rc=2 again, recreate again — an
+		# in-process exec recursion (~2.5s/cycle, 1,300+ events on ADV-1308)
+		# invisible to every scheduler cooldown. CATALYST_RECREATE_ATTEMPTED
+		# survives the exec; a second rc=2 parks as stalled instead.
+		# thoughts conflict (rc 3) or rc 2 on non-research/plan → park as stalled.
+		if [[ $REBASE_RC -eq 2 ]] && [[ -z ${CATALYST_RECREATE_ATTEMPTED:-} ]] \
+			&& { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
 			# CTL-707 Layer 3: destroy and recreate the worktree from origin/<base>.
 			# Derive the main checkout root from this worktree's git common dir.
 			_REPO_ROOT=""
@@ -985,6 +994,9 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 					rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
 					echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
 					cd "$_NEW_WT"
+					# CTL-990: mark the recreate as spent — survives the exec, so a
+					# second rc=2 in the re-dispatched run parks instead of looping.
+					export CATALYST_RECREATE_ATTEMPTED=1
 					exec "$0" --phase "$PHASE" --ticket "$TICKET" \
 						--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
 				else

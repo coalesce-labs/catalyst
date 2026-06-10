@@ -44,7 +44,8 @@ source "$REBASE_LIB"
 # ─── Fixture builder ────────────────────────────────────────────────────────
 # new_fixture <tag> → sets ORIGIN (bare), WORK (clone, on branch `work`), UP
 # (upstream-editor clone, on main). Seeds an initial commit on main with
-# shared.txt (the conflict target) + a tracked .catalyst/config.json.
+# shared.txt (the conflict target) + tracked .catalyst/config.json and
+# .claude/config.json (both noise-stash members — CTL-990).
 new_fixture() {
 	local tag="$1"
 	ORIGIN="$SCRATCH/$tag/origin.git"
@@ -56,8 +57,9 @@ new_fixture() {
 	(
 		cd "$UP"
 		printf 'base-line\n' >shared.txt
-		mkdir -p .catalyst
+		mkdir -p .catalyst .claude
 		printf '{"committed":true}\n' >.catalyst/config.json
+		printf '{"claude":true}\n' >.claude/config.json
 		git add -A
 		git commit --quiet -m "initial"
 		git push --quiet origin main
@@ -418,6 +420,156 @@ new_fixture t13
 )
 assert_eq "1" "$(cat "$SCRATCH/t13.rc")" "fetch failure → rc 1"
 assert_eq "$(cat "$SCRATCH/t13.orig")" "$(cat "$SCRATCH/t13.head")" "fetch failure: HEAD unchanged"
+
+# ─── CTL-990: dirty-tree precheck, .claude noise, continue guard ─────────────
+# Root incident: a tracked dirty file OUTSIDE the noise set makes `git rebase`
+# refuse to START (pre-flight, not a conflict). classify_conflicted_files then
+# sees 0 unmerged paths, every branch is skipped, and the old code fell through
+# to a bogus `git rebase --continue` → {continue_failed, files:[], category:
+# unknown} — looping ~1,300 events on ADV-1326/ADV-1308.
+
+# ── 14. dirty tracked NON-noise file → typed precheck stall (rc 2) ──────────
+echo "14. rebase_onto_base_classified dirty tracked source file → precheck stall"
+new_fixture t14
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # Uncommitted edit to a tracked non-noise file — survives noise_stash_push.
+  printf 'dirty-edit\n' >shared.txt
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t14.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t14.rc"
+  echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t14.reason_var"
+  git rev-parse HEAD >"$SCRATCH/t14.head"
+  cat shared.txt >"$SCRATCH/t14.dirty"
+  [[ -d .git/rebase-merge ]] && echo leftover >"$SCRATCH/t14.rebasedir" || echo clean >"$SCRATCH/t14.rebasedir"
+)
+assert_eq "2" "$(cat "$SCRATCH/t14.rc")" "precheck stall → rc 2"
+assert_eq "rebase_refused_dirty_tree" "$(cat "$SCRATCH/t14.reason_var")" \
+  "REBASE_LAST_STALL_REASON carries the typed reason"
+assert_eq "$(cat "$SCRATCH/t14.orig")" "$(cat "$SCRATCH/t14.head")" "precheck: HEAD unchanged"
+assert_eq "dirty-edit" "$(cat "$SCRATCH/t14.dirty")" "precheck: dirty edit left intact"
+assert_eq "clean" "$(cat "$SCRATCH/t14.rebasedir")" "precheck: no rebase-merge leftover"
+STALL14="$(last_telem_line)"
+assert_eq "rebase_refused_dirty_tree" "$(jq -r '.body.payload.reason' <<<"$STALL14")" \
+  "precheck: stalled event reason=rebase_refused_dirty_tree"
+assert_eq "precheck" "$(jq -r '.body.payload.category' <<<"$STALL14")" \
+  "precheck: stalled event category=precheck"
+assert_eq "shared.txt" "$(jq -r '.body.payload.files[0]' <<<"$STALL14")" \
+  "precheck: offending dirty file listed in event"
+
+# ── 15. dirty tracked .claude/config.json → stashed noise, clean rebase ─────
+echo "15. rebase_onto_base_classified dirty .claude/config.json is stashed noise"
+new_fixture t15
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # The ADV-1326/ADV-1308 blocker: a tracked, locally-modified .claude config.
+  printf '{"claude":false,"dirty":true}\n' >.claude/config.json
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t15.rc"
+  cat .claude/config.json >"$SCRATCH/t15.config"
+  [[ -f upstream.txt ]] && echo yes >"$SCRATCH/t15.base" || echo no >"$SCRATCH/t15.base"
+)
+assert_eq "0" "$(cat "$SCRATCH/t15.rc")" "dirty .claude/config.json → rc 0 (stashed as noise)"
+assert_eq '{"claude":false,"dirty":true}' "$(cat "$SCRATCH/t15.config")" \
+  ".claude/config.json dirty content restored after rebase"
+assert_eq "yes" "$(cat "$SCRATCH/t15.base")" "rebase still advanced onto new base"
+
+# ── 16. .claude/config.json CONFLICT classifies as noise; other .claude files stay source ──
+echo "16. classifier sync: .claude/config.json conflict → noise; .claude/skills/* → source"
+new_fixture t16
+(
+  cd "$UP"
+  git checkout --quiet main
+  printf '{"upstream":true}\n' >.claude/config.json
+  git add -A && git commit --quiet -m "upstream claude config"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  printf '{"local":true}\n' >.claude/config.json
+  git add -A && git commit --quiet -m "local claude config"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t16.rc"
+  cat .claude/config.json >"$SCRATCH/t16.config"
+)
+assert_eq "0" "$(cat "$SCRATCH/t16.rc")" ".claude/config.json conflict → rc 0 (noise take-ours)"
+assert_eq '{"upstream":true}' "$(cat "$SCRATCH/t16.config")" \
+  ".claude/config.json noise take-ours: upstream content wins"
+
+# Non-noise .claude content (skills/agents/rules) must STAY a source conflict —
+# auto-resolving it take-ours would silently discard committed branch work.
+new_fixture t16b
+(
+  cd "$UP"
+  git checkout --quiet main
+  mkdir -p .claude/skills
+  printf 'upstream-skill\n' >.claude/skills/foo.md
+  git add -A && git commit --quiet -m "upstream skill"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  mkdir -p .claude/skills
+  printf 'local-skill\n' >.claude/skills/foo.md
+  git add -A && git commit --quiet -m "local skill"
+  ORIG_HEAD="$(git rev-parse HEAD)"
+  echo "$ORIG_HEAD" >"$SCRATCH/t16b.orig"
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t16b.rc"
+  git rev-parse HEAD >"$SCRATCH/t16b.head"
+)
+assert_eq "2" "$(cat "$SCRATCH/t16b.rc")" ".claude/skills conflict stays source → rc 2"
+assert_eq "$(cat "$SCRATCH/t16b.orig")" "$(cat "$SCRATCH/t16b.head")" \
+  ".claude/skills conflict: HEAD restored (no silent take-ours)"
+
+# ── 17. rebase_in_progress predicate ────────────────────────────────────────
+echo "17. rebase_in_progress predicate"
+new_fixture t17
+(
+  cd "$WORK"
+  if rebase_in_progress; then echo yes; else echo no; fi >"$SCRATCH/t17.idle"
+)
+assert_eq "no" "$(cat "$SCRATCH/t17.idle")" "rebase_in_progress=false in an idle repo"
+advance_origin_main_conflict
+(
+  cd "$WORK"
+  printf 'local-edit\n' >shared.txt
+  git add -A && git commit --quiet -m "local conflicting edit"
+  git fetch --quiet origin main 2>/dev/null
+  git rebase --quiet "origin/main" 2>/dev/null # stops on the conflict
+  if rebase_in_progress; then echo yes; else echo no; fi >"$SCRATCH/t17.during"
+  git rebase --abort 2>/dev/null
+  if rebase_in_progress; then echo yes; else echo no; fi >"$SCRATCH/t17.after"
+)
+assert_eq "yes" "$(cat "$SCRATCH/t17.during")" "rebase_in_progress=true mid-conflict"
+assert_eq "no" "$(cat "$SCRATCH/t17.after")" "rebase_in_progress=false after abort"
+
+# ── 18. refresh_worktree (periodic path) stashes noise too ──────────────────
+echo "18. refresh_worktree stashes noise (periodic timer path)"
+new_fixture t18
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  printf '{"committed":false,"dirty":true}\n' >.catalyst/config.json
+)
+# shellcheck source=../worktree-refresh.sh
+source "$LIB_DIR/worktree-refresh.sh"
+refresh_worktree "$WORK" main
+echo "$?" >"$SCRATCH/t18.rc"
+assert_eq "0" "$(cat "$SCRATCH/t18.rc")" "refresh with dirty noise → rc 0"
+assert_eq '{"committed":false,"dirty":true}' "$(cat "$WORK/.catalyst/config.json")" \
+  "refresh: dirty noise restored after rebase"
+T18_BASE="no"; [[ -f "$WORK/upstream.txt" ]] && T18_BASE="yes"
+assert_eq "yes" "$T18_BASE" "refresh: worktree advanced onto new base"
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"

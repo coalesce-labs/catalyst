@@ -52,6 +52,15 @@ function defaultResolveProject(ticket) {
 // the dead session) instead of a fresh phase-0 `$PROMPT` start. Omitted entirely
 // when null/undefined → today's fresh-start behaviour. `spawn` is injectable so
 // the unit test can assert the built arg array without a real spawn.
+// CTL-990: hard ceiling on the synchronous phase-agent-dispatch spawn. A
+// wedged dispatch (the recreate→rebase-refused exec recursion looped here for
+// hours, invisible — no rc, no failure ladder) must surface as a failed
+// dispatch, not block the daemon. Generous: worktree provisioning (bun
+// install et al) can legitimately take minutes. Read lazily so tests and
+// operators can override at runtime.
+const getDispatchTimeoutMs = () =>
+  Number(process.env.CATALYST_DISPATCH_TIMEOUT_MS) || 15 * 60 * 1000;
+
 export function defaultRunPhaseAgent(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt },
   { spawn = spawnSync } = {},
@@ -64,6 +73,8 @@ export function defaultRunPhaseAgent(
   const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
     cwd: worktreePath,
     encoding: "utf8",
+    timeout: getDispatchTimeoutMs(), // CTL-990
+    killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
     env: {
       ...process.env,
       CATALYST_ORCHESTRATOR_DIR: orchDir,

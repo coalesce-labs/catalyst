@@ -1908,6 +1908,58 @@ assert_eq "prior_artifact_missing" \
 [[ -f "${WORKER_DIR}/phase-teardown.json" ]] && SIG_TD_EXISTS="yes" || SIG_TD_EXISTS="no"
 assert_eq "no" "$SIG_TD_EXISTS" "no teardown signal written when refused"
 
+# ─── Test 61 (CTL-990): recreate runs at most ONCE — guard env parks instead ─
+# The ADV-1308 storm: research/plan rc=2 → destroy+recreate → exec $0 → the
+# recreated worktree is dirty again → rc=2 → recreate → exec … an in-process
+# infinite loop no scheduler cooldown can see. With CATALYST_RECREATE_ATTEMPTED
+# already set, the dispatcher must PARK (stalled, exit 1), never re-recreate.
+echo ""
+echo "Test 61 (CTL-990): CATALYST_RECREATE_ATTEMPTED set → source conflict parks, no second recreate"
+fresh_env t61_recreate_guard
+git_worktree_fixture t61
+advance_origin_conflict
+printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
+(
+	cd "$GWORK"
+	printf 'local-edit\n' >shared.txt
+	git add -A && git commit --quiet -m "local conflicting edit"
+)
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main CATALYST_RECREATE_ATTEMPTED=1 \
+	"$DISPATCH" --phase research --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t61.out" 2>/dev/null)
+RC61=$?
+SIGNAL="${WORKER_DIR}/phase-research.json"
+assert_eq "1" "$RC61" "recreate guard: dispatcher exits 1 (parked, not exec-looped)"
+CLAUDE61="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE61="yes"
+assert_eq "no" "$CLAUDE61" "recreate guard: claude --bg was NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "recreate guard: signal status = stalled"
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "recreate guard: worktree NOT destroyed/recreated (HEAD unchanged)"
+
+# ─── Test 62 (CTL-990): pre-flight dirty-tree refusal parks with the TYPED reason ─
+# A tracked dirty non-noise file makes git refuse to start the rebase. The
+# signal's failureReason must carry rebase_refused_dirty_tree — not the old
+# misleading source_conflict_ctl708_unavailable (from a continue_failed cascade).
+echo ""
+echo "Test 62 (CTL-990): dirty tracked file → park with failureReason=rebase_refused_dirty_tree"
+fresh_env t62_precheck_reason
+git_worktree_fixture t62
+advance_origin_clean
+seed_local_plan_commit
+# Dirty a tracked NON-noise file AFTER the local commit (uncommitted edit).
+printf 'uncommitted-dirty-edit\n' >"${GWORK}/shared.txt"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t62.out" 2>/dev/null)
+RC62=$?
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+assert_eq "1" "$RC62" "precheck park: dispatcher exits 1"
+CLAUDE62="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE62="yes"
+assert_eq "no" "$CLAUDE62" "precheck park: claude --bg was NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "precheck park: signal status = stalled"
+assert_eq "rebase_refused_dirty_tree" "$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)" \
+	"precheck park: signal failureReason = rebase_refused_dirty_tree (typed, not continue_failed cascade)"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
