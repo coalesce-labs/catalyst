@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import type { BoardWorker } from "./types";
+import type { BoardWorker, BoardTicket } from "./types";
 import type { DetailSearch } from "./route-search";
 import {
   resolveHeaderModel,
@@ -33,6 +33,9 @@ import { deriveIdleRatio, type WorkerBurnSeries } from "./worker-burn-data";
 import { LIVE_CYAN } from "./detail-chrome";
 import { NowPanel } from "./now-panel";
 import { WorkerBurnChart } from "./worker-burn-chart";
+import { ActivityTimeline } from "./activity-timeline";
+import { SubworkerTree } from "./subworker-tree";
+import { PhaseOutcome } from "./phase-outcome";
 import type { WorkerDetailModel } from "./use-worker-detail-model";
 
 // ── tokens (mirror Shell.tsx's inline-`C` palette) ──────────────────────────
@@ -440,17 +443,29 @@ export function WorkerDetailBody({
   id,
   worker,
   model,
+  tickets,
   search,
 }: {
   id: string;
   worker: BoardWorker | undefined;
   /** The hoisted live model (shared with the Shell rail's Diagnostics group). */
   model: WorkerDetailModel;
+  /** The resident board tickets — the phase-aware section (§6) resolves THIS
+   *  worker's ticket here for the estimate/scope/type/pr it reads (the same way
+   *  the ticket page receives `tickets`). Empty when the payload hasn't landed. */
+  tickets: BoardTicket[];
   /** The route search params — carried into the ticket Link so the pager context
    *  is preserved on the cross-navigation. */
   search: DetailSearch;
 }) {
   const phase = worker?.phase;
+  // The resident BoardTicket for this worker's ticket — the phase-aware section's
+  // estimate/scope/type/pr source. undefined when not in the resident payload
+  // (a cold-linked Done ticket) → the section dims those fields honestly.
+  const ticketModel = useMemo(
+    () => (worker?.ticket ? tickets.find((t) => t.id === worker.ticket) : undefined),
+    [tickets, worker?.ticket],
+  );
 
   return (
     <div data-worker-detail-body data-id={id} style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
@@ -469,8 +484,22 @@ export function WorkerDetailBody({
       {/* COST + TOKENS over-time chart (ChartCard honesty ladder) + scalar strip. */}
       <WorkerBurnChart series={model.burnSeries} worker={worker} health={model.health} />
 
-      {/* idle-ratio summary — the at-a-glance stuck-tell (Pass-B adds the timeline). */}
+      {/* IDLE-vs-WORKING timeline (Pass B §5B) — the over-time stall shape, with the
+          idle-ratio summary beneath it as the at-a-glance scalar stuck-tell. */}
+      <ActivityTimeline series={model.burnSeries} health={model.health} />
       <IdleRatioBar activeSeconds={model.burnSeries?.activeSeconds ?? null} runtimeMs={worker?.runtimeMs ?? null} />
+
+      {/* SUBWORKER count + compact tree (Pass B §5C) — honest 404 degraded state. */}
+      <SubworkerTree workerName={worker?.name} ticket={worker?.ticket} />
+
+      {/* PHASE-AWARE "what it (is) doing / did" — keyed on worker.phase (Pass B §6). */}
+      <PhaseOutcome
+        phase={phase}
+        ticket={worker?.ticket}
+        ticketModel={ticketModel}
+        signal={model.signal}
+        search={search}
+      />
 
       {/* raw SIGNAL — the always-available ground-truth escape hatch, last. */}
       <SignalPanel signal={model.signal} label={phase ? `phase-${phase}.json` : ""} />

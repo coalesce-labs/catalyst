@@ -211,7 +211,13 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
         }
         streamHealth={health}
       >
-        <WorkerDetailBody id={id} worker={worker} model={model} search={search} />
+        <WorkerDetailBody
+          id={id}
+          worker={worker}
+          model={model}
+          tickets={payload?.tickets ?? []}
+          search={search}
+        />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "worker", id }} />
     </>

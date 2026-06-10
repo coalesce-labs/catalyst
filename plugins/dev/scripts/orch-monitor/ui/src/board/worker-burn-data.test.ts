@@ -8,6 +8,10 @@ import { describe, it, expect } from "bun:test";
 import {
   buildBurnTiles,
   deriveIdleRatio,
+  deriveActivityBuckets,
+  activityHasData,
+  inferBucketWidthSeconds,
+  DEFAULT_BUCKET_WIDTH_SECONDS,
   seriesIsLive,
   seriesLast,
   type WorkerBurnSeries,
@@ -115,6 +119,62 @@ describe("Scenario: Counters stay honest to their source", () => {
     expect(commits.source).toBe("needs-plumbing");
     expect(commits.value).toBeNull(); // never a fabricated count
     expect(commits.points).toEqual([]);
+  });
+});
+
+// ── Scenario: Idle-vs-working timeline (Pass B §5B) ──────────────────────────
+// GROUND-TRUTH: the live activeSeconds series is per-bucket and NON-MONOTONIC,
+// and a bucket can OVER-report (>60s against a 60s wall) when a worker's summed
+// session streams reset — so we clamp working to [0, width] and never read >100%.
+describe("Scenario: idle-vs-working timeline buckets", () => {
+  it("infers the bucket width from the first adjacent timestamp gap (60s)", () => {
+    expect(inferBucketWidthSeconds([[100, 5], [160, 9], [220, 3]])).toBe(60);
+  });
+
+  it("falls back to the default width when <2 points or a bad gap", () => {
+    expect(inferBucketWidthSeconds([])).toBe(DEFAULT_BUCKET_WIDTH_SECONDS);
+    expect(inferBucketWidthSeconds([[100, 5]])).toBe(DEFAULT_BUCKET_WIDTH_SECONDS);
+    expect(inferBucketWidthSeconds([[100, 5], [100, 9]])).toBe(DEFAULT_BUCKET_WIDTH_SECONDS);
+  });
+
+  it("splits each bucket into working + idle that sum to the wall width", () => {
+    // 19s active of a 60s bucket → 19 working / 41 idle.
+    const buckets = deriveActivityBuckets([[100, 19.1], [160, 79.3]]);
+    expect(buckets).toHaveLength(2);
+    expect(buckets[0].workingSeconds).toBeCloseTo(19.1, 1);
+    expect(buckets[0].idleSeconds).toBeCloseTo(40.9, 1);
+    expect(buckets[0].workingSeconds + buckets[0].idleSeconds).toBeCloseTo(60, 5);
+  });
+
+  it("CLAMPS an over-report (active>width) to fully-working, zero idle (never >100%)", () => {
+    // Observed live: a 197s reading against a 60s bucket — clamp to 60 working.
+    const buckets = deriveActivityBuckets([[100, 197.2], [160, 32.6]]);
+    expect(buckets[0].workingSeconds).toBe(60);
+    expect(buckets[0].idleSeconds).toBe(0);
+  });
+
+  it("clamps a negative reading to zero working / full idle (never a negative bar)", () => {
+    const buckets = deriveActivityBuckets([[100, -5], [160, 30]]);
+    expect(buckets[0].workingSeconds).toBe(0);
+    expect(buckets[0].idleSeconds).toBe(60);
+  });
+
+  it("skips non-finite points rather than zero-filling them", () => {
+    const buckets = deriveActivityBuckets([[100, 30], [Number.NaN, 40], [220, 10]]);
+    expect(buckets).toHaveLength(2);
+    expect(buckets.map((b) => b.t)).toEqual([100, 220]);
+  });
+
+  it("an absent / empty series yields [] (the ChartCard shows no-data, not flat bars)", () => {
+    expect(deriveActivityBuckets(null)).toEqual([]);
+    expect(deriveActivityBuckets(undefined)).toEqual([]);
+    expect(deriveActivityBuckets([])).toEqual([]);
+  });
+
+  it("activityHasData is true only when some bucket has positive working time", () => {
+    expect(activityHasData(null)).toBe(false);
+    expect(activityHasData([[100, 0], [160, 0]])).toBe(false);
+    expect(activityHasData([[100, 0], [160, 12]])).toBe(true);
   });
 });
 
