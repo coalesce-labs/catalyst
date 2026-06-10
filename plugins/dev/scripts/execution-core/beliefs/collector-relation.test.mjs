@@ -313,20 +313,17 @@ describe("obs_relation — edge normalization (CTL-964 §2)", () => {
     expect(res.ok).toBe(true);
 
     const rows = db.query("SELECT source_ticket, target_ticket, relation_type FROM obs_relation ORDER BY source_ticket, target_ticket").all();
-    // Expected canonical edges:
-    //   CTL-100 blocks CTL-200 (from relations.nodes type=blocks on CTL-100)
-    //   CTL-200 blocks CTL-100 (from relations.nodes type=blocked_by on CTL-100)
-    //   CTL-100 blocks CTL-200 (from inverseRelations.nodes type=blocks on CTL-200)
-    //   CTL-200 blocks CTL-100 (from inverseRelations.nodes type=blocked_by on CTL-200)
-    // All four normalization paths produce exactly 4 rows (insert-only, no dedup).
-    expect(rows.length).toBe(4);
+    // Expected canonical edges after within-tick edge-level deduplication:
+    //   CTL-100 blocks CTL-200 (first seen via relations.nodes type=blocks on CTL-100;
+    //     inverseRelations.nodes type=blocks on CTL-200 would produce the same edge → skipped)
+    //   CTL-200 blocks CTL-100 (first seen via relations.nodes type=blocked_by on CTL-100;
+    //     inverseRelations.nodes type=blocked_by on CTL-200 would produce the same edge → skipped)
+    // Edge-level seenEdge dedup collapses 4 normalization-path outputs → 2 distinct rows.
+    expect(rows.length).toBe(2);
 
     const keys = rows.map(edgeKey).sort();
-    // Two rows: CTL-100 blocks CTL-200, and two: CTL-200 blocks CTL-100.
     const expected = [
       "CTL-100|CTL-200|blocks",
-      "CTL-100|CTL-200|blocks",
-      "CTL-200|CTL-100|blocks",
       "CTL-200|CTL-100|blocks",
     ].sort();
     expect(keys).toEqual(expected);
@@ -508,6 +505,59 @@ describe("obs_relation — per-tick deduplication by seen-set (CTL-964 §2)", ()
     expect(getCalls.filter((t) => t === "CTL-100").length).toBe(1);
     // One edge row (CTL-100 blocks CTL-200) recorded once
     expect(db.query("SELECT COUNT(*) AS n FROM obs_relation").get().n).toBe(1);
+    db.close();
+  });
+});
+
+describe("obs_relation — within-tick symmetric-edge dedup (CTL-964 follow-up)", () => {
+  test("symmetric pair: relations.nodes blocks->B + inverseRelations.nodes blocks from A → exactly ONE row per tick", () => {
+    // Scenario: both tickets A and B are in-flight. A's cache descriptor shows
+    // "A blocks B" via relations.nodes. B's cache descriptor shows "A blocks B"
+    // via inverseRelations.nodes. Without edge-level dedup this inserts two rows
+    // with identical (src=A, tgt=B, type=blocks) in the same tick.
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+
+    const relMap = {
+      "CTL-100": {
+        // A blocks B via relations.nodes
+        relations: {
+          nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-200" } }],
+        },
+        inverseRelations: { nodes: [] },
+      },
+      "CTL-200": {
+        relations: { nodes: [] },
+        // B's inverseRelations: "blocks from A" → same canonical edge (A blocks B)
+        inverseRelations: {
+          nodes: [{ type: "blocks", issue: { identifier: "CTL-100" } }],
+        },
+      },
+    };
+
+    // Tick 1: both tickets processed; symmetric edge must appear exactly once.
+    const r1 = collect(db, relMap);
+    expect(r1.ok).toBe(true);
+    const tick1Rows = db.query("SELECT * FROM obs_relation WHERE tick_id = ?").all(r1.tickId);
+    expect(tick1Rows.length).toBe(1);
+    expect(tick1Rows[0].source_ticket).toBe("CTL-100");
+    expect(tick1Rows[0].target_ticket).toBe("CTL-200");
+    expect(tick1Rows[0].relation_type).toBe("blocks");
+
+    // Tick 2: same cache — edge must be re-inserted (insert-only-per-tick preserved).
+    const r2 = collect(db, relMap, () => twoSignals(), { now: NOW + 60_000 });
+    expect(r2.ok).toBe(true);
+    expect(r1.tickId).not.toBe(r2.tickId);
+    const tick2Rows = db.query("SELECT * FROM obs_relation WHERE tick_id = ?").all(r2.tickId);
+    expect(tick2Rows.length).toBe(1);
+    expect(tick2Rows[0].source_ticket).toBe("CTL-100");
+    expect(tick2Rows[0].target_ticket).toBe("CTL-200");
+    expect(tick2Rows[0].relation_type).toBe("blocks");
+
+    // Total rows across both ticks: 2 (one per tick), not 4 (which would be the
+    // result without edge-level dedup).
+    const allRows = db.query("SELECT COUNT(*) AS n FROM obs_relation").get();
+    expect(allRows.n).toBe(2);
+
     db.close();
   });
 });
