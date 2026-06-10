@@ -101,14 +101,12 @@ const routeTree = rootRoute.addChildren([boardRoute, ticketRoute, workerRoute, d
 
 export const router = createRouter({ routeTree });
 
-// Register the router instance type so `Link`, `useParams`, `useSearch`, etc.
-// are fully typed app-wide against this exact route tree (standard TanStack
-// type-registration pattern).
-declare module "@tanstack/react-router" {
-  interface Register {
-    router: typeof router;
-  }
-}
+// CTL-989: the app-wide Register type registration now lives in the unified
+// app-router.tsx (the ONE router mounted from index.html). This legacy board
+// router is retired (no longer an entry point) and intentionally does NOT
+// re-declare Register — two `declare module` blocks would conflict on the
+// `router` property type. Its remaining exports are kept only so the structural
+// detail-shell.test.ts assertions (CTL-912) continue to read the route wiring.
 
 /** Wrap the whole app in the router. Mounted by main.tsx inside #board-root. */
 export function AppRouter() {

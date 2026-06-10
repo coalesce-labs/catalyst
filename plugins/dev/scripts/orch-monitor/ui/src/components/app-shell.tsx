@@ -1,4 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   InboxIcon,
   LayoutGridIcon,
@@ -17,11 +18,15 @@ import {
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
+// CTL-989 — the active surface is now DERIVED from the route (URL = source of
+// truth for location); the nav navigates via router.navigate instead of writing
+// React surface state.
+import {
+  pathnameToSurface,
+  surfaceToPath,
+  SETTINGS_PATH,
+} from "@/lib/route-surface";
 import { breadcrumbFor, buildNavGroups, paletteEntries } from "@/lib/nav-model";
-// CTL-911 / SURF3 — the persisted landing-surface preference (which OPERATE
-// surface opens first on a fresh load); the Settings surface writes it.
-import { readLandingSurface } from "@/lib/prefs";
-import { SettingsSurface } from "@/components/settings-surface";
 // CTL-898 / SHELL8 — the shell owns the NODE-SCOPE store (All-nodes by default).
 // Single-host is an identity no-op: the filter affordance is absent (the sidebar
 // gates it on the live cluster signal) so the scope stays All-nodes and nothing
@@ -40,10 +45,6 @@ import { shouldOpenPalette } from "@/lib/command-palette";
 import { useAtom } from "jotai";
 import { repoScopeAtom } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
-// CTL-971: reseat the board SURFACE + repo SCOPE on return from a detail page so
-// the board actually mounts (else the landing-pref Inbox shows and the scroll/focus
-// snapshot the board would consume is silently ignored).
-import { useSurfaceRestore } from "@/hooks/use-surface-restore";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -94,13 +95,25 @@ const SURFACE_ICON: Partial<Record<Surface, typeof InboxIcon>> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState<boolean>(readSidebarOpen);
-  // CTL-911 / SURF3 — the initial surface SEEDS from the persisted landing
-  // preference (defaults Home), then becomes ephemeral navigation state: jumping
-  // around does NOT rewrite the persisted default — only Settings changes it.
-  const [surface, setSurface] = useState<Surface>(readLandingSurface);
-  // CTL-911 / SURF3 — Settings is a FOOTER destination, not one of the four
-  // OPERATE landing surfaces; it takes over the inset via this open-flag.
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // CTL-989 — the active surface + Settings-open are DERIVED from the route (the
+  // URL is the source of truth for location). pathnameToSurface maps the current
+  // pathname to a surface (or "settings"); the nav navigates via router.navigate.
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const search = useRouterState({ select: (s) => s.location.search });
+  const derived = pathnameToSurface(
+    pathname,
+    typeof (search as { from?: unknown }).from === "string"
+      ? { from: (search as { from?: string }).from }
+      : undefined,
+  );
+  const settingsOpen = derived === "settings";
+  // The nav-highlight surface: detail pages + settings still resolve to an
+  // OPERATE surface for the left nav (settings highlights nothing of the four,
+  // so fall back to the board surface for the SurfaceContext `surface` value the
+  // sidebar reads — settingsOpen separately drives the Settings item's active
+  // state).
+  const surface: Surface = derived === "settings" ? "board" : derived;
   const [paletteOpen, setPaletteOpen] = useState(false);
   // CTL-898 / SHELL8 — the active node scope. Defaults to ALL_NODES (the cluster-
   // wide view); the sidebar's node filter sets it when N>1, and the sidebar also
@@ -108,16 +121,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // roster (a node going dark never strands the operator on an empty view).
   const [nodeScope, setNodeScope] = useState<NodeScope>(ALL_NODES);
   // CTL-944 — the active repo scope for breadcrumbs + palette navigation.
+  // CTL-989 — repoScopeAtom is DEMOTED to a URL-mirror: a single effect below
+  // syncs it from the `?scope` typed search param on every search change, so the
+  // existing dozen `useAtom(repoScopeAtom)` readers (app-sidebar, surfaces) need
+  // no edit. Nav WRITES go through navigate({search:{scope}}), not setRepoScope.
   const [repoScope, setRepoScope] = useAtom(repoScopeAtom);
-  // CTL-971 — on return from a detail page, reseat the surface the card was opened
-  // from (else the landing-pref Inbox shows) + re-apply the saved repo scope. PEEKS
-  // the restore snapshot (the board's own useBoardRestore consumes it for scroll).
-  // Reseating the surface ALSO leaves Settings, mirroring the `g`-chord behavior.
-  const restoreSurface = useCallback((s: Surface) => {
-    setSurface(s);
-    setSettingsOpen(false);
-  }, []);
-  useSurfaceRestore(restoreSurface, setRepoScope);
+  const scopeSearch =
+    typeof (search as { scope?: unknown }).scope === "string"
+      ? (search as { scope?: string }).scope
+      : undefined;
+  useEffect(() => {
+    const next = scopeSearch ?? "all";
+    if (next !== repoScope) setRepoScope(next);
+  }, [scopeSearch, repoScope, setRepoScope]);
   // Repos from the board snapshot for palette navigation group construction.
   const { payload } = useBoardSnapshot();
   const repos = payload?.repos ?? [];
@@ -177,8 +193,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         const target = SURFACE_CHORD[e.key];
         if (target) {
           e.preventDefault();
-          setSurface(target);
-          setSettingsOpen(false); // jumping to a surface leaves Settings
+          // CTL-989: jumping to a surface is now a client-side route navigation
+          // (URL = source of truth). Preserve the current `?scope` (the search
+          // updater keeps the existing scope).
+          void navigate({ to: surfaceToPath(target), search: (prev) => prev });
         }
         chordArmed = false;
         clearTimeout(chordTimer);
@@ -190,7 +208,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       window.removeEventListener("keydown", onKey);
       clearTimeout(chordTimer);
     };
-  }, []);
+  }, [navigate]);
 
   // ⌘K / Ctrl+K and a bare `/` (outside a field) open the command palette — the
   // SINGLE search affordance for the shell (SHELL5 de-dups the prototype's two
@@ -225,25 +243,36 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // CTL-944: jumpTo now accepts a NavTarget (surface + scope) for project palette entries.
-  const jumpTo = useCallback((s: Surface, scope?: string) => {
-    setSurface(s);
-    if (scope !== undefined) setRepoScope(scope);
-    setSettingsOpen(false);
-    setPaletteOpen(false);
-  }, [setRepoScope]);
+  // CTL-944 / CTL-989: jumpTo navigates to the surface's route + writes the repo
+  // scope onto the URL `?scope` (the source of truth). The repoScopeAtom mirror
+  // effect keeps the atom in sync, so the dozen atom readers need no edit.
+  const jumpTo = useCallback(
+    (s: Surface, scope?: string) => {
+      void navigate({
+        to: surfaceToPath(s),
+        search: (prev) =>
+          scope !== undefined
+            ? { ...prev, scope: scope === "all" ? undefined : scope }
+            : prev,
+      });
+      setPaletteOpen(false);
+    },
+    [navigate],
+  );
 
   const openSettings = useCallback(() => {
-    setSettingsOpen(true);
+    void navigate({ to: SETTINGS_PATH, search: (prev) => prev });
     setPaletteOpen(false);
-  }, []);
+  }, [navigate]);
 
-  // The context's setSurface ALSO leaves Settings, so clicking an OPERATE nav
-  // item from the Settings surface returns to that surface (not a dead frame).
-  const selectSurface = useCallback((s: Surface) => {
-    setSurface(s);
-    setSettingsOpen(false);
-  }, []);
+  // CTL-989: clicking an OPERATE nav item navigates to that surface's route; the
+  // route change leaves Settings automatically (the path is no longer /settings).
+  const selectSurface = useCallback(
+    (s: Surface) => {
+      void navigate({ to: surfaceToPath(s), search: (prev) => prev });
+    },
+    [navigate],
+  );
 
   const surfaceCtx = useMemo(
     () => ({ surface, setSurface: selectSurface, settingsOpen, openSettings }),
@@ -319,12 +348,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           </header>
 
-          {/* The active surface renders edge-to-edge below the strip. The
-              Settings surface (CTL-911 / SURF3) takes over the inset when the
-              footer Settings item is open; otherwise the surface content
-              (children) renders. */}
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {settingsOpen ? <SettingsSurface /> : children}
+          {/* CTL-989: the matched ROUTE renders into the layout's content slot
+              (children === the router <Outlet/>). Settings is now the /settings
+              route, not an inset takeover. The slot is `flex flex-col min-h-0` so
+              the routed surface (a Board root with flex:1/height:100%) can fill
+              the full height of the inset content area (the board-height fix
+              chain — completed in Pass B). */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            {children}
           </div>
 
           {/* CTL-930: AppFooter carries the status cluster (LIVE badge + activity +

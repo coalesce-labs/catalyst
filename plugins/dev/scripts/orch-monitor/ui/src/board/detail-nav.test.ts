@@ -355,27 +355,23 @@ describe("Shell Esc-restore wiring (static source, CTL-951 deliverable c)", () =
   });
 });
 
-describe("CTL-971: shell reseats SURFACE + SCOPE on return (static source)", () => {
+// CTL-989 supersedes the CTL-971 surface-restore reseat. The board surface is
+// now a REAL URL path (/board), so browser Back / refresh reconstruct the
+// surface natively from the URL — there is no longer a full-doc nav to `/` that
+// reseeds the landing-pref Inbox, and no sessionStorage surface-reseat hack is
+// needed. AppShell DERIVES the active surface from the route (route-surface.ts)
+// instead of calling useSurfaceRestore. (The hook + its sessionStorage bridge
+// are fully deleted in Pass B; Pass A just stops the shell from invoking them.)
+describe("CTL-989: shell derives SURFACE from the route (static source)", () => {
   const appShellSrc = readFileSync(join(HERE, "..", "components", "app-shell.tsx"), "utf8");
-  const surfaceRestoreSrc = readFileSync(
-    join(HERE, "..", "hooks", "use-surface-restore.ts"),
-    "utf8",
-  );
 
-  it("AppShell invokes useSurfaceRestore with a surface setter + the scope setter", () => {
-    // This is the FIX for the dominant bug: the board surface is NOT in the URL, so a
-    // full-doc nav back to `/` reseeds the landing-pref Inbox. The shell-mount restore
-    // reseats the captured surface so the board actually mounts (and its own
-    // useBoardRestore can apply the scroll).
-    expect(appShellSrc).toContain("useSurfaceRestore(restoreSurface, setRepoScope)");
-    // Reseating a surface ALSO leaves Settings (mirrors the g-chord behavior).
-    expect(appShellSrc).toContain("setSettingsOpen(false)");
-  });
-
-  it("useSurfaceRestore PEEKS the snapshot (does not clear it — the board consumes it)", () => {
-    // It must NOT clear: the board-local useBoardRestore clears the snapshot after
-    // applying scroll + focus, so it must still be present when the board mounts.
-    expect(surfaceRestoreSrc).toContain("readListContext()");
-    expect(surfaceRestoreSrc).not.toContain("clearListContext");
+  it("AppShell derives the active surface from the route, not a surface-restore reseat", () => {
+    // The URL is the source of truth for location: pathnameToSurface maps the
+    // current pathname to a surface; navigation goes through router.navigate.
+    expect(appShellSrc).toContain("pathnameToSurface");
+    expect(appShellSrc).toContain("useRouterState");
+    expect(appShellSrc).toContain("useNavigate");
+    // The legacy surface-restore reseat is no longer wired into the shell.
+    expect(appShellSrc).not.toContain("useSurfaceRestore(");
   });
 });

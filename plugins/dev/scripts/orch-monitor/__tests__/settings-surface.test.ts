@@ -28,6 +28,10 @@ const shellSrc = read("components/app-shell.tsx");
 const sidebarSrc = read("components/app-sidebar.tsx");
 const surfaceSrc = read("lib/surface.ts");
 const cssSrc = read("app.css");
+// CTL-989: Settings is now the /settings ROUTE (mounted by the unified router
+// into the AppShell layout's <Outlet/>), not an inset takeover. The router-entry
+// wiring lives in app-router.tsx.
+const routerSrc = read("app-router.tsx");
 
 // ── Scenario: Settings nav item opens the preferences surface ─────────────────
 describe("Settings nav item opens the preferences surface (CTL-911)", () => {
@@ -39,11 +43,16 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
     expect(sidebarSrc).toContain("isActive={settingsOpen}");
   });
 
-  it("the shell renders SettingsSurface inside the SidebarInset when open", () => {
-    expect(shellSrc).toContain("SettingsSurface");
+  it("the unified router mounts SettingsSurface at the /settings route (CTL-989)", () => {
+    // CTL-989: Settings is the /settings route now — the router renders
+    // SettingsSurface into the AppShell layout's <Outlet/> (left nav stays),
+    // instead of the old `settingsOpen ? <SettingsSurface/> : children` inset
+    // takeover. The shell's content slot just renders the routed children, and
+    // `settingsOpen` is DERIVED from the route (pathname === "/settings").
+    expect(routerSrc).toContain("SettingsSurface");
+    expect(routerSrc).toContain("SETTINGS_PATH");
     expect(shellSrc).toContain("SidebarInset");
-    // settingsOpen ? <SettingsSurface /> : children — takes over the inset.
-    expect(shellSrc).toMatch(/settingsOpen\s*\?\s*<SettingsSurface\s*\/>\s*:\s*children/);
+    expect(shellSrc).toContain("const settingsOpen = derived === \"settings\"");
   });
 
   it("the surface presents grouped sections for Board defaults, Theme, and Shell prefs", () => {
@@ -135,9 +144,14 @@ describe("Shell preferences persist (CTL-911)", () => {
     expect(shellSrc).toContain("onOpenChange");
   });
 
-  it("the landing surface seeds the initial active surface from the pref", () => {
-    expect(shellSrc).toContain("readLandingSurface");
-    expect(shellSrc).toMatch(/useState<Surface>\(readLandingSurface\)/);
+  it("the landing surface seeds the first screen via the home route's beforeLoad (CTL-989)", () => {
+    // CTL-989: the landing pref no longer seeds React surface state — the URL is
+    // the source of truth. The home ("/") route's beforeLoad reads the persisted
+    // pref and redirects to a non-home landing surface on a fresh load. The
+    // Settings WRITE path (lib/prefs#writeLandingSurface) is unchanged.
+    expect(routerSrc).toContain("readLandingSurface");
+    expect(routerSrc).toMatch(/beforeLoad/);
+    expect(routerSrc).toMatch(/redirect\(\{\s*to:\s*surfaceToPath\(pref\)/);
   });
 
   it("Settings exposes the landing-surface control and writes it through lib/prefs", () => {

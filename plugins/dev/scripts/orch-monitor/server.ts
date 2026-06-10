@@ -256,23 +256,46 @@ import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
-// CTL-942: detail-page deep links. The /ticket/$id and /worker/$id routes live
-// in the TanStack router mounted by the BOARD entry (board.html →
-// src/board/main.tsx → AppRouter) — index.html's shell App mounts no router —
-// so a hard navigation / refresh / shared link must be answered with board.html
-// for the route to render at all. Scope is deliberately tight: exactly one
-// non-empty path segment after /ticket or /worker, and the segment must not
-// look like an asset (no "." extension) so a mistyped asset URL keeps 404ing
-// instead of receiving html. /api/* and /events* can never match (the
-// ^/(ticket|worker)/ prefix excludes them by construction).
+// CTL-942: detail-page deep links. The /ticket/$id and /worker/$id routes are
+// SPA routes — a hard navigation / refresh / shared link must be answered with
+// the app HTML (index.html, see CTL-989) for the route to render at all. Scope
+// is deliberately tight: exactly one non-empty path segment after /ticket or
+// /worker, and the segment must not look like an asset (no "." extension) so a
+// mistyped asset URL keeps 404ing instead of receiving html. /api/* and /events*
+// can never match (the ^/(ticket|worker)/ prefix excludes them by construction).
 //
-// CTL-959: /dep-graph is also a board-entry route (mounted by AppRouter in
-// board.html via src/board/main.tsx). Hard navigation / refresh must serve
-// board.html rather than 404ing.
+// CTL-959: /dep-graph is also a deep-linkable SPA route.
 export function isDetailDeepLinkPath(pathname: string): boolean {
   if (pathname === "/dep-graph") return true;
   const m = /^\/(ticket|worker)\/([^/]+)$/.exec(pathname);
   return m != null && !m[2].includes(".");
+}
+
+// CTL-989: the SINGLE unified TanStack Router is mounted from index.html and
+// owns EVERY app route — every surface is now a real path. `isAppRoute`
+// generalizes `isDetailDeepLinkPath` into the full SPA-fallback predicate: a
+// hard navigation / refresh / shared link to ANY app route must be answered with
+// index.html (the unified router boots, reads the URL, and lands on the right
+// surface/detail page). The flat surface paths are an explicit allowlist; the
+// detail/dep-graph paths reuse isDetailDeepLinkPath. /api/*, /events*, /public/*,
+// /assets/*, /mockups/* and any asset-looking segment are excluded (they are
+// served by their own handlers; this predicate only matches clean app paths).
+const APP_SURFACE_PATHS: ReadonlySet<string> = new Set([
+  "/",
+  "/index.html",
+  "/board",
+  "/workers",
+  "/queue",
+  "/telemetry",
+  "/utilization",
+  "/finops",
+  "/fleetops",
+  "/devops",
+  "/settings",
+]);
+export function isAppRoute(pathname: string): boolean {
+  if (APP_SURFACE_PATHS.has(pathname)) return true;
+  return isDetailDeepLinkPath(pathname);
 }
 
 export interface CreateServerOptions {
@@ -2467,33 +2490,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return new Response("index.html not found", { status: 500 });
         }
 
-        // CTL-892 / SHELL2: the standalone board is no longer at root, but stays
-        // reachable as a legacy/fallback entry. It's still built (vite `board`
-        // input) and owns the board deep-link routes until those migrate into the
-        // shell router in a later SHELL/FND ticket.
-        if (url.pathname === "/board" || url.pathname === "/board.html") {
-          const file = Bun.file(join(publicDir, "board.html"));
+        // CTL-989: the unified SPA fallback. EVERY app route — the flat surface
+        // paths (/board, /workers, /queue, /telemetry, /utilization, /finops,
+        // /fleetops, /devops, /settings) AND the detail/dep-graph deep links
+        // (/ticket/$id, /worker/$id, /dep-graph) — is served by the ONE TanStack
+        // Router mounted from index.html. A hard navigation / refresh / shared
+        // link to any of them serves index.html; the router boots, reads the URL,
+        // and lands on the right surface or detail page. (`/` and `/index.html`
+        // are handled by the dedicated block above; `/legacy` + `/history` keep
+        // their own handlers below.) Vite emits absolute /assets/* paths, so the
+        // nested /ticket/$id pathname is safe. GET-only: a POST to an app path is
+        // not the SPA entry.
+        if (req.method === "GET" && isAppRoute(url.pathname)) {
+          const file = Bun.file(join(publicDir, "index.html"));
           if (await file.exists()) {
             return new Response(file, {
               headers: { "Content-Type": "text/html; charset=utf-8" },
             });
           }
-          return new Response("board.html not found", { status: 500 });
-        }
-
-        // CTL-942: SPA fallback for detail-page deep links (/ticket/$id,
-        // /worker/$id). Serve board.html — the entry that carries the deep-link
-        // router (index.html's shell App mounts none) — so hard navigation,
-        // refresh, and shared links render the detail pages instead of 404ing.
-        // Vite emits absolute /assets/* paths, so the nested pathname is safe.
-        if (req.method === "GET" && isDetailDeepLinkPath(url.pathname)) {
-          const file = Bun.file(join(publicDir, "board.html"));
-          if (await file.exists()) {
-            return new Response(file, {
-              headers: { "Content-Type": "text/html; charset=utf-8" },
-            });
-          }
-          return new Response("board.html not found", { status: 500 });
+          return new Response("index.html not found", { status: 500 });
         }
 
         if (
