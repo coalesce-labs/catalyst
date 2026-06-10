@@ -32,7 +32,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.7",
-    "@types/dagre": "^0.7.54",
     "@types/lodash.throttle": "^4.1.9",
     "@types/react": "^19.1.4",
     "@types/react-dom": "^19.1.5",

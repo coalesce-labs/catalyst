@@ -83,6 +83,18 @@ function applyDagreLayout(
   });
 }
 
+// ── scope label helpers ──────────────────────────────────────────────────────
+// Maps the raw scope string stored on BoardTicket to the 2-letter display abbr
+// used everywhere else in the board (e.g. Board.tsx SCOPE_ABBR). Raw values
+// come from Linear's estimate field as lowercase size names.
+const SCOPE_ABBR: Record<string, string> = {
+  xs: "XS",
+  small: "S",
+  medium: "M",
+  large: "L",
+  xl: "XL",
+};
+
 // ── shared node color helpers ────────────────────────────────────────────────
 function phaseColor(phase: string): string {
   return PHASE[phase] ?? C.fgDim;
@@ -91,6 +103,7 @@ function phaseColor(phase: string): string {
 // ── TicketNode custom React Flow node ────────────────────────────────────────
 // A compact card: ID monospace chip · title truncated · scope/estimate badge.
 // Colored left-border uses the phase color. Used in both graph variants.
+// `terminal` = true for Done/excluded tickets included only to anchor an edge.
 interface TicketNodeData {
   id: string;
   title: string;
@@ -98,23 +111,25 @@ interface TicketNodeData {
   estimate: number | null;
   scope: string | null;
   focused?: boolean;
+  terminal?: boolean; // Done/excluded node — dimmed, exists only to draw edges
   [key: string]: unknown;
 }
 
 function TicketNode({ data }: { data: TicketNodeData }) {
-  const pc = phaseColor(data.phase);
+  const pc = data.terminal ? C.fgDim : phaseColor(data.phase);
   const scopeLabel = data.estimate != null
     ? `${data.estimate}pt`
     : data.scope
-    ? data.scope.toUpperCase().slice(0, 2)
+    ? (SCOPE_ABBR[data.scope.toLowerCase()] ?? data.scope.toUpperCase().slice(0, 2))
     : null;
 
   return (
     <div
       style={{
-        background: data.focused ? C.s3 : C.s2,
+        background: data.terminal ? C.s1 : data.focused ? C.s3 : C.s2,
         border: `1px solid ${data.focused ? pc : C.border}`,
         borderLeft: `3px solid ${pc}`,
+        opacity: data.terminal ? 0.55 : 1,
         borderRadius: 7,
         padding: "7px 10px",
         width: NODE_WIDTH,
@@ -224,29 +239,42 @@ export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => {
     const nodes: Node[] = [];
     const edges: Edge[] = [];
+    const addedNodeIds = new Set<string>();
 
-    for (const id of participating) {
+    // Helper: add a node (idempotent by addedNodeIds)
+    function addNode(id: string, terminal: boolean) {
+      if (addedNodeIds.has(id)) return;
+      addedNodeIds.add(id);
       const t = ticketById.get(id);
-      if (!t) continue;
       nodes.push({
-        id: t.id,
+        id,
         type: "ticket",
         position: { x: 0, y: 0 }, // dagre fills this
         data: {
-          id: t.id,
-          title: t.title,
-          phase: t.phase,
-          estimate: t.estimate,
-          scope: t.scope,
+          id,
+          title: t?.title ?? id, // fallback to id for completely unknown tickets
+          phase: t?.phase ?? "done",
+          estimate: t?.estimate ?? null,
+          scope: t?.scope ?? null,
+          terminal,
         } satisfies TicketNodeData,
       });
+    }
+
+    for (const id of participating) {
+      addNode(id, false);
+      const t = ticketById.get(id);
 
       // Edge from each blocker → this ticket (blocker must execute first → left of target)
-      for (const blockerId of t.blockers ?? []) {
-        // Only draw the edge if both ends are in the graph
-        if (participating.has(blockerId)) {
-          edges.push(makeEdge(blockerId, t.id));
+      for (const blockerId of t?.blockers ?? []) {
+        if (!addedNodeIds.has(blockerId)) {
+          // Blocker is not in participating set (Done/excluded) — add as terminal node
+          // so the edge has both endpoints and actually renders.
+          if (!participating.has(blockerId)) {
+            addNode(blockerId, true);
+          }
         }
+        edges.push(makeEdge(blockerId, id));
       }
     }
 

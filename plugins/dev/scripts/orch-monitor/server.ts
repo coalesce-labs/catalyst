@@ -244,7 +244,12 @@ type BunServer = ReturnType<typeof Bun.serve>;
 // look like an asset (no "." extension) so a mistyped asset URL keeps 404ing
 // instead of receiving html. /api/* and /events* can never match (the
 // ^/(ticket|worker)/ prefix excludes them by construction).
+//
+// CTL-959: /dep-graph is also a board-entry route (mounted by AppRouter in
+// board.html via src/board/main.tsx). Hard navigation / refresh must serve
+// board.html rather than 404ing.
 export function isDetailDeepLinkPath(pathname: string): boolean {
+  if (pathname === "/dep-graph") return true;
   const m = /^\/(ticket|worker)\/([^/]+)$/.exec(pathname);
   return m != null && !m[2].includes(".");
 }

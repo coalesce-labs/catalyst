@@ -44,6 +44,16 @@ describe("isDetailDeepLinkPath (CTL-942)", () => {
     expect(isDetailDeepLinkPath("/events")).toBe(false);
     expect(isDetailDeepLinkPath("/tickets/CTL-845")).toBe(false);
   });
+
+  // CTL-959: /dep-graph is a board-entry route (same AppRouter as /ticket, /worker)
+  it("matches /dep-graph for hard-nav SPA fallback (CTL-959)", () => {
+    expect(isDetailDeepLinkPath("/dep-graph")).toBe(true);
+  });
+
+  it("does not match /dep-graph/ with trailing slash or sub-paths", () => {
+    expect(isDetailDeepLinkPath("/dep-graph/")).toBe(false);
+    expect(isDetailDeepLinkPath("/dep-graph/sub")).toBe(false);
+  });
 });
 
 // ── Served fallback (integration through createServer) ──────────────────────
@@ -128,5 +138,22 @@ describe("GET /ticket/$id and /worker/$id SPA fallback (CTL-942)", () => {
       expect(res.headers.get("content-type")).toContain("text/html");
       expect(await res.text()).toBe(body);
     }
+  });
+});
+
+// CTL-959: /dep-graph SPA fallback — hard navigation must serve board.html
+describe("GET /dep-graph SPA fallback (CTL-959)", () => {
+  it("serves board.html for a hard navigation to /dep-graph", async () => {
+    const res = await fetch(`${baseUrl}/dep-graph`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toBe(BOARD_HTML);
+  });
+
+  it("does not serve board.html for /dep-graph/ or /dep-graph/sub", async () => {
+    const trailing = await fetch(`${baseUrl}/dep-graph/`);
+    expect(trailing.status).toBe(404);
+    const nested = await fetch(`${baseUrl}/dep-graph/sub`);
+    expect(nested.status).toBe(404);
   });
 });
