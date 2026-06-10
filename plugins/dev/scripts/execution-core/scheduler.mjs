@@ -2316,6 +2316,12 @@ export function schedulerTick(
         case "revived":
           revived.push(entry);
           break;
+        case "wedged-redispatched":
+          // CTL-932: a turn-zero-wedged worker (registered, never started its
+          // first turn) was stopped and replaced via the revive path. Bucket
+          // with revived — a replacement worker is now live for the phase.
+          revived.push(entry);
+          break;
         case "revive-suppressed":
           // CTL-736: the revive event could not be persisted (audit-append failure)
           // so the dispatch was skipped to preserve the attempt counter; retries

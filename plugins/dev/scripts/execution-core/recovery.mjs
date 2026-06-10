@@ -34,6 +34,7 @@ import {
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
   ZOMBIE_STALE_FLOOR_MS,
+  NEVER_STARTED_MS,
 } from "./config.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -41,8 +42,9 @@ import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-read
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
-import { claudeStop, getAgentsCached, agentForShortId } from "./claude-agents.mjs";
+import { claudeStop, getAgentsCached, agentForShortId, claudeLogs } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { findTranscript, defaultProjectsDir } from "./session-recency.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import {
   WORK_DONE_PROBES,
@@ -118,6 +120,14 @@ export function resolvePhaseSessionId(
 // Claude stamps it the moment a job reaches a terminal lifecycle state, so
 // jobLifecycle can declare death even when the .state string is one we don't
 // enumerate. Null for a live/non-terminal job (and when state.json is unreadable).
+//
+// CTL-932: also parse tempo / detail / needs — the CC supervisor's self-report.
+// On 2026-06-09 every wedged-never-started worker's state.json read
+// state:"working" (alive forever) while tempo:"blocked" + detail:"stuck on a
+// startup dialog" + needs:"open this session to continue setup" sat UNREAD in
+// the same file all day. They are observability fields (logged by the reclaim
+// sweep), deliberately NOT a death trigger — the turn-zero gate keys on the
+// transcript + fresh agents-snapshot state instead.
 export function defaultStatJob(bgJobId) {
   const file = join(getJobsRoot(), bgJobId, "state.json");
   let st;
@@ -128,14 +138,20 @@ export function defaultStatJob(bgJobId) {
   }
   let state = null;
   let firstTerminalAt = null;
+  let tempo = null;
+  let detail = null;
+  let needs = null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     state = parsed?.state ?? null;
     firstTerminalAt = parsed?.firstTerminalAt ?? null;
+    tempo = parsed?.tempo ?? null;
+    detail = parsed?.detail ?? null;
+    needs = parsed?.needs ?? null;
   } catch {
     /* state.json unreadable — liveness still proven by the dir existing */
   }
-  return { exists: true, mtimeMs: st.mtimeMs, state, firstTerminalAt };
+  return { exists: true, mtimeMs: st.mtimeMs, state, firstTerminalAt, tempo, detail, needs };
 }
 
 // CTL-736 Phase 2 — the authoritative job-lifecycle terminal states. These are
@@ -395,6 +411,145 @@ export function defaultAppendOrphanDetectedEvent({
   );
 }
 
+// ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
+//
+// A wedged-never-started worker registered with CC but never resolved its
+// slash-command prompt ("Unknown command: /catalyst-dev:phase-*") — it idles
+// forever at an empty input prompt holding a concurrency slot while every
+// existing guard reads it "alive" (state.json state:"working"; LISTED in the
+// agents snapshot, so the ghost breaker suppresses). The gate's evidence is
+// the conjunction the 2026-06-09 incident proved: dispatch age past
+// NEVER_STARTED_MS ∧ NO transcript file ∧ FRESH agents-snapshot state
+// "blocked". See thoughts/shared/research/
+// 2026-06-09-execution-core-fable-root-cause-and-architecture.md (A1/A2 +
+// Appendix 2 "minimal turn-zero gate").
+
+// How many stop+replace attempts the gate makes before declaring the
+// environment broken (marketplace wedge, plugin-registration race) and
+// escalating needs-human instead of looping. Replacement N+1 only happens if
+// replacement N ALSO wedged, so 2 ineffective replacements = 3 wedged spawns.
+export const NEVER_STARTED_ATTEMPT_CAP = 2;
+
+// Captures stored in the durable attempt marker are truncated so the marker
+// (and the final escalation payload aggregating all of them) stays bounded.
+const NEVER_STARTED_CAPTURE_CAP = 2_000;
+
+// neverStartedAttemptsPath — the durable per-(ticket, phase) attempt marker,
+// living in the worker dir like the .revive-N / .progress-<phase> crumbs.
+export function neverStartedAttemptsPath(orchDir, ticket, phase) {
+  return join(orchDir, "workers", ticket, `.never-started-${phase}.json`);
+}
+
+// defaultReadNeverStartedAttempts — {count, captures[]}. Fail-open to zero
+// attempts on a missing/corrupt marker (the conservative direction: the gate
+// retries a replacement rather than falsely escalating).
+export function defaultReadNeverStartedAttempts(orchDir, ticket, phase) {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(neverStartedAttemptsPath(orchDir, ticket, phase), "utf8"),
+    );
+    const count = Number.isInteger(parsed?.count) && parsed.count > 0 ? parsed.count : 0;
+    const captures = Array.isArray(parsed?.captures)
+      ? parsed.captures.filter((c) => typeof c === "string")
+      : [];
+    return { count, captures };
+  } catch {
+    return { count: 0, captures: [] };
+  }
+}
+
+// defaultRecordNeverStartedAttempt — increment the durable count and retain the
+// (truncated) screen capture so the final escalation can carry the captures
+// from ALL attempts. Atomic tmp+rename; fail-open (a write failure costs one
+// extra replacement attempt, never a throw out of the reclaim sweep).
+export function defaultRecordNeverStartedAttempt(orchDir, ticket, phase, capture) {
+  try {
+    const prev = defaultReadNeverStartedAttempts(orchDir, ticket, phase);
+    const p = neverStartedAttemptsPath(orchDir, ticket, phase);
+    mkdirSync(dirname(p), { recursive: true });
+    const next = {
+      count: prev.count + 1,
+      captures: [
+        ...prev.captures,
+        String(capture ?? "").slice(0, NEVER_STARTED_CAPTURE_CAP),
+      ],
+      updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    };
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2));
+    renameSync(tmp, p);
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker write failed");
+  }
+}
+
+// defaultTranscriptExists — does the session's transcript JSONL exist? A
+// healthy session creates it ~0.3s after its first turn (session-recency.mjs);
+// absence minutes after dispatch means the prompt was never processed — the
+// cleanest never-started detector (research Appendix 2).
+export function defaultTranscriptExists(sessionId, { projectsDir = defaultProjectsDir() } = {}) {
+  if (!sessionId) return false;
+  return findTranscript(sessionId, projectsDir) !== null;
+}
+
+// defaultCaptureWedgeLogs — `claude logs <shortId>`: the rendered screen, the
+// only surface that shows WHY the session idles (the "Unknown command" banner).
+// Captured BEFORE the stop (stopping destroys the buffer) and embedded in the
+// escalation event so the cause is visible without archaeology. Best-effort:
+// "" on any failure.
+export function defaultCaptureWedgeLogs(bgJobId, { logs = claudeLogs } = {}) {
+  if (!bgJobId) return "";
+  let shortId;
+  try {
+    shortId = shortIdFromSessionId(bgJobId);
+  } catch {
+    return "";
+  }
+  const res = logs(shortId);
+  return res?.ok ? res.output : "";
+}
+
+// defaultAppendWedgedNeverStartedEvent —
+// phase.<phase>.wedged-never-started.<TICKET>. The per-attempt escalation
+// event: carries the captured screen (captured_logs), the attempt ordinal, and
+// the state.json/agents-snapshot self-reports the diagnosis keyed on. Audit-
+// only (not in the broker's PHASE_EVENT_PATTERN). Exported for the round-trip
+// envelope test.
+export function defaultAppendWedgedNeverStartedEvent({
+  phase,
+  ticket,
+  orchId,
+  attempt,
+  bg_job_id = null,
+  agents_state = null,
+  tempo = null,
+  detail = null,
+  needs = null,
+  captured_logs = "",
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "wedged-never-started",
+      reason: "no-transcript-and-agents-blocked",
+      payloadExtras: {
+        attempt,
+        bg_job_id,
+        agents_state,
+        tempo,
+        detail,
+        needs,
+        captured_logs,
+        title: `phase ${phase} worker wedged at turn zero (attempt ${attempt})`,
+        body: `Worker for ${ticket} ${phase} registered but never started its first turn (no transcript; agents state=blocked). Stopped and replaced via the revive path. Captured screen:\n\n${captured_logs}`,
+      },
+    }),
+    "wedged-never-started",
+  );
+}
+
 // CTL-664: post the reclaim Linear mirror the skill End block would have posted
 // had the worker survived. Marker-guarded by the SHARED .linear-mirror-<phase>
 // (first-writer-wins: if the skill already mirrored, the marker exists and we
@@ -540,7 +695,10 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
   );
 }
 
-function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count }) {
+// CTL-932: `extras` rides into the payload so an escalation can carry evidence
+// (the wedged-never-started cap escalation embeds the screen captures from all
+// attempts). Absent for every pre-existing caller — shape unchanged.
+function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count, extras = {} }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
@@ -548,7 +706,7 @@ function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_atte
       orchId,
       action: "escalated",
       reason,
-      payloadExtras: { final_attempt_count },
+      payloadExtras: { final_attempt_count, ...extras },
     }),
     "escalated",
   );
@@ -1359,9 +1517,19 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 //   'inert-stale'         reclaim-eligible + work NOT done + the signal is older
 //                         than reviveMaxAgeMs — an abandoned historical dir, left
 //                         inert (no revive, no escalate). (CTL-735, kept.)
+//   'wedged-redispatched' CTL-932 turn-zero gate: an `alive` worker past
+//                         NEVER_STARTED_MS with NO transcript and a FRESH
+//                         agents-snapshot state of "blocked" never started its
+//                         first turn. Screen captured into the wedged event,
+//                         session stopped, signal flipped through reviveDispatch
+//                         (replacement worker). Durable attempt marker bumped;
+//                         past NEVER_STARTED_ATTEMPT_CAP the gate escalates
+//                         needs-human ('escalated', reason
+//                         wedged-never-started-exhausted) instead of looping.
 //   'escalated' / 'escalation-suppressed'
 //                         an `alive` worker past BUSY_CEILING_MS with no committed
-//                         work (the backstop), behind the CTL-638 cool-down.
+//                         work (the backstop), behind the CTL-638 cool-down — or
+//                         the CTL-932 wedge cap above.
 //   'superseded-noop'     reclaim-eligible BUT the signal's phase precedes the
 //                         ticket's latest-dispatched phase (CTL-606). A reap-intent
 //                         is emitted so the reaper stops the bg.
@@ -1430,6 +1598,20 @@ export function reclaimDeadWorkIfPossible(
     // registered fresh spawn — CTL-662-safe; a busy fan-out worker stays LISTED).
     agentsSnapshot = getAgentsCached,
     ghostGraceMs = GHOST_GRACE_MS,
+    // CTL-932 — TURN-ZERO GATE seams. A jobLifecycle-alive worker past
+    // neverStartedMs whose session has NO transcript AND whose FRESH agents-
+    // snapshot state is "blocked" never started its first turn: stop it,
+    // capture `claude logs` into the escalation event, and replace it through
+    // the normal revive/redispatch path — bounded by a durable per-(ticket,
+    // phase) attempt marker; past the cap, escalate needs-human instead of
+    // looping. All injectable; production defaults are the real primitives.
+    neverStartedMs = NEVER_STARTED_MS,
+    transcriptExists = defaultTranscriptExists,
+    captureWedgeLogs = defaultCaptureWedgeLogs,
+    appendWedgedEvent = defaultAppendWedgedNeverStartedEvent,
+    readNeverStartedAttempts = defaultReadNeverStartedAttempts,
+    recordNeverStartedAttempt = defaultRecordNeverStartedAttempt,
+    wedgeAttemptCap = NEVER_STARTED_ATTEMPT_CAP,
     // CTL-868 — zombie state.json staleness floor (the GHOST BREAKER's fallback
     // for when no FRESH `claude agents` snapshot is available, e.g. the headless
     // mini where CTL-829 makes `claude agents` unreliable). A `working` job whose
@@ -1511,15 +1693,21 @@ export function reclaimDeadWorkIfPossible(
   // CTL-662 removed it from every DECISION branch — it is telemetry, not a
   // trigger. Best-effort: a missing job dir (real crash) just leaves it null.
   let prevStateJsonMtime = null;
+  // CTL-932: keep the FULL statJob read so the supervisor's self-report fields
+  // (tempo/detail/needs — previously never read) reach the logs below.
+  let jobStat = null;
   if (signal?.liveness?.value) {
-    const job = statJob(signal.liveness.value);
-    if (job && typeof job.mtimeMs === "number") prevStateJsonMtime = job.mtimeMs;
+    jobStat = statJob(signal.liveness.value);
+    if (jobStat && typeof jobStat.mtimeMs === "number") prevStateJsonMtime = jobStat.mtimeMs;
   }
 
   // CTL-638 — escalation helper (unchanged): wraps appendEscalatedEvent +
   // applyStalledLabel in a per-(ticket, phase) cool-down so the same escalation
   // cannot re-fire within the window (the pre-CTL-638 self-feeding storm).
-  function escalateOnce(reason, finalAttemptCount) {
+  // CTL-932: `extras` (optional) rides evidence into the escalated event
+  // payload (e.g. the wedge screen captures). Cool-down/breaker behaviour is
+  // untouched.
+  function escalateOnce(reason, finalAttemptCount, extras) {
     // CTL-679 — while the Linear breaker is open we are rate-limited; the
     // needs-human apply would 429 and write no marker, re-firing every tick.
     // Defer: skip the audit event + label write entirely (no cool-down record,
@@ -1541,6 +1729,7 @@ export function reclaimDeadWorkIfPossible(
       orchId,
       reason,
       final_attempt_count: finalAttemptCount,
+      ...(extras ? { extras } : {}),
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
@@ -1683,6 +1872,114 @@ export function reclaimDeadWorkIfPossible(
     }
 
     const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
+
+    // ── CTL-932 — TURN-ZERO GATE. A worker can register with CC but never
+    // resolve its slash-command prompt ("Unknown command:
+    // /catalyst-dev:phase-*"): it idles forever at an empty input prompt. Every
+    // other guard is blind to this class — state.json stays state:"working"
+    // (jobLifecycle alive forever), the session IS listed (ghost breaker
+    // suppresses), and the 6h busy-ceiling is label-only. Evidence conjunction
+    // (all three required; any doubt → fall through, no-op):
+    //   1. dispatch age > neverStartedMs (default 120s; a healthy session
+    //      creates its transcript ~0.3s after the first turn);
+    //   2. NO transcript file for the session (the cleanest wedge detector);
+    //   3. FRESH agents-snapshot state === "blocked" (the listing's signature
+    //      of registered-but-prompt-never-resolved).
+    // INVARIANT: the committed-work probe runs BEFORE any kill — a worker with
+    // committed work is never touched here (existing paths own it). Dead
+    // workers never reach this branch (lifecycle === "alive" only), and a
+    // worker WITH a transcript falls through untouched.
+    if (
+      prevBgJobId &&
+      Number.isFinite(startedAtMs) &&
+      now() - startedAtMs > neverStartedMs
+    ) {
+      let wedgeShortId = null;
+      try {
+        wedgeShortId = shortIdFromSessionId(prevBgJobId);
+      } catch {
+        wedgeShortId = null; // malformed bg_job_id → cannot prove → no-op
+      }
+      if (wedgeShortId) {
+        const snap = agentsSnapshot();
+        const agent = snap?.isFresh ? agentForShortId(wedgeShortId, snap.agents) : null;
+        if (agent && agent.state === "blocked") {
+          const sessionId = resolveSession(prevBgJobId);
+          if (!transcriptExists(sessionId)) {
+            // Committed-work probe BEFORE any kill (the invariant): committed
+            // work means this is NOT a never-started worker — leave it to the
+            // existing alive-branch paths.
+            const workCommitted = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
+            if (!workCommitted) {
+              // Capture the rendered screen BEFORE stopping (stop destroys it)
+              // so the escalation event shows the cause without archaeology.
+              const captured = captureWedgeLogs(prevBgJobId);
+              const attempts = readNeverStartedAttempts(orchDir, ticket, phase);
+              if (attempts.count >= wedgeAttemptCap) {
+                // Replacements keep wedging — the environment is broken
+                // (marketplace wedge / plugin-registration race). Stop the
+                // corpse (it holds a slot) and page a human with the screen
+                // captures from ALL attempts instead of looping.
+                killBgJob({ bgJobId: prevBgJobId });
+                log.warn(
+                  { ticket, phase, prevBgJobId, attempts: attempts.count, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+                  "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)",
+                );
+                return escalateOnce("wedged-never-started-exhausted", attempts.count, {
+                  bg_job_id: prevBgJobId,
+                  captured_logs_all_attempts: [
+                    ...attempts.captures,
+                    String(captured ?? "").slice(0, 2_000),
+                  ],
+                });
+              }
+              const attempt = attempts.count + 1;
+              appendWedgedEvent({
+                phase,
+                ticket,
+                orchId,
+                attempt,
+                bg_job_id: prevBgJobId,
+                agents_state: agent.state,
+                tempo: jobStat?.tempo ?? null,
+                detail: jobStat?.detail ?? null,
+                needs: jobStat?.needs ?? null,
+                captured_logs: captured,
+              });
+              recordNeverStartedAttempt(orchDir, ticket, phase, captured);
+              // Stop the wedged session (reap-intent for the reaper + inline
+              // best-effort stop, mirroring the no-progress STOP path), then
+              // flip the signal through the normal revive/redispatch path
+              // (reset-to-stalled + fresh dispatch, gen+1). Backoff is
+              // structural: the replacement's fresh startedAt keeps the gate
+              // silent for another neverStartedMs window.
+              emitReapIntent("phase.terminal.reap-requested", {
+                ticket,
+                phase,
+                bgJobId: prevBgJobId,
+                worktreePath: signal.raw?.worktreePath,
+                reason: "ctl-932-wedged-never-started",
+              }).catch(() => {});
+              killBgJob({ bgJobId: prevBgJobId });
+              const dr = reviveDispatch({ orchDir, ticket, phase, resumeSession: null, attempt: attempt + 1 });
+              if (dr.code === 0) {
+                log.warn(
+                  { ticket, phase, prevBgJobId, attempt, ageMs: now() - startedAtMs, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+                  "ctl-932: wedged-never-started worker stopped and replaced (no transcript + agents blocked)",
+                );
+              } else {
+                log.warn(
+                  { ticket, phase, attempt, code: dr.code, stderr: dr.stderr },
+                  "ctl-932: wedged replacement dispatch failed; will retry next tick",
+                );
+              }
+              return "wedged-redispatched";
+            }
+          }
+        }
+      }
+    }
+
     if (Number.isFinite(startedAtMs) && now() - startedAtMs > busyCeilingMs) {
       const workDone = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
       if (!workDone) {
@@ -1758,7 +2055,12 @@ export function reclaimDeadWorkIfPossible(
       }
     }
     if (!ghostAbsent) {
-      log.info({ ticket, phase, prevBgJobId }, "ctl-736: alive worker — reclaim suppressed");
+      // CTL-932: surface the supervisor's self-report (tempo/detail/needs) —
+      // the fields that contained the 2026-06-09 diagnosis but were never read.
+      log.info(
+        { ticket, phase, prevBgJobId, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+        "ctl-736: alive worker — reclaim suppressed",
+      );
       return "alive-suppressed";
     }
     // ghostAbsent → fall through to the dead-eligible reclaim path below (supersede
