@@ -167,7 +167,7 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
             DETAIL7 (CTL-918): the resident workers are passed so the active spine
             node can resolve its running phase's sessionId and tail the live
             stream (the same BFF SSE the worker [live] tab consumes). */}
-        <TicketDetailPage ticket={ticket} workers={payload?.workers ?? []} />
+        <TicketDetailPage ticket={ticket} workers={payload?.workers ?? []} tickets={payload?.tickets ?? []} />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "ticket", id }} />
     </>

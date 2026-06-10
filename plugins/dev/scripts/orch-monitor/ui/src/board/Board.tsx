@@ -822,6 +822,9 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
 // ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
 // CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
 // Queue is now its own left-nav destination (QueueSurface), never a board view.
+// CTL-948: "graph" is not a Board view — it navigates to the /dep-graph route;
+// the Board exposes `onDepGraph` so BoardRoot (router.tsx) can inject the
+// navigate() callback without leaking router coupling into the component.
 type View = "tickets" | "workers";
 // WorkerGrouping ("status" | "phase" | "node") is now owned by worker-grouping.ts
 // (CTL-909 / SURF1) so the column derivation + the type stay in lock-step.
@@ -848,7 +851,8 @@ export function Board({
   view: viewProp,
   onViewChange,
   onWorkerSelect,
-}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onWorkerSelect?: (name: string) => void } = {}) {
+  onDepGraph,
+}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onWorkerSelect?: (name: string) => void; onDepGraph?: () => void } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [viewInternal, setViewInternal] = useState<View>("tickets");
@@ -958,6 +962,22 @@ export function Board({
               />
             )}
           </>}
+          {/* CTL-948: dep-graph link — only shown when a navigate callback is
+              wired (BoardRoot in router.tsx injects it; embedded callers that
+              don't mount the router leave it absent, so no broken link). */}
+          {onDepGraph && (
+            <button
+              onClick={onDepGraph}
+              style={{
+                fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
+                background: "transparent", border: `1px solid ${C.border}`,
+                color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
+              }}
+              title="Open backlog dependency graph"
+            >
+              Dep Graph
+            </button>
+          )}
         </div>
 
         {/* body */}
