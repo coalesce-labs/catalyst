@@ -111,6 +111,33 @@ function mkTicket(id: string, blockers: string[] = []): BoardTicket {
   };
 }
 
+/**
+ * Computes the full set of node IDs that BacklogDepGraph renders — including
+ * "terminal" blocker nodes whose IDs appear in some ticket's blockers[] but
+ * are not themselves present in the `tickets` array (Done / excluded).
+ * Mirrors the CTL-959 fix: edges must have both endpoints in the graph.
+ */
+function participatingWithTerminals(tickets: BoardTicket[]): { participating: Set<string>; terminals: Set<string> } {
+  const rev = buildReverseIndex(tickets);
+  const p = new Set<string>();
+  for (const t of tickets) {
+    if ((t.blockers?.length ?? 0) > 0 || rev.has(t.id)) {
+      p.add(t.id);
+    }
+  }
+  const ticketIds = new Set(tickets.map((t) => t.id));
+  const terminals = new Set<string>();
+  for (const id of p) {
+    const t = tickets.find((x) => x.id === id);
+    for (const blockerId of t?.blockers ?? []) {
+      if (!p.has(blockerId) && !ticketIds.has(blockerId)) {
+        terminals.add(blockerId);
+      }
+    }
+  }
+  return { participating: p, terminals };
+}
+
 // ── BacklogDepGraph: participating set ───────────────────────────────────────
 describe("BacklogDepGraph — participating ticket filter", () => {
   it("returns empty set when no tickets have dep relations", () => {
@@ -136,6 +163,37 @@ describe("BacklogDepGraph — participating ticket filter", () => {
   it("does not crash on empty blockers array", () => {
     const tickets = [mkTicket("X", []), mkTicket("Y", [])];
     expect(participating(tickets).size).toBe(0);
+  });
+});
+
+// ── BacklogDepGraph: terminal (Done/excluded) blocker nodes ──────────────────
+// CTL-959: edges need both endpoints. When a blocker is Done and excluded from
+// the payload, the component must add a "terminal" dimmed node so the edge
+// actually renders instead of being silently skipped.
+describe("BacklogDepGraph — terminal nodes for Done/excluded blockers (CTL-959)", () => {
+  it("detects a terminal node when a blocker is not in the tickets list", () => {
+    // B is blocked by A, but A was Done and is absent from the payload.
+    const tickets = [mkTicket("B", ["A"])];
+    const { participating: p, terminals } = participatingWithTerminals(tickets);
+    expect(p.has("B")).toBe(true);   // B participates (it has a blocker)
+    expect(terminals.has("A")).toBe(true); // A is a terminal (referenced but absent)
+  });
+
+  it("does not add terminal nodes when the blocker IS in the payload", () => {
+    const tickets = [mkTicket("A"), mkTicket("B", ["A"])];
+    const { participating: p, terminals } = participatingWithTerminals(tickets);
+    expect(p.has("A")).toBe(true);
+    expect(terminals.size).toBe(0); // A is present — no terminals needed
+  });
+
+  it("handles mixed: some blockers present, some Done/excluded", () => {
+    // C blocked by both A (present) and GONE (absent)
+    const tickets = [mkTicket("A"), mkTicket("C", ["A", "GONE"])];
+    const { participating: p, terminals } = participatingWithTerminals(tickets);
+    expect(p.has("A")).toBe(true);
+    expect(p.has("C")).toBe(true);
+    expect(terminals.has("GONE")).toBe(true);
+    expect(terminals.has("A")).toBe(false); // A is present, not terminal
   });
 });
 
