@@ -35,8 +35,10 @@
 //   wake-diag      — diagnostician channel wake (escalate to human operator)
 //
 // ── Postcondition shapes (stored as JSON in intent.postcondition) ─────────────
-//   kill:      { kind:"kill",  subject:"<ticket>/<phase>", sessionNotRegistered:true }
-//              satisfied when the session is absent from obs_agent for the subject
+//   kill:      { kind:"kill",  subject:"<ticket>/<phase>", bgJobId:"<id>", sessionNotRegistered:true }
+//              bgJobId pins the SPECIFIC session we wanted stopped; satisfied
+//              when that specific session is absent from obs_agent (not just any
+//              session for the subject — a revived worker is a different session)
 //   mirror:    { kind:"mirror", subject:"<ticket>", wantState:"<Linear key>" }
 //              satisfied when obs_linear.state == wantState for the ticket
 //   label:     { kind:"label", subject:"<ticket>", label:"<name>", present:true }
@@ -110,10 +112,25 @@ function resolvePostcondition(postcondition, worldSnapshot) {
     const pc = typeof postcondition === "string" ? JSON.parse(postcondition) : postcondition;
     switch (pc.kind) {
       case "kill": {
-        // Satisfied when the subject (ticket/phase) has NO session registered
-        // this tick (the bg job left the agents listing).
+        // Satisfied when the SPECIFIC bg job we wanted stopped is absent.
+        // If the postcondition pins a bgJobId (CTL-936 H1 fix), check that
+        // the specific session is gone — a newly-revived worker filling the
+        // same subject slot has a different bgJobId and must not satisfy this
+        // intent. Falls back to subject-level absence for legacy records that
+        // have no bgJobId (safe: those were recorded before the revive path
+        // was a concern).
         const entry = worldSnapshot.agentsBySubject?.get(pc.subject);
-        return entry == null; // null/undefined = absent = stop worked
+        if (pc.bgJobId) {
+          // Specific session: satisfied only when that exact bgJobId is absent.
+          // entry.session_id may be a full session id; bgJobId may be the same
+          // or a short prefix — compare the stored bgJobId against both forms.
+          if (entry == null) return true; // slot empty — definitely gone
+          const entryBgId = entry.session_id ?? "";
+          // Consider it gone if the current entry's session does NOT match the
+          // targeted bgJobId (either as-is or as a prefix match for short ids).
+          return !entryBgId.startsWith(pc.bgJobId) && !pc.bgJobId.startsWith(entryBgId);
+        }
+        return entry == null; // legacy: subject-level absence (no bgJobId pinned)
       }
       case "mirror": {
         // Satisfied when the Linear state for the ticket matches wantState.

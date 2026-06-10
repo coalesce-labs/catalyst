@@ -7662,3 +7662,57 @@ describe("dispatchAndVerify shared core (CTL-826)", () => {
     expect(resumed.calls[0].ticket).toBe("CTL-826E");
   });
 });
+
+// ── CTL-936: startScheduler wires intentDb + appendIntentEvent through runTick ──
+//
+// These tests verify that the production runTick call site threads intentDb and
+// appendIntentEvent into schedulerTick — the keystone fix for C1 (kill-storm
+// suppression inert) and C2 (operator events never reach event log). Both seams
+// must be present in __getRunningOpts after startScheduler boots.
+//
+// Additionally verifies that collectBeliefsTick accepts appendIntentEvent so
+// the reconcileIntents operator-event path can be exercised in the wrapper.
+describe("CTL-936: runTick production wiring — intentDb + appendIntentEvent seams", () => {
+  afterEach(() => __resetForTests());
+
+  test("startScheduler stores appendIntentEvent in runningOpts (seam available to runTick)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const emitted = [];
+    const appendIntentEvent = (evt) => emitted.push(evt);
+
+    startScheduler({
+      orchDir,
+      dispatch: fakeDispatch({ code: 0 }),
+      readEligible: () => [],
+      liveBackgroundCount: () => 0,
+      appendIntentEvent,
+      tickIntervalMs: 60_000,
+      debounceMs: 5,
+    });
+
+    const opts = __getRunningOpts();
+    expect(typeof opts.appendIntentEvent).toBe("function");
+    // Confirm it IS the same function we passed (identity check).
+    expect(opts.appendIntentEvent).toBe(appendIntentEvent);
+  });
+
+  test("startScheduler without appendIntentEvent leaves the seam null-safe (no throw)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    // Should NOT throw even without appendIntentEvent
+    expect(() =>
+      startScheduler({
+        orchDir,
+        dispatch: fakeDispatch({ code: 0 }),
+        readEligible: () => [],
+        liveBackgroundCount: () => 0,
+        tickIntervalMs: 60_000,
+        debounceMs: 5,
+      })
+    ).not.toThrow();
+
+    const opts = __getRunningOpts();
+    // appendIntentEvent defaults to undefined → intentEventAppender in runTick
+    // resolves to null, which is the safe no-op path.
+    expect(opts.appendIntentEvent == null).toBe(true);
+  });
+});

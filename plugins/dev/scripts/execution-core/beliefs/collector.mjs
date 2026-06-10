@@ -569,7 +569,7 @@ export function collectTickFacts({
 // scheduler already touches and logs (never throws). This is the only call
 // site in scheduler.mjs (kept to ~2 lines there to avoid conflicting with
 // parallel work on the tick loop).
-export function collectBeliefsTick({ orchDir, linearCache } = {}) {
+export function collectBeliefsTick({ orchDir, linearCache, appendIntentEvent = null } = {}) {
   if ((process.env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
     return { ok: false, skipped: "disabled" }; // cheap pre-gate: no wiring work at all
   }
@@ -587,6 +587,9 @@ export function collectBeliefsTick({ orchDir, linearCache } = {}) {
       readJobState: defaultReadJobState,
       findTranscriptFn: (sid) => findTranscript(sid, defaultProjectsDir()),
       linearCache, // the daemon's TTL cache when threaded; else null-state rows
+      // CTL-936: operator-event seam for intent.ineffective — threaded from
+      // runTick when CATALYST_INTENTS_ENFORCE=1. Null → legacy shadow-only.
+      appendIntentEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
     });
     if (!res.ok && !res.skipped) {
       log.warn({ err: res.error }, "beliefs: collector tick failed (shadow — tick unaffected)");
