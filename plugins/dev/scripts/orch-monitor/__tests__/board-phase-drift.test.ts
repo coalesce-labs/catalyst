@@ -28,8 +28,11 @@
 //                 DOM-free column-derivation tests can read them; the board now
 //                 imports them from here — ONE definition).
 //     • PHASE_COLUMNS   the visual board's phase columns (key + user-facing
-//                       label). The .key order is the literal column order the
-//                       user sees, so it MUST equal descriptor PHASES exactly.
+//                       label). SUPERSET of PHASES (CTL-972: also includes
+//                       ancillary phases like 'remediate' interleaved at the
+//                       correct position). Pipeline PHASES must all appear, in
+//                       correct relative order; ancillary phases are allowed as
+//                       extras (same superset rule PHASE_C already follows).
 //     • LINEAR_COLUMNS  the visual board's Linear-lens columns. Must match the
 //                       value-space the data layer (PHASE_TO_LINEAR) produces —
 //                       every label the data layer emits needs a UI column, and
@@ -226,18 +229,54 @@ test("board-data.mjs PHASE_TO_LINEAR keys cover every descriptor PHASE (superset
   expect(missing).toEqual([]);
 });
 
-// ── Requirement 5a: board-display PHASE_COLUMNS .key order === PHASES (exact) ──
-test("board-display PHASE_COLUMNS keys equal descriptor PHASES exactly (visual column order)", () => {
-  if (JSON.stringify(phaseColsKeys) !== JSON.stringify([...PHASES])) {
+// ── Requirement 5a: board-display PHASE_COLUMNS ⊇ PHASES in order (superset ok) ─
+// CTL-972: PHASE_COLUMNS is now a SUPERSET of PHASES — it also includes the
+// ancillary 'remediate' phase (which cycles with verify). The guard checks:
+//   (a) every pipeline PHASE appears in PHASE_COLUMNS (no missing columns);
+//   (b) the pipeline PHASES appear in the CORRECT RELATIVE ORDER within
+//       PHASE_COLUMNS (ancillary phases may be interleaved, but the pipeline
+//       skeleton must be preserved so the visual left→right column order
+//       reflects pipeline progression).
+// "exact equality" is no longer enforced — PHASE_C already legitimately
+// includes ancillary phases, and PHASE_COLUMNS now follows the same superset rule.
+test("board-display PHASE_COLUMNS covers every descriptor PHASE in order (ancillary ok)", () => {
+  const phases = [...PHASES];
+  const colKeys = phaseColsKeys;
+  // (a) every pipeline phase must be present.
+  const missing = phases.filter((p) => !colKeys.includes(p));
+  if (missing.length > 0) {
     throw new Error(
-      `DRIFT: ui/src/board/board-display.ts PHASE_COLUMNS (the visual board columns) ` +
-        `diverged from ${SOT}.\n` +
-        `  descriptor PHASES:        ${JSON.stringify([...PHASES])}\n` +
-        `  board-display PHASE_COLUMNS: ${JSON.stringify(phaseColsKeys)}\n` +
-        `Fix PHASE_COLUMNS .key order/membership to match workflow.default.json.`,
+      `DRIFT: ui/src/board/board-display.ts PHASE_COLUMNS is missing column(s) ` +
+        `${JSON.stringify(missing)} from ${SOT}. Add them to PHASE_COLUMNS.`,
     );
   }
-  expect(phaseColsKeys).toEqual([...PHASES]);
+  // (b) pipeline phases must appear in their descriptor order within PHASE_COLUMNS.
+  const pipelineColIndices = phases.map((p) => colKeys.indexOf(p));
+  const ordered = pipelineColIndices.every((idx, i) => i === 0 || pipelineColIndices[i] > pipelineColIndices[i - 1]);
+  if (!ordered) {
+    throw new Error(
+      `DRIFT: ui/src/board/board-display.ts PHASE_COLUMNS pipeline phases are out of ` +
+        `order relative to ${SOT}.\n` +
+        `  descriptor PHASES:            ${JSON.stringify(phases)}\n` +
+        `  board-display PHASE_COLUMNS:  ${JSON.stringify(colKeys)}\n` +
+        `  expected pipeline indices:    ${JSON.stringify(pipelineColIndices)}\n` +
+        `Restore the correct relative order in PHASE_COLUMNS.`,
+    );
+  }
+  // (c) only ancillary phases (ANCILLARY_PHASES) may be the extra keys.
+  const ancillarySet = new Set(ANCILLARY_PHASES);
+  const unexpected = colKeys.filter((k) => !phases.includes(k) && !ancillarySet.has(k));
+  if (unexpected.length > 0) {
+    throw new Error(
+      `DRIFT: ui/src/board/board-display.ts PHASE_COLUMNS contains key(s) ` +
+        `${JSON.stringify(unexpected)} that are neither a descriptor PHASE nor an ` +
+        `ancillary phase (${JSON.stringify(ANCILLARY_PHASES)}). ` +
+        `Remove unexpected keys or add them to workflow.default.json ancillarySteps.`,
+    );
+  }
+  expect(missing).toEqual([]);
+  expect(ordered).toBe(true);
+  expect(unexpected).toEqual([]);
 });
 
 // ── Requirement 5b: Board.tsx PHASE_C keys ⊇ PHASES (colors; extras allowed) ──
