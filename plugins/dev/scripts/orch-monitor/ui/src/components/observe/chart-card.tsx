@@ -132,6 +132,10 @@ export interface ChartCardProps {
   className?: string;
   /** Body min-height so the footprint is identical across all four states (no reflow). */
   bodyClassName?: string;
+  /** Optional header-right content (e.g. a P2 trend sparkline — layout spec §5 #2:
+   *  the trend belongs in the header, never inside a row or as a full chart). Sits
+   *  before the data-source chip. */
+  headerExtra?: ReactNode;
 }
 
 // Fixed body so the panel footprint never changes between states (no reflow).
@@ -145,6 +149,7 @@ export function ChartCard({
   children,
   className,
   bodyClassName,
+  headerExtra,
 }: ChartCardProps) {
   const state = resolveChartCardState({ health, dataSource, hasData });
 
@@ -152,9 +157,13 @@ export function ChartCard({
     <Panel className={cn("flex flex-col", className)}>
       <PanelHeader className="flex items-center justify-between gap-2">
         <SectionLabel>{title}</SectionLabel>
-        <span className="font-mono text-[10px] tracking-wide text-muted/70">
-          {dataSource}
-        </span>
+        <div className="flex items-center gap-2">
+          {/* header trend (e.g. P2 sparkline) — only meaningful in the live state. */}
+          {state === "live" && headerExtra}
+          <span className="font-mono text-[10px] tracking-wide text-muted/70">
+            {dataSource}
+          </span>
+        </div>
       </PanelHeader>
       <div className={cn(BODY_BASE, bodyClassName)}>
         {state === "unconfigured" && <UnconfiguredState />}

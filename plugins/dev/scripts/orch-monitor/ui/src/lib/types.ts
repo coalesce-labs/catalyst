@@ -309,6 +309,19 @@ export interface TailResult {
   freshnessMs: number | null;
 }
 
+// ── OBS-7 (TELEMETRY P4): per-model latency wire shape ───────────────────────
+// Mirrors lib/otel-queries.ts ModelLatencyRow. p50/p95 are ms (null when the model
+// had no unwrappable api_request samples in the window); errorRate is errors/
+// requests, or null when requests === 0 (the UI shows "—", never a fabricated 0%).
+export interface ModelLatencyRow {
+  model: string;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  requests: number;
+  errors: number;
+  errorRate: number | null;
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"

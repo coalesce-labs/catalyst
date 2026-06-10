@@ -199,6 +199,8 @@ import {
   cacheHitRate,
   costRateByModel,
   toolUsageByName,
+  modelLatency,
+  toolLatency,
   apiErrors,
   recentTail,
   costValidation,
@@ -1863,12 +1865,45 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ data: result });
         }
 
+        // OBS-7 (TELEMETRY P3): per-tool p50/p95 latency, the half /api/otel/tools
+        // (counts only) is missing so the panel can sort by TOTAL TIME (count × p95)
+        // rather than chattiness. unwrap duration_ms on tool_result by tool_name
+        // (toolLatency in otel-queries.ts). 503 when Loki is not configured; an
+        // empty stream is an HONEST 200 with `data:{}` (counts-only fallback).
+        if (url.pathname === "/api/otel/tool-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await toolLatency(loki, range);
+          if (result === null) {
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
         if (url.pathname === "/api/otel/errors") {
           if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "1h";
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
           const result = await apiErrors(loki, range, limit);
+          return Response.json({ data: result });
+        }
+
+        // OBS-7 (TELEMETRY P4): per-model api_request latency (p50/p95) + error%,
+        // read off the SAME claude-code Loki stream as the tail/errors — NOT a new
+        // Prometheus dependency. The LogQL unwraps `duration_ms` on api_request and
+        // aggregates with quantile_over_time by model (modelLatency in
+        // otel-queries.ts). 503 when Loki is not configured (the P4 ChartCard
+        // degrades via the ladder); an empty stream is an HONEST 200 with `data:[]`
+        // (the card's "no data in range" state, NOT an error).
+        if (url.pathname === "/api/otel/model-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await modelLatency(loki, range);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 

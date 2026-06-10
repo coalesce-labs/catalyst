@@ -1,5 +1,5 @@
 import type { PrometheusFetcher, PrometheusMetricValue } from "./prometheus";
-import type { LokiFetcher, LokiStreamValue } from "./loki";
+import type { LokiFetcher, LokiStreamValue, LokiQueryResult } from "./loki";
 
 const DURATION_RE = /^\d+(ms|s|m|h|d)$/;
 
@@ -106,6 +106,221 @@ export async function toolUsageByName(
     if (!name || !metric.values?.length) continue;
     const lastVal = metric.values[metric.values.length - 1];
     if (lastVal) map[name] = parseInt(lastVal[1], 10) || 0;
+  }
+  return map;
+}
+
+// ── OBS-7 (TELEMETRY P4): per-model request latency + error% ─────────────────
+// Model latency is read off the SAME claude-code Loki stream the tail/errors use,
+// not Prometheus — `api_request` lines carry a `duration_ms` field we can unwrap
+// and aggregate with LogQL's `quantile_over_time`. p50/p95 by `model` answer "is
+// this model slow right now?"; the error% by model (api_error / api_request) is a
+// second, complementary axis the P4 bar labels (a model can be fast but erroring).
+//
+// The LogQL is a metric query (queryRange returns a matrix, one series per model):
+//   quantile_over_time(0.95, {…} |= "claude_code.api_request" | json
+//     | unwrap duration_ms [r]) by (model)
+// We take the LAST point of each series (the cumulative-window aggregate over the
+// scan), the same "last value" idiom toolUsageByName uses for count_over_time.
+
+/** One model's latency + error profile for the P4 panel. p50/p95 are in ms (null
+ *  when the model produced no unwrappable api_request samples in the window);
+ *  requests/errors are the raw counts the error-rate is derived from so the UI can
+ *  show "n=…" honestly. errorRate is errors/requests, or null when requests===0
+ *  (no requests to divide by — the UI shows "—", never a fabricated 0%). */
+export interface ModelLatencyRow {
+  model: string;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  requests: number;
+  errors: number;
+  /** errors / requests over the window, or null when requests === 0. */
+  errorRate: number | null;
+}
+
+/** Build the exact LogQL for one latency quantile over unwrapped `duration_ms` on
+ *  the `api_request` stream, grouped by model. Exported so a test can pin the
+ *  `| json | unwrap duration_ms` pipe + the `by (model)` grouping (a refactor that
+ *  drops the unwrap or the json stage silently returns zero series). */
+export function modelLatencyLogQL(quantile: number, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
+    `|= "claude_code.api_request" | json | unwrap duration_ms [${r}]) by (model)`
+  );
+}
+
+/** Build the LogQL for an event count by model (api_request or api_error), used
+ *  to derive the per-model error rate. Exported for the same pin-the-shape reason. */
+export function modelEventCountLogQL(eventLiteral: string, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `sum by (model) (count_over_time({service_name=~"claude-code.*"} ` +
+    `|= "${eventLiteral}" | json [${r}]))`
+  );
+}
+
+/** Pull the LAST numeric point of each `by (model)` series into a model→value map.
+ *  A series with no usable points is skipped (the model simply has no value on that
+ *  axis — never fabricated). Shared by the latency + count extractions. Each entry
+ *  is cast to the matrix shape (LogQL metric queries return matrix series), the
+ *  same defensive cast toolUsageByName uses on Loki results. */
+function lastValueByModel(result: LokiQueryResult): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const metric = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const model = metric.metric?.["model"];
+    if (!model || !metric.values?.length) continue;
+    const last = metric.values[metric.values.length - 1];
+    if (!last) continue;
+    const v = parseFloat(last[1]);
+    if (Number.isFinite(v)) map[model] = v;
+  }
+  return map;
+}
+
+/**
+ * Per-model api_request latency (p50/p95) + error% over the window, off the
+ * claude-code Loki stream. Returns `null` ONLY when Loki is unavailable (the first
+ * probe failed — caller surfaces a 503); an empty stream is `[]` (an honest "no
+ * api_request samples in range", which the ChartCard renders as the empty state,
+ * NOT an error). Rows are sorted slowest-p95-first so the bottleneck model leads.
+ */
+export async function modelLatency(
+  loki: LokiFetcher,
+  range: string,
+): Promise<ModelLatencyRow[] | null> {
+  const r = safeDuration(range, "1h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const startIso = start.toISOString();
+  const endIso = now.toISOString();
+
+  const [p50Res, p95Res, reqRes, errRes] = await Promise.all([
+    loki.queryRange(modelLatencyLogQL(0.5, r), startIso, endIso),
+    loki.queryRange(modelLatencyLogQL(0.95, r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("claude_code.api_request", r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("claude_code.api_error", r), startIso, endIso),
+  ]);
+
+  // Loki unavailable → the very first (and every) probe is null. Distinguish that
+  // from "reachable but empty" (a result with an empty `.data.result`).
+  if (p50Res === null && p95Res === null && reqRes === null && errRes === null) {
+    return null;
+  }
+
+  const p50 = p50Res ? lastValueByModel(p50Res) : {};
+  const p95 = p95Res ? lastValueByModel(p95Res) : {};
+  const requests = reqRes ? lastValueByModel(reqRes) : {};
+  const errors = errRes ? lastValueByModel(errRes) : {};
+
+  // Union the models seen on any axis so a model that only errored (or only had a
+  // latency sample) still appears — never dropped.
+  const models = new Set<string>([
+    ...Object.keys(p50),
+    ...Object.keys(p95),
+    ...Object.keys(requests),
+    ...Object.keys(errors),
+  ]);
+
+  const rows: ModelLatencyRow[] = [];
+  for (const model of models) {
+    const req = Math.round(requests[model] ?? 0);
+    const err = Math.round(errors[model] ?? 0);
+    rows.push({
+      model,
+      p50Ms: p50[model] ?? null,
+      p95Ms: p95[model] ?? null,
+      requests: req,
+      errors: err,
+      errorRate: req > 0 ? err / req : null,
+    });
+  }
+
+  // Slowest p95 first (the bottleneck model leads); rows with no p95 sink last.
+  rows.sort((a, b) => (b.p95Ms ?? -1) - (a.p95Ms ?? -1));
+  return rows;
+}
+
+// ── OBS-7 (TELEMETRY P3): per-tool latency (p50/p95) ─────────────────────────
+// The P3 tool-mix panel sorts by TOTAL TIME (count × p95), not call count — a slow
+// tool used 10× beats a fast tool used 1000× (design §3.1). The counts come from
+// toolUsageByName; this adds the p50/p95 half by unwrapping `duration_ms` on
+// `tool_result`, the SAME LogQL idiom as modelLatency but grouped by `tool_name`.
+
+/** One tool's p50/p95 latency (ms), null when no unwrappable tool_result samples
+ *  fell in the window. Keyed by tool name in the returned map. */
+export interface ToolLatency {
+  p50Ms: number | null;
+  p95Ms: number | null;
+}
+
+/** Build the LogQL for one latency quantile over unwrapped `duration_ms` on the
+ *  `tool_result` stream, grouped by tool_name. Exported so a test can pin the
+ *  unwrap pipe + grouping (mirrors modelLatencyLogQL). */
+export function toolLatencyLogQL(quantile: number, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
+    `|= "claude_code.tool_result" | json | unwrap duration_ms [${r}]) by (tool_name)`
+  );
+}
+
+/** Pull the LAST numeric point of each `by (tool_name)` series into a tool→value
+ *  map (mirrors lastValueByModel, keyed on tool_name). */
+function lastValueByTool(result: LokiQueryResult): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const metric = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const tool = metric.metric?.["tool_name"];
+    if (!tool || !metric.values?.length) continue;
+    const last = metric.values[metric.values.length - 1];
+    if (!last) continue;
+    const v = parseFloat(last[1]);
+    if (Number.isFinite(v)) map[tool] = v;
+  }
+  return map;
+}
+
+/**
+ * Per-tool p50/p95 latency over the window, off the claude-code Loki stream.
+ * Returns `null` ONLY when Loki is unavailable (both probes failed → caller
+ * surfaces a 503); an empty stream is `{}` (an honest "no tool_result samples" —
+ * the UI shows counts only, never a fabricated latency).
+ */
+export async function toolLatency(
+  loki: LokiFetcher,
+  range: string,
+): Promise<Record<string, ToolLatency> | null> {
+  const r = safeDuration(range, "1h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const startIso = start.toISOString();
+  const endIso = now.toISOString();
+
+  const [p50Res, p95Res] = await Promise.all([
+    loki.queryRange(toolLatencyLogQL(0.5, r), startIso, endIso),
+    loki.queryRange(toolLatencyLogQL(0.95, r), startIso, endIso),
+  ]);
+
+  if (p50Res === null && p95Res === null) return null;
+
+  const p50 = p50Res ? lastValueByTool(p50Res) : {};
+  const p95 = p95Res ? lastValueByTool(p95Res) : {};
+  const tools = new Set<string>([...Object.keys(p50), ...Object.keys(p95)]);
+
+  const map: Record<string, ToolLatency> = {};
+  for (const tool of tools) {
+    map[tool] = {
+      p50Ms: p50[tool] ?? null,
+      p95Ms: p95[tool] ?? null,
+    };
   }
   return map;
 }

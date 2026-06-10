@@ -12,9 +12,15 @@
 // api_error / api_request over the window) plus the /api/health/otel reachability
 // probe — no fabricated numbers, and QUIET (idle, not erroring) is rendered
 // cleanly (neutral, never amber).
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
-import type { OtelHealth, TailResult, TailRow } from "@/lib/types";
+import type {
+  OtelHealth,
+  OtelLogEntry,
+  ModelLatencyRow,
+  TailResult,
+  TailRow,
+} from "@/lib/types";
 import type { BoardPayload } from "@/board/types";
 import {
   timeRangeAtom,
@@ -26,9 +32,17 @@ import {
 import { ChartCard } from "@/components/observe/chart-card";
 import { TelemetryHero } from "@/components/observe/telemetry-hero";
 import { LiveTail } from "@/components/observe/live-tail";
+import { ErrorClustersPanel } from "@/components/observe/error-clusters-panel";
+import { ToolMixPanel } from "@/components/observe/tool-mix-panel";
+import { ModelLatencyPanel } from "@/components/observe/model-latency-panel";
+import { errorTrendSparkline } from "@/components/observe/telemetry-panels";
+import { Sparkline } from "@/components/sparkline";
 import { heroState } from "@/components/observe/hero-state";
 import { isErrorRow, type TailWorkerRef } from "@/components/observe/tail-group";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+
+/** Per-tool p50/p95 latency map from /api/otel/tool-latency. */
+type ToolLatencyMap = Record<string, { p50Ms: number | null; p95Ms: number | null }>;
 
 /** Count api_error and api_request rows in the tail window → the hero's error
  *  rate. Pure on the rows so the derivation is honest (no separate fabricated
@@ -58,6 +72,28 @@ export function TelemetrySurface() {
   const [tailReachable, setTailReachable] = useState<boolean>(true);
   const [lastGoodMs, setLastGoodMs] = useState<number | null>(null);
   const [workers, setWorkers] = useState<TailWorkerRef[]>([]);
+
+  // OBS-7 panel data: P2 error clusters, P3 tool mix (counts + p95), P4 model
+  // latency. Each reads a [loki] route; the ChartCard owns the honesty states so a
+  // null/empty result just degrades that one card.
+  const [errors, setErrors] = useState<OtelLogEntry[]>([]);
+  const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
+  const [toolLatency, setToolLatency] = useState<ToolLatencyMap>({});
+  const [modelRows, setModelRows] = useState<ModelLatencyRow[]>([]);
+  const [errorsReachable, setErrorsReachable] = useState<boolean>(true);
+  const [toolsReachable, setToolsReachable] = useState<boolean>(true);
+  const [modelReachable, setModelReachable] = useState<boolean>(true);
+
+  // Cross-panel drill (P3 tool / P4 model click → P1 tail filter). The nonce ref
+  // lets a re-click of the SAME tool/model re-apply (a value-only change wouldn't
+  // re-trigger the tail's effect).
+  const [focusFilter, setFocusFilter] = useState<{
+    tool?: string;
+    eventType?: string;
+    errorsOnly?: boolean;
+    nonce: number;
+  } | null>(null);
+  const focusNonce = useRef(1);
 
   // Health probe (10s TTL) — drives the ChartCard ladder AND the hero DARK state.
   useEffect(() => {
@@ -133,8 +169,94 @@ export function TelemetrySurface() {
     };
   }, [range]);
 
+  // P2/P3/P4 panels, refreshed on the shared cadence. These are AGGREGATE panels
+  // (clusters / p95 / model latency) so they read a ≥1h window even when the hero/
+  // tail are on the tight NOW (15m) scan — a 15m window is too thin for a stable
+  // p95 (design §3.1 pins P2/P3 to range=1h). NOW → 1h; the longer ranges pass
+  // through the same Loki duration the tail uses.
+  useEffect(() => {
+    let alive = true;
+    const lokiRange = range === "NOW" ? "1h" : TIME_RANGE_TO_LOKI[range];
+
+    async function loadErrors() {
+      try {
+        const resp = await fetch(`/api/otel/errors?range=${lokiRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setErrorsReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: OtelLogEntry[] | null };
+        setErrors(body.data ?? []);
+        setErrorsReachable(true);
+      } catch {
+        if (alive) setErrorsReachable(false);
+      }
+    }
+
+    async function loadTools() {
+      try {
+        const [countsResp, latResp] = await Promise.all([
+          fetch(`/api/otel/tools?range=${lokiRange}`),
+          fetch(`/api/otel/tool-latency?range=${lokiRange}`),
+        ]);
+        if (!alive) return;
+        if (countsResp.status === 503) {
+          setToolsReachable(false);
+          return;
+        }
+        if (countsResp.ok) {
+          const body = (await countsResp.json()) as { data: Record<string, number> | null };
+          setToolCounts(body.data ?? {});
+          setToolsReachable(true);
+        }
+        // tool-latency is best-effort: a 503/empty just means the bars sort with
+        // no p95 (counts-only), never blocks the panel.
+        if (latResp.ok) {
+          const body = (await latResp.json()) as { data: ToolLatencyMap | null };
+          setToolLatency(body.data ?? {});
+        }
+      } catch {
+        if (alive) setToolsReachable(false);
+      }
+    }
+
+    async function loadModelLatency() {
+      try {
+        const resp = await fetch(`/api/otel/model-latency?range=${lokiRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setModelReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: ModelLatencyRow[] | null };
+        setModelRows(body.data ?? []);
+        setModelReachable(true);
+      } catch {
+        if (alive) setModelReachable(false);
+      }
+    }
+
+    void loadErrors();
+    void loadTools();
+    void loadModelLatency();
+    const id = setInterval(() => {
+      void loadErrors();
+      void loadTools();
+      void loadModelLatency();
+    }, refreshIntervalMs(range));
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [range]);
+
   const rows = tail?.rows ?? [];
   const { errorCount, errorRate } = useMemo(() => deriveErrorStats(rows), [rows]);
+
+  // The P2 header trend (24h error-count sparkline) + per-panel reachability for
+  // the ChartCard health, layered over the global /api/health/otel probe.
+  const errorTrend = useMemo(() => errorTrendSparkline(errors), [errors]);
+  const lokiHealth = (reachable: boolean): OtelHealth | null =>
+    health === null
+      ? null
+      : { ...health, loki: { ...health.loki, reachable: health.loki.reachable && reachable } };
 
   // Loki reachability for the hero: health probe OR the tail's own 503 signal.
   // health.loki.reachable is authoritative once the probe resolves; until then
@@ -183,29 +305,101 @@ export function TelemetrySurface() {
         lastGoodMs={lastGoodMs}
       />
 
-      {/* P1 LIVE TAIL — grouped by worker, internally scrolled so the hero stays
-          the first paint on small screens (~40vh cap, layout spec §5 #4). The
-          ChartCard owns the unconfigured/unreachable/empty honesty states; the
-          tail only renders the LIVE rows. */}
-      <ChartCard
-        title="Live tail — grouped by worker"
-        dataSource="[loki]"
-        health={health}
-        hasData={rows.length > 0}
-        bodyClassName="min-h-[320px] h-[min(52vh,520px)] p-3"
-      >
-        <LiveTail
-          rows={rows}
-          workers={workers}
-          onOpenWorker={(workerName) => {
-            // Drill (one click): worker → its history page (/worker/$id). A full-
-            // document navigation hits the server's SPA fallback (the same path
-            // the board's openDetail uses — router.tsx:48). The worker page then
-            // resolves the CC session + its /api/ec-worker-history tail itself.
-            window.location.assign(`/worker/${encodeURIComponent(workerName)}`);
-          }}
-        />
-      </ChartCard>
+      {/* GRID — responsive 2-column (layout spec §2). Left col: P1 (tall) then the
+          P5 slot (OBS-8); right col: P2, P3, P4. Collapses to one column on
+          <1024px with the tail first after the hero. 8px gap (Principle 7). */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-2 lg:grid-cols-2">
+        {/* P1 LIVE TAIL — grouped by worker, spans both grid rows on the left.
+            Internally scrolled so the hero stays the first paint on small screens
+            (~40vh cap, layout spec §5 #4). The ChartCard owns the
+            unconfigured/unreachable/empty honesty states; the tail renders LIVE rows. */}
+        <ChartCard
+          title="Live tail — grouped by worker"
+          dataSource="[loki]"
+          health={health}
+          hasData={rows.length > 0}
+          className="lg:row-span-3"
+          bodyClassName="min-h-[320px] h-[min(40vh,360px)] lg:h-auto p-3"
+        >
+          <LiveTail
+            rows={rows}
+            workers={workers}
+            focusFilter={focusFilter}
+            onOpenWorker={(workerName) => {
+              // Drill (one click): worker → its history page (/worker/$id). A full-
+              // document navigation hits the server's SPA fallback (the same path
+              // the board's openDetail uses — router.tsx:48). The worker page then
+              // resolves the CC session + its /api/ec-worker-history tail itself.
+              window.location.assign(`/worker/${encodeURIComponent(workerName)}`);
+            }}
+          />
+        </ChartCard>
+
+        {/* P2 API ERRORS by (error string + model) — bar rows + a 24h error-count
+            sparkline in the header (60×32, no axes — Principle 4 / §5 #2). Errors
+            are usually EMPTY (the healthy case) → the ChartCard renders the honest
+            "no data in range", which is CORRECT, not a bug. Row → request modal. */}
+        <ChartCard
+          title="API errors"
+          dataSource="[loki]"
+          health={lokiHealth(errorsReachable)}
+          hasData={errors.length > 0}
+          bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-2"
+          headerExtra={
+            errorTrend.length > 0 ? (
+              <Sparkline
+                points={errorTrend}
+                width={60}
+                height={32}
+                color="var(--chart-4)"
+                ariaLabel="error trend"
+              />
+            ) : undefined
+          }
+        >
+          <ErrorClustersPanel entries={errors} />
+        </ChartCard>
+
+        {/* P3 TOOLS by TOTAL TIME (count × p95), not call count — a slow tool used
+            10× beats a fast tool used 1000× (Principle 2). Row → P1 tail filtered
+            to that tool. */}
+        <ChartCard
+          title="Tools — by total time"
+          dataSource="[loki]"
+          health={lokiHealth(toolsReachable)}
+          hasData={Object.keys(toolCounts).length > 0}
+          bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-2"
+        >
+          <ToolMixPanel
+            counts={toolCounts}
+            latency={toolLatency}
+            onSelectTool={(tool) =>
+              setFocusFilter({ tool, nonce: focusNonce.current++ })
+            }
+          />
+        </ChartCard>
+
+        {/* P4 MODEL LATENCY p50/p95 + error% by model. Row → P1 tail filtered to
+            that model (errors-only when the model is erroring — design §3.1). */}
+        <ChartCard
+          title="Model latency"
+          dataSource="[loki]"
+          health={lokiHealth(modelReachable)}
+          hasData={modelRows.length > 0}
+          bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-2"
+        >
+          <ModelLatencyPanel
+            rows={modelRows}
+            onSelectModel={(model) => {
+              const row = modelRows.find((r) => r.model === model);
+              const erroring = row?.errorRate !== null && (row?.errorRate ?? 0) > 0.02;
+              // No model filter axis on the tail; an erroring model drills to
+              // errors-only, otherwise this is a soft focus (no-op filter).
+              setFocusFilter({ errorsOnly: erroring, nonce: focusNonce.current++ });
+            }}
+          />
+        </ChartCard>
+      </div>
     </div>
   );
 }

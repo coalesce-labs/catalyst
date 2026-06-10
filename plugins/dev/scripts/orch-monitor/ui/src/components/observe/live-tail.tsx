@@ -12,7 +12,7 @@
 // (dataSource="[loki]") owns the unconfigured / unreachable / empty honesty
 // states, so this never has to draw its own "no data" placeholder.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import type { TailRow } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -37,6 +37,17 @@ export interface LiveTailProps {
   workers: TailWorkerRef[];
   /** Drill: open a worker's history page (passes the worker RUN id for /worker/$id). */
   onOpenWorker?: (workerName: string) => void;
+  /** A cross-panel drill seed (P3 tool / P4 model click). When it changes the tail
+   *  applies it as a filter so "show me what this tool/model is doing" lands here.
+   *  Carries a nonce so re-clicking the SAME tool/model re-applies (the value alone
+   *  wouldn't change). model has no tail filter axis, so an erroring model drills
+   *  to errors-only (design §3.1: "or errors-only if error% is the interesting axis"). */
+  focusFilter?: {
+    tool?: string;
+    eventType?: string;
+    errorsOnly?: boolean;
+    nonce: number;
+  } | null;
 }
 
 /** Format a row timestamp as HH:MM:SS (local) — the terminal-style left gutter. */
@@ -129,9 +140,24 @@ function WorkerGroupHeader({
   );
 }
 
-export function LiveTail({ rows, workers, onOpenWorker }: LiveTailProps) {
+export function LiveTail({ rows, workers, onOpenWorker, focusFilter }: LiveTailProps) {
   const [filter, setFilter] = useState<TailFilter>(EMPTY_TAIL_FILTER);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+
+  // Apply a cross-panel drill (P3 tool / P4 erroring-model) as a filter. Keyed on
+  // the nonce so re-clicking the same value re-applies; resets the other axes so
+  // the drill is an unambiguous "show me only this".
+  const focusNonce = focusFilter?.nonce;
+  useEffect(() => {
+    if (!focusFilter) return;
+    setFilter({
+      ...EMPTY_TAIL_FILTER,
+      tool: focusFilter.tool ?? "",
+      eventType: focusFilter.eventType ?? "",
+      errorsOnly: focusFilter.errorsOnly ?? false,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusNonce]);
 
   // PURE pipeline: bucket key → filter → group. Memoized on the inputs.
   const bucketKeyOf = useMemo(() => bucketKeyFactory(workers), [workers]);

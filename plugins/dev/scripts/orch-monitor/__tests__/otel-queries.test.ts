@@ -6,6 +6,11 @@ import {
   cacheHitRate,
   costRateByModel,
   toolUsageByName,
+  modelLatency,
+  modelLatencyLogQL,
+  modelEventCountLogQL,
+  toolLatency,
+  toolLatencyLogQL,
   apiErrors,
   recentTail,
   recentTailLogQL,
@@ -261,6 +266,193 @@ describe("apiErrors", () => {
 
   it("returns null when unavailable", async () => {
     expect(await apiErrors(mockLoki(null), "1h")).toBeNull();
+  });
+});
+
+// ── OBS-7 (TELEMETRY P4): per-model latency + error% ─────────────────────────
+// modelLatency fans out FOUR distinct LogQL queries (p50, p95, request-count,
+// error-count) and joins them by model, so the mock routes each query to a result
+// by matching a substring — the same idiom as mockPromRange below.
+function mockLokiRange(
+  routes: Array<{ match: string; result: LokiQueryResult | null }>,
+  available = true,
+): LokiFetcher {
+  return {
+    queryRange: (logql: string) => {
+      for (const r of routes) {
+        if (logql.includes(r.match)) return Promise.resolve(r.result);
+      }
+      // no registered match → an honest empty matrix (model not on that axis).
+      return Promise.resolve({ data: { resultType: "matrix", result: [] } });
+    },
+    isAvailable: () => available,
+  };
+}
+
+function lokiMatrix(
+  series: Array<{ model: string; values: Array<[number, string]> }>,
+): LokiQueryResult {
+  return {
+    data: {
+      resultType: "matrix",
+      result: series.map((s) => ({ metric: { model: s.model }, values: s.values })),
+    },
+  };
+}
+
+describe("modelLatencyLogQL / modelEventCountLogQL — pin the LogQL shape", () => {
+  it("latency query unwraps duration_ms on api_request and groups by (model)", () => {
+    const q = modelLatencyLogQL(0.95, "1h");
+    expect(q).toContain("quantile_over_time(0.95,");
+    expect(q).toContain('|= "claude_code.api_request"');
+    expect(q).toContain("| json | unwrap duration_ms");
+    expect(q).toContain("by (model)");
+  });
+
+  it("error-count query counts the lowercase api_error literal by (model)", () => {
+    const q = modelEventCountLogQL("claude_code.api_error", "1h");
+    expect(q).toContain("sum by (model)");
+    expect(q).toContain("count_over_time");
+    // The literal MUST be lowercase — uppercase returns zero rows (verified live).
+    expect(q).toContain('|= "claude_code.api_error"');
+    expect(q).not.toContain("API_ERROR");
+  });
+
+  it("a bad range duration falls back, never injected into the LogQL", () => {
+    const q = modelLatencyLogQL(0.5, "1h])) or vector(1#");
+    expect(q).toContain("[1h]"); // safeDuration fallback
+    expect(q).not.toContain("vector(1#");
+  });
+});
+
+describe("modelLatency", () => {
+  it("joins p50/p95/requests/errors by model and derives error%", async () => {
+    const loki = mockLokiRange([
+      {
+        match: "quantile_over_time(0.5,",
+        result: lokiMatrix([
+          { model: "fable-5", values: [[160, "3100"]] },
+          { model: "haiku-4.5", values: [[160, "900"]] },
+        ]),
+      },
+      {
+        match: "quantile_over_time(0.95,",
+        result: lokiMatrix([
+          { model: "fable-5", values: [[160, "22000"]] },
+          { model: "haiku-4.5", values: [[160, "4000"]] },
+        ]),
+      },
+      {
+        match: '|= "claude_code.api_request"',
+        result: lokiMatrix([
+          { model: "fable-5", values: [[160, "300"]] },
+          { model: "haiku-4.5", values: [[160, "120"]] },
+        ]),
+      },
+      {
+        match: '|= "claude_code.api_error"',
+        result: lokiMatrix([{ model: "fable-5", values: [[160, "3"]] }]),
+      },
+    ]);
+    const rows = await modelLatency(loki, "1h");
+    expect(rows).not.toBeNull();
+    // sorted slowest-p95 first
+    expect(rows![0]!.model).toBe("fable-5");
+    expect(rows![0]!.p50Ms).toBe(3100);
+    expect(rows![0]!.p95Ms).toBe(22000);
+    expect(rows![0]!.requests).toBe(300);
+    expect(rows![0]!.errors).toBe(3);
+    expect(rows![0]!.errorRate).toBeCloseTo(0.01);
+    // haiku has no errors → errorRate 0 (it HAS requests, so not null)
+    const haiku = rows!.find((r) => r.model === "haiku-4.5")!;
+    expect(haiku.errors).toBe(0);
+    expect(haiku.errorRate).toBe(0);
+  });
+
+  it("a model with requests===0 gets errorRate null (never a fabricated 0%)", async () => {
+    const loki = mockLokiRange([
+      {
+        match: "quantile_over_time(0.95,",
+        result: lokiMatrix([{ model: "ghost", values: [[160, "5000"]] }]),
+      },
+      // no request-count or error-count series for "ghost"
+    ]);
+    const rows = await modelLatency(loki, "1h");
+    const ghost = rows!.find((r) => r.model === "ghost")!;
+    expect(ghost.requests).toBe(0);
+    expect(ghost.errorRate).toBeNull();
+    expect(ghost.p95Ms).toBe(5000);
+    expect(ghost.p50Ms).toBeNull(); // only p95 had a sample
+  });
+
+  it("an empty stream is an HONEST [] (reachable-but-no-samples), NOT null", async () => {
+    const loki = mockLokiRange([]); // every query → empty matrix
+    const rows = await modelLatency(loki, "1h");
+    expect(rows).toEqual([]);
+  });
+
+  it("returns null ONLY when Loki is unavailable (every probe null)", async () => {
+    const loki: LokiFetcher = {
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => false,
+    };
+    expect(await modelLatency(loki, "1h")).toBeNull();
+  });
+});
+
+describe("toolLatency", () => {
+  it("unwraps duration_ms on tool_result grouped by tool_name", () => {
+    const q = toolLatencyLogQL(0.95, "1h");
+    expect(q).toContain("quantile_over_time(0.95,");
+    expect(q).toContain('|= "claude_code.tool_result"');
+    expect(q).toContain("| json | unwrap duration_ms");
+    expect(q).toContain("by (tool_name)");
+  });
+
+  it("joins p50/p95 into a tool→latency map", async () => {
+    const loki = mockLokiRange([
+      {
+        match: "quantile_over_time(0.5,",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [
+              { metric: { tool_name: "Bash" }, values: [[160, "1200"]] },
+              { metric: { tool_name: "Read" }, values: [[160, "150"]] },
+            ],
+          },
+        },
+      },
+      {
+        match: "quantile_over_time(0.95,",
+        result: {
+          data: {
+            resultType: "matrix",
+            result: [
+              { metric: { tool_name: "Bash" }, values: [[160, "8200"]] },
+              { metric: { tool_name: "Read" }, values: [[160, "300"]] },
+            ],
+          },
+        },
+      },
+    ]);
+    const map = await toolLatency(loki, "1h");
+    expect(map).not.toBeNull();
+    expect(map!["Bash"]).toEqual({ p50Ms: 1200, p95Ms: 8200 });
+    expect(map!["Read"]).toEqual({ p50Ms: 150, p95Ms: 300 });
+  });
+
+  it("an empty stream is an HONEST {} (counts-only fallback), NOT null", async () => {
+    const loki = mockLokiRange([]);
+    expect(await toolLatency(loki, "1h")).toEqual({});
+  });
+
+  it("returns null when Loki is unavailable", async () => {
+    const loki: LokiFetcher = {
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => false,
+    };
+    expect(await toolLatency(loki, "1h")).toBeNull();
   });
 });
 
