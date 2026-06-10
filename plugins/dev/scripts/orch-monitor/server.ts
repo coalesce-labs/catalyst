@@ -28,6 +28,8 @@ import { createClusterEntity } from "./lib/cluster-view.mjs";
 import type { ClusterView } from "./lib/cluster-view.mjs";
 import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
 import type { ClusterSignal } from "./lib/cluster-signal.mjs";
+// CTL-865: cluster-board aggregation — host-grouped ticker view with heartbeat liveness.
+import { getClusterBoard } from "./lib/cluster-data";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
 // queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
 // (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
@@ -322,6 +324,12 @@ export interface CreateServerOptions {
    * deterministic ClusterView so the routes don't read the live event log/roster.
    */
   clusterReader?: ((board: BoardPayload) => ClusterView | Promise<ClusterView>) | null;
+  /**
+   * CTL-865: override for the cluster-board reader (/api/cluster/board).
+   * Production calls getClusterBoard(); tests inject a deterministic payload
+   * so the route doesn't invoke linearis or read the live event log.
+   */
+  clusterBoardReader?: (() => Promise<import("./lib/cluster-data").ClusterBoardPayload>) | null;
   /**
    * CTL-938: override for the `claude logs <shortId>` runner that feeds the
    * live SCREEN SSE (/api/ec-worker-screen/<shortId>) — the pre-transcript
@@ -702,6 +710,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linearWebhookConfig,
     daemonHealthReader: daemonHealthReaderOpt,
     clusterReader: clusterReaderOpt,
+    clusterBoardReader: clusterBoardReaderOpt,
     screenLogsExec: screenLogsExecOpt,
     screenPollMs = SCREEN_POLL_MS,
   } = opts;
@@ -3240,6 +3249,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
               "Access-Control-Allow-Origin": "*",
             },
           });
+        }
+
+        // CTL-865: cluster-board aggregate — host-grouped ticket view with
+        // heartbeat liveness. Delegates to getClusterBoard() (30s cache) or
+        // the injected clusterBoardReaderOpt so tests never hit linearis/fs.
+        if (url.pathname === "/api/cluster/board") {
+          const reader = clusterBoardReaderOpt ?? (() => getClusterBoard());
+          return Response.json(await reader());
         }
 
         // CTL-967 (N5): read-only SSE feed of new belief rows from

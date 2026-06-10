@@ -20,6 +20,7 @@ export type Surface =
   | "board"
   | "workers"
   | "queue"
+  | "cluster"
   | "telemetry"
   | "utilization"
   | "finops"
@@ -27,12 +28,14 @@ export type Surface =
   | "devops";
 
 /** Every surface in nav order — the single source the sidebar + palette iterate.
- *  OBS-5: OBSERVE surfaces follow the OPERATE block (after queue). */
+ *  OBS-5: OBSERVE surfaces follow the OPERATE block (after queue).
+ *  CTL-865: cluster surface added after queue (OPERATE group). */
 export const SURFACES: readonly Surface[] = [
   "home",
   "board",
   "workers",
   "queue",
+  "cluster",
   "telemetry",
   "utilization",
   "finops",
@@ -42,12 +45,14 @@ export const SURFACES: readonly Surface[] = [
 
 /** Human label per surface (sidebar item + command palette).
  *  CTL-930: home → "Inbox", board → "Tickets" (internal union keys unchanged).
- *  OBS-5: OBSERVE labels (Telemetry/Utilization/FinOps/Fleet Ops/DevOps). */
+ *  OBS-5: OBSERVE labels (Telemetry/Utilization/FinOps/Fleet Ops/DevOps).
+ *  CTL-865: cluster → "Cluster". */
 export const SURFACE_LABEL: Record<Surface, string> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
   queue: "Queue",
+  cluster: "Cluster",
   telemetry: "Telemetry",
   utilization: "Utilization",
   finops: "FinOps",
@@ -57,12 +62,14 @@ export const SURFACE_LABEL: Record<Surface, string> = {
 
 /** The `g <key>` jump keys, kept next to the Surface union so they stay in sync.
  *  OBS-5: OBSERVE chords pick keys that don't collide with the existing h/b/w/q —
- *  t(elemetry) / u(tilization) / f(inops) / o(=fleetOps, f taken) / d(evops). */
+ *  t(elemetry) / u(tilization) / f(inops) / o(=fleetOps, f taken) / d(evops).
+ *  CTL-865: c(luster) — doesn't collide with any existing binding. */
 export const SURFACE_CHORD: Record<string, Surface> = {
   h: "home",
   b: "board",
   w: "workers",
   q: "queue",
+  c: "cluster",
   t: "telemetry",
   u: "utilization",
   f: "finops",
@@ -72,12 +79,14 @@ export const SURFACE_CHORD: Record<string, Surface> = {
 
 /** Breadcrumb trail per surface — scope-less fallback (used by tests + non-scoped contexts).
  *  CTL-930: scope-aware breadcrumbs use lib/nav-model#breadcrumbFor instead.
- *  OBS-5: OBSERVE surfaces sit under an "Observe" crumb instead of "Overall". */
+ *  OBS-5: OBSERVE surfaces sit under an "Observe" crumb instead of "Overall".
+ *  CTL-865: cluster sits under "Overall" (an OPERATE surface). */
 export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
   home: ["Overall", "Inbox"],
   board: ["Overall", "Tickets"],
   workers: ["Overall", "Workers"],
   queue: ["Overall", "Queue"],
+  cluster: ["Overall", "Cluster"],
   telemetry: ["Observe", "Telemetry"],
   utilization: ["Observe", "Utilization"],
   finops: ["Observe", "FinOps"],

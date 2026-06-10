@@ -9,6 +9,7 @@ import {
   LayoutGridIcon,
   ListOrderedIcon,
   MoonIcon,
+  NetworkIcon,
   ServerIcon,
   SettingsIcon,
   SunIcon,
@@ -123,6 +124,7 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
   { surface: "queue", label: "Queue", icon: ListOrderedIcon },
+  { surface: "cluster", label: "Cluster", icon: NetworkIcon },
 ];
 
 // CTL-977: Shared classes for collapsible group trigger rows.

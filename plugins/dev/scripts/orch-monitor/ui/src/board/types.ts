@@ -245,3 +245,28 @@ type AssertAssignable<From, To> = From extends To ? true : never;
 // Compile-time contract assertion: `true` when the server payload fits the UI view;
 // collapses to `never` (typecheck break) on a non-conforming change.
 type ContractPayloadFitsUiView = AssertAssignable<ReadModelPayload, BoardPayload>;
+
+// ── CTL-865: cluster-board types (mirrored from lib/cluster-data.ts) ─────────
+export type Liveness = "live" | "degraded" | "offline";
+
+export interface ClusterTicketRow {
+  id: string;
+  title: string;
+  phase: string | null;
+  linearState: string;
+  pr: number | null;
+  prState: string | null;
+}
+
+export interface ClusterHostStatus {
+  hostName: string;
+  lastHeartbeatISO: string | null;
+  liveness: Liveness;
+  tickets: ClusterTicketRow[];
+}
+
+export interface ClusterBoardPayload {
+  generatedAt: string;
+  hosts: ClusterHostStatus[];
+  unclaimed: ClusterTicketRow[];
+}

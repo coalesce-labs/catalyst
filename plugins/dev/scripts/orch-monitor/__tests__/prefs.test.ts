@@ -40,11 +40,13 @@ describe("landing-surface pref — documented defaults (CTL-911)", () => {
     // the not-yet-shipped OBSERVE surfaces (utilization/finops/fleetops/devops) are
     // deliberately NOT offered as a landing default — so LANDING is a strict subset
     // of SURFACES, never the full nav array.
+    // CTL-865: cluster is a shipped OPERATE surface, so it IS a valid landing.
     expect([...LANDING_SURFACES]).toEqual([
       "home",
       "board",
       "workers",
       "queue",
+      "cluster",
       "telemetry",
     ]);
     // The not-yet-shipped OBSERVE surfaces are excluded.

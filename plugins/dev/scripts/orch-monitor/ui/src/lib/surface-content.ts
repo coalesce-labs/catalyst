@@ -40,6 +40,7 @@ export type SurfaceContentKind =
   | "board"
   | "workers"
   | "queue"
+  | "cluster"
   | "telemetry"
   | "finops"
   | "utilization"
@@ -57,6 +58,8 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   if (surface === "board") return "board";
   if (surface === "workers") return "workers";
   if (surface === "queue") return "queue";
+  // CTL-865: Cluster surface — aggregate host view with heartbeat liveness.
+  if (surface === "cluster") return "cluster";
   // OBS-5: Telemetry is the first OBSERVE surface to ship its own content shell.
   if (surface === "telemetry") return "telemetry";
   // OBS-10: FinOps is the second OBSERVE surface to ship its own content shell.

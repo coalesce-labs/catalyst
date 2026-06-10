@@ -46,11 +46,13 @@ const shellCode = stripComments(shellSrc);
 describe("surface contract (CTL-891)", () => {
   it("declares the OPERATE surfaces then the OBSERVE surfaces in nav order", () => {
     // OBS-5: the five OBSERVE analytics surfaces follow the four OPERATE surfaces.
+    // CTL-865: cluster added after queue in the OPERATE block.
     expect([...SURFACES]).toEqual([
       "home",
       "board",
       "workers",
       "queue",
+      "cluster",
       "telemetry",
       "utilization",
       "finops",
@@ -59,14 +61,16 @@ describe("surface contract (CTL-891)", () => {
     ]);
   });
 
-  it("maps a g-chord key to every surface (OPERATE h/b/w/q + OBSERVE t/u/f/o/d)", () => {
+  it("maps a g-chord key to every surface (OPERATE h/b/w/q/c + OBSERVE t/u/f/o/d)", () => {
     // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w/q —
     // t(elemetry) / u(tilization) / f(inops) / o(=fleetOps) / d(evops).
+    // CTL-865: c(luster) chord added for the cluster surface.
     expect(SURFACE_CHORD).toEqual({
       h: "home",
       b: "board",
       w: "workers",
       q: "queue",
+      c: "cluster",
       t: "telemetry",
       u: "utilization",
       f: "finops",
@@ -191,6 +195,7 @@ test("SURFACES round-trips the Surface union", () => {
     board: false,
     workers: false,
     queue: false,
+    cluster: false,
     telemetry: false,
     utilization: false,
     finops: false,

@@ -105,6 +105,13 @@ const FleetOpsSurface = lazy(() =>
     default: m.FleetOpsSurface,
   })),
 );
+// CTL-865: the Cluster surface — aggregate host view with heartbeat liveness and
+// per-host drill-down. Lazy so its chunk doesn't ship in the main bundle.
+const ClusterSurface = lazy(() =>
+  import("./board/ClusterBoard").then((m) => ({
+    default: m.ClusterBoard,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -430,6 +437,14 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <FleetOpsSurface />
+      </Suspense>
+    );
+  }
+  // CTL-865: the Cluster surface — aggregate host view with heartbeat liveness.
+  if (kind === "cluster") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <ClusterSurface />
       </Suspense>
     );
   }
