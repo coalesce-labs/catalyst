@@ -79,6 +79,8 @@ import {
 // CTL-960 — left-nav polish: project-group headers, consistent twistie, Overall label.
 // CTL-977 — left-nav restyle v2: natural-case headers, quieter labels, rebalanced icon/label,
 //            Linear-style selected state, twistie moved to right.
+// CTL-980 — nav proportion v3: icons 16px (size-4), muted inactive labels, icon color = label
+//            color via currentColor, twistie beside label (not far-right), "Projects" heading.
 
 /** A status dot overlaid on a nav icon (emerald = live, amber = anomaly). */
 function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
@@ -111,11 +113,11 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
 ];
 
 // CTL-977: Shared classes for collapsible group trigger rows.
-// Natural-case (no uppercase), quiet/muted color, twistie on the RIGHT.
-// The favicon and label sit on the left; the chevron is ml-auto on the right.
+// Natural-case (no uppercase), quiet/muted color.
+// CTL-980: twistie is placed BESIDE the label text (no ml-auto), favicon LEFT of label.
 const GROUP_TRIGGER_BASE = cn(
   "flex h-7 w-full shrink-0 items-center rounded-md px-2 outline-hidden",
-  // CTL-977: no uppercase — render names in their natural case.
+  // CTL-977/CTL-980: no uppercase — render names in their natural case; muted color.
   "text-[11px] font-medium text-sidebar-foreground/45",
   "transition-[margin,opacity,color] duration-200 ease-linear",
   "cursor-pointer hover:text-sidebar-foreground/70 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
@@ -201,6 +203,9 @@ export function AppSidebar() {
   // monotony from four repeated blocks of identical Inbox/Tickets/Workers/Queue.
   // CTL-977: active item gets sidebar-primary (accent) color on icon + label text,
   // providing a clear Linear-style selected state beyond the bg fill.
+  // CTL-980: icon size forced to 16px (size-4) so it reads as ~same size as the 13px
+  // label (not 1.7× bigger). Icon color = currentColor so it inherits the label's
+  // muted-inactive / bright-active tone automatically. Inactive labels muted to /60.
   function renderOperateItem(
     item: (typeof OPERATE_ITEMS)[number],
     scopeVal: string,
@@ -216,17 +221,21 @@ export function AppSidebar() {
           tooltip={item.label}
           size={compact ? "sm" : "default"}
           onClick={() => go(item.surface, scopeVal)}
-          // CTL-977: active item gets accent (sidebar-primary) color treatment on
-          // icon + label so the selected state is unmistakable but quiet.
-          // Inactive icon is muted; label is full-contrast sidebar-foreground.
+          // CTL-980: inactive = muted label + icon (both text-sidebar-foreground/60);
+          // active/hover = full contrast (text-sidebar-primary). Icon inherits via
+          // currentColor — no separate [&>svg]: override needed when icon is inline.
           className={cn(
             active
-              ? "text-sidebar-primary [&>svg]:text-sidebar-primary"
-              : "[&>svg]:text-sidebar-foreground/55 hover:[&>svg]:text-sidebar-foreground/80",
+              ? "text-sidebar-primary"
+              : "text-sidebar-foreground/60 hover:text-sidebar-foreground",
           )}
         >
-          <span className="relative flex items-center justify-center">
-            <item.icon />
+          {/* CTL-980: explicit size-4 because the icon is inside a <span> wrapper
+              (for the status dot overlay), so the SidebarMenuButton's [&>svg]:size-4
+              selector does NOT reach the nested SVG. Force it here. Icon uses
+              currentColor — inherits the button's muted/active text color. */}
+          <span className="relative flex shrink-0 items-center justify-center">
+            <item.icon className="size-4 shrink-0" />
             {dot && scopeVal === "all" && <StatusDot kind={dot} />}
           </span>
           <span>{item.label}</span>
@@ -275,8 +284,17 @@ export function AppSidebar() {
         </SidebarGroup>
 
         {/* ── PER-PROJECT GROUPS: one collapsible per repo ────────────────── */}
-        {/* CTL-977: natural-case repo name, twistie moved to RIGHT (ml-auto),
-            favicon stays LEFT of the label, no uppercase transformation. */}
+        {/* CTL-980: "Projects" / "Your projects" section heading above the collapsible
+            project rows — mirrors Linear's "Your teams" parent section label. Only
+            render the heading when there is at least one project to show. */}
+        {repos.length > 0 && (
+          <SidebarGroup className="pt-0 pb-0">
+            <SidebarGroupLabel>Projects</SidebarGroupLabel>
+          </SidebarGroup>
+        )}
+        {/* CTL-977: natural-case repo name, favicon stays LEFT of the label.
+            CTL-980: twistie is now BESIDE the label (no ml-auto), placed right
+            after the label text with a small gap, so the row reads "adva ⌄". */}
         {repos.map((repo) => {
           // navGroups has the per-repo group; get its dotColor + iconDataUrl (CTL-961)
           const navGroup = navGroups.find((g) => g.scope === repo);
@@ -317,10 +335,11 @@ export function AppSidebar() {
                     />
                   ) : null}
                   {repo}
-                  {/* CTL-977: twistie on the RIGHT — ml-auto pushes to far end of row. */}
+                  {/* CTL-980: twistie immediately AFTER the label text (no ml-auto).
+                      A small ml-1 gap keeps it visually adjacent to the label. */}
                   <ChevronRightIcon
                     className={cn(
-                      "ml-auto size-3 flex-shrink-0 transition-transform duration-200",
+                      "ml-1 size-3 flex-shrink-0 transition-transform duration-200",
                       isOpen && "rotate-90",
                     )}
                   />
@@ -347,8 +366,8 @@ export function AppSidebar() {
           <SidebarGroup className="pt-0">
             <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
               Observe
-              {/* CTL-977: twistie on the RIGHT — group-data-[state=open]/observe rotates. */}
-              <ChevronRightIcon className="ml-auto size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
+              {/* CTL-980: twistie immediately after label (no ml-auto). */}
+              <ChevronRightIcon className="ml-1 size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
             </CollapsibleTrigger>
             <CollapsibleContent>
               <SidebarGroupContent>
