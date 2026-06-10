@@ -679,6 +679,10 @@ SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
    AND NOT EXISTS (SELECT 1 FROM obs_signal s
                     WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)`;
 
+// Exported for the FSM-drift guard (advance-rules.test.mjs): asserts the compiled
+// rank/next-phase maps stay byte-equal to the live phase-fsm.mjs declarations.
+export const R16_advance_to_SQL_FOR_TEST = R16_advance_to;
+
 // R17 cycle_exhausted — the remediate-cycle cap is reached: latest=verify done,
 // verdict=fail, remediate_count >= cap. Mirrors maybeEscalateRemediateExhausted's
 // trigger (signals.verify==='done' && verdict==='fail' && cycleCount >= cap) as a

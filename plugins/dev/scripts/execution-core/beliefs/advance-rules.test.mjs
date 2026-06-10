@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
-import { evaluateBeliefs } from "./rules.mjs";
+import { evaluateBeliefs, R16_advance_to_SQL_FOR_TEST } from "./rules.mjs";
 import { REMEDIATE_CYCLE_CAP, PHASES, NEXT_PHASE } from "../../lib/phase-fsm.mjs";
 import { deriveAdvancement } from "../scheduler.mjs";
 
@@ -368,6 +368,19 @@ describe("CROSS-CHECK: advance_to.to === deriveAdvancement(...) for every fixtur
       opts: { verifyVerdict: "fail", remediateCycleCount: REMEDIATE_CYCLE_CAP + 2 },
     },
   ];
+
+  // FSM-DRIFT GUARD: the R16/R17 SQL embeds the FSM phase-rank + next-phase maps
+  // (compiled from phase-fsm.mjs at module load). This asserts the rule SQL still
+  // contains every (phase, rank) and (cur, next) pair the LIVE FSM declares — so a
+  // descriptor edit (lib/workflow.default.json) that re-orders phases or changes a
+  // successor can't silently desync the belief from deriveAdvancement.
+  test("R16 SQL embeds the live FSM phase-rank + next-phase maps (single source of truth)", () => {
+    // Re-derive the expected VALUES fragments exactly as rules.mjs does.
+    const expectedRank = PHASES.map((p, i) => `('${p}', ${i})`).join(", ");
+    const expectedNext = PHASES.map((p) => `('${p}', '${NEXT_PHASE[p]}')`).join(", ");
+    expect(R16_advance_to_SQL_FOR_TEST).toContain(expectedRank);
+    expect(R16_advance_to_SQL_FOR_TEST).toContain(expectedNext);
+  });
 
   for (const [idx, fx] of fixtures.entries()) {
     test(`fixture #${idx}: ${JSON.stringify(fx.sig)} | ${JSON.stringify(fx.opts)}`, () => {

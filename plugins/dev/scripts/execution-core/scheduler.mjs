@@ -73,6 +73,11 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
+// CTL-966 + CTL-935: the advancement shadow comparator — compares the procedural
+// deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
+// logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
+// dispatches/writes a signal/writes Linear).
+import { runAdvanceShadow } from "./beliefs/advance-shadow.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -3530,6 +3535,38 @@ function runTick() {
       } catch (escErr) {
         try {
           log.warn({ err: escErr?.message }, "escalate: executor threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+
+      // CTL-966 + CTL-935: advancement shadow comparator. For each in-flight
+      // ticket compute the PROCEDURAL deriveAdvancement and compare it to the
+      // DERIVE-ONLY advance_to / cycle_exhausted beliefs for this tick; log any
+      // disagreement as a `beliefs.advance_shadow.disagree` operator event.
+      // SHADOW ONLY — never dispatches, never writes a signal, never writes
+      // Linear, never resets the cycle. Wrapped in its own guard so it can never
+      // break the tick. Reads the SAME shared beliefs.db handle (no second open)
+      // and the SAME procedural readers the advancement sweep below consumes.
+      try {
+        const advDb = getBeliefsDb();
+        if (advDb) {
+          runAdvanceShadow(advDb, beliefsRes.tickId, {
+            orchDir: runningOpts.orchDir,
+            listInFlight: (od) => listInFlightTickets(od),
+            readSignals: (od, ticket) => readPhaseSignals(od, ticket),
+            readVerdict: ({ ticket, orchDir }) => readVerifyVerdict({ ticket, orchDir }),
+            countCycles: ({ ticket }) => countRemediateCycles({ ticket }),
+            deriveAdvancement,
+            cap: REMEDIATE_CYCLE_CAP,
+            appendEvent: intentEventAppender,
+            // Opt-in tick summary; off by default to keep the event log lean.
+            emitTickSummary: (process.env.CATALYST_ADVANCE_SHADOW_SUMMARY ?? "0") === "1",
+          });
+        }
+      } catch (advErr) {
+        try {
+          log.warn({ err: advErr?.message }, "advance-shadow: comparator threw (tick unaffected)");
         } catch {
           /* even logging must not break the tick */
         }
