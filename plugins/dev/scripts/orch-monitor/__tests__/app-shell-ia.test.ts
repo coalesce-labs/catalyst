@@ -106,17 +106,28 @@ describe("OBSERVE is a recessed collapsible go-deeper tier (CTL-893)", () => {
     expect(sidebarCode).toMatch(/Observe/);
   });
 
-  it("OBSERVE items are disabled 'soon' placeholders (future routes, no content)", () => {
-    // Each OBSERVE item button is disabled and carries a 'soon' affordance.
-    const observeRender = sidebarSrc.slice(sidebarSrc.indexOf("OBSERVE.map"));
+  it("not-yet-shipped OBSERVE items are disabled 'soon' placeholders (future routes, no content)", () => {
+    // OBS-5: the OBSERVE group is split into live items (clickable surfaces with a
+    // content shell) and "soon" placeholders. Telemetry ships its shell first, so
+    // it leaves the disabled set; the remaining four stay disabled + carry 'soon'.
+    const observeRender = sidebarSrc.slice(sidebarSrc.indexOf("OBSERVE_SOON.map"));
     expect(observeRender).toContain("disabled");
     expect(observeRender.toLowerCase()).toContain("soon");
+    // The live Telemetry item is NOT a disabled 'soon' placeholder — it navigates.
+    const liveDecl = sidebarSrc.slice(
+      sidebarSrc.indexOf("OBSERVE_LIVE"),
+      sidebarSrc.indexOf("OBSERVE_SOON"),
+    );
+    expect(liveDecl).toContain('"Telemetry"');
   });
 
   it("OBSERVE defaults collapsed (the toggle state initialises closed)", () => {
     // useState(false) → collapsed by default; open is bound to the Collapsible.
+    // OBS-5: the Collapsible force-opens when a live OBSERVE surface is active
+    // (open={observeOpen || observeContainsActive}), so the selected item is never
+    // hidden inside a collapsed group — but observeOpen still drives the default.
     expect(sidebarSrc).toMatch(/useState\(\s*false\s*\)/);
-    expect(sidebarSrc).toMatch(/open=\{observeOpen\}/);
+    expect(sidebarSrc).toMatch(/open=\{observeOpen/);
   });
 });
 

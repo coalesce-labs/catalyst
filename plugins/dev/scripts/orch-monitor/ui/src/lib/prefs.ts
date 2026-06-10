@@ -17,9 +17,19 @@
 // the shell + Settings surface call.
 import { SURFACES, type Surface } from "./surface";
 
-/** The surfaces eligible as a landing default — exactly the four OPERATE
- *  surfaces. Settings itself is a footer destination, never a landing. */
-export const LANDING_SURFACES: readonly Surface[] = SURFACES;
+/** The surfaces eligible as a landing default — the four OPERATE surfaces plus
+ *  any OBSERVE surface that has shipped live content. Settings itself is a footer
+ *  destination, never a landing. OBS-5: Telemetry is the first OBSERVE surface to
+ *  qualify; the other four OBSERVE surfaces stay nav-disabled ("soon"), so they
+ *  are deliberately NOT offered as a landing default (landing on a surface that
+ *  only renders the dashboard fall-through would confuse the operator). */
+export const LANDING_SURFACES: readonly Surface[] = SURFACES.filter(
+  (s) =>
+    s !== "utilization" &&
+    s !== "finops" &&
+    s !== "fleetops" &&
+    s !== "devops",
+);
 
 /** localStorage key the landing-surface preference persists under. Named in the
  *  `catalyst:*` family like `catalyst:theme` / `catalyst:sidebar-open`. */

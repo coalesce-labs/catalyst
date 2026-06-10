@@ -29,11 +29,24 @@ describe("surfaceContentKind", () => {
     expect(surfaceContentKind("queue")).toBe("queue");
   });
 
+  it("routes the Telemetry surface to its own OBSERVE content shell (OBS-5)", () => {
+    // Gherkin (OBS-5): "the operator clicks the Telemetry nav item → the
+    // Telemetry OBSERVE shell renders in the SidebarInset" — the first OBSERVE
+    // surface to leave the dashboard fall-through.
+    expect(surfaceContentKind("telemetry")).toBe("telemetry");
+  });
+
   it("keeps Home on the dashboard (no regression)", () => {
     // Home must stay exactly what SHELL1/SHELL2 rendered — only board (SHELL2),
-    // workers (SURF1), and queue (SURF2) are special-cased now.
+    // workers (SURF1), queue (SURF2), and telemetry (OBS-5) are special-cased.
+    // The remaining OBSERVE surfaces (utilization/finops/fleetops/devops) keep
+    // the dashboard fall-through until their own OBS tickets ship.
     const stillDashboard = SURFACES.filter(
-      (s) => s !== "board" && s !== "workers" && s !== "queue",
+      (s) =>
+        s !== "board" &&
+        s !== "workers" &&
+        s !== "queue" &&
+        s !== "telemetry",
     );
     for (const s of stillDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
@@ -42,7 +55,7 @@ describe("surfaceContentKind", () => {
 
   it("covers every declared surface (no surface falls through undefined)", () => {
     for (const s of SURFACES as readonly Surface[]) {
-      expect(["board", "workers", "queue", "dashboard"]).toContain(
+      expect(["board", "workers", "queue", "telemetry", "dashboard"]).toContain(
         surfaceContentKind(s),
       );
     }

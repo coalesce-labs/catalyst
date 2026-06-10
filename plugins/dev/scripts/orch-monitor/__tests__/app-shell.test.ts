@@ -44,16 +44,34 @@ const shellCode = stripComments(shellSrc);
 
 // ── Pure surface contract (lib/surface.ts) ───────────────────────────────────
 describe("surface contract (CTL-891)", () => {
-  it("declares exactly the four OPERATE surfaces in nav order", () => {
-    expect([...SURFACES]).toEqual(["home", "board", "workers", "queue"]);
+  it("declares the OPERATE surfaces then the OBSERVE surfaces in nav order", () => {
+    // OBS-5: the five OBSERVE analytics surfaces follow the four OPERATE surfaces.
+    expect([...SURFACES]).toEqual([
+      "home",
+      "board",
+      "workers",
+      "queue",
+      "telemetry",
+      "utilization",
+      "finops",
+      "fleetops",
+      "devops",
+    ]);
   });
 
-  it("maps a g-chord key to every surface (g h / g b / g w / g q)", () => {
+  it("maps a g-chord key to every surface (OPERATE h/b/w/q + OBSERVE t/u/f/o/d)", () => {
+    // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w/q —
+    // t(elemetry) / u(tilization) / f(inops) / o(=fleetOps) / d(evops).
     expect(SURFACE_CHORD).toEqual({
       h: "home",
       b: "board",
       w: "workers",
       q: "queue",
+      t: "telemetry",
+      u: "utilization",
+      f: "finops",
+      o: "fleetops",
+      d: "devops",
     });
     // Every surface is reachable by some chord, and every chord targets a real surface.
     const chordTargets = new Set(Object.values(SURFACE_CHORD));
@@ -173,6 +191,11 @@ test("SURFACES round-trips the Surface union", () => {
     board: false,
     workers: false,
     queue: false,
+    telemetry: false,
+    utilization: false,
+    finops: false,
+    fleetops: false,
+    devops: false,
   };
   for (const s of SURFACES) seen[s] = true;
   expect(Object.values(seen).every(Boolean)).toBe(true);

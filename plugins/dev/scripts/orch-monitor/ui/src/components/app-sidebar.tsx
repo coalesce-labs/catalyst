@@ -97,9 +97,16 @@ function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
   );
 }
 
+// ── OBSERVE — live items (clickable surfaces) ────────────────────────────────
+// OBS-5: Telemetry is the first OBSERVE surface to ship a real content shell, so
+// it is a clickable nav item (navigates to surface === "telemetry"). The other
+// four stay disabled "soon" until their own OBS tickets land.
+const OBSERVE_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
+  { surface: "telemetry", label: "Telemetry", icon: ActivityIcon },
+];
+
 // ── OBSERVE — disabled "soon" items ──────────────────────────────────────────
-const OBSERVE = [
-  { label: "Telemetry", icon: ActivityIcon },
+const OBSERVE_SOON = [
   { label: "Utilization", icon: GaugeIcon },
   { label: "FinOps", icon: WalletIcon },
   { label: "Fleet Ops", icon: ServerIcon },
@@ -174,6 +181,11 @@ export function AppSidebar() {
     if (scopeVal !== undefined) setRepoScope(scopeVal);
     if (isMobile) setOpenMobile(false);
   }
+
+  // OBS-5: force the OBSERVE group open while a live OBSERVE surface is active.
+  const observeContainsActive = OBSERVE_LIVE.some(
+    (item) => item.surface === surface,
+  );
 
   // Derive badge for an OPERATE item from the nav signal.
   function liveBadge(s: Surface, scopeVal: string): number | null {
@@ -363,9 +375,14 @@ export function AppSidebar() {
 
         {/* ── OBSERVE — collapsible, defaults collapsed, "soon" items ──────── */}
         {/* CTL-977: natural-case "Observe", twistie on RIGHT to match project groups. */}
+        {/* OBS-5: force-open when a live OBSERVE surface is active (e.g. reached via
+            the `g t` chord or a fresh load) so the selected item is never hidden
+            inside a collapsed group — mirrors the per-project groupContainsActive. */}
         <Collapsible
-          open={observeOpen}
-          onOpenChange={setObserveOpen}
+          open={observeOpen || observeContainsActive}
+          onOpenChange={(open) => {
+            if (!observeContainsActive) setObserveOpen(open);
+          }}
           className="group/observe"
         >
           <SidebarGroup className="pt-0">
@@ -377,7 +394,34 @@ export function AppSidebar() {
             <CollapsibleContent>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {OBSERVE.map((item) => (
+                  {/* OBS-5: live OBSERVE items — clickable, no "soon" badge. Styled
+                      identically to OPERATE items (CTL-980/981: 16px icon via
+                      size-4, weight-500 muted-inactive label / accent-active) so
+                      the nav styling never regresses. OBSERVE surfaces are not
+                      repo-scoped, so the active check is surface-only. */}
+                  {OBSERVE_LIVE.map((item) => {
+                    const active = surface === item.surface;
+                    return (
+                      <SidebarMenuItem key={item.surface}>
+                        <SidebarMenuButton
+                          isActive={active}
+                          tooltip={item.label}
+                          onClick={() => go(item.surface)}
+                          className={cn(
+                            active
+                              ? "text-sidebar-primary"
+                              : "font-medium text-sidebar-foreground/72 hover:text-sidebar-foreground",
+                          )}
+                        >
+                          <span className="relative flex shrink-0 items-center justify-center">
+                            <item.icon className="size-4 shrink-0" />
+                          </span>
+                          <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                  {OBSERVE_SOON.map((item) => (
                     <SidebarMenuItem key={item.label}>
                       <SidebarMenuButton
                         disabled
