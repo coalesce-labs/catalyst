@@ -4,13 +4,15 @@
 // instead). No axes, no labels — a glanceable inline trend, the design's "▁▂▃▅▆█"
 // shape rendered as real geometry.
 import type { SparklinePoint } from "@/board/worker-burn-data";
-import { LIVE } from "@/board/board-tokens";
 
+// OBS-1: default stroke/fill uses the categorical chart palette token
+// (--chart-1, brand blue) rather than the reserved LIVE signal — sparklines
+// show trend, not liveness. Callers can still override `color`.
 export function Sparkline({
   points,
   width = 64,
   height = 18,
-  color = LIVE,
+  color = "var(--chart-1)",
   ariaLabel,
 }: {
   points: SparklinePoint[];

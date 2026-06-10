@@ -27,6 +27,15 @@
   --color-blue-soft: #aecdf2;
   --color-purple-soft: #cdb4f0;
 
+  /* OBS-1: shadcn chart color utilities — categorical series palette.
+     Aliased to the --chart-1..6 tokens defined in :root and .dark below. */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
+
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   /* shadcn/ui semantic color utilities — aliased to existing tokens via :root */
@@ -107,6 +116,14 @@
   --ring: var(--color-light-accent);
   --radius: 0.5rem;
 
+  /* OBS-1: categorical chart palette (shared across both themes). */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #53cde2;
+  --chart-6: #a98ee3;
+
   --sidebar: var(--color-light-surface-1);
   --sidebar-foreground: var(--color-light-fg);
   --sidebar-primary: var(--color-light-accent);
@@ -136,6 +153,15 @@
   --destructive: var(--color-red);
   --input: var(--color-border);
   --ring: var(--color-accent);
+
+  /* OBS-1: categorical chart palette (same values as :root — the palette is
+     theme-independent; status color is reserved for health, not series). */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #53cde2;
+  --chart-6: #a98ee3;
 
   /* CTL-891 / SHELL1: sidebar surface — the rail sits one step up from the
      base surface so the SidebarInset (background) reads as a raised card. */
