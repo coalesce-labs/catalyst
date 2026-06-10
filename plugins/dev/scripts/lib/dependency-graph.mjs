@@ -266,3 +266,36 @@ export function analyzeDependencyGraph(issues, options = {}) {
   const anomalies = detectCycles(list.map((i) => i?.identifier).filter(Boolean), edges);
   return { ready, blocked, anomalies };
 }
+
+// wouldCreateCycle — would adding a NEW edge `from → to` (from blocks to) to
+// the given edge set close a dependency cycle? (CTL-925)
+//
+// Adding `from → to` creates a cycle iff `to` can already reach `from` over
+// the existing edges (a path to → … → from, which the new edge would close
+// back to `to`), OR the edge is a self-loop (from === to). Pure DFS
+// reachability over the forward `blocks` direction — O(V + E), no SCC
+// allocation. Defensive against a null/undefined edge list (treated as
+// empty → no cycle). Used by STEP E and the CTL-537 sequencing seam in
+// scheduler.mjs to refuse a cycle-closing blocked_by write of ANY length,
+// superseding the prior direct 2-node candidateBlocks.has shortcut.
+export function wouldCreateCycle(edges, from, to) {
+  if (!from || !to) return false;
+  if (from === to) return true;
+  const list = edges ?? [];
+  const adj = new Map();
+  for (const { from: f, to: t } of list) {
+    if (!f || !t) continue;
+    if (!adj.has(f)) adj.set(f, []);
+    adj.get(f).push(t);
+  }
+  const stack = [to];
+  const seen = new Set();
+  while (stack.length) {
+    const node = stack.pop();
+    if (node === from) return true;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    for (const next of adj.get(node) ?? []) stack.push(next);
+  }
+  return false;
+}
