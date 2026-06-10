@@ -115,6 +115,18 @@ const DDL = [
     postcondition TEXT, attempts INTEGER DEFAULT 0,
     outcome     TEXT
   )`,
+  // Retention-prune indexes (additive to the spec §1 tables; adversarial-review
+  // finding 3): pruneRetention's DELETE … WHERE tick_id IN (SELECT … now_ms < ?)
+  // would otherwise full-scan every obs_* table at steady state (10⁵–10⁶ rows).
+  // belief(tick_id) is already covered by its UNIQUE(tick_id, name, subject).
+  `CREATE INDEX IF NOT EXISTS idx_tick_now_ms ON tick (now_ms)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_agent_tick ON obs_agent (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_job_tick ON obs_job (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_signal_tick ON obs_signal (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_transcript_tick ON obs_transcript (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_linear_tick ON obs_linear (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_heartbeat_ts ON obs_heartbeat (ts_ms)`,
+  `CREATE INDEX IF NOT EXISTS idx_intent_tick ON intent (tick_id)`,
 ];
 
 // openBeliefsDb — open (creating parent dirs) + migrate idempotently + seed

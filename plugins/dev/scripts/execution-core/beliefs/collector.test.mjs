@@ -399,6 +399,76 @@ describe("collectTickFacts — heartbeat tail", () => {
     expect(rows[1].kind).toBe("test");
     db.close();
   });
+
+  // Adversarial-review finding 1: cursor 0 on a pre-existing fat log (100MB+
+  // in production) must NOT slurp the whole file inside the tick transaction.
+  test("first-enable on a fat log is tail-capped: bounded read, partial head dropped, cursor lands at EOF", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const log = join(scratch(), "2026-06.jsonl");
+    // 3 heartbeat lines; cap sized so only the LAST line (plus a partial head
+    // of the middle one) fits in the window → exactly 1 row ingested.
+    const l1 = hbLine({ kind: "old-1", epoch: 1781029700000 });
+    const l2 = hbLine({ kind: "old-2", epoch: 1781029750000 });
+    const l3 = hbLine({ kind: "recent", epoch: 1781029800000 });
+    writeFileSync(log, l1 + l2 + l3);
+    const cap = Buffer.byteLength(l3) + 10; // window covers l3 + a torn tail of l2
+    const orchDir = scratch();
+    const res = collect(db, orchDir, { eventLogPath: log, hbTailCapBytes: cap });
+    expect(res.ok).toBe(true);
+    expect((res.errors ?? []).map((e) => e.source)).not.toContain("heartbeats");
+    const rows = db.query("SELECT * FROM obs_heartbeat").all();
+    expect(rows.length).toBe(1); // torn l2 head dropped, only complete l3 ingested
+    expect(rows[0].kind).toBe("recent");
+    // cursor is at EOF: a re-tick ingests nothing, an append ingests exactly it
+    collect(db, orchDir, { eventLogPath: log, hbTailCapBytes: cap });
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_heartbeat").get().n).toBe(1);
+    appendFileSync(log, hbLine({ kind: "new", epoch: 1781029860000 }));
+    collect(db, orchDir, { eventLogPath: log, hbTailCapBytes: cap });
+    const after = db.query("SELECT kind FROM obs_heartbeat ORDER BY ts_ms").all();
+    expect(after.map((r) => r.kind)).toEqual(["recent", "new"]);
+    db.close();
+  });
+
+  test("capped window with NO complete line still advances the cursor past the torn head", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const log = join(scratch(), "2026-06.jsonl");
+    // One long line, NOT newline-terminated, longer than the cap: the capped
+    // window contains no newline at all. The cursor must still advance so the
+    // blob is never re-read every tick.
+    const giant = JSON.stringify({
+      attributes: { "event.name": "worker.heartbeat" },
+      body: { payload: { ticket: "CTL-1", phase: "plan", epoch: 1, pad: "x".repeat(4000) } },
+    });
+    writeFileSync(log, giant); // no trailing \n
+    const orchDir = scratch();
+    collect(db, orchDir, { eventLogPath: log, hbTailCapBytes: 256 });
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_heartbeat").get().n).toBe(0);
+    const cur = db
+      .query("SELECT value_int FROM cfg WHERE key = ?")
+      .get(`hb_cursor:${log}`);
+    expect(cur.value_int).toBe(Buffer.byteLength(giant)); // skipped, never re-read
+    // a real, complete line appended after the blob is picked up next tick
+    appendFileSync(log, `\n${hbLine({ kind: "post-blob", epoch: 1781029900000 })}`);
+    collect(db, orchDir, { eventLogPath: log, hbTailCapBytes: 1024 });
+    const rows = db.query("SELECT kind FROM obs_heartbeat").all();
+    expect(rows.map((r) => r.kind)).toEqual(["post-blob"]);
+    db.close();
+  });
+
+  // Adversarial-review finding 5: a cache handing back a non-bindable value
+  // (object, not string) must be contained by the per-source catch — the rest
+  // of the tick still commits.
+  test("linearCache.get returns a non-bindable object → linear error recorded, tick survives", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), {
+      linearCache: { get: () => ({ state: "Plan" }) }, // misshaped: object, not string
+    });
+    expect(res.ok).toBe(true); // whole tick NOT rolled back
+    expect((res.errors ?? []).map((e) => e.source)).toContain("linear");
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(1);
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_agent").get().n).toBe(1);
+    db.close();
+  });
 });
 
 describe("collectTickFacts — Linear read-backs", () => {

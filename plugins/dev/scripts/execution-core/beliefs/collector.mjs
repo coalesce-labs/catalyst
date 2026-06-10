@@ -131,12 +131,30 @@ export function defaultReadJobState(bgJobId, { jobsDir = join(homedir(), ".claud
   };
 }
 
+// HB_TAIL_CAP_BYTES — hard ceiling on how many event-log bytes a single tick
+// may read. Without it, the FIRST tick after enabling the shadow (cursor 0)
+// would slurp the entire current-month log — 100MB+ on a busy host — inside
+// the tick's transaction (adversarial-review finding, 2026-06-09). When the
+// gap exceeds the cap we jump the cursor to the last `capBytes` of the file
+// and drop the partial head line; older heartbeats are forfeited, recency is
+// what the liveness rules need anyway.
+const HB_TAIL_CAP_BYTES = 4 * 1024 * 1024;
+
 // tailHeartbeats — append-only ingest of worker.heartbeat events from the
 // unified event log, byte-cursored in cfg ('hb_cursor:<path>') so a row is
 // recorded exactly once across ticks AND daemon restarts. Only complete
 // (newline-terminated) lines are consumed; a partial trailing line waits for
 // the next tick. Throws on real failures (caller's per-source catch records).
-function tailHeartbeats(db, eventLogPath) {
+//
+// EVENT-NAME DISPOSITION (adversarial-review finding 2, 2026-06-09): the spec
+// (research/2026-06-09-belief-store-step1-datalog.md §1) prescribes
+// `worker.heartbeat` verbatim, but as of 2026-06 NO emitter produces it — the
+// live stream's only heartbeat is `session.heartbeat` (catalyst-session.sh),
+// which carries no `phase` and a null payload, so it cannot satisfy
+// obs_heartbeat's NOT NULL ticket+phase columns. obs_heartbeat therefore
+// stays EMPTY until the worker.heartbeat emitter lands (CTL-934+ scope).
+// Deliberately spec-conformant rather than mis-ingesting session.heartbeat.
+function tailHeartbeats(db, eventLogPath, capBytes = HB_TAIL_CAP_BYTES) {
   let st;
   try {
     st = statSync(eventLogPath);
@@ -150,6 +168,11 @@ function tailHeartbeats(db, eventLogPath) {
   const row = db.query("SELECT value_int FROM cfg WHERE key = ?").get(cursorKey);
   let offset = row?.value_int ?? 0;
   if (offset > st.size) offset = 0; // rotation/truncation → re-read
+  let skipPartialHead = false;
+  if (st.size - offset > capBytes) {
+    offset = st.size - capBytes; // bounded read: tail-cap (first-enable / big gap)
+    skipPartialHead = true; // we landed mid-line — drop bytes up to the first newline
+  }
   if (st.size <= offset) return;
 
   const fd = openSync(eventLogPath, "r");
@@ -161,15 +184,30 @@ function tailHeartbeats(db, eventLogPath) {
   } finally {
     closeSync(fd);
   }
+  let start = 0;
+  if (skipPartialHead) {
+    while (start < read && buf[start] !== 0x0a) start += 1;
+    start += 1; // first byte after the newline (== read+1 when none found)
+  }
   // Byte-accurate cursor: consume only up to the last newline actually read.
   let end = read - 1;
-  while (end >= 0 && buf[end] !== 0x0a) end -= 1;
-  if (end < 0) return; // no complete line yet
+  while (end >= start && buf[end] !== 0x0a) end -= 1;
+  if (end < start) {
+    // No complete line in the window. If we capped past a giant head, still
+    // advance the cursor so those bytes are never re-read next tick.
+    if (skipPartialHead) {
+      db.run("INSERT OR REPLACE INTO cfg (key, value_int) VALUES (?, ?)", [
+        cursorKey,
+        offset + Math.min(start, read),
+      ]);
+    }
+    return;
+  }
 
   const insert = db.prepare(
     "INSERT INTO obs_heartbeat (ticket, phase, generation, host, kind, ts_ms) VALUES (?, ?, ?, ?, ?, ?)",
   );
-  for (const line of buf.toString("utf8", 0, end + 1).split("\n")) {
+  for (const line of buf.toString("utf8", start, end + 1).split("\n")) {
     if (!line.trim()) continue;
     let evt;
     try {
@@ -240,6 +278,7 @@ export function collectTickFacts({
   host: hostOpt,
   env = process.env,
   eventLogPath,
+  hbTailCapBytes = HB_TAIL_CAP_BYTES,
   pruneEveryTicks = PRUNE_EVERY_TICKS,
   getAgents,
   readSignals,
@@ -386,7 +425,7 @@ export function collectTickFacts({
 
       // ── obs_heartbeat — cursored event-log tail ─────────────────────────
       try {
-        if (eventLogPath) tailHeartbeats(db, eventLogPath);
+        if (eventLogPath) tailHeartbeats(db, eventLogPath, hbTailCapBytes);
       } catch (err) {
         fail("heartbeats", err);
       }
@@ -398,15 +437,23 @@ export function collectTickFacts({
         for (const s of signals) {
           if (!s?.ticket || seen.has(s.ticket)) continue;
           seen.add(s.ticket);
-          let state = null;
-          if (linearCache?.get) {
-            try {
-              state = linearCache.get(s.ticket) ?? null;
-            } catch (err) {
-              fail("linear", err); // noted; the null-state row still records the read-back attempt
+          try {
+            let state = null;
+            if (linearCache?.get) {
+              try {
+                state = linearCache.get(s.ticket) ?? null;
+              } catch (err) {
+                fail("linear", err); // noted; the null-state row still records the read-back attempt
+                state = null;
+              }
             }
+            // ins.run INSIDE the per-source catch: a cache returning a
+            // non-bindable value must not escape to the whole-tick rollback
+            // (adversarial-review finding 5).
+            ins.run(tickId, String(s.ticket), state);
+          } catch (err) {
+            fail("linear", err);
           }
-          ins.run(tickId, String(s.ticket), state);
         }
       }
 
