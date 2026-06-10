@@ -1,0 +1,538 @@
+// collector.test.mjs — CTL-933 belief-store Step 1: the in-daemon fact
+// collector. All sources are injected fakes (hermetic — no `claude agents`,
+// no real jobs dir, no Linear). The spec §5 CTL-722 fixture is the anchor:
+// signal running + agent state=blocked + job tempo=blocked + transcript
+// exists=0 must land side by side under one tick row.
+import { describe, test, expect, afterEach, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import { openBeliefsDb } from "./schema.mjs";
+import { collectTickFacts, __resetBeliefsCollectorForTests } from "./collector.mjs";
+
+const DAY = 86_400_000;
+const NOW = 1781030108000; // spec §5 tick: 2026-06-09T18:35:08Z
+
+const tmps = [];
+function scratch() {
+  const d = mkdtempSync(join(tmpdir(), "ctl933-collector-"));
+  tmps.push(d);
+  return d;
+}
+beforeEach(() => __resetBeliefsCollectorForTests());
+afterEach(() => {
+  __resetBeliefsCollectorForTests();
+  while (tmps.length) {
+    try {
+      rmSync(tmps.pop(), { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+});
+
+const SID = "5ad5c1ff-1111-2222-3333-444455556666";
+
+// --- spec §5 fixture sources (the CTL-722 wedge, 2026-06-09) ---------------
+function wedgeSources() {
+  return {
+    getAgents: () => [
+      {
+        sessionId: SID,
+        kind: "background",
+        status: "idle",
+        state: "blocked", // the field the procedural code never read
+        cwd: "/work/ctl722",
+        name: "worker-CTL-722",
+        pid: 4242,
+        startedAt: "2026-06-09T08:56:24Z",
+      },
+    ],
+    readSignals: () => [
+      {
+        ticket: "CTL-722",
+        phase: "plan",
+        status: "running",
+        liveness: { kind: "bg", value: "5ad5c1ff" },
+        updatedAt: "2026-06-09T08:56:30Z",
+        raw: { generation: 3, startedAt: "2026-06-09T08:56:24Z" },
+      },
+    ],
+    // NOTE (adversarial review): NO assertions inside injected fakes — the
+    // collector's per-source try/catch would swallow a failed expect() and the
+    // test would pass vacuously. Fakes RECORD (see jobStateCalls below); the
+    // test body asserts. Unknown ids get a keyed miss, never a wrong fixture.
+    readJobState: (bgJobId) =>
+      bgJobId === "5ad5c1ff"
+        ? {
+            exists: true,
+            state: "working",
+            tempo: "blocked",
+            detail: "stuck on a startup dialog",
+            needs: null,
+            firstTerminalAt: null,
+            cliVersion: "2.1.152",
+            createdAtMs: 1780995384000,
+            updatedAtMs: 1780995390000,
+            mtimeMs: 1780995390000,
+          }
+        : { exists: false },
+    findTranscriptFn: () => null, // f104: transcript never created
+  };
+}
+
+// `now` CONTRACT (standardized per adversarial review): a FINITE NUMBER of
+// epoch-ms, captured ONCE per tick by the caller (spec §2 — `now` is a fact,
+// not a function). Never a function. The collector itself reads the clock
+// only when `now` is omitted entirely (standalone use), exactly once.
+function collect(db, orchDir, overrides = {}) {
+  return collectTickFacts({
+    orchDir,
+    db,
+    now: NOW,
+    host: "mini",
+    env: { CATALYST_BELIEFS_SHADOW: "1" }, // shadow is OPT-IN (default OFF)
+    eventLogPath: join(scratch(), "absent.jsonl"),
+    linearCache: { get: () => undefined },
+    ...wedgeSources(),
+    ...overrides,
+  });
+}
+
+describe("collectTickFacts — spec §5 fixture facts", () => {
+  test("writes f101–f104 side by side under one tick row", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // Recording fake — the bg_job_id routing assertion lives HERE in the test
+    // body, not inside the fake (per-source try/catch would swallow it there).
+    const jobStateCalls = [];
+    const baseJobState = wedgeSources().readJobState;
+    const res = collect(db, scratch(), {
+      readJobState: (bgJobId) => {
+        jobStateCalls.push(bgJobId);
+        return baseJobState(bgJobId);
+      },
+    });
+    expect(res.ok).toBe(true);
+    expect(jobStateCalls).toEqual(["5ad5c1ff"]); // exactly the signal's bg job, once
+
+    const tick = db.query("SELECT * FROM tick").get();
+    expect(tick.now_ms).toBe(NOW);
+    expect(tick.host).toBe("mini");
+
+    // f101 — obs_signal: CTL-722/plan running, bg_job_id, started 08:56:24Z
+    const sig = db.query("SELECT * FROM obs_signal").get();
+    expect(sig.tick_id).toBe(tick.tick_id);
+    expect(sig.ticket).toBe("CTL-722");
+    expect(sig.phase).toBe("plan");
+    expect(sig.status).toBe("running");
+    expect(sig.bg_job_id).toBe("5ad5c1ff");
+    expect(sig.generation).toBe(3);
+    expect(sig.started_at_ms).toBe(Date.parse("2026-06-09T08:56:24Z"));
+    expect(sig.updated_at_ms).toBe(Date.parse("2026-06-09T08:56:30Z"));
+
+    // f102 — obs_agent: ALL fields including state=blocked
+    const agent = db.query("SELECT * FROM obs_agent").get();
+    expect(agent.tick_id).toBe(tick.tick_id);
+    expect(agent.session_id).toBe(SID);
+    expect(agent.short_id).toBe("5ad5c1ff");
+    expect(agent.kind).toBe("background");
+    expect(agent.status).toBe("idle");
+    expect(agent.state).toBe("blocked");
+    expect(agent.cwd).toBe("/work/ctl722");
+    expect(agent.name).toBe("worker-CTL-722");
+    expect(agent.pid).toBe(4242);
+    expect(agent.started_at_ms).toBe(Date.parse("2026-06-09T08:56:24Z"));
+
+    // f103 — obs_job: tempo/detail/needs parsed (the 2026-06-09 diagnosis fields)
+    const job = db.query("SELECT * FROM obs_job").get();
+    expect(job.tick_id).toBe(tick.tick_id);
+    expect(job.bg_job_id).toBe("5ad5c1ff");
+    expect(job.state).toBe("working");
+    expect(job.tempo).toBe("blocked");
+    expect(job.detail).toBe("stuck on a startup dialog");
+    expect(job.needs).toBe(null);
+    expect(job.first_terminal_at).toBe(null);
+    expect(job.cli_version).toBe("2.1.152");
+    expect(job.exists_flag).toBe(1);
+
+    // f104 — obs_transcript: exists=0 (turn-zero discriminator)
+    const tr = db.query("SELECT * FROM obs_transcript").get();
+    expect(tr.tick_id).toBe(tick.tick_id);
+    expect(tr.session_id).toBe(SID);
+    expect(tr.exists_flag).toBe(0);
+    expect(tr.mtime_ms).toBe(null);
+    db.close();
+  });
+
+  test("now contract: a number, captured once by the caller — zero clock reads in the write path (spec §2)", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const realNow = Date.now;
+    let clockReads = 0;
+    Date.now = () => {
+      clockReads += 1;
+      return realNow.call(Date);
+    };
+    try {
+      const res = collect(db, scratch(), {
+        pruneEveryTicks: 1, // even the prune path must reuse the tick's now
+      });
+      expect(res.ok).toBe(true);
+      expect(clockReads).toBe(0); // caller supplied now → collector NEVER reads the clock
+      expect(db.query("SELECT now_ms FROM tick").get().now_ms).toBe(NOW);
+    } finally {
+      Date.now = realNow;
+    }
+    db.close();
+  });
+
+  test("now contract: omitted → exactly one Date.now() read for the whole tick", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const realNow = Date.now;
+    let clockReads = 0;
+    Date.now = () => {
+      clockReads += 1;
+      return NOW;
+    };
+    try {
+      const res = collect(db, scratch(), { now: undefined, pruneEveryTicks: 1 });
+      expect(res.ok).toBe(true);
+      expect(clockReads).toBe(1);
+      expect(db.query("SELECT now_ms FROM tick").get().now_ms).toBe(NOW);
+    } finally {
+      Date.now = realNow;
+    }
+    db.close();
+  });
+
+  test("now contract: a function (the old ambiguity) is REJECTED, not silently called", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { now: () => NOW });
+    expect(res.ok).toBe(false); // contract violation → collector reports, never throws
+    expect(String(res.error)).toMatch(/now/);
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(0);
+    db.close();
+  });
+
+  test("transcript present → exists=1 with mtime and bytes", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const dir = scratch();
+    const transcript = join(dir, `${SID}.jsonl`);
+    writeFileSync(transcript, "x".repeat(17));
+    const res = collect(db, scratch(), { findTranscriptFn: () => transcript });
+    expect(res.ok).toBe(true);
+    const tr = db.query("SELECT * FROM obs_transcript").get();
+    expect(tr.exists_flag).toBe(1);
+    expect(tr.bytes).toBe(17);
+    expect(tr.mtime_ms).toBeGreaterThan(0);
+    db.close();
+  });
+});
+
+describe("collectTickFacts — source-failure isolation (EVERY source, not just agents)", () => {
+  const boom = (what) => () => {
+    throw new Error(`${what} exploded`);
+  };
+
+  function counts(db) {
+    const n = (t) => db.query(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
+    return {
+      tick: n("tick"),
+      agent: n("obs_agent"),
+      signal: n("obs_signal"),
+      job: n("obs_job"),
+      transcript: n("obs_transcript"),
+      heartbeat: n("obs_heartbeat"),
+      linear: n("obs_linear"),
+    };
+  }
+
+  function errorSources(res) {
+    return (res.errors ?? []).map((e) => e.source);
+  }
+
+  test("getAgents throws → tick survives; signal/job/linear still recorded; error names the source", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { getAgents: boom("claude agents") });
+    expect(res.ok).toBe(true); // the tick survived
+    const c = counts(db);
+    expect(c.tick).toBe(1);
+    expect(c.agent).toBe(0);
+    // transcripts derive from the agents listing → none; independent sources land
+    expect(c.signal).toBe(1);
+    expect(c.job).toBe(1);
+    expect(c.linear).toBe(1);
+    expect(errorSources(res)).toContain("agents");
+    db.close();
+  });
+
+  test("readSignals throws → agents/transcripts still recorded; signal-derived rows absent", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { readSignals: boom("signal reader") });
+    expect(res.ok).toBe(true);
+    const c = counts(db);
+    expect(c.tick).toBe(1);
+    expect(c.signal).toBe(0);
+    expect(c.job).toBe(0); // jobs are keyed off signals' bg_job_id
+    expect(c.linear).toBe(0); // linear read-backs are keyed off signals' tickets
+    expect(c.agent).toBe(1); // independent source landed
+    expect(c.transcript).toBe(1); // agents-derived source landed
+    expect(errorSources(res)).toContain("signals");
+    db.close();
+  });
+
+  test("readJobState throws → only obs_job missing; everything else recorded", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { readJobState: boom("job state") });
+    expect(res.ok).toBe(true);
+    const c = counts(db);
+    expect(c).toEqual({ ...c, tick: 1, agent: 1, signal: 1, job: 0, transcript: 1, linear: 1 });
+    expect(errorSources(res)).toContain("jobs");
+    db.close();
+  });
+
+  test("findTranscriptFn throws → only obs_transcript missing (no fabricated exists=0 row)", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { findTranscriptFn: boom("transcript resolver") });
+    expect(res.ok).toBe(true);
+    const c = counts(db);
+    // a resolver FAILURE must not be recorded as the fact "transcript absent"
+    expect(c).toEqual({ ...c, tick: 1, agent: 1, signal: 1, job: 1, transcript: 0, linear: 1 });
+    expect(errorSources(res)).toContain("transcripts");
+    db.close();
+  });
+
+  test("heartbeat tail fails (event log path is a directory) → other sources recorded", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { eventLogPath: scratch() }); // a dir, not a file
+    expect(res.ok).toBe(true);
+    const c = counts(db);
+    expect(c).toEqual({ ...c, tick: 1, agent: 1, signal: 1, job: 1, transcript: 1, heartbeat: 0, linear: 1 });
+    expect(errorSources(res)).toContain("heartbeats");
+    db.close();
+  });
+
+  test("linearCache.get throws → obs_linear records null state (unreadable this tick); others fine", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { linearCache: { get: boom("linear cache") } });
+    expect(res.ok).toBe(true);
+    const c = counts(db);
+    expect(c).toEqual({ ...c, tick: 1, agent: 1, signal: 1, job: 1, transcript: 1, linear: 1 });
+    // schema comment contract: null state = unreadable this tick
+    expect(db.query("SELECT state FROM obs_linear").get().state).toBe(null);
+    expect(errorSources(res)).toContain("linear");
+    db.close();
+  });
+
+  test("ALL sources throw at once → the tick row itself still lands", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), {
+      getAgents: boom("agents"),
+      readSignals: boom("signals"),
+      readJobState: boom("jobs"),
+      findTranscriptFn: boom("transcripts"),
+      eventLogPath: scratch(),
+      linearCache: { get: boom("linear") },
+    });
+    expect(res.ok).toBe(true);
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(1);
+    expect(errorSources(res)).toEqual(
+      expect.arrayContaining(["agents", "signals", "heartbeats"]),
+    );
+    db.close();
+  });
+
+  test("a broken db never throws out of the collector", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    db.close(); // closed handle → every statement throws
+    const res = collect(db, scratch());
+    expect(res.ok).toBe(false);
+  });
+});
+
+describe("collectTickFacts — heartbeat tail", () => {
+  function hbLine(overrides = {}) {
+    return `${JSON.stringify({
+      ts: "2026-06-09T18:30:00Z",
+      attributes: { "event.name": "worker.heartbeat" },
+      resource: { "host.name": "mini" },
+      body: {
+        payload: {
+          ticket: "CTL-722",
+          phase: "plan",
+          generation: 3,
+          kind: "commit",
+          epoch: 1781029800000,
+          ...overrides,
+        },
+      },
+    })}\n`;
+  }
+
+  test("ingests worker.heartbeat events; cursor prevents duplicates", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const log = join(scratch(), "2026-06.jsonl");
+    writeFileSync(
+      log,
+      `${JSON.stringify({ attributes: { "event.name": "node.heartbeat" } })}\n${hbLine()}`,
+    );
+    const orchDir = scratch();
+    collect(db, orchDir, { eventLogPath: log });
+    let rows = db.query("SELECT * FROM obs_heartbeat").all();
+    expect(rows.length).toBe(1);
+    expect(rows[0].ticket).toBe("CTL-722");
+    expect(rows[0].phase).toBe("plan");
+    expect(rows[0].generation).toBe(3);
+    expect(rows[0].host).toBe("mini");
+    expect(rows[0].kind).toBe("commit");
+    expect(rows[0].ts_ms).toBe(1781029800000);
+
+    // second tick, no new bytes → no duplicate
+    collect(db, orchDir, { eventLogPath: log });
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_heartbeat").get().n).toBe(1);
+
+    // appended event → exactly one new row
+    appendFileSync(log, hbLine({ kind: "test", epoch: 1781029860000 }));
+    collect(db, orchDir, { eventLogPath: log });
+    rows = db.query("SELECT * FROM obs_heartbeat ORDER BY ts_ms").all();
+    expect(rows.length).toBe(2);
+    expect(rows[1].kind).toBe("test");
+    db.close();
+  });
+});
+
+describe("collectTickFacts — Linear read-backs", () => {
+  test("TTL-cache hit records the state; miss records null", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    collect(db, scratch(), {
+      linearCache: { get: (t) => (t === "CTL-722" ? "Plan" : undefined) },
+    });
+    const row = db.query("SELECT * FROM obs_linear").get();
+    expect(row.ticket).toBe("CTL-722");
+    expect(row.state).toBe("Plan");
+    db.close();
+
+    const db2 = openBeliefsDb({ path: join(scratch(), "b2.db") });
+    collect(db2, scratch(), { linearCache: { get: () => undefined } });
+    expect(db2.query("SELECT state FROM obs_linear").get().state).toBe(null);
+    db2.close();
+  });
+
+  test("no cache wired → null state row, still one per ticket", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    collect(db, scratch(), { linearCache: undefined });
+    const rows = db.query("SELECT * FROM obs_linear").all();
+    expect(rows.length).toBe(1);
+    expect(rows[0].state).toBe(null);
+    db.close();
+  });
+});
+
+describe("collectTickFacts — retention", () => {
+  test("prunes obs_*/tick at 14d, belief/intent at 90d; provenance ticks survive", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+
+    // tick A (100d old) with a belief → belief past 90d: both pruned.
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (1, ?, 'h')", [NOW - 100 * DAY]);
+    db.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids) VALUES (1, 1, 'x', 's', 'R1', '[]')",
+    );
+    db.run("INSERT INTO intent (tick_id, kind, subject) VALUES (1, 'kill', 's')");
+    // tick B (15d old) with an obs row, no beliefs → obs + tick pruned at 14d.
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (2, ?, 'h')", [NOW - 15 * DAY]);
+    db.run(
+      "INSERT INTO obs_agent (tick_id, session_id, short_id) VALUES (2, 'sid-b', 'sid-b')",
+    );
+    // tick C (30d old) with a belief INSIDE the 90d window → belief kept, and
+    // its tick row survives the 14d prune as the belief's provenance time-spine.
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (3, ?, 'h')", [NOW - 30 * DAY]);
+    db.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids) VALUES (3, 1, 'y', 's', 'R1', '[]')",
+    );
+    // heartbeats are pruned by their own ts_ms (no tick_id column).
+    db.run(
+      "INSERT INTO obs_heartbeat (ticket, phase, ts_ms) VALUES ('CTL-1', 'plan', ?)",
+      [NOW - 15 * DAY],
+    );
+    db.run(
+      "INSERT INTO obs_heartbeat (ticket, phase, ts_ms) VALUES ('CTL-2', 'plan', ?)",
+      [NOW - 1 * DAY],
+    );
+
+    const res = collect(db, scratch(), { pruneEveryTicks: 1 });
+    expect(res.ok).toBe(true);
+
+    const tickIds = db.query("SELECT tick_id FROM tick ORDER BY tick_id").all().map((r) => r.tick_id);
+    expect(tickIds).not.toContain(1); // 100d-old tick gone with its belief
+    expect(tickIds).not.toContain(2); // 15d-old unreferenced tick gone
+    expect(tickIds).toContain(3); // 30d-old tick survives as belief provenance
+    expect(db.query("SELECT COUNT(*) AS n FROM belief WHERE tick_id=1").get().n).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM intent").get().n).toBe(0);
+    expect(db.query("SELECT COUNT(*) AS n FROM belief WHERE tick_id=3").get().n).toBe(1);
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_agent WHERE tick_id=2").get().n).toBe(0);
+    const hb = db.query("SELECT ticket FROM obs_heartbeat").all().map((r) => r.ticket);
+    expect(hb).toEqual(["CTL-2"]);
+    db.close();
+  });
+
+  test("prune runs once per N ticks, not every tick", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (999, ?, 'h')", [NOW - 15 * DAY]);
+    const orchDir = scratch();
+    collect(db, orchDir, { pruneEveryTicks: 3 }); // tick 1 → prunes (boot prune)
+    db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (998, ?, 'h')", [NOW - 15 * DAY]);
+    collect(db, orchDir, { pruneEveryTicks: 3 }); // tick 2 → no prune
+    expect(db.query("SELECT COUNT(*) AS n FROM tick WHERE tick_id=998").get().n).toBe(1);
+    collect(db, orchDir, { pruneEveryTicks: 3 }); // tick 3 → no prune
+    expect(db.query("SELECT COUNT(*) AS n FROM tick WHERE tick_id=998").get().n).toBe(1);
+    collect(db, orchDir, { pruneEveryTicks: 3 }); // tick 4 → prunes
+    expect(db.query("SELECT COUNT(*) AS n FROM tick WHERE tick_id=998").get().n).toBe(0);
+    db.close();
+  });
+});
+
+describe("collectTickFacts — shadow gate (OPT-IN, default OFF) + db path", () => {
+  // Adversarial-review decision: this is a NEW synchronous write on the hot
+  // scheduler tick, so shadow mode is opt-in (CATALYST_BELIEFS_SHADOW=1), not
+  // default-on as spec §6 sketched. Deviation recorded in the PR body.
+  test("default (env unset) is OFF — no db writes at all", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { env: {} });
+    expect(res.ok).toBe(false);
+    expect(res.skipped).toBe("disabled");
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(0);
+    db.close();
+  });
+
+  test("CATALYST_BELIEFS_SHADOW=0 keeps it disabled", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { env: { CATALYST_BELIEFS_SHADOW: "0" } });
+    expect(res.ok).toBe(false);
+    expect(res.skipped).toBe("disabled");
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(0);
+    db.close();
+  });
+
+  test("CATALYST_BELIEFS_SHADOW=1 enables the collector", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { env: { CATALYST_BELIEFS_SHADOW: "1" } });
+    expect(res.ok).toBe(true);
+    expect(db.query("SELECT COUNT(*) AS n FROM tick").get().n).toBe(1);
+    db.close();
+  });
+
+  test("no injected db → opens the CATALYST_BELIEFS_DB override path", () => {
+    const target = join(scratch(), "override-beliefs.db");
+    const res = collectTickFacts({
+      orchDir: scratch(),
+      now: NOW,
+      host: "mini",
+      env: { CATALYST_BELIEFS_DB: target, CATALYST_BELIEFS_SHADOW: "1" },
+      eventLogPath: join(scratch(), "absent.jsonl"),
+      linearCache: { get: () => undefined },
+      ...wedgeSources(),
+    });
+    expect(res.ok).toBe(true);
+    expect(existsSync(target)).toBe(true);
+  });
+});
