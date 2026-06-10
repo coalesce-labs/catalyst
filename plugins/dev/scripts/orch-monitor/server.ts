@@ -1197,7 +1197,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // icon paths via `gh api`, caches the result for 7 days, returns a data URL.
         // Fail-open: returns { found: false } (204) when not configured or not found.
         if (url.pathname.startsWith("/api/repo-icon/")) {
-          const repoKey = url.pathname.slice("/api/repo-icon/".length).trim();
+          // CTL-979: normalize to lowercase so /api/repo-icon/adva resolves "Adva" vcsRepo keys.
+          const repoKey = url.pathname.slice("/api/repo-icon/".length).trim().toLowerCase();
           if (!repoKey || repoKey.includes("/")) {
             return new Response("Bad repo key", { status: 400 });
           }

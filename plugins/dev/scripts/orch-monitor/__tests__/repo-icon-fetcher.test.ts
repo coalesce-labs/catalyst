@@ -43,6 +43,25 @@ describe("ICON_PATH_PRIORITY", () => {
     const pngIdx = ICON_PATH_PRIORITY.indexOf("public/favicon.png");
     expect(svgIdx).toBeLessThan(pngIdx);
   });
+
+  // CTL-979: monorepo layout support
+  it("includes apps/web/public/favicon.ico, .svg, .png (CTL-979)", () => {
+    expect(ICON_PATH_PRIORITY).toContain("apps/web/public/favicon.ico");
+    expect(ICON_PATH_PRIORITY).toContain("apps/web/public/favicon.svg");
+    expect(ICON_PATH_PRIORITY).toContain("apps/web/public/favicon.png");
+  });
+
+  it("includes apps/website/public/favicon.ico, .svg, .png (CTL-979)", () => {
+    expect(ICON_PATH_PRIORITY).toContain("apps/website/public/favicon.ico");
+    expect(ICON_PATH_PRIORITY).toContain("apps/website/public/favicon.svg");
+    expect(ICON_PATH_PRIORITY).toContain("apps/website/public/favicon.png");
+  });
+
+  it("apps/web paths come after root public paths (root takes priority)", () => {
+    const rootIdx = ICON_PATH_PRIORITY.indexOf("public/favicon.ico");
+    const monorepoIdx = ICON_PATH_PRIORITY.indexOf("apps/web/public/favicon.ico");
+    expect(rootIdx).toBeLessThan(monorepoIdx);
+  });
 });
 
 // ── buildRepoOwnerMap ─────────────────────────────────────────────────────────
@@ -75,6 +94,14 @@ describe("buildRepoOwnerMap", () => {
     const map = buildRepoOwnerMap(teams);
     expect(map["some-repo"]).toBe("some-org/some-repo");
     expect(map["some-org"]).toBeUndefined();
+  });
+
+  // CTL-979: case normalization — vcsRepo "rightsite-cloud/Adva" must map key "adva"
+  it("lowercases the repo short-name so /api/repo-icon/adva matches Adva vcsRepo (CTL-979)", () => {
+    const teams = [{ key: "ADV", vcsRepo: "rightsite-cloud/Adva" }];
+    const map = buildRepoOwnerMap(teams);
+    expect(map["adva"]).toBe("rightsite-cloud/Adva");
+    expect(map["Adva"]).toBeUndefined();
   });
 });
 
@@ -153,5 +180,21 @@ describe("loadMonitorConfig — repoOwners extraction (CTL-961)", () => {
     const cfg = loadMonitorConfig(configPath);
     expect(cfg.repoColors["coalesce-labs/catalyst"]).toBe("green");
     expect(cfg.repoOwners.catalyst).toBe("coalesce-labs/catalyst");
+  });
+
+  // CTL-979: case normalization for private-org repos with mixed-case names
+  it("lowercases repo short-name key for mixed-case vcsRepo (CTL-979)", () => {
+    writeFileSync(configPath, JSON.stringify({
+      catalyst: {
+        monitor: {
+          linear: {
+            teams: [{ key: "ADV", vcsRepo: "rightsite-cloud/Adva" }],
+          },
+        },
+      },
+    }));
+    const cfg = loadMonitorConfig(configPath);
+    expect(cfg.repoOwners["adva"]).toBe("rightsite-cloud/Adva");
+    expect(cfg.repoOwners["Adva"]).toBeUndefined();
   });
 });
