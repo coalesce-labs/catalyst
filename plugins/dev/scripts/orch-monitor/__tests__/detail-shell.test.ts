@@ -131,7 +131,10 @@ describe("use-keyboard-nav.ts — extended in place, pre-existing bindings kept"
   it("the shell wires j/k to the pager walk and Esc back to the originating list", () => {
     expect(shellSrc).toMatch(/onNext: goNext/);
     expect(shellSrc).toMatch(/onPrev: goPrev/);
-    expect(shellSrc).toMatch(/onEscape: goRoot/);
+    // onEscape is a layered callback (palette/cheatsheet dismiss first, then goRoot);
+    // the shorthand property form `onEscape,` passes the callback to useKeyboardNav.
+    expect(shellSrc).toMatch(/onEscape[,\s]/);
+    expect(shellSrc).toMatch(/goRoot\(\)/);
   });
 });
 
