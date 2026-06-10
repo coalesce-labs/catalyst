@@ -52,7 +52,13 @@ function labelMarkerBase(orchDir, ticket, label) {
 // "exclusive-conflict": the label's exclusive-group sibling is already present.
 const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
 
-export function labelOnce(orchDir, ticket, label, writeStatus) {
+// CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
+// AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
+// operator-visible "intent.ineffective" event instead of silently writing
+// .skipped and logging a warn. The .skipped marker is still written so the
+// per-tick retry storm stays suppressed — the difference is operator visibility.
+// Default null → legacy behavior (all existing callers unaffected).
+export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = null, env = process.env } = {}) {
   const base = labelMarkerBase(orchDir, ticket, label);
   if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
   try {
@@ -63,10 +69,31 @@ export function labelOnce(orchDir, ticket, label, writeStatus) {
       writeFileSync(`${base}.applied`, "");
     } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
+      const reason = res.reason;
       log.warn(
-        { ticket, label, reason: res.reason },
+        { ticket, label, reason },
         "scheduler: label unrecoverable (missing / exclusive-conflict) — skipping retries for this run"
       );
+      // CTL-936: emit operator-visible event when enforce mode is on.
+      if ((env.CATALYST_INTENTS_ENFORCE ?? "0") === "1" && typeof appendEvent === "function") {
+        try {
+          appendEvent({
+            "event.name": "intent.ineffective",
+            payload: {
+              kind: "label",
+              subject: ticket,
+              attempts: 1,
+              postcondition: { kind: "label", subject: ticket, label, present: true },
+              reason,
+            },
+          });
+        } catch (evtErr) {
+          log.warn(
+            { ticket, label, err: evtErr?.message },
+            "ctl-936: labelOnce appendEvent threw — continuing"
+          );
+        }
+      }
     }
   } catch (err) {
     log.warn(

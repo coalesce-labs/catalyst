@@ -1686,6 +1686,13 @@ export function reclaimDeadWorkIfPossible(
     cache,
     prAdapter,
     now = Date.now,
+    // CTL-936: closed-loop intent layer. When a beliefs.db handle is provided,
+    // kill actions record intents with a "session left agents" postcondition and
+    // are suppressed once the intent goes ineffective — stopping the stop-storm
+    // class. Default null → legacy behavior unchanged (all existing tests unaffected).
+    // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
+    // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
+    intentDb = null,
   } = {},
 ) {
   const klass = classifyWorker(signal, { statJob });
@@ -1706,6 +1713,72 @@ export function reclaimDeadWorkIfPossible(
   const { ticket, phase } = signal;
   const orchId = signal.raw?.orchestrator;
   const prevBgJobId = signal.raw?.bg_job_id ?? null;
+
+  // CTL-936: intent-aware kill helper. Wraps killBgJob with:
+  //   1. isIntentEffective guard — when CATALYST_INTENTS_ENFORCE=1 and the kill
+  //      intent for this (ticket, phase) has already gone ineffective, skip the
+  //      claude stop call (stops the stop-storm after N failed attempts).
+  //   2. recordIntent — record the kill intent the first time we issue the stop
+  //      so the next-tick reconciler can check whether the session left the
+  //      agents listing.
+  // Falls back to plain killBgJob({ bgJobId }) when intentDb is null (all
+  // existing tests are unaffected — intentDb defaults to null).
+  function intentAwareKill({ bgJobId: killBgJobId }) {
+    if (!intentDb || !killBgJobId) {
+      killBgJob({ bgJobId: killBgJobId });
+      return;
+    }
+    const subject = `${ticket}/${phase}`;
+    let maxAttempts = 2;
+    try {
+      const cfgRow = intentDb.query("SELECT value_int FROM cfg WHERE key = 'max_attempts'").get();
+      if (typeof cfgRow?.value_int === "number") maxAttempts = cfgRow.value_int;
+    } catch { /* fall through — use default */ }
+
+    // Enforce: suppress kill when the intent has already gone ineffective.
+    if ((process.env.CATALYST_INTENTS_ENFORCE ?? "0") === "1") {
+      try {
+        const ineffective = intentDb
+          .query(
+            `SELECT 1 FROM intent
+              WHERE kind = 'kill' AND subject = ?
+                AND (outcome = 'ineffective'
+                  OR (outcome IS NULL AND attempts >= ?))
+              LIMIT 1`,
+          )
+          .get(subject, maxAttempts);
+        if (ineffective) {
+          log.warn(
+            { ticket, phase, bgJobId: killBgJobId, subject },
+            "ctl-936: kill intent ineffective — skipping claude stop (stop-storm prevention)",
+          );
+          return;
+        }
+      } catch (err) {
+        log.warn({ err: err?.message }, "ctl-936: isIntentEffective check threw — continuing kill");
+      }
+    }
+
+    // Record the intent if not already open.
+    try {
+      const open = intentDb
+        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+        .get(subject);
+      if (!open) {
+        const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+        if (tickRow) {
+          intentDb.run(
+            `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
+             VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
+            [tickRow.tick_id, subject, JSON.stringify({ kind: "kill", subject, sessionNotRegistered: true })],
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err: err?.message, ticket, phase }, "ctl-936: recordIntent threw — continuing kill");
+    }
+    killBgJob({ bgJobId: killBgJobId });
+  }
 
   // CTL-587: capture the bg state.json mtime for the revive AUDIT payload only.
   // CTL-662 removed it from every DECISION branch — it is telemetry, not a
@@ -1963,7 +2036,7 @@ export function reclaimDeadWorkIfPossible(
                   worktreePath: signal.raw?.worktreePath,
                   reason: "ctl-932-wedged-never-started-exhausted",
                 }).catch(() => {});
-                killBgJob({ bgJobId: prevBgJobId });
+                intentAwareKill({ bgJobId: prevBgJobId });
                 log.warn(
                   { ticket, phase, prevBgJobId, attempts: attempts.count, exhaustedProgress, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
                   "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)",
@@ -2003,7 +2076,7 @@ export function reclaimDeadWorkIfPossible(
                 worktreePath: signal.raw?.worktreePath,
                 reason: "ctl-932-wedged-never-started",
               }).catch(() => {});
-              killBgJob({ bgJobId: prevBgJobId });
+              intentAwareKill({ bgJobId: prevBgJobId });
               const dr = reviveDispatch({ orchDir, ticket, phase, resumeSession: null, attempt: attempt + 1 });
               if (dr.code === 0) {
                 log.warn(
@@ -2325,7 +2398,7 @@ export function reclaimDeadWorkIfPossible(
         worktreePath: signal.raw?.worktreePath,
         reason: "ctl-736-no-progress-stopped",
       }).catch(() => {});
-      killBgJob({ bgJobId: prevBgJobId });
+      intentAwareKill({ bgJobId: prevBgJobId });
     }
     log.warn(
       { ticket, phase, prevBgJobId, currentProgress, lastProgress },
@@ -2390,7 +2463,7 @@ export function reclaimDeadWorkIfPossible(
       worktreePath: signal.raw?.worktreePath,
       prevStateJsonMtime,
     }).catch(() => {});
-    killBgJob({ bgJobId: prevBgJobId });
+    intentAwareKill({ bgJobId: prevBgJobId });
   }
 
   const attempt = priorRevives + 1;

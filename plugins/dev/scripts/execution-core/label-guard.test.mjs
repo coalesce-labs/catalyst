@@ -365,3 +365,73 @@ describe("clearStalledLabel", () => {
     expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
   });
 });
+
+// ─── CTL-936: labelOnce — operator-visible event on unrecoverable failure ────
+
+describe("labelOnce CTL-936 operator-visible event", () => {
+  test("emits intent.ineffective event on exclusive-conflict when enforce=1", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-A"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+
+    labelOnce(orchDir, "CTL-936-A", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]["event.name"]).toBe("intent.ineffective");
+    expect(events[0].payload.kind).toBe("label");
+    expect(events[0].payload.subject).toBe("CTL-936-A");
+    expect(events[0].payload.postcondition.label).toBe("needs-human");
+    expect(events[0].payload.reason).toBe("exclusive-conflict");
+    // .skipped marker still written (retry storm still suppressed)
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-936-A", ".linear-label-needs-human.skipped"))
+    ).toBe(true);
+  });
+
+  test("does NOT emit event in shadow mode (enforce=0)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-B"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+
+    labelOnce(orchDir, "CTL-936-B", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+    });
+
+    expect(events).toHaveLength(0);
+  });
+
+  test("does NOT emit event when appendEvent is absent (legacy callers)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-C"), { recursive: true });
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+    // Should not throw even without appendEvent
+    expect(() => {
+      labelOnce(orchDir, "CTL-936-C", "needs-human", ws, {
+        env: { CATALYST_INTENTS_ENFORCE: "1" },
+      });
+    }).not.toThrow();
+  });
+
+  test("does NOT emit event for transient failures (only unrecoverable)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-D"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "rate-limited" }) };
+
+    labelOnce(orchDir, "CTL-936-D", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+    });
+
+    expect(events).toHaveLength(0);
+    // No .skipped marker for transient failures (retry next tick)
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-936-D", ".linear-label-needs-human.skipped"))
+    ).toBe(false);
+  });
+});

@@ -1969,6 +1969,12 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
+    // provided, kill actions in reclaimDeadWork are recorded as intents and
+    // suppressed once ineffective. Default null → legacy behavior (all existing
+    // tests unaffected). Production wires the module-level beliefs db handle
+    // via startScheduler → runTick when CATALYST_BELIEFS_SHADOW=1.
+    intentDb = null,
   } = {}
 ) {
   // CTL-850: resolve this host + the cluster roster ONCE per tick (cheap
@@ -2301,6 +2307,10 @@ export function schedulerTick(
         // cross-check a jobLifecycle-alive-but-process-gone ghost (getAgentsCached is
         // already imported at scheduler.mjs:81).
         agentsSnapshot: getAgentsCached,
+        // CTL-936: thread the beliefs.db handle for kill-intent recording + stop-storm
+        // suppression. null when CATALYST_BELIEFS_SHADOW=0 (the default — legacy tests
+        // unaffected; intentAwareKill falls through to plain killBgJob).
+        intentDb,
       };
       // CTL-736 Phase 3: no per-tick revive budget is threaded — the progress gate
       // (revive only while progressing; stop on zero progress) + the Phase-1 O_EXCL
