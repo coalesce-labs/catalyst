@@ -516,6 +516,8 @@ run_implement_mirror() {
   (
     cd "$repo_dir" || exit 1
     PATH="$case_dir/bin:$PATH" \
+      PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
+      CATALYST_COMMENT_POST_HELPER="$case_dir/bin/linear-comment-post.sh" \
       ORCH_DIR="${case_dir}/orch" \
       TICKET="CTL-449" \
       PHASE="implement" \
@@ -614,6 +616,8 @@ linear_comment_post_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/comment-post-cal
 (
   cd "$REPO_D" || exit 1
   PATH="$CASE_D_DIR/bin:$PATH" \
+    PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
+    CATALYST_COMMENT_POST_HELPER="$CASE_D_DIR/bin/linear-comment-post.sh" \
     ORCH_DIR="${CASE_D_DIR}/orch" \
     TICKET="CTL-449" \
     PHASE="implement" \
