@@ -3216,7 +3216,33 @@ export function schedulerTick(
         );
       }
       if (validDeps.length > 0) {
+        // CTL-925 Gap 3: guard each sequencing write against closing a cycle.
+        // Build seqEdges from the candidate's relations (always available) plus
+        // any in-flight descriptor in the cache (best-effort transitive coverage).
+        // Raw edge extraction — no inSet filter, so candidate→in-flight edges
+        // survive even when the in-flight ticket is not in the eligible pool.
+        const seqRaw = [];
+        const addRawBlocks = (issue) => {
+          const self = issue?.identifier;
+          if (!self) return;
+          for (const node of issue?.relations?.nodes ?? []) {
+            const peer = node?.relatedIssue?.identifier;
+            if (node?.type === "blocks" && peer) seqRaw.push({ from: self, to: peer });
+          }
+        };
+        addRawBlocks(t);
+        for (const ifId of inFlightTickets) {
+          const d = cache?.get?.(ifId) ?? null;
+          if (d) addRawBlocks({ identifier: ifId, ...d });
+        }
         for (const dep of validDeps) {
+          if (wouldCreateCycle(seqRaw, dep.blocked_by, dep.candidate)) {
+            log.warn(
+              { candidate: dep.candidate, blockedBy: dep.blocked_by },
+              "ctl-925 sequencing: skipping hard_dependency that would close a cycle",
+            );
+            continue;
+          }
           safeWrite(
             () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
             { ticket: dep.candidate, phase: "sequencing" }
