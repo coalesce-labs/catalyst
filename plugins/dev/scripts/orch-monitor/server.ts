@@ -2796,7 +2796,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
               timer = setInterval(pump, screenPollMs);
               // Interval cleanup on client abort — Bun fires req.signal when
               // the EventSource disconnects, in addition to stream cancel().
-              req.signal.addEventListener("abort", close);
+              // CTL-967 SIDE-AC: guard against req.signal already being aborted
+              // at registration time (race between stream setup and client
+              // disconnect) — call close() immediately rather than leaking the
+              // interval.
+              if (req.signal.aborted) {
+                close();
+              } else {
+                req.signal.addEventListener("abort", close);
+              }
             },
             cancel() {
               closed = true;
@@ -2995,6 +3003,113 @@ export function createServer(opts: CreateServerOptions): BunServer {
               closed = true;
               unsubscribe?.();
               unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-967 (N5): read-only SSE feed of new belief rows from
+        // ~/catalyst/beliefs.db, tailed by a BeliefTail cursor. Each SSE
+        // event carries a single belief row (joined with tick.ts_ms/host) in
+        // the FiringFeed shape the Rules Explorer expects. The BeliefTail
+        // module is imported via a COMPUTED specifier so bun:sqlite never
+        // enters the vite/esbuild graph (same guard as linear-cache-reader).
+        // Graceful degradation: if beliefs.db is absent (shadow off), the
+        // endpoint emits only an `open` frame and stays alive — no crash.
+        if (url.pathname === "/api/beliefs/stream") {
+          // COMPUTED specifier — DO NOT inline to a literal (see belief-reader.mjs
+          // header and the CTL-883/vite-config-bun-sqlite trap notes).
+          const beliefReaderModule = [".", "lib", "belief-reader.mjs"].join("/");
+          let tail: {
+            poll(): Promise<unknown[]>;
+            close(): void;
+          } | null = null;
+          try {
+            const mod = await import(beliefReaderModule) as {
+              BeliefTail: new (opts?: { dbPath?: string; pageSize?: number }) => {
+                poll(): Promise<unknown[]>;
+                close(): void;
+              };
+            };
+            tail = new mod.BeliefTail();
+          } catch {
+            // module or bun:sqlite unavailable — degrade to null tail
+            tail = null;
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const close = () => {
+                if (closed) return;
+                closed = true;
+                if (timer) clearInterval(timer);
+                timer = null;
+                tail?.close();
+                tail = null;
+                try {
+                  controller.close();
+                } catch {
+                  /* already closed */
+                }
+              };
+              // Open frame so the client knows the connection is live even
+              // when beliefs.db is absent or the db has no new rows yet.
+              try {
+                controller.enqueue(
+                  encoder.encode(`event: open\ndata: ${JSON.stringify({ source: "beliefs" })}\n\n`),
+                );
+              } catch {
+                closed = true;
+                return;
+              }
+              const pump = () => {
+                if (inFlight || closed || !tail) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const rows = await tail!.poll();
+                    if (closed) return;
+                    for (const row of rows) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: belief\ndata: ${JSON.stringify(row)}\n\n`,
+                        ),
+                      );
+                    }
+                  } catch {
+                    // client likely went away mid-enqueue; stop pumping
+                    close();
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              pump();
+              timer = setInterval(pump, 1000);
+              // Cleanup on client abort. Guard against already-aborted signal
+              // (same pattern as the screen SSE endpoint — CTL-967 SIDE-AC).
+              if (req.signal.aborted) {
+                close();
+              } else {
+                req.signal.addEventListener("abort", close);
+              }
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+              tail?.close();
+              tail = null;
             },
           });
           return new Response(stream, {
