@@ -31,6 +31,7 @@ import {
   referencedBlockerIds,
   buildDependencyEdges,
   DEFAULT_TERMINAL_STATUSES,
+  wouldCreateCycle,
 } from "../lib/dependency-graph.mjs";
 // teamOf (CTL-838 cross-team guard) is imported from ./dispatch.mjs below.
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
@@ -2665,6 +2666,13 @@ export function schedulerTick(
       const descriptorByTicket = new Map(
         waitingDescriptors.map((d) => [d.identifier, d]),
       );
+      // CTL-925 Gap 2: full-graph edge set for the transitive cycle guard below.
+      // waitingDescriptors carry relations/inverseRelations (inSet = the pool),
+      // so buildDependencyEdges yields the canonical {from,to} edges the detector
+      // uses. Built once and reused per (candidate, dep). The 2-node
+      // candidateBlocks.has shortcut remains as a backstop for direct out-of-pool
+      // back-edges; wouldCreateCycle adds transitive coverage over the pool.
+      const poolEdges = buildDependencyEdges(waitingDescriptors);
       // CTL-784: pre-collect every (non-cycle) candidate's triage.json deps and
       // resolve their live Linear states in ONE batched, cache-first request —
       // was one fetchTicketState per dep per candidate. The per-dep loop below
@@ -2743,12 +2751,15 @@ export function schedulerTick(
             );
             continue;
           }
-          if (candidateBlocks.has(dep)) {
-            // Persisting blocked_by(candidate ← dep) while candidate already
-            // blocks dep would close a cycle. Drop it (do not deadlock).
+          if (candidateBlocks.has(dep) || wouldCreateCycle(poolEdges, dep, candidate)) {
+            // Persisting blocked_by(candidate ← dep) would close a cycle of
+            // any length (2-node direct OR transitive through pool edges).
+            // CTL-925 supersedes the CTL-755 direct-only check with full
+            // reachability via wouldCreateCycle. candidateBlocks remains as a
+            // backstop for direct out-of-pool back-edges.
             log.warn(
               { candidate, dep },
-              "ctl-755 step-e: skipping dependency that would close a cycle",
+              "ctl-925 step-e: skipping dependency that would close a cycle (transitive)",
             );
             continue;
           }
