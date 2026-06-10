@@ -23,6 +23,7 @@ import type { PaletteFocus } from "./palette-actions";
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
+import { useLinearTicket } from "../components/use-linear-ticket";
 import { WorkerDetailBody } from "./worker-detail-body";
 import { WorkerRailExtra } from "./worker-rail-extra";
 import { useWorkerDetailModel } from "./use-worker-detail-model";
@@ -150,6 +151,11 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
   const kind: ShellKind = "ticket";
   const listIds = payload ? resolveListIds(payload, { kind, lens: search.lens, col: search.col }) : [];
   const ticket = payload?.tickets.find((t) => t.id === id);
+  // CTL-974: the LIVE Linear {title, description} from /api/linear-ticket — ONE
+  // fetch lifted to the route so the Shell chrome title (breadcrumb/doc title)
+  // AND the page body share it. Fail-open: nulls until/unless Linear answers, so
+  // the chrome falls back to the resident board title and the body to its skeleton.
+  const linear = useLinearTicket(id);
 
   return (
     <>
@@ -159,7 +165,7 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         search={search}
         listIds={listIds}
         live={{ working: ticket?.working ?? false, activeState: ticket?.activeState ?? null }}
-        title={ticket?.title ?? id}
+        title={linear.title ?? ticket?.title ?? id}
         properties={ticketRows(ticket)}
         streamHealth={health}
       >
@@ -168,8 +174,17 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
             off the RESIDENT BoardTicket + phaseSummary (zero new endpoints).
             DETAIL7 (CTL-918): the resident workers are passed so the active spine
             node can resolve its running phase's sessionId and tail the live
-            stream (the same BFF SSE the worker [live] tab consumes). */}
-        <TicketDetailPage ticket={ticket} workers={payload?.workers ?? []} tickets={payload?.tickets ?? []} />
+            stream (the same BFF SSE the worker [live] tab consumes).
+            CTL-974: realTitle + description + descLoaded carry the LIVE Linear
+            title (Header <h1>) and markdown description (Overview lead). */}
+        <TicketDetailPage
+          ticket={ticket}
+          workers={payload?.workers ?? []}
+          tickets={payload?.tickets ?? []}
+          realTitle={linear.title}
+          description={linear.description}
+          descLoaded={linear.loaded}
+        />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "ticket", id }} />
     </>

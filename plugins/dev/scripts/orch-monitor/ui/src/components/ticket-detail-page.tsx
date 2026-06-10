@@ -14,7 +14,7 @@
 // channel, activity predicate) live in board/ticket-page-model.ts and are unit-
 // tested without a DOM; this file is the thin React skin over them.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   resolvePipelineRail,
   resolveHeldBanner,
@@ -54,6 +54,29 @@ import { useRepoColors } from "@/hooks/use-repo-colors";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
+
+// CTL-974: the markdown DESCRIPTION renderer is lazy-loaded so its heavy engine
+// (marked-highlight + highlight.js) code-splits OUT of the board entry chunk
+// (deliverable §3). The description already loads behind an async fetch, so the
+// extra dynamic import adds no perceptible latency; the Suspense fallback reuses
+// the same fixed-height skeleton as the not-yet-loaded state (no layout jump).
+const TicketDescription = lazy(() =>
+  import("./ticket-description").then((m) => ({ default: m.TicketDescription })),
+);
+
+/** The description block's fixed-height skeleton — shared by the Suspense
+ *  fallback (chunk loading) AND the lazy component's own !loaded state, so the
+ *  lifecycle spine below never jumps as the chunk + fetch resolve. */
+function DescriptionSkeleton() {
+  return (
+    <div
+      data-ticket-description-skeleton
+      style={{ height: 18, color: C.fgDim, font: `12px ${C.mono}` }}
+    >
+      Loading description…
+    </div>
+  );
+}
 
 // ── tokens (mirror Shell.tsx / Board.tsx inline-`C` palette; cyan reserved) ──
 const C = {
@@ -133,11 +156,36 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── Header (title link + meta) ───────────────────────────────────────────────
-function Header({ ticket }: { ticket: BoardTicket }) {
+// ── Header (real Linear title + meta) ────────────────────────────────────────
+// `realTitle` is the LIVE Linear title from /api/linear-ticket/<id> (CTL-974);
+// it WINS over `ticket.title` (the stale triage-summary-sourced board title).
+// Fail-open: a null realTitle falls back to ticket.title on the SAME line — no
+// layout shift (a same-line text swap when the live title arrives).
+function Header({ ticket, realTitle }: { ticket: BoardTicket; realTitle?: string | null }) {
   const link = linearDeepLink(ticket.id);
+  const title = realTitle ?? ticket.title;
   return (
     <div data-ticket-header style={{ marginBottom: 14 }}>
+      {/* The real Linear title — big/bold/high-contrast, capped at the 680px
+          reading measure, wraps naturally. The id prefix is a small mono lead-in
+          (mono reserved for code/chips/ids); the title itself is SANS. */}
+      <h1
+        data-ticket-title
+        style={{
+          margin: "0 0 8px",
+          maxWidth: 680,
+          color: C.fg,
+          letterSpacing: "-0.01em",
+          font: "600 28px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+        }}
+      >
+        <span
+          style={{ font: `13px ${C.mono}`, color: C.fgMuted, marginRight: 8, verticalAlign: "middle" }}
+        >
+          {ticket.id}
+        </span>
+        {title}
+      </h1>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
         <span style={{ font: `12px ${C.mono}`, color: C.fgMuted }}>{ticket.type}</span>
         <span style={{ color: C.fgDim }}>·</span>
@@ -695,11 +743,22 @@ export function TicketDetailPage({
   ticket,
   workers = [],
   tickets = [],
+  realTitle = null,
+  description = null,
+  descLoaded = false,
 }: {
   ticket: BoardTicket | undefined;
   workers?: BoardWorker[];
   /** CTL-948: all resident tickets, used to build the dep sub-graph. */
   tickets?: BoardTicket[];
+  /** CTL-974: the LIVE Linear title from /api/linear-ticket — wins over the
+   *  stale board title in the Header; null falls back to the board title. */
+  realTitle?: string | null;
+  /** CTL-974: the LIVE Linear markdown description — the Overview tab lead. */
+  description?: string | null;
+  /** CTL-974: whether the live fetch has resolved (drives the honest skeleton
+   *  vs honest-empty in the description block). */
+  descLoaded?: boolean;
 }) {
   // Spine node refs so a PIPELINE segment click smooth-scrolls to its node.
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -759,7 +818,7 @@ export function TicketDetailPage({
   return (
     <div data-ticket-page={ticket.id}>
       {/* ── ABOVE TABS — answers "where / shipped?" (never one click away) ── */}
-      <Header ticket={ticket} />
+      <Header ticket={ticket} realTitle={realTitle} />
       <ShippedHero ticket={ticket} />
       <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
       <HeldBanner ticket={ticket} />
@@ -786,6 +845,20 @@ export function TicketDetailPage({
         {/* Overview: the consolidated lifecycle timeline + cost rollup + deps */}
         <TabsContent value="overview">
           <div data-ticket-overview style={{ paddingTop: 12 }}>
+            {/* CTL-974: the LIVE Linear markdown description, Linear-style, as the
+                FIRST thing in Overview (above the lifecycle spine). Renders in its
+                capped 680px reading column; the lifecycle/deps below keep full
+                width. The honest skeleton reserves space so the spine never jumps
+                when prose arrives. Section renders once the fetch has started
+                (description present OR loaded) so the empty/loading state is
+                honest, never a flash of fabricated prose. */}
+            {(description || descLoaded) && (
+              <section data-ticket-description-section style={{ marginBottom: 20 }}>
+                <Suspense fallback={<DescriptionSkeleton />}>
+                  <TicketDescription markdown={description} loaded={descLoaded} />
+                </Suspense>
+              </section>
+            )}
             <SectionLabel>Lifecycle</SectionLabel>
             <LifecycleTimeline
               ticket={ticket}
