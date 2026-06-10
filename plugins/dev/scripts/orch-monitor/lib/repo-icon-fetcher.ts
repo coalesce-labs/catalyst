@@ -17,6 +17,12 @@
 //  14. static/favicon.ico
 //  15. static/favicon.svg
 //  16. static/favicon.png
+//  17. apps/web/public/favicon.ico   (CTL-979: monorepo web app layout, e.g. Adva)
+//  18. apps/web/public/favicon.svg
+//  19. apps/web/public/favicon.png
+//  20. apps/website/public/favicon.ico
+//  21. apps/website/public/favicon.svg
+//  22. apps/website/public/favicon.png
 //
 // The first path that returns a file object (non-null download_url) is cached.
 // Cache: JSON files in cacheDir (default ~/catalyst/repo-icon-cache/), keyed by
@@ -49,6 +55,13 @@ export const ICON_PATH_PRIORITY: readonly string[] = [
   "static/favicon.ico",
   "static/favicon.svg",
   "static/favicon.png",
+  // CTL-979: monorepo web-app layout (e.g. rightsite-cloud/Adva uses apps/web/public/)
+  "apps/web/public/favicon.ico",
+  "apps/web/public/favicon.svg",
+  "apps/web/public/favicon.png",
+  "apps/website/public/favicon.ico",
+  "apps/website/public/favicon.svg",
+  "apps/website/public/favicon.png",
 ];
 
 export type IconResult =
@@ -183,9 +196,9 @@ export async function fetchRepoIcon(
  * Build the repo → owner/repo mapping from the monitor config's linearTeams array.
  * e.g. [{ key: "CTL", vcsRepo: "coalesce-labs/catalyst" }]
  * → { "catalyst": "coalesce-labs/catalyst" }
- * (the repo short-name is the last segment of vcsRepo)
+ * (the repo short-name is the last segment of vcsRepo, lowercased for case-insensitive lookup)
  *
- * Falls back to deriving from the working-tree git remote when not configured.
+ * CTL-979: keys are lowercased so /api/repo-icon/adva resolves vcsRepo "rightsite-cloud/Adva".
  */
 export function buildRepoOwnerMap(
   linearTeams: ReadonlyArray<{ key: string; vcsRepo: string }>,
@@ -194,7 +207,7 @@ export function buildRepoOwnerMap(
   for (const team of linearTeams) {
     if (!team.vcsRepo || !team.vcsRepo.includes("/")) continue;
     const shortName = team.vcsRepo.split("/").at(-1);
-    if (shortName) map[shortName] = team.vcsRepo;
+    if (shortName) map[shortName.toLowerCase()] = team.vcsRepo;
   }
   return map;
 }
