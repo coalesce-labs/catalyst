@@ -85,7 +85,8 @@ describe("nav-signal UI contract (CTL-896 / SHELL6)", () => {
   describe("app-sidebar wiring (static source analysis)", () => {
     it("consumes the live nav signal hook (no more mock badges)", () => {
       expect(sidebarCode).toContain("useNavSignal");
-      expect(sidebarCode).toContain("const nav = useNavSignal()");
+      // CTL-930 refactored to context-based hook; accept either form
+      expect(sidebarCode).toMatch(/const nav = useNavSignal(?:Context)?\(\)/);
     });
 
     it("no longer hardcodes the mock badge numbers 4 / 7", () => {

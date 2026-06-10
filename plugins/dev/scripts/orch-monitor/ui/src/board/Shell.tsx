@@ -458,12 +458,18 @@ export function Shell({
   const footerContext = breadcrumbText(breadcrumbCtx);
 
   return (
+    // CTL-949: `minHeight: "100vh"` is the viewport-fill safety net for deep-links
+    // (where the parent height chain may not be 100%). `height: "100%"` fills the
+    // container when the chain IS wired (board.html establishes html/body/#board-root
+    // at 100%); the two rules together mean the shell always fills at least the
+    // full viewport without capping shorter-than-viewport content.
     <div
       data-detail-shell={kind}
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
+        minHeight: "100vh",
         background: C.s0,
         color: C.fg,
         overflow: "hidden",

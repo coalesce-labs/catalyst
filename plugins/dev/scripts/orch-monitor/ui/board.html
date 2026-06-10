@@ -4,6 +4,14 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Catalyst · Board</title>
+    <!-- CTL-949: full-height chain so detail routes fill the viewport.
+         html/body/#board-root must all be 100% for Shell's height:100% to reach the
+         viewport; body gets the dark app background so no white gap shows beneath
+         short content while the React tree mounts. -->
+    <style data-ctl-949-height-guard>
+      html, body, #board-root { height: 100%; }
+      body { background: #0e1116; }
+    </style>
   </head>
   <body>
     <div id="board-root"></div>
