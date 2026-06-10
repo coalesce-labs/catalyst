@@ -20,6 +20,13 @@ export interface HudColumnConfig {
 
 export interface MonitorConfig {
   repoColors: Record<string, string>;
+  /**
+   * CTL-961: repo short-name → GitHub owner/repo string.
+   * Derived from `catalyst.monitor.linear.teams` (same source linearTeams uses).
+   * e.g. { "catalyst": "coalesce-labs/catalyst", "adva": "coalesce-labs/adva" }
+   * Used by the /api/repo-icon/:repo endpoint to resolve auto-detected favicons.
+   */
+  repoOwners: Record<string, string>;
 }
 
 const VALID_COLUMN_IDS = new Set<string>([
@@ -52,26 +59,40 @@ export function loadMonitorConfig(configPath: string): MonitorConfig {
   try {
     raw = readFileSync(configPath, "utf8");
   } catch {
-    return { repoColors: {} };
+    return { repoColors: {}, repoOwners: {} };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return { repoColors: {} };
+    return { repoColors: {}, repoOwners: {} };
   }
-  if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return { repoColors: {} };
+  if (!isRecord(parsed) || !isRecord(parsed.catalyst)) return { repoColors: {}, repoOwners: {} };
   const monitor = parsed.catalyst.monitor;
-  if (!isRecord(monitor)) return { repoColors: {} };
+  if (!isRecord(monitor)) return { repoColors: {}, repoOwners: {} };
+
+  // repoColors from catalyst.monitor.github.repoColors
   const github = monitor.github;
-  if (!isRecord(github)) return { repoColors: {} };
-  const repoColors = github.repoColors;
-  if (!isRecord(repoColors)) return { repoColors: {} };
-  const result: Record<string, string> = {};
-  for (const [repo, color] of Object.entries(repoColors)) {
-    if (typeof color === "string") result[repo] = color;
+  const repoColors: Record<string, string> = {};
+  if (isRecord(github) && isRecord(github.repoColors)) {
+    for (const [repo, color] of Object.entries(github.repoColors)) {
+      if (typeof color === "string") repoColors[repo] = color;
+    }
   }
-  return { repoColors: result };
+
+  // CTL-961: repoOwners from catalyst.monitor.linear.teams (repo short-name → owner/repo)
+  const repoOwners: Record<string, string> = {};
+  const linear = monitor.linear;
+  if (isRecord(linear) && Array.isArray(linear.teams)) {
+    for (const team of linear.teams) {
+      if (isRecord(team) && typeof team.vcsRepo === "string" && team.vcsRepo.includes("/")) {
+        const shortName = team.vcsRepo.split("/").at(-1);
+        if (shortName) repoOwners[shortName] = team.vcsRepo;
+      }
+    }
+  }
+
+  return { repoColors, repoOwners };
 }
 
 /**

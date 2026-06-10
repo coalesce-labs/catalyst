@@ -34,6 +34,8 @@ import { CatalystLogo } from "@/components/catalyst-logo";
 import { buildNavGroups } from "@/lib/nav-model";
 import { repoScopeAtom, navGroupsOpenAtom } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+// CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
+import { useRepoIcons } from "@/hooks/use-repo-icons";
 import {
   Collapsible,
   CollapsibleContent,
@@ -128,10 +130,18 @@ export function AppSidebar() {
   const { payload } = useBoardSnapshot();
   const repos = payload?.repos ?? [];
 
+  // CTL-961: auto-detect repo favicons from GitHub + manual overrides.
+  const repoIconMap = useRepoIcons(repos);
+  // Map to the simple repoKey → dataUrl shape that buildNavGroups expects.
+  const repoIconDataUrls: Record<string, string | null> = {};
+  for (const repo of repos) {
+    repoIconDataUrls[repo] = repoIconMap[repo]?.autoDataUrl ?? null;
+  }
+
   // Repo colors from the nav signal (if available) or empty.
   const repoColors: Record<string, { text: string }> = {};
   // Build nav groups dynamically from live repos.
-  const navGroups = buildNavGroups(repos, repoColors);
+  const navGroups = buildNavGroups(repos, repoColors, repoIconDataUrls);
 
   // CTL-898 / SHELL8 — a node going dark must not strand the operator.
   useEffect(() => {
@@ -243,9 +253,11 @@ export function AppSidebar() {
             uppercase tracking); twistie moved LEFT with CSS-class rotation to
             match Observe's group/observe pattern. */}
         {repos.map((repo) => {
-          // navGroups has the per-repo group; get its dotColor
+          // navGroups has the per-repo group; get its dotColor + iconDataUrl (CTL-961)
           const navGroup = navGroups.find((g) => g.scope === repo);
           const dotColor = navGroup?.dotColor;
+          // CTL-961: show auto-detected favicon if available; otherwise fall back to dot.
+          const iconDataUrl = navGroup?.iconDataUrl ?? null;
           // Force-open when this group contains the active item.
           const forceOpen = groupContainsActive(repo);
           const isOpen = forceOpen || (groupsOpen[repo] ?? true); // default open
@@ -279,13 +291,22 @@ export function AppSidebar() {
                       isOpen && "rotate-90",
                     )}
                   />
-                  {dotColor && (
+                  {/* CTL-961: favicon takes priority over the color dot; only show dot
+                      when no favicon is available. Never show a placeholder. */}
+                  {iconDataUrl ? (
+                    <img
+                      src={iconDataUrl}
+                      alt=""
+                      aria-hidden
+                      className="mr-1.5 size-3 flex-shrink-0 rounded-sm object-contain"
+                    />
+                  ) : dotColor ? (
                     <span
                       aria-hidden
                       className="mr-1.5 size-1.5 rounded-full flex-shrink-0 inline-block"
                       style={{ background: dotColor }}
                     />
-                  )}
+                  ) : null}
                   {repo}
                 </CollapsibleTrigger>
                 <CollapsibleContent>

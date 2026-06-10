@@ -61,12 +61,14 @@ describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
   });
 
   it("OPERATE is a plain (always-expanded) SidebarGroup, NOT wrapped in a Collapsible", () => {
-    // The OPERATE group must render outside any Collapsible — only OBSERVE collapses.
-    const operateGroupIdx = sidebarSrc.indexOf("Operate</SidebarGroupLabel>");
+    // The OPERATE group must render outside any Collapsible — only per-project and
+    // OBSERVE groups collapse. CTL-960: the label was renamed "Overall" (from "Operate").
+    // Check for "Overall" — the current label — to verify it's the non-collapsible group.
+    const operateGroupIdx = sidebarSrc.indexOf("Overall</SidebarGroupLabel>");
     const firstCollapsibleIdx = sidebarSrc.indexOf("<Collapsible");
     expect(operateGroupIdx).toBeGreaterThan(-1);
     expect(firstCollapsibleIdx).toBeGreaterThan(-1);
-    // OPERATE's label appears BEFORE the first <Collapsible> (OBSERVE) in source.
+    // OPERATE's label appears BEFORE the first <Collapsible> in source.
     expect(operateGroupIdx).toBeLessThan(firstCollapsibleIdx);
   });
 
