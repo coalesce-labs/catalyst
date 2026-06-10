@@ -136,3 +136,90 @@ export function deriveIdleRatio(
   const fraction = Math.max(0, Math.min(1, raw));
   return { fraction, activeSeconds: active, wallSeconds };
 }
+
+// ── idle-vs-working timeline (CTL-925 / WORKER-DETAIL v2 Pass B §5B) ─────────
+// A per-bucket "working vs idle over the worker's life" stacked timeline, derived
+// from the SAME activeSeconds series the idle-ratio summary uses. The idle-ratio
+// is the at-a-glance scalar; THIS is the over-time shape (when did it stall?).
+//
+// GROUND-TRUTH (verified against the live /api/otel/burn endpoint, 2026-06-10):
+// the burn endpoint's `activeSeconds` series is a `sum(claude_code_active_time_
+// seconds_total{session_id})` query_range at step=60s, but in practice it is
+// NON-MONOTONIC — each bucket carries the active-seconds attributable to THAT
+// 60s window (a worker's multiple session streams reset/restart, so the summed
+// `*_total` reads per-bucket, not a clean cumulative counter). Observed buckets
+// like 19s, 79s, 132s, 197s against a 60s wall width confirm it: a clean
+// cumulative diff (activeSeconds[i] − activeSeconds[i-1]) would go NEGATIVE and
+// fabricate garbage. So we treat each bucket's value as that bucket's active
+// seconds DIRECTLY and CLAMP it to [0, bucketWidth] — an over-count (a summed
+// reading above the wall width) clamps to "fully working", never reads >100% and
+// never invents idle. This is honest: we down-clamp an over-report, we never
+// up-fill a gap.
+
+/** One bucket of the idle-vs-working timeline: a 60s (or endpoint-step) window
+ *  split into working vs idle seconds, both clamped so working+idle === width. */
+export interface ActivityBucket {
+  /** Epoch SECONDS — the bucket's start timestamp (the series' native unit). */
+  t: number;
+  /** Active (working) seconds in this bucket, clamped to [0, widthSeconds]. */
+  workingSeconds: number;
+  /** Idle seconds in this bucket = widthSeconds − workingSeconds (clamped ≥0). */
+  idleSeconds: number;
+  /** The bucket's wall width in seconds (the series step; 60s by default). */
+  widthSeconds: number;
+}
+
+/** The default bucket width when a series has too few points to infer the step
+ *  (the burn endpoint's fixed query_range step — otel-queries.ts rangeWindow). */
+export const DEFAULT_BUCKET_WIDTH_SECONDS = 60;
+
+/**
+ * Infer the bucket width (seconds) from a series' first adjacent timestamp gap.
+ * Returns DEFAULT_BUCKET_WIDTH_SECONDS when the series has <2 points or the gap
+ * is non-finite/non-positive (never a divide-by-zero or a fabricated width).
+ */
+export function inferBucketWidthSeconds(points: SparklinePoint[]): number {
+  if (points.length < 2) return DEFAULT_BUCKET_WIDTH_SECONDS;
+  const a = points[0]?.[0];
+  const b = points[1]?.[0];
+  if (a == null || b == null) return DEFAULT_BUCKET_WIDTH_SECONDS;
+  const gap = b - a;
+  return Number.isFinite(gap) && gap > 0 ? gap : DEFAULT_BUCKET_WIDTH_SECONDS;
+}
+
+/**
+ * Derive the idle-vs-working timeline buckets from the activeSeconds series. Each
+ * series point [t, activeSecondsInBucket] becomes one ActivityBucket: working is
+ * the point's value CLAMPED to [0, bucketWidth] (an over-report — a summed reading
+ * above the wall width — down-clamps to fully-working, never reads >100%), and
+ * idle is the remaining wall seconds. Pure: an empty/absent series yields [] so
+ * the timeline degrades honestly (the ChartCard shows "no data in range") rather
+ * than fabricating flat bars. Non-finite values are skipped, not zero-filled.
+ */
+export function deriveActivityBuckets(
+  activeSeconds: SparklinePoint[] | null | undefined,
+): ActivityBucket[] {
+  if (!activeSeconds || activeSeconds.length === 0) return [];
+  const width = inferBucketWidthSeconds(activeSeconds);
+  const buckets: ActivityBucket[] = [];
+  for (const [t, raw] of activeSeconds) {
+    if (!Number.isFinite(t) || !Number.isFinite(raw)) continue;
+    const working = Math.max(0, Math.min(width, raw));
+    buckets.push({
+      t,
+      workingSeconds: working,
+      idleSeconds: Math.max(0, width - working),
+      widthSeconds: width,
+    });
+  }
+  return buckets;
+}
+
+/** Whether the activity timeline has any bucket carrying positive working time —
+ *  drives the ChartCard `hasData` flag so a never-active worker degrades to the
+ *  honest "no data in range" state rather than an all-idle bar wall. */
+export function activityHasData(
+  activeSeconds: SparklinePoint[] | null | undefined,
+): boolean {
+  return deriveActivityBuckets(activeSeconds).some((b) => b.workingSeconds > 0);
+}
