@@ -38,9 +38,10 @@ export function traceTicket(db, ticket, { tickId: explicitTick } = {}) {
 
   // The §5 recursive CTE: start from the ticket's beliefs at this tick, walk
   // source_fact_ids transitively to reach every belief in the chain. Refs are
-  // TAGGED (rules.mjs): 'b<id>' belief, 'f<id>' fact, 't<id>' tick, 'i<id>'
-  // intent — so the belief edges are exactly the 'b'-prefixed refs (no integer-
-  // space collision). Facts are leaves resolved per-table below.
+  // TAGGED (rules.mjs): 'b<id>' belief, 't<id>' tick, 'i<id>' intent, and the
+  // obs_* fact tags (s/a/j/r/h/l, plus 'x' obs_relation from CTL-965) — so the
+  // belief edges are exactly the 'b'-prefixed refs (no integer-space collision).
+  // Facts are leaves resolved per-table below.
   const beliefRows = db
     .query(
       `WITH RECURSIVE chain(belief_id) AS (
@@ -114,6 +115,17 @@ export function traceTicket(db, ticket, { tickId: explicitTick } = {}) {
       table: "obs_linear",
       sql: "SELECT fact_id AS id, ticket, state FROM obs_linear WHERE fact_id = ?",
       summary: (r) => `linear ${r.ticket} state=${r.state}`,
+    },
+    // CTL-965 — obs_relation blocking edge. Canonical direction: source BLOCKS
+    // target ⇒ target depends_on source. Rendered as the dep arrow so a `why`
+    // transitive chain reads "X depends_on Y" not the raw blocks direction.
+    x: {
+      table: "obs_relation",
+      sql: "SELECT fact_id AS id, source_ticket, target_ticket, relation_type FROM obs_relation WHERE fact_id = ?",
+      summary: (r) =>
+        r.relation_type === "blocks"
+          ? `relation ${r.target_ticket} depends_on ${r.source_ticket} (${r.source_ticket} blocks ${r.target_ticket})`
+          : `relation ${r.source_ticket} ${r.relation_type} ${r.target_ticket}`,
     },
   };
 
