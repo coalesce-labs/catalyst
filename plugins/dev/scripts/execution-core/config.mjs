@@ -252,6 +252,18 @@ export const STALE_WORKER_CUTOFF_MS =
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
 
+// CTL-932 — turn-zero gate threshold. A healthy `claude --bg` worker creates
+// its session transcript ~0.3s after its first turn; a wedged one (slash
+// command failed to resolve at session start — "Unknown command:
+// /catalyst-dev:phase-*") never does and idles forever holding a concurrency
+// slot. A running-signal worker older than this with NO transcript AND a
+// FRESH `claude agents` snapshot state of "blocked" is classified
+// wedged-never-started (stop + replace via the normal revive path; escalate
+// needs-human after repeated ineffective replacements). 120s comfortably
+// exceeds registration + first-turn latency. Env-overridable.
+export const NEVER_STARTED_MS =
+  Number(process.env.CATALYST_NEVER_STARTED_MS) || 120_000;
+
 // CTL-809 — ghost-breaker just-dispatched grace. The reclaim alive-branch
 // cross-checks the FRESH `claude agents` snapshot to catch a jobLifecycle-alive
 // worker whose process is actually gone (CC 2.x never flips a crashed/wedged
