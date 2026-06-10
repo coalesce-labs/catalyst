@@ -46,6 +46,12 @@ export const PHASE_ORDER = [
   "triage", "research", "plan", "implement", "verify",
   "review", "pr", "monitor-merge", "monitor-deploy", "teardown",
 ];
+// CTL-972: the ancillary remediate phase. It is NOT in PHASE_ORDER (it cycles
+// WITH verify, not in the linear pipeline order), but it IS a real phase-agent
+// type surfaced by the queue/workers. We read its signal file separately and
+// use it to override ticket.phase when remediate is the most-recently-active
+// phase — so the board column and the queue agree on the ticket's current agent type.
+export const REMEDIATE_PHASE = "remediate";
 // Single source of truth for which phase statuses are terminal (no longer
 // running). Exported so the UI's PhaseStrip terminal-status list can be guarded
 // against drift (board-phase-drift.test.ts) instead of carrying a silent
@@ -132,9 +138,11 @@ export function heldFor(labels) {
 }
 
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
+// CTL-972: remediate maps to "Validate" (the Linear stage it cycles within,
+// alongside verify — both are part of the validate gate loop).
 export const PHASE_TO_LINEAR = {
   triage: "Triage", research: "Research", plan: "Plan", implement: "Implement",
-  verify: "Validate", review: "Validate", pr: "PR", "monitor-merge": "PR",
+  verify: "Validate", remediate: "Validate", review: "Validate", pr: "PR", "monitor-merge": "PR",
   "monitor-deploy": "Done", teardown: "Done", done: "Done",
   queued: "Todo",  // synthetic phase for eligible-queue board cards (CTL-767)
 };
@@ -432,6 +440,49 @@ export function deriveCurrentPhase(phaseSigs) {
     return { phase: "done", status: "done", model: lastTerminal.model };
   }
   return lastTerminal;
+}
+
+// CTL-972: override ticket.phase with 'remediate' when the remediate phase-agent
+// is (or was most recently) active. The remediate signal is NOT in PHASE_ORDER
+// (it cycles alongside verify, not in the linear pipeline), so deriveCurrentPhase
+// is blind to it — this function layers the remediate signal on top:
+//
+//   1. remediateSig non-terminal (running)        → 'remediate' wins unconditionally.
+//   2. remediateSig terminal + more recent than cur (updatedAt comparison) →
+//      remediate was the last thing that ran (e.g. dead worker, CTL-928 case) →
+//      surface 'remediate' so board column and queue agree.
+//   3. Otherwise                                  → return cur unchanged.
+//
+// "more recent" uses string ISO-8601 comparison (lexicographic = chronological),
+// falling back to the remediate sig being present at all (no updatedAt on base).
+// PURE — exported so unit tests can drive it directly.
+export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
+  const cur = deriveCurrentPhase(phaseSigs);
+  if (!remediateSig) return cur;
+  const remStatus = remediateSig.status || "unknown";
+  // Case 1: remediate is actively running.
+  if (!TERMINAL.has(remStatus)) {
+    return {
+      phase: REMEDIATE_PHASE, status: remStatus,
+      model: remediateSig.model || null,
+      startedAt: remediateSig.startedAt ?? null,
+      updatedAt: remediateSig.updatedAt ?? null,
+    };
+  }
+  // Case 2: remediate is terminal but more recent than what PHASE_ORDER surfaced.
+  // Compare updatedAt strings (ISO-8601, lexicographic = chronological). When
+  // cur has no updatedAt (unknown phase, no signal), treat remediate as the winner.
+  const remUpdated = remediateSig.updatedAt ?? remediateSig.completedAt ?? "";
+  const curUpdated = cur.updatedAt ?? "";
+  if (remUpdated > curUpdated || (!curUpdated && remUpdated)) {
+    return {
+      phase: REMEDIATE_PHASE, status: remStatus,
+      model: remediateSig.model || null,
+      startedAt: remediateSig.startedAt ?? null,
+      updatedAt: remUpdated || null,
+    };
+  }
+  return cur;
 }
 
 // ── per-entity node attribution (CTL-922 / BFF10) ────────────────────────────
@@ -755,16 +806,19 @@ async function maxParallel() {
 }
 
 // Read a ticket's worker-dir artifacts once (phase signals + triage + PR signals).
+// CTL-972: also reads phase-remediate.json separately (it is NOT in PHASE_ORDER,
+// so derivePhaseWithRemediate overlays it on top of the PHASE_ORDER-based result).
 async function readTicketArtifacts(id) {
   const dir = join(WORKERS_DIR, id);
-  if (!(await exists(dir))) return { phaseSigs: [], triage: null, prSigs: [] };
-  const [phaseSigs, triage, prSigs] = await Promise.all([
+  if (!(await exists(dir))) return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [] };
+  const [phaseSigs, remediateSig, triage, prSigs] = await Promise.all([
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
+    readJSON(join(dir, `phase-${REMEDIATE_PHASE}.json`)),
     readJSON(join(dir, "triage.json")),
     Promise.all(["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"]
       .map((f) => readJSON(join(dir, f)))),
   ]);
-  return { phaseSigs, triage, prSigs };
+  return { phaseSigs, remediateSig, triage, prSigs };
 }
 
 // CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
@@ -871,8 +925,10 @@ export async function assembleBoard() {
   const cardTicketIds = new Set([...workers.map((w) => w.ticket), ...workerDirs]);
 
   let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
-    const { phaseSigs, triage, prSigs } = await readTicketArtifacts(id);
-    const cur = deriveCurrentPhase(phaseSigs);
+    const { phaseSigs, remediateSig, triage, prSigs } = await readTicketArtifacts(id);
+    // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
+    // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
+    const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
     const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
     return {
