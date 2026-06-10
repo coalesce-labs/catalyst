@@ -40,6 +40,7 @@ CLI_ENTRIES=(
   "catalyst-filter:catalyst-filter"
   "catalyst-otel-forward:catalyst-otel-forward"
   "catalyst-transitions:catalyst-transitions"
+  "catalyst-why:catalyst-why"
   "catalyst-session.sh:catalyst-session"
   "catalyst-state.sh:catalyst-state"
   "catalyst-statusline.sh:catalyst-statusline"

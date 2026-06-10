@@ -43,9 +43,10 @@ import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
+import { evaluateBeliefs } from "./rules.mjs";
 import { shortIdFromSessionId } from "../claude-ids.mjs";
 import { getAgentsCached } from "../claude-agents.mjs";
-import { readWorkerSignals } from "../signal-reader.mjs";
+import { readAllPhaseSignals } from "../signal-reader.mjs";
 import { findTranscript, defaultProjectsDir } from "../session-recency.mjs";
 import { getEventLogPath, getHostName, log } from "../config.mjs";
 
@@ -457,10 +458,22 @@ export function collectTickFacts({
         }
       }
 
+      // ── derive beliefs (CTL-934) — run all four strata over this tick's
+      // facts, INSIDE the same transaction so facts + beliefs land atomically.
+      // Pure over the recorded facts (no clock read; recency uses tick.now_ms).
+      // A rule-evaluation failure is isolated like any other source: the facts
+      // already inserted still commit; only the beliefs are missing this tick.
+      let beliefsInserted;
+      try {
+        beliefsInserted = evaluateBeliefs(db, tickId).inserted;
+      } catch (err) {
+        fail("rules", err);
+      }
+
       if (shouldPrune) pruneRetention(db, now);
 
       db.run("COMMIT");
-      return { ok: true, tickId, errors };
+      return { ok: true, tickId, errors, beliefsInserted };
     } catch (err) {
       try {
         db.run("ROLLBACK");
@@ -489,7 +502,10 @@ export function collectBeliefsTick({ orchDir, linearCache } = {}) {
       host: getHostName(),
       eventLogPath: getEventLogPath(),
       getAgents: () => getAgentsCached().agents, // warm snapshot — never blocks the tick
-      readSignals: () => readWorkerSignals(orchDir),
+      // CTL-934: record EVERY per-phase signal (not just the active-phase
+      // projection) so the belief rules can join obs_signal(T, P, …) for
+      // superseded/terminal sibling phases (orphan-takeover, etc.).
+      readSignals: () => readAllPhaseSignals(orchDir),
       readJobState: defaultReadJobState,
       findTranscriptFn: (sid) => findTranscript(sid, defaultProjectsDir()),
       linearCache, // the daemon's TTL cache when threaded; else null-state rows

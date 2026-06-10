@@ -229,6 +229,117 @@ describe("collectTickFacts — spec §5 fixture facts", () => {
   });
 });
 
+describe("collectTickFacts — per-phase obs_signal fan-out (CTL-934)", () => {
+  // The belief rules join obs_signal(T, P, …) per phase, so the collector must
+  // record a row for EVERY workers/<T>/phase-*.json — superseded/terminal
+  // siblings included — not just the active-phase projection. Production wires
+  // readAllPhaseSignals; here we drive the seam directly.
+  test("records one obs_signal row per phase signal, all under one tick; one obs_job per distinct bg job", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const jobStates = {
+      aaa1: { exists: true, state: "done", firstTerminalAt: "2026-06-09T01:30:00Z" },
+      bbb2: { exists: true, state: "working", tempo: "fast" },
+    };
+    const res = collect(db, scratch(), {
+      readSignals: () => [
+        {
+          ticket: "CTL-50",
+          phase: "research",
+          status: "done",
+          liveness: { kind: "bg", value: "aaa1" },
+          updatedAt: "2026-06-09T01:00:00Z",
+          raw: { generation: 1, startedAt: "2026-06-09T00:00:00Z" },
+        },
+        {
+          ticket: "CTL-50",
+          phase: "implement",
+          status: "running",
+          liveness: { kind: "bg", value: "bbb2" },
+          updatedAt: "2026-06-09T03:00:00Z",
+          raw: { generation: 2, startedAt: "2026-06-09T02:00:00Z" },
+        },
+      ],
+      readJobState: (id) => jobStates[id] ?? { exists: false },
+      findTranscriptFn: () => null,
+    });
+    expect(res.ok).toBe(true);
+
+    const tickIds = db.query("SELECT DISTINCT tick_id FROM obs_signal").all();
+    expect(tickIds).toHaveLength(1); // every phase row shares the one tick
+
+    const sigs = db.query("SELECT * FROM obs_signal ORDER BY phase").all();
+    expect(sigs.map((s) => s.phase)).toEqual(["implement", "research"]);
+    const byPhase = Object.fromEntries(sigs.map((s) => [s.phase, s]));
+    expect(byPhase.research.status).toBe("done");
+    expect(byPhase.research.bg_job_id).toBe("aaa1");
+    expect(byPhase.implement.status).toBe("running");
+    expect(byPhase.implement.bg_job_id).toBe("bbb2");
+
+    // obs_job: one per distinct bg job referenced by ANY phase signal — the
+    // terminal sibling's job (aaa1) is now observed, which it would not be from
+    // the active-phase projection alone.
+    const jobs = db.query("SELECT * FROM obs_job ORDER BY bg_job_id").all();
+    expect(jobs.map((j) => j.bg_job_id)).toEqual(["aaa1", "bbb2"]);
+    expect(jobs.find((j) => j.bg_job_id === "aaa1").first_terminal_at).toBe(
+      "2026-06-09T01:30:00Z",
+    );
+
+    // obs_linear is still deduped by ticket (one read-back per ticket per tick).
+    expect(db.query("SELECT COUNT(*) AS n FROM obs_linear").get().n).toBe(1);
+    db.close();
+  });
+});
+
+describe("collectTickFacts — belief evaluation wired into the tick (CTL-934)", () => {
+  // The §5 wedge fixture: collecting the facts must, in the SAME tick/transaction,
+  // derive the belief chain (R1 → R4 → R10) — proving rule evaluation runs after
+  // fact collection inside the shadow gate.
+  test("the wedge fixture derives session_registered → wedged_never_started → wake_diagnostician", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), {
+      // age the signal well past never_started_ms relative to NOW
+      readSignals: () => [
+        {
+          ticket: "CTL-722",
+          phase: "plan",
+          status: "running",
+          liveness: { kind: "bg", value: "5ad5c1ff" },
+          updatedAt: "2026-06-09T08:56:30Z",
+          raw: { generation: 3, startedAt: "2026-06-09T08:56:24Z" },
+        },
+      ],
+    });
+    expect(res.ok).toBe(true);
+    expect(res.beliefsInserted.R1).toBe(1);
+    expect(res.beliefsInserted.R4).toBe(1);
+
+    const tickId = db.query("SELECT tick_id FROM tick").get().tick_id;
+    const names = db
+      .query("SELECT name FROM belief WHERE tick_id = ? ORDER BY name")
+      .all(tickId)
+      .map((r) => r.name);
+    expect(names).toContain("session_registered");
+    expect(names).toContain("wedged_never_started");
+    expect(names).toContain("wake_diagnostician");
+    expect(names).toContain("free_slots");
+    expect(names).not.toContain("turn_started"); // transcript exists=0
+    expect(names).not.toContain("worker_dead"); // job state=working
+
+    // beliefs share the facts' tick — same transaction
+    const beliefTicks = db.query("SELECT DISTINCT tick_id FROM belief").all();
+    expect(beliefTicks).toEqual([{ tick_id: tickId }]);
+    db.close();
+  });
+
+  test("belief evaluation is gated with the collector — disabled writes neither facts nor beliefs", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { env: {} });
+    expect(res.ok).toBe(false);
+    expect(db.query("SELECT COUNT(*) AS n FROM belief").get().n).toBe(0);
+    db.close();
+  });
+});
+
 describe("collectTickFacts — source-failure isolation (EVERY source, not just agents)", () => {
   const boom = (what) => () => {
     throw new Error(`${what} exploded`);
