@@ -35,8 +35,6 @@ export const C = {
  *  Still unmistakably cyan; LIVE ONLY — never use for decorative chrome. */
 export const LIVE = "#53cde2";
 
-/** CSS rgba triplet for LIVE (for use in rgba() / box-shadow alpha calcs). */
-export const LIVE_RGB = "83, 205, 226";
 
 /** Canonical PHASE color map — the SINGLE definition; board-display.ts, formatters.ts,
  *  Board.tsx all import from here. Legacy verb aliases (in_progress, shipping, etc.)

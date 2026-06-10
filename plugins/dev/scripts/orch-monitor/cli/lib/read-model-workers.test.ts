@@ -41,45 +41,45 @@ function boardWorker(overrides: Partial<BoardWorker> = {}): BoardWorker {
 describe("boardWorkersToSignals (CTL-920)", () => {
   it("maps the load-bearing fields the WorkerList renders", () => {
     const [w] = boardWorkersToSignals([boardWorker()], 1_700_000_100_000);
-    expect(w!.ticket).toBe("CTL-100");
-    expect(w!.workerName).toBe("alice");
-    expect(w!.status).toBe("active");
+    expect(w.ticket).toBe("CTL-100");
+    expect(w.workerName).toBe("alice");
+    expect(w.status).toBe("active");
     // BoardWorker.phase is the per-phase NAME (string) → WorkerSignal.phaseName.
-    expect(w!.phaseName).toBe("implement");
-    expect(w!.phase).toBeNull(); // legacy integer phase has no read-model source
+    expect(w.phaseName).toBe("implement");
+    expect(w.phase).toBeNull(); // legacy integer phase has no read-model source
   });
 
   it("derives lastHeartbeat ISO from lastActiveMs relative to now", () => {
     const now = 1_700_000_100_000;
     const [w] = boardWorkersToSignals([boardWorker({ lastActiveMs: 60_000 })], now);
-    expect(w!.lastHeartbeat).toBe(new Date(now - 60_000).toISOString());
+    expect(w.lastHeartbeat).toBe(new Date(now - 60_000).toISOString());
   });
 
   it("a null lastActiveMs yields a null lastHeartbeat (not Epoch)", () => {
     const [w] = boardWorkersToSignals([boardWorker({ lastActiveMs: null })], Date.now());
-    expect(w!.lastHeartbeat).toBeNull();
+    expect(w.lastHeartbeat).toBeNull();
   });
 
   it("leaves pr null — the read-model worker slice carries no PR (PR is on the ticket slice)", () => {
     const [w] = boardWorkersToSignals([boardWorker()], Date.now());
-    expect(w!.pr).toBeNull();
+    expect(w.pr).toBeNull();
   });
 
   it("maps startedAt epoch-ms to an ISO string and preserves the orchestrator-as-team note", () => {
     const [w] = boardWorkersToSignals([boardWorker({ startedAt: 1_700_000_000_000 })], Date.now());
-    expect(w!.startedAt).toBe(new Date(1_700_000_000_000).toISOString());
+    expect(w.startedAt).toBe(new Date(1_700_000_000_000).toISOString());
   });
 
   it("carries the source BoardWorker through as `raw` so the detail pane shows it verbatim", () => {
     const src = boardWorker();
     const [w] = boardWorkersToSignals([src], Date.now());
-    expect(w!.raw).toBe(src);
+    expect(w.raw).toBe(src);
   });
 
   it("a stuck worker surfaces as status with no fabricated stalledReason", () => {
     const [w] = boardWorkersToSignals([boardWorker({ status: "stuck", activeState: "stuck" })], Date.now());
-    expect(w!.status).toBe("stuck");
-    expect(w!.stalledReason).toBeNull();
+    expect(w.status).toBe("stuck");
+    expect(w.stalledReason).toBeNull();
   });
 });
 
@@ -110,11 +110,11 @@ describe("selectWorkers — read-model-vs-raw fallback (CTL-920)", () => {
   ];
 
   it("prefers the read-model rows when connected (server up)", () => {
-    expect(selectWorkers(rmRow, rawRow)[0]!.ticket).toBe("CTL-READMODEL");
+    expect(selectWorkers(rmRow, rawRow)[0].ticket).toBe("CTL-READMODEL");
   });
 
   it("falls back to the raw scan when the read-model is unavailable (server down ⇒ null)", () => {
-    expect(selectWorkers(null, rawRow)[0]!.ticket).toBe("CTL-RAW");
+    expect(selectWorkers(null, rawRow)[0].ticket).toBe("CTL-RAW");
   });
 
   it("an empty read-model worker list is still authoritative (NOT treated as fallback)", () => {

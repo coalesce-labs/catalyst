@@ -18,7 +18,6 @@ import {
   nextTheme,
   readStoredTheme,
   applyTheme,
-  type Theme,
 } from "../ui/src/lib/theme";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -218,6 +217,6 @@ describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
 // Sanity: every theme has a label.
 describe("theme metadata is exhaustive (CTL-893)", () => {
   it("every theme is labelled", () => {
-    for (const t of THEMES) expect(THEME_LABEL[t as Theme]).toBeTruthy();
+    for (const t of THEMES) expect(THEME_LABEL[t]).toBeTruthy();
   });
 });

@@ -213,7 +213,7 @@ function asBool(v: unknown): boolean | null {
 export function parseHistoryLine(ts: number, line: string): WorkerHistoryRow {
   let body: Record<string, unknown> = {};
   try {
-    const parsed = JSON.parse(line);
+    const parsed: unknown = JSON.parse(line) as unknown;
     if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
   } catch {
     /* leave body empty; the raw line is unreadable JSON */

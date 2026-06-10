@@ -30,7 +30,7 @@ const sidebarPrimitiveSrc = read("components/ui/sidebar.tsx");
 /**
  * Strip JS comments so "edge-to-edge" CLASSNAME assertions can't be tripped by
  * prose that merely mentions `mx-auto` / `max-w-*` in a code comment. Removes
- * block comments, JSX `{/* … *​/}` comments, and `//` line comments.
+ * block comments, JSX {comment} expressions, and `//` line comments.
  */
 function stripComments(src: string): string {
   return src

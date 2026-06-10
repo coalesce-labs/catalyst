@@ -261,11 +261,8 @@ export function PropertiesSection({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Keep the old primitives exported for any callers outside this file that haven't
-// been migrated yet. They are no longer used in the popover itself.
-// (SegRow / SwitchRow / RadioRow — minimal stubs so nothing breaks.)
-/** @deprecated use LayoutSwitch or SelectRow instead */
-export function SegRow<T extends string>({
+/** @deprecated use LayoutSwitch or SelectRow instead — no external callers */
+function SegRow<T extends string>({
   label,
   value,
   onChange,
@@ -286,8 +283,8 @@ export function SegRow<T extends string>({
   );
 }
 
-/** @deprecated use ChipToggle instead */
-export function SwitchRow({
+/** @deprecated use ChipToggle instead — no external callers */
+function SwitchRow({
   label,
   checked,
   onChange,
@@ -312,8 +309,8 @@ export function SwitchRow({
   );
 }
 
-/** @deprecated use SelectRow instead */
-export function RadioRow<T extends string>({
+/** @deprecated use SelectRow instead — no external callers */
+function RadioRow<T extends string>({
   label,
   value,
   onChange,

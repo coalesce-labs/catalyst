@@ -29,7 +29,7 @@ function sseFrame(p: ReadModelPayload): string {
 
 /** A fetch stub that streams the given chunks then ends the body. */
 function fetchStreaming(chunks: string[]): typeof fetch {
-  return (async () => {
+  return (() => {
     const enc = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -37,7 +37,7 @@ function fetchStreaming(chunks: string[]): typeof fetch {
         controller.close();
       },
     });
-    return new Response(stream, { status: 200 });
+    return Promise.resolve(new Response(stream, { status: 200 }));
   }) as unknown as typeof fetch;
 }
 
@@ -51,7 +51,7 @@ describe("createNodeEventSource (CTL-920)", () => {
     es.addEventListener("board", (ev) => got.push(ev.data));
     await es.whenIdle();
     expect(got.length).toBe(1);
-    expect(JSON.parse(got[0]!).generatedAt).toBe("2026-06-09T01:02:03.000Z");
+    expect((JSON.parse(got[0]) as { generatedAt: string }).generatedAt).toBe("2026-06-09T01:02:03.000Z");
     es.close();
   });
 
@@ -81,13 +81,11 @@ describe("createNodeEventSource (CTL-920)", () => {
     // Give the injected stream a microtask turn to flush.
     await new Promise((r) => setTimeout(r, 20));
     expect(snaps.length).toBe(1);
-    expect(Array.isArray(snaps[0]!.workers)).toBe(true);
+    expect(Array.isArray(snaps[0].workers)).toBe(true);
   });
 
   it("invokes onerror when the connection fails, never throwing into the loop", async () => {
-    const failing = (async () => {
-      throw new Error("ECONNREFUSED");
-    }) as unknown as typeof fetch;
+    const failing = (() => Promise.reject(new Error("ECONNREFUSED"))) as unknown as typeof fetch;
     const es = createNodeEventSource("http://x/api/board/stream", { fetchImpl: failing });
     let errored = false;
     es.onerror = () => {
@@ -99,7 +97,7 @@ describe("createNodeEventSource (CTL-920)", () => {
   });
 
   it("a non-200 response triggers onerror (server up but endpoint missing)", async () => {
-    const notFound = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    const notFound = (() => Promise.resolve(new Response("nope", { status: 404 }))) as unknown as typeof fetch;
     const es = createNodeEventSource("http://x/api/board/stream", { fetchImpl: notFound });
     let errored = false;
     es.onerror = () => {

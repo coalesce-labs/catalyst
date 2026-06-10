@@ -507,10 +507,10 @@ export function Shell({
   );
 }
 
-/** A thin named export for the body slot so page surfaces can compose explicitly
- *  (`<Shell …><DetailBody>…</DetailBody></Shell>`). It is a passthrough — the slot
- *  semantics live in `Shell`'s `children`; this just documents intent + reserves
- *  the data attribute the body region is keyed on for tests. */
+/** A passthrough wrapper for the body slot so page surfaces can compose explicitly.
+ *  Reserves the data attribute the body region is keyed on for tests.
+ *  @ignore
+ */
 export function DetailBody({ children }: { children: ReactNode }) {
   return <div data-detail-body>{children}</div>;
 }

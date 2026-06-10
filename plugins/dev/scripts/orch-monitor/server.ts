@@ -970,8 +970,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
           const configMod = ["..", "execution-core", "config.mjs"].join("/");
           const [recovery, config, navSignal] = await Promise.all([
-            import(recoveryMod),
-            import(configMod),
+            import(recoveryMod) as Promise<{ readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string> }>,
+            import(configMod) as Promise<{ getHostName: () => string }>,
             import("./lib/nav-signal.mjs"),
           ]);
           return {
