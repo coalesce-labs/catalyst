@@ -83,8 +83,14 @@ jobs:
         #   Memory ref: project_execution_core_daemon_flaky_test
         run: |
           bun test \
+            beliefs/advance-rules.test.mjs \
+            beliefs/advance-shadow.test.mjs \
+            beliefs/collector-advance.test.mjs \
+            beliefs/collector-relation.test.mjs \
             beliefs/collector.test.mjs \
+            beliefs/escalate.test.mjs \
             beliefs/intent.test.mjs \
+            beliefs/recursive-rules.test.mjs \
             beliefs/rules.test.mjs \
             beliefs/schema.test.mjs \
             beliefs/why.test.mjs \
