@@ -99,6 +99,35 @@ export const BOARD_BUMP_CLASS_RIGHT = "cat-board-bump-right";
 
 /** Duration (ms) the bump class is held before being removed. */
 export const BOARD_BUMP_DURATION_MS = 150;
+
+/** Pure decision for the wheel guard: should this horizontal wheel gesture be
+ *  blocked (to suppress the browser's swipe-to-navigate), and in which direction?
+ *
+ *  Returns "left"/"right" when the gesture pushes OUTWARD past the corresponding
+ *  edge — the only case that is a back/forward-navigation intent — and `null`
+ *  otherwise (including every scroll INTO content, which must pass through to the
+ *  browser). The board rests at scrollLeft=0 (the left edge), so gating on
+ *  direction here is what keeps normal rightward scrolling alive; CTL-973's
+ *  original guard blocked every at-edge horizontal wheel and froze the board.
+ *
+ *  When the board has no horizontal overflow, scrollLeft=0 is simultaneously both
+ *  edges, so any horizontal swipe is outward and is (correctly) suppressed. */
+export function swipeBlockDirection(
+  deltaX: number,
+  deltaY: number,
+  scrollLeft: number,
+  scrollWidth: number,
+  clientWidth: number,
+  tolerance: number = SWIPE_EDGE_TOLERANCE,
+): "left" | "right" | null {
+  // Vertical-dominant gestures are never the swipe-nav intent — let them scroll.
+  if (Math.abs(deltaX) <= Math.abs(deltaY)) return null;
+  const atLeft = scrollLeft <= tolerance;
+  const atRight = scrollLeft >= scrollWidth - clientWidth - tolerance;
+  if (atLeft && deltaX < 0) return "left";
+  if (atRight && deltaX > 0) return "right";
+  return null;
+}
 const COL_GAP = 16;
 const PAD_X = 16;
 // Sticky offset for the group-label row — it pins just below the column header
@@ -327,27 +356,23 @@ function useBoardSwipeGuard(
     let bumpTimer: ReturnType<typeof setTimeout> | null = null;
 
     const onWheel = (e: WheelEvent) => {
-      // Only intercept primarily-horizontal gestures.
-      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
       const { scrollLeft, scrollWidth, clientWidth } = el;
-      const atLeft = scrollLeft <= SWIPE_EDGE_TOLERANCE;
-      const atRight = scrollLeft >= scrollWidth - clientWidth - SWIPE_EDGE_TOLERANCE;
-      if (!atLeft && !atRight) return;
+      // Block ONLY a horizontal gesture pushing outward past an edge (swipe-nav
+      // intent). Scrolling into content — including rightward from the board's
+      // default scrollLeft=0 resting position — returns null and passes through.
+      const dir = swipeBlockDirection(e.deltaX, e.deltaY, scrollLeft, scrollWidth, clientWidth);
+      if (dir === null) return;
       e.preventDefault();
       // Bump affordance: apply the class, clear after BOARD_BUMP_DURATION_MS.
       const bump = bumpRef.current;
       if (bump) {
-        const cls = atLeft && e.deltaX < 0 ? BOARD_BUMP_CLASS_LEFT
-          : atRight && e.deltaX > 0 ? BOARD_BUMP_CLASS_RIGHT
-          : null;
-        if (cls) {
-          bump.classList.add(cls);
-          if (bumpTimer) clearTimeout(bumpTimer);
-          bumpTimer = setTimeout(() => {
-            bump.classList.remove(cls);
-            bumpTimer = null;
-          }, BOARD_BUMP_DURATION_MS);
-        }
+        const cls = dir === "left" ? BOARD_BUMP_CLASS_LEFT : BOARD_BUMP_CLASS_RIGHT;
+        bump.classList.add(cls);
+        if (bumpTimer) clearTimeout(bumpTimer);
+        bumpTimer = setTimeout(() => {
+          bump.classList.remove(cls);
+          bumpTimer = null;
+        }, BOARD_BUMP_DURATION_MS);
       }
     };
 
