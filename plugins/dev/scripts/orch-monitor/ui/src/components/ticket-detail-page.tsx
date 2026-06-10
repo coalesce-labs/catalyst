@@ -41,6 +41,8 @@ import {
   type ActiveNodeTail,
 } from "@/board/live-tail-data";
 import type { BoardTicket, BoardWorker } from "@/board/types";
+// CTL-948: per-ticket dependency sub-graph
+import { TicketDepSubGraph } from "@/board/dependency-graph";
 import type { StreamEvent } from "@/lib/types";
 import { phaseColor, fmtDuration, fmtClock, phaseModelLabel, fmtCost, fmtTokens } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
@@ -750,9 +752,12 @@ function TelemetryStrip({ ticket }: { ticket: BoardTicket }) {
 export function TicketDetailPage({
   ticket,
   workers = [],
+  tickets = [],
 }: {
   ticket: BoardTicket | undefined;
   workers?: BoardWorker[];
+  /** CTL-948: all resident tickets, used to build the dep sub-graph. */
+  tickets?: BoardTicket[];
 }) {
   // Spine node refs so a PIPELINE segment click smooth-scrolls to its node.
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -794,6 +799,15 @@ export function TicketDetailPage({
       <Header ticket={ticket} />
       <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
       <HeldBanner ticket={ticket} />
+      {/* CTL-948: per-ticket dep sub-graph — backward (blocked_by) + forward
+          (what this ticket blocks) up to 2 hops. Shown only when the resident
+          payload has tickets to cross-reference; honest empty-state otherwise. */}
+      {tickets.length > 0 && (
+        <section data-ticket-deps style={{ marginBottom: 20 }}>
+          <SectionLabel>Dependencies</SectionLabel>
+          <TicketDepSubGraph focusId={ticket.id} tickets={tickets} />
+        </section>
+      )}
       <LifecycleSpine ticket={ticket} registerNode={registerNode} activeSession={activeSession} />
       <TelemetryStrip ticket={ticket} />
       <CommsSection ticket={ticket} />

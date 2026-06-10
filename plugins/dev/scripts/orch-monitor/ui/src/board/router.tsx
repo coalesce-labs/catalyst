@@ -3,7 +3,7 @@
 // The board was a route-less React tree: main.tsx mounted <Board /> directly,
 // so nothing was deep-linkable and a refresh/paste could not reconstruct where
 // you were. This adopts @tanstack/react-router (greenfield — the redesign's
-// whole detail-page spine sits on it) and defines three routes:
+// whole detail-page spine sits on it) and defines four routes:
 //
 //   /              → the existing <Board /> (mounted unchanged; the SharedWorker
 //                    board stream in board-client.ts is untouched — routing wraps
@@ -15,6 +15,9 @@
 //   /worker/$id    → same shape; `id` is e.g. "CTL-845:2" (a colon is legal
 //                    inside a single path segment, so the run-id resolves whole).
 //                    Renders the shared <Shell> with a worker-body slot (DETAIL3).
+//   /dep-graph     → CTL-948: full backlog as a directed dependency graph.
+//                    Ticket nodes linked by blocked_by edges, auto-laid-out LR
+//                    via dagre. Click a node → navigate to /ticket/$id.
 //
 // CTL-912 / DETAIL1 wires the shared shell chrome (breadcrumb · pager · live-dot
 // title · Properties rail · footer · keyboard) into these routes; the per-page
@@ -32,6 +35,8 @@ import {
 import { Board } from "./Board";
 import { validateDetailSearch } from "./route-search";
 import { TicketDetailRoute, WorkerDetailRoute } from "./detail-route";
+// CTL-948: backlog dep-graph route
+import { DepGraphRoute } from "./dep-graph-route";
 
 // Root route: holds the <Outlet> the matched child renders into. No chrome yet
 // (the Sidebar/SHELL frame is a later ticket) — the root is a bare passthrough
@@ -51,6 +56,7 @@ function BoardRoot() {
       onWorkerSelect={(name) =>
         void navigate({ to: "/worker/$id", params: { id: name }, search: { from: "board" } })
       }
+      onDepGraph={() => void navigate({ to: "/dep-graph" })}
     />
   );
 }
@@ -90,7 +96,14 @@ function WorkerDetailContainer() {
   return <WorkerDetailRoute id={id} search={search} />;
 }
 
-const routeTree = rootRoute.addChildren([boardRoute, ticketRoute, workerRoute]);
+// CTL-948: `/dep-graph` — full backlog dependency graph (dagre LR layout).
+const depGraphRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/dep-graph",
+  component: DepGraphRoute,
+});
+
+const routeTree = rootRoute.addChildren([boardRoute, ticketRoute, workerRoute, depGraphRoute]);
 
 export const router = createRouter({ routeTree });
 
