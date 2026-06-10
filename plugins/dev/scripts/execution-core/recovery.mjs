@@ -483,6 +483,23 @@ export function defaultRecordNeverStartedAttempt(orchDir, ticket, phase, capture
   }
 }
 
+// defaultClearNeverStartedAttempts — unlink the durable per-(ticket, phase)
+// attempt marker once a replacement worker SUCCEEDS (the phase reclaims as
+// work-done, or a revive observes forward progress). Without this the count is
+// sticky forever: a much-later legitimate re-dispatch of the same (ticket, phase)
+// that wedges once on a transient blip would read the stale count>=cap and
+// escalate needs-human with ZERO fresh replacement attempts — contradicting the
+// gate's "retry a replacement rather than falsely escalate" intent. Idempotent
+// (ENOENT is the common, expected case) and fail-open (a stuck marker only costs
+// a too-early escalation on a future wedge, never a throw out of the sweep).
+export function defaultClearNeverStartedAttempts(orchDir, ticket, phase, { rm = rmSync } = {}) {
+  try {
+    rm(neverStartedAttemptsPath(orchDir, ticket, phase), { force: true });
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker clear failed");
+  }
+}
+
 // defaultTranscriptExists — does the session's transcript JSONL exist? A
 // healthy session creates it ~0.3s after its first turn (session-recency.mjs);
 // absence minutes after dispatch means the prompt was never processed — the
@@ -1611,6 +1628,7 @@ export function reclaimDeadWorkIfPossible(
     appendWedgedEvent = defaultAppendWedgedNeverStartedEvent,
     readNeverStartedAttempts = defaultReadNeverStartedAttempts,
     recordNeverStartedAttempt = defaultRecordNeverStartedAttempt,
+    clearNeverStartedAttempts = defaultClearNeverStartedAttempts,
     wedgeAttemptCap = NEVER_STARTED_ATTEMPT_CAP,
     // CTL-868 — zombie state.json staleness floor (the GHOST BREAKER's fallback
     // for when no FRESH `claude agents` snapshot is available, e.g. the headless
@@ -1920,9 +1938,34 @@ export function reclaimDeadWorkIfPossible(
                 // (marketplace wedge / plugin-registration race). Stop the
                 // corpse (it holds a slot) and page a human with the screen
                 // captures from ALL attempts instead of looping.
+                //
+                // CTL-932 fix: make this corpse terminally NOT-revivable before
+                // returning. Without the next two steps the kill alone is not
+                // enough — next tick the stopped worker reads `dead`, branch (C)
+                // runs, and its no-progress gate (currentProgress 0 > stored -1
+                // on a never-observed phase) PASSES, reviving a futile 4th
+                // worker that re-wedges and re-escalates. Pre-seed the progress
+                // high-water mark to the worker's current (zero) progress so
+                // branch (C) reads `0 <= 0` and STOPS via its own terminal
+                // no-progress path — the exact mechanism the sibling stop uses,
+                // no new state. needs-human is already applied by escalateOnce,
+                // so that terminal stop's escalation is cool-down-suppressed; net
+                // = zero post-escalation respawns.
+                const exhaustedProgress = progressMark({ ticket, phase, repoRoot, orchDir });
+                writeProgressMark(orchDir, ticket, phase, exhaustedProgress);
+                // Reap-intent BEFORE the inline kill (the authoritative backup if
+                // the inline stop fails), mirroring the no-progress + gate-
+                // redispatch stop paths which both pair emitReapIntent + kill.
+                emitReapIntent("phase.terminal.reap-requested", {
+                  ticket,
+                  phase,
+                  bgJobId: prevBgJobId,
+                  worktreePath: signal.raw?.worktreePath,
+                  reason: "ctl-932-wedged-never-started-exhausted",
+                }).catch(() => {});
                 killBgJob({ bgJobId: prevBgJobId });
                 log.warn(
-                  { ticket, phase, prevBgJobId, attempts: attempts.count, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+                  { ticket, phase, prevBgJobId, attempts: attempts.count, exhaustedProgress, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
                   "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)",
                 );
                 return escalateOnce("wedged-never-started-exhausted", attempts.count, {
@@ -2195,6 +2238,11 @@ export function reclaimDeadWorkIfPossible(
       probeChecked: probe_checked,
       reclaimedBgJobId: prevBgJobId,
     });
+    // CTL-932 fix #3: the phase SUCCEEDED (work committed) — clear any stale
+    // never-started attempt marker so a much-later legitimate re-dispatch of the
+    // same (ticket, phase) starts the wedge budget fresh instead of inheriting a
+    // count>=cap that would escalate on the first transient blip.
+    clearNeverStartedAttempts(orchDir, ticket, phase);
     log.info({ ticket, phase }, "reclaim-dead-work: dead worker reclaimed (work was committed)");
     return "reclaimed";
   }
@@ -2291,6 +2339,11 @@ export function reclaimDeadWorkIfPossible(
   }
   // Forward progress was made → record the new high-water mark and revive below.
   writeProgressMark(orchDir, ticket, phase, currentProgress);
+  // CTL-932 fix #3: forward progress proves a replacement actually started and
+  // is producing work — clear any never-started attempt marker so a much-later
+  // wedge of the same (ticket, phase) earns a fresh replacement budget rather
+  // than inheriting a stale count>=cap and escalating with zero retries.
+  clearNeverStartedAttempts(orchDir, ticket, phase);
 
   // Attempt number for the revive audit + `.revive-N.applied` marker. This is now
   // TELEMETRY ONLY (no longer a budget gate — the progress gate bounds retries).
