@@ -65,6 +65,8 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     pr: null,
     updatedAt: "2026-06-08T11:00:00.000Z",
     held: null,
+    heldSince: null,
+    currentPhaseSince: null,
     blockers: [],
     host: null,
     generation: null,
