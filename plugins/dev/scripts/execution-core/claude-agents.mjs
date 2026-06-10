@@ -302,6 +302,19 @@ export function agentForShortId(shortId, agents) {
   );
 }
 
+// agentStateForShortId — the matched agent's `.state` string, or null. CTL-932:
+// the snapshot already retains every raw field of `claude agents --json`
+// (agents are stored verbatim, never projected), but nothing READ `.state`
+// before — and `state === "blocked"` is the listing's signature of a worker
+// that registered but never resolved its initial prompt (the wedged-never-
+// started class: all six 2026-06-09 wedges showed kind:"background",
+// status:"idle", state:"blocked"). Null on absent agent / missing field /
+// malformed input — callers treat null as "cannot prove blocked" (no-op).
+export function agentStateForShortId(shortId, agents) {
+  const agent = agentForShortId(shortId, agents);
+  return typeof agent?.state === "string" && agent.state ? agent.state : null;
+}
+
 // isBgJobAlive — true iff a live `claude agents` session matches bgJobId. This
 // replaces the pid-file keep-alive check: a crashed worker disappears from
 // `claude agents`, whereas a live one (busy OR idle between turns) is still
@@ -364,6 +377,41 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
 export function countBackgroundAgents({ agents, now } = {}) {
   const list = agents ?? getAgentsCached(now ? { now } : {}).agents;
   return list.filter((a) => a?.kind === "background").length;
+}
+
+// --- CTL-932: screen capture for wedge escalations -------------------------
+
+// stripAnsi — drop ANSI CSI/OSC escape sequences from a rendered screen buffer
+// so the captured text is grep-able in the event log. Covers CSI (ESC [ … cmd),
+// OSC (ESC ] … BEL / ESC \), and bare two-byte escapes.
+const ANSI_RE =
+  /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
+function stripAnsi(s) {
+  return String(s).replace(ANSI_RE, "");
+}
+
+// claudeLogs — `claude logs <shortId>`: the session's rendered screen buffer,
+// the ONLY external surface that shows WHY a session is idle (it revealed the
+// "Unknown command: /catalyst-dev:phase-*" banner behind the 2026-06-09
+// fleet-wide wedge). ANSI-stripped and capped so the capture can ride inside
+// an escalation event payload without archaeology — or bloat. shortId MUST be
+// the 8-char form (same contract as claudeStop). Returns {ok, output, error?};
+// never throws.
+const CLAUDE_LOGS_CAP = 8_192;
+export function claudeLogs(shortId, { spawn = spawnSync } = {}) {
+  try {
+    const res = spawn(CLAUDE_BIN, ["logs", shortId], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if ((res.status ?? 0) !== 0) {
+      return { ok: false, output: "", error: res.stderr?.trim() || `claude logs rc=${res.status}` };
+    }
+    const cleaned = stripAnsi(res.stdout ?? "").trim();
+    return { ok: true, output: cleaned.slice(0, CLAUDE_LOGS_CAP) };
+  } catch (err) {
+    return { ok: false, output: "", error: err.message };
+  }
 }
 
 // claudeStop — `claude stop <shortId>`. shortId MUST be the 8-char form
