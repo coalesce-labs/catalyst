@@ -195,6 +195,7 @@ import {
 } from "./lib/otel-health";
 import {
   costByTicket,
+  costByTaskType,
   tokensByType,
   cacheHitRate,
   costRateByModel,
@@ -205,6 +206,9 @@ import {
   recentTail,
   eventsHeatmap,
   costValidation,
+  costToday,
+  costSeries,
+  cacheSavings,
   workerHistoryBySession,
   isValidCcSessionId,
   workerBurnSeries,
@@ -1877,6 +1881,61 @@ export function createServer(opts: CreateServerOptions): BunServer {
           if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const interval = url.searchParams.get("interval") ?? "5m";
           const result = await costRateByModel(prom, interval);
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS P-B): cost by pipeline stage. Routes the EXISTING (but
+        // previously unrouted) `costByTaskType` — `sum by (task_type)(increase(
+        // cost[r]))` — with the OBS-9 zero-series filter applied at the query layer
+        // so the by-stage bar never renders the ~5 exact-0 phases. 503 when
+        // Prometheus is not configured (the P-B ChartCard degrades via the ladder).
+        if (url.pathname === "/api/otel/cost-by-stage") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costByTaskType(prom, range);
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS HERO): the today-vs-7d dollar band. todayUsd (spend since
+        // local midnight) + avg7dUsd (the prior 7 FULL days' mean baseline) + the
+        // delta fraction + a linear EOD projection — all off the cost counter, no
+        // new plumbing. The partial current day is EXCLUDED from the 7d baseline so
+        // "is today normal?" compares like-for-like. 503 when Prometheus is absent.
+        if (url.pathname === "/api/otel/cost-today") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const result = await costToday(prom);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS P-A): hourly spend-over-time bars + spike flags. A
+        // query_range of `sum(increase(cost[1h]))` stepped at 1h over the window;
+        // each point carries `isSpike` (spend > max(2× median, μ+2σ) — the P-A
+        // `--chart-4` dot). 503 when Prometheus is absent; an honest `[]` for a
+        // quiet stack (the ChartCard empty state, never a fabricated bar).
+        if (url.pathname === "/api/otel/cost-series") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costSeries(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS HERO-C, THE HEADLINE): cache-ROI $. Σ_model cacheRead_tokens
+        // × (input_price − cache_read_price) from a per-model price book — the real
+        // dollars the 99.8%-hit-rate prompt cache saved — plus the "(Nx)" multiplier
+        // (savings / actual spend). 503 when Prometheus is absent.
+        if (url.pathname === "/api/otel/cache-savings") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await cacheSavings(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 
