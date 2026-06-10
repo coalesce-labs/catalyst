@@ -746,6 +746,7 @@ compose_worker_settings_json() {
 	local phase_val="${PHASE:-}"
 	local ticket_val="${TICKET:-}"
 	local generation_val="${GENERATION:-}"
+	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION:-}"   # CTL-864
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -761,6 +762,7 @@ compose_worker_settings_json() {
 		--arg phase "$phase_val" \
 		--arg ticket "$ticket_val" \
 		--arg generation "$generation_val" \
+		--arg cluster_generation "$cluster_generation_val" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -778,6 +780,7 @@ compose_worker_settings_json() {
          + (if $phase == "" then {} else { "CATALYST_PHASE": $phase } end)
          + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
          + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
+         + (if $cluster_generation == "" then {} else { "CATALYST_CLUSTER_GENERATION": $cluster_generation } end)
        )
      }
      + (if $have_statusline
@@ -800,6 +803,9 @@ DISPATCH_ENV=(
 	# fence-check) before emitting any outcome — a stale (false-dead-revived)
 	# generation bows out instead of double-completing.
 	"CATALYST_GENERATION=${GENERATION}"
+	# CTL-864: cross-host cluster fencing token (distinct from the host-local
+	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
+	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION:-}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
