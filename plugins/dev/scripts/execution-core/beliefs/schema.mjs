@@ -93,6 +93,19 @@ const DDL = [
     tick_id     INTEGER NOT NULL REFERENCES tick(tick_id),
     ticket      TEXT NOT NULL, state TEXT
   )`,
+  // Blocking relationships observed at a tick — one directed edge per row.
+  // Canonical direction: source blocks target ('blocks'). 'blocked_by' is
+  // folded into 'blocks' by swapping source/target at ingest (never stored).
+  // 'related'/'duplicate' stored as-is (source=ticket, target=peer).
+  // Insert-only; no upsert or delete. Cold/stale cache → no rows this tick
+  // (same null-is-unreadable contract as obs_linear).
+  `CREATE TABLE IF NOT EXISTS obs_relation (
+    fact_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    tick_id        INTEGER NOT NULL REFERENCES tick(tick_id),
+    source_ticket  TEXT NOT NULL,
+    target_ticket  TEXT NOT NULL,
+    relation_type  TEXT NOT NULL
+  )`,
   // Static-ish facts the rules need.
   `CREATE TABLE IF NOT EXISTS cfg (key TEXT PRIMARY KEY, value_int INTEGER, value_text TEXT)`,
   // IDB: every derived belief, uniform shape, provenance MANDATORY.
@@ -125,6 +138,8 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_obs_signal_tick ON obs_signal (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_transcript_tick ON obs_transcript (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_linear_tick ON obs_linear (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_relation_tick ON obs_relation (tick_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_obs_relation_source ON obs_relation (source_ticket)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_heartbeat_ts ON obs_heartbeat (ts_ms)`,
   `CREATE INDEX IF NOT EXISTS idx_intent_tick ON intent (tick_id)`,
 ];
