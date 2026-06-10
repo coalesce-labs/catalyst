@@ -102,3 +102,53 @@ export function ticketColumns(
     })
     .filter((col) => opts.showEmptyColumns || col.items.length > 0);
 }
+
+// ── CTL-950: shared column header across swimlanes ───────────────────────────
+// The single sticky header row at the top of the swimlane board must show the
+// SAME column set for every lane (Linear-style), so the column SET is derived
+// ONCE over the full (cross-lane) ticket array rather than per-lane. With
+// showEmptyColumns=false a column is kept iff ANY lane has a ticket in it — so a
+// column an operator sees in the header is guaranteed to be a real lane cell
+// somewhere, never empty-in-header-yet-present-in-one-lane.
+/**
+ * The visible column DEFINITIONS for the shared header — the lens column set,
+ * narrowed by `showEmptyColumns` over the WHOLE ticket array (every swimlane
+ * combined). PURE; no items, no order — just which columns the header shows.
+ */
+export function visibleColumnDefs(
+  tickets: BoardTicket[],
+  opts: { groupBy: ListLens; showEmptyColumns: boolean },
+): BoardColumnDef[] {
+  const defs = opts.groupBy === "linear" ? LINEAR_COLUMNS : PHASE_COLUMNS;
+  if (opts.showEmptyColumns) return [...defs];
+  const payload: BoardPayload = { ...STUB_REST, tickets };
+  return defs.filter(
+    (def) =>
+      resolveList(payload, { kind: "ticket", lens: opts.groupBy, col: def.key }).length > 0,
+  );
+}
+
+/**
+ * Distribute ONE lane's tickets across a FIXED column set (the shared header's
+ * `defs`), returning a derived column per def in def order (so every lane lays
+ * its cards into the same grid tracks). Empty lane-cells are KEPT — the column
+ * exists in the shared header, the lane simply has nothing in it (an aligned
+ * blank cell, not a reflow). PURE.
+ */
+export function laneColumns(
+  tickets: BoardTicket[],
+  defs: readonly BoardColumnDef[],
+  opts: { groupBy: ListLens; order?: Ordering },
+): DerivedColumn[] {
+  const payload: BoardPayload = { ...STUB_REST, tickets };
+  return defs.map((def): DerivedColumn => {
+    const items = resolveList(payload, {
+      kind: "ticket",
+      lens: opts.groupBy,
+      col: def.key,
+      order: opts.order,
+    });
+    const live = items.filter((t) => t.activeState === "active").length;
+    return { ...def, items, live };
+  });
+}

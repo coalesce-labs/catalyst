@@ -4,19 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Catalyst · Board</title>
-    <script type="module" crossorigin src="/assets/board-ZP87iS_f.js"></script>
-    <link rel="modulepreload" crossorigin href="/assets/app-C78n9Is-.js">
-    <link rel="modulepreload" crossorigin href="/assets/tabs-Czg1uRQq.js">
-    <link rel="modulepreload" crossorigin href="/assets/empty-state-7lVld7A3.js">
-    <link rel="modulepreload" crossorigin href="/assets/use-sort-9GwYxnyp.js">
-    <link rel="modulepreload" crossorigin href="/assets/search-input-C6g3H6qm.js">
-    <link rel="modulepreload" crossorigin href="/assets/refresh-cw-h_qPE83a.js">
-    <link rel="modulepreload" crossorigin href="/assets/comms-view-Bi0K8kma.js">
-    <link rel="modulepreload" crossorigin href="/assets/external-link-D5e-F4Fu.js">
-    <link rel="modulepreload" crossorigin href="/assets/Board-CXvB7BsQ.js">
-    <link rel="modulepreload" crossorigin href="/assets/use-activity-hxA686-d.js">
-    <link rel="modulepreload" crossorigin href="/assets/radio-BYkXoujt.js">
-    <link rel="stylesheet" crossorigin href="/assets/app-DimXUbJ2.css">
+    <!-- CTL-949: full-height chain so detail routes fill the viewport.
+         html/body/#board-root must all be 100% for Shell's height:100% to reach the
+         viewport; body gets the dark app background so no white gap shows beneath
+         short content while the React tree mounts. -->
+    <style data-ctl-949-height-guard>
+      html, body, #board-root { height: 100%; }
+      body { background: #0e1116; }
+    </style>
+    <script type="module" crossorigin src="/assets/board-C6YClrC8.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/app-DM63d3JO.js">
+    <link rel="modulepreload" crossorigin href="/assets/use-repo-colors-CYyQKhHF.js">
+    <link rel="modulepreload" crossorigin href="/assets/radio-XgcfQo_G.js">
+    <link rel="stylesheet" crossorigin href="/assets/app-CS4U5LxY.css">
+    <link rel="stylesheet" crossorigin href="/assets/board-C5ap-Sga.css">
   </head>
   <body>
     <div id="board-root"></div>
