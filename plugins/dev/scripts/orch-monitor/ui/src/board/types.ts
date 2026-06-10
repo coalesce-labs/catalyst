@@ -99,6 +99,10 @@ export interface BoardTicket {
   lastActiveMs: number | null;
   priority: number;
   estimate: number | null;
+  /** CTL-954: estimation method (fibonacci/tShirt/exponential/linear); null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-957: method-aware display string (e.g. "M" for tShirt 2, "5" for fibonacci 5); null when absent. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
   costUSD: number | null;
@@ -178,6 +182,10 @@ export interface BoardQueueItem {
   team: string;
   rank: number;
   estimate: number | null;
+  /** CTL-954: estimation method (fibonacci/tShirt/exponential/linear); null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-957: method-aware display string (e.g. "M" for tShirt 2, "5" for fibonacci 5); null when absent. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
   /** CTL-922 (BFF10): the node owning this queued ticket (SURF2 queue node

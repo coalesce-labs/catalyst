@@ -109,6 +109,8 @@ export function parseIssueUpdatedEvent(event) {
     toLabels: payload.toLabels ?? null,
     toProject: payload.toProject ?? null,
     toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
+    // CTL-957: estimate from the event payload (may be undefined when absent).
+    toEstimate: typeof payload.toEstimate === "number" ? payload.toEstimate : ("toEstimate" in payload ? null : undefined),
     description: typeof payload.description === "string" ? payload.description : null, // CTL-749
     descriptionChanged: payload.descriptionChanged === true, // CTL-749
     actorId: payload.actorId ?? null,   // CTL-749
@@ -171,12 +173,16 @@ export function handleIssueUpdatedEvent(
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
     if (ticketMatchesQuery(query, parsed)) {
-      upsertTicket(query.team, {
+      const upd = {
         identifier: parsed.identifier,
         state: parsed.toState,
         priority: parsed.toPriority,
         project: parsed.toProject ?? null,
-      });
+      };
+      // CTL-957: forward estimate into the eligible projection when present
+      // (undefined = absent from payload = keep stored value).
+      if (parsed.toEstimate !== undefined) upd.estimate = parsed.toEstimate;
+      upsertTicket(query.team, upd);
     } else {
       removeTicket(query.team, parsed.identifier);
     }

@@ -17,6 +17,8 @@ export interface TicketDescriptor {
   relations: unknown;
   labels: string[] | null;
   priority: number | null;
+  /** CTL-957: Linear story-point estimate (numeric), projected by webhook. */
+  estimate: number | null;
   resolution: string | null;
   assignee: string | null;
   uuid: string | null;
@@ -38,6 +40,8 @@ export interface UpsertTicketDescriptorInput {
   relations?: unknown;
   labels?: string[] | null;
   priority?: number | null;
+  /** CTL-957: Linear story-point estimate (key-presence: absent = keep). */
+  estimate?: number | null;
   resolution?: string | null;
   assignee?: string | null;
   uuid?: string | null;

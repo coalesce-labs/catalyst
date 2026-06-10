@@ -40,9 +40,12 @@ function byIdentifier(a, b) {
 // key, a pre-fix projection (no parent field) written by an older daemon would
 // survive across a deploy whenever the project's identifier/state/priority set
 // is steady — leaving the parent-epic edge un-dropped and the child deadlocked.
+// CTL-957: `estimate` added to the signature so an estimate-only change
+// (e.g. PM sets points on a queued ticket) forces a projection rewrite and the
+// board picks up the new value without waiting for a state/priority change.
 function contentKey(tickets) {
   return JSON.stringify(
-    tickets.map((t) => [t.identifier, t.state, t.priority, t.parent ?? null]),
+    tickets.map((t) => [t.identifier, t.state, t.priority, t.parent ?? null, t.estimate ?? null]),
   );
 }
 

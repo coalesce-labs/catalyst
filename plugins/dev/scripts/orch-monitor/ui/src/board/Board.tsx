@@ -287,8 +287,27 @@ export function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
   );
 }
 const SCOPE_ABBR: Record<string, string> = { xs: "XS", small: "S", medium: "M", large: "L", xl: "XL" };
-export function ScopeChip({ scope, estimate }: { scope: string | null; estimate: number | null }) {
-  if (estimate != null) return <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{estimate}pt</Badge>;
+// CTL-957: one-estimate chip — show the Linear estimate (method-aware) when
+// present, else fall back to the triage scope string. NEVER both.
+// `estimateDisplay` is the pre-computed method-aware label from board-data.mjs
+// (fibonacci → "5", tShirt → "M"); when present it takes sole precedence.
+export function ScopeChip({ scope, estimate, estimateDisplay }: {
+  scope: string | null;
+  estimate: number | null;
+  estimateDisplay?: string | null;
+}) {
+  // A real Linear estimate: show method-correct display label.
+  if (estimateDisplay != null) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{estimateDisplay}</Badge>
+        </TooltipTrigger>
+        <TooltipContent>estimate: {estimate}</TooltipContent>
+      </Tooltip>
+    );
+  }
+  // No Linear estimate: fall back to triage scope string.
   if (!scope) return null;
   return (
     <Tooltip><TooltipTrigger asChild><Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10 }}>{SCOPE_ABBR[scope] || scope}</Badge></TooltipTrigger>
@@ -332,6 +351,40 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
     </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
   );
 }
+// CTL-957: dependency chips — compact `blocked_by: X, Y` and `blocks: A`
+// chips on every ticket card that has deps (not only held ones). Extends the
+// HeldBadge pattern to all cards with dependencies regardless of held state.
+// blockers[] = what this ticket waits on; blockedBy[] = tickets waiting on this.
+// Both are optional; absent/empty → that direction is not rendered.
+export function DepChips({ blockers, blockedBy }: { blockers?: string[]; blockedBy?: string[] }) {
+  const fwd = (blockers ?? []).filter(Boolean);
+  const rev = (blockedBy ?? []).filter(Boolean);
+  if (!fwd.length && !rev.length) return null;
+  return (
+    <>
+      {fwd.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 6px", borderRadius: 6, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, whiteSpace: "nowrap", cursor: "default" }}>
+              {fwd.length === 1 ? `← ${fwd[0]}` : `← ${fwd.length}`}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>blocked by: {fwd.join(", ")}</TooltipContent>
+        </Tooltip>
+      )}
+      {rev.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 6px", borderRadius: 6, color: C.fgDim, background: C.s1, border: `1px solid ${C.borderSubtle}`, whiteSpace: "nowrap", cursor: "default" }}>
+              {rev.length === 1 ? `→ ${rev[0]}` : `→ ${rev.length}`}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>blocks: {rev.join(", ")}</TooltipContent>
+        </Tooltip>
+      )}
+    </>
+  );
+}
 export function Cost({ v }: { v: number | null }) {
   return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
 }
@@ -365,7 +418,7 @@ type OpenDetailFn = (
 // rather than jump-cutting. AnimatePresence (in the column container) handles
 // enter/exit. `useReducedMotion` collapses everything to instant when the OS
 // accessibility preference is set.
-function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn }) {
+function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, onOpen, blockedBy }: { t: Ticket; colorBy: ColorBy; density?: Density; colIds?: string[]; lens?: DetailLens; col?: string; onOpen?: OpenDetailFn; blockedBy?: string[] }) {
   const accent = accentFor(t, colorBy);
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
@@ -433,7 +486,8 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
         <PhasePill phase={t.phase} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
-        {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} />}
+        {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />}
+        {!compact && <DepChips blockers={t.blockers} blockedBy={blockedBy} />}
         {!compact && t.project && <Badge variant="outline" style={{ fontSize: 10, color: C.fgDim }}>{t.project}</Badge>}
       </div>
       {!compact && <PhaseStrip phaseSummary={t.phaseSummary} />}
@@ -596,6 +650,20 @@ function sharedHeaderTotals(
   });
 }
 
+// CTL-957: build a reverse-dependency index from the full ticket set.
+// blockedByIndex[ticketId] = ids of tickets whose blockers[] includes ticketId
+// (i.e. the tickets that are waiting on ticketId to complete).
+function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
+  const idx: Record<string, string[]> = {};
+  for (const t of tickets) {
+    for (const b of t.blockers ?? []) {
+      if (!idx[b]) idx[b] = [];
+      idx[b].push(t.id);
+    }
+  }
+  return idx;
+}
+
 // The TICKET shared-header board: the column SET is `visibleColumnDefs` over the
 // WHOLE ticket array (so a column the header shows is real in SOME lane); each
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
@@ -607,6 +675,7 @@ function TicketSwimlaneBoard({
   density: Density; order: Ordering; showEmpty: boolean; fill: boolean; onOpen?: OpenDetailFn;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
+  const blockedByIdx = buildBlockedByIndex(tickets);
   const deriveLane = (laneItems: Ticket[]): LaneCell[] =>
     laneColumns(laneItems, defs, { groupBy, order }).map((c) => {
       // CTL-951: each card carries its COLUMN's ordered ids — the exact walk list
@@ -617,7 +686,7 @@ function TicketSwimlaneBoard({
         count: c.items.length,
         live: c.live,
         cards: c.items.map((t) => (
-          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} />
+          <TicketCard key={t.id} t={t} colorBy={colorBy} density={density} colIds={colIds} lens={groupBy} col={c.key} onOpen={onOpen} blockedBy={blockedByIdx[t.id]} />
         )),
       };
     });
@@ -753,7 +822,7 @@ function QueueRow({ q, freeSlots, showHost }: { q: QueueItem; freeSlots: number;
       <TableCell><PriorityIcon p={q.priority} /></TableCell>
       <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{q.id}</TableCell>
       <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>{q.title}</TableCell>
-      <TableCell><ScopeChip scope={q.scope} estimate={q.estimate} /></TableCell>
+      <TableCell><ScopeChip scope={q.scope} estimate={q.estimate} estimateDisplay={q.estimateDisplay} /></TableCell>
       <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{q.repo}</TableCell>
       {showHost && (
         <TableCell style={{ ...mono, fontSize: 11, color: q.host ? C.fgMuted : C.fgDim }}>{q.host?.name ?? "—"}</TableCell>

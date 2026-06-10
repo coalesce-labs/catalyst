@@ -98,6 +98,8 @@ function normalizeTicket(node) {
     title: node.title ?? null,
     state: node.state?.name ?? node.state ?? null,
     priority: typeof node.priority === "number" ? node.priority : 0,
+    // CTL-957: Linear numeric estimate (story points). null when unset.
+    estimate: typeof node.estimate === "number" ? node.estimate : null,
     project: node.project?.name ?? node.project ?? null,
     updatedAt: node.updatedAt ?? null,
     createdAt: node.createdAt ?? null,
