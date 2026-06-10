@@ -60,6 +60,26 @@ describe("labelOnce", () => {
     expect(ws.applyLabel.calls.length).toBe(0);
   });
 
+  test("CTL-962: returns true on the first application, false on a marker-guarded no-op", () => {
+    const ws = { applyLabel: recorder({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    // First call performs the write → true (callers bound side-effects to this).
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(true);
+    // Second call short-circuits on the .applied marker → false.
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(false);
+    expect(ws.applyLabel.calls.length).toBe(1);
+  });
+
+  test("CTL-962: returns false on a no-op when a .skipped marker exists", () => {
+    const ws = { applyLabel: recorder({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"), "");
+
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(false);
+    expect(ws.applyLabel.calls.length).toBe(0);
+  });
+
   test("missing-label reason → writes .skipped marker (no retry within this run)", () => {
     const ws = { applyLabel: recorder({ applied: false, reason: "missing-label" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });

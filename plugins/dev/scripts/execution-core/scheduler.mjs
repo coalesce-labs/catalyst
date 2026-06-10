@@ -75,6 +75,7 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
+import { executeEscalations } from "./beliefs/escalate.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
 // the daemon's recovery short-circuit + reconcile backstop run the identical
@@ -3496,21 +3497,39 @@ function runTick() {
       try {
         const diagDb = getBeliefsDb();
         if (diagDb) {
-          processDiagnosticianWakes(diagDb, beliefsRes.tickId, {
-            // Wire R12 escalation: apply needs-human via the scheduler's
-            // idempotent labelOnce so the once-marker and Linear label stay
-            // in sync with all other escalation paths. Subject is TICKET/phase.
-            applyNeedsHuman: (subject, _evidence) => {
-              const ticket = subject.split("/")[0];
-              if (ticket) {
-                labelOnce(runningOpts.orchDir, ticket, "needs-human", runningOpts.writeStatus);
-              }
-            },
-          });
+          // CTL-962: the diagnostician supplies evidence only — it no longer
+          // applies needs-human. The single label owner is executeEscalations
+          // (beliefs/escalate.mjs), called immediately after, which pages off the
+          // same R12 escalate_human beliefs exactly once.
+          processDiagnosticianWakes(diagDb, beliefsRes.tickId, {});
         }
       } catch (diagErr) {
         try {
           log.warn({ err: diagErr?.message }, "diagnostician: wake processing threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+
+      // CTL-962: escalate_human executor — the single owner of needs-human. Reads
+      // R12 beliefs for this tick, pages once (label + escalate.human event) when
+      // enforce is on, and flips the capped wake-diagnostician intent(s) to
+      // 'escalated' so R11/R12 stop firing. Wrapped in its own guard, identical
+      // to the diagnostician guard, so it never breaks the tick.
+      try {
+        const escDb = getBeliefsDb();
+        if (escDb) {
+          executeEscalations(escDb, beliefsRes.tickId, {
+            orchDir: runningOpts.orchDir,
+            writeStatus: runningOpts.writeStatus,
+            appendEvent: intentEventAppender,
+            enforce: (process.env.CATALYST_INTENTS_ENFORCE ?? "0") === "1",
+            env: process.env,
+          });
+        }
+      } catch (escErr) {
+        try {
+          log.warn({ err: escErr?.message }, "escalate: executor threw (tick unaffected)");
         } catch {
           /* even logging must not break the tick */
         }
