@@ -10,11 +10,12 @@
 //   3. resolvePostcondition (via reconcileIntents) — all four kinds
 //   4. reconcileIntents marks satisfied when world changed
 //   5. reconcileIntents increments attempts + retries when not satisfied
-//   6. reconcileIntents marks ineffective at maxAttempts (the R11 keystone):
-//      simulate the 8h kill-storm and prove it stops after 2 attempts +
-//      emits the operator event instead of looping
+//   6. reconcileIntents CAPS the channel at maxAttempts (the R11 keystone,
+//      CTL-962): simulate the 8h kill-storm and prove it stops retrying after 2
+//      attempts, leaves outcome NULL (so R11/R12 derive next tick), caps attempts
+//      at maxAttempts, and emits NO event (escalate.mjs owns paging)
 //   7. mirror read-back mismatch → retry then satisfied on convergence
-//   8. label failure → operator event not silent skip (enforce=true)
+//   8. label failure → channel caps, reconciler emits nothing (CTL-962)
 //   9. terminal-Done exempt (mirror kind)
 //  10. isIntentEffective guard
 //  11. getMaxAttempts reads cfg or defaults
@@ -269,13 +270,15 @@ describe("reconcileIntents — retry path", () => {
   });
 });
 
-// ── 5. THE KEYSTONE: kill-storm simulation ────────────────────────────────────
+// ── 5. THE KEYSTONE: kill-storm simulation (CTL-962 semantics) ────────────────
 // Simulate the 8h stop-storm scenario: daemon issues `claude stop` N times
-// against a session that never leaves the agents listing. After maxAttempts
-// the intent is marked ineffective, an operator event is emitted, and the
-// channel stops being retried.
-describe("reconcileIntents — ineffective escalation (stop-storm keystone)", () => {
-  test("marks ineffective after maxAttempts and emits operator event (enforce=true)", () => {
+// against a session that never leaves the agents listing. After maxAttempts the
+// reconciler STOPS retrying — but CTL-962 says it must NOT decide the outcome:
+// outcome STAYS NULL and attempts plateau at maxAttempts so R11/R12 can derive
+// next tick and escalate.mjs (not the reconciler) pages. NO event is emitted
+// from reconcileIntents in either mode.
+describe("reconcileIntents — channel capped, outcome stays NULL (stop-storm keystone)", () => {
+  test("caps attempts at maxAttempts, leaves outcome NULL, emits NO event (enforce=true)", () => {
     const events = [];
     const appendEvent = (evt) => events.push(evt);
 
@@ -286,7 +289,7 @@ describe("reconcileIntents — ineffective escalation (stop-storm keystone)", ()
       postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
     });
 
-    // Tick 1: attempt 1 — session still listed, below maxAttempts=2
+    // Tick 1: attempt 1 — session still listed, below maxAttempts=2 → retry
     const r1 = reconcileIntents(db, 1, worldStillRegistered(), {
       maxAttempts: 2,
       enforce: true,
@@ -295,12 +298,13 @@ describe("reconcileIntents — ineffective escalation (stop-storm keystone)", ()
     });
     expect(r1.retried).toBe(1);
     expect(r1.ineffective).toBe(0);
-    expect(events).toHaveLength(0); // not yet ineffective
+    expect(events).toHaveLength(0); // reconciler NEVER emits (CTL-962)
     const after1 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
     expect(after1.attempts).toBe(1);
     expect(after1.outcome).toBeNull();
 
-    // Tick 2: attempt 2 — still listed, reaches maxAttempts → ineffective
+    // Tick 2: attempt 2 — still listed, reaches the cap → counted ineffective,
+    // outcome STAYS NULL (the reconciler no longer flips it), NO event emitted.
     const r2 = reconcileIntents(db, 1, worldStillRegistered(), {
       maxAttempts: 2,
       enforce: true,
@@ -309,18 +313,15 @@ describe("reconcileIntents — ineffective escalation (stop-storm keystone)", ()
     });
     expect(r2.ineffective).toBe(1);
     expect(r2.retried).toBe(0);
-    expect(events).toHaveLength(1);
-
-    const evt = events[0];
-    expect(evt["event.name"]).toBe("intent.ineffective");
-    expect(evt.payload.kind).toBe("kill");
-    expect(evt.payload.subject).toBe(SUBJECT_KILL);
-    expect(evt.payload.attempts).toBe(2);
+    expect(events).toHaveLength(0); // still no event — escalate.mjs owns paging
 
     const after2 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
-    expect(after2.outcome).toBe("ineffective");
+    expect(after2.attempts).toBe(2); // plateaued at maxAttempts
+    expect(after2.outcome).toBeNull(); // R11 keystone: outcome left NULL
 
-    // Tick 3: intent is already closed — reconcile sees no open intents
+    // Tick 3: intent still open-and-capped. The storm is broken (NO third stop
+    // issued — capped branch does not re-issue), attempts do NOT exceed the cap,
+    // and outcome STAYS NULL so R11/R12 keep matching until escalate.mjs flips it.
     const r3 = reconcileIntents(db, 1, worldStillRegistered(), {
       maxAttempts: 2,
       enforce: true,
@@ -329,16 +330,19 @@ describe("reconcileIntents — ineffective escalation (stop-storm keystone)", ()
     });
     expect(r3.satisfied).toBe(0);
     expect(r3.retried).toBe(0);
-    expect(r3.ineffective).toBe(0);
-    // NO third stop issued — the storm is broken
-    expect(events).toHaveLength(1); // still only one event
+    expect(r3.ineffective).toBe(1); // still counted as capped, not retried
+    expect(events).toHaveLength(0);
+
+    const after3 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after3.attempts).toBe(2); // NEVER exceeds the cap
+    expect(after3.outcome).toBeNull(); // still NULL — waiting on escalate.mjs
   });
 
-  test("shadow mode: marks ineffective but does NOT call appendEvent (enforce=false)", () => {
+  test("shadow mode: caps attempts, leaves outcome NULL, NO appendEvent (enforce=false)", () => {
     const events = [];
     const appendEvent = (evt) => events.push(evt);
 
-    recordIntent(db, {
+    const id = recordIntent(db, {
       tickId: 1,
       kind: "kill",
       subject: SUBJECT_KILL,
@@ -353,8 +357,11 @@ describe("reconcileIntents — ineffective escalation (stop-storm keystone)", ()
       appendEvent,
     });
     expect(r2.ineffective).toBe(1);
-    // Shadow: appendEvent NOT called
-    expect(events).toHaveLength(0);
+    expect(events).toHaveLength(0); // reconciler never emits
+
+    const after = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after.attempts).toBe(2);
+    expect(after.outcome).toBeNull(); // CTL-962: outcome NOT flipped
   });
 });
 
@@ -411,13 +418,17 @@ describe("mirror intent lifecycle", () => {
   });
 });
 
-// ── 7. label failure → operator event not silent skip ─────────────────────────
-describe("label intent — operator visibility", () => {
-  test("emits operator event when label write is ineffective (enforce=true)", () => {
+// ── 7. label failure → channel caps, reconciler never emits (CTL-962) ─────────
+// Pre-CTL-962 the reconciler emitted an intent.ineffective event when a label
+// write stayed unsatisfied at the cap. CTL-962 moves ALL escalation/paging to
+// escalate.mjs, so the reconciler now only caps the channel: it leaves outcome
+// NULL and emits NO event, in BOTH enforce and shadow mode.
+describe("label intent — channel caps, reconciler emits nothing", () => {
+  test("caps the channel, leaves outcome NULL, emits NO event (enforce=true)", () => {
     const events = [];
     const appendEvent = (evt) => events.push(evt);
 
-    recordIntent(db, {
+    const id = recordIntent(db, {
       tickId: 1,
       kind: "label",
       subject: TICKET,
@@ -425,32 +436,36 @@ describe("label intent — operator visibility", () => {
     });
 
     // Tick 1: label not on ticket → retry
-    reconcileIntents(
+    const r1 = reconcileIntents(
       db,
       1,
       { labelsByTicket: new Map([[TICKET, new Set()]]) },
       { maxAttempts: 2, enforce: true, appendEvent },
     );
+    expect(r1.retried).toBe(1);
     expect(events).toHaveLength(0);
 
-    // Tick 2: still not on ticket → ineffective → operator event
-    reconcileIntents(
+    // Tick 2: still not on ticket → reaches the cap → counted ineffective,
+    // outcome STAYS NULL, NO event (escalate.mjs owns paging).
+    const r2 = reconcileIntents(
       db,
       1,
       { labelsByTicket: new Map([[TICKET, new Set()]]) },
       { maxAttempts: 2, enforce: true, appendEvent },
     );
-    expect(events).toHaveLength(1);
-    expect(events[0]["event.name"]).toBe("intent.ineffective");
-    expect(events[0].payload.kind).toBe("label");
-    expect(events[0].payload.subject).toBe(TICKET);
+    expect(r2.ineffective).toBe(1);
+    expect(events).toHaveLength(0);
+
+    const row = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.attempts).toBe(2);
+    expect(row.outcome).toBeNull();
   });
 
-  test("silent skip in shadow mode (enforce=false)", () => {
+  test("shadow mode also emits nothing and leaves outcome NULL (enforce=false)", () => {
     const events = [];
     const appendEvent = (evt) => events.push(evt);
 
-    recordIntent(db, {
+    const id = recordIntent(db, {
       tickId: 1,
       kind: "label",
       subject: TICKET,
@@ -471,6 +486,8 @@ describe("label intent — operator visibility", () => {
     );
     // Shadow: event NOT emitted
     expect(events).toHaveLength(0);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
   });
 });
 
@@ -499,6 +516,18 @@ describe("isIntentEffective", () => {
     });
     db.run("UPDATE intent SET outcome = 'ineffective' WHERE intent_id = ?", [id]);
     expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(false);
+  });
+
+  test("returns false when intent outcome='escalated' (CTL-962: still suppress re-issuance)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "wake-diagnostician",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "wake-diag", subject: SUBJECT_KILL },
+    });
+    // escalate.mjs flips a capped intent to 'escalated' after paging once.
+    db.run("UPDATE intent SET attempts = 2, outcome = 'escalated' WHERE intent_id = ?", [id]);
+    expect(isIntentEffective(db, "wake-diagnostician", SUBJECT_KILL, { maxAttempts: 2 })).toBe(false);
   });
 
   test("returns false when intent is open but attempts >= maxAttempts (in-flight ineffective)", () => {

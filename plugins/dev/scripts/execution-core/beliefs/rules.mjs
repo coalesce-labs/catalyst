@@ -334,6 +334,9 @@ WHERE t.tick_id = :tick
 // class (2 attempts, no observed effect → stop retrying this channel).
 //   action_ineffective(Kind,Subj) :- intent(Kind,Subj,attempts:N,outcome:null),
 //       N >= cfg(max_attempts).
+// CTL-962: the reconciler (intent.mjs) deliberately LEAVES outcome NULL at the
+// cap (it no longer flips to 'ineffective'), so this `outcome IS NULL` predicate
+// keeps matching until escalate.mjs pages once and flips outcome='escalated'.
 const R11_action_ineffective = `
 INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
 SELECT t.tick_id, 4, 'action_ineffective', i.kind || ':' || i.subject,

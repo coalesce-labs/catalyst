@@ -7,7 +7,12 @@
 // reconciler dependency; we read the belief store DB directly per the spec),
 // runs evidence capture for fresh wakes, records a wake-diagnostician intent,
 // and — when R12 escalate_human also fired AND the prior intent is ineffective
-// — calls applyNeedsHuman with the captured evidence attached.
+// — SUPPLIES THE CAPTURED EVIDENCE for the escalation (returned in `escalated`).
+//
+// CTL-962: the diagnostician applies NO label. needs-human is owned by a single
+// executor, beliefs/escalate.mjs, which reads the same R12 escalate_human
+// beliefs and pages exactly once. The diagnostician only supplies the evidence
+// envelope; escalate.mjs (called right after this in runTick) does the paging.
 //
 // ── Design choice: deterministic evidence-collector (v1), not a full agent ──
 //
@@ -48,13 +53,16 @@
 // belief evaluation and this code ever run with a clock skew. Recording the
 // intent is what makes R10's cooldown self-enforce across ticks.
 //
-// ── Second-line escalation ──────────────────────────────────────────────────
-// needs-human fires when BOTH:
-//   (a) R12 escalate_human belief exists for the current tick
-//   (b) The wake-diagnostician intent for the subject is ineffective
+// ── Second-line escalation (CTL-962: evidence only, no label) ─────────────────
+// When BOTH:
+//   (a) R12 escalate_human belief exists for the current tick, AND
+//   (b) the wake-diagnostician intent for the subject is ineffective
 //       (attempts >= max_attempts AND outcome IS NULL)
-// This ordering means: the machine always gets at least one pass before the
-// human is paged, and the escalation carries the evidence the machine captured.
+// the diagnostician CAPTURES fresh evidence and returns it in the result's
+// `escalated` array. It does NOT apply needs-human — beliefs/escalate.mjs is the
+// single label owner and pages off the same R12 beliefs. This ordering still
+// means the machine always gets at least one pass before the human is paged, and
+// the escalation carries the evidence the machine captured.
 
 import { execSync } from "node:child_process";
 
@@ -182,10 +190,14 @@ function isActionIneffective(db, subject) {
 //     env              : Record<string,string>    (process.env in production)
 //     captureLogs      : (shortId) => string      (injectable for tests)
 //     readJobState     : (bgJobId) => object      (injectable for tests)
-//     applyNeedsHuman  : (subject, evidence) => void (injectable for tests)
 //   }
+//   (CTL-962: applyNeedsHuman removed — escalate.mjs is the single label owner.)
 //
-// Returns: { skipped, ran, cooled } (never throws — failures are logged).
+// Returns: { skipped, ran, cooled, escalated } (never throws — failures logged).
+//   ran[]       — fresh wakes the diagnostician processed this tick (evidence)
+//   escalated[] — subjects whose R12 escalation fired; carries the captured
+//                 evidence so the operator-facing path (escalate.mjs) and any
+//                 audit can read what the machine saw. NO label is applied here.
 export function processDiagnosticianWakes(db, tickId, opts = {}) {
   const env = opts.env ?? process.env;
 
@@ -196,6 +208,7 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
 
   const ran = [];
   const cooled = [];
+  const escalated = []; // CTL-962: subjects whose R12 fired, with captured evidence
   const errors = [];
 
   try {
@@ -233,21 +246,19 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
 
       try {
         // ── escalate_human check (R12): if the belief fired AND the prior
-        // action is ineffective, page the human WITH evidence BEFORE we
-        // consider running another diagnostician pass (R12 is a second-line
-        // gate; we still run the diagnostician below if it's a fresh wake).
+        // action is ineffective, CAPTURE EVIDENCE for the escalation (the second
+        // line) and continue. CTL-962: the diagnostician applies NO label — it
+        // only supplies evidence; beliefs/escalate.mjs (called right after this
+        // in runTick) is the single owner of the needs-human label and pages off
+        // the same R12 beliefs exactly once.
         if (humanBeliefs.has(subject) && isActionIneffective(db, subject)) {
           // Capture evidence for the escalation (re-captures fresh state)
           const bgJobId = extractShortId(db, tickId, subject);
           const evidence = captureEvidence(subject, bgJobId, opts);
           evidence.reason = reason;
-          try {
-            opts.applyNeedsHuman?.(subject, evidence);
-          } catch (err) {
-            errors.push({ subject, phase: "applyNeedsHuman", err: String(err?.message ?? err) });
-          }
+          escalated.push({ subject, reason, evidence });
           // Do not run the diagnostician again for this subject this tick
-          // (it already ran; this is the second line firing).
+          // (it already ran; this is the second line firing — evidence only).
           continue;
         }
 
@@ -279,7 +290,7 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
     errors.push({ phase: "outer", err: String(err?.message ?? err) });
   }
 
-  return { ran, cooled, errors: errors.length ? errors : undefined };
+  return { ran, cooled, escalated, errors: errors.length ? errors : undefined };
 }
 
 // ── extractShortId — resolve the bg_job_id / short_id for a subject ──────

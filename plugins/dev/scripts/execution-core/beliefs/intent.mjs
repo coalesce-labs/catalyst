@@ -1,9 +1,20 @@
 // beliefs/intent.mjs — CTL-936: closed-loop intent layer.
+//                       CTL-962: escalation is the executor's job, not the
+//                                reconciler's.
 //
 // Every daemon side-effect records a DESIRED POSTCONDITION; a per-tick
 // reconciler re-checks whether the world changed, increments attempts + backs
-// off when it did not, and when attempts >= max_attempts (R11 action_ineffective)
-// STOPS retrying that channel and ESCALATES to an operator-visible event.
+// off when it did not, and when attempts >= max_attempts STOPS retrying that
+// channel — but it does NOT decide the outcome. It LEAVES outcome NULL so the
+// belief rules can see the capped intent on the next tick:
+//   R11 action_ineffective  (intent.outcome IS NULL AND attempts >= max_attempts)
+//   R12 escalate_human       (wake_diagnostician + action_ineffective co-occur)
+// and the escalate.mjs executor (CTL-962) pages the operator EXACTLY ONCE and
+// flips outcome='escalated'. Before CTL-962 the reconciler imperatively flipped
+// outcome='ineffective' the moment the cap was hit; that stranded the ladder
+// because R11's `outcome IS NULL` predicate never matched (the reconciler runs
+// before the NEXT tick's evaluateBeliefs), so R12 never derived and nobody was
+// ever paged. The reconciler now only counts the capped intent and stops.
 //
 // This fixes three bug classes documented in 2026-06-09-execution-core-fable-
 // root-cause-and-architecture.md:
@@ -19,8 +30,9 @@
 //           retry-suppression or alternate-channel escalation affects runtime
 //           behavior. Safe to enable alongside CATALYST_BELIEFS_SHADOW=1.
 //     "1" — enforce: reconcileIntents WILL suppress re-issuance of an
-//           ineffective channel and WILL emit operator-visible events via the
-//           appendEvent seam. Gate this on a controlled canary first.
+//           ineffective channel. Operator paging (the needs-human label + the
+//           escalate.human event) is now owned by escalate.mjs's executor, also
+//           gated on this flag. Gate this on a controlled canary first.
 //
 //   Rationale for the flag split: the kill-suppress (stop retrying claude stop)
 //   and alternate-channel escalation paths mutate RUNTIME behavior. The mirror
@@ -47,7 +59,7 @@
 //              satisfied by operator acknowledgement (out-of-band; treated as
 //              satisfied after max_attempts to avoid runaway events)
 //
-// ── Reconciliation contract ───────────────────────────────────────────────────
+// ── Reconciliation contract (CTL-962) ─────────────────────────────────────────
 // reconcileIntents(db, tickId, worldSnapshot, opts) runs INSIDE the belief-tick
 // transaction (same tx as evaluateBeliefs), so intent mutations and the derived
 // R11 belief are always in sync. It:
@@ -57,15 +69,21 @@
 //      • unsatisfied:
 //          attempts < max_attempts → increment attempts (backoff deferred to
 //          caller — the tick cadence already provides natural backoff).
-//          attempts >= max_attempts → outcome='ineffective', emit operator event
-//          (when CATALYST_INTENTS_ENFORCE=1) or log-only (shadow).
-//   3. Returns { satisfied, retried, ineffective, events } counts.
+//          attempts >= max_attempts → STOP. Do NOT increment further (attempts
+//          plateaus at max_attempts, never exceeds), LEAVE outcome NULL, do NOT
+//          re-issue the channel, and do NOT emit any escalation event. The capped
+//          intent is counted in the returned `ineffective` stat so the caller can
+//          log it, but the OUTCOME decision is no longer made here.
+//   3. Returns { satisfied, retried, ineffective, events } counts. `events` is
+//      always empty (escalation moved to escalate.mjs); retained for caller compat.
 //
-// ── Operator event shape ──────────────────────────────────────────────────────
-// When an intent goes ineffective the appendEvent seam is called with:
-//   { "event.name": "intent.ineffective",
-//     payload: { kind, subject, attempts, postcondition } }
-// Callers wire this into the daemon's unified event log.
+// Why leave outcome NULL: R11's SQL matches `outcome IS NULL AND attempts >=
+// max_attempts`. The reconciler runs AFTER evaluateBeliefs in the tick, so any
+// flip here would only ever be visible to the NEXT tick's R11 — but flipping to
+// a terminal outcome makes that predicate FALSE, so R11 would never see it and
+// R12 escalate_human would never derive. Leaving outcome NULL lets R11 derive
+// action_ineffective next tick, R12 derive escalate_human, and escalate.mjs page
+// the operator once and flip outcome='escalated' (which then suppresses R11/R12).
 
 import { log } from "../config.mjs";
 
@@ -165,8 +183,10 @@ function resolvePostcondition(postcondition, worldSnapshot) {
 //
 // opts:
 //   maxAttempts   — from cfg(max_attempts), default 2
-//   enforce       — true when CATALYST_INTENTS_ENFORCE=1
-//   appendEvent   — (evt) => void, the operator-event seam
+//   enforce       — true when CATALYST_INTENTS_ENFORCE=1 (kept for the
+//                   retry-suppression log line; escalation is escalate.mjs's job)
+//   appendEvent   — RETAINED for caller compat; reconcileIntents no longer emits
+//                   any escalation event (escalate.mjs owns that seam, CTL-962)
 //   now           — epoch-ms (for log context; does not affect SQL)
 export function reconcileIntents(
   db,
@@ -212,50 +232,43 @@ export function reconcileIntents(
       continue;
     }
 
-    // Not satisfied — increment attempts first, then check threshold.
+    // Not satisfied. CTL-962: the reconciler stops deciding the outcome.
+    //   • below the cap → increment attempts (one retry; tick cadence is backoff)
+    //   • at/over the cap → STOP: do not increment further (attempts plateaus at
+    //     maxAttempts), leave outcome NULL, do not re-issue, do not emit. R11
+    //     derives action_ineffective next tick over this still-open capped intent,
+    //     R12 derives escalate_human, and escalate.mjs pages once + flips
+    //     outcome='escalated'. We only COUNT the capped intent here.
+    if (intent.attempts >= maxAttempts) {
+      // Already at/over the cap from a prior tick — stop retrying this channel.
+      // Leave attempts and outcome untouched so R11's `outcome IS NULL AND
+      // attempts >= max_attempts` predicate keeps matching until escalate.mjs
+      // flips it to 'escalated'.
+      ineffective++;
+      log.warn(
+        {
+          intentId: intent.intent_id,
+          kind: intent.kind,
+          subject: intent.subject,
+          attempts: intent.attempts,
+          enforce,
+          now,
+        },
+        "intents: action_ineffective — channel capped, outcome left NULL for R11/R12 (escalate.mjs pages)",
+      );
+      continue;
+    }
+
+    // Below the cap — one retry. Increment, then re-check whether THIS increment
+    // reached the cap (so we count it as ineffective the moment it plateaus).
     incrementAttempts.run(intent.intent_id);
     const attemptsAfter = intent.attempts + 1;
 
     if (attemptsAfter >= maxAttempts) {
-      // R11 territory: action_ineffective. Mark the intent ineffective so the
-      // SQL rule R11 fires on the NEXT tick's belief derivation (the belief
-      // table is derived AFTER reconcileIntents in the tick order — see
-      // collector.mjs's call order; the R11 SQL reads intents with outcome IS
-      // NULL and attempts >= max_attempts, so we leave outcome NULL here to let
-      // R11 see it this tick, and flip to 'ineffective' AFTER evaluation — BUT
-      // the simplest correct approach is to flip here and re-seed R11 via the
-      // NEXT tick. We therefore flip to 'ineffective' immediately so we don't
-      // silently retry on the next tick, and rely on the R11 SQL matching
-      // attempts >= max_attempts with outcome IS NULL on intermediate ticks.
-      //
-      // DESIGN NOTE: R11 matches `outcome IS NULL AND attempts >= max_attempts`.
-      // This means we must NOT flip outcome to 'ineffective' before evaluateBeliefs
-      // runs (otherwise R11 won't see it this tick either). Since reconcileIntents
-      // is called AFTER evaluateBeliefs in the collector's transaction, we flip
-      // outcome='ineffective' here so it is accurate for the next tick's R11. The
-      // current tick's R11 already fired over the previous tick's open intents.
-      updateOutcome.run("ineffective", intent.intent_id);
+      // Just hit the cap. Leave outcome NULL; this is the last increment (the
+      // capped-branch above will no-op it on subsequent ticks). Count it so the
+      // caller's stats reflect that the channel stopped here.
       ineffective++;
-
-      const evt = {
-        "event.name": "intent.ineffective",
-        payload: {
-          kind: intent.kind,
-          subject: intent.subject,
-          attempts: attemptsAfter,
-          postcondition: pc,
-        },
-      };
-      events.push(evt);
-
-      if (enforce && typeof appendEvent === "function") {
-        try {
-          appendEvent(evt);
-        } catch (err) {
-          log.warn({ err: err?.message, intentId: intent.intent_id }, "intents: appendEvent threw — continuing");
-        }
-      }
-
       log.warn(
         {
           intentId: intent.intent_id,
@@ -265,9 +278,7 @@ export function reconcileIntents(
           enforce,
           now,
         },
-        enforce
-          ? "intents: action_ineffective — stopped retrying channel, operator event emitted"
-          : "intents: action_ineffective (shadow) — would stop retrying channel",
+        "intents: action_ineffective — reached cap, outcome left NULL for R11/R12 (escalate.mjs pages)",
       );
     } else {
       retried++;
@@ -278,6 +289,9 @@ export function reconcileIntents(
     }
   }
 
+  // `events` stays empty — escalation moved to escalate.mjs (CTL-962). The field
+  // is retained so existing callers that destructure it keep working.
+  void appendEvent; // intentionally unused; retained in the signature for compat
   return { satisfied, retried, ineffective, events };
 }
 
@@ -289,18 +303,22 @@ export function reconcileIntents(
 // This is the guard that kills the 8-hour stop-storm: when enforce=true and
 // killBgJob's intent has gone ineffective, callers skip re-issuing the stop.
 export function isIntentEffective(db, kind, subject, { maxAttempts = 2 } = {}) {
-  // An intent is "ineffective" if outcome='ineffective' OR (outcome IS NULL AND
-  // attempts >= maxAttempts — the in-flight state before reconcileIntents flips it).
+  // CTL-962: an intent is "ineffective" (channel NOT viable) when its outcome is
+  // 'ineffective' or 'escalated' (legacy + escalate.mjs's terminal flip) OR it is
+  // still open (outcome IS NULL) but has reached the cap — the steady state the
+  // reconciler now leaves it in until escalate.mjs flips it to 'escalated'. After
+  // escalation outcome='escalated' must STILL suppress re-issuance, hence it is in
+  // the terminal set below.
   const row = db
     .query(
       `SELECT 1 FROM intent
         WHERE kind = ? AND subject = ?
-          AND (outcome = 'ineffective'
+          AND (outcome IN ('ineffective', 'escalated')
             OR (outcome IS NULL AND attempts >= ?))
         LIMIT 1`,
     )
     .get(kind, subject, maxAttempts);
-  return row == null; // no ineffective intent → channel still viable
+  return row == null; // no ineffective/escalated intent → channel still viable
 }
 
 // ── getMaxAttempts — read cfg(max_attempts) from the beliefs db.

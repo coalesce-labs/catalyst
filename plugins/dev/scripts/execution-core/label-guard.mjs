@@ -58,9 +58,15 @@ const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflic
 // .skipped and logging a warn. The .skipped marker is still written so the
 // per-tick retry storm stays suppressed — the difference is operator visibility.
 // Default null → legacy behavior (all existing callers unaffected).
+//
+// CTL-962: returns a boolean so callers can bound side-effects (an operator
+// event, a counter) to the FIRST application only. Returns `false` when a
+// terminal marker (.applied/.skipped) already exists → this call is a no-op;
+// `true` when this call performed the write attempt (the once-application).
+// Existing callers ignore the return value, so this is backward-compatible.
 export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = null, env = process.env } = {}) {
   const base = labelMarkerBase(orchDir, ticket, label);
-  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
+  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
@@ -101,6 +107,9 @@ export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = n
       "scheduler: label write-back threw — continuing tick"
     );
   }
+  // CTL-962: reached only when no terminal marker existed at entry, i.e. this
+  // call performed the write attempt (the once-application for this lifetime).
+  return true;
 }
 
 // ─── CTL-646: clearStalledLabel — inverse of labelOnce ───

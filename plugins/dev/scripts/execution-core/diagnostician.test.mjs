@@ -251,7 +251,6 @@ describe("gating flag OFF", () => {
       env: {},
       captureLogs: fakeCaptureLogs,
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     expect(result.skipped).toBe("disabled");
@@ -267,7 +266,6 @@ describe("gating flag OFF", () => {
       env: { CATALYST_DIAGNOSTICIAN: "0" },
       captureLogs: fakeCaptureLogs,
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
     expect(result.skipped).toBe("disabled");
   });
@@ -286,7 +284,6 @@ describe("never-started wake → diagnostician runs once, captures evidence", ()
         return fakeCaptureLogs(id);
       },
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     // One diagnostician ran
@@ -334,7 +331,6 @@ describe("never-started wake → diagnostician runs once, captures evidence", ()
       env: { CATALYST_DIAGNOSTICIAN: "1" },
       captureLogs: fakeCaptureLogs,
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
     const intentsAfterTick1 = getIntents("wake-diagnostician", subject);
     expect(intentsAfterTick1).toHaveLength(1);
@@ -357,7 +353,6 @@ describe("cooldown — does NOT re-run next tick for the same subject", () => {
         return fakeCaptureLogs(id);
       },
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     // No new diagnostician runs (cooldown guards it)
@@ -388,7 +383,6 @@ describe("cooldown — does NOT re-run next tick for the same subject", () => {
         return fakeCaptureLogs(id);
       },
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     // Diagnostician ran because the prior intent is expired
@@ -422,7 +416,6 @@ describe("stalled-alive variant", () => {
         return "stalled output";
       },
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     expect(result.ran).toHaveLength(1);
@@ -435,24 +428,26 @@ describe("stalled-alive variant", () => {
   });
 });
 
-describe("second-line escalation — needs-human only AFTER diagnostician ran", () => {
-  test("needs-human NOT called on first wake (diagnostician just ran)", () => {
+// CTL-962: the diagnostician supplies EVIDENCE but applies NO label. needs-human
+// is owned by beliefs/escalate.mjs. These tests therefore assert the second-line
+// branch CAPTURES evidence (returned in result.escalated[]) and never pages.
+describe("second-line escalation — evidence supplied (no label), only AFTER diagnostician ran", () => {
+  test("nothing escalated on first wake (diagnostician just ran)", () => {
     const { tickId, ticket, phase } = seedNeverStartedTick();
     const subject = `${ticket}/${phase}`;
 
-    const humanCalls = [];
-    processDiagnosticianWakes(db, tickId, {
+    const result = processDiagnosticianWakes(db, tickId, {
       env: { CATALYST_DIAGNOSTICIAN: "1" },
       captureLogs: fakeCaptureLogs,
       readJobState: fakeReadJobState,
-      applyNeedsHuman: (s, ev) => humanCalls.push({ s, ev }),
     });
 
-    // Diagnostician ran but has not yet been deemed ineffective → no human paged
-    expect(humanCalls).toHaveLength(0);
+    // Diagnostician ran but has not yet been deemed ineffective → nothing escalated
+    expect(result.escalated ?? []).toHaveLength(0);
+    void subject;
   });
 
-  test("needs-human called WITH evidence when wake action is ineffective (attempts >= max_attempts)", () => {
+  test("escalation evidence captured when wake action is ineffective (attempts >= max_attempts)", () => {
     const { tickId, ticket, phase } = seedNeverStartedTick({ now: NOW });
     const subject = `${ticket}/${phase}`;
 
@@ -492,24 +487,22 @@ describe("second-line escalation — needs-human only AFTER diagnostician ran", 
     expect(humanBelief).toBeTruthy();
 
     // Run processDiagnosticianWakes on tick2 — now the intent is "ineffective"
-    // and R12 is present; needs-human should fire WITH evidence
-    const humanCalls = [];
+    // and R12 is present; the diagnostician CAPTURES evidence (no label).
     const result = processDiagnosticianWakes(db, tick2, {
       env: { CATALYST_DIAGNOSTICIAN: "1" },
       captureLogs: fakeCaptureLogs,
       readJobState: fakeReadJobState,
-      applyNeedsHuman: (s, ev) => humanCalls.push({ s, ev }),
     });
 
-    // needs-human fired for the subject with evidence attached
-    expect(humanCalls).toHaveLength(1);
-    expect(humanCalls[0].s).toBe(subject);
-    expect(humanCalls[0].ev).toBeDefined();
+    // Escalation evidence captured for the subject — but NO label applied here.
+    expect(result.escalated).toHaveLength(1);
+    expect(result.escalated[0].subject).toBe(subject);
+    expect(result.escalated[0].evidence).toBeDefined();
     // Evidence carries what the diagnostician captured
-    expect(humanCalls[0].ev.reason).toBeDefined();
+    expect(result.escalated[0].evidence.reason).toBeDefined();
   });
 
-  test("needs-human carries the diagnostician evidence, not a bare label", () => {
+  test("escalation evidence carries the diagnostician capture, not a bare label", () => {
     const { ticket, phase } = seedNeverStartedTick({ now: NOW });
     const subject = `${ticket}/${phase}`;
 
@@ -531,16 +524,14 @@ describe("second-line escalation — needs-human only AFTER diagnostician ran", 
     insertJob(tick2, { bg_job_id: "abcCTLT1", state: "working", tempo: "blocked" });
     evaluateBeliefs(db, tick2);
 
-    const humanCalls = [];
-    processDiagnosticianWakes(db, tick2, {
+    const result = processDiagnosticianWakes(db, tick2, {
       env: { CATALYST_DIAGNOSTICIAN: "1" },
       captureLogs: () => "⏺ Unknown command: /catalyst-dev:phase-implement",
       readJobState: fakeReadJobState,
-      applyNeedsHuman: (s, ev) => humanCalls.push({ s, ev }),
     });
 
-    expect(humanCalls).toHaveLength(1);
-    const { ev } = humanCalls[0];
+    expect(result.escalated).toHaveLength(1);
+    const { evidence: ev } = result.escalated[0];
     // Evidence must carry diagnostic information (not just the subject)
     expect(ev).toHaveProperty("reason");
     expect(ev).toHaveProperty("logsOutput");
@@ -574,7 +565,6 @@ describe("multiple subjects in one tick", () => {
         return `logs for ${id}`;
       },
       readJobState: fakeReadJobState,
-      applyNeedsHuman: () => {},
     });
 
     // CTL-B/implement processed on tickId
