@@ -108,15 +108,15 @@ In `execution-core` dispatch mode the daemon's monitor reacts to Linear
 
 - **`→Triage`** one-shot-dispatches the triage phase agent (the ticket is not
   scheduler-pulled).
-- **`→Ready`** is the scheduler-eligible entry. New work enters the pipeline at
-  the `research` phase on the contract that a Ready ticket has already been
+- **`→Todo`** is the scheduler-eligible entry. New work enters the pipeline at
+  the `research` phase on the contract that a Todo ticket has already been
   triaged.
 
-A user may move a ticket **Backlog → Ready directly**, skipping `→Triage`
+A user may move a ticket **Backlog → Todo directly**, skipping `→Triage`
 (an intentional human shortcut). When this happens and no `triage.json` exists
 for the ticket, the monitor **auto-dispatches the triage phase agent** rather
 than reconciling the ticket into the eligible set — triage then runs and its
-completion advances the ticket to `research` normally. This makes "Ready" a
+completion advances the ticket to `research` normally. This makes "Todo" a
 valid manual entry point: the system transparently runs the missing triage
 instead of dead-locking the research prior-artifact gate. (CTL-625)
 

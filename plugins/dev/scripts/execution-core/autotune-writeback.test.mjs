@@ -34,7 +34,7 @@ describe("writeLayer2MaxParallel", () => {
     writeFileSync(p, JSON.stringify({
       catalyst: {
         orchestration: {
-          eligibleQuery: { status: ["Ready"] },
+          eligibleQuery: { status: ["Todo"] },
           executionCore: { maxParallel: 3, minParallel: 1 },
         },
       },
@@ -44,7 +44,7 @@ describe("writeLayer2MaxParallel", () => {
     const out = JSON.parse(readFileSync(p, "utf8"));
     expect(out.catalyst.orchestration.executionCore.maxParallel).toBe(7);
     expect(out.catalyst.orchestration.executionCore.minParallel).toBe(1);
-    expect(out.catalyst.orchestration.eligibleQuery.status).toEqual(["Ready"]);
+    expect(out.catalyst.orchestration.eligibleQuery.status).toEqual(["Todo"]);
     expect(out.anotherTopKey).toBe("preserved");
   });
 
