@@ -25,10 +25,13 @@ import type { Surface } from "./surface";
  * Home is the calm dashboard inbox; every other surface falls through to it.
  *  - "telemetry" → the OBSERVE Telemetry surface shell (OBS-5).
  *  - "finops"    → the OBSERVE FinOps surface shell (OBS-10): the dollar+ROI hero
- *                  band + spend-over-time bars with spikes. The remaining three
- *                  OBSERVE surfaces (utilization/fleetops/devops) keep the
- *                  dashboard fall-through until their content ships in later OBS
- *                  tickets — they are nav-disabled ("soon") for now.
+ *                  band + spend-over-time bars with spikes.
+ *  - "utilization" → the OBSERVE Utilization surface shell (OBS-16): the slot-
+ *                  occupancy hero + the STARVED/JAMMED pathology badge + idle list +
+ *                  429/overload + active-time. The remaining two OBSERVE surfaces
+ *                  (fleetops/devops) keep the dashboard fall-through until their
+ *                  content ships in later OBS tickets — they are nav-disabled
+ *                  ("soon") for now.
  */
 export type SurfaceContentKind =
   | "board"
@@ -36,6 +39,7 @@ export type SurfaceContentKind =
   | "queue"
   | "telemetry"
   | "finops"
+  | "utilization"
   | "dashboard";
 
 /**
@@ -52,9 +56,12 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   // OBS-5: Telemetry is the first OBSERVE surface to ship its own content shell.
   if (surface === "telemetry") return "telemetry";
   // OBS-10: FinOps is the second OBSERVE surface to ship its own content shell.
-  // The remaining three (utilization/fleetops/devops) stay on the dashboard
-  // fall-through (and are nav-disabled "soon") until their own OBS tickets land.
   if (surface === "finops") return "finops";
+  // OBS-16: Utilization is the third OBSERVE surface to ship its own content shell
+  // (slot-occupancy hero + STARVED/JAMMED pathology badge + idle list + 429 +
+  // active-time). The remaining two (fleetops/devops) stay on the dashboard
+  // fall-through (and are nav-disabled "soon") until their own OBS tickets land.
+  if (surface === "utilization") return "utilization";
   return "dashboard";
 }
 

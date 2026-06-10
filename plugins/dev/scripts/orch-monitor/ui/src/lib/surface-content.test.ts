@@ -43,18 +43,27 @@ describe("surfaceContentKind", () => {
     expect(surfaceContentKind("finops")).toBe("finops");
   });
 
+  it("routes the Utilization surface to its own OBSERVE content shell (OBS-16)", () => {
+    // Gherkin (OBS-16): "the operator clicks the Utilization nav item → the
+    // Utilization OBSERVE shell renders in the SidebarInset" — the THIRD OBSERVE
+    // surface to leave the dashboard fall-through (slot-occupancy hero +
+    // STARVED/JAMMED pathology badge + idle list + 429 + active-time).
+    expect(surfaceContentKind("utilization")).toBe("utilization");
+  });
+
   it("keeps Home on the dashboard (no regression)", () => {
     // Home must stay exactly what SHELL1/SHELL2 rendered — only board (SHELL2),
-    // workers (SURF1), queue (SURF2), telemetry (OBS-5), and finops (OBS-10) are
-    // special-cased. The remaining OBSERVE surfaces (utilization/fleetops/devops)
-    // keep the dashboard fall-through until their own OBS tickets ship.
+    // workers (SURF1), queue (SURF2), telemetry (OBS-5), finops (OBS-10), and
+    // utilization (OBS-16) are special-cased. The remaining OBSERVE surfaces
+    // (fleetops/devops) keep the dashboard fall-through until their own OBS tickets ship.
     const stillDashboard = SURFACES.filter(
       (s) =>
         s !== "board" &&
         s !== "workers" &&
         s !== "queue" &&
         s !== "telemetry" &&
-        s !== "finops",
+        s !== "finops" &&
+        s !== "utilization",
     );
     for (const s of stillDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
@@ -69,6 +78,7 @@ describe("surfaceContentKind", () => {
         "queue",
         "telemetry",
         "finops",
+        "utilization",
         "dashboard",
       ]).toContain(surfaceContentKind(s));
     }

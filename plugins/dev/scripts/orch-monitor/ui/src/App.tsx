@@ -90,6 +90,13 @@ const FinopsSurface = lazy(() =>
     default: m.FinopsSurface,
   })),
 );
+// OBS-16: the OBSERVE Utilization surface. Lazy/code-split like the others so its
+// chunk only loads when the operator is on Utilization.
+const UtilizationSurface = lazy(() =>
+  import("./components/observe/utilization-surface").then((m) => ({
+    default: m.UtilizationSurface,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -399,6 +406,14 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <FinopsSurface />
+      </Suspense>
+    );
+  }
+  // OBS-16: the third OBSERVE surface (Utilization). Same lazy/code-split branch.
+  if (kind === "utilization") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <UtilizationSurface />
       </Suspense>
     );
   }

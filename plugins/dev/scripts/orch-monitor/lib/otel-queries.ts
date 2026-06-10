@@ -1346,6 +1346,47 @@ export async function costAtHour(
   };
 }
 
+// ── OBS-16 (UTILIZATION P_active): active-time ratio ─────────────────────────
+// "Of the wall-clock seconds the fleet COULD be computing, what fraction is it
+// actually computing?" The numerator is Prometheus's already-emitting
+// `claude_code_active_time_seconds_total` — the cumulative seconds Claude Code
+// spent actively working (NOT waiting on I/O, the model, or a parked prompt).
+// `sum(rate(...[range]))` gives the fleet-wide active seconds-per-second, i.e. how
+// many slots' worth of wall-clock are genuinely busy at any instant (≈0.076 live —
+// honest-low because the Mini daemon is parked with 0 busy slots).
+//
+// The UI compares this against the busy-slot capacity (config.inFlight from
+// /api/board) to render "X% computing / Y% waiting": with inFlight=0 the ratio is
+// an honest "no busy slots", with inFlight>0 it reads the genuine compute fraction.
+// We return ONLY the raw active-seconds rate here (a pure Prometheus signal); the
+// busy-slot denominator is board state the UI already holds, so the route stays a
+// single-metric read with no board coupling on the server.
+
+/** The active-time signal: the fleet-wide active seconds-per-second (`sum(rate(
+ *  active_time[range]))`). `null` ONLY when Prometheus is unavailable (caller
+ *  surfaces a 503); an honest 0 for a fully-idle fleet. */
+export interface ActiveTimeRatio {
+  /** `sum(rate(claude_code_active_time_seconds_total[range]))` — active seconds per
+   *  second across the fleet (≈ the number of slots' worth of wall-clock genuinely
+   *  computing). 0 when the fleet is idle (honest, never fabricated). */
+  activeSecondsPerSecond: number;
+}
+
+/** Fleet-wide active-time rate over the window. Returns `null` when Prometheus is
+ *  unavailable (the query came back null → caller surfaces a 503); a quiet/idle
+ *  fleet returns `{activeSecondsPerSecond:0}` honestly. */
+export async function activeTimeRatio(
+  prom: PrometheusFetcher,
+  range: string,
+): Promise<ActiveTimeRatio | null> {
+  const r = safeDuration(range, "1h");
+  const result = await prom.query(
+    `sum(rate(claude_code_active_time_seconds_total[${r}]))`,
+  );
+  if (result === null) return null;
+  return { activeSecondsPerSecond: extractScalar(result) };
+}
+
 function parseDuration(s: string): number {
   const match = /^(\d+)(ms|s|m|h|d)$/.exec(s);
   if (!match) return 3600_000;
