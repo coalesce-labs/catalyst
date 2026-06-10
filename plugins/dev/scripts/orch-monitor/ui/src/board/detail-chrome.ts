@@ -20,14 +20,14 @@
 import type { DetailFrom, DetailLens } from "./route-search";
 import type { BoardActiveState } from "./types";
 
-// ── colour tokens (mirror Board.tsx; cyan is the reserved live signal) ───────
-/** The reserved "in-loop" live colour — `Board.tsx:33` `LIVE = "#5be0ff"`. The
- *  detail chrome reuses the SAME token; it is the only cyan in the whole shell
- *  (peek frame + focus ring use blue, below). */
+// ── colour tokens ────────────────────────────────────────────────────────────
+/** The reserved "in-loop" live colour. The detail chrome reuses the SAME token
+ *  as the board's breathing ring; it is the only cyan in the whole shell
+ *  (peek frame + focus ring use CHROME_BLUE, below). */
 export const LIVE_CYAN = "#5be0ff";
-/** Stuck/error red — `Board.tsx` `C.red`. A stuck worker's static dot. */
+/** Stuck/error red. A stuck worker's static dot. */
 export const STUCK_RED = "#ef5d5d";
-/** The chrome's accent blue — peek frame + focus ring (NEVER cyan), `C.blue`. */
+/** The chrome's accent blue — peek frame + focus ring (NEVER cyan). */
 export const CHROME_BLUE = "#4ea1ff";
 
 // ── breadcrumb ───────────────────────────────────────────────────────────────
@@ -232,8 +232,8 @@ export interface LiveSignal {
  * Derive the title's live-dot (detail design §3.3 "Title block", cyan license
  * §3.4). Cyan is reserved to GENUINE liveness only:
  *
- *   - `working && activeState === "active"` → cyan `#5be0ff` breathing ring.
- *   - `activeState === "stuck"`             → static red `#ef5d5d` dot.
+ *   - `working && activeState === "active"` → cyan LIVE (#53cde2) breathing ring.
+ *   - `activeState === "stuck"`             → static STUCK_RED dot.
  *   - otherwise (settled / done)            → no dot at all.
  *
  * Mirrors the board's `board-data.mjs:499`-style derivation surfaced on

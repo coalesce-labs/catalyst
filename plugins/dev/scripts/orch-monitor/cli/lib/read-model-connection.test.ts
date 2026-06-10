@@ -101,15 +101,15 @@ describe("createReadModelConnection (CTL-920)", () => {
     });
     conn.start();
     expect(built).toBe(1);
-    fakes[0]!.pushError();
+    fakes[0].pushError();
     expect(conn.snapshot().status).toBe("down");
     // Fire the scheduled reconnect.
     expect(scheduled.length).toBe(1);
-    scheduled[0]!();
+    scheduled[0]();
     expect(built).toBe(2);
     expect(conn.snapshot().status).toBe("connecting");
     // The new connection delivers a snapshot → connected again.
-    fakes[1]!.pushSnapshot(payload());
+    fakes[1].pushSnapshot(payload());
     expect(conn.snapshot().status).toBe("connected");
     conn.stop();
   });

@@ -127,7 +127,7 @@ describe("resolveList — ticket columns (the board renders through resolveList)
 
   it("filters a Linear column on linearState, payload array order preserved", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement" });
-    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-845", "CTL-877", "CTL-880"]);
+    expect(got.map((t) => (t).id)).toEqual(["CTL-845", "CTL-877", "CTL-880"]);
   });
 
   it("is byte-for-byte identical to the prior inline linear filter (Board.tsx:362)", () => {
@@ -137,7 +137,7 @@ describe("resolveList — ticket columns (the board renders through resolveList)
 
   it("filters a phase column on phase when lens === 'phase'", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "phase", col: "implement" });
-    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-845", "CTL-880"]);
+    expect(got.map((t) => (t).id)).toEqual(["CTL-845", "CTL-880"]);
     expect(got).toEqual(legacyTicketFilter(tickets, "phase", "implement"));
   });
 
@@ -173,7 +173,7 @@ describe("resolveList — worker queue (rank-sort preserved through the same fn)
   const payload = mkPayload({ workers });
 
   it("orders by rank then runtimeMs desc", () => {
-    const got = resolveList(payload, { kind: "worker" }) as BoardWorker[];
+    const got = resolveList(payload, { kind: "worker" });
     expect(got.map((w) => w.name)).toEqual([
       "w-active-long", // active, 8000
       "w-active-short", // active, 1000
@@ -273,23 +273,23 @@ describe("resolveList — the optional BOARD2 (CTL-906) `order` param", () => {
 
   it("with NO order is byte-for-byte identical to today (regression guard — payload order preserved)", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement" });
-    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-845", "CTL-877", "CTL-880"]);
+    expect(got.map((t) => (t).id)).toEqual(["CTL-845", "CTL-877", "CTL-880"]);
     expect(got).toEqual(legacyTicketFilter(tickets, "linear", "Implement"));
   });
 
   it("with order='priority' applies compareTickets AFTER the column filter", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "priority" });
-    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-877", "CTL-880", "CTL-845"]);
+    expect(got.map((t) => (t).id)).toEqual(["CTL-877", "CTL-880", "CTL-845"]);
   });
 
   it("with order='live' floats the active ticket to the top", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "live" });
-    expect((got[0] as BoardTicket).id).toBe("CTL-880"); // the only active one
+    expect((got[0]).id).toBe("CTL-880"); // the only active one
   });
 
   it("with order='recent' sorts by updatedAt desc within the column", () => {
     const got = resolveList(payload, { kind: "ticket", lens: "linear", col: "Implement", order: "recent" });
-    expect(got.map((t) => (t as BoardTicket).id)).toEqual(["CTL-880", "CTL-877", "CTL-845"]);
+    expect(got.map((t) => (t).id)).toEqual(["CTL-880", "CTL-877", "CTL-845"]);
   });
 
   it("does not mutate the payload's ticket array when ordering", () => {
@@ -322,7 +322,7 @@ describe("resolveListIds — the id list the pager + j/k bind to", () => {
     expect(ids.indexOf("CTL-877") + 1).toBe(2);
     expect(ids.length).toBe(3);
     // And the ids are exactly resolveList(...).map(id) — one source.
-    const list = resolveList(payload, ctx) as BoardTicket[];
+    const list = resolveList(payload, ctx);
     expect(list.map((t) => t.id)).toEqual(ids);
   });
 

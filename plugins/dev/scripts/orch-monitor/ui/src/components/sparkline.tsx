@@ -4,12 +4,13 @@
 // instead). No axes, no labels — a glanceable inline trend, the design's "▁▂▃▅▆█"
 // shape rendered as real geometry.
 import type { SparklinePoint } from "@/board/worker-burn-data";
+import { LIVE } from "@/board/board-tokens";
 
 export function Sparkline({
   points,
   width = 64,
   height = 18,
-  color = "#5be0ff",
+  color = LIVE,
   ariaLabel,
 }: {
   points: SparklinePoint[];

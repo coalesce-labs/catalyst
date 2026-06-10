@@ -47,6 +47,19 @@ export const REPO_SCOPE_STORAGE_KEY = "catalyst-repo-scope";
 export const repoScopeAtom = atomWithStorage<RepoScope>(
   REPO_SCOPE_STORAGE_KEY,
   REPO_SCOPE_ALL,
+  undefined,           // use default storage
+  { getOnInit: true }, // CTL-944: prevents first-frame write to wrong prefs slice
+);
+
+// ── project-grouped nav open-state (CTL-944) ─────────────────────────────────
+/**
+ * Persisted open/closed state for each per-project nav group in the sidebar.
+ * Keys are repo scope strings; true = open, false = collapsed. Groups containing
+ * the active item force-render open regardless of this value.
+ */
+export const navGroupsOpenAtom = atomWithStorage<Record<string, boolean>>(
+  "catalyst-nav-groups-v1",
+  {},
 );
 
 // ── list context (the resolved walk list) ───────────────────────────────────

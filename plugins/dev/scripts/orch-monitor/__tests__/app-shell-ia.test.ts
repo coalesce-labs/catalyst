@@ -18,7 +18,6 @@ import {
   nextTheme,
   readStoredTheme,
   applyTheme,
-  type Theme,
 } from "../ui/src/lib/theme";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -46,12 +45,13 @@ const sidebarCode = stripComments(sidebarSrc);
 
 // ── Scenario: OPERATE is the always-visible primary tier ─────────────────────
 describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
-  it("the OPERATE group lists Home, Board, Workers, Queue in nav order", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers, Queue in nav order", () => {
+    // CTL-930: labels renamed Home→Inbox, Board→Tickets; array renamed OPERATE_ITEMS.
+    // OBSERVE is declared before OPERATE_ITEMS in source (observe first, items after).
     const operateBlock = sidebarSrc.slice(
-      sidebarSrc.indexOf("const OPERATE"),
-      sidebarSrc.indexOf("const OBSERVE"),
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
     );
-    const order = ["Home", "Board", "Workers", "Queue"].map((l) =>
+    const order = ["Inbox", "Tickets", "Workers", "Queue"].map((l) =>
       operateBlock.indexOf(`"${l}"`),
     );
     for (const i of order) expect(i).toBeGreaterThan(-1);
@@ -70,14 +70,17 @@ describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
     expect(operateGroupIdx).toBeLessThan(firstCollapsibleIdx);
   });
 
-  it("Board is a first-class top-tier OPERATE item, not buried under OBSERVE", () => {
+  it("Tickets is a first-class top-tier OPERATE item, not buried under OBSERVE", () => {
+    // CTL-930: Board renamed to Tickets; OPERATE_ITEMS declared after OBSERVE in source.
     const operateBlock = sidebarSrc.slice(
-      sidebarSrc.indexOf("const OPERATE"),
-      sidebarSrc.indexOf("const OBSERVE"),
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
     );
-    const observeBlock = sidebarSrc.slice(sidebarSrc.indexOf("const OBSERVE"));
-    expect(operateBlock).toContain('"Board"');
-    expect(observeBlock).not.toContain('"Board"');
+    const observeBlock = sidebarSrc.slice(
+      sidebarSrc.indexOf("const OBSERVE"),
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
+    );
+    expect(operateBlock).toContain('"Tickets"');
+    expect(observeBlock).not.toContain('"Tickets"');
   });
 });
 
@@ -214,6 +217,6 @@ describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
 // Sanity: every theme has a label.
 describe("theme metadata is exhaustive (CTL-893)", () => {
   it("every theme is labelled", () => {
-    for (const t of THEMES) expect(THEME_LABEL[t as Theme]).toBeTruthy();
+    for (const t of THEMES) expect(THEME_LABEL[t]).toBeTruthy();
   });
 });

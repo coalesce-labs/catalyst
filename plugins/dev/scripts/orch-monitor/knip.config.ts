@@ -2,6 +2,13 @@ import type { KnipConfig } from "knip";
 
 const config: KnipConfig = {
   ignoreExportsUsedInFile: true,
+  // Tags: honour @ignore JSDoc annotation on exports (e.g. DetailBody, contract types).
+  tags: ["-ignore"],
+  // Unused files (dead code from prior tickets — pending cleanup):
+  ignoreFiles: [
+    "ui/src/components/layout/sidebar.tsx",
+    "ui/src/components/workspace-switcher.tsx",
+  ],
   workspaces: {
     ".": {
       entry: [

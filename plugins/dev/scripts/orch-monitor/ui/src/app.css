@@ -2,20 +2,30 @@
 @import "tw-animate-css";
 
 @theme inline {
-  --color-surface-0: #0b0d10;
-  --color-surface-1: #111318;
-  --color-surface-2: #16191f;
-  --color-surface-3: #1c2028;
-  --color-surface-4: #232a33;
-  --color-border: #262d36;
-  --color-border-subtle: #1e242c;
-  --color-fg: #e6e9ef;
-  --color-muted: #8a93a1;
-  --color-accent: #4ea1ff;
-  --color-green: #39d07a;
-  --color-red: #ef5d5d;
-  --color-yellow: #eabc3b;
-  --color-blue: #4ea1ff;
+  /* CTL-930 Phase 4: raised dark ramp, muted-pop accents (board-tokens.ts is the source). */
+  --color-surface-0: #0e1116;
+  --color-surface-1: #151a21;
+  --color-surface-2: #1b212a;
+  --color-surface-3: #242c37;
+  --color-surface-4: #2e3845;
+  --color-border: #333e4d;
+  --color-border-subtle: #273039;
+  --color-fg: #edf1f7;
+  --color-muted: #9ba6b5;
+  --color-accent: #5e9ee8;
+  --color-green: #41bd7d;
+  --color-red: #e36b6b;
+  --color-yellow: #d9a843;
+  --color-blue: #5e9ee8;
+  --color-purple: #a98ee3;
+  /* LIVE is reserved for the in-loop signal — NOT used as a theme accent. */
+  --color-live: #53cde2;
+  /* Soft semantic pill classes (lib/formatters.ts). */
+  --color-red-soft: #f0a8a8;
+  --color-yellow-soft: #e9d08e;
+  --color-green-soft: #9ce3bd;
+  --color-blue-soft: #aecdf2;
+  --color-purple-soft: #cdb4f0;
 
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
@@ -90,7 +100,9 @@
   --secondary-foreground: var(--color-light-fg);
   --muted-foreground: var(--color-light-muted);
   --accent-foreground: var(--color-light-fg);
-  --destructive: var(--color-red);
+  /* Pin --destructive to a stable value independent of the dark red retune so the
+     warm-light theme's destructive color doesn't follow the Phase 4 red change. */
+  --destructive: #ef5d5d;
   --input: var(--color-light-border);
   --ring: var(--color-light-accent);
   --radius: 0.5rem;
@@ -271,6 +283,45 @@ body {
 
 .animate-drawer-in {
   animation: drawer-in 0.2s ease-out both;
+}
+
+/* CTL-930 Phase 4: hoisted live-signal keyframes.
+   Previously lived inside Board.tsx PULSE_CSS (only loaded on board surfaces).
+   Now in app.css so every surface (AppFooter, detail pages) gets the animation. */
+
+/* Live card ring (TicketCard / WorkerCard .catalyst-live) */
+@keyframes catalystLiveRing {
+  0%, 100% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.30), 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  50% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.55), 0 2px 12px rgba(0, 0, 0, 0.35), 0 0 12px rgba(83, 205, 226, 0.10);
+  }
+}
+.catalyst-live {
+  animation: catalystLiveRing 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live {
+    animation: none;
+    /* Constant 2px left-edge so liveness reads with animation off. */
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.45);
+  }
+}
+
+/* Live status dot (.catalyst-live-dot) — used in LaneHeader, AppFooter, column headers */
+@keyframes catalystLivePing {
+  0% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(83, 205, 226, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0); }
+}
+.catalyst-live-dot {
+  animation: catalystLivePing 1.9s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live-dot {
+    animation: none;
+  }
 }
 
 /* Markdown rendered content */

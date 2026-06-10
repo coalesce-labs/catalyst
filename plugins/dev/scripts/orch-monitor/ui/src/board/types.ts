@@ -230,7 +230,6 @@ export type { ConnectionStatus };
 // renames a field the board relies on, this stops compiling here AND in the HUD,
 // because both import the SAME `read-model-client` contract.
 type AssertAssignable<From, To> = From extends To ? true : never;
-// Exported so the unused-type alias is unambiguously a contract assertion, not
-// dead code: it is `true` exactly when the server contract payload fits the UI
-// view, and a non-conforming change collapses it to `never` (a typecheck break).
-export type ContractPayloadFitsUiView = AssertAssignable<ReadModelPayload, BoardPayload>;
+// Compile-time contract assertion: `true` when the server payload fits the UI view;
+// collapses to `never` (typecheck break) on a non-conforming change.
+type ContractPayloadFitsUiView = AssertAssignable<ReadModelPayload, BoardPayload>;

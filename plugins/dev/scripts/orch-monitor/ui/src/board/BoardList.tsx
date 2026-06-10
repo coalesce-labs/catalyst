@@ -50,9 +50,11 @@ import {
   visibleColumns,
   type ListColumn,
 } from "./list-columns";
+import { showLaneChrome, singleLaneHint } from "./board-grouping";
 
 // the blue cursor / selection vocabulary — NEVER the cyan LIVE signal (design §5.2).
-const CURSOR_BLUE = "#4ea1ff";
+// CTL-930 Phase 5: C.blue from canonical board-tokens.ts (already imported above).
+const CURSOR_BLUE = C.blue;
 
 export interface BoardListProps {
   /** which lens — selects the column set + the flatten path. */
@@ -188,7 +190,8 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
     setCursor((c) => Math.min(c, Math.max(0, orderedIds.length - 1)));
   }, [orderedIds, navKind, lens, setListContext]);
 
-  const showHeaders = swimlane !== "none" && sortedLanes.length > 1;
+  // CTL-930 Phase 3: explicit axis always shows headers (even for 1 lane).
+  const showHeaders = showLaneChrome(swimlane, sortedLanes.length);
   const cursorId = orderedIds[cursor];
 
   return (
@@ -229,6 +232,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     count={lane.items.length}
                     live={lane.live}
                     span={cols.length}
+                    hint={sortedLanes.length === 1 ? singleLaneHint(swimlane, lane, navKind) : null}
                   />
                 )}
                 {lane.items.map((row) => {
@@ -311,11 +315,13 @@ function GroupHeaderRow({
   count,
   live,
   span,
+  hint,
 }: {
   label: string;
   count: number;
   live: "live" | "degraded" | "offline" | null;
   span: number;
+  hint?: string | null;
 }) {
   // heartbeat dot uses status-dot semantics (green live / amber degraded / muted
   // offline) — cyan is reserved for the LIVE entity signal only (design §4.3/§5.2),
@@ -336,6 +342,11 @@ function GroupHeaderRow({
           <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>
             {count}
           </span>
+          {hint && (
+            <span style={{ fontFamily: C.mono, fontSize: 11, color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {hint}
+            </span>
+          )}
         </span>
       </TableCell>
     </TableRow>

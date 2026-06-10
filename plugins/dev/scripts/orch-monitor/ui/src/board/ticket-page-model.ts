@@ -49,7 +49,7 @@ export const PIPELINE_PHASES = [
   "teardown",
 ] as const;
 
-export type PipelinePhase = (typeof PIPELINE_PHASES)[number];
+type PipelinePhase = (typeof PIPELINE_PHASES)[number];
 
 /** Human label per canonical phase (mirrors Board.tsx:48 PHASE_COLS labels). */
 const PHASE_LABEL: Record<string, string> = {

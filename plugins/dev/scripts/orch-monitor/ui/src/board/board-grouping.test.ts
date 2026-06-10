@@ -17,9 +17,12 @@ import type { BoardHostRef } from "./types";
 import {
   buildLanes,
   groupKeyFor,
+  showLaneChrome,
+  singleLaneHint,
   UNASSIGNED,
   type GroupableEntity,
   type HostLiveness,
+  type Lane,
 } from "./board-grouping";
 
 // host is the REAL shipped shape: BoardHostRef {name, id}. id is the dedup key.
@@ -140,5 +143,98 @@ describe("board-grouping — invariants", () => {
     const lanes = buildLanes([a, b], "team");
     expect(lanes).toHaveLength(1);
     expect(lanes[0]?.items).toEqual([a, b]);
+  });
+});
+
+// ── Phase 3 — showLaneChrome ─────────────────────────────────────────────────
+
+describe("showLaneChrome — lane-chrome policy", () => {
+  it("(none, 5) → false — identity no-op always suppresses chrome", () => {
+    expect(showLaneChrome("none", 5)).toBe(false);
+  });
+
+  it("(team, 1) → true — THE regression lock: explicit axis always shows chrome even for 1 lane", () => {
+    expect(showLaneChrome("team", 1)).toBe(true);
+  });
+
+  it("(host, 1) → true — single host lane gets chrome", () => {
+    expect(showLaneChrome("host", 1)).toBe(true);
+  });
+
+  it("(repo, 1) → true — single repo lane gets chrome", () => {
+    expect(showLaneChrome("repo", 1)).toBe(true);
+  });
+
+  it("(project, 3) → true — multiple lanes with explicit axis", () => {
+    expect(showLaneChrome("project", 3)).toBe(true);
+  });
+
+  it("(team, 0) → false — zero lanes means nothing to decorate", () => {
+    expect(showLaneChrome("team", 0)).toBe(false);
+  });
+
+  it("(none, 1) → false — none axis never shows chrome", () => {
+    expect(showLaneChrome("none", 1)).toBe(false);
+  });
+});
+
+// ── Phase 3 — singleLaneHint ─────────────────────────────────────────────────
+
+const makeLane = (label: string, count: number): Lane<unknown> => ({
+  key: label === "Unassigned" || label === "No team" ? UNASSIGNED : label,
+  label,
+  live: null,
+  items: Array.from({ length: count }, () => ({})),
+});
+
+describe("singleLaneHint — single-lane hint text", () => {
+  it("returns null for axis=none", () => {
+    expect(singleLaneHint("none", makeLane("", 3), "ticket")).toBeNull();
+  });
+
+  it("team axis, 3 tickets → 'All 3 tickets are in team CTL'", () => {
+    expect(singleLaneHint("team", makeLane("CTL", 3), "ticket")).toBe(
+      "All 3 tickets are in team CTL",
+    );
+  });
+
+  it("team axis, count=1 → 'The only ticket here is in team CTL'", () => {
+    expect(singleLaneHint("team", makeLane("CTL", 1), "ticket")).toBe(
+      "The only ticket here is in team CTL",
+    );
+  });
+
+  it("team UNASSIGNED → 'All 3 tickets have no team'", () => {
+    const lane = makeLane("No team", 3);
+    // key must be UNASSIGNED sentinel
+    expect(singleLaneHint("team", lane, "ticket")).toBe(
+      "All 3 tickets have no team",
+    );
+  });
+
+  it("host axis, 2 workers → 'All 2 workers are on host mini'", () => {
+    expect(singleLaneHint("host", makeLane("mini", 2), "worker")).toBe(
+      "All 2 workers are on host mini",
+    );
+  });
+
+  it("host UNASSIGNED → \"All 3 workers aren't attributed to a host yet\"", () => {
+    const lane = makeLane("Unassigned", 3);
+    expect(singleLaneHint("host", lane, "worker")).toBe(
+      "All 3 workers aren't attributed to a host yet",
+    );
+  });
+
+  it("project axis, UNASSIGNED → 'All 2 tickets have no project'", () => {
+    const lane = makeLane("Unassigned", 2);
+    expect(singleLaneHint("project", lane, "ticket")).toBe(
+      "All 2 tickets have no project",
+    );
+  });
+
+  it("repo axis, 4 tickets → 'All 4 tickets are in repo catalyst'", () => {
+    expect(singleLaneHint("repo", makeLane("catalyst", 4), "ticket")).toBe(
+      "All 4 tickets are in repo catalyst",
+    );
   });
 });

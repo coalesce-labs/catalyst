@@ -1,19 +1,23 @@
-// display-options-popover.tsx — the BOARD2 (CTL-906) Display-options popover:
-// ONE toolbar button that owns every board display choice, folding today's
-// scattered subhead Seg toggles (lens / colorBy / repo-lanes) into one tray and
-// adding the NEW density / ordering / show-empty knobs. All choices persist via
-// the `boardPrefsAtom` (board/prefs-store.ts). Catalyst-specific composition of
-// the shadcn primitives in display-options-sections.tsx + ui/popover.tsx.
+// display-options-popover.tsx — the BOARD2 (CTL-906) Display-options popover,
+// restyled in CTL-930 Phase 2. ONE toolbar button that owns every board display
+// choice, folding the scattered subhead Seg toggles into a quiet Linear-grammar
+// tray. All choices persist via `boardPrefsAtom` (board/prefs-store.ts).
 //
 // INVARIANTS honored here:
 //   - density is per-surface (the board-prefs atom), NOT a global app mode.
-//   - the reserved live-signal cyan appears NOWHERE in this file (a source-grep
-//     test guards the hex literal). The "customized" dot uses the blue accent,
-//     never the live signal.
-//   - CTL-930 forward-compat: this file renders NO in-board tab strip and NO
-//     "Catalyst" wordmark; it reserves a Lens slot for CTL-930 to fill.
+//   - The reserved live-signal cyan appears NOWHERE in this file (a source-grep
+//     test guards the hex literal and the LIVE token).
+//   - CTL-930: the Lens slot reservation is removed — Workers is first-class nav.
+//   - display-options-popover.tsx filename is stable (guard test imports from it).
+//   - All five option arrays kept at lines 44–69 (guard test source-parses them).
 import { useAtom } from "jotai";
-import { SlidersHorizontal } from "lucide-react";
+import {
+  LayoutGrid,
+  ListOrdered,
+  Palette,
+  Rows2,
+  SlidersHorizontal,
+} from "lucide-react";
 import {
   Popover,
   PopoverContent,
@@ -32,10 +36,11 @@ import {
   type Swimlane,
   type Layout,
 } from "./prefs-store";
-import { SegRow, SwitchRow, RadioRow } from "./display-options-sections";
+import { LayoutSwitch, SelectRow, ChipToggle, PropertiesSection } from "./display-options-sections";
 // BOARD3 / CTL-907: the swimlane axis option set (none|repo|team|project|host),
 // owned alongside the swimlane renderer so the control and the engine cannot drift.
 import { SWIMLANE_OPTIONS } from "./Swimlane";
+import { C } from "./board-tokens";
 
 // The option arrays. Their keys are the STORED pref values, so a drift-guard
 // test (board-display-options-drift.test.ts) asserts each array's key set equals
@@ -68,6 +73,27 @@ export const LAYOUT_OPTIONS: { k: Layout; label: string }[] = [
   { k: "list", label: "List" },
 ];
 
+// ── Phase 2 / CTL-930 exported helpers ───────────────────────────────────────
+
+/**
+ * Convert a chip's pressed state to a Density value.
+ * The Compact chip: pressed → "compact", unpressed → "comfortable".
+ */
+export const chipToDensity = (pressed: boolean): Density =>
+  pressed ? "compact" : "comfortable";
+
+/** True when the density is "compact" (drives the chip's pressed state). */
+export const densityIsCompact = (d: Density): boolean => d === "compact";
+
+/**
+ * Which sections are visible for a given layout.
+ * In List layout, Color and Empty-columns controls are hidden (BoardList uses neither).
+ */
+export function visibleSections(layout: Layout): { color: boolean; emptyColumns: boolean } {
+  if (layout === "board") return { color: true, emptyColumns: true };
+  return { color: false, emptyColumns: false };
+}
+
 export function DisplayOptionsPopover({
   repos = [],
 }: {
@@ -78,8 +104,13 @@ export function DisplayOptionsPopover({
   const [prefs, setPrefs] = useAtom(boardPrefsAtom);
   const patch = (d: Partial<BoardPrefs>) => setPrefs((p) => patchBoardPrefs(p, d));
   // A small dot when any pref differs from default → the operator sees the board
-  // is customized. Uses --accent, deliberately NOT the cyan live signal.
+  // is customized. Uses C.blue accent, deliberately NOT the cyan live signal.
   const customized = JSON.stringify(prefs) !== JSON.stringify(DEFAULT_BOARD_PREFS);
+
+  const sections = visibleSections(prefs.layout);
+  const swimlaneOptions = repos.length > 1
+    ? SWIMLANE_OPTIONS
+    : SWIMLANE_OPTIONS.filter((o) => o.k !== "repo");
 
   return (
     <Popover>
@@ -93,13 +124,14 @@ export function DisplayOptionsPopover({
             alignItems: "center",
             gap: 6,
             borderRadius: 6,
-            border: "1px solid #262d36",
-            background: "#16191f",
-            color: "#8b93a1",
+            border: `1px solid ${C.border}`,
+            background: C.s2,
+            color: C.fgMuted,
             padding: "5px 10px",
             fontSize: 12,
             cursor: "pointer",
             lineHeight: 1,
+            fontFamily: "inherit",
           }}
         >
           <SlidersHorizontal style={{ width: 14, height: 14 }} aria-hidden />
@@ -114,69 +146,113 @@ export function DisplayOptionsPopover({
                 width: 8,
                 height: 8,
                 borderRadius: "50%",
-                background: "#4ea1ff",
+                background: C.blue,
               }}
             />
           )}
         </button>
       </PopoverTrigger>
       <PopoverContent
-        style={{ background: "#16191f", border: "1px solid #262d36", color: "#e6e9ef", padding: 8 }}
+        style={{
+          background: C.s2,
+          border: `1px solid ${C.border}`,
+          color: C.fg,
+          padding: "10px 8px",
+          width: 240,
+        }}
+        onInteractOutside={(e) => {
+          // Radix nested-portal dismissal guard: keep the tray open when the user
+          // clicks inside a DropdownMenuContent (a nested portal outside the Popover
+          // portal tree). Keyed to data-slot="dropdown-menu-content".
+          if ((e.target as Element | null)?.closest?.('[data-slot="dropdown-menu-content"]'))
+            e.preventDefault();
+        }}
       >
-        <SegRow
-          label="Group by"
-          value={prefs.groupBy}
-          onChange={(v) => patch({ groupBy: v })}
-          options={GROUP_BY_OPTIONS}
-        />
-        <SegRow
-          label="Density"
-          value={prefs.density}
-          onChange={(v) => patch({ density: v })}
-          options={DENSITY_OPTIONS}
-        />
-        <SegRow
-          label="Order"
-          value={prefs.order}
-          onChange={(v) => patch({ order: v })}
-          options={ORDER_OPTIONS}
-        />
-        <SegRow
-          label="Color"
-          value={prefs.colorBy}
-          onChange={(v) => patch({ colorBy: v })}
-          options={COLOR_BY_OPTIONS}
-        />
-        <SwitchRow
-          label="Show empty columns"
-          checked={prefs.showEmptyColumns}
-          onChange={(v) => patch({ showEmptyColumns: v })}
-        />
-        {/* Swimlanes — BOARD3 (CTL-907) generalizes the former binary "Repo lanes"
-            toggle into one axis: None | (Repo) | Team | Project | Host. The Repo
-            option only appears in a multi-repo workspace (single-repo = no lanes
-            to draw, an identity no-op). Host stays selectable single-node: picking
-            it collapses to one lane, exactly like the SURF1/SURF2 node controls
-            stay inert single-host. Writes straight to `prefs.swimlane`. */}
-        <Separator style={{ margin: "8px 0", background: "#262d36" }} />
-        <RadioRow
-          label="Swimlanes"
-          value={prefs.swimlane}
-          onChange={(v) => patch({ swimlane: v as Swimlane })}
-          options={repos.length > 1 ? SWIMLANE_OPTIONS : SWIMLANE_OPTIONS.filter((o) => o.k !== "repo")}
-        />
-        {/* BOARD4 (CTL-908): the Board ⇄ List layout toggle. Writes straight to
-            `prefs.layout`; Board.tsx forks its Tickets body on it ("board" = the
-            column kanban, "list" = the dense BoardList table). One more SegRow in
-            the reserved slot — no tray re-architecting. CTL-930 «Lens» still drops
-            in below this without further change. */}
-        <Separator style={{ margin: "8px 0", background: "#262d36" }} />
-        <SegRow
-          label="Layout"
+        {/* 1. Layout switch — top of tray */}
+        <LayoutSwitch
           value={prefs.layout}
           onChange={(v) => patch({ layout: v })}
           options={LAYOUT_OPTIONS}
         />
+
+        <Separator style={{ margin: "8px 0", background: C.border }} />
+
+        {/* 2. SelectRow controls: Columns / Rows / Ordering / Color */}
+        <SelectRow
+          label="Columns"
+          icon={LayoutGrid}
+          tip="Which axis becomes the board's columns"
+          value={prefs.groupBy}
+          onChange={(v) => patch({ groupBy: v })}
+          options={GROUP_BY_OPTIONS}
+        />
+        <SelectRow
+          label="Rows"
+          icon={Rows2}
+          tip="Horizontal swimlanes across the board"
+          value={prefs.swimlane}
+          onChange={(v) => patch({ swimlane: v as Swimlane })}
+          options={swimlaneOptions}
+        />
+        <SelectRow
+          label="Ordering"
+          icon={ListOrdered}
+          tip="How cards sort inside each column"
+          value={prefs.order}
+          onChange={(v) => patch({ order: v })}
+          options={ORDER_OPTIONS}
+        />
+        {sections.color && (
+          <SelectRow
+            label="Color"
+            icon={Palette}
+            tip="What the card accent encodes"
+            value={prefs.colorBy}
+            onChange={(v) => patch({ colorBy: v })}
+            options={COLOR_BY_OPTIONS}
+          />
+        )}
+
+        <Separator style={{ margin: "8px 0", background: C.border }} />
+
+        {/* 3. PropertiesSection chips */}
+        <PropertiesSection>
+          <ChipToggle
+            label="Compact"
+            pressed={densityIsCompact(prefs.density)}
+            onChange={(v) => patch({ density: chipToDensity(v) })}
+          />
+          {sections.emptyColumns && (
+            <ChipToggle
+              label="Empty columns"
+              pressed={prefs.showEmptyColumns}
+              onChange={(v) => patch({ showEmptyColumns: v })}
+            />
+          )}
+        </PropertiesSection>
+
+        {/* 4. Reset row — only when customized */}
+        {customized && (
+          <button
+            type="button"
+            onClick={() => setPrefs(() => DEFAULT_BOARD_PREFS)}
+            style={{
+              display: "block",
+              width: "100%",
+              padding: "4px 2px",
+              marginTop: 4,
+              background: "transparent",
+              border: "none",
+              color: C.fgDim,
+              fontSize: 11,
+              textAlign: "left",
+              cursor: "pointer",
+              fontFamily: "inherit",
+            }}
+          >
+            Reset to defaults
+          </button>
+        )}
       </PopoverContent>
     </Popover>
   );

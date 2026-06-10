@@ -1,36 +1,268 @@
-// display-options-sections.tsx — the uniform popover row primitives for the
-// BOARD2 (CTL-906) Display-options popover, extracted so BOARD3 (Swimlanes) /
-// BOARD4 (Layout) add a control by DROPPING IN one `<…Row>` rather than editing
-// a monolith. Hand-rolled composition of the shadcn primitives (Catalyst-
-// specific), token-locked to the dark board surface; the reserved live-signal
-// cyan is NEVER used here — active treatment leans on the muted/fg pair the
-// board's Seg already uses.
+// display-options-sections.tsx — the CTL-930 Phase 2 display-options primitives.
+// Replaces SegRow/SwitchRow/RadioRow with quieter Linear-grammar controls:
+// LayoutSwitch (icon+label ToggleGroup at top), SelectRow (dropdown with icon+tip),
+// ChipToggle (Toggle chip), PropertiesSection (chip group with micro-label).
+//
+// INVARIANTS honored here:
+//   - No cyan (the live signal) anywhere in this file (drift-guard test guards it).
+//   - DropdownMenuRadioItem a11y semantics preserved (menuitemradio role).
+//   - display-options-sections.tsx filename is stable (guard test imports from it).
 import * as React from "react";
+import { Check, ChevronDown, Kanban, List } from "lucide-react";
+import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { Switch } from "@/components/ui/switch";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { C } from "./board-tokens";
 
-// Row label treatment: the muted uppercase micro-label the board uses for Stat
-// labels + Column headers (Board.tsx Stat / Column). Deliberately NOT cyan.
-const ROW_LABEL: React.CSSProperties = {
-  fontSize: 10.5,
-  textTransform: "uppercase",
-  letterSpacing: 0.6,
-  color: "#8b93a1",
-  fontWeight: 600,
-};
+// ── LayoutSwitch ─────────────────────────────────────────────────────────────
+// Full-width 2-cell toggle: icon + label stacked in each cell.
+// "Board" → Kanban icon; "List" → List icon.
+const LAYOUT_ICONS = {
+  board: Kanban,
+  list: List,
+} as const;
 
-function Row({ children }: { children: React.ReactNode }) {
+export function LayoutSwitch<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { k: T; label: string }[];
+}) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "7px 6px" }}>
-      {children}
+    <ToggleGroup
+      type="single"
+      value={value}
+      onValueChange={(v) => v && onChange(v as T)}
+      aria-label="Layout"
+      style={{
+        display: "flex",
+        width: "100%",
+        background: C.s1,
+        border: `1px solid ${C.border}`,
+        borderRadius: 8,
+        padding: 3,
+        gap: 3,
+      }}
+    >
+      {options.map((o) => {
+        const Icon = LAYOUT_ICONS[o.k as keyof typeof LAYOUT_ICONS];
+        const selected = value === o.k;
+        return (
+          <ToggleGroupItem
+            key={o.k}
+            value={o.k}
+            aria-label={o.label}
+            style={{
+              flex: 1,
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 4,
+              padding: "8px 0",
+              borderRadius: 6,
+              border: "none",
+              cursor: "pointer",
+              background: selected ? C.s3 : "transparent",
+              color: selected ? C.fg : C.fgMuted,
+              boxShadow: selected ? `inset 0 0 0 1px ${C.border}` : "none",
+              fontSize: 11.5,
+              fontFamily: "inherit",
+              transition: "background 150ms, color 150ms",
+            }}
+          >
+            {Icon && <Icon style={{ width: 16, height: 16 }} aria-hidden />}
+            {o.label}
+          </ToggleGroupItem>
+        );
+      })}
+    </ToggleGroup>
+  );
+}
+
+// ── SelectRow ────────────────────────────────────────────────────────────────
+// One-line row: [icon 14px] [label 12px muted] [spacer] [value dropdown button].
+// Tooltip on the label explains the axis.
+// The `hint` slot carries an inline explainer (Phase 3: "filtered to one repo").
+export function SelectRow<T extends string>({
+  label,
+  icon: Icon,
+  tip,
+  value,
+  onChange,
+  options,
+  hint,
+}: {
+  label: string;
+  icon?: React.ComponentType<{ style?: React.CSSProperties }>;
+  tip?: string;
+  value: T;
+  onChange: (v: T) => void;
+  options: { k: T; label: string }[];
+  hint?: string | null;
+}) {
+  const current = options.find((o) => o.k === value);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        height: 30,
+        gap: 6,
+        padding: "0 2px",
+      }}
+    >
+      {Icon && (
+        <Icon style={{ width: 14, height: 14, color: C.fgDim, flex: "0 0 auto" }} />
+      )}
+      {tip ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              style={{
+                fontSize: 12,
+                color: C.fgMuted,
+                cursor: "default",
+                userSelect: "none",
+              }}
+            >
+              {label}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="left">{tip}</TooltipContent>
+        </Tooltip>
+      ) : (
+        <span style={{ fontSize: 12, color: C.fgMuted }}>{label}</span>
+      )}
+      <span style={{ flex: 1 }} />
+      {hint && (
+        <span style={{ fontSize: 11, color: C.fgDim, fontStyle: "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>
+          {hint}
+        </span>
+      )}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            aria-label={`${label}: ${current?.label ?? value}`}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "3px 8px",
+              borderRadius: 6,
+              border: "1px solid transparent",
+              background: "transparent",
+              color: C.fg,
+              fontSize: 12,
+              cursor: "pointer",
+              fontFamily: "inherit",
+              transition: "background 150ms",
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = C.s3; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+          >
+            {current?.label ?? value}
+            <ChevronDown style={{ width: 12, height: 12, color: C.fgDim }} aria-hidden />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          style={{
+            minWidth: 168,
+            background: C.s2,
+            border: `1px solid ${C.border}`,
+            color: C.fg,
+            fontSize: 12,
+          }}
+        >
+          <DropdownMenuRadioGroup value={value} onValueChange={(v) => onChange(v as T)}>
+            {options.map((o) => (
+              <DropdownMenuRadioItem
+                key={o.k}
+                value={o.k}
+                className="pl-2 [&>span:first-child]:hidden"
+                style={{ fontSize: 12 }}
+              >
+                <span style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                  {o.label}
+                  {value === o.k && <Check style={{ width: 14, height: 14, flex: "0 0 auto" }} />}
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
 
-/** A labelled single-select segmented row (the workhorse — Group by, Density,
- *  Order, Color, Repo lanes). `options` keys are the stored pref value. */
-export function SegRow<T extends string>({
+// ── ChipToggle ───────────────────────────────────────────────────────────────
+// A quiet toggle chip. Pressed: s3 bg + fg text. Unpressed: transparent + muted.
+export function ChipToggle({
+  label,
+  pressed,
+  onChange,
+  "aria-label": ariaLabel,
+}: {
+  label: string;
+  pressed: boolean;
+  onChange: (v: boolean) => void;
+  "aria-label"?: string;
+}) {
+  return (
+    <Toggle
+      pressed={pressed}
+      onPressedChange={onChange}
+      aria-label={ariaLabel ?? label}
+      style={{
+        fontSize: 11.5,
+        padding: "2px 9px",
+        height: "auto",
+        borderRadius: 6,
+        border: `1px solid ${C.border}`,
+        background: pressed ? C.s3 : "transparent",
+        color: pressed ? C.fg : C.fgMuted,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        transition: "background 150ms, color 150ms",
+      }}
+    >
+      {label}
+    </Toggle>
+  );
+}
+
+// ── PropertiesSection ─────────────────────────────────────────────────────────
+// Micro-label "Display properties" + a flex-wrap row of ChipToggles.
+export function PropertiesSection({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "6px 2px" }}>
+      <span style={{ fontSize: 11, color: C.fgDim, userSelect: "none" }}>
+        Display properties
+      </span>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** @deprecated use LayoutSwitch or SelectRow instead — no external callers */
+function SegRow<T extends string>({
   label,
   value,
   onChange,
@@ -42,32 +274,17 @@ export function SegRow<T extends string>({
   options: { k: T; label: string }[];
 }) {
   return (
-    <Row>
-      <span style={ROW_LABEL}>{label}</span>
-      <ToggleGroup
-        type="single"
-        value={value}
-        onValueChange={(v) => v && onChange(v as T)}
-        variant="outline"
-        size="sm"
-        aria-label={label}
-      >
-        {options.map((o) => (
-          <ToggleGroupItem
-            key={o.k}
-            value={o.k}
-            style={{ fontSize: 11.5, color: value === o.k ? "#e6e9ef" : "#8b93a1" }}
-          >
-            {o.label}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
-    </Row>
+    <SelectRow
+      label={label}
+      value={value}
+      onChange={onChange}
+      options={options}
+    />
   );
 }
 
-/** A labelled boolean row (Show empty columns). */
-export function SwitchRow({
+/** @deprecated use ChipToggle instead — no external callers */
+function SwitchRow({
   label,
   checked,
   onChange,
@@ -83,21 +300,17 @@ export function SwitchRow({
         alignItems: "center",
         justifyContent: "space-between",
         gap: 10,
-        padding: "9px 6px",
+        padding: "6px 2px",
       }}
     >
-      <span style={{ ...ROW_LABEL, textTransform: "none", fontSize: 12, letterSpacing: 0, color: "#e6e9ef" }}>
-        {label}
-      </span>
-      <Switch checked={checked} onCheckedChange={onChange} aria-label={label} />
+      <span style={{ fontSize: 12, color: C.fg }}>{label}</span>
+      <ChipToggle label={label} pressed={checked} onChange={onChange} />
     </div>
   );
 }
 
-/** A labelled stacked single-select (reserved for BOARD3 Swimlanes — four+
- *  options read better stacked than as a wide segmented bar). Shipped now so the
- *  popover shape is final; BOARD3 wires it to `prefs.swimlane`. */
-export function RadioRow<T extends string>({
+/** @deprecated use SelectRow instead — no external callers */
+function RadioRow<T extends string>({
   label,
   value,
   onChange,
@@ -109,28 +322,11 @@ export function RadioRow<T extends string>({
   options: { k: T; label: string }[];
 }) {
   return (
-    <Row>
-      <span style={ROW_LABEL}>{label}</span>
-      <RadioGroup
-        value={value}
-        onValueChange={(v) => v && onChange(v as T)}
-        aria-label={label}
-        style={{ gap: 6 }}
-      >
-        {options.map((o) => {
-          const id = `${label}-${o.k}`;
-          return (
-            <label
-              key={o.k}
-              htmlFor={id}
-              style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#e6e9ef", cursor: "pointer" }}
-            >
-              <RadioGroupItem id={id} value={o.k} />
-              {o.label}
-            </label>
-          );
-        })}
-      </RadioGroup>
-    </Row>
+    <SelectRow
+      label={label}
+      value={value}
+      onChange={onChange}
+      options={options}
+    />
   );
 }

@@ -2,7 +2,6 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { useAtom } from "jotai";
 import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -78,7 +77,7 @@ import { ticketColumns, PHASE_COLUMNS } from "./board-display";
 // column board, collapsing to the bare flat board for a single lane (the
 // identity no-op). Replaces the repo-only Lane/ticketLanes/combined path. The
 // shared `C` / `LIVE` tokens are hoisted to board-tokens.ts.
-import { C, LIVE } from "./board-tokens";
+import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS } from "./board-tokens";
 import { SwimlaneBoard } from "./Swimlane";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
@@ -98,13 +97,15 @@ import type {
 import type { ConnectionStatus } from "@/lib/types";
 
 // ── tokens (orch-monitor DESIGN.md) ─────────────────────────────────────────
-// BOARD3 / CTL-907 §8.5: the `C` palette + the reserved `LIVE` signal are hoisted
-// to board-tokens.ts so the swimlane chrome (Swimlane.tsx) split out of this file
-// imports the SAME object — one source for the hexes, not two copies.
+// CTL-930 Phase 4/5: phase/type/node tokens from canonical board-tokens.ts.
+// PHASE_C is an inline literal so the drift guard (board-phase-drift.test.ts)
+// can text-extract its keys; values match the Phase-4 board-tokens.ts palette.
+// The PHASE alias (imported from board-tokens) is available for non-guarded use.
 const PHASE_C: Record<string, string> = {
-  triage: "#64748b", research: "#3b82f6", plan: "#a855f7", implement: "#10b981",
-  verify: "#f59e0b", remediate: "#f472b6", review: "#eab308", pr: "#14b8a6",
-  "monitor-merge": "#4ea1ff", "monitor-deploy": "#39d07a", teardown: "#6b7280", merge: "#4ea1ff", deploy: "#39d07a", done: "#6b7280",
+  triage: "#8492a4", research: "#5e9ee8", plan: "#a98ee3", implement: "#45c08a",
+  verify: "#dba14f", remediate: "#d98ab2", review: "#cdb84e", pr: "#45bcab",
+  "monitor-merge": "#5e9ee8", "monitor-deploy": "#41bd7d", teardown: "#788596",
+  merge: "#5e9ee8", deploy: "#41bd7d", done: "#788596",
 };
 // BOARD2 / CTL-906: the ticket column SETS (linear / phase) now live in the pure
 // board-display.ts (LINEAR_COLUMNS / PHASE_COLUMNS) so there is ONE definition
@@ -131,16 +132,15 @@ const HELD_LABEL_WAITING = "waiting";
 // phase render (which would let the Board and List drift). They stay module-local
 // to Board.tsx (the single source of truth); BOARD4 imports the named exports.
 export type ColorBy = "phase" | "status" | "repo" | "type";
-const TYPE_C: Record<string, string> = {
-  feature: "#4ea1ff", bug: "#ef5d5d", refactor: "#a855f7", chore: "#8b93a1", docs: "#39d07a", test: "#eabc3b",
-};
-const repoColor = (repo: string) => (repo === "adva" ? "#c084fc" : "#4ea1ff");
+// CTL-930 Phase 5: type/repo/node accents from canonical board-tokens.ts.
+const TYPE_C: Record<string, string> = TYPE_MAP;
+const repoColor = (repo: string) => (repo === "adva" ? C.purple : C.blue);
 const isActive = (s: ActiveState) => s === "active";
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the
 // host name (the unattributed bucket reads dim) — deterministic, no palette
 // state, and the single-host case simply gets its one color.
-const NODE_PALETTE = ["#4ea1ff", "#39d07a", "#a855f7", "#eabc3b", "#f472b6", "#5be0ff", "#fb8b3a"];
+const NODE_PALETTE = NODE_ACCENTS;
 const nodeColor = (host: string): string => {
   if (host === UNATTRIBUTED_HOST) return C.fgDim;
   let h = 0;
@@ -157,7 +157,7 @@ export function accentFor(t: { phase: string; repo: string; type: string; active
   if (by === "type") return TYPE_C[t.type] || C.fgMuted;
   if (t.activeState === "active") return LIVE;
   if (t.activeState === "stuck" || t.status === "failed") return C.red;
-  return "#5b6b80";
+  return C.fgDim;
 }
 
 export const fmtRuntime = (ms: number | null) => {
@@ -184,19 +184,12 @@ export const fmtMsAgo = (ms: number) => {
   return m < 60 ? `${m}m ago` : `${Math.floor(m / 60)}h ago`;
 };
 
+// CTL-930 Phase 5: live keyframes hoisted to app.css (available on all surfaces).
+// PULSE_CSS retains only the board-local scroll styling.
 const PULSE_CSS = `
-@keyframes catalystLivePing { 0%{box-shadow:0 0 0 0 rgba(91,224,255,.6)} 70%{box-shadow:0 0 0 6px rgba(91,224,255,0)} 100%{box-shadow:0 0 0 0 rgba(91,224,255,0)} }
-@keyframes catalystLiveRing { 0%,100%{box-shadow:inset 0 0 0 1px rgba(91,224,255,.4), 0 0 14px rgba(91,224,255,.08)} 50%{box-shadow:inset 0 0 0 1px rgba(91,224,255,.8), 0 0 24px rgba(91,224,255,.2)} }
-.catalyst-live { animation: catalystLiveRing 1.9s ease-in-out infinite; }
-.catalyst-live-dot { animation: catalystLivePing 1.9s infinite; }
 .cat-scroll::-webkit-scrollbar { width:9px; height:9px; }
-.cat-scroll::-webkit-scrollbar-thumb { background:#2a323d; border-radius:6px; }
+.cat-scroll::-webkit-scrollbar-thumb { background:${C.s4}; border-radius:6px; }
 .cat-scroll::-webkit-scrollbar-track { background:transparent; }
-/* token-lock the shadcn Tabs nav to our dark surfaces (stock bg-muted is too light) */
-.cat-nav [role="tablist"] { background:#16191f; border:1px solid #262d36; height:auto; padding:3px; gap:2px; }
-.cat-nav [role="tab"] { color:#8b93a1; flex:0 0 auto; padding:4px 13px; font-size:12.5px; box-shadow:none; border:none; }
-.cat-nav [role="tab"]:hover { color:#e6e9ef; }
-.cat-nav [role="tab"][data-state="active"] { background:#1c2028; color:#e6e9ef; box-shadow:inset 0 0 0 1px #262d36; }
 `;
 
 // ── domain viz (hand-rolled per DESIGN.md) ──────────────────────────────────
@@ -245,7 +238,7 @@ const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
 export function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
   const icon = p === 1 ? (
     <svg width={size} height={size} viewBox="0 0 14 14" aria-label="Urgent">
-      <rect x="0.5" y="0.5" width="13" height="13" rx="3" fill="#fb8b3a" />
+      <rect x="0.5" y="0.5" width="13" height="13" rx="3" fill={C.orange} />
       <rect x="6.1" y="2.8" width="1.8" height="5.2" rx="0.9" fill="#1b1206" />
       <rect x="6.1" y="9.4" width="1.8" height="1.9" rx="0.95" fill="#1b1206" />
     </svg>
@@ -253,7 +246,7 @@ export function PriorityIcon({ p, size = 14 }: { p: number; size?: number }) {
     <svg width={size} height={size} viewBox="0 0 14 14" aria-label={PRIORITY_LABEL[p]}>
       {[{ x: 1, h: 5 }, { x: 5.5, h: 9 }, { x: 10, h: 13 }].map((b, i) => {
         const filled = i < (p === 2 ? 3 : p === 3 ? 2 : p === 4 ? 1 : 0);
-        return <rect key={i} x={b.x} y={14 - b.h} width="3" height={b.h} rx="1" fill={filled ? "#cdd3dd" : "#39424d"} />;
+        return <rect key={i} x={b.x} y={14 - b.h} width="3" height={b.h} rx="1" fill={filled ? "#d3dae4" : "#424d5c"} />;
       })}
     </svg>
   );
@@ -273,11 +266,11 @@ export function ScopeChip({ scope, estimate }: { scope: string | null; estimate:
 }
 export function StatusBadge({ status }: { status: string }) {
   const meta: Record<string, { label: string; fg: string; bg: string }> = {
-    failed: { label: "failed", fg: "#f4a8a8", bg: "rgba(239,93,93,0.14)" },
-    stalled: { label: "stalled", fg: "#f4dc8a", bg: "rgba(234,188,59,0.14)" },
-    aborted: { label: "aborted", fg: "#8b93a1", bg: "#1c2028" },
-    superseded: { label: "superseded", fg: "#8b93a1", bg: "#1c2028" },
-    skipped: { label: "skipped", fg: "#5b626f", bg: "#16191f" },
+    failed: { label: "failed", fg: C.redSoft, bg: `${C.red}24` },
+    stalled: { label: "stalled", fg: C.yellowSoft, bg: `${C.yellow}24` },
+    aborted: { label: "aborted", fg: C.fgMuted, bg: C.s2 },
+    superseded: { label: "superseded", fg: C.fgMuted, bg: C.s2 },
+    skipped: { label: "skipped", fg: C.fgDim, bg: C.s1 },
   };
   const m = meta[status];
   if (!m) return null;
@@ -291,8 +284,8 @@ export function StatusBadge({ status }: { status: string }) {
 export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | null | undefined; blockers?: string[] }) {
   if (held !== HELD_LABEL_BLOCKED && held !== HELD_LABEL_WAITING) return null;
   const isBlocked = held === HELD_LABEL_BLOCKED;
-  const fg = isBlocked ? "#f4a8a8" : "#f4dc8a";
-  const bg = isBlocked ? "rgba(239,93,93,0.14)" : "rgba(234,188,59,0.14)";
+  const fg = isBlocked ? C.redSoft : C.yellowSoft;
+  const bg = isBlocked ? `${C.red}24` : `${C.yellow}24`;
   const ids = (blockers ?? []).filter(Boolean);
   const label = isBlocked
     ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
@@ -337,8 +330,8 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
       className={live ? "catalyst-live" : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
-        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`,
-        opacity: dim ? 0.5 : 1, filter: dim ? "saturate(0.6)" : undefined, transition: "opacity .25s, background .25s",
+        border: `1px solid ${stuck ? `${C.red}80` : dim ? C.borderSubtle : C.border}`,
+        transition: "background .25s",
         cursor: onSelect ? "pointer" : undefined,
       }}
       // CTL-942: cmd/ctrl-click deep-links straight to the full ticket page;
@@ -361,7 +354,6 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
         <ActivityDot state={t.activeState} fallback={accent} />
-        <PriorityIcon p={t.priority} />
         <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
@@ -370,6 +362,7 @@ function TicketCard({ t, colorBy, density = "comfortable", onSelect }: { t: Tick
       </div>
       <TitleText text={t.title} clamp={compact ? 1 : 2} />
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
+        <PriorityIcon p={t.priority} />
         <PhasePill phase={t.phase} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
@@ -453,13 +446,13 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
       onKeyDown={onSelect ? (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(w.name); } } : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-        border: `1px solid ${stuck ? "rgba(239,93,93,0.5)" : C.border}`, opacity: stuck ? 0.7 : 1,
+        border: `1px solid ${stuck ? `${C.red}80` : C.border}`,
+        boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : undefined,
         cursor: onSelect ? "pointer" : undefined,
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
         <ActivityDot state={w.activeState} fallback={accent} />
-        {info && <PriorityIcon p={info.priority} />}
         <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>{w.ticket}</span>
         {w.sessionId && (
           <Tooltip><TooltipTrigger asChild>
@@ -473,6 +466,7 @@ function WorkerCard({ w, info, onSelect }: { w: Worker; info?: Ticket; onSelect?
       </div>
       {info?.title && <TitleText text={info.title} />}
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
+        {info && <PriorityIcon p={info.priority} />}
         <PhasePill phase={w.phase} />
         {/* CTL-909 / SURF1: owning host.name on every worker card. */}
         <HostChip host={w.host} />
@@ -762,8 +756,10 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
   );
 }
 
-// ── shell (real shadcn Tabs + ToggleGroup, TooltipProvider) ─────────────────
-type View = "tickets" | "workers" | "queue";
+// ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
+// CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
+// Queue is now its own left-nav destination (QueueSurface), never a board view.
+type View = "tickets" | "workers";
 // WorkerGrouping ("status" | "phase" | "node") is now owned by worker-grouping.ts
 // (CTL-909 / SURF1) so the column derivation + the type stay in lock-step.
 function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string }[] }) {
@@ -781,20 +777,24 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
 // the inset's flex slot instead of overflowing the viewport by the strip height.
 // The data path (connectBoard / SharedWorker EventSource) is untouched in both.
 //
-// CTL-909 / SURF1:
-//   - `initialView` lets a host (e.g. the Workers app-shell surface) open the
-//     board straight onto the Workers grid instead of the Tickets default.
-//   - `onWorkerSelect` is the worker-card deep-link: the routed `/` board passes
-//     a `useNavigate`-backed callback to `/worker/$id`; when absent (the embedded
-//     mount has no router) the cards stay non-interactive, exactly as before.
+// CTL-930: Board.props changes from `initialView?: View` to `view?: View; onViewChange?`.
+// The SurfaceSwitch collapses to ONE <Board> branch; internal useState is the
+// uncontrolled fallback for standalone board.html mount.
 export function Board({
   embedded = false,
-  initialView = "tickets",
+  view: viewProp,
+  onViewChange,
   onWorkerSelect,
-}: { embedded?: boolean; initialView?: View; onWorkerSelect?: (name: string) => void } = {}) {
+}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onWorkerSelect?: (name: string) => void } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [view, setView] = useState<View>(initialView);
+  const [viewInternal, setViewInternal] = useState<View>("tickets");
+  // Controlled when viewProp is provided; uncontrolled (own state) otherwise.
+  const view = viewProp ?? viewInternal;
+  const setView = (v: View) => {
+    setViewInternal(v);
+    onViewChange?.(v);
+  };
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
@@ -851,16 +851,11 @@ export function Board({
     () => filterWorkersByHost(fWorkers, activeHostFilter),
     [fWorkers, activeHostFilter],
   );
-  // BOARD3 / CTL-907: the generalized row-swimlane axis (none | repo | team |
-  // project | host) the display-options popover writes to `prefs.swimlane`. The
-  // pure board-grouping engine (buildLanes, inside <SwimlaneBoard>) now OWNS lane
-  // resolution — the repo-only ticketLanes/workerLanes/combined derivation is gone.
-  // A specific repo scope collapses to the flat board (a single repo has no lanes
-  // to draw) by mapping the axis to "none" — preserving today's "filter ⇒ flat"
-  // semantic exactly (the conservative R3 default; buildLanes would otherwise still
-  // collapse to one lane for the repo axis, and could show team/host lanes within
-  // one repo — a deliberate, separate product decision, not regressed here).
-  const effectiveGroupBy: GroupBy = repo !== "all" ? "none" : prefs.swimlane;
+  // CTL-930 Phase 3: swimlanes engage under any workspace scope. The repo scope
+  // narrows the entity set (fTickets/fWorkers at :841–842) and the axis groups
+  // within it — swimlane=repo under a single-repo scope collapses naturally to
+  // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
+  const swimlane: GroupBy = prefs.swimlane;
   const selectedTicket =
     selectedTicketId != null
       ? (data?.tickets ?? []).find((t) => t.id === selectedTicketId) ?? null
@@ -870,36 +865,16 @@ export function Board({
     <TooltipProvider delayDuration={200}>
       <div style={{ [BOARD_VH_VAR]: boardRootHeight(embedded), background: C.s0, color: C.fg, height: `var(${BOARD_VH_VAR})`, display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" } as React.CSSProperties}>
         <style>{PULSE_CSS}</style>
-        {/* chrome */}
-        <header style={{ height: 48, display: "flex", alignItems: "center", gap: 18, padding: "0 16px", background: C.s1, borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 600 }}>
-            <span style={{ width: 16, height: 16, borderRadius: 4, background: "linear-gradient(135deg,#4ea1ff,#39d07a)", boxShadow: "0 0 12px rgba(78,161,255,0.45)" }} />Catalyst
-          </div>
-          <div className="cat-nav">
-            <Tabs value={view} onValueChange={(v) => setView(v as View)}>
-              <TabsList>
-                <TabsTrigger value="tickets">Tickets</TabsTrigger>
-                <TabsTrigger value="workers">Workers</TabsTrigger>
-                <TabsTrigger value="queue">Queue</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-          <span style={{ flex: 1 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11.5, color: C.fgMuted }}>
-            {data && <span style={{ display: "flex", alignItems: "center", gap: 6, color: C.fg }}><span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{data.config.active} active{data.config.stuck > 0 ? ` · ${data.config.stuck} stuck` : ""}</span>}
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
-            <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: status === "connected" ? C.green : C.red, border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{status === "connected" ? "LIVE" : "OFFLINE"}</span>
-          </div>
-        </header>
+        {/* CTL-930: in-board header (Catalyst swatch + Tabs nav + status cluster)
+            DELETED — the left sidebar is now the sole navigation and the app footer
+            carries the status cluster. The subhead carries only the view label,
+            description, display popover, and worker-grouping controls. */}
 
         {/* subhead */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
-          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : view === "workers" ? "Workers" : "Capacity & queue"}</h1>
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
+          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
+          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : "Workers the daemon has deployed — active vs stuck"}</span>
           <span style={{ flex: 1 }} />
-          {repos.length > 1 && <Seg value={repo} onChange={setRepo} options={[{ k: "all", label: "All" }, ...repos.map((r) => ({ k: r, label: r }))]} />}
           {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
               colorBy / repo-lanes) are folded into ONE Display-options popover —
               "density is a knob". The popover rides along in both the embedded
@@ -937,8 +912,7 @@ export function Board({
             // groupListRows, so NOT wrapped in SwimlaneBoard); "board" keeps the
             // untouched column kanban. Flipping back restores the kanban with the
             // SAME lens/filters/density/live cards — all live in shared atoms, never
-            // in BoardList. effectiveGroupBy carries the same "scoped-repo => flat"
-            // collapse the kanban lanes use.
+            // in BoardList.
             prefs.layout === "list" ? (
               <BoardList
                 kind="ticket"
@@ -946,15 +920,16 @@ export function Board({
                 lens={lens}
                 order={prefs.order}
                 density={prefs.density}
-                swimlane={effectiveGroupBy}
+                swimlane={swimlane}
                 onSelect={(id) => setSelectedTicketId(id)}
                 embedded={embedded}
               />
             ) : (
               <SwimlaneBoard
                 items={fTickets}
-                groupBy={effectiveGroupBy}
+                groupBy={swimlane}
                 fill
+                entityNoun="ticket"
                 renderBoard={(laneItems, laneFill) => (
                   <TicketBoard tickets={laneItems} groupBy={lens} colorBy={colorBy} density={prefs.density} order={prefs.order} showEmpty={prefs.showEmptyColumns} fill={laneFill} onSelect={(id) => setSelectedTicketId(id)} />
                 )}
@@ -969,14 +944,16 @@ export function Board({
             // inside each lane so host is not double-encoded (rows AND columns).
             <SwimlaneBoard
               items={nodeWorkers}
-              groupBy={effectiveGroupBy}
+              groupBy={swimlane}
               fill
+              entityNoun="worker"
               renderBoard={(laneItems, laneFill) => (
-                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={effectiveGroupBy === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
+                <WorkerBoard workers={laneItems} tickets={data.tickets} grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping} fill={laneFill} onWorkerSelect={onWorkerSelect} />
               )}
             />
           )}
-          {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
+          {/* CTL-930: queue view branch removed — Queue is now its own left-nav
+              destination (QueueSurface). Board view is narrowed to tickets|workers. */}
         </div>
         {selectedTicket && (
           <TicketDetailDrawer

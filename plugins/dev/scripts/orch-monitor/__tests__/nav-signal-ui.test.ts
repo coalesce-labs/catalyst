@@ -20,6 +20,8 @@ const UI_SRC = join(HERE, "..", "ui", "src");
 const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
 
 const sidebarSrc = read("components/app-sidebar.tsx");
+// CTL-930: health dots moved from sidebar footer to app-footer.tsx.
+const footerSrc = read("components/app-footer.tsx");
 
 /** Strip JS/JSX comments so token assertions can't be tripped by prose. */
 function stripComments(src: string): string {
@@ -29,6 +31,7 @@ function stripComments(src: string): string {
     .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
 }
 const sidebarCode = stripComments(sidebarSrc);
+const footerCode = stripComments(footerSrc);
 
 const signal = (overrides: Partial<NavSignal> = {}): NavSignal => ({
   workerCount: 0,
@@ -101,10 +104,12 @@ describe("nav-signal UI contract (CTL-896 / SHELL6)", () => {
     });
 
     it("wires the footer daemon-health dot to the signal (no hardcoded emerald)", () => {
-      expect(sidebarCode).toContain("daemonDotClass(nav.daemon)");
+      // CTL-930: health dots moved from app-sidebar.tsx to app-footer.tsx.
+      // The daemon dot lives in AppFooter; sidebar no longer needs daemonDotClass.
+      expect(footerCode).toContain("daemonDotClass(nav.daemon)");
       // The old SHELL1 footer hardcoded `bg-emerald-500` for the daemon dot;
       // SHELL6 must drive it off daemonDotClass, not a literal class.
-      expect(sidebarCode).not.toMatch(/rounded-full bg-emerald-500/);
+      expect(footerCode).not.toMatch(/rounded-full bg-emerald-500/);
     });
   });
 });

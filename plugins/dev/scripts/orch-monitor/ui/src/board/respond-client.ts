@@ -42,7 +42,7 @@ export interface VerbAction {
  *  live on hover / in the `⋯` overflow menu (Direction A: "demoted to hover /
  *  overflow"). This is the closed set the row's overflow renders. */
 export const OVERFLOW_ACTIONS = ["View in Claude", "Snooze", "Dismiss"] as const;
-export type OverflowAction = (typeof OVERFLOW_ACTIONS)[number];
+type OverflowAction = (typeof OVERFLOW_ACTIONS)[number];
 
 /**
  * The single primary verb action for a row, or null for the neutral
