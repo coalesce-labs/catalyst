@@ -182,6 +182,8 @@ import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
+// CTL-961: per-repo favicon auto-detection via GitHub API + disk cache.
+import { fetchRepoIcon } from "./lib/repo-icon-fetcher";
 import {
   createPrometheusFetcher,
   type PrometheusFetcher,
@@ -1188,6 +1190,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/config") {
           const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
           return Response.json(cfg);
+        }
+
+        // CTL-961: /api/repo-icon/<repoShortName> — auto-detect favicon from GitHub.
+        // Reads the owner/repo from the monitor config repoOwners map, probes common
+        // icon paths via `gh api`, caches the result for 7 days, returns a data URL.
+        // Fail-open: returns { found: false } (204) when not configured or not found.
+        if (url.pathname.startsWith("/api/repo-icon/")) {
+          const repoKey = url.pathname.slice("/api/repo-icon/".length).trim();
+          if (!repoKey || repoKey.includes("/")) {
+            return new Response("Bad repo key", { status: 400 });
+          }
+          const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
+          const ownerRepo = cfg.repoOwners[repoKey];
+          if (!ownerRepo) {
+            return Response.json({ found: false }, { status: 204 });
+          }
+          const cacheDir = join(CATALYST_DIR, "repo-icon-cache");
+          const result = await fetchRepoIcon(ownerRepo, cacheDir);
+          if (!result.found) return Response.json({ found: false }, { status: 204 });
+          return Response.json(result);
         }
 
         if (url.pathname === "/api/analytics") {
