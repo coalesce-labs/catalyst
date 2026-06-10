@@ -58,10 +58,10 @@
 
 import { execSync } from "node:child_process";
 
-// ── module-level state (reset hook for tests) ─────────────────────────────
-let _capturedThisBoot = new Set(); // de-dup within a single tick across calls
+// ── test reset hook (no-op: the boot-level de-dup set was removed in CTL-937 fix
+// after review found it was declared but never .add()ed or .has()-checked)
 export function __resetDiagnosticianForTests() {
-  _capturedThisBoot = new Set();
+  /* no-op — retained for test import compatibility */
 }
 
 // ── captureEvidence — deterministic evidence-collector (v1) ──────────────
@@ -133,7 +133,9 @@ function isWithinCooldown(db, subject, nowMs) {
 
 // ── recordWakeIntent — inserts a wake-diagnostician intent row.
 // This is what R10's "not recent_intent" check reads across ticks.
-function recordWakeIntent(db, tickId, subject, beliefId, evidence) {
+// Evidence is NOT stored here: the intent table has no evidence column.
+// CTL-828 (LLM diagnostician) should add evidence_json to the schema.
+function recordWakeIntent(db, tickId, subject, beliefId) {
   db.run(
     `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -261,7 +263,7 @@ export function processDiagnosticianWakes(db, tickId, opts = {}) {
         evidence.reason = reason;
 
         // ── record wake intent (the cooldown key for R10 and isWithinCooldown)
-        recordWakeIntent(db, tickId, subject, wb.belief_id, evidence);
+        recordWakeIntent(db, tickId, subject, wb.belief_id);
 
         ran.push({
           subject,
