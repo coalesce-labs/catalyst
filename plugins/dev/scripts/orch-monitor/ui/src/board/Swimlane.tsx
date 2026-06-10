@@ -1,5 +1,6 @@
 // Swimlane.tsx — generalized row swimlanes (BOARD3 / CTL-907), reworked into a
-// SHARED-HEADER · SINGLE-SCROLL board (CTL-950).
+// SHARED-HEADER · SINGLE-SCROLL board (CTL-950), refined to Linear's nuanced
+// scroll UX (CTL-958).
 //
 // BEFORE (CTL-907): each swimlane rendered its OWN full TicketBoard — its own
 // repeated column-header row AND its own horizontal overflow. Headers repeated
@@ -14,6 +15,25 @@
 // moves every group's columns together and they stay vertically aligned — EXACTLY
 // one horizontal scrollbar, at the bottom. axis="none" collapses to the single
 // shared-header column board (one synthetic lane, no group label).
+//
+// CTL-958 REFINEMENTS (Linear-style scroll UX):
+//   1. DUAL-STICKY GROUP LABEL: the group label chip (dot + name + count) is sticky
+//      on BOTH axes — top:HEADER_H (vertical) AND left:0 (horizontal). The outer
+//      row band (the full-width divider stripe) stays sticky-top only; the CHIP
+//      inside it adds left:0 so the group name stays pinned to the board's left
+//      edge during horizontal scroll, exactly as observed on Linear's live board.
+//      Column headers are sticky-top only (they scroll horizontally with columns).
+//   2. CONSTRAINED PER-CELL HEIGHT + OVERSCROLL CHAINING: when multiple groups are
+//      visible (axis !== none AND laneCount > 1), each (group × column) cell becomes
+//      a vertical scroll container — overflow-y:auto + max-height:var(--lane-cell-max)
+//      (≈ 2.6 cards). Critically, overscroll-behavior is NOT set to "contain" — the
+//      default "auto" lets wheel events chain to the board's vertical scroll once the
+//      cell reaches its boundary (revealing the next group). A short/empty cell
+//      passes the wheel straight to the board. The board remains the single both-
+//      axes scroll container; groups stack vertically inside it.
+//   3. axis="none" (single flat board): no group cells, no height constraint, the
+//      board scrolls normally. A single group (laneCount === 1) on a real axis
+//      also skips the height constraint so one lane doesn't get a tiny scroll box.
 //
 // The grouping logic itself still lives in the pure, unit-tested board-grouping.ts
 // (buildLanes / showLaneChrome); this file is the presentational shell that lays
@@ -44,6 +64,12 @@ const PAD_X = 16;
 // Sticky offset for the group-label row — it pins just below the column header
 // (header content + its vertical padding + the 1px rule ≈ 44px).
 const HEADER_H = 44;
+// CTL-958: CSS variable name for the per-cell max-height knob. The default
+// (≈ 2.6 comfortable cards × ~120px/card + gaps) is tuned so at least 2 groups
+// are visible at once on a typical 900–1080px viewport.
+// Exported for tests.
+export const LANE_CELL_MAX_VAR = "--lane-cell-max";
+export const LANE_CELL_MAX_DEFAULT = "300px";
 
 /** One shared header column — the lens phase/linear column the whole board aligns
  *  to. `count` / `live` are totals across ALL lanes (the header chip + live dot). */
@@ -99,8 +125,15 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
 }
 
 // ── a sticky group-label divider row ─────────────────────────────────────────
-// Spans the full board width, sticky just BELOW the column header so the group
-// name (e.g. "CTL 21") stays pinned while its cards scroll.
+// CTL-950: the outer band spans the full board width and is sticky-top (pins just
+// below the column header) so the group label holds position during vertical scroll.
+//
+// CTL-958 DUAL-STICKY: the CHIP (dot + name + count + hint) inside the band is
+// ALSO sticky-left:0 so it stays pinned to the board's LEFT edge during horizontal
+// scroll. Linear's behavior (verified 2026-06-10): after scrolling the board 700px
+// right the "ADVA" label held at the left edge while column headers scrolled away.
+// The outer band's full-width background scrolls, the chip does not.
+//
 // INVARIANT: cyan == live ONLY. degraded → amber, offline → muted (NEVER red —
 // red is reserved for stuck/failed). null (non-host axis / no overlay) → blue, no
 // liveness signal.
@@ -118,12 +151,10 @@ function GroupLabelRow({
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
   return (
+    // Outer band: sticky-TOP only — holds its row position during vertical scroll;
+    // scrolls horizontally with the column grid so the background fills the full width.
     <div
       style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: `10px ${PAD_X}px 8px`,
         position: "sticky",
         top: HEADER_H,
         zIndex: 2,
@@ -132,23 +163,40 @@ function GroupLabelRow({
         minWidth: "100%",
       }}
     >
-      <span
-        className={isLive ? "catalyst-live-dot" : undefined}
-        style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, display: "inline-block", flex: "0 0 auto" }}
-      />
-      <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.fg }}>{label}</span>
-      <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{count}</span>
-      {hint && (
-        <span style={{ fontSize: 11, color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>
-      )}
-      {live === "offline" && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>offline</span>
-          </TooltipTrigger>
-          <TooltipContent>No heartbeat within the liveness grace — last-synced truth shown (CTL-866)</TooltipContent>
-        </Tooltip>
-      )}
+      {/* Inner chip: ALSO sticky-LEFT:0 — pins the label to the board's left edge
+          during horizontal scroll (the dual-sticky behavior). The chip has its own
+          background so it paints over the band behind it as it holds position. */}
+      <div
+        data-swimlane-label="true"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 8,
+          padding: `10px ${PAD_X}px 8px`,
+          position: "sticky",
+          left: 0,
+          zIndex: 3,
+          background: C.s0,
+        }}
+      >
+        <span
+          className={isLive ? "catalyst-live-dot" : undefined}
+          style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, display: "inline-block", flex: "0 0 auto" }}
+        />
+        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.fg }}>{label}</span>
+        <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{count}</span>
+        {hint && (
+          <span style={{ fontSize: 11, color: C.fgMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{hint}</span>
+        )}
+        {live === "offline" && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>offline</span>
+            </TooltipTrigger>
+            <TooltipContent>No heartbeat within the liveness grace — last-synced truth shown (CTL-866)</TooltipContent>
+          </Tooltip>
+        )}
+      </div>
     </div>
   );
 }
@@ -158,7 +206,17 @@ function GroupLabelRow({
 // track aligned with the shared header. An empty cell shows the dashed "—"
 // placeholder so the lane reads as "nothing in this phase here" and the columns
 // stay visibly aligned across lanes.
-function LaneCardsRow({ cells }: { cells: LaneCell[] }) {
+//
+// CTL-958: when `constrainCells` is true each cell becomes a vertical scroll
+// container — overflow-y:auto + max-height:var(--lane-cell-max, 300px). This
+// shows ~2.6 cards per cell so multiple groups are visible at once. The cell's
+// overscroll-behavior is left at the browser default ("auto") intentionally:
+// this is the standard chaining behavior where wheel events that reach the
+// cell's scroll boundary are passed up to the board's vertical scroll (revealing
+// the next group). "contain" would block that hand-off — do NOT set it.
+// Short/empty cells (not independently scrollable) pass the wheel straight
+// to the board with no extra config needed.
+function LaneCardsRow({ cells, constrainCells = false }: { cells: LaneCell[]; constrainCells?: boolean }) {
   return (
     <div
       style={{
@@ -171,7 +229,27 @@ function LaneCardsRow({ cells }: { cells: LaneCell[] }) {
       }}
     >
       {cells.map((cell, i) => (
-        <div key={i} style={{ display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+        <div
+          key={i}
+          data-lane-cell="true"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            minWidth: 0,
+            // CTL-958: per-cell constrained height with overscroll chaining.
+            // Only applied when multiple groups are present (constrainCells=true).
+            ...(constrainCells
+              ? {
+                  overflowY: "auto",
+                  maxHeight: `var(${LANE_CELL_MAX_VAR}, ${LANE_CELL_MAX_DEFAULT})`,
+                  // overscroll-behavior: "auto" is the default — chains to the
+                  // parent board scroll at the cell boundary. Explicit for clarity.
+                  overscrollBehavior: "auto",
+                }
+              : {}),
+          }}
+        >
           {cell.count === 0 ? (
             <div style={{ color: C.fgDim, fontSize: 11.5, padding: "10px 0", border: `1px dashed ${C.borderSubtle}`, borderRadius: 8, textAlign: "center" }}>—</div>
           ) : (
@@ -191,7 +269,8 @@ function LaneCardsRow({ cells }: { cells: LaneCell[] }) {
 }
 
 /**
- * SwimlaneBoard — the shared-header, single-scroll swimlane board (CTL-950).
+ * SwimlaneBoard — the shared-header, single-scroll swimlane board (CTL-950),
+ * refined to Linear's nuanced scroll UX (CTL-958).
  *
  * `columns` is the SINGLE shared header column set (derived once over EVERY lane
  * combined by the caller). `deriveLane(laneItems)` distributes ONE lane's items
@@ -201,6 +280,14 @@ function LaneCardsRow({ cells }: { cells: LaneCell[] }) {
  * ALL lanes live inside ONE overflow-x:auto · overflow-y:auto container, so the
  * column header + every lane's cells scroll together on one horizontal axis and
  * stay vertically aligned — exactly one horizontal scrollbar at the bottom.
+ *
+ * CTL-958 scroll refinements:
+ *   - Group label chips are dual-sticky (top + left), pinning the label to the
+ *     board's left edge during horizontal scroll.
+ *   - When multiple groups are active (axis !== none AND laneCount > 1), each
+ *     (group × column) cell is height-constrained with overscroll-behavior:auto
+ *     so wheel events chain to the board's vertical scroll at the cell boundary.
+ *   - axis="none" and single-group boards scroll normally (no cell constraint).
  *
  * `fill`: standalone fills the shell board-var height; embedded fills its inset
  * slot (the var resolves to 100% there).
@@ -226,6 +313,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
+  // CTL-958: constrain cell heights only when multiple groups are present
+  // (axis !== "none" AND laneCount > 1). A single group or no-axis board
+  // scrolls normally — one lane should not get a tiny scroll box.
+  const constrainCells = groupBy !== "none" && lanes.length > 1;
 
   return (
     <div
@@ -254,7 +345,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                 />
-                <LaneCardsRow cells={cells} />
+                <LaneCardsRow cells={cells} constrainCells={constrainCells} />
               </Fragment>
             );
           })
