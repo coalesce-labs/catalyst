@@ -44,6 +44,7 @@ import { homedir, hostname } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
 import { evaluateBeliefs } from "./rules.mjs";
+import { reconcileIntents, getMaxAttempts } from "./intent.mjs";
 import { shortIdFromSessionId } from "../claude-ids.mjs";
 import { getAgentsCached } from "../claude-agents.mjs";
 import { readAllPhaseSignals } from "../signal-reader.mjs";
@@ -281,6 +282,11 @@ export function getBeliefsDb() {
 //
 // Sources: getAgents(), readSignals(), readJobState(bgJobId),
 // findTranscriptFn(sessionId), eventLogPath, linearCache ({get} or undefined).
+//
+// CTL-936 additions:
+//   intentsEnforce  — when true, reconcileIntents emits operator events and
+//                     suppresses ineffective channels. Default false (shadow).
+//   appendIntentEvent — the operator-event seam for intent.ineffective events.
 export function collectTickFacts({
   orchDir, // reserved: identifies the orchestrator; sources close over it
   db: injectedDb,
@@ -295,6 +301,8 @@ export function collectTickFacts({
   readJobState,
   findTranscriptFn,
   linearCache,
+  // CTL-936: intent reconciliation
+  appendIntentEvent = null,
 } = {}) {
   // Shadow gate FIRST — disabled must cost nothing (no db open, no clock read).
   if ((env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
@@ -479,10 +487,71 @@ export function collectTickFacts({
         fail("rules", err);
       }
 
+      // ── CTL-936: reconcile open intents against the world ─────────────────
+      // Runs AFTER evaluateBeliefs so R11 (action_ineffective) has already been
+      // derived from the PREVIOUS tick's open intents. This tick's reconciliation
+      // marks intents satisfied/ineffective so the NEXT tick's R11 sees them.
+      // Failure is isolated (shadow contract — never breaks the tick).
+      let intentResult;
+      try {
+        // Build a worldSnapshot from the data already collected this tick.
+        // agentsBySubject: ticket/phase → agent entry (or absent → session gone)
+        const agentsBySubject = (() => {
+          // Build a short_id → agent map from this tick's obs_agent rows.
+          const agentByShortId = new Map();
+          for (const a of agents) {
+            const sid = a?.sessionId ?? a?.session_id;
+            if (!sid) continue;
+            agentByShortId.set(shortIdOf(sid), { session_id: String(sid), short_id: shortIdOf(sid) });
+          }
+          // Map each signal's (ticket/phase) → its registered agent entry (or null).
+          const m = new Map();
+          for (const s of signals) {
+            if (!s?.ticket || s.phase == null) continue;
+            const bgJobId = s.liveness?.kind === "bg" ? s.liveness.value : null;
+            if (!bgJobId) continue;
+            const key = `${s.ticket}/${s.phase}`;
+            const agent = agentByShortId.get(bgJobId) ?? null;
+            if (agent) m.set(key, agent); // present → registered
+            // absent from map → key not in m → postcondition "session gone" satisfied
+          }
+          return m;
+        })();
+
+        // linearStateByTicket: ticket → Linear state string (or null)
+        const linearStateByTicket = (() => {
+          const m = new Map();
+          for (const s of signals) {
+            if (!s?.ticket || m.has(s.ticket)) continue;
+            let state = null;
+            if (linearCache?.get) {
+              try {
+                state = linearCache.get(s.ticket) ?? null;
+              } catch {
+                state = null;
+              }
+            }
+            m.set(s.ticket, state);
+          }
+          return m;
+        })();
+
+        const maxAttempts = getMaxAttempts(db);
+        const intentsEnforce = (env.CATALYST_INTENTS_ENFORCE ?? "0") === "1";
+        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket }, {
+          maxAttempts,
+          enforce: intentsEnforce,
+          appendEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
+          now,
+        });
+      } catch (err) {
+        fail("intents", err);
+      }
+
       if (shouldPrune) pruneRetention(db, now);
 
       db.run("COMMIT");
-      return { ok: true, tickId, errors, beliefsInserted };
+      return { ok: true, tickId, errors, beliefsInserted, intentResult };
     } catch (err) {
       try {
         db.run("ROLLBACK");
