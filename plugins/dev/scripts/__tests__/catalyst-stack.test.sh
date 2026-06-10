@@ -159,6 +159,55 @@ run "restart exits 0" bash -c "
   PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' restart >/dev/null 2>&1
 "
 
+# ── CTL-946: proxy env-injection assertions ───────────────────────────────────
+# A stub that records its env to a file, so we can assert what the daemon sees.
+
+STUBDIR_ENVLOG="${SCRATCH}/stubs_envlog"
+make_stubs "$STUBDIR_ENVLOG"
+# Overwrite execution-core stub: report stopped on status (so start_daemon proceeds),
+# then log env on any other invocation (start) and succeed.
+cat > "$STUBDIR_ENVLOG/catalyst-execution-core" <<EOF
+#!/usr/bin/env bash
+case "\${1:-}" in
+  status) echo "stopped"; exit 0 ;;
+  *) env > "${SCRATCH}/daemon.env"; echo "running"; exit 0 ;;
+esac
+EOF
+chmod +x "$STUBDIR_ENVLOG/catalyst-execution-core"
+# Provide mitmdump so --proxy can proceed (pgrep won't find it running, so start proceeds).
+cat > "$STUBDIR_ENVLOG/mitmdump" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$STUBDIR_ENVLOG/mitmdump"
+# Fake CA cert so the CA-missing guard doesn't block.
+mkdir -p "${SCRATCH}/fake_mitm_home/.mitmproxy"
+touch "${SCRATCH}/fake_mitm_home/.mitmproxy/mitmproxy-ca-cert.pem"
+# Fake mitm_linear_addon.py (catalyst-stack copies from vendored if not at MITM_ADDON).
+mkdir -p "${SCRATCH}/fake_mitm_home/catalyst"
+touch "${SCRATCH}/fake_mitm_home/catalyst/mitm_linear_addon.py"
+
+run "default start injects no HTTPS_PROXY into daemon env (CTL-946)" bash -c "
+  rm -f '${SCRATCH}/daemon.env'
+  PATH='${STUBDIR_ENVLOG}:${REAL_PATH}' \
+    HOME='${SCRATCH}/fake_mitm_home' \
+    '${STACK}' start >/dev/null 2>&1 || true
+  # HTTPS_PROXY must be absent from the env the daemon process sees
+  ! grep -q '^HTTPS_PROXY=' '${SCRATCH}/daemon.env' 2>/dev/null
+"
+
+run "--proxy start injects HTTPS_PROXY into daemon env (CTL-946)" bash -c "
+  rm -f '${SCRATCH}/daemon.env'
+  HOME='${SCRATCH}/fake_mitm_home' \
+    PATH='${STUBDIR_ENVLOG}:${REAL_PATH}' \
+    '${STACK}' start --proxy >/dev/null 2>&1 || true
+  grep -q '^HTTPS_PROXY=' '${SCRATCH}/daemon.env' 2>/dev/null
+"
+
+run "--proxy start injects NO_PROXY with anthropic.com into daemon env (CTL-946)" bash -c "
+  grep -q 'anthropic\.com' '${SCRATCH}/daemon.env' 2>/dev/null
+"
+
 # ── Addon portability tests ───────────────────────────────────────────────────
 
 ADDON="${REPO_ROOT}/plugins/dev/scripts/mitm_linear_addon.py"

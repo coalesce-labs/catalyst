@@ -34,11 +34,16 @@ Opt-in to Linear traffic capture via mitmproxy. When passed, `catalyst-stack` wi
 1. Verify `mitmdump` is installed (offer `brew install mitmproxy` if absent).
 2. Generate the mitmproxy CA cert at `~/.mitmproxy/mitmproxy-ca-cert.pem` if missing.
 3. Copy the vendored addon to `~/catalyst/mitm_linear_addon.py` if absent.
-4. Start mitmproxy, then set `HTTPS_PROXY` / `NODE_USE_ENV_PROXY` / `NODE_EXTRA_CA_CERTS` for the execution-core daemon.
+4. Start mitmproxy, then set `HTTPS_PROXY` / `NODE_USE_ENV_PROXY` / `NODE_EXTRA_CA_CERTS` /
+   `NO_PROXY=api.anthropic.com,...` as an **inline env prefix** for the execution-core daemon.
 
-Traffic is logged to `~/catalyst/linear-proxy.jsonl` (one JSON record per Linear API response, including rate-limit headers and caller attribution).
+Traffic is logged to `~/catalyst/linear-proxy.jsonl` (one JSON record per Linear API response,
+including rate-limit headers and caller attribution).
 
-Proxy is **off by default**. The daemon runs correctly without it — you only need `--proxy` when you want Linear traffic logging.
+Proxy is **off by default**. The daemon runs correctly without it — use `--proxy` only for short
+diagnostic windows (e.g. investigating Linear rate-limiting). The proxy vars are never written to
+disk; a plain `catalyst-stack restart` removes them. `NO_PROXY` ensures Claude worker API calls
+bypass the proxy even if mitmdump hiccups.
 
 ### `--no-proxy`
 
