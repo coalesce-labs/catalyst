@@ -33,12 +33,17 @@ export const LINEAR_COLUMNS: readonly BoardColumnDef[] = [
   { key: "Done", label: "Done", c: "#6b7280" },
 ];
 
+// CTL-972: PHASE_COLUMNS includes the ancillary 'remediate' phase between
+// verify and review. Remediate is not in PHASE_ORDER (the linear pipeline) but
+// is a real phase-agent type that cycles with verify; its color matches Board.tsx
+// PHASE_C.remediate (#d98ab2, already defined there).
 export const PHASE_COLUMNS: readonly BoardColumnDef[] = [
   { key: "triage", label: "Triage", c: "#64748b" },
   { key: "research", label: "Research", c: "#3b82f6" },
   { key: "plan", label: "Plan", c: "#a855f7" },
   { key: "implement", label: "Implement", c: "#10b981" },
   { key: "verify", label: "Verify", c: "#f59e0b" },
+  { key: "remediate", label: "Remediate", c: "#d98ab2" },
   { key: "review", label: "Review", c: "#eab308" },
   { key: "pr", label: "PR", c: "#14b8a6" },
   { key: "monitor-merge", label: "Merge", c: "#4ea1ff" },

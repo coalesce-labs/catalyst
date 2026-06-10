@@ -217,10 +217,23 @@ export const fmtMsAgo = (ms: number) => {
 
 // CTL-930 Phase 5: live keyframes hoisted to app.css (available on all surfaces).
 // PULSE_CSS retains only the board-local scroll styling.
+// CTL-973: bump nudge classes — translateX applied by the wheel guard when the
+// user's 2-finger swipe hits the left/right scroll boundary. The quick snap-back
+// (cubic-bezier jolt) is the visual analog of the iOS rubber-band that the CSS
+// contain alone can't provide in Safari. Gated on prefers-reduced-motion: under
+// reduce, the translateX is 0 (no motion) and only the edge shadow remains.
 const PULSE_CSS = `
 .cat-scroll::-webkit-scrollbar { width:9px; height:9px; }
 .cat-scroll::-webkit-scrollbar-thumb { background:${C.s4}; border-radius:6px; }
 .cat-scroll::-webkit-scrollbar-track { background:transparent; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .cat-board-bump-left  { transform: translateX(4px);  transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+  .cat-board-bump-right { transform: translateX(-4px); transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cat-board-bump-left, .cat-board-bump-right { transform: none; }
+}
 `;
 
 // ── domain viz (hand-rolled per DESIGN.md) ──────────────────────────────────
@@ -1197,7 +1210,19 @@ export function Board({
         {/* subhead */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : "Workers the daemon has deployed — active vs stuck"}</span>
+          {/* CTL-972: lens-aware tagline + quiet active-lens indicator */}
+          <span style={{ color: C.fgMuted, fontSize: 12 }}>
+            {view === "tickets"
+              ? lens === "phase"
+                ? "Which phase-agent is working each ticket · cyan = live worker"
+                : "Linear stage for each ticket · cyan = a worker is live on it now"
+              : "Workers the daemon has deployed — active vs stuck"}
+          </span>
+          {view === "tickets" && (
+            <span style={{ fontSize: 11, color: C.fgDim, background: C.s1, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 6px", whiteSpace: "nowrap" }}>
+              {lens === "phase" ? "Pipeline phase" : "Linear stage"}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
           {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
               colorBy / repo-lanes) are folded into ONE Display-options popover —

@@ -186,6 +186,10 @@ export interface BoardPayload {
 }
 
 export const PHASE_ORDER: string[];
+/** CTL-972: the ancillary remediate phase — not in PHASE_ORDER (cycles with
+ *  verify), but a real phase-agent type. Used by derivePhaseWithRemediate to
+ *  unify ticket.phase with the worker/queue's phase-agent-type value. */
+export const REMEDIATE_PHASE: string;
 export const PHASE_TO_LINEAR: Record<string, string>;
 export const TERMINAL: Set<string>;
 /** CTL-928: the `claude --bg` job-lifecycle terminal `state` values (distinct from
@@ -259,6 +263,15 @@ export function laneFor(ticket: {
 }): BoardLane;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
 export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
+/** CTL-972: derive a ticket's current phase, overlaying the remediate signal on
+ *  top of the PHASE_ORDER-based result. Returns phase='remediate' when the
+ *  remediate agent is active (non-terminal) OR when remediate was the most-recently-
+ *  active phase (terminal but more recent than the base phase). Returns the
+ *  deriveCurrentPhase result unchanged when remediateSig is null/absent. PURE. */
+export function derivePhaseWithRemediate(
+  phaseSigs: unknown[],
+  remediateSig: unknown | null | undefined,
+): BoardCurrentPhase;
 /** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767). */
 export function synthesizeQueuedTicket(
   eligible: unknown,

@@ -1,6 +1,7 @@
 // Swimlane.tsx — generalized row swimlanes (BOARD3 / CTL-907), reworked into a
 // SHARED-HEADER · SINGLE-SCROLL board (CTL-950), refined to Linear's nuanced
-// scroll UX (CTL-958).
+// scroll UX (CTL-958), and protected from browser back/forward swipe hijack
+// (CTL-973).
 //
 // BEFORE (CTL-907): each swimlane rendered its OWN full TicketBoard — its own
 // repeated column-header row AND its own horizontal overflow. Headers repeated
@@ -35,11 +36,28 @@
 //      board scrolls normally. A single group (laneCount === 1) on a real axis
 //      also skips the height constraint so one lane doesn't get a tiny scroll box.
 //
+// CTL-973 SWIPE FIX — prevents browser back/forward navigation on 2-finger swipe:
+//   Layer 1 — CSS: `overscroll-behavior-x: contain` on the scroll container. The Y
+//     axis is left at "auto" (default) so per-cell overscroll chaining (CTL-958 #2)
+//     is unaffected. `contain` keeps the native rubber-band deceleration on Chrome/
+//     Edge/Firefox; `none` would silently kill that affordance. CAVEAT: WebKit bug
+//     240183 means `contain` does NOT prevent the two-finger history swipe in macOS
+//     Safari — the wheel guard (Layer 2) is the authoritative cross-browser fix.
+//   Layer 2 — JS wheel guard: a non-passive `wheel` listener on the scroll container.
+//     When `|deltaX| > |deltaY|` (primarily horizontal) AND the container is at its
+//     left/right edge (2px tolerance for float jitter), `e.preventDefault()` blocks
+//     the browser's swipe-navigation intent. Must be `{ passive: false }` — browsers
+//     default wheel to passive:true which makes preventDefault() a no-op.
+//   Layer 3 — Bump affordance: edge shadow gradient (CSS, degrades in Safari) + a
+//     subtle `translateX` nudge when the wheel guard fires at the edge. The nudge is
+//     gated on `prefers-reduced-motion: no-preference`; the shadow is static and
+//     always shown.
+//
 // The grouping logic itself still lives in the pure, unit-tested board-grouping.ts
 // (buildLanes / showLaneChrome); this file is the presentational shell that lays
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE } from "./board-tokens";
@@ -59,6 +77,28 @@ import {
 // grid tracks and scroll as one. The board height reads the shell --cat-board-vh
 // var minus the subhead offset, exactly as the prior BoardScroll did.
 const COL_W = 300;
+
+// ── CTL-973 swipe-fix constants ───────────────────────────────────────────────
+// Exported for test assertions (see swimlane-scroll.test.ts).
+
+/** The overscroll-behavior-x value on the board scroll container (X axis only).
+ *  "contain" keeps the macOS rubber-band elastic deceleration while blocking the
+ *  browser's back/forward navigation intent. "none" would kill the rubber-band.
+ *  NOTE: Safari bug 240183 means this alone is insufficient — the wheel guard
+ *  (useBoardSwipeGuard) is the authoritative cross-browser fix. */
+export const BOARD_SCROLL_OVERSCROLL_X = "contain" as const;
+
+/** Edge tolerance (px) for the wheel guard boundary check. Absorbs floating-point
+ *  jitter from inertia-based trackpad scrolling so the guard fires reliably. */
+export const SWIPE_EDGE_TOLERANCE = 2;
+
+/** CSS class applied to the board container for the `translateX` bump nudge when
+ *  the wheel guard fires at the left/right edge. Gated on prefers-reduced-motion. */
+export const BOARD_BUMP_CLASS_LEFT = "cat-board-bump-left";
+export const BOARD_BUMP_CLASS_RIGHT = "cat-board-bump-right";
+
+/** Duration (ms) the bump class is held before being removed. */
+export const BOARD_BUMP_DURATION_MS = 150;
 const COL_GAP = 16;
 const PAD_X = 16;
 // Sticky offset for the group-label row — it pins just below the column header
@@ -268,6 +308,57 @@ function LaneCardsRow({ cells, constrainCells = false }: { cells: LaneCell[]; co
   );
 }
 
+// ── CTL-973: wheel guard + bump affordance ────────────────────────────────────
+// Attaches a non-passive `wheel` listener to `scrollRef.current`. When the gesture
+// is primarily horizontal (|deltaX| > |deltaY|) AND the container is at its left or
+// right scroll boundary (within SWIPE_EDGE_TOLERANCE px), calls e.preventDefault()
+// to block the browser's swipe-navigation intent, then briefly applies the bump
+// class to `bumpRef.current` for the translateX nudge affordance.
+//
+// Must use `{ passive: false }` — browsers default wheel listeners to passive:true
+// which silently ignores preventDefault(). Cleans up on unmount.
+function useBoardSwipeGuard(
+  scrollRef: React.RefObject<HTMLDivElement | null>,
+  bumpRef: React.RefObject<HTMLDivElement | null>,
+): void {
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let bumpTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const onWheel = (e: WheelEvent) => {
+      // Only intercept primarily-horizontal gestures.
+      if (Math.abs(e.deltaX) <= Math.abs(e.deltaY)) return;
+      const { scrollLeft, scrollWidth, clientWidth } = el;
+      const atLeft = scrollLeft <= SWIPE_EDGE_TOLERANCE;
+      const atRight = scrollLeft >= scrollWidth - clientWidth - SWIPE_EDGE_TOLERANCE;
+      if (!atLeft && !atRight) return;
+      e.preventDefault();
+      // Bump affordance: apply the class, clear after BOARD_BUMP_DURATION_MS.
+      const bump = bumpRef.current;
+      if (bump) {
+        const cls = atLeft && e.deltaX < 0 ? BOARD_BUMP_CLASS_LEFT
+          : atRight && e.deltaX > 0 ? BOARD_BUMP_CLASS_RIGHT
+          : null;
+        if (cls) {
+          bump.classList.add(cls);
+          if (bumpTimer) clearTimeout(bumpTimer);
+          bumpTimer = setTimeout(() => {
+            bump.classList.remove(cls);
+            bumpTimer = null;
+          }, BOARD_BUMP_DURATION_MS);
+        }
+      }
+    };
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      if (bumpTimer) clearTimeout(bumpTimer);
+    };
+  }, [scrollRef, bumpRef]);
+}
+
 /**
  * SwimlaneBoard — the shared-header, single-scroll swimlane board (CTL-950),
  * refined to Linear's nuanced scroll UX (CTL-958).
@@ -318,18 +409,82 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // scrolls normally — one lane should not get a tiny scroll box.
   const constrainCells = groupBy !== "none" && lanes.length > 1;
 
+  // CTL-973: refs for the swipe guard + bump affordance.
+  // `scrollRef` points at the overflow container (the wheel listener target).
+  // `bumpRef` points at the inner content div (the element that receives the
+  // translateX nudge class — translating the scroll container itself would
+  // cause a layout shift, so we nudge the inner block instead).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const bumpRef = useRef<HTMLDivElement | null>(null);
+  useBoardSwipeGuard(scrollRef, bumpRef);
+
+  // Shadow visibility state: tracks whether the board has scrollable overflow
+  // on either side, so we can show left/right edge shadows without scroll-
+  // driven animations (which degrade in Safari). Updated on scroll + resize.
+  const [shadows, setShadows] = useState<{ left: boolean; right: boolean }>({ left: false, right: false });
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => {
+      const { scrollLeft, scrollWidth, clientWidth } = el;
+      setShadows({
+        left: scrollLeft > SWIPE_EDGE_TOLERANCE,
+        right: scrollLeft < scrollWidth - clientWidth - SWIPE_EDGE_TOLERANCE,
+      });
+    };
+    update();
+    el.addEventListener("scroll", update, { passive: true });
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => {
+      el.removeEventListener("scroll", update);
+      ro.disconnect();
+    };
+  }, []);
+
   return (
     <div
-      className="cat-scroll"
+      ref={scrollRef}
+      className="cat-scroll cat-board-scroll"
+      data-board-scroll="true"
       style={{
         overflowX: "auto",
         overflowY: "auto",
+        // CTL-973 Layer 1: contain the X overscroll to block browser swipe-navigation
+        // on Chrome/Edge/Firefox. Y axis stays "auto" (default) so per-cell overscroll
+        // chaining (CTL-958 #2) continues to work. Safari bug 240183 means this alone
+        // is not sufficient — the wheel guard above is the authoritative fix.
+        overscrollBehaviorX: BOARD_SCROLL_OVERSCROLL_X,
+        overscrollBehaviorY: "auto",
         height: fill ? "calc(var(--cat-board-vh, 100vh) - 104px)" : "auto",
+        position: "relative",
       }}
     >
+      {/* CTL-973 Layer 3: left/right edge shadow affordances. Rendered as
+          position:sticky pseudo-elements via a wrapper div so the shadow
+          travels with the viewport during scroll without needing JS. The
+          gradient fades from the board background color to transparent.
+          Visibility is driven by the scroll-position state. */}
+      {shadows.left && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: "sticky",
+            left: 0,
+            top: 0,
+            width: 32,
+            height: "100%",
+            pointerEvents: "none",
+            zIndex: 10,
+            float: "left",
+            background: `linear-gradient(to right, ${C.s0}cc 0%, transparent 100%)`,
+            marginRight: -32,
+          }}
+        />
+      )}
       {/* the inner block sizes to the full column run (max-content) so the single
           overflow-x container scrolls the header + every lane together. */}
-      <div style={{ width: "max-content", minWidth: "100%" }}>
+      <div ref={bumpRef} style={{ width: "max-content", minWidth: "100%" }}>
         <ColumnHeaderRow columns={columns} />
         {/* axis="none" (and the empty-on-a-real-axis fallthrough) → one synthetic
             lane, no group label. Real axis → a sticky group-label divider per lane,
@@ -353,6 +508,23 @@ export function SwimlaneBoard<T extends GroupableEntity>({
           <LaneCardsRow cells={deriveLane(lanes[0]?.items ?? items)} />
         )}
       </div>
+      {shadows.right && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: "sticky",
+            right: 0,
+            top: 0,
+            width: 32,
+            height: "100%",
+            pointerEvents: "none",
+            zIndex: 10,
+            float: "right",
+            background: `linear-gradient(to left, ${C.s0}cc 0%, transparent 100%)`,
+            marginLeft: -32,
+          }}
+        />
+      )}
     </div>
   );
 }

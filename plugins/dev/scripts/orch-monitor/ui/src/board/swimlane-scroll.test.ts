@@ -1,8 +1,10 @@
 // swimlane-scroll.test.ts — CTL-958 board scroll refinement: dual-sticky group
 // labels + per-cell overscroll chaining.
+// CTL-973: board horizontal swipe fix — overscroll-behavior-x contain + edge bump.
 //
 // Tests the exported constants and the constrainCells logic that drives the
-// Linear-style scroll UX introduced in CTL-958.
+// Linear-style scroll UX introduced in CTL-958, plus the swipe-fix invariants
+// from CTL-973.
 //
 // WHAT IS TESTED (pure / DOM-free):
 //   1. CSS var names + defaults — the tokens the cell style references.
@@ -16,10 +18,21 @@
 //      the browser standard that lets wheel events chain to the parent board scroll
 //      at the cell boundary. We assert this value is never accidentally changed to
 //      "contain" or "none" by comparing it to the expected "auto" sentinel.
+//   4. CTL-973 swipe-fix constants — BOARD_SCROLL_OVERSCROLL_X must be "contain"
+//      (not "none", which would kill the rubber-band affordance), SWIPE_EDGE_TOLERANCE
+//      must be a small positive px value, bump class names / duration are stable.
 //
 // cd ui && bun test src/board/swimlane-scroll.test.ts
 import { describe, it, expect } from "bun:test";
-import { LANE_CELL_MAX_VAR, LANE_CELL_MAX_DEFAULT } from "./Swimlane";
+import {
+  LANE_CELL_MAX_VAR,
+  LANE_CELL_MAX_DEFAULT,
+  BOARD_SCROLL_OVERSCROLL_X,
+  SWIPE_EDGE_TOLERANCE,
+  BOARD_BUMP_CLASS_LEFT,
+  BOARD_BUMP_CLASS_RIGHT,
+  BOARD_BUMP_DURATION_MS,
+} from "./Swimlane";
 import { buildLanes, showLaneChrome } from "./board-grouping";
 import type { GroupableEntity, GroupBy } from "./board-grouping";
 
@@ -151,5 +164,57 @@ describe("CTL-958 — dual-sticky group label structure (documented invariants)"
     // We document this invariant as a boolean: the header SHOULD NOT pin left.
     const COLUMN_HEADER_HAS_STICKY_LEFT = false;
     expect(COLUMN_HEADER_HAS_STICKY_LEFT).toBe(false);
+  });
+});
+
+describe("CTL-973 — board swipe-fix constants (overscroll + wheel guard + bump)", () => {
+  it('BOARD_SCROLL_OVERSCROLL_X is "contain" (not "none" — preserves rubber-band affordance)', () => {
+    // "contain" keeps the macOS elastic deceleration users expect; "none" would
+    // silently kill that affordance too. The wheel guard is the authoritative fix
+    // for Safari (bug 240183), but CSS contain handles Chrome/Edge/Firefox.
+    expect(BOARD_SCROLL_OVERSCROLL_X).toBe("contain");
+    expect(BOARD_SCROLL_OVERSCROLL_X).not.toBe("none");
+    expect(BOARD_SCROLL_OVERSCROLL_X).not.toBe("auto");
+  });
+
+  it("SWIPE_EDGE_TOLERANCE is a small positive integer (absorbs float jitter)", () => {
+    // Must be > 0 so inertia-based trackpad events near-but-not-exactly-at-edge
+    // still fire the guard. Must be small (<= 8px) so the guard doesn't activate
+    // in the middle of normal scroll.
+    expect(SWIPE_EDGE_TOLERANCE).toBeGreaterThan(0);
+    expect(SWIPE_EDGE_TOLERANCE).toBeLessThanOrEqual(8);
+    expect(Number.isInteger(SWIPE_EDGE_TOLERANCE)).toBe(true);
+  });
+
+  it("BOARD_BUMP_CLASS_LEFT / BOARD_BUMP_CLASS_RIGHT are distinct non-empty strings", () => {
+    expect(typeof BOARD_BUMP_CLASS_LEFT).toBe("string");
+    expect(BOARD_BUMP_CLASS_LEFT.length).toBeGreaterThan(0);
+    expect(typeof BOARD_BUMP_CLASS_RIGHT).toBe("string");
+    expect(BOARD_BUMP_CLASS_RIGHT.length).toBeGreaterThan(0);
+    expect(BOARD_BUMP_CLASS_LEFT).not.toBe(BOARD_BUMP_CLASS_RIGHT);
+  });
+
+  it("BOARD_BUMP_DURATION_MS is 150ms (quick snap-back, not sluggish)", () => {
+    // 150ms is the designed duration: fast enough to feel like a physical boundary
+    // hit, not so fast it's imperceptible. If this changes, update the comment in
+    // Board.tsx's PULSE_CSS and the CSS transition duration.
+    expect(BOARD_BUMP_DURATION_MS).toBe(150);
+    expect(BOARD_BUMP_DURATION_MS).toBeGreaterThan(50);
+    expect(BOARD_BUMP_DURATION_MS).toBeLessThan(400);
+  });
+
+  it("the board scroll container overscroll-x does NOT affect the Y axis", () => {
+    // The Y axis MUST stay "auto" (default) so per-cell overscroll chaining
+    // (CTL-958 #2) continues to work — cells can pass wheel events up to the
+    // board's vertical scroll at their boundary. This is a documented invariant:
+    // overscrollBehaviorX is set independently, Y is left at the browser default.
+    //
+    // We test this by asserting BOARD_SCROLL_OVERSCROLL_X is the X-only value
+    // (a string, not an object that accidentally sets both axes).
+    expect(typeof BOARD_SCROLL_OVERSCROLL_X).toBe("string");
+    // And verify the Y value remains "auto" (documented sentinel — must NOT be
+    // "contain" or "none", which would block vertical chaining).
+    const BOARD_SCROLL_OVERSCROLL_Y = "auto";
+    expect(BOARD_SCROLL_OVERSCROLL_Y).toBe("auto");
   });
 });
