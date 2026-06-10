@@ -57,6 +57,18 @@ import {
   resolvePeerBaseUrl,
   proxyRemoteTail,
 } from "./lib/cross-node-stream.mjs";
+// CTL-938: the live SCREEN tail — the PRE-transcript wedge window. `claude logs
+// <shortId>` dumps a bg session's rendered screen buffer (the only surface that
+// shows WHY a session idles before any transcript exists — e.g. the
+// "Unknown command: /catalyst-dev:phase-plan" wedge). No follow flag exists, so
+// /api/ec-worker-screen/<shortId> polls every SCREEN_POLL_MS, ANSI-normalizes,
+// diffs, and pushes only CHANGED full-screen frames over SSE.
+import {
+  ScreenPoller,
+  deriveScreenShortId,
+  SCREEN_POLL_MS,
+} from "./lib/ec-worker-screen.mjs";
+import type { ScreenLogsExec } from "./lib/ec-worker-screen.mjs";
 import { hostName } from "./lib/canonical-event-shared.ts";
 // CTL-890 (BFF8): the read-model's ONE destructive endpoint (design P10) —
 // POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
@@ -277,6 +289,16 @@ export interface CreateServerOptions {
    * deterministic ClusterView so the routes don't read the live event log/roster.
    */
   clusterReader?: ((board: BoardPayload) => ClusterView | Promise<ClusterView>) | null;
+  /**
+   * CTL-938: override for the `claude logs <shortId>` runner that feeds the
+   * live SCREEN SSE (/api/ec-worker-screen/<shortId>) — the pre-transcript
+   * wedge window. Production spawns the real claude CLI (defaultClaudeLogsExec);
+   * tests inject a scripted fake so no subprocess is ever forked.
+   */
+  screenLogsExec?: ScreenLogsExec | null;
+  /** CTL-938: screen poll cadence override (default SCREEN_POLL_MS ≈ 2s). Tests
+   *  shrink it so the SSE assertions don't wait multiple seconds per frame. */
+  screenPollMs?: number;
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
@@ -626,6 +648,8 @@ export function createServer(opts: CreateServerOptions): BunServer {
     linearWebhookConfig,
     daemonHealthReader: daemonHealthReaderOpt,
     clusterReader: clusterReaderOpt,
+    screenLogsExec: screenLogsExecOpt,
+    screenPollMs = SCREEN_POLL_MS,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -2596,6 +2620,127 @@ export function createServer(opts: CreateServerOptions): BunServer {
               );
               pump();
               timer = setInterval(pump, 750);
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-938: the live SCREEN SSE — the PRE-transcript wedge window. Given
+        // a worker's bg shortId (or full job UUID), poll `claude logs <shortId>`
+        // every screenPollMs, ANSI-normalize, diff against the last snapshot,
+        // and push only CHANGED frames (each carrying the FULL screen, never a
+        // delta — frames are droppable, so a slow client just paints the latest
+        // one). Terminal outcomes close the stream: session gone → `gone`
+        // event, claude CLI unusable → `unavailable` event. The FIRST poll runs
+        // before the SSE handshake so a dead session is an HTTP status (404 /
+        // 503), not an empty stream the client must time out on.
+        const ecWorkerScreenMatch = url.pathname.match(
+          /^\/api\/ec-worker-screen\/([^/]+)$/,
+        );
+        if (ecWorkerScreenMatch) {
+          let rawId: string;
+          try {
+            rawId = decodeURIComponent(ecWorkerScreenMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // `claude logs` only accepts the 8-char short form; deriveScreenShortId
+          // also truncates a full job UUID. null = malformed → nothing ever
+          // reaches the exec fn (no arbitrary string ever hits a subprocess).
+          const screenShortId = deriveScreenShortId(rawId);
+          if (!screenShortId) {
+            return new Response("Bad Request", { status: 400 });
+          }
+
+          const poller = new ScreenPoller(screenShortId, {
+            exec: screenLogsExecOpt ?? undefined,
+          });
+          const first = await poller.poll();
+          if (first.kind === "gone") {
+            return new Response("Not Found", { status: 404 });
+          }
+          if (first.kind === "unavailable") {
+            return new Response("Service Unavailable", { status: 503 });
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const close = () => {
+                if (closed) return;
+                closed = true;
+                if (timer) clearInterval(timer);
+                timer = null;
+                try {
+                  controller.close();
+                } catch {
+                  /* already closed */
+                }
+              };
+              const emit = (event: string, data: unknown) => {
+                if (closed) return;
+                try {
+                  controller.enqueue(
+                    encoder.encode(
+                      `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+                    ),
+                  );
+                } catch {
+                  // client went away mid-enqueue — stop polling immediately
+                  close();
+                }
+              };
+              emit("open", { shortId: screenShortId });
+              if (first.kind === "frame") {
+                emit("screen", { screen: first.screen, ts: Date.now() });
+              }
+              // Backpressure: skip the tick while a poll is in flight (a slow
+              // `claude logs` never queues a pile-up — intermediate frames are
+              // simply never produced; the next completed poll diffs against
+              // the latest screen).
+              const pump = () => {
+                if (inFlight || closed) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const res = await poller.poll();
+                    if (closed) return;
+                    if (res.kind === "frame") {
+                      emit("screen", { screen: res.screen, ts: Date.now() });
+                    } else if (res.kind === "gone") {
+                      emit("gone", { reason: res.reason });
+                      close();
+                    } else if (res.kind === "unavailable") {
+                      emit("unavailable", { reason: res.reason });
+                      close();
+                    }
+                    // "unchanged" → nothing on the wire (change-driven); the
+                    // client derives the frozen-screen age from its own clock.
+                  } catch {
+                    close();
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              timer = setInterval(pump, screenPollMs);
+              // Interval cleanup on client abort — Bun fires req.signal when
+              // the EventSource disconnects, in addition to stream cancel().
+              req.signal.addEventListener("abort", close);
             },
             cancel() {
               closed = true;
