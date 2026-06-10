@@ -16,9 +16,10 @@
 //
 // ticket_state takes precedence (it is the freshest Linear-truth descriptor);
 // the eligible projection fills gaps (notably `project`, which ticket_state does
-// not store). `estimate` lives in neither durable cache, so it degrades to null
-// rather than being re-fetched — the read-model never fabricates a value and
-// never re-opens the live path (CTL-883: cache-only, breaker-safe by design).
+// not store). `estimate` is projected into ticket_state from Linear webhooks
+// (CTL-957) — it is a real numeric value when the broker has received an
+// estimate-carrying event, or honest null otherwise. No live refetch is ever
+// performed (CTL-883: cache-only, breaker-safe by design).
 //
 // The Linear circuit breaker (execution-core/linear-breaker.mjs) is honored by
 // construction: this module spawns NOTHING, so an OPEN breaker cannot be tripped
@@ -80,8 +81,10 @@ async function readTicketStateById(dbPath) {
     for (const d of getAllTicketDescriptors()) {
       byId[d.ticket] = {
         priority: normPriority(d.priority),
-        // estimate is NOT in the durable cache — honest null, never refetched.
-        estimate: null,
+        // CTL-957: estimate is NOW in ticket_state (projected from Linear webhooks).
+        // null when the broker has not yet received an estimate-carrying event for
+        // this ticket (older rows, or a ticket never touched by the webhook path).
+        estimate: typeof d.estimate === "number" ? d.estimate : null,
         project: null, // ticket_state has no project column; eligible fills it.
         labels: Array.isArray(d.labels) ? d.labels.filter(Boolean) : [],
         relations: d.relations ?? null,
@@ -136,6 +139,10 @@ async function readEligibleById(eligibleDir) {
           if (!id) continue;
           byId[id] = {
             priority: normPriority(t.priority),
+            // CTL-957: estimate from the eligible projection (normalized by
+            // linear-query.mjs::normalizeTicket). null when linearis returned
+            // no estimate for the ticket (unset in Linear).
+            estimate: typeof t.estimate === "number" ? t.estimate : null,
             project:
               t.project?.name ||
               (typeof t.project === "string" ? t.project : null) ||
@@ -189,8 +196,11 @@ export async function readLinearCache({
     byId[id] = {
       // priority: ticket_state first, else eligible, else 0 (Linear "no priority")
       priority: ts?.priority ?? el?.priority ?? 0,
-      // estimate: absent from both durable caches → honest null (no live refetch)
-      estimate: ts?.estimate ?? null,
+      // CTL-957: estimate now flows from ticket_state (broker projects it from
+      // Linear webhooks) — or from the eligible projection when ticket_state
+      // has no row yet (queued ticket, not yet started). Honest null when
+      // neither cache has seen an estimate for this ticket.
+      estimate: ts?.estimate ?? el?.estimate ?? null,
       // project: ticket_state has no project column, so eligible owns it
       project: ts?.project ?? el?.project ?? null,
       labels: ts?.labels ?? [],

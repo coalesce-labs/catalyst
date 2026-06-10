@@ -18,6 +18,7 @@ import {
   ScopeChip,
   StatusBadge,
   HeldBadge,
+  DepChips,
   Cost,
   accentFor,
   fmtAgo,
@@ -51,6 +52,23 @@ export interface ListColumn<E> {
 const idStyle: React.CSSProperties = { fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue };
 const titleStyle: React.CSSProperties = { color: C.fg, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const dimMono: React.CSSProperties = { fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgDim };
+
+// CTL-957: dep column — a compact "← X" / "→ Y" cell showing forward (blocked_by)
+// and reverse (blocks) dependencies. The reverse index (blockedByIdx) must be
+// supplied by the caller (built from all tickets' blockers arrays in BoardList);
+// when absent the column renders forward-only.
+export function makeDepColumn(
+  blockedByIdx: Record<string, string[]> = {},
+): ListColumn<BoardTicket> {
+  return {
+    id: "deps",
+    header: "Deps",
+    width: 90,
+    sortable: false,
+    sortValue: (t) => (t.blockers?.length ?? 0) + (blockedByIdx[t.id]?.length ?? 0) > 0 ? 1 : 0,
+    cell: (t) => <DepChips blockers={t.blockers} blockedBy={blockedByIdx[t.id]} />,
+  };
+}
 
 // ── ticket columns (the Tickets-lens List) ───────────────────────────────────
 // 1:1 from the BOARD4 Gherkin row spec ("id, priority, title, phase, status,
@@ -117,7 +135,7 @@ export const TICKET_COLUMNS: readonly ListColumn<BoardTicket>[] = [
     header: "Est",
     width: 64,
     sortValue: (t) => ticketSortValue(t, "est"),
-    cell: (t) => <ScopeChip scope={t.scope} estimate={t.estimate} />,
+    cell: (t) => <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />,
   },
   {
     id: "host",

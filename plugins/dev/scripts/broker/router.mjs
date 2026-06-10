@@ -939,6 +939,13 @@ function foldLinearIssueDescriptor(name, detail, eventTicket) {
     if (detail.toPriority !== undefined && detail.toPriority !== null) {
       descriptor.priority = detail.toPriority;
     }
+    // CTL-957: project Linear estimate (numeric story points) into ticket_state
+    // so the read-model can serve real points without a live API call.
+    // KEY-PRESENCE: absent = keep stored value; explicit null = clear.
+    if ("toEstimate" in detail) {
+      const v = detail.toEstimate;
+      descriptor.estimate = typeof v === "number" ? v : null;
+    }
     if ("toAssigneeId" in detail) {
       const v = detail.toAssigneeId ?? null;
       // Linear sends partial issue payloads (data.assignee can be omitted on

@@ -20,6 +20,7 @@ function descriptor(partial: Partial<TicketDescriptor>): TicketDescriptor {
     relations: partial.relations ?? null,
     labels: partial.labels ?? null,
     priority: partial.priority ?? null,
+    estimate: partial.estimate ?? null,
     resolution: partial.resolution ?? null,
     assignee: partial.assignee ?? null,
     uuid: partial.uuid ?? null,

@@ -81,6 +81,7 @@ import {
 import {
   TICKET_COLUMNS,
   WORKER_COLUMNS,
+  makeDepColumn,
   visibleColumns,
   type ListColumn,
 } from "./list-columns";
@@ -160,6 +161,26 @@ export function BoardList({
   );
   const workerRows = useMemo(() => flattenWorkerRows(workers), [workers]);
 
+  // CTL-957: reverse-dependency index (ticketId → [ids of tickets waiting on it]).
+  // Built from all tickets' blockers[] so the dep column can show both directions
+  // without adding a field to the server payload.
+  const blockedByIdx = useMemo<Record<string, string[]>>(() => {
+    const idx: Record<string, string[]> = {};
+    for (const t of tickets) {
+      for (const b of t.blockers ?? []) {
+        if (!idx[b]) idx[b] = [];
+        idx[b].push(t.id);
+      }
+    }
+    return idx;
+  }, [tickets]);
+
+  // CTL-957: ticket columns with the dep column injected (uses blockedByIdx closure).
+  const ticketColumnsWithDeps = useMemo(
+    () => [...TICKET_COLUMNS, makeDepColumn(blockedByIdx)],
+    [blockedByIdx],
+  );
+
   if (kind === "worker") {
     return (
       <ListTable
@@ -177,7 +198,7 @@ export function BoardList({
   return (
     <ListTable
       rows={ticketRows}
-      columns={TICKET_COLUMNS}
+      columns={ticketColumnsWithDeps}
       density={density}
       swimlane={swimlane}
       navKind="ticket"
