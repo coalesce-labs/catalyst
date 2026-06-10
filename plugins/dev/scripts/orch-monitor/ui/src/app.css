@@ -436,3 +436,136 @@ body {
 .md-content th {
   background: var(--color-surface-3);
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
+ * client pass). Composes ON TOP of .md-content (reuses its table rules; the
+ * description div carries BOTH classes) and overrides the rest to match Linear:
+ * a capped ~680px reading measure, large semibold section headings WITHOUT the
+ * .md-content underline, inline-code chips, themed hljs code blocks, and
+ * internal ticket-ref pills. All colours via @theme tokens (light + dark
+ * inherit the token values). --color-live (cyan) stays RESERVED for live
+ * signals — the description never uses it.
+ * ────────────────────────────────────────────────────────────────────────── */
+.ticket-desc {
+  max-width: 680px;
+  color: var(--color-fg);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.ticket-desc p {
+  margin: 0.7em 0;
+}
+/* section headings: semibold, NO underline (Linear), generous top rhythm */
+.ticket-desc h1,
+.ticket-desc h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.4em 0 0.5em;
+  border: 0;
+  padding: 0;
+  line-height: 1.3;
+}
+.ticket-desc h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.2em 0 0.4em;
+}
+.ticket-desc strong {
+  font-weight: 600;
+  color: var(--color-fg);
+}
+.ticket-desc ul,
+.ticket-desc ol {
+  margin: 0.6em 0;
+  padding-left: 1.5em;
+}
+.ticket-desc li {
+  margin: 0.3em 0;
+}
+/* inline code CHIP (mono, subtle rounded bg) — only OUTSIDE <pre> */
+.ticket-desc :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-fg);
+}
+/* code BLOCK — rounded, bordered, themed */
+.ticket-desc pre {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0.9em 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.ticket-desc pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--color-fg);
+}
+/* hljs token theme → app tokens (no vendor stylesheet imported) */
+.ticket-desc .hljs-keyword,
+.ticket-desc .hljs-built_in {
+  color: var(--color-purple);
+}
+.ticket-desc .hljs-string,
+.ticket-desc .hljs-regexp {
+  color: var(--color-green-soft);
+}
+.ticket-desc .hljs-title,
+.ticket-desc .hljs-title.function_ {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-number,
+.ticket-desc .hljs-literal {
+  color: var(--color-yellow-soft);
+}
+.ticket-desc .hljs-comment {
+  color: var(--color-muted);
+  font-style: italic;
+}
+.ticket-desc .hljs-attr,
+.ticket-desc .hljs-property {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-addition {
+  color: var(--color-green);
+}
+.ticket-desc .hljs-deletion {
+  color: var(--color-red);
+}
+/* ticket-ref PILL → /ticket/<id> (SPA) */
+.ticket-desc a.ticket-ref-pill {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.3;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ticket-desc a.ticket-ref-pill:hover {
+  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
+}
+.ticket-desc a:not(.ticket-ref-pill) {
+  color: var(--color-accent);
+}
+.ticket-desc blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 14px;
+  margin: 0.8em 0;
+  color: var(--color-muted);
+}
