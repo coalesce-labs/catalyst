@@ -52,6 +52,11 @@ export interface BoardWorker {
    *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
    *  isFenceCurrent without a live attachment fetch. null when no fence. */
   generation: number | null;
+  /** CTL-947: true when the worker is parked waiting for a human prompt —
+   *  derived from the durable bg-job state "blocked" (the Claude Code signal
+   *  that the job needs user input / a permission grant). false otherwise.
+   *  Optional so existing BoardWorker fixtures stay valid without back-fill. */
+  waitingOnUser?: boolean;
 }
 
 export interface BoardPhaseCost {

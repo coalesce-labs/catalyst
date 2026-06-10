@@ -104,9 +104,17 @@ function legacyTicketFilter(
     ? tickets.filter((t) => t.linearState === col)
     : tickets.filter((t) => t.phase === col);
 }
+// CTL-947: the new rank is active=0 / waiting-on-user=1 / waiting(null)=2 /
+// stuck=3 / blocked=4. The "legacy sort" is updated to match; rankWorker also
+// takes an optional ticketHeld param (absent = no blocked override).
 function legacyWorkerSort(workers: BoardWorker[]): BoardWorker[] {
   const isActive = (s: BoardActiveState) => s === "active";
-  const rank = (w: BoardWorker) => (isActive(w.activeState) ? 0 : w.activeState === "stuck" ? 2 : 1);
+  const rank = (w: BoardWorker) => {
+    if (isActive(w.activeState) && !w.waitingOnUser) return 0;
+    if (w.waitingOnUser) return 1;
+    if (w.activeState === "stuck") return 3;
+    return 2; // null / idle / between-phases
+  };
   return [...workers].sort((a, b) => rank(a) - rank(b) || (b.runtimeMs ?? 0) - (a.runtimeMs ?? 0));
 }
 
@@ -172,12 +180,12 @@ describe("resolveList — worker queue (rank-sort preserved through the same fn)
   ];
   const payload = mkPayload({ workers });
 
-  it("orders by rank then runtimeMs desc", () => {
+  it("orders by rank then runtimeMs desc — CTL-947: active→waiting(null)→stuck", () => {
     const got = resolveList(payload, { kind: "worker" });
     expect(got.map((w) => w.name)).toEqual([
       "w-active-long", // active, 8000
       "w-active-short", // active, 1000
-      "w-idle", // else, 9000
+      "w-idle", // waiting(null), 9000
       "w-stuck-long", // stuck, 9999
       "w-stuck", // stuck, 5000
     ]);
@@ -188,10 +196,20 @@ describe("resolveList — worker queue (rank-sort preserved through the same fn)
     expect(got).toEqual(legacyWorkerSort(workers));
   });
 
-  it("rankWorker matches active=0 / stuck=2 / else=1", () => {
+  it("rankWorker matches CTL-947 ranks: active=0 / null(waiting)=2 / stuck=3", () => {
     expect(rankWorker(mkWorker("a", "active", 0))).toBe(0);
-    expect(rankWorker(mkWorker("b", null, 0))).toBe(1);
-    expect(rankWorker(mkWorker("c", "stuck", 0))).toBe(2);
+    expect(rankWorker(mkWorker("b", null, 0))).toBe(2); // CTL-947: waiting(null) is rank 2
+    expect(rankWorker(mkWorker("c", "stuck", 0))).toBe(3); // CTL-947: stuck is rank 3
+  });
+
+  it("rankWorker: waitingOnUser=true is rank 1 (between active and idle)", () => {
+    const wou = mkWorker("wou", "active", 0, { waitingOnUser: true });
+    expect(rankWorker(wou)).toBe(1);
+  });
+
+  it("rankWorker: ticketHeld='blocked' yields rank 4 (always last)", () => {
+    const blocked = mkWorker("b", "active", 0);
+    expect(rankWorker(blocked, "blocked")).toBe(4);
   });
 
   it("treats a null runtimeMs as 0 in the tie-break", () => {

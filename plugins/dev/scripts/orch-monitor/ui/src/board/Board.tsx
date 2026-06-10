@@ -61,6 +61,14 @@ import {
   groupQueueByHost,
   type QueueHostGroup,
 } from "./queue-grouping";
+// ── CTL-947: in-flight worker activity grouping ────────────────────────────────
+// The in-flight table groups workers by activity state: active / waiting-on-user
+// / waiting / stuck / blocked (bottom). groupWorkersByActivity is PURE (no DOM),
+// unit-tested in queue-worker-grouping.test.ts.
+import {
+  groupWorkersByActivity,
+  type WorkerActivitySection,
+} from "./queue-worker-grouping";
 // ── BOARD2 / CTL-906: the display-options popover + its persisted prefs ────────
 // One toolbar button owns every board display choice (density / grouping /
 // ordering / color / show-empty / repo-lanes). The three scattered subhead Seg
@@ -685,13 +693,34 @@ function WaitingTable({ queue, freeSlots, showHost, grouped }: { queue: QueueIte
 // + a waiting ranked table. NEW for SURF2: an optional per-node column + a
 // group-by-node toggle, both gated behind queueHostMode so a single-host fleet is
 // an exact identity no-op (no node column, no toggle, no added noise).
+// CTL-947: accent color for each activity group section header.
+const WORKER_GROUP_C: Record<string, string> = {
+  active: LIVE,
+  "waiting-on-user": C.yellow,
+  waiting: C.fgDim,
+  stuck: C.red,
+  blocked: C.red,
+};
+
+// CTL-947: status cell text for a worker row.
+function workerStatusText(w: Worker): string {
+  if (isActive(w.activeState)) return w.working ? "working" : "active";
+  if (w.activeState === "stuck") return "stuck";
+  if (w.waitingOnUser) return "waiting on you";
+  return w.activeState ?? "idle";
+}
+
 export function QueueView({ data, embedded = false }: { data: BoardPayload; embedded?: boolean }) {
   const { config, queue, workers, tickets } = data;
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
-  // Order through the SHARED comparator (CTL-882 / FND2): rank(active=0, stuck=2,
-  // else=1) then runtimeMs desc — the same order the worker pager + j/k walk
-  // resolve via resolveList({kind:"worker"}). Byte-for-byte the prior inline sort.
-  const inflight = sortWorkers(workers);
+  // CTL-947: build the ticket held lookup so the grouper can sink blocked tickets.
+  const ticketHeld: Record<string, "blocked" | "waiting" | null | undefined> =
+    Object.fromEntries(tickets.map((t) => [t.id, t.held]));
+  // CTL-947: group in-flight workers by activity state. This replaces the flat
+  // sortWorkers call — groupWorkersByActivity sorts internally using rankWorker
+  // (which now includes waitingOnUser + blocked from the ticket held lookup).
+  const inflightSections: WorkerActivitySection[] = groupWorkersByActivity(workers, ticketHeld);
+  const inflightCount = workers.length;
   // SINGLE-HOST IDENTITY NO-OP: only surface the node column / group affordance
   // when the queue spans two or more DISTINCT owner hosts. With hosts.json absent
   // or length 1 every row resolves to one host (or none), so this is "single" and
@@ -700,6 +729,9 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
   const [groupByNode, setGroupByNode] = useState(false);
   // The toggle only makes sense in a multi-node fleet; never grouped single-host.
   const grouped = multiHost && groupByNode;
+  // Whether there are multiple non-empty groups (drives section header visibility:
+  // single-group = no chrome, multi-group = show labeled dividers).
+  const multiGroup = inflightSections.length > 1;
   return (
     <div className="cat-scroll" style={{ overflowY: "auto", height: embedded ? "100%" : "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
       <div style={{ maxWidth: 1040 }}>
@@ -712,7 +744,7 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
         </div>
         <SlotBar capacity={config.maxParallel} inFlight={config.inFlight} />
 
-        <div style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted, margin: "0 0 8px" }}>On the plate — in flight ({inflight.length})</div>
+        <div style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted, margin: "0 0 8px" }}>On the plate — in flight ({inflightCount})</div>
         <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 22 }}>
           <Table>
             <TableHeader><TableRow style={{ background: C.s1 }}>
@@ -721,16 +753,47 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
               <TableHead style={{ ...th, width: 130 }}>Phase</TableHead><TableHead style={{ ...th, width: 84 }}>Status</TableHead><TableHead style={{ ...th, width: 76 }}>Age</TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {inflight.map((w) => (
-                <TableRow key={w.name} style={{ opacity: w.activeState === "stuck" ? 0.6 : 1 }}>
-                  <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
-                  <TableCell><PriorityIcon p={infoById[w.ticket]?.priority ?? 0} /></TableCell>
-                  <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
-                  <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>{infoById[w.ticket]?.title || ""}</TableCell>
-                  <TableCell><PhasePill phase={w.phase} /></TableCell>
-                  <TableCell style={{ ...mono, fontSize: 11, color: isActive(w.activeState) ? LIVE : w.activeState === "stuck" ? C.red : C.fgDim }}>{isActive(w.activeState) ? (w.working ? "working" : "active") : w.activeState}</TableCell>
-                  <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</TableCell>
-                </TableRow>
+              {inflightSections.map((section: WorkerActivitySection) => (
+                <Fragment key={section.group}>
+                  {/* CTL-947: section header row — only rendered when there are
+                      multiple non-empty groups, so a homogenous fleet (all active)
+                      renders exactly as before with no extra chrome. */}
+                  {multiGroup && (
+                    <TableRow style={{ background: C.s1 }}>
+                      <TableCell colSpan={7} style={{ ...mono, fontSize: 11, color: C.fgMuted, padding: "6px 12px" }}>
+                        <span style={{ color: WORKER_GROUP_C[section.group] ?? C.fgDim, fontWeight: 600 }}>{section.label}</span>
+                        <span style={{ color: C.fgDim }}> · {section.workers.length}</span>
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {section.workers.map((w) => {
+                    // CTL-947: blocked rows show the blocker ids inline.
+                    const ticket = infoById[w.ticket];
+                    const blockers: string[] = section.group === "blocked"
+                      ? (ticket?.blockers ?? [])
+                      : [];
+                    return (
+                      <TableRow key={w.name} style={{ opacity: w.activeState === "stuck" ? 0.6 : 1 }}>
+                        <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
+                        <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
+                        <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
+                        <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>
+                          {ticket?.title || ""}
+                          {blockers.length > 0 && (
+                            <span style={{ marginLeft: 8, fontFamily: C.mono, fontSize: 10, color: C.red }}>
+                              blocked on: {blockers.join(", ")}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell><PhasePill phase={w.phase} /></TableCell>
+                        <TableCell style={{ ...mono, fontSize: 11, color: isActive(w.activeState) ? LIVE : w.activeState === "stuck" ? C.red : w.waitingOnUser ? C.yellow : C.fgDim }}>
+                          {workerStatusText(w)}
+                        </TableCell>
+                        <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </Fragment>
               ))}
             </TableBody>
           </Table>

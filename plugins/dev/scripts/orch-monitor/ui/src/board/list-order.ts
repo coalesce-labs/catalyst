@@ -56,12 +56,57 @@ export type ListContext =
 const isActive = (s: BoardActiveState): boolean => s === "active";
 
 /**
- * The worker rank used by the in-flight queue: active (in-loop) first, then
- * everything else, then stuck last. Byte-for-byte the closure from
- * `Board.tsx:441` — `active?0 : stuck?2 : 1`.
+ * CTL-947: the activity group a worker belongs to, for display grouping. The
+ * full ordered set of groups (first → last):
+ *   0 — active       : `activeState === "active"` (in-loop, generating)
+ *   1 — waiting-on-user: live worker parked for a human prompt (`waitingOnUser`)
+ *   2 — waiting      : idle / between-phases (`activeState === null`)
+ *   3 — stuck        : `activeState === "stuck"` (stale transcript / terminal marker)
+ *   4 — blocked      : ticket hold `held === "blocked"` — rendered LAST per spec
+ *
+ * Note: "blocked" is a ticket-level attribute; `workerActivityGroup` takes it as
+ * an optional second argument so the pure grouper can partition without needing
+ * to carry a ticket lookup internally.
  */
-export function rankWorker(w: BoardWorker): number {
-  return isActive(w.activeState) ? 0 : w.activeState === "stuck" ? 2 : 1;
+export type WorkerActivityGroup =
+  | "active"
+  | "waiting-on-user"
+  | "waiting"
+  | "stuck"
+  | "blocked";
+
+const WORKER_GROUP_RANK: Record<WorkerActivityGroup, number> = {
+  active: 0,
+  "waiting-on-user": 1,
+  waiting: 2,
+  stuck: 3,
+  blocked: 4,
+};
+
+/** Map a worker (+ optional ticket held state) to its display activity group. */
+export function workerActivityGroup(
+  w: BoardWorker,
+  ticketHeld?: "blocked" | "waiting" | null,
+): WorkerActivityGroup {
+  if (ticketHeld === "blocked") return "blocked";
+  if (w.activeState === "stuck") return "stuck";
+  if (w.waitingOnUser) return "waiting-on-user";
+  if (isActive(w.activeState)) return "active";
+  return "waiting";
+}
+
+/**
+ * The worker rank used by the in-flight queue: active (in-loop) first,
+ * waiting-on-user second, idle/between-phases third, stuck fourth, blocked last.
+ * CTL-947 extends the original `active?0 : stuck?2 : 1` closure to cover all
+ * activity states. `ticketHeld` is the associated ticket's `held` field — pass
+ * it when building the grouped queue view so blocked tickets sort to the bottom.
+ */
+export function rankWorker(
+  w: BoardWorker,
+  ticketHeld?: "blocked" | "waiting" | null,
+): number {
+  return WORKER_GROUP_RANK[workerActivityGroup(w, ticketHeld)];
 }
 
 /**
