@@ -24,6 +24,11 @@ export interface LokiFetcher {
     start: string,
     end: string,
     limit?: number,
+    /** Explicit step in SECONDS for a metric query. When set, Loki returns one
+     *  matrix point per `step`-wide window (e.g. 900 → clean 15m buckets for the
+     *  Telemetry events/min heatmap, OBS-8). Omitted for log/range queries where
+     *  Loki's auto-step is fine. */
+    stepSeconds?: number,
   ): Promise<LokiQueryResult | null>;
   isAvailable(): boolean;
 }
@@ -67,7 +72,7 @@ export function createLokiFetcher(opts: {
   }
 
   return {
-    async queryRange(logql, start, end, limit) {
+    async queryRange(logql, start, end, limit, stepSeconds) {
       if (!(await probe())) return null;
 
       const params = new URLSearchParams({
@@ -76,6 +81,12 @@ export function createLokiFetcher(opts: {
         end,
         limit: String(limit ?? DEFAULT_LIMIT),
       });
+      // Pin the matrix bucket width for metric queries (e.g. the OBS-8 heatmap's
+      // 15m buckets). Only forwarded when a positive integer step is given; a
+      // log/range query omits it and keeps Loki's auto-step.
+      if (stepSeconds && Number.isFinite(stepSeconds) && stepSeconds > 0) {
+        params.set("step", String(Math.floor(stepSeconds)));
+      }
       const url = `${baseUrl}/loki/api/v1/query_range?${params.toString()}`;
 
       const cached = cache.get(url);

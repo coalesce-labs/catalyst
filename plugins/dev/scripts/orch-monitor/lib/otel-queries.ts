@@ -1,5 +1,5 @@
 import type { PrometheusFetcher, PrometheusMetricValue } from "./prometheus";
-import type { LokiFetcher, LokiStreamValue } from "./loki";
+import type { LokiFetcher, LokiStreamValue, LokiQueryResult } from "./loki";
 
 const DURATION_RE = /^\d+(ms|s|m|h|d)$/;
 
@@ -110,6 +110,221 @@ export async function toolUsageByName(
   return map;
 }
 
+// ── OBS-7 (TELEMETRY P4): per-model request latency + error% ─────────────────
+// Model latency is read off the SAME claude-code Loki stream the tail/errors use,
+// not Prometheus — `api_request` lines carry a `duration_ms` field we can unwrap
+// and aggregate with LogQL's `quantile_over_time`. p50/p95 by `model` answer "is
+// this model slow right now?"; the error% by model (api_error / api_request) is a
+// second, complementary axis the P4 bar labels (a model can be fast but erroring).
+//
+// The LogQL is a metric query (queryRange returns a matrix, one series per model):
+//   quantile_over_time(0.95, {…} |= "claude_code.api_request" | json
+//     | unwrap duration_ms [r]) by (model)
+// We take the LAST point of each series (the cumulative-window aggregate over the
+// scan), the same "last value" idiom toolUsageByName uses for count_over_time.
+
+/** One model's latency + error profile for the P4 panel. p50/p95 are in ms (null
+ *  when the model produced no unwrappable api_request samples in the window);
+ *  requests/errors are the raw counts the error-rate is derived from so the UI can
+ *  show "n=…" honestly. errorRate is errors/requests, or null when requests===0
+ *  (no requests to divide by — the UI shows "—", never a fabricated 0%). */
+export interface ModelLatencyRow {
+  model: string;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  requests: number;
+  errors: number;
+  /** errors / requests over the window, or null when requests === 0. */
+  errorRate: number | null;
+}
+
+/** Build the exact LogQL for one latency quantile over unwrapped `duration_ms` on
+ *  the `api_request` stream, grouped by model. Exported so a test can pin the
+ *  `| json | unwrap duration_ms` pipe + the `by (model)` grouping (a refactor that
+ *  drops the unwrap or the json stage silently returns zero series). */
+export function modelLatencyLogQL(quantile: number, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
+    `|= "claude_code.api_request" | json | unwrap duration_ms [${r}]) by (model)`
+  );
+}
+
+/** Build the LogQL for an event count by model (api_request or api_error), used
+ *  to derive the per-model error rate. Exported for the same pin-the-shape reason. */
+export function modelEventCountLogQL(eventLiteral: string, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `sum by (model) (count_over_time({service_name=~"claude-code.*"} ` +
+    `|= "${eventLiteral}" | json [${r}]))`
+  );
+}
+
+/** Pull the LAST numeric point of each `by (model)` series into a model→value map.
+ *  A series with no usable points is skipped (the model simply has no value on that
+ *  axis — never fabricated). Shared by the latency + count extractions. Each entry
+ *  is cast to the matrix shape (LogQL metric queries return matrix series), the
+ *  same defensive cast toolUsageByName uses on Loki results. */
+function lastValueByModel(result: LokiQueryResult): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const metric = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const model = metric.metric?.["model"];
+    if (!model || !metric.values?.length) continue;
+    const last = metric.values[metric.values.length - 1];
+    if (!last) continue;
+    const v = parseFloat(last[1]);
+    if (Number.isFinite(v)) map[model] = v;
+  }
+  return map;
+}
+
+/**
+ * Per-model api_request latency (p50/p95) + error% over the window, off the
+ * claude-code Loki stream. Returns `null` ONLY when Loki is unavailable (the first
+ * probe failed — caller surfaces a 503); an empty stream is `[]` (an honest "no
+ * api_request samples in range", which the ChartCard renders as the empty state,
+ * NOT an error). Rows are sorted slowest-p95-first so the bottleneck model leads.
+ */
+export async function modelLatency(
+  loki: LokiFetcher,
+  range: string,
+): Promise<ModelLatencyRow[] | null> {
+  const r = safeDuration(range, "1h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const startIso = start.toISOString();
+  const endIso = now.toISOString();
+
+  const [p50Res, p95Res, reqRes, errRes] = await Promise.all([
+    loki.queryRange(modelLatencyLogQL(0.5, r), startIso, endIso),
+    loki.queryRange(modelLatencyLogQL(0.95, r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("claude_code.api_request", r), startIso, endIso),
+    loki.queryRange(modelEventCountLogQL("claude_code.api_error", r), startIso, endIso),
+  ]);
+
+  // Loki unavailable → the very first (and every) probe is null. Distinguish that
+  // from "reachable but empty" (a result with an empty `.data.result`).
+  if (p50Res === null && p95Res === null && reqRes === null && errRes === null) {
+    return null;
+  }
+
+  const p50 = p50Res ? lastValueByModel(p50Res) : {};
+  const p95 = p95Res ? lastValueByModel(p95Res) : {};
+  const requests = reqRes ? lastValueByModel(reqRes) : {};
+  const errors = errRes ? lastValueByModel(errRes) : {};
+
+  // Union the models seen on any axis so a model that only errored (or only had a
+  // latency sample) still appears — never dropped.
+  const models = new Set<string>([
+    ...Object.keys(p50),
+    ...Object.keys(p95),
+    ...Object.keys(requests),
+    ...Object.keys(errors),
+  ]);
+
+  const rows: ModelLatencyRow[] = [];
+  for (const model of models) {
+    const req = Math.round(requests[model] ?? 0);
+    const err = Math.round(errors[model] ?? 0);
+    rows.push({
+      model,
+      p50Ms: p50[model] ?? null,
+      p95Ms: p95[model] ?? null,
+      requests: req,
+      errors: err,
+      errorRate: req > 0 ? err / req : null,
+    });
+  }
+
+  // Slowest p95 first (the bottleneck model leads); rows with no p95 sink last.
+  rows.sort((a, b) => (b.p95Ms ?? -1) - (a.p95Ms ?? -1));
+  return rows;
+}
+
+// ── OBS-7 (TELEMETRY P3): per-tool latency (p50/p95) ─────────────────────────
+// The P3 tool-mix panel sorts by TOTAL TIME (count × p95), not call count — a slow
+// tool used 10× beats a fast tool used 1000× (design §3.1). The counts come from
+// toolUsageByName; this adds the p50/p95 half by unwrapping `duration_ms` on
+// `tool_result`, the SAME LogQL idiom as modelLatency but grouped by `tool_name`.
+
+/** One tool's p50/p95 latency (ms), null when no unwrappable tool_result samples
+ *  fell in the window. Keyed by tool name in the returned map. */
+export interface ToolLatency {
+  p50Ms: number | null;
+  p95Ms: number | null;
+}
+
+/** Build the LogQL for one latency quantile over unwrapped `duration_ms` on the
+ *  `tool_result` stream, grouped by tool_name. Exported so a test can pin the
+ *  unwrap pipe + grouping (mirrors modelLatencyLogQL). */
+export function toolLatencyLogQL(quantile: number, range: string): string {
+  const r = safeDuration(range, "1h");
+  return (
+    `quantile_over_time(${quantile}, {service_name=~"claude-code.*"} ` +
+    `|= "claude_code.tool_result" | json | unwrap duration_ms [${r}]) by (tool_name)`
+  );
+}
+
+/** Pull the LAST numeric point of each `by (tool_name)` series into a tool→value
+ *  map (mirrors lastValueByModel, keyed on tool_name). */
+function lastValueByTool(result: LokiQueryResult): Record<string, number> {
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const metric = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const tool = metric.metric?.["tool_name"];
+    if (!tool || !metric.values?.length) continue;
+    const last = metric.values[metric.values.length - 1];
+    if (!last) continue;
+    const v = parseFloat(last[1]);
+    if (Number.isFinite(v)) map[tool] = v;
+  }
+  return map;
+}
+
+/**
+ * Per-tool p50/p95 latency over the window, off the claude-code Loki stream.
+ * Returns `null` ONLY when Loki is unavailable (both probes failed → caller
+ * surfaces a 503); an empty stream is `{}` (an honest "no tool_result samples" —
+ * the UI shows counts only, never a fabricated latency).
+ */
+export async function toolLatency(
+  loki: LokiFetcher,
+  range: string,
+): Promise<Record<string, ToolLatency> | null> {
+  const r = safeDuration(range, "1h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const startIso = start.toISOString();
+  const endIso = now.toISOString();
+
+  const [p50Res, p95Res] = await Promise.all([
+    loki.queryRange(toolLatencyLogQL(0.5, r), startIso, endIso),
+    loki.queryRange(toolLatencyLogQL(0.95, r), startIso, endIso),
+  ]);
+
+  if (p50Res === null && p95Res === null) return null;
+
+  const p50 = p50Res ? lastValueByTool(p50Res) : {};
+  const p95 = p95Res ? lastValueByTool(p95Res) : {};
+  const tools = new Set<string>([...Object.keys(p50), ...Object.keys(p95)]);
+
+  const map: Record<string, ToolLatency> = {};
+  for (const tool of tools) {
+    map[tool] = {
+      p50Ms: p50[tool] ?? null,
+      p95Ms: p95[tool] ?? null,
+    };
+  }
+  return map;
+}
+
 interface LogEntry {
   timestamp: string;
   line: string;
@@ -144,6 +359,107 @@ export async function apiErrors(
     }
   }
   return entries;
+}
+
+// ── OBS-6 (TELEMETRY): the grouped live tail + Loki freshness ────────────────
+// The Telemetry surface's P1 panel is a live tail of the WHOLE fleet's
+// claude-code activity, grouped by worker — not one session at a time (that's
+// the CTL-914 worker page below). It rides the SAME Loki pipe as
+// workerHistoryLogQL, but UN-filtered by session: a single newest-first scan of
+// `{service_name=~"claude-code.*"}` over a short window. Each line is parsed by
+// the SAME parseHistoryLine (absent fields render dimmed, NEVER fabricated), and
+// we additionally lift the per-line `session_id` / `linear_key` structured
+// metadata so the UI can group rows under `▾<ticket>·<phase>` worker headers by
+// joining client-side against the board's worker list.
+//
+// The hero's freshness signal (age of the newest claude-code line) falls out of
+// the same scan for free — `freshnessMs` is `now − newest row ts`, or null when
+// the stream is empty (an honest "no recent events", which the hero reads as
+// QUIET, never as an error).
+
+/** One parsed tail row for the grouped live tail. Extends the WorkerHistoryRow
+ *  shape with the grouping keys lifted from the line body so a row can be bucketed
+ *  under its worker without a second query. Both keys are null when the line did
+ *  not carry them (a row is still shown — under an "unattributed" bucket — never
+ *  dropped or fabricated). */
+export interface TailRow extends WorkerHistoryRow {
+  /** CC session UUID (from the line's `session_id`), the join key to a BoardWorker. */
+  sessionId: string | null;
+  /** Linear key (from the line's `linear_key`), the human-facing group label. */
+  linearKey: string | null;
+}
+
+/** The grouped-tail payload: newest-first parsed rows + the fleet-wide freshness
+ *  (age in ms of the newest claude-code line). `null` rows ⇒ Loki unavailable
+ *  (caller surfaces a 503). `freshnessMs === null` ⇒ no lines in the window (the
+ *  hero reads this as QUIET — honest "no recent events", not an error). */
+export interface TailResult {
+  rows: TailRow[];
+  freshnessMs: number | null;
+}
+
+/** Build the exact LogQL for the fleet-wide tail. Exported so a test can pin the
+ *  un-filtered `{service_name=~"claude-code.*"}` selector (the same stream the
+ *  per-session history reads, minus the session pipe). */
+export function recentTailLogQL(): string {
+  return `{service_name=~"claude-code.*"}`;
+}
+
+/** Query the claude-code Loki stream for the fleet's recent activity, newest
+ *  first, and derive the fleet-wide freshness. Returns `{rows:[], freshnessMs:null}`
+ *  vs `null`: `null` ONLY when Loki is unavailable (probe failed). An empty stream
+ *  is `{rows:[], freshnessMs:null}` — a real "no recent events" answer the hero
+ *  renders as QUIET, never an error. */
+export async function recentTail(
+  loki: LokiFetcher,
+  range: string,
+  limit = 300,
+): Promise<TailResult | null> {
+  const r = safeDuration(range, "15m");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    recentTailLogQL(),
+    start.toISOString(),
+    now.toISOString(),
+    limit,
+  );
+  if (!result) return null;
+  const rows: TailRow[] = [];
+  for (const stream of result.data.result) {
+    const s = stream as LokiStreamValue;
+    if (!s.values) continue;
+    // Stream-level labels are a fallback for the grouping keys when the JSON body
+    // omits them (some lines carry session_id only as a stream label).
+    const streamSession = asStr(s.stream?.["session_id"]);
+    const streamLinear = asStr(s.stream?.["linear_key"]);
+    for (const [tsNanos, line] of s.values) {
+      const tsMs = Math.floor(Number(tsNanos) / 1_000_000);
+      const base = parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line);
+      const body = safeJsonObject(line);
+      rows.push({
+        ...base,
+        sessionId: asStr(body["session_id"]) ?? streamSession,
+        linearKey: asStr(body["linear_key"]) ?? streamLinear,
+      });
+    }
+  }
+  rows.sort((a, b) => b.ts - a.ts);
+  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0]!.ts) : null;
+  return { rows, freshnessMs };
+}
+
+/** Parse a Loki line body to a plain object, tolerating non-JSON (returns {}).
+ *  Shared with parseHistoryLine's internal try/catch so the tail's extra
+ *  structured-metadata lift uses the SAME defensive parse. */
+function safeJsonObject(line: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(line) as unknown;
+    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+  } catch {
+    /* unreadable JSON → empty object */
+  }
+  return {};
 }
 
 // ── CTL-914 (DETAIL3): worker-page [history] tail ───────────────────────────
@@ -435,6 +751,117 @@ interface CostValidationEntry {
   signalCost: number;
   otelCost: number;
   discrepancy: number;
+}
+
+// ── OBS-8 (TELEMETRY P5): events/min heatmap, workers × time ──────────────────
+// "Is each running worker still emitting, or has one gone silent?" The P5 panel is
+// a workers × time-bucket grid: rows = board worker sessions, columns = 15-minute
+// windows, each cell = the count of claude-code log lines that session emitted in
+// that window. A `running` worker whose recent cells are dark is an early-STALL
+// signal (design §3.1 / build-plan §3 P5 → cross-links FleetOps stuck list).
+//
+// The data is one metric query over the SAME claude-code Loki stream the tail uses:
+//   sum by (session_id) (count_over_time({service_name=~"claude-code.*"} [15m]))
+// run as a query_range with an explicit 15m (900s) step so each matrix series
+// carries one [epochSec, count] point per 15m bucket. session_id is a STREAM LABEL
+// (no `| json` stage — verified live: `| json` errors on malformed lines and is
+// unnecessary, the label is matchable directly), so the grouping is cheap and never
+// drops a line to a parser error.
+//
+// Row headers (which sessions to SHOW, including silent ones) come from the board,
+// joined in the route — so a `running` worker with ZERO Loki lines in the window
+// still gets a row of all-silence cells (the whole point of the silence signal).
+
+/** The 15-minute bucket width, in seconds — the Loki `step` and the bucket spacing. */
+export const HEATMAP_BUCKET_SECONDS = 900;
+
+/** One worker × time-bucket cell for the P5 heatmap. `x` is the bucket's start
+ *  (epoch SECONDS, the Loki matrix point ts); `sessionId` is the row key; `value`
+ *  is the count of claude-code lines that session emitted in that 15m window. */
+export interface HeatmapCell {
+  /** Bucket start, epoch seconds (the Loki matrix point timestamp). */
+  x: number;
+  /** CC session UUID — the row key (joined to a board worker name in the UI). */
+  sessionId: string;
+  /** Count of claude-code log lines in this session × bucket. */
+  value: number;
+}
+
+/** The P5 events/min heatmap payload: the cells with positive activity + the
+ *  ordered bucket axis (so the UI renders EVERY 15m column even where a session
+ *  was silent — silence is the signal, never an absent column). */
+export interface EventsHeatmap {
+  /** Bucket starts (epoch seconds), ascending — the full column axis for the window. */
+  buckets: number[];
+  /** Activity cells (value > 0). Sessions/buckets absent here are honest silence. */
+  cells: HeatmapCell[];
+}
+
+/** Build the exact LogQL for the events/min heatmap: a count of claude-code lines
+ *  per session over a 15m sliding window, grouped by the `session_id` STREAM LABEL.
+ *  Exported so a test can pin the shape — note there is deliberately NO `| json`
+ *  stage (session_id is a stream label, and `| json` errors on malformed lines and
+ *  would silently zero the matrix). */
+export function eventsHeatmapLogQL(): string {
+  return `sum by (session_id) (count_over_time({service_name=~"claude-code.*"} [${HEATMAP_BUCKET_SECONDS}s]))`;
+}
+
+/** PURE extraction of a Loki matrix result into heatmap cells + the bucket axis.
+ *  Each matrix series is one session (the `session_id` metric label); each of its
+ *  `values` points is one 15m bucket `[epochSec, countStr]`. We keep only cells
+ *  with a positive, finite count (silence is represented by ABSENCE, which the UI
+ *  fills from the bucket axis), and union every point's timestamp into the sorted
+ *  bucket axis so the column grid is complete even when no session was active in a
+ *  given window. A series with no `session_id` label is skipped (never bucketed
+ *  under a fabricated key). Exported for direct unit testing. */
+export function extractHeatmap(result: LokiQueryResult): EventsHeatmap {
+  const cells: HeatmapCell[] = [];
+  const bucketSet = new Set<number>();
+  for (const entry of result.data.result) {
+    const series = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const sessionId = series.metric?.["session_id"];
+    if (!sessionId || !series.values?.length) continue;
+    for (const point of series.values) {
+      const ts = Math.floor(Number(point[0]));
+      if (!Number.isFinite(ts)) continue;
+      bucketSet.add(ts);
+      const value = parseInt(point[1], 10);
+      if (Number.isFinite(value) && value > 0) {
+        cells.push({ x: ts, sessionId, value });
+      }
+    }
+  }
+  const buckets = [...bucketSet].sort((a, b) => a - b);
+  return { buckets, cells };
+}
+
+/**
+ * Per-session events-per-15m-bucket heatmap over the window, off the claude-code
+ * Loki stream. Returns `null` ONLY when Loki is unavailable (the probe failed →
+ * caller surfaces a 503); a reachable-but-quiet stream is an honest empty
+ * `{buckets:[], cells:[]}` (the ChartCard renders silence, NOT an error). The
+ * caller joins `cells[].sessionId` to board worker names and renders a row for
+ * every running worker — including silent ones — so an early stall is visible.
+ */
+export async function eventsHeatmap(
+  loki: LokiFetcher,
+  range: string,
+): Promise<EventsHeatmap | null> {
+  const r = safeDuration(range, "6h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    eventsHeatmapLogQL(),
+    start.toISOString(),
+    now.toISOString(),
+    undefined,
+    HEATMAP_BUCKET_SECONDS,
+  );
+  if (!result) return null;
+  return extractHeatmap(result);
 }
 
 export async function costValidation(

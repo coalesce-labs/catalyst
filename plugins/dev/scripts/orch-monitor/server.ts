@@ -199,7 +199,11 @@ import {
   cacheHitRate,
   costRateByModel,
   toolUsageByName,
+  modelLatency,
+  toolLatency,
   apiErrors,
+  recentTail,
+  eventsHeatmap,
   costValidation,
   workerHistoryBySession,
   isValidCcSessionId,
@@ -1862,12 +1866,87 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ data: result });
         }
 
+        // OBS-7 (TELEMETRY P3): per-tool p50/p95 latency, the half /api/otel/tools
+        // (counts only) is missing so the panel can sort by TOTAL TIME (count × p95)
+        // rather than chattiness. unwrap duration_ms on tool_result by tool_name
+        // (toolLatency in otel-queries.ts). 503 when Loki is not configured; an
+        // empty stream is an HONEST 200 with `data:{}` (counts-only fallback).
+        if (url.pathname === "/api/otel/tool-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await toolLatency(loki, range);
+          if (result === null) {
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
         if (url.pathname === "/api/otel/errors") {
           if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "1h";
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
           const result = await apiErrors(loki, range, limit);
+          return Response.json({ data: result });
+        }
+
+        // OBS-7 (TELEMETRY P4): per-model api_request latency (p50/p95) + error%,
+        // read off the SAME claude-code Loki stream as the tail/errors — NOT a new
+        // Prometheus dependency. The LogQL unwraps `duration_ms` on api_request and
+        // aggregates with quantile_over_time by model (modelLatency in
+        // otel-queries.ts). 503 when Loki is not configured (the P4 ChartCard
+        // degrades via the ladder); an empty stream is an HONEST 200 with `data:[]`
+        // (the card's "no data in range" state, NOT an error).
+        if (url.pathname === "/api/otel/model-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await modelLatency(loki, range);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-6 (TELEMETRY): the fleet-wide grouped live tail + freshness. ONE
+        // newest-first scan of the claude-code Loki stream (same pipe as the
+        // per-session history, minus the session filter). The hero reads
+        // `freshnessMs` (age of the newest line) to pick FLOWING vs QUIET; the P1
+        // panel groups `rows` by worker client-side. 503 when Loki is not
+        // configured (the surface degrades via the ChartCard ladder). An empty
+        // stream is an HONEST 200 with `freshnessMs:null` (QUIET, not an error).
+        if (url.pathname === "/api/otel/tail") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "15m";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "300", 10);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(1, rawLimit), 1000)
+            : 300;
+          const result = await recentTail(loki, range, limit);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-8 (TELEMETRY P5): events/min heatmap, workers × time. ONE metric
+        // query over the claude-code Loki stream — `count_over_time` of every line
+        // per `session_id` in 15m buckets (eventsHeatmap in otel-queries.ts). The
+        // payload is {buckets, cells}; the UI joins cells[].sessionId to board
+        // worker names and renders a row for EVERY running worker (silent ones
+        // included) so an early stall — a `running` worker with dark recent cells —
+        // is visible. 503 when Loki is not configured (the P5 ChartCard degrades via
+        // the ladder, but its board-sourced row headers still render per design
+        // §3.1); a reachable-but-quiet stream is an HONEST 200 with empty cells.
+        if (url.pathname === "/api/otel/events-heatmap") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "6h";
+          const result = await eventsHeatmap(loki, range);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 

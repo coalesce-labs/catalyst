@@ -279,6 +279,69 @@ export interface OtelLogEntry {
   labels: Record<string, string>;
 }
 
+// ── OBS-6 (TELEMETRY): the grouped live tail wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts TailRow/TailResult on the server side. One parsed
+// claude-code Loki line; absent fields stay null (the renderer dims them, never
+// fabricates). sessionId/linearKey are the grouping keys lifted from the line.
+export interface TailRow {
+  /** Log timestamp (epoch ms). */
+  ts: number;
+  /** The OTEL event name (e.g. claude_code.tool_result), or null. */
+  eventName: string | null;
+  toolName: string | null;
+  toolInput: string | null;
+  durationMs: number | null;
+  costUsd: number | null;
+  tokens: number | null;
+  model: string | null;
+  success: boolean | null;
+  /** CC session UUID — the join key to a BoardWorker for grouping. */
+  sessionId: string | null;
+  /** Linear key — the human group label. */
+  linearKey: string | null;
+}
+
+/** The /api/otel/tail payload: newest-first rows + fleet-wide freshness (age in
+ *  ms of the newest line, or null when no lines in the window → the hero reads
+ *  QUIET). */
+export interface TailResult {
+  rows: TailRow[];
+  freshnessMs: number | null;
+}
+
+// ── OBS-7 (TELEMETRY P4): per-model latency wire shape ───────────────────────
+// Mirrors lib/otel-queries.ts ModelLatencyRow. p50/p95 are ms (null when the model
+// had no unwrappable api_request samples in the window); errorRate is errors/
+// requests, or null when requests === 0 (the UI shows "—", never a fabricated 0%).
+export interface ModelLatencyRow {
+  model: string;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  requests: number;
+  errors: number;
+  errorRate: number | null;
+}
+
+// ── OBS-8 (TELEMETRY P5): events/min heatmap wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts EventsHeatmap. `buckets` is the full 15m column axis
+// (epoch seconds, ascending) so the UI renders every column even where a session
+// was silent; `cells` carries only the positive-activity (session × bucket) counts.
+export interface HeatmapCell {
+  /** Bucket start, epoch seconds. */
+  x: number;
+  /** CC session UUID — joined to a board worker name for the row label. */
+  sessionId: string;
+  /** Count of claude-code log lines in this session × bucket. */
+  value: number;
+}
+
+export interface EventsHeatmap {
+  /** Bucket starts (epoch seconds), ascending — the full column axis. */
+  buckets: number[];
+  /** Activity cells (value > 0). Absent (session, bucket) pairs are honest silence. */
+  cells: HeatmapCell[];
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"
