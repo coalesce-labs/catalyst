@@ -504,13 +504,18 @@ export function collectTickFacts({
       //   inverseRelations.nodes type='blocked_by' → (source=ticket, target=peer, 'blocks')
       // 'blocked_by' is never stored as a relation_type — always folded into
       // 'blocks' by swapping direction. Nodes with missing peer identifier are
-      // skipped. The seen-set deduplicates symmetric relations/inverseRelations
-      // pairs identical to buildDependencyEdges.
+      // skipped. seenRel deduplicates tickets so each ticket's relations are read
+      // exactly once per tick. seenEdge deduplicates at the edge level: because
+      // relations.nodes and inverseRelations.nodes both surface the same logical
+      // edge (symmetric view), the same (src, tgt, type) triple can be produced
+      // twice in one tick — seenEdge prevents inserting duplicates within the tick
+      // while still re-inserting on subsequent ticks (insert-only-per-tick preserved).
       {
         const insRel = db.prepare(
           "INSERT INTO obs_relation (tick_id, source_ticket, target_ticket, relation_type) VALUES (?, ?, ?, ?)",
         );
         const seenRel = new Set();
+        const seenEdge = new Set();
         for (const s of signals) {
           if (!s?.ticket || seenRel.has(s.ticket)) continue;
           seenRel.add(s.ticket);
@@ -519,6 +524,9 @@ export function collectTickFacts({
             if (descriptor == null) continue; // cold/stale cache → no rows this tick
             const addEdge = (src, tgt, type) => {
               if (!src || !tgt) return; // malformed node — missing peer identifier
+              const edgeKey = `${src}\t${tgt}\t${type}`;
+              if (seenEdge.has(edgeKey)) return; // within-tick symmetric duplicate
+              seenEdge.add(edgeKey);
               insRel.run(tickId, String(src), String(tgt), String(type));
             };
             for (const node of descriptor?.relations?.nodes ?? []) {
