@@ -20,8 +20,9 @@ import type {
   ModelLatencyRow,
   TailResult,
   TailRow,
+  EventsHeatmap,
 } from "@/lib/types";
-import type { BoardPayload } from "@/board/types";
+import type { BoardPayload, BoardWorker } from "@/board/types";
 import {
   timeRangeAtom,
   TIME_RANGES,
@@ -39,6 +40,8 @@ import { errorTrendSparkline } from "@/components/observe/telemetry-panels";
 import { Sparkline } from "@/components/sparkline";
 import { heroState } from "@/components/observe/hero-state";
 import { isErrorRow, type TailWorkerRef } from "@/components/observe/tail-group";
+import { EventsHeatmapPanel } from "@/components/observe/events-heatmap-panel";
+import type { HeatmapWorkerRef } from "@/components/observe/events-heatmap-data";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 /** Per-tool p50/p95 latency map from /api/otel/tool-latency. */
@@ -71,7 +74,19 @@ export function TelemetrySurface() {
   const [tail, setTail] = useState<TailResult | null>(null);
   const [tailReachable, setTailReachable] = useState<boolean>(true);
   const [lastGoodMs, setLastGoodMs] = useState<number | null>(null);
-  const [workers, setWorkers] = useState<TailWorkerRef[]>([]);
+  // The board-worker subset both P1 (tail attribution) and P5 (heatmap rows)
+  // consume. We keep the activeState/working flags so P5 can flag a `running`
+  // worker that's gone silent (the early-stall signal); P1 only needs the join keys.
+  const [workers, setWorkers] = useState<
+    Pick<
+      BoardWorker,
+      "sessionId" | "ticket" | "phase" | "name" | "activeState" | "working"
+    >[]
+  >([]);
+
+  // OBS-8 (TELEMETRY P5): events/min heatmap (workers × 15m buckets).
+  const [heatmap, setHeatmap] = useState<EventsHeatmap | null>(null);
+  const [heatmapReachable, setHeatmapReachable] = useState<boolean>(true);
 
   // OBS-7 panel data: P2 error clusters, P3 tool mix (counts + p95), P4 model
   // latency. Each reads a [loki] route; the ChartCard owns the honesty states so a
@@ -150,6 +165,8 @@ export function TelemetrySurface() {
             ticket: w.ticket,
             phase: w.phase,
             name: w.name,
+            activeState: w.activeState,
+            working: w.working,
           })),
         );
       } catch {
@@ -233,13 +250,34 @@ export function TelemetrySurface() {
       }
     }
 
+    // P5 heatmap window: wide enough for several 15m columns. On NOW we pin a 6h
+    // window (≈24 buckets) so a worker's recent-vs-earlier activity is legible; the
+    // longer ranges pass through the same Loki duration the other aggregate panels
+    // use (capped at 7d by Loki retention via TIME_RANGE_TO_LOKI).
+    async function loadHeatmap() {
+      const heatmapRange = range === "NOW" ? "6h" : TIME_RANGE_TO_LOKI[range];
+      try {
+        const resp = await fetch(`/api/otel/events-heatmap?range=${heatmapRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setHeatmapReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: EventsHeatmap | null };
+        setHeatmap(body.data ?? null);
+        setHeatmapReachable(true);
+      } catch {
+        if (alive) setHeatmapReachable(false);
+      }
+    }
+
     void loadErrors();
     void loadTools();
     void loadModelLatency();
+    void loadHeatmap();
     const id = setInterval(() => {
       void loadErrors();
       void loadTools();
       void loadModelLatency();
+      void loadHeatmap();
     }, refreshIntervalMs(range));
     return () => {
       alive = false;
@@ -249,6 +287,31 @@ export function TelemetrySurface() {
 
   const rows = tail?.rows ?? [];
   const { errorCount, errorRate } = useMemo(() => deriveErrorStats(rows), [rows]);
+
+  // The board-worker subset, projected to the two ref shapes the panels need.
+  // P1 wants the join keys (TailWorkerRef); P5 wants the row label + a `running`
+  // flag (active OR working, and not dead) so a silent running worker is flagged.
+  const tailWorkers = useMemo<TailWorkerRef[]>(
+    () =>
+      workers.map((w) => ({
+        sessionId: w.sessionId,
+        ticket: w.ticket,
+        phase: w.phase,
+        name: w.name,
+      })),
+    [workers],
+  );
+  const heatmapWorkers = useMemo<HeatmapWorkerRef[]>(
+    () =>
+      workers.map((w) => ({
+        sessionId: w.sessionId,
+        // Same `ticket·phase` label shape the tail's worker headers use.
+        label: `${w.ticket}·${w.phase}`,
+        name: w.name,
+        running: w.activeState !== "dead" && (w.activeState === "active" || w.working),
+      })),
+    [workers],
+  );
 
   // The P2 header trend (24h error-count sparkline) + per-panel reachability for
   // the ChartCard health, layered over the global /api/health/otel probe.
@@ -323,7 +386,7 @@ export function TelemetrySurface() {
         >
           <LiveTail
             rows={rows}
-            workers={workers}
+            workers={tailWorkers}
             focusFilter={focusFilter}
             onOpenWorker={(workerName) => {
               // Drill (one click): worker → its history page (/worker/$id). A full-
@@ -396,6 +459,46 @@ export function TelemetrySurface() {
               // No model filter axis on the tail; an erroring model drills to
               // errors-only, otherwise this is a soft focus (no-op filter).
               setFocusFilter({ errorsOnly: erroring, nonce: focusNonce.current++ });
+            }}
+          />
+        </ChartCard>
+
+        {/* P5 EVENTS/MIN HEATMAP — workers × 15m time buckets (OBS-8). Sits
+            bottom-left under the tall P1 on desktop (layout spec §2); rows = board
+            worker sessions (so a SILENT running worker still gets a row — the
+            early-stall signal), columns = 15m windows, cell opacity = events that
+            window. dataSource="[loki+board]": Loki gates the cell DATA but the
+            board-sourced row headers render even when Loki is down (design §4) — so
+            the card never goes fully blank. Cell click → tail at that window; a
+            running-but-silent row → the worker page (the FleetOps stuck cross-link
+            available today, design §3.1). */}
+        <ChartCard
+          title="Events / min — workers × time"
+          dataSource="[loki+board]"
+          health={lokiHealth(heatmapReachable)}
+          hasData={heatmapWorkers.length > 0 || (heatmap?.cells.length ?? 0) > 0}
+          bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-2"
+        >
+          <EventsHeatmapPanel
+            payload={heatmap}
+            workers={heatmapWorkers}
+            onCellClick={(sessionId) => {
+              // Drill (progressive disclosure): focus the P1 tail on this worker's
+              // session. The tail's worker filter keys off sessionId (tail-group's
+              // bucketKeyFactory), so a soft focus re-surfaces that worker's rows.
+              // TODO(OBS-8 follow-up): scope the focus to the clicked 15m window
+              // once the tail accepts a time-bound filter (today it shows the whole
+              // current scan).
+              setFocusFilter({ eventType: "", nonce: focusNonce.current++ });
+              void sessionId;
+            }}
+            onStallClick={(sessionId) => {
+              // A running-but-silent worker → its history page (the closest existing
+              // FleetOps stuck-list cross-link). Find the worker name for the
+              // /worker/$id route; fall back to the session id.
+              const worker = workers.find((w) => w.sessionId === sessionId);
+              const target = worker?.name ?? sessionId;
+              window.location.assign(`/worker/${encodeURIComponent(target)}`);
             }}
           />
         </ChartCard>

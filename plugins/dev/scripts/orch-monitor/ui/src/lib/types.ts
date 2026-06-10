@@ -322,6 +322,26 @@ export interface ModelLatencyRow {
   errorRate: number | null;
 }
 
+// ── OBS-8 (TELEMETRY P5): events/min heatmap wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts EventsHeatmap. `buckets` is the full 15m column axis
+// (epoch seconds, ascending) so the UI renders every column even where a session
+// was silent; `cells` carries only the positive-activity (session × bucket) counts.
+export interface HeatmapCell {
+  /** Bucket start, epoch seconds. */
+  x: number;
+  /** CC session UUID — joined to a board worker name for the row label. */
+  sessionId: string;
+  /** Count of claude-code log lines in this session × bucket. */
+  value: number;
+}
+
+export interface EventsHeatmap {
+  /** Bucket starts (epoch seconds), ascending — the full column axis. */
+  buckets: number[];
+  /** Activity cells (value > 0). Absent (session, bucket) pairs are honest silence. */
+  cells: HeatmapCell[];
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"

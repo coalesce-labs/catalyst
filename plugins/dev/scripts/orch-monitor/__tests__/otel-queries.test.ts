@@ -14,6 +14,10 @@ import {
   apiErrors,
   recentTail,
   recentTailLogQL,
+  eventsHeatmap,
+  eventsHeatmapLogQL,
+  extractHeatmap,
+  HEATMAP_BUCKET_SECONDS,
   costValidation,
   safeDuration,
   workerHistoryBySession,
@@ -895,5 +899,100 @@ describe("recentTail", () => {
     expect(res!.rows).toHaveLength(1);
     expect(res!.rows[0]!.eventName).toBeNull();
     expect(res!.rows[0]!.sessionId).toBeNull();
+  });
+});
+
+// ── OBS-8 (TELEMETRY P5): events/min heatmap ──────────────────────────────────
+
+/** A Loki matrix keyed by session_id (mirrors lokiMatrix but on the session label). */
+function lokiSessionMatrix(
+  series: Array<{ session: string; values: Array<[number, string]> }>,
+): LokiQueryResult {
+  return {
+    data: {
+      resultType: "matrix",
+      result: series.map((s) => ({
+        metric: { session_id: s.session },
+        values: s.values,
+      })),
+    },
+  };
+}
+
+describe("eventsHeatmapLogQL — pin the LogQL shape", () => {
+  it("counts claude-code lines by (session_id) in 15m windows, NO json stage", () => {
+    const q = eventsHeatmapLogQL();
+    expect(q).toContain("sum by (session_id)");
+    expect(q).toContain("count_over_time");
+    expect(q).toContain('{service_name=~"claude-code.*"}');
+    expect(q).toContain(`[${HEATMAP_BUCKET_SECONDS}s]`);
+    // session_id is a STREAM label — a `| json` stage errors on malformed lines and
+    // would silently zero the matrix. It must NOT be present.
+    expect(q).not.toContain("| json");
+  });
+
+  it("uses a 900s (15m) bucket", () => {
+    expect(HEATMAP_BUCKET_SECONDS).toBe(900);
+  });
+});
+
+describe("extractHeatmap — matrix → cells + bucket axis", () => {
+  it("keeps positive cells, unions the sorted bucket axis, drops zeros", () => {
+    const result = lokiSessionMatrix([
+      { session: "sess-a", values: [[300, "5"], [1200, "0"], [2100, "3"]] },
+      { session: "sess-b", values: [[1200, "7"]] },
+    ]);
+    const hm = extractHeatmap(result);
+    // axis is the union of every point ts, ascending.
+    expect(hm.buckets).toEqual([300, 1200, 2100]);
+    // zero cell (sess-a @1200) is dropped — silence is represented by ABSENCE.
+    expect(hm.cells).toEqual([
+      { x: 300, sessionId: "sess-a", value: 5 },
+      { x: 2100, sessionId: "sess-a", value: 3 },
+      { x: 1200, sessionId: "sess-b", value: 7 },
+    ]);
+  });
+
+  it("skips a series with no session_id label (never a fabricated key)", () => {
+    const result: LokiQueryResult = {
+      data: {
+        resultType: "matrix",
+        result: [{ metric: {}, values: [[300, "9"]] } as never],
+      },
+    };
+    const hm = extractHeatmap(result);
+    expect(hm.cells).toHaveLength(0);
+    expect(hm.buckets).toHaveLength(0);
+  });
+
+  it("an empty matrix → empty model (honest silence, not an error)", () => {
+    const hm = extractHeatmap({ data: { resultType: "matrix", result: [] } });
+    expect(hm).toEqual({ buckets: [], cells: [] });
+  });
+});
+
+describe("eventsHeatmap", () => {
+  it("returns the extracted model and passes a 15m step to Loki", async () => {
+    let seenStep: number | undefined;
+    const loki: LokiFetcher = {
+      queryRange: (_q, _s, _e, _limit, step) => {
+        seenStep = step;
+        return Promise.resolve(
+          lokiSessionMatrix([{ session: "sess-a", values: [[300, "4"]] }]),
+        );
+      },
+      isAvailable: () => true,
+    };
+    const hm = await eventsHeatmap(loki, "6h");
+    expect(seenStep).toBe(HEATMAP_BUCKET_SECONDS);
+    expect(hm!.cells).toEqual([{ x: 300, sessionId: "sess-a", value: 4 }]);
+  });
+
+  it("returns null ONLY when Loki is unavailable (probe failed)", async () => {
+    const loki: LokiFetcher = {
+      queryRange: () => Promise.resolve(null),
+      isAvailable: () => false,
+    };
+    expect(await eventsHeatmap(loki, "6h")).toBeNull();
   });
 });

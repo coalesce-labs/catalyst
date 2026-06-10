@@ -203,6 +203,7 @@ import {
   toolLatency,
   apiErrors,
   recentTail,
+  eventsHeatmap,
   costValidation,
   workerHistoryBySession,
   isValidCcSessionId,
@@ -1922,6 +1923,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
             ? Math.min(Math.max(1, rawLimit), 1000)
             : 300;
           const result = await recentTail(loki, range, limit);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-8 (TELEMETRY P5): events/min heatmap, workers × time. ONE metric
+        // query over the claude-code Loki stream — `count_over_time` of every line
+        // per `session_id` in 15m buckets (eventsHeatmap in otel-queries.ts). The
+        // payload is {buckets, cells}; the UI joins cells[].sessionId to board
+        // worker names and renders a row for EVERY running worker (silent ones
+        // included) so an early stall — a `running` worker with dark recent cells —
+        // is visible. 503 when Loki is not configured (the P5 ChartCard degrades via
+        // the ladder, but its board-sourced row headers still render per design
+        // §3.1); a reachable-but-quiet stream is an HONEST 200 with empty cells.
+        if (url.pathname === "/api/otel/events-heatmap") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "6h";
+          const result = await eventsHeatmap(loki, range);
           if (result === null) {
             // Loki probe failed mid-flight — honest 503, not a fabricated empty.
             return Response.json({ error: "Loki unavailable" }, { status: 503 });

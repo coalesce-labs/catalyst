@@ -753,6 +753,117 @@ interface CostValidationEntry {
   discrepancy: number;
 }
 
+// ── OBS-8 (TELEMETRY P5): events/min heatmap, workers × time ──────────────────
+// "Is each running worker still emitting, or has one gone silent?" The P5 panel is
+// a workers × time-bucket grid: rows = board worker sessions, columns = 15-minute
+// windows, each cell = the count of claude-code log lines that session emitted in
+// that window. A `running` worker whose recent cells are dark is an early-STALL
+// signal (design §3.1 / build-plan §3 P5 → cross-links FleetOps stuck list).
+//
+// The data is one metric query over the SAME claude-code Loki stream the tail uses:
+//   sum by (session_id) (count_over_time({service_name=~"claude-code.*"} [15m]))
+// run as a query_range with an explicit 15m (900s) step so each matrix series
+// carries one [epochSec, count] point per 15m bucket. session_id is a STREAM LABEL
+// (no `| json` stage — verified live: `| json` errors on malformed lines and is
+// unnecessary, the label is matchable directly), so the grouping is cheap and never
+// drops a line to a parser error.
+//
+// Row headers (which sessions to SHOW, including silent ones) come from the board,
+// joined in the route — so a `running` worker with ZERO Loki lines in the window
+// still gets a row of all-silence cells (the whole point of the silence signal).
+
+/** The 15-minute bucket width, in seconds — the Loki `step` and the bucket spacing. */
+export const HEATMAP_BUCKET_SECONDS = 900;
+
+/** One worker × time-bucket cell for the P5 heatmap. `x` is the bucket's start
+ *  (epoch SECONDS, the Loki matrix point ts); `sessionId` is the row key; `value`
+ *  is the count of claude-code lines that session emitted in that 15m window. */
+export interface HeatmapCell {
+  /** Bucket start, epoch seconds (the Loki matrix point timestamp). */
+  x: number;
+  /** CC session UUID — the row key (joined to a board worker name in the UI). */
+  sessionId: string;
+  /** Count of claude-code log lines in this session × bucket. */
+  value: number;
+}
+
+/** The P5 events/min heatmap payload: the cells with positive activity + the
+ *  ordered bucket axis (so the UI renders EVERY 15m column even where a session
+ *  was silent — silence is the signal, never an absent column). */
+export interface EventsHeatmap {
+  /** Bucket starts (epoch seconds), ascending — the full column axis for the window. */
+  buckets: number[];
+  /** Activity cells (value > 0). Sessions/buckets absent here are honest silence. */
+  cells: HeatmapCell[];
+}
+
+/** Build the exact LogQL for the events/min heatmap: a count of claude-code lines
+ *  per session over a 15m sliding window, grouped by the `session_id` STREAM LABEL.
+ *  Exported so a test can pin the shape — note there is deliberately NO `| json`
+ *  stage (session_id is a stream label, and `| json` errors on malformed lines and
+ *  would silently zero the matrix). */
+export function eventsHeatmapLogQL(): string {
+  return `sum by (session_id) (count_over_time({service_name=~"claude-code.*"} [${HEATMAP_BUCKET_SECONDS}s]))`;
+}
+
+/** PURE extraction of a Loki matrix result into heatmap cells + the bucket axis.
+ *  Each matrix series is one session (the `session_id` metric label); each of its
+ *  `values` points is one 15m bucket `[epochSec, countStr]`. We keep only cells
+ *  with a positive, finite count (silence is represented by ABSENCE, which the UI
+ *  fills from the bucket axis), and union every point's timestamp into the sorted
+ *  bucket axis so the column grid is complete even when no session was active in a
+ *  given window. A series with no `session_id` label is skipped (never bucketed
+ *  under a fabricated key). Exported for direct unit testing. */
+export function extractHeatmap(result: LokiQueryResult): EventsHeatmap {
+  const cells: HeatmapCell[] = [];
+  const bucketSet = new Set<number>();
+  for (const entry of result.data.result) {
+    const series = entry as {
+      metric?: Record<string, string>;
+      values?: Array<[number, string]>;
+    };
+    const sessionId = series.metric?.["session_id"];
+    if (!sessionId || !series.values?.length) continue;
+    for (const point of series.values) {
+      const ts = Math.floor(Number(point[0]));
+      if (!Number.isFinite(ts)) continue;
+      bucketSet.add(ts);
+      const value = parseInt(point[1], 10);
+      if (Number.isFinite(value) && value > 0) {
+        cells.push({ x: ts, sessionId, value });
+      }
+    }
+  }
+  const buckets = [...bucketSet].sort((a, b) => a - b);
+  return { buckets, cells };
+}
+
+/**
+ * Per-session events-per-15m-bucket heatmap over the window, off the claude-code
+ * Loki stream. Returns `null` ONLY when Loki is unavailable (the probe failed →
+ * caller surfaces a 503); a reachable-but-quiet stream is an honest empty
+ * `{buckets:[], cells:[]}` (the ChartCard renders silence, NOT an error). The
+ * caller joins `cells[].sessionId` to board worker names and renders a row for
+ * every running worker — including silent ones — so an early stall is visible.
+ */
+export async function eventsHeatmap(
+  loki: LokiFetcher,
+  range: string,
+): Promise<EventsHeatmap | null> {
+  const r = safeDuration(range, "6h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    eventsHeatmapLogQL(),
+    start.toISOString(),
+    now.toISOString(),
+    undefined,
+    HEATMAP_BUCKET_SECONDS,
+  );
+  if (!result) return null;
+  return extractHeatmap(result);
+}
+
 export async function costValidation(
   prom: PrometheusFetcher,
   signalCosts: Record<string, number>,
