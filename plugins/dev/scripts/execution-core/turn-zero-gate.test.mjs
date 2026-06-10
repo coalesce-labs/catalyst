@@ -34,9 +34,11 @@ import {
   defaultStatJob,
   defaultReadNeverStartedAttempts,
   defaultRecordNeverStartedAttempt,
+  defaultClearNeverStartedAttempts,
   neverStartedAttemptsPath,
   defaultAppendWedgedNeverStartedEvent,
 } from "./recovery.mjs";
+import { existsSync } from "node:fs";
 import { claudeLogs, agentStateForShortId } from "./claude-agents.mjs";
 
 // Frozen clock — all tests pin `now` so no wall-clock leaks in.
@@ -231,7 +233,8 @@ describe("turn-zero gate — wedged-never-started detection (CTL-932)", () => {
   test("(5) attempt cap: 2 prior ineffective replacements → needs-human escalation instead of a third redispatch", () => {
     defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "capture-1");
     defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "capture-2");
-    const seams = gateSeams();
+    const emitReapIntent = recorder(Promise.resolve());
+    const seams = gateSeams({ emitReapIntent });
     const r = reclaimDeadWorkIfPossible(orchDir, wedgedSignal(), seams);
 
     expect(r).toBe("escalated");
@@ -249,6 +252,24 @@ describe("turn-zero gate — wedged-never-started detection (CTL-932)", () => {
     expect(allLogs).toContain("Unknown command");
     // the wedged corpse is still stopped (it holds a slot).
     expect(seams.killBgJob.calls.length).toBe(1);
+
+    // ── CTL-932 fix #2: the cap branch emits a reap-intent (the authoritative
+    //    backup if the inline kill fails) — both sibling stop paths do this.
+    expect(emitReapIntent.calls.length).toBe(1);
+    expect(emitReapIntent.calls[0][0]).toBe("phase.terminal.reap-requested");
+    expect(emitReapIntent.calls[0][1]).toMatchObject({
+      ticket: "CTL-722",
+      phase: "implement",
+      bgJobId: BG_JOB_ID,
+      reason: "ctl-932-wedged-never-started-exhausted",
+    });
+
+    // ── CTL-932 fix #1: the cap branch pre-seeds the progress high-water mark to
+    //    the worker's current (zero) progress so the dead-path revive gate
+    //    (branch C) reads `0 <= 0` next tick and STOPS instead of reviving a
+    //    futile 4th worker.
+    expect(seams.writeProgressMark.calls.length).toBe(1);
+    expect(seams.writeProgressMark.calls[0]).toEqual([orchDir, "CTL-722", "implement", 0]);
   });
 
   test("stale snapshot → gate is a no-op (only a FRESH blocked verdict counts)", () => {
@@ -294,6 +315,155 @@ describe("turn-zero gate — wedged-never-started detection (CTL-932)", () => {
     expect(probe.calls.length).toBe(1); // probe ran before any kill decision
     expect(seams.killBgJob.calls.length).toBe(0);
     expect(seams.appendWedgedEvent.calls.length).toBe(0);
+  });
+});
+
+describe("turn-zero gate — cap-branch terminality across ticks (CTL-932 fix)", () => {
+  // Recent-but-past-threshold dispatch: > 120s gate, well under the busy ceiling
+  // and reviveMaxAge so neither intercepts the dead-path traversal on tick 2.
+  const FIVE_MIN_AGO = new Date(NOW - 5 * 60_000).toISOString();
+
+  test("(fix-a) MULTI-TICK: cap-branch escalation is terminal — the corpse is NOT revived on the next dead tick (zero 4th worker)", () => {
+    // Pre-load 2 prior ineffective replacements → tick 1 hits the cap branch.
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "capture-1");
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "capture-2");
+
+    // Stateful statJob: tick 1 = the wedged ALIVE worker (cap branch fires +
+    // kills it); tick 2 = the killed worker's dir is gone (dead-gone → branch C).
+    let tick = 0;
+    const statJob = () => (tick === 0 ? wedgedStatJob() : null);
+
+    // REAL on-disk progress marks (no seam) so the high-water the cap branch
+    // pre-seeds on tick 1 persists and branch C reads it on tick 2.
+    const reviveDispatch = recorder({ code: 0 });
+    const killBgJob = recorder(undefined);
+    const escalations = recorder(true);
+    const baseSeams = gateSeams({
+      statJob,
+      reviveDispatch,
+      killBgJob,
+      appendEscalatedEvent: escalations,
+    });
+    // Drop the progress-mark seams so the defaults persist to disk.
+    delete baseSeams.writeProgressMark;
+    delete baseSeams.readProgressMark;
+    // No second escalation should fire on tick 2; if it does, fail loud rather
+    // than silently cool-down-suppress (escalation-suppressed would also mask a
+    // bug). Track via the audit-event recorder above.
+
+    const sig = wedgedSignal({ startedAt: FIVE_MIN_AGO });
+
+    // ── TICK 1: cap branch — kill + escalate + pre-seed progress mark.
+    const r1 = reclaimDeadWorkIfPossible(orchDir, sig, baseSeams);
+    expect(r1).toBe("escalated");
+    expect(killBgJob.calls.length).toBe(1);
+    expect(reviveDispatch.calls.length).toBe(0); // no replacement at the cap
+    // the high-water mark was written to disk so branch C's gate fails next tick.
+    expect(existsSync(join(orchDir, "workers", "CTL-722", ".progress-implement"))).toBe(true);
+
+    // ── TICK 2: the corpse reads dead-gone → branch C. Its no-progress gate
+    //    now reads `0 <= 0` (the seeded mark) and STOPS — it must NOT revive a
+    //    4th worker. THIS is the regression the single-sweep test 5 can't see.
+    tick = 1;
+    const r2 = reclaimDeadWorkIfPossible(orchDir, sig, baseSeams);
+    expect(r2).toBe("no-progress-stopped");
+    // THE assertion: zero post-escalation respawns — reviveDispatch never fired.
+    expect(reviveDispatch.calls.length).toBe(0);
+
+    // ── TICK 3 (idempotency): still terminal, still no respawn.
+    const r3 = reclaimDeadWorkIfPossible(orchDir, sig, baseSeams);
+    expect(r3).toBe("no-progress-stopped");
+    expect(reviveDispatch.calls.length).toBe(0);
+  });
+
+  test("(fix-a, regression baseline) WITHOUT the seeded mark a dead never-started worker WOULD revive — proving the seed is what closes branch C", () => {
+    // No progress mark on disk + the dead-path gate's readProgressMark default of
+    // -1 → currentProgress(0) > -1 → branch C revives. This is the pre-fix
+    // behaviour the seeded mark suppresses. (Documents WHY fix #1 is load-bearing.)
+    const reviveDispatch = recorder({ code: 0 });
+    const seams = gateSeams({ statJob: () => null, reviveDispatch });
+    delete seams.writeProgressMark;
+    delete seams.readProgressMark;
+    const r = reclaimDeadWorkIfPossible(
+      orchDir,
+      wedgedSignal({ startedAt: FIVE_MIN_AGO }),
+      seams,
+    );
+    expect(r).toBe("revived");
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+});
+
+describe("never-started marker cleanup on success (CTL-932 fix #3)", () => {
+  const FIVE_MIN_AGO = new Date(NOW - 5 * 60_000).toISOString();
+
+  test("(fix-c) marker cleared when the phase reclaims as work-done", () => {
+    // Stale marker from a long-past wedge sits in the worker dir.
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "old-wedge");
+    expect(existsSync(neverStartedAttemptsPath(orchDir, "CTL-722", "implement"))).toBe(true);
+
+    // A dead worker whose committed-work probe now PASSES → reclaimed happy path.
+    const seams = gateSeams({
+      statJob: () => null, // dead-gone
+      probes: { implement: recorder(true) }, // work IS done
+    });
+    const r = reclaimDeadWorkIfPossible(
+      orchDir,
+      wedgedSignal({ startedAt: FIVE_MIN_AGO }),
+      seams,
+    );
+    expect(r).toBe("reclaimed");
+    // the stale marker is gone → a future wedge earns a fresh budget.
+    expect(existsSync(neverStartedAttemptsPath(orchDir, "CTL-722", "implement"))).toBe(false);
+  });
+
+  test("(fix-c) marker cleared when a revive observes forward progress", () => {
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "old-wedge");
+    expect(existsSync(neverStartedAttemptsPath(orchDir, "CTL-722", "implement"))).toBe(true);
+
+    // Dead worker, work not done, but progress ADVANCED (current 3 > stored -1)
+    // → branch C revives AND clears the stale marker.
+    const seams = gateSeams({
+      statJob: () => null,
+      progressMark: () => 3,
+      readProgressMark: () => -1,
+    });
+    delete seams.writeProgressMark; // real on-disk write
+    const r = reclaimDeadWorkIfPossible(
+      orchDir,
+      wedgedSignal({ startedAt: FIVE_MIN_AGO }),
+      seams,
+    );
+    expect(r).toBe("revived");
+    expect(existsSync(neverStartedAttemptsPath(orchDir, "CTL-722", "implement"))).toBe(false);
+  });
+
+  test("(fix-c) cleared marker → a LATER wedge gets a fresh replacement attempt (count reset), not instant escalation", () => {
+    // Simulate the full lifecycle: a phase wedged twice long ago, then SUCCEEDED
+    // (marker cleared), then much later wedges ONCE on a transient blip.
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "ancient-1");
+    defaultRecordNeverStartedAttempt(orchDir, "CTL-722", "implement", "ancient-2");
+    // …the phase later succeeded → marker cleared.
+    defaultClearNeverStartedAttempts(orchDir, "CTL-722", "implement");
+    expect(defaultReadNeverStartedAttempts(orchDir, "CTL-722", "implement").count).toBe(0);
+
+    // A new wedge now: because the count reset, the gate REPLACES (attempt 1),
+    // it does NOT escalate with zero retries off a stale count>=cap.
+    const seams = gateSeams();
+    const r = reclaimDeadWorkIfPossible(
+      orchDir,
+      wedgedSignal({ startedAt: FIVE_MIN_AGO }),
+      seams,
+    );
+    expect(r).toBe("wedged-redispatched"); // fresh replacement, NOT "escalated"
+    expect(seams.reviveDispatch.calls.length).toBe(1);
+    expect(seams.appendWedgedEvent.calls[0][0].attempt).toBe(1);
+  });
+
+  test("(fix-c) defaultClearNeverStartedAttempts is idempotent (no throw when the marker is absent)", () => {
+    expect(() =>
+      defaultClearNeverStartedAttempts(orchDir, "CTL-NONE", "plan"),
+    ).not.toThrow();
   });
 });
 
