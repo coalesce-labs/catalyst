@@ -47,6 +47,12 @@ export interface NavGroup {
   label: string;
   /** Dot color for per-repo groups (from repoColors config). */
   dotColor?: string;
+  /**
+   * CTL-961: auto-detected favicon as a data URL (fetched from the repo's
+   * GitHub by the server, cached for 7 days). null = not yet fetched or not found.
+   * Shown in preference to the color dot when present.
+   */
+  iconDataUrl?: string | null;
   items: NavItem[];
 }
 
@@ -80,6 +86,7 @@ function makeOperateItems(scope: string): NavItem[] {
 /**
  * Build the full nav group list: Overall (all) first, one group per repo in
  * `repos` order, then Observe (last). `repoColors` maps repo key → `{ text }`.
+ * `repoIcons` optionally maps repo key → data URL for auto-detected favicons (CTL-961).
  *
  * Gherkin (CTL-944): project-grouped left nav — Overall flat, per-project
  * Collapsibles, Observe recessed and last.
@@ -87,6 +94,7 @@ function makeOperateItems(scope: string): NavItem[] {
 export function buildNavGroups(
   repos: readonly string[],
   repoColors: Readonly<Record<string, { text: string }>>,
+  repoIcons?: Readonly<Record<string, string | null>>,
 ): NavGroup[] {
   const overall: NavGroup = {
     scope: "all",
@@ -98,6 +106,7 @@ export function buildNavGroups(
     scope: repo,
     label: repo,
     dotColor: repoColors[repo]?.text,
+    iconDataUrl: repoIcons ? (repoIcons[repo] ?? null) : undefined,
     items: makeOperateItems(repo),
   }));
 

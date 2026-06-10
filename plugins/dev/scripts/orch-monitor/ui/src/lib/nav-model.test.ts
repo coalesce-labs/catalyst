@@ -83,6 +83,36 @@ describe("nav-model — buildNavGroups", () => {
     const grp = groups.find((g) => g.scope === "unknown-repo")!;
     expect(grp.dotColor).toBeUndefined();
   });
+
+  // CTL-961: iconDataUrl is passed through from the repoIcons arg
+  it("passes iconDataUrl from repoIcons to the per-repo group", () => {
+    const icons: Record<string, string | null> = { catalyst: "data:image/png;base64,abc" };
+    const groups = buildNavGroups(["catalyst"], repoColors, icons);
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    expect(grp.iconDataUrl).toBe("data:image/png;base64,abc");
+  });
+
+  it("sets iconDataUrl to null when icon is null in repoIcons", () => {
+    const icons: Record<string, string | null> = { catalyst: null };
+    const groups = buildNavGroups(["catalyst"], repoColors, icons);
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    expect(grp.iconDataUrl).toBeNull();
+  });
+
+  it("sets iconDataUrl to undefined when repoIcons arg is omitted (backward compat)", () => {
+    const groups = buildNavGroups(["catalyst"], repoColors);
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    expect(grp.iconDataUrl).toBeUndefined();
+  });
+
+  it("Overall and Observe groups never have iconDataUrl", () => {
+    const icons = { catalyst: "data:image/png;base64,abc" };
+    const groups = buildNavGroups(["catalyst"], repoColors, icons);
+    const overall = groups.find((g) => g.scope === "all")!;
+    const observe = groups.find((g) => g.scope === "observe")!;
+    expect(overall.iconDataUrl).toBeUndefined();
+    expect(observe.iconDataUrl).toBeUndefined();
+  });
 });
 
 describe("nav-model — breadcrumbFor", () => {

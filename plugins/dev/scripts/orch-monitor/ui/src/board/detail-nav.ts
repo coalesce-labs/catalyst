@@ -26,6 +26,12 @@ import type { DetailFrom, DetailLens } from "./route-search";
 /** The kind of entity a card opens — selects the route + the list-context kind. */
 export type DetailKind = "ticket" | "worker";
 
+/** Which board SURFACE the operator was on when they opened the card (CTL-971).
+ *  Persisted in the restore snapshot so the return paths (Esc / breadcrumb /
+ *  browser back) reseat the shell on that surface instead of the landing-pref
+ *  default. Ticket cards live on "board"; worker cards on "workers". */
+export type RestoreSurface = "board" | "workers";
+
 /** The list-origin context a card carries into the detail page (mirrors the
  *  typed search params the Shell reconstructs). `cursor` is the 0-based index of
  *  the clicked entity within the on-screen ordered list. */
@@ -87,9 +93,19 @@ export const LIST_CONTEXT_MAX_AGE_MS = 30 * 60 * 1000; // 30 minutes
  * board exactly. `ids` + `kind` + `lens` + `col` mirror the resolved walk list
  * (so the restored board's listContextAtom matches the pager); `scroll` is the
  * board scroll-container offset; `focusId` is the originating card to re-focus;
- * `cursor` is its index in `ids`. Display-options (density/grouping/order/repo
- * scope) are NOT stored here — they already persist in their own localStorage
- * atoms (`boardPrefsAtom` / `repoScopeAtom`) and survive the navigation for free.
+ * `cursor` is its index in `ids`.
+ *
+ * CTL-971: `surface` + `scope` are now stored too — the original reasoning that
+ * "display-options ride their own persisted atoms for free" was only HALF true.
+ * The repo SCOPE does persist in localStorage (`repoScopeAtom`), but the active
+ * SURFACE does NOT: the return paths are a full-document navigation to `/`, and
+ * the shell reseeds the surface from the LANDING preference (default "home"/Inbox)
+ * — so without the saved surface the operator lands on the Inbox, the board never
+ * mounts, and `useBoardRestore` never runs (the scroll/focus snapshot is silently
+ * ignored). Storing the surface lets the shell reseat the board on return; storing
+ * the scope makes the restore the single source of truth (it no longer relies on a
+ * separately-timed localStorage read). Density/grouping/order STILL ride their own
+ * persisted `boardPrefsAtom` and are not duplicated here.
  */
 export interface ListContextSnapshot {
   ids: string[];
@@ -100,8 +116,17 @@ export interface ListContextSnapshot {
   cursor: number;
   /** The opened entity id — the card the board re-focuses on return. */
   focusId: string;
-  /** The board scroll-container offset to restore (px). */
+  /** The board scroll-container offset to restore (px). Both axes — CTL-950's
+   *  single both-axes `.cat-scroll` scroller means LEFT matters as much as TOP. */
   scroll: { top: number; left: number };
+  /** CTL-971: the board surface the card was opened FROM ("board" for ticket
+   *  cards, "workers" for worker cards). The shell reseats this surface on return
+   *  so the board actually mounts (else the landing-pref Inbox shows instead). */
+  surface: RestoreSurface;
+  /** CTL-971: the active repo scope at capture (`REPO_SCOPE_ALL` or a repo key).
+   *  Re-applied to `repoScopeAtom` on restore so the scope round-trips even if the
+   *  persisted localStorage value drifted between the two entries. */
+  scope: string;
   /** When captured (ms epoch) — a stale snapshot is ignored on restore. */
   savedAt: number;
 }
@@ -178,6 +203,19 @@ export function parseListContext(
           left: typeof (o.scroll as { left?: unknown }).left === "number" ? (o.scroll as { left: number }).left : 0,
         }
       : { top: 0, left: 0 };
+  // CTL-971: surface — accept the stored "board"/"workers", else DERIVE from the
+  // entity kind (a worker card was on the Workers surface; a ticket on the board)
+  // so an older snapshot (pre-CTL-971, no surface field) still reseats correctly.
+  const surface: RestoreSurface =
+    o.surface === "board" || o.surface === "workers"
+      ? o.surface
+      : o.kind === "worker"
+        ? "workers"
+        : "board";
+  // CTL-971: scope — any string is a valid repo key / the "all" sentinel; a
+  // missing/malformed value falls back to "all" (the unfiltered view) rather than
+  // forcing a wrong scope. The shell reconciles a stale scope against live repos.
+  const scope = typeof o.scope === "string" && o.scope !== "" ? o.scope : "all";
   return {
     ids: o.ids as string[],
     kind: o.kind,
@@ -187,6 +225,8 @@ export function parseListContext(
       typeof o.cursor === "number" && Number.isInteger(o.cursor) && o.cursor >= 0 ? o.cursor : 0,
     focusId: o.focusId,
     scroll,
+    surface,
+    scope,
     savedAt: o.savedAt,
   };
 }
@@ -242,6 +282,12 @@ export function hardNavigate(href: string): void {
  * snapshot, then hard-navigate to the deep link. `scroll` is the board
  * scroll-container offset the caller reads (kanban + list own different scroll
  * roots); it defaults to no offset when omitted. `from` defaults to "board".
+ *
+ * CTL-971: the caller also passes the live `surface` ("board"/"workers") + the
+ * active repo `scope` so the snapshot reseats them on return — without the surface
+ * the shell would reseed the landing-pref Inbox and the board would never mount.
+ * Both default sensibly (surface from kind, scope to "all") when the caller omits
+ * them so the seam stays drop-in for any older invoker.
  */
 export function openDetail(
   kind: DetailKind,
@@ -252,6 +298,8 @@ export function openDetail(
     col?: string;
     from?: DetailFrom;
     scroll?: { top: number; left: number };
+    surface?: RestoreSurface;
+    scope?: string;
   },
 ): void {
   const cursor = args.ids.indexOf(id);
@@ -264,6 +312,8 @@ export function openDetail(
     cursor: cursor >= 0 ? cursor : 0,
     focusId: id,
     scroll: args.scroll ?? { top: 0, left: 0 },
+    surface: args.surface ?? (kind === "worker" ? "workers" : "board"),
+    scope: args.scope ?? "all",
     savedAt: Date.now(),
   });
   const href = detailHref(kind, id, {

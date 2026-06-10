@@ -1109,21 +1109,11 @@ export function Board({
   // offset (+ re-focuses the originating card) when the operator returns. ONE ref
   // shared by the tickets + workers + list bodies (they all live inside it).
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // CTL-971: restore now reseats the surface + scope too, so it is driven from the
+  // shell (App.tsx) BEFORE the board mounts (the surface must already be "board"
+  // for this component to exist). This board-local hook still re-applies the
+  // SCROLL offset + originating-card focus once the payload has rendered.
   useBoardRestore(scrollRef, data != null);
-  // CTL-951: the single card-open seam. Reads the live board scroll offset off the
-  // `.cat-scroll` overflow container (NOT the flex body wrapper, which never
-  // scrolls — `resolveScrollEl` is the SAME lookup the restore uses, so the offset
-  // round-trips), stashes the restore snapshot + walk-list, then hard-navigates.
-  const onOpen: OpenDetailFn = (kind, id, ctx) => {
-    const el = resolveScrollEl(scrollRef.current);
-    openDetail(kind, id, {
-      ids: ctx.ids,
-      lens: ctx.lens,
-      col: ctx.col,
-      from: "board",
-      scroll: el ? { top: el.scrollTop, left: el.scrollLeft } : { top: 0, left: 0 },
-    });
-  };
 
   // CTL-733 PR-2b: subscribe through the board transport — a SharedWorker shares
   // ONE EventSource (+ an IndexedDB cache) across every tab, with a direct
@@ -1173,6 +1163,27 @@ export function Board({
   // within it — swimlane=repo under a single-repo scope collapses naturally to
   // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
   const swimlane: GroupBy = prefs.swimlane;
+
+  // CTL-951 + CTL-971: the single card-open seam. Reads the live board scroll
+  // offset off the `.cat-scroll` overflow container (NOT the flex body wrapper,
+  // which never scrolls — `resolveScrollEl` is the SAME lookup the restore uses,
+  // so the offset round-trips on BOTH axes after CTL-950's single both-axes
+  // scroller / CTL-958's overscroll-chaining cells). CTL-971: it ALSO stamps the
+  // current SURFACE ("board"/"workers", derived from the active `view`) + repo
+  // `scope` into the snapshot so the return paths reseat them — without the surface
+  // the shell would reseed the landing-pref Inbox and the board would never mount.
+  const onOpen: OpenDetailFn = (kind, id, ctx) => {
+    const el = resolveScrollEl(scrollRef.current);
+    openDetail(kind, id, {
+      ids: ctx.ids,
+      lens: ctx.lens,
+      col: ctx.col,
+      from: "board",
+      scroll: el ? { top: el.scrollTop, left: el.scrollLeft } : { top: 0, left: 0 },
+      surface: view === "workers" ? "workers" : "board",
+      scope: repo,
+    });
+  };
 
   return (
     <TooltipProvider delayDuration={200}>
