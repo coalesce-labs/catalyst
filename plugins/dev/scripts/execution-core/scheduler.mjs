@@ -71,7 +71,10 @@ import { getProjectConfig, listProjects } from "./registry.mjs";
 // presweep + non-force `git worktree remove`) in phase-teardown/SKILL.md.
 import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
-import { collectBeliefsTick } from "./beliefs/collector.mjs";
+// CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
+import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
+// CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
+import { processDiagnosticianWakes } from "./diagnostician.mjs";
 // CTL-642/758: the live PR-merged adapter. makePrView is the single gh
 // `pr view` source of truth (shared with the scan CLI's makeScanAdapters), so
 // the daemon's recovery short-circuit + reconcile backstop run the identical
@@ -3403,7 +3406,26 @@ function runTick() {
     }
     // CTL-933: record this tick's liveness observations BEFORE the decisions run
     // (write-only shadow; own try/catch inside — never throws, never gates).
-    collectBeliefsTick({ orchDir: runningOpts.orchDir, linearCache: runningOpts.cache });
+    const beliefsRes = collectBeliefsTick({ orchDir: runningOpts.orchDir, linearCache: runningOpts.cache });
+    // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
+    // Reads wake_diagnostician beliefs for the current tick from the shared beliefs.db
+    // handle (same connection — no second db open). Never throws. Only activates
+    // when CATALYST_BELIEFS_SHADOW=1 (collector opened the db) AND
+    // CATALYST_DIAGNOSTICIAN=1 (diagnostician gate).
+    if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      try {
+        const diagDb = getBeliefsDb();
+        if (diagDb) {
+          processDiagnosticianWakes(diagDb, beliefsRes.tickId);
+        }
+      } catch (diagErr) {
+        try {
+          log.warn({ err: diagErr?.message }, "diagnostician: wake processing threw (tick unaffected)");
+        } catch {
+          /* even logging must not break the tick */
+        }
+      }
+    }
     schedulerTick(runningOpts.orchDir, {
       readEligible: runningOpts.readEligible,
       dispatch: runningOpts.dispatch,
