@@ -200,6 +200,7 @@ import {
   costRateByModel,
   toolUsageByName,
   apiErrors,
+  recentTail,
   costValidation,
   workerHistoryBySession,
   isValidCcSessionId,
@@ -1868,6 +1869,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
           const result = await apiErrors(loki, range, limit);
+          return Response.json({ data: result });
+        }
+
+        // OBS-6 (TELEMETRY): the fleet-wide grouped live tail + freshness. ONE
+        // newest-first scan of the claude-code Loki stream (same pipe as the
+        // per-session history, minus the session filter). The hero reads
+        // `freshnessMs` (age of the newest line) to pick FLOWING vs QUIET; the P1
+        // panel groups `rows` by worker client-side. 503 when Loki is not
+        // configured (the surface degrades via the ChartCard ladder). An empty
+        // stream is an HONEST 200 with `freshnessMs:null` (QUIET, not an error).
+        if (url.pathname === "/api/otel/tail") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "15m";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "300", 10);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(1, rawLimit), 1000)
+            : 300;
+          const result = await recentTail(loki, range, limit);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 

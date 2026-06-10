@@ -7,6 +7,8 @@ import {
   costRateByModel,
   toolUsageByName,
   apiErrors,
+  recentTail,
+  recentTailLogQL,
   costValidation,
   safeDuration,
   workerHistoryBySession,
@@ -609,5 +611,97 @@ describe("ticketTelemetrySeries", () => {
       isAvailable: () => false,
     };
     expect(await ticketTelemetrySeries(prom, "CTL-845", "1h")).toBeNull();
+  });
+});
+
+// ── OBS-6 (TELEMETRY): the fleet-wide grouped live tail + freshness ──────────
+describe("recentTailLogQL", () => {
+  it("scans the whole claude-code stream un-filtered by session", () => {
+    expect(recentTailLogQL()).toBe('{service_name=~"claude-code.*"}');
+  });
+});
+
+describe("recentTail", () => {
+  // A Loki stream value carries per-line `[tsNanos, jsonBody]` plus stream labels.
+  function lokiStream(
+    stream: Record<string, string>,
+    values: Array<[string, string]>,
+  ): LokiQueryResult {
+    return { data: { resultType: "streams", result: [{ stream, values }] } };
+  }
+
+  it("parses rows newest-first and derives freshnessMs from the newest line", async () => {
+    const now = Date.now();
+    const newest = now - 4_000; // 4s ago
+    const older = now - 60_000;
+    const loki = mockLoki(
+      lokiStream({ service_name: "claude-code" }, [
+        // Loki returns ns timestamps as strings; give them out-of-order to prove sort.
+        [String(older * 1_000_000), JSON.stringify({ event_name: "claude_code.tool_result", tool_name: "Read" })],
+        [String(newest * 1_000_000), JSON.stringify({ event_name: "claude_code.api_request", model: "fable" })],
+      ]),
+    );
+    const res = await recentTail(loki, "15m");
+    expect(res).not.toBeNull();
+    expect(res!.rows).toHaveLength(2);
+    // newest-first
+    expect(res!.rows[0]!.eventName).toBe("claude_code.api_request");
+    expect(res!.rows[0]!.model).toBe("fable");
+    // freshness ≈ 4s (allow a little slack for the now() taken inside recentTail)
+    expect(res!.freshnessMs).not.toBeNull();
+    expect(res!.freshnessMs!).toBeGreaterThanOrEqual(3_000);
+    expect(res!.freshnessMs!).toBeLessThan(10_000);
+  });
+
+  it("lifts session_id / linear_key from the JSON body (the grouping keys)", async () => {
+    const loki = mockLoki(
+      lokiStream({ service_name: "claude-code" }, [
+        [
+          String(Date.now() * 1_000_000),
+          JSON.stringify({
+            event_name: "claude_code.tool_result",
+            session_id: "abc-123",
+            linear_key: "CTL-928",
+          }),
+        ],
+      ]),
+    );
+    const res = await recentTail(loki, "15m");
+    expect(res!.rows[0]!.sessionId).toBe("abc-123");
+    expect(res!.rows[0]!.linearKey).toBe("CTL-928");
+  });
+
+  it("falls back to stream labels for session_id when the body omits it", async () => {
+    const loki = mockLoki(
+      lokiStream({ service_name: "claude-code", session_id: "label-sess" }, [
+        [String(Date.now() * 1_000_000), JSON.stringify({ event_name: "claude_code.api_request" })],
+      ]),
+    );
+    const res = await recentTail(loki, "15m");
+    expect(res!.rows[0]!.sessionId).toBe("label-sess");
+  });
+
+  it("an empty stream is an HONEST result with freshnessMs null (QUIET), NOT null", async () => {
+    const loki = mockLoki({ data: { resultType: "streams", result: [] } });
+    const res = await recentTail(loki, "15m");
+    expect(res).not.toBeNull();
+    expect(res!.rows).toHaveLength(0);
+    expect(res!.freshnessMs).toBeNull();
+  });
+
+  it("returns null ONLY when Loki is unavailable (probe failed)", async () => {
+    expect(await recentTail(mockLoki(null), "15m")).toBeNull();
+  });
+
+  it("tolerates a non-JSON line — row is present with null fields, never crashes", async () => {
+    const loki = mockLoki(
+      lokiStream({ service_name: "claude-code" }, [
+        [String(Date.now() * 1_000_000), "not json at all"],
+      ]),
+    );
+    const res = await recentTail(loki, "15m");
+    expect(res!.rows).toHaveLength(1);
+    expect(res!.rows[0]!.eventName).toBeNull();
+    expect(res!.rows[0]!.sessionId).toBeNull();
   });
 });

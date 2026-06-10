@@ -50,3 +50,24 @@ export const TIME_RANGE_LABEL: Record<TimeRange, string> = {
  *  live OBSERVE surface tonight). Per-surface defaults are applied on mount by
  *  each surface in its own OBS ticket. */
 export const timeRangeAtom = atom<TimeRange>("NOW");
+
+// ── range → Loki query-range string (OBS-6) ──────────────────────────────────
+// The Loki/Prometheus query helpers take a duration string ("15m", "1h", …). The
+// telemetry tail maps the operator's TimeRange selection to that duration. NOW is
+// the live moment — a tight 15m scan keeps the tail fresh and cheap; the longer
+// ranges widen the window for back-scroll.
+export const TIME_RANGE_TO_LOKI: Record<TimeRange, string> = {
+  NOW: "15m",
+  TODAY: "24h",
+  "24H": "24h",
+  "7D": "7d",
+  CYCLE: "7d",
+  "30D": "7d", // Loki retention is short; cap the tail scan at 7d.
+};
+
+/** Auto-refresh cadence (ms) for the live (NOW) range — the design's "15-60s
+ *  auto-refresh". NOW polls fast (15s) so the hero/tail feel live; the longer,
+ *  historical ranges refresh lazily (60s) since they move slowly. */
+export function refreshIntervalMs(range: TimeRange): number {
+  return range === "NOW" ? 15_000 : 60_000;
+}

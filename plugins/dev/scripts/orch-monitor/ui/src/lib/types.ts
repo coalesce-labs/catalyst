@@ -279,6 +279,36 @@ export interface OtelLogEntry {
   labels: Record<string, string>;
 }
 
+// ── OBS-6 (TELEMETRY): the grouped live tail wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts TailRow/TailResult on the server side. One parsed
+// claude-code Loki line; absent fields stay null (the renderer dims them, never
+// fabricates). sessionId/linearKey are the grouping keys lifted from the line.
+export interface TailRow {
+  /** Log timestamp (epoch ms). */
+  ts: number;
+  /** The OTEL event name (e.g. claude_code.tool_result), or null. */
+  eventName: string | null;
+  toolName: string | null;
+  toolInput: string | null;
+  durationMs: number | null;
+  costUsd: number | null;
+  tokens: number | null;
+  model: string | null;
+  success: boolean | null;
+  /** CC session UUID — the join key to a BoardWorker for grouping. */
+  sessionId: string | null;
+  /** Linear key — the human group label. */
+  linearKey: string | null;
+}
+
+/** The /api/otel/tail payload: newest-first rows + fleet-wide freshness (age in
+ *  ms of the newest line, or null when no lines in the window → the hero reads
+ *  QUIET). */
+export interface TailResult {
+  rows: TailRow[];
+  freshnessMs: number | null;
+}
+
 export type CommsMessageType =
   | "proposal"
   | "question"

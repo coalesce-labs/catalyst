@@ -146,6 +146,107 @@ export async function apiErrors(
   return entries;
 }
 
+// ── OBS-6 (TELEMETRY): the grouped live tail + Loki freshness ────────────────
+// The Telemetry surface's P1 panel is a live tail of the WHOLE fleet's
+// claude-code activity, grouped by worker — not one session at a time (that's
+// the CTL-914 worker page below). It rides the SAME Loki pipe as
+// workerHistoryLogQL, but UN-filtered by session: a single newest-first scan of
+// `{service_name=~"claude-code.*"}` over a short window. Each line is parsed by
+// the SAME parseHistoryLine (absent fields render dimmed, NEVER fabricated), and
+// we additionally lift the per-line `session_id` / `linear_key` structured
+// metadata so the UI can group rows under `▾<ticket>·<phase>` worker headers by
+// joining client-side against the board's worker list.
+//
+// The hero's freshness signal (age of the newest claude-code line) falls out of
+// the same scan for free — `freshnessMs` is `now − newest row ts`, or null when
+// the stream is empty (an honest "no recent events", which the hero reads as
+// QUIET, never as an error).
+
+/** One parsed tail row for the grouped live tail. Extends the WorkerHistoryRow
+ *  shape with the grouping keys lifted from the line body so a row can be bucketed
+ *  under its worker without a second query. Both keys are null when the line did
+ *  not carry them (a row is still shown — under an "unattributed" bucket — never
+ *  dropped or fabricated). */
+export interface TailRow extends WorkerHistoryRow {
+  /** CC session UUID (from the line's `session_id`), the join key to a BoardWorker. */
+  sessionId: string | null;
+  /** Linear key (from the line's `linear_key`), the human-facing group label. */
+  linearKey: string | null;
+}
+
+/** The grouped-tail payload: newest-first parsed rows + the fleet-wide freshness
+ *  (age in ms of the newest claude-code line). `null` rows ⇒ Loki unavailable
+ *  (caller surfaces a 503). `freshnessMs === null` ⇒ no lines in the window (the
+ *  hero reads this as QUIET — honest "no recent events", not an error). */
+export interface TailResult {
+  rows: TailRow[];
+  freshnessMs: number | null;
+}
+
+/** Build the exact LogQL for the fleet-wide tail. Exported so a test can pin the
+ *  un-filtered `{service_name=~"claude-code.*"}` selector (the same stream the
+ *  per-session history reads, minus the session pipe). */
+export function recentTailLogQL(): string {
+  return `{service_name=~"claude-code.*"}`;
+}
+
+/** Query the claude-code Loki stream for the fleet's recent activity, newest
+ *  first, and derive the fleet-wide freshness. Returns `{rows:[], freshnessMs:null}`
+ *  vs `null`: `null` ONLY when Loki is unavailable (probe failed). An empty stream
+ *  is `{rows:[], freshnessMs:null}` — a real "no recent events" answer the hero
+ *  renders as QUIET, never an error. */
+export async function recentTail(
+  loki: LokiFetcher,
+  range: string,
+  limit = 300,
+): Promise<TailResult | null> {
+  const r = safeDuration(range, "15m");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    recentTailLogQL(),
+    start.toISOString(),
+    now.toISOString(),
+    limit,
+  );
+  if (!result) return null;
+  const rows: TailRow[] = [];
+  for (const stream of result.data.result) {
+    const s = stream as LokiStreamValue;
+    if (!s.values) continue;
+    // Stream-level labels are a fallback for the grouping keys when the JSON body
+    // omits them (some lines carry session_id only as a stream label).
+    const streamSession = asStr(s.stream?.["session_id"]);
+    const streamLinear = asStr(s.stream?.["linear_key"]);
+    for (const [tsNanos, line] of s.values) {
+      const tsMs = Math.floor(Number(tsNanos) / 1_000_000);
+      const base = parseHistoryLine(Number.isFinite(tsMs) ? tsMs : Date.now(), line);
+      const body = safeJsonObject(line);
+      rows.push({
+        ...base,
+        sessionId: asStr(body["session_id"]) ?? streamSession,
+        linearKey: asStr(body["linear_key"]) ?? streamLinear,
+      });
+    }
+  }
+  rows.sort((a, b) => b.ts - a.ts);
+  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0]!.ts) : null;
+  return { rows, freshnessMs };
+}
+
+/** Parse a Loki line body to a plain object, tolerating non-JSON (returns {}).
+ *  Shared with parseHistoryLine's internal try/catch so the tail's extra
+ *  structured-metadata lift uses the SAME defensive parse. */
+function safeJsonObject(line: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(line) as unknown;
+    if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+  } catch {
+    /* unreadable JSON → empty object */
+  }
+  return {};
+}
+
 // ── CTL-914 (DETAIL3): worker-page [history] tail ───────────────────────────
 // A single phase-agent run's transcript is readable HOURS after the worker died
 // by querying the `claude-code` Loki stream filtered to its CC session UUID. The
