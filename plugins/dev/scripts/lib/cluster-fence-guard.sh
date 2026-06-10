@@ -6,7 +6,10 @@
 # Call BEFORE any irreversible side-effect (git push, gh pr create|merge,
 # Linear mirror comment + transition):
 #
-#   "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit $?
+#   "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
+#
+# (All 5 call-sites use `|| exit 10`, matching the guard's only non-zero exit
+# code; CTL-864 remediation aligned this example to that convention.)
 #
 # Contract:
 #   CATALYST_CLUSTER_GENERATION unset/empty → exit 0  (single-host no-op)

@@ -503,6 +503,15 @@ function dispatchTriage(identifier, {
       return false;
     }
   }
+  // CTL-864 reduced scope: triage is dispatched WITHOUT a cross-host fence token.
+  // The monitor has no cluster-claim wiring (no roster / claimDispatch / won
+  // generation), so there is no token to forward here. phase-triage's
+  // cluster-fence-guard is therefore a no-op on this path — its Linear mirror
+  // comment + Todo→Triage transition are idempotent and cheap, so an unfenced
+  // double-triage from a partitioned host is benign relative to the push/PR/merge
+  // side-effects the scheduler-dispatched phases (now fenced) guard against.
+  // Fencing triage would require plumbing the cluster claim into the monitor —
+  // tracked separately, out of scope for the CTL-864 fence-token remediation.
   const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
