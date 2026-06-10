@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
+import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -168,6 +169,11 @@ export function synthesizeQueuedTicket(e, linfo) {
     lastActiveMs: null,
     priority: li.priority ?? e.priority ?? 0,
     estimate: li.estimate ?? null,
+    // CTL-974: estimateMethod + estimateDisplay for queued tickets. A queued ticket
+    // has no triage.json, so the method comes from the supplemental fallback's
+    // linfo estimateMethod (team method resolved by getEstimationMethodAsync).
+    estimateMethod: li.estimateMethod ?? null,
+    estimateDisplay: deriveEstimateDisplay(li.estimate ?? null, li.estimateMethod ?? null),
     scope: null,
     project: li.project ?? null,
     costUSD: null,
@@ -924,6 +930,67 @@ export async function assembleBoard() {
   // union of card sources, so a between-phases ticket still gets a BoardTicket.
   const cardTicketIds = new Set([...workers.map((w) => w.ticket), ...workerDirs]);
 
+  // CTL-974: supplemental estimate fallback — tickets whose durable-cache estimate
+  // is null may have an estimate set in Linear that the broker's webhook path has
+  // not yet projected (old tickets pre-dating CTL-957, or tickets never touched by
+  // a relevant webhook).  Collect all board ticket IDs (worker-dir cards + queued
+  // eligible) whose linfo estimate is null, batch-fetch from Linear (5-min TTL,
+  // fail-open), and merge into linfo so deriveEstimateDisplay sees real values.
+  //
+  // This is the ONLY place in the read-model that triggers a live Linear call —
+  // all other enrichment is purely durable-cache (CTL-883).  The call is batched
+  // (one request for all null-estimate IDs), short-TTL-cached, and fail-open, so
+  // a Linear outage / missing token merely leaves estimate===null (the prior state).
+  await (async () => {
+    const allBoardIds = [
+      ...[...cardTicketIds],
+      ...eligible.map((e) => e.id),
+    ];
+    const nullEstimateIds = allBoardIds.filter((id) => (linfo[id]?.estimate ?? null) === null);
+    if (nullEstimateIds.length === 0) return;
+
+    // Batch-fetch estimates for null-estimate IDs.
+    const fallback = await fillEstimateFallback(nullEstimateIds);
+
+    // Derive the distinct team keys present so we can fetch estimation methods.
+    const teamKeys = [...new Set(nullEstimateIds.map((id) => String(id).split("-")[0]).filter(Boolean))];
+    // Fetch all team methods in parallel (each has its own 24h on-disk TTL).
+    const methodEntries = await Promise.all(
+      teamKeys.map(async (team) => [team, await getEstimationMethodAsync(team)]),
+    );
+    const methodByTeam = Object.fromEntries(methodEntries);
+
+    // Merge fallback results into linfo (in-place — linfo is a plain object, never
+    // shared with the broker DB or the cache reader, so mutation here is safe).
+    for (const id of nullEstimateIds) {
+      const fetchedEstimate = fallback[id] ?? null;
+      if (fetchedEstimate === null) continue; // Linear has no estimate → leave null
+      const team = String(id).split("-")[0];
+      const method = methodByTeam[team] ?? null;
+      // Ensure a linfo entry exists (ticket might be in eligible only, not ticket_state).
+      if (!linfo[id]) {
+        linfo[id] = {
+          priority: 0, estimate: null, project: null, labels: [], relations: null,
+          assignee: null, linearState: null, title: null,
+          ownerHost: null, generation: null, fencePhase: null, claimedAt: null, heldSince: null,
+        };
+      }
+      linfo[id] = {
+        ...linfo[id],
+        estimate: fetchedEstimate,
+        // estimateMethod is surfaced from triage.json by ticketEstimateMethod() in the
+        // ticket build loop below; BUT for tickets that have never been triaged
+        // (queued-only), triage is null and ticketEstimateMethod returns null.
+        // We carry the team method here so the synthesizeQueuedTicket path can use it.
+        // Board ticket assemblers use ticketEstimateMethod(triage) first; for worker-dir
+        // tickets that IS the correct source.  For queued tickets estimateMethod comes
+        // from here via linfo (see synthesizeQueuedTicket's estimateMethod passthrough
+        // added below).
+        estimateMethod: linfo[id].estimateMethod ?? method?.type ?? null,
+      };
+    }
+  })();
+
   let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
     const { phaseSigs, remediateSig, triage, prSigs } = await readTicketArtifacts(id);
     // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
@@ -942,8 +1009,11 @@ export async function assembleBoard() {
       priority: linfo[id]?.priority ?? 0,
       estimate: linfo[id]?.estimate ?? null,
       // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
-      estimateMethod: ticketEstimateMethod(triage),
-      estimateDisplay: deriveEstimateDisplay(linfo[id]?.estimate ?? null, ticketEstimateMethod(triage)),
+      // CTL-974: fall back to linfo estimateMethod (populated by the supplemental
+      // estimate fallback) when triage.json has no estimateMethod (un-triaged tickets
+      // whose estimate was fetched from Linear directly).
+      estimateMethod: ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null,
+      estimateDisplay: deriveEstimateDisplay(linfo[id]?.estimate ?? null, ticketEstimateMethod(triage) ?? linfo[id]?.estimateMethod ?? null),
       scope: ticketScope(triage),
       project: linfo[id]?.project ?? null,
       // CTL-755 held indicator: "blocked" | "waiting" | null, read from the
@@ -1025,9 +1095,11 @@ export async function assembleBoard() {
         ...e, rank: i + 1,
         priority: linfo[e.id]?.priority ?? e.priority ?? 0,
         estimate: linfo[e.id]?.estimate ?? null,
-        // CTL-954: method-aware estimate fields from triage.json (set by Opus-mode pass).
-        estimateMethod: ticketEstimateMethod(triage),
-        estimateDisplay: deriveEstimateDisplay(linfo[e.id]?.estimate ?? null, ticketEstimateMethod(triage)),
+        // CTL-954/CTL-974: method-aware estimate fields. triage.json is the primary
+        // source; fall back to linfo estimateMethod (set by the CTL-974 supplemental
+        // fallback) for tickets whose triage.json lacks it.
+        estimateMethod: ticketEstimateMethod(triage) ?? linfo[e.id]?.estimateMethod ?? null,
+        estimateDisplay: deriveEstimateDisplay(linfo[e.id]?.estimate ?? null, ticketEstimateMethod(triage) ?? linfo[e.id]?.estimateMethod ?? null),
         scope: ticketScope(triage),
         project: linfo[e.id]?.project ?? e.project ?? null,
         // CTL-922 (BFF10): owning host from the durable fence projection (BFF11);
