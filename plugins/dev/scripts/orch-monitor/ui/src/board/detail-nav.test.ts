@@ -128,7 +128,7 @@ describe("isNewTabClick gesture (CTL-942 / CTL-951)", () => {
   });
 });
 
-describe("list-context snapshot parse/restore (CTL-951)", () => {
+describe("list-context snapshot parse/restore (CTL-951 + CTL-971)", () => {
   const base: ListContextSnapshot = {
     ids: ["CTL-1", "CTL-2", "CTL-3"],
     kind: "ticket",
@@ -136,13 +136,20 @@ describe("list-context snapshot parse/restore (CTL-951)", () => {
     col: "Implement",
     cursor: 1,
     focusId: "CTL-2",
-    scroll: { top: 420, left: 0 },
+    // CTL-971: BOTH scroll axes are load-bearing (CTL-950 single both-axes scroller).
+    scroll: { top: 420, left: 1400 },
+    surface: "board",
+    scope: "catalyst",
     savedAt: 1_000,
   };
 
-  it("round-trips a valid snapshot (the board restores ids/scroll/focus on return)", () => {
+  it("round-trips a valid snapshot (board restores ids/scroll BOTH axes/surface/scope/focus)", () => {
     const parsed = parseListContext(JSON.stringify(base), 1_000);
     expect(parsed).toEqual(base);
+    // explicit: both axes + the two CTL-971 fields survive the round-trip.
+    expect(parsed?.scroll).toEqual({ top: 420, left: 1400 });
+    expect(parsed?.surface).toBe("board");
+    expect(parsed?.scope).toBe("catalyst");
   });
 
   it("drops a snapshot older than the max age (a stale session never yanks scroll)", () => {
@@ -163,9 +170,46 @@ describe("list-context snapshot parse/restore (CTL-951)", () => {
     expect(parsed?.scroll).toEqual({ top: 0, left: 0 });
   });
 
+  it("preserves a horizontal-only offset (left set, top 0) — the Validate-column case", () => {
+    const parsed = parseListContext(JSON.stringify({ ...base, scroll: { top: 0, left: 2200 } }), 1_000);
+    expect(parsed?.scroll).toEqual({ top: 0, left: 2200 });
+  });
+
   it("clamps a bad cursor to 0 rather than carrying an out-of-range index", () => {
     const parsed = parseListContext(JSON.stringify({ ...base, cursor: -4 }), 1_000);
     expect(parsed?.cursor).toBe(0);
+  });
+
+  // ── CTL-971: surface + scope robustness ──────────────────────────────────────
+  it("CTL-971: an older snapshot with NO surface derives it from kind (ticket→board)", () => {
+    const { surface: _drop, ...noSurface } = base;
+    const parsed = parseListContext(JSON.stringify(noSurface), 1_000);
+    expect(parsed?.surface).toBe("board");
+  });
+
+  it("CTL-971: an older WORKER snapshot with no surface derives workers", () => {
+    const { surface: _drop, ...noSurface } = base;
+    const parsed = parseListContext(
+      JSON.stringify({ ...noSurface, kind: "worker" }),
+      1_000,
+    );
+    expect(parsed?.surface).toBe("workers");
+  });
+
+  it("CTL-971: a bogus surface value falls back to the kind-derived default", () => {
+    const parsed = parseListContext(JSON.stringify({ ...base, surface: "nope" }), 1_000);
+    expect(parsed?.surface).toBe("board");
+  });
+
+  it("CTL-971: a missing/empty scope falls back to the 'all' sentinel (never a wrong scope)", () => {
+    const { scope: _drop, ...noScope } = base;
+    expect(parseListContext(JSON.stringify(noScope), 1_000)?.scope).toBe("all");
+    expect(parseListContext(JSON.stringify({ ...base, scope: "" }), 1_000)?.scope).toBe("all");
+    expect(parseListContext(JSON.stringify({ ...base, scope: 7 }), 1_000)?.scope).toBe("all");
+  });
+
+  it("CTL-971: a real repo-key scope is preserved verbatim", () => {
+    expect(parseListContext(JSON.stringify({ ...base, scope: "adva" }), 1_000)?.scope).toBe("adva");
   });
 });
 
@@ -192,6 +236,20 @@ describe("kanban card wiring (static source, CTL-951)", () => {
   it("the originating card is stamped with data-card-id for the restore focus", () => {
     expect(boardSrc).toContain("data-card-id={t.id}");
     expect(boardSrc).toContain("data-card-id={w.name}");
+  });
+
+  it("CTL-971: the onOpen seam captures BOTH scroll axes off the live scroller", () => {
+    // The Board reads scrollTop AND scrollLeft (CTL-950 single both-axes scroller)
+    // off the resolved `.cat-scroll` element, not the never-scrolling flex wrapper.
+    expect(boardSrc).toContain("resolveScrollEl(scrollRef.current)");
+    expect(boardSrc).toContain("top: el.scrollTop, left: el.scrollLeft");
+  });
+
+  it("CTL-971: the onOpen seam stamps the SURFACE + repo SCOPE into the snapshot", () => {
+    // Without the surface the shell reseeds the landing-pref Inbox and the board
+    // never mounts; without the scope the restore can't reseat scope authoritatively.
+    expect(boardSrc).toContain('surface: view === "workers" ? "workers" : "board"');
+    expect(boardSrc).toContain("scope: repo,");
   });
 });
 
@@ -283,5 +341,41 @@ describe("Shell Esc-restore wiring (static source, CTL-951 deliverable c)", () =
     // index.html shell board — only a full-doc nav does (the restore reads
     // sessionStorage on that load).
     expect(shellSrc).toContain('hardNavigate("/")');
+  });
+
+  it("CTL-971: goRoot (the single return target) is wired to BOTH Esc and the breadcrumb", () => {
+    // The breadcrumb root button calls onRoot={goRoot}; the layered-Escape handler
+    // falls through to goRoot() once no overlay is open. Both reach the same full-
+    // doc nav, so all THREE paths (Esc, breadcrumb, browser-back via the assign()
+    // history entry) funnel through the shell-mount restore.
+    expect(shellSrc).toContain("onRoot={goRoot}");
+    expect(shellSrc).toContain("const goRoot = useCallback(() => hardNavigate");
+    // The Escape handler ends at goRoot() after exhausting the overlay layers.
+    expect(shellSrc).toMatch(/onEscape[\s\S]*goRoot\(\)/);
+  });
+});
+
+describe("CTL-971: shell reseats SURFACE + SCOPE on return (static source)", () => {
+  const appShellSrc = readFileSync(join(HERE, "..", "components", "app-shell.tsx"), "utf8");
+  const surfaceRestoreSrc = readFileSync(
+    join(HERE, "..", "hooks", "use-surface-restore.ts"),
+    "utf8",
+  );
+
+  it("AppShell invokes useSurfaceRestore with a surface setter + the scope setter", () => {
+    // This is the FIX for the dominant bug: the board surface is NOT in the URL, so a
+    // full-doc nav back to `/` reseeds the landing-pref Inbox. The shell-mount restore
+    // reseats the captured surface so the board actually mounts (and its own
+    // useBoardRestore can apply the scroll).
+    expect(appShellSrc).toContain("useSurfaceRestore(restoreSurface, setRepoScope)");
+    // Reseating a surface ALSO leaves Settings (mirrors the g-chord behavior).
+    expect(appShellSrc).toContain("setSettingsOpen(false)");
+  });
+
+  it("useSurfaceRestore PEEKS the snapshot (does not clear it — the board consumes it)", () => {
+    // It must NOT clear: the board-local useBoardRestore clears the snapshot after
+    // applying scroll + focus, so it must still be present when the board mounts.
+    expect(surfaceRestoreSrc).toContain("readListContext()");
+    expect(surfaceRestoreSrc).not.toContain("clearListContext");
   });
 });
