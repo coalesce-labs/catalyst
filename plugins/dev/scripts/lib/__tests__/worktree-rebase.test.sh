@@ -551,6 +551,42 @@ advance_origin_main_conflict
 assert_eq "yes" "$(cat "$SCRATCH/t17.during")" "rebase_in_progress=true mid-conflict"
 assert_eq "no" "$(cat "$SCRATCH/t17.after")" "rebase_in_progress=false after abort"
 
+# ── 19. untracked-overwrite refusal → dirty-tree stall with files listed ────
+# git ALSO refuses to start a rebase when an UNTRACKED file would be
+# overwritten by the incoming base — invisible to the tracked-only precheck.
+# The no-rebase-in-progress guard must report it as the dirty-tree class with
+# the worktree's dirt listed, not as an opaque internal/[] stall.
+echo "19. untracked-overwrite refusal → rebase_refused_dirty_tree with files"
+new_fixture t19
+(
+  cd "$UP"
+  git checkout --quiet main
+  printf 'upstream-version\n' >colliding.txt
+  git add -A && git commit --quiet -m "upstream adds colliding.txt"
+  git push --quiet origin main
+)
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # UNTRACKED file at the path origin/main now tracks → rebase refuses to start.
+  printf 'untracked-local-version\n' >colliding.txt
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t19.rc"
+  echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t19.reason_var"
+  cat colliding.txt >"$SCRATCH/t19.untracked"
+)
+assert_eq "2" "$(cat "$SCRATCH/t19.rc")" "untracked-overwrite refusal → rc 2"
+assert_eq "rebase_refused_dirty_tree" "$(cat "$SCRATCH/t19.reason_var")" \
+  "untracked-overwrite: typed dirty-tree reason (not no_rebase_in_progress)"
+assert_eq "untracked-local-version" "$(cat "$SCRATCH/t19.untracked")" \
+  "untracked-overwrite: local untracked file left intact"
+STALL19="$(last_telem_line)"
+assert_eq "precheck" "$(jq -r '.body.payload.category' <<<"$STALL19")" \
+  "untracked-overwrite: stalled event category=precheck"
+T19_HAS_FILE="$(jq -r '.body.payload.files | index("colliding.txt") != null' <<<"$STALL19")"
+assert_eq "true" "$T19_HAS_FILE" "untracked-overwrite: colliding file listed in event"
+
 # ── 18. refresh_worktree (periodic path) stashes noise too ──────────────────
 echo "18. refresh_worktree stashes noise (periodic timer path)"
 new_fixture t18

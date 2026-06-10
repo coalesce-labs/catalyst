@@ -70,20 +70,25 @@ export function defaultRunPhaseAgent(
   if (attempt != null) args.push("--attempt", String(attempt)); // CTL-761
   const extraEnv = {};
   if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
+  const env = {
+    ...process.env,
+    CATALYST_ORCHESTRATOR_DIR: orchDir,
+    CATALYST_ORCHESTRATOR_ID: ticket,
+    CATALYST_PHASE: phase,
+    CATALYST_TICKET: ticket,
+    CATALYST_EXECUTION_CORE: "1",
+    ...extraEnv,
+  };
+  // CTL-990: the recreate-once marker is PER DISPATCH CHAIN — only the chain's
+  // own exec may set it. An ambient daemon-env value would pre-spend every
+  // fresh dispatch's single recreate attempt.
+  delete env.CATALYST_RECREATE_ATTEMPTED;
   const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
     cwd: worktreePath,
     encoding: "utf8",
     timeout: getDispatchTimeoutMs(), // CTL-990
     killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
-    env: {
-      ...process.env,
-      CATALYST_ORCHESTRATOR_DIR: orchDir,
-      CATALYST_ORCHESTRATOR_ID: ticket,
-      CATALYST_PHASE: phase,
-      CATALYST_TICKET: ticket,
-      CATALYST_EXECUTION_CORE: "1",
-      ...extraEnv,
-    },
+    env,
   });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };

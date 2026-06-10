@@ -283,10 +283,22 @@ rebase_onto_base_classified() {
   fi
 
   # CTL-990 guard: never call `git rebase --continue` with nothing in progress
-  # — it exits non-zero and used to mis-report as continue_failed. With the
-  # precheck above this state should be unreachable; keep it as belt-and-braces.
+  # — it exits non-zero and used to mis-report as continue_failed. Reaching
+  # here without a rebase means git refused to START it for a reason the
+  # tracked-only precheck can't see (e.g. an UNTRACKED file the incoming base
+  # would overwrite). Report THAT as the dirty-tree class with the worktree's
+  # dirt listed; no_rebase_in_progress is reserved for a genuinely clean tree.
   if ! rebase_in_progress; then
-    _stall_and_return "$marker" no_rebase_in_progress 2
+    RT_PRECHECK=()
+    local _gf
+    while IFS= read -r _gf; do
+      [[ -n $_gf ]] && RT_PRECHECK+=("${_gf:3}")
+    done < <(git status --porcelain 2>/dev/null)
+    if [[ ${#RT_PRECHECK[@]} -gt 0 ]]; then
+      _stall_and_return "$marker" rebase_refused_dirty_tree 2
+    else
+      _stall_and_return "$marker" no_rebase_in_progress 2
+    fi
     return
   fi
 

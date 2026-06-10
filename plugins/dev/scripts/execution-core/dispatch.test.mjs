@@ -282,6 +282,23 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     }
     expect(spawn.calls[0].opts.timeout).toBe(12345);
   });
+
+  // CTL-990: the recreate-once marker must be PER DISPATCH CHAIN (set only by
+  // phase-agent-dispatch's own exec). An ambient value in the daemon's env
+  // would pre-spend every fresh dispatch's recreate budget via ...process.env.
+  test("strips an ambient CATALYST_RECREATE_ATTEMPTED from the spawned env (CTL-990)", () => {
+    const spawn = spy();
+    process.env.CATALYST_RECREATE_ATTEMPTED = "1";
+    try {
+      defaultRunPhaseAgent(
+        { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+        { spawn },
+      );
+    } finally {
+      delete process.env.CATALYST_RECREATE_ATTEMPTED;
+    }
+    expect("CATALYST_RECREATE_ATTEMPTED" in spawn.calls[0].opts.env).toBe(false);
+  });
 });
 
 describe("dispatchTicket", () => {
