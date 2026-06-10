@@ -25,7 +25,7 @@ import { Panel, PanelHeader, SectionLabel } from "@/components/ui/panel";
 import { EmptyState } from "@/components/ui/empty-state";
 import { OtelHealthBanner } from "@/components/ui/otel-health-banner";
 import { Badge } from "@/components/ui/badge";
-import { Database } from "lucide-react";
+import { Database, Lock } from "lucide-react";
 import type { ReactNode } from "react";
 
 // ── data-source → backend mapping ────────────────────────────────────────────
@@ -57,7 +57,23 @@ export type ChartCardState =
   | "unconfigured"
   | "unreachable"
   | "empty"
+  | "locked"
   | "live";
+
+/** OBS-16: an OBS-15-gated panel's locked descriptor. When a ChartCard carries
+ *  `locked`, the honesty ladder short-circuits to the "locked" state — a dashed,
+ *  dimmed card that occupies the SAME footprint as the live version and explains,
+ *  in plain language, what it is waiting on ("{reason} · {ticket}"). This is the
+ *  honest-degraded contract (design Principle 6) generalized BEYOND the OTEL
+ *  "Configure Prometheus" CTA: the deferred occupancy timeline + quota gauges need
+ *  the OBS-15 event-log read-model (not built), so they render locked rather than
+ *  blank, fake, or abusing the Prometheus-config CTA. */
+export interface ChartCardLocked {
+  /** Plain-language reason the panel is dark (e.g. "needs event-log reader"). */
+  reason: string;
+  /** The ticket that unlocks it (e.g. "OBS-15"). */
+  ticket: string;
+}
 
 export interface ResolveChartCardStateArgs {
   /** Health snapshot from /api/health/otel. null = not yet loaded (treat as live-pending so we don't flash a degraded state on first paint). */
@@ -66,6 +82,10 @@ export interface ResolveChartCardStateArgs {
   dataSource: string;
   /** Whether the panel actually has rows to render. Lets the card own the "reachable-but-empty" state. Defaults to true (caller hasn't told us → assume data). */
   hasData?: boolean;
+  /** OBS-16: when set, the card short-circuits to the "locked" state (an
+   *  OBS-15-gated panel) regardless of health/data — the data source is not built
+   *  yet, so it renders a dashed dimmed placeholder, never blank or fabricated. */
+  locked?: ChartCardLocked;
 }
 
 /**
@@ -74,6 +94,9 @@ export interface ResolveChartCardStateArgs {
  * covered in observe-kit.test.ts).
  *
  * Decision order (most-degraded first):
+ *   0. `locked` set → "locked" (OBS-16): an OBS-15-gated panel whose data source is
+ *      not built yet — wins over EVERYTHING, including health/data, so the card is
+ *      an honest dashed placeholder rather than blank or a fabricated empty.
  *   1. Board/events-backed panels NEVER gate on OTEL health — they read the
  *      monitor's own state, so they only ever go empty or live.
  *   2. health === null → "live" (first-paint optimism; the real state lands on
@@ -87,7 +110,13 @@ export function resolveChartCardState({
   health,
   dataSource,
   hasData = true,
+  locked,
 }: ResolveChartCardStateArgs): ChartCardState {
+  // OBS-16: a locked (OBS-15-gated) panel short-circuits — its data source does not
+  // exist yet, so no health/data path could make it live. Render the dashed dimmed
+  // placeholder, never blank/fake.
+  if (locked) return "locked";
+
   const backend = dataSourceBackend(dataSource);
 
   // Board/events panels read the monitor's own state — they never degrade on
@@ -136,6 +165,10 @@ export interface ChartCardProps {
    *  the trend belongs in the header, never inside a row or as a full chart). Sits
    *  before the data-source chip. */
   headerExtra?: ReactNode;
+  /** OBS-16: when set, the card renders the dashed "locked" placeholder (an
+   *  OBS-15-gated panel) instead of children/empty/degraded — same footprint, plain
+   *  "{reason} · {ticket}" copy, never blank or fabricated. */
+  locked?: ChartCardLocked;
 }
 
 // Fixed body so the panel footprint never changes between states (no reflow).
@@ -150,8 +183,9 @@ export function ChartCard({
   className,
   bodyClassName,
   headerExtra,
+  locked,
 }: ChartCardProps) {
-  const state = resolveChartCardState({ health, dataSource, hasData });
+  const state = resolveChartCardState({ health, dataSource, hasData, locked });
 
   return (
     <Panel className={cn("flex flex-col", className)}>
@@ -168,12 +202,46 @@ export function ChartCard({
       <div className={cn(BODY_BASE, bodyClassName)}>
         {state === "unconfigured" && <UnconfiguredState />}
         {state === "unreachable" && <UnreachableState health={health} />}
+        {state === "locked" && locked && <LockedState locked={locked} />}
         {state === "empty" && (
           <EmptyState message="no data in range" className="py-0 h-full" />
         )}
         {state === "live" && children}
       </div>
     </Panel>
+  );
+}
+
+// State (OBS-16) — a dashed, dimmed placeholder for an OBS-15-gated panel. Fills the
+// SAME footprint as a live chart (the dimmed skeleton geometry from UnconfiguredState)
+// so the panel never reflows when its data source later ships — and explains, in
+// plain language, what it is waiting on. NOT the "Configure Prometheus" CTA (this is
+// gated on a missing READER, not a missing backend) and NEVER a fabricated number.
+function LockedState({ locked }: { locked: ChartCardLocked }) {
+  return (
+    <div
+      className="flex h-full flex-col gap-3 rounded border border-dashed border-border/60 p-3"
+      aria-label={`${locked.reason} — ${locked.ticket}`}
+    >
+      {/* dimmed skeleton bars — placeholder geometry that matches a live chart's
+          footprint (same shape UnconfiguredState uses), so going live never reflows. */}
+      <div className="flex flex-1 items-end gap-2 opacity-25" aria-hidden>
+        {[40, 65, 30, 80, 55, 70, 45].map((h, i) => (
+          <div
+            key={i}
+            className="flex-1 rounded-sm bg-fg/30"
+            style={{ height: `${h}%` }}
+          />
+        ))}
+      </div>
+      <div className="flex items-center gap-2 text-[12px] text-muted">
+        <Lock className="h-4 w-4 shrink-0 opacity-50" />
+        <span>
+          {locked.reason} ·{" "}
+          <span className="font-mono text-muted-foreground/80">{locked.ticket}</span>
+        </span>
+      </div>
+    </div>
   );
 }
 

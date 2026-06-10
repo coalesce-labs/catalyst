@@ -24,6 +24,7 @@ import {
   costSeries,
   cacheSavings,
   costAtHour,
+  activeTimeRatio,
   scoreSpikes,
   avgPrior7FullDays,
   secondsSinceLocalMidnight,
@@ -1541,5 +1542,32 @@ describe("eventsHeatmap", () => {
       isAvailable: () => false,
     };
     expect(await eventsHeatmap(loki, "6h")).toBeNull();
+  });
+});
+
+// ── OBS-16 (UTILIZATION P_active): active-time ratio ─────────────────────────
+describe("activeTimeRatio", () => {
+  function vectorScalar(value: string): PrometheusQueryResult {
+    return {
+      data: { resultType: "vector", result: [{ metric: {}, value: [0, value] }] },
+    };
+  }
+
+  it("reads the fleet-wide active seconds-per-second scalar", async () => {
+    // The live ground-truth shape: a single sum(rate(...)) series ≈ 0.076 s/s.
+    const prom = mockProm(vectorScalar("0.0760"));
+    const result = await activeTimeRatio(prom, "1h");
+    expect(result).not.toBeNull();
+    expect(result!.activeSecondsPerSecond).toBeCloseTo(0.076, 4);
+  });
+
+  it("returns an HONEST 0 for a fully-idle fleet (empty vector)", async () => {
+    const prom = mockProm({ data: { resultType: "vector", result: [] } });
+    const result = await activeTimeRatio(prom, "1h");
+    expect(result).toEqual({ activeSecondsPerSecond: 0 });
+  });
+
+  it("returns null ONLY when Prometheus is unavailable (query failed)", async () => {
+    expect(await activeTimeRatio(mockProm(null), "1h")).toBeNull();
   });
 });

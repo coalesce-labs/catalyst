@@ -99,17 +99,18 @@ function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
 
 // ── OBSERVE — live items (clickable surfaces) ────────────────────────────────
 // OBS-5: Telemetry is the first OBSERVE surface to ship a real content shell.
-// OBS-10: FinOps is the second — the dollar+ROI hero + spend-over-time bars. Both
-// are clickable nav items; the remaining three stay disabled "soon" until their
-// own OBS tickets land.
+// OBS-10: FinOps is the second — the dollar+ROI hero + spend-over-time bars.
+// OBS-16: Utilization is the third — the slot-occupancy hero + STARVED/JAMMED
+// pathology badge + idle list + 429 + active-time. All clickable nav items; the
+// remaining two stay disabled "soon" until their own OBS tickets land.
 const OBSERVE_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
   { surface: "telemetry", label: "Telemetry", icon: ActivityIcon },
+  { surface: "utilization", label: "Utilization", icon: GaugeIcon },
   { surface: "finops", label: "FinOps", icon: WalletIcon },
 ];
 
 // ── OBSERVE — disabled "soon" items ──────────────────────────────────────────
 const OBSERVE_SOON = [
-  { label: "Utilization", icon: GaugeIcon },
   { label: "Fleet Ops", icon: ServerIcon },
   { label: "DevOps", icon: CodeIcon },
 ] as const;

@@ -212,6 +212,7 @@ import {
   costSeries,
   cacheSavings,
   costAtHour,
+  activeTimeRatio,
   workerHistoryBySession,
   isValidCcSessionId,
   workerBurnSeries,
@@ -2011,6 +2012,25 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
           const result = await apiErrors(loki, range, limit);
+          return Response.json({ data: result });
+        }
+
+        // OBS-16 (UTILIZATION P_active): fleet-wide active-time ratio. A single
+        // Prometheus read of `sum(rate(claude_code_active_time_seconds_total[range]))`
+        // — the active seconds-per-second across the fleet (≈ slots' worth of
+        // wall-clock genuinely computing). The UI divides this by config.inFlight
+        // (busy-slot capacity it already holds) to render "X% computing / Y%
+        // waiting". 503 when Prometheus is absent (the P_active ChartCard degrades
+        // via the [prom] ladder); an idle fleet is an HONEST 200 with
+        // `data:{activeSecondsPerSecond:0}` (the genuine low read, never a
+        // fabricated number).
+        if (url.pathname === "/api/otel/active-time") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await activeTimeRatio(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 
