@@ -97,6 +97,14 @@ const UtilizationSurface = lazy(() =>
     default: m.UtilizationSurface,
   })),
 );
+// OBS-18: the OBSERVE FleetOps surface. Lazy/code-split like the others; it is
+// deliberately Prometheus/Loki-FREE (board + /api/cluster + events only), so it
+// carries no chart-kit chunk at all.
+const FleetOpsSurface = lazy(() =>
+  import("./components/observe/fleetops-surface").then((m) => ({
+    default: m.FleetOpsSurface,
+  })),
+);
 
 type TopView = "dashboard" | "comms" | "activity" | "god-mode";
 
@@ -414,6 +422,14 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
         <UtilizationSurface />
+      </Suspense>
+    );
+  }
+  // OBS-18: the fourth OBSERVE surface (FleetOps). Same lazy/code-split branch.
+  if (kind === "fleetops") {
+    return (
+      <Suspense fallback={<SkeletonDashboard />}>
+        <FleetOpsSurface />
       </Suspense>
     );
   }

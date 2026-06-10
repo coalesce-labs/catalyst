@@ -28,10 +28,13 @@ import type { Surface } from "./surface";
  *                  band + spend-over-time bars with spikes.
  *  - "utilization" → the OBSERVE Utilization surface shell (OBS-16): the slot-
  *                  occupancy hero + the STARVED/JAMMED pathology badge + idle list +
- *                  429/overload + active-time. The remaining two OBSERVE surfaces
- *                  (fleetops/devops) keep the dashboard fall-through until their
- *                  content ships in later OBS tickets — they are nav-disabled
- *                  ("soon") for now.
+ *                  429/overload + active-time.
+ *  - "fleetops"  → the OBSERVE FleetOps surface shell (OBS-18): the host-health
+ *                  hero + host matrix + stuck/dead reap hints + reconcile, built on
+ *                  board + /api/cluster + events ONLY (deliberately Prom/Loki-FREE
+ *                  so it survives a telemetry-stack outage). The remaining OBSERVE
+ *                  surface (devops) keeps the dashboard fall-through until its
+ *                  content ships — it is nav-disabled ("soon") for now.
  */
 export type SurfaceContentKind =
   | "board"
@@ -40,6 +43,7 @@ export type SurfaceContentKind =
   | "telemetry"
   | "finops"
   | "utilization"
+  | "fleetops"
   | "dashboard";
 
 /**
@@ -59,9 +63,13 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   if (surface === "finops") return "finops";
   // OBS-16: Utilization is the third OBSERVE surface to ship its own content shell
   // (slot-occupancy hero + STARVED/JAMMED pathology badge + idle list + 429 +
-  // active-time). The remaining two (fleetops/devops) stay on the dashboard
-  // fall-through (and are nav-disabled "soon") until their own OBS tickets land.
+  // active-time).
   if (surface === "utilization") return "utilization";
+  // OBS-18: FleetOps is the fourth OBSERVE surface — host-health hero + host matrix
+  // + stuck/dead reap hints + reconcile, board + /api/cluster + events ONLY. The
+  // remaining surface (devops) stays on the dashboard fall-through (nav-disabled
+  // "soon") until its own OBS ticket lands.
+  if (surface === "fleetops") return "fleetops";
   return "dashboard";
 }
 
