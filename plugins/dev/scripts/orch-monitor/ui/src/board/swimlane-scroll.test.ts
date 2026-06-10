@@ -32,6 +32,7 @@ import {
   BOARD_BUMP_CLASS_LEFT,
   BOARD_BUMP_CLASS_RIGHT,
   BOARD_BUMP_DURATION_MS,
+  swipeBlockDirection,
 } from "./Swimlane";
 import { buildLanes, showLaneChrome } from "./board-grouping";
 import type { GroupableEntity, GroupBy } from "./board-grouping";
@@ -216,5 +217,63 @@ describe("CTL-973 — board swipe-fix constants (overscroll + wheel guard + bump
     // "contain" or "none", which would block vertical chaining).
     const BOARD_SCROLL_OVERSCROLL_Y = "auto";
     expect(BOARD_SCROLL_OVERSCROLL_Y).toBe("auto");
+  });
+});
+
+describe("CTL-973 — swipeBlockDirection (wheel-guard direction gate)", () => {
+  // A board with horizontal overflow: 2000px content in a 1000px viewport.
+  // maxScrollLeft = scrollWidth - clientWidth = 1000.
+  const SCROLL_WIDTH = 2000;
+  const CLIENT_WIDTH = 1000;
+  const MAX_LEFT = SCROLL_WIDTH - CLIENT_WIDTH; // 1000
+
+  // ── THE REGRESSION (CTL-973 froze the board) ──────────────────────────────
+  // The board rests at scrollLeft=0 (left edge). Scrolling RIGHT into content
+  // (deltaX > 0) from there must NOT be blocked — this is the exact gesture the
+  // original guard ate, freezing all horizontal scroll.
+  it("rightward scroll INTO content from the resting left edge is NOT blocked", () => {
+    expect(swipeBlockDirection(40, 0, 0, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+  });
+
+  it("leftward scroll INTO content from the right edge is NOT blocked", () => {
+    expect(swipeBlockDirection(-40, 0, MAX_LEFT, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+  });
+
+  it("horizontal scroll in the MIDDLE (no edge) is never blocked, either direction", () => {
+    expect(swipeBlockDirection(40, 0, 500, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+    expect(swipeBlockDirection(-40, 0, 500, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+  });
+
+  // ── THE INTENDED SUPPRESSION (back/forward swipe-nav) ──────────────────────
+  it("leftward gesture pushing OUTWARD past the left edge is blocked → 'left'", () => {
+    expect(swipeBlockDirection(-40, 0, 0, SCROLL_WIDTH, CLIENT_WIDTH)).toBe("left");
+  });
+
+  it("rightward gesture pushing OUTWARD past the right edge is blocked → 'right'", () => {
+    expect(swipeBlockDirection(40, 0, MAX_LEFT, SCROLL_WIDTH, CLIENT_WIDTH)).toBe("right");
+  });
+
+  it("within SWIPE_EDGE_TOLERANCE of an edge still counts as at-edge (float jitter)", () => {
+    expect(swipeBlockDirection(-40, 0, SWIPE_EDGE_TOLERANCE, SCROLL_WIDTH, CLIENT_WIDTH)).toBe("left");
+    expect(
+      swipeBlockDirection(40, 0, MAX_LEFT - SWIPE_EDGE_TOLERANCE, SCROLL_WIDTH, CLIENT_WIDTH),
+    ).toBe("right");
+  });
+
+  // ── VERTICAL GESTURES ARE NEVER THE SWIPE-NAV INTENT ───────────────────────
+  it("vertical-dominant gestures are never blocked (pass through to scroll)", () => {
+    // |deltaX| <= |deltaY| → null regardless of edge state.
+    expect(swipeBlockDirection(0, 40, 0, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+    expect(swipeBlockDirection(10, 40, 0, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+    expect(swipeBlockDirection(-10, 40, MAX_LEFT, SCROLL_WIDTH, CLIENT_WIDTH)).toBeNull();
+  });
+
+  // ── NO-OVERFLOW BOARD: scrollLeft=0 is BOTH edges → suppress any h-swipe ────
+  it("a board with no horizontal overflow suppresses any horizontal swipe", () => {
+    // scrollWidth == clientWidth → maxLeft 0 → scrollLeft 0 is at both edges.
+    expect(swipeBlockDirection(-40, 0, 0, 1000, 1000)).toBe("left");
+    expect(swipeBlockDirection(40, 0, 0, 1000, 1000)).toBe("right");
+    // ...but a vertical scroll still passes through.
+    expect(swipeBlockDirection(0, 40, 0, 1000, 1000)).toBeNull();
   });
 });
