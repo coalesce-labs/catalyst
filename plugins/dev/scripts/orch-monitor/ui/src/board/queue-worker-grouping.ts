@@ -3,12 +3,13 @@
 // grouping contract is unit-testable under `bun test` without a DOM, matching
 // the queue-grouping.ts / worker-grouping.ts / board-grouping.ts pattern.
 //
-// The five groups, in display order:
+// The six groups, in display order:
 //   active          — worker is in-loop, generating (activeState === "active")
 //   waiting-on-user — worker is parked for a human prompt (waitingOnUser === true)
 //   waiting         — worker is idle / between-phases (activeState === null)
 //   stuck           — worker is stale / terminal-marker (activeState === "stuck")
-//   blocked         — ticket hold held === "blocked" with blockers[] — ALWAYS LAST
+//   blocked         — ticket hold held === "blocked" with blockers[]
+//   dead            — CTL-978 bg job terminal; NOT in-flight — de-emphasized, LAST
 //
 // Within each group workers keep the existing priority rank (sortWorkers order:
 // longest runtimeMs first within a group). The BLOCKED group always renders last
@@ -30,6 +31,9 @@ export const WORKER_GROUP_LABEL: Record<WorkerActivityGroup, string> = {
   waiting: "Waiting",
   stuck: "Stuck",
   blocked: "Blocked",
+  // CTL-978: de-emphasized section for dead bg-jobs still listed by `claude agents`.
+  // These are NOT in-flight and do NOT consume capacity — operator context only.
+  dead: "Dead / stale",
 };
 
 /** One activity-state section of the in-flight worker list. */
@@ -53,7 +57,8 @@ export interface WorkerActivitySection {
  * Workers within each section are ordered by `runtimeMs` descending
  * (longest-running first), which is the existing `sortWorkers` tie-break.
  *
- * The BLOCKED group is ALWAYS last (rank 4) — even if no other groups exist.
+ * CTL-978: the DEAD group is ALWAYS last (rank 5) — even if no other groups exist.
+ * The BLOCKED group comes just before dead (rank 4).
  * Within each group the existing priority rank (`rankWorker` without a held
  * override, i.e. just activeState/waitingOnUser) is used for tie-breaking.
  */

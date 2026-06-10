@@ -63,6 +63,7 @@ const isActive = (s: BoardActiveState): boolean => s === "active";
  *   2 — waiting      : idle / between-phases (`activeState === null`)
  *   3 — stuck        : `activeState === "stuck"` (stale transcript / terminal marker)
  *   4 — blocked      : ticket hold `held === "blocked"` — rendered LAST per spec
+ *   5 — dead         : CTL-978 — bg job reached terminal state; NOT in-flight
  *
  * Note: "blocked" is a ticket-level attribute; `workerActivityGroup` takes it as
  * an optional second argument so the pure grouper can partition without needing
@@ -73,7 +74,8 @@ export type WorkerActivityGroup =
   | "waiting-on-user"
   | "waiting"
   | "stuck"
-  | "blocked";
+  | "blocked"
+  | "dead";
 
 const WORKER_GROUP_RANK: Record<WorkerActivityGroup, number> = {
   active: 0,
@@ -81,6 +83,7 @@ const WORKER_GROUP_RANK: Record<WorkerActivityGroup, number> = {
   waiting: 2,
   stuck: 3,
   blocked: 4,
+  dead: 5,
 };
 
 /** Map a worker (+ optional ticket held state) to its display activity group. */
@@ -88,6 +91,9 @@ export function workerActivityGroup(
   w: BoardWorker,
   ticketHeld?: "blocked" | "waiting" | null,
 ): WorkerActivityGroup {
+  // CTL-978: dead workers form their own group — excluded from in-flight count.
+  // Dead takes priority over everything else (the bg job is definitively gone).
+  if (w.activeState === "dead") return "dead";
   if (ticketHeld === "blocked") return "blocked";
   if (w.activeState === "stuck") return "stuck";
   if (w.waitingOnUser) return "waiting-on-user";

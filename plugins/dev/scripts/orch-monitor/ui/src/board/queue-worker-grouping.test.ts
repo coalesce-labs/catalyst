@@ -197,6 +197,85 @@ describe("groupWorkersByActivity — waitingOnUser", () => {
   });
 });
 
+// ── dead group (CTL-978) ─────────────────────────────────────────────────────
+
+describe("groupWorkersByActivity — dead workers (CTL-978)", () => {
+  it("dead worker → 'dead' group, not 'waiting' or any in-flight group", () => {
+    const workers = [
+      w({ name: "d1", ticket: "CTL-1", activeState: "dead" }),
+    ];
+    const sections = groupWorkersByActivity(workers, noHeld);
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.group).toBe("dead");
+  });
+
+  it("dead worker is excluded from in-flight count (live workers only)", () => {
+    const workers = [
+      w({ name: "live-w", ticket: "CTL-1", activeState: "active" }),
+      w({ name: "dead-w", ticket: "CTL-2", activeState: "dead" }),
+    ];
+    const sections = groupWorkersByActivity(workers, noHeld);
+    // two sections: active + dead
+    expect(sections.map((s) => s.group)).toEqual(["active", "dead"]);
+    // in-flight count = only live workers (activeState !== "dead")
+    const liveCount = workers.filter((wk) => wk.activeState !== "dead").length;
+    const inflightSectionWorkers = sections
+      .filter((s) => s.group !== "dead")
+      .flatMap((s) => s.workers);
+    expect(inflightSectionWorkers).toHaveLength(liveCount);
+    expect(inflightSectionWorkers.every((wk) => wk.activeState !== "dead")).toBe(true);
+  });
+
+  it("dead group appears after blocked (rank 5 > rank 4)", () => {
+    const held: Record<string, "blocked" | "waiting" | null> = {
+      "CTL-2": "blocked",
+    };
+    const workers = [
+      w({ name: "dead-w", ticket: "CTL-1", activeState: "dead", runtimeMs: 9999 }),
+      w({ name: "blocked-w", ticket: "CTL-2", activeState: null }),
+      w({ name: "active-w", ticket: "CTL-3", activeState: "active" }),
+    ];
+    const sections = groupWorkersByActivity(workers, held);
+    const groups = sections.map((s) => s.group);
+    // dead must come after blocked
+    const deadIdx = groups.indexOf("dead");
+    const blockedIdx = groups.indexOf("blocked");
+    expect(deadIdx).toBeGreaterThan(blockedIdx);
+    // dead is last
+    expect(groups.at(-1)).toBe("dead");
+  });
+
+  it("dead worker with longest runtimeMs still lands in dead group (not active)", () => {
+    const workers = [
+      w({ name: "dead-fast", ticket: "CTL-1", activeState: "dead", runtimeMs: 99999 }),
+      w({ name: "active-slow", ticket: "CTL-2", activeState: "active", runtimeMs: 1 }),
+    ];
+    const sections = groupWorkersByActivity(workers, noHeld);
+    expect(sections[0]?.group).toBe("active");
+    expect(sections.at(-1)?.group).toBe("dead");
+    // active section has only the live worker
+    expect(sections[0]?.workers[0]?.name).toBe("active-slow");
+    // dead section has the dead worker
+    expect(sections.at(-1)?.workers[0]?.name).toBe("dead-fast");
+  });
+
+  it("all-dead fleet → single 'dead' section", () => {
+    const workers = [
+      w({ name: "d1", ticket: "CTL-1", activeState: "dead" }),
+      w({ name: "d2", ticket: "CTL-2", activeState: "dead" }),
+      w({ name: "d3", ticket: "CTL-3", activeState: "dead" }),
+    ];
+    const sections = groupWorkersByActivity(workers, noHeld);
+    expect(sections).toHaveLength(1);
+    expect(sections[0]?.group).toBe("dead");
+    expect(sections[0]?.workers).toHaveLength(3);
+  });
+
+  it("dead section label is 'Dead / stale'", () => {
+    expect(WORKER_GROUP_LABEL.dead).toBe("Dead / stale");
+  });
+});
+
 // ── labels ───────────────────────────────────────────────────────────────────
 
 describe("WORKER_GROUP_LABEL — human-readable group labels", () => {
@@ -227,5 +306,29 @@ describe("groupWorkersByActivity — invariants", () => {
     const sections = groupWorkersByActivity(workers, held);
     const flat = sections.flatMap((s) => s.workers.map((x) => x.name)).sort();
     expect(flat).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it("dead workers are in exactly one section and not duplicated in live sections", () => {
+    const held: Record<string, "blocked" | "waiting" | null> = { "CTL-5": "blocked" };
+    const workers = [
+      w({ name: "a", ticket: "CTL-1", activeState: "active" }),
+      w({ name: "b", ticket: "CTL-2", activeState: null }),
+      w({ name: "c", ticket: "CTL-3", activeState: "stuck" }),
+      w({ name: "d", ticket: "CTL-4", activeState: "dead" }),
+      w({ name: "e", ticket: "CTL-5", activeState: null }),
+      w({ name: "f", ticket: "CTL-6", activeState: "dead" }),
+    ];
+    const sections = groupWorkersByActivity(workers, held);
+    const flat = sections.flatMap((s) => s.workers.map((x) => x.name)).sort();
+    // all 6 workers present exactly once
+    expect(flat).toEqual(["a", "b", "c", "d", "e", "f"]);
+    // dead section holds exactly the dead workers
+    const deadSection = sections.find((s) => s.group === "dead");
+    expect(deadSection?.workers.map((x) => x.name).sort()).toEqual(["d", "f"]);
+    // no live section contains a dead worker
+    const liveWorkers = sections
+      .filter((s) => s.group !== "dead")
+      .flatMap((s) => s.workers);
+    expect(liveWorkers.every((wk) => wk.activeState !== "dead")).toBe(true);
   });
 });
