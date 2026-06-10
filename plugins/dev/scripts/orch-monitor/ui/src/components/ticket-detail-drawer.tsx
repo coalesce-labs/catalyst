@@ -17,7 +17,8 @@ import type { BoardTicket, WorkflowSubStep } from "@/board/types";
 import { TicketGantt } from "./ticket-gantt";
 import { CommsView } from "./comms-view";
 import { phaseColor, fmtCost, fmtTokens } from "@/lib/formatters";
-import { DollarSign } from "lucide-react";
+import { ticketDetailHref } from "@/board/detail-nav";
+import { DollarSign, ExternalLink } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Sub-step list (kept under the Gantt tab)
@@ -264,6 +265,33 @@ export function TicketDetailDrawer({
             <span style={{ fontFamily: "monospace" }}>{ticket.id}</span>
             <span style={{ fontSize: 11, opacity: 0.5 }}>·</span>
             <span style={{ fontSize: 12, opacity: 0.7 }}>{ticket.phase}</span>
+            <span style={{ flex: 1 }} />
+            {/* CTL-942: explicit escalation from quick-peek drawer to the full
+                /ticket/$id page. A real <a href> (full browser navigation) on
+                purpose: the drawer also mounts in the router-less shell entry,
+                and only board.html carries the deep-link router — the server's
+                SPA fallback serves it. marginRight clears the sheet's close X. */}
+            <a
+              href={ticketDetailHref(ticket.id)}
+              title={`Open ${ticket.id} as a full page`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                fontSize: 11,
+                fontWeight: 500,
+                opacity: 0.7,
+                color: "inherit",
+                textDecoration: "none",
+                border: "1px solid rgba(255,255,255,0.14)",
+                borderRadius: 6,
+                padding: "2px 8px",
+                marginRight: 28,
+              }}
+            >
+              <ExternalLink size={12} />
+              Open
+            </a>
           </SheetTitle>
           <SheetDescription style={{ fontSize: 12, opacity: 0.6, marginTop: 2 }}>
             {ticket.title}
