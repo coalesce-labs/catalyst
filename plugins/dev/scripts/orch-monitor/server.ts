@@ -235,6 +235,20 @@ import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
 type BunServer = ReturnType<typeof Bun.serve>;
 
+// CTL-942: detail-page deep links. The /ticket/$id and /worker/$id routes live
+// in the TanStack router mounted by the BOARD entry (board.html →
+// src/board/main.tsx → AppRouter) — index.html's shell App mounts no router —
+// so a hard navigation / refresh / shared link must be answered with board.html
+// for the route to render at all. Scope is deliberately tight: exactly one
+// non-empty path segment after /ticket or /worker, and the segment must not
+// look like an asset (no "." extension) so a mistyped asset URL keeps 404ing
+// instead of receiving html. /api/* and /events* can never match (the
+// ^/(ticket|worker)/ prefix excludes them by construction).
+export function isDetailDeepLinkPath(pathname: string): boolean {
+  const m = /^\/(ticket|worker)\/([^/]+)$/.exec(pathname);
+  return m != null && !m[2].includes(".");
+}
+
 export interface CreateServerOptions {
   port?: number;
   hostname?: string;
@@ -2152,6 +2166,21 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // input) and owns the board deep-link routes until those migrate into the
         // shell router in a later SHELL/FND ticket.
         if (url.pathname === "/board" || url.pathname === "/board.html") {
+          const file = Bun.file(join(publicDir, "board.html"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
+          return new Response("board.html not found", { status: 500 });
+        }
+
+        // CTL-942: SPA fallback for detail-page deep links (/ticket/$id,
+        // /worker/$id). Serve board.html — the entry that carries the deep-link
+        // router (index.html's shell App mounts none) — so hard navigation,
+        // refresh, and shared links render the detail pages instead of 404ing.
+        // Vite emits absolute /assets/* paths, so the nested pathname is safe.
+        if (req.method === "GET" && isDetailDeepLinkPath(url.pathname)) {
           const file = Bun.file(join(publicDir, "board.html"));
           if (await file.exists()) {
             return new Response(file, {

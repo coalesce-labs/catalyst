@@ -125,7 +125,10 @@ function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
 }
 
 export function AppSidebar() {
-  const { surface, setSurface } = useSurface();
+  // CTL-911 / SURF3 — settingsOpen/openSettings drive the footer Settings item
+  // (the Settings surface takes over the SidebarInset; it is NOT an OPERATE
+  // landing surface).
+  const { surface, setSurface, settingsOpen, openSettings } = useSurface();
   const { setOpenMobile, isMobile } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
   const [observeOpen, setObserveOpen] = useState(false);
@@ -346,7 +349,17 @@ export function AppSidebar() {
           )}
 
           <SidebarMenuItem>
-            <SidebarMenuButton tooltip="Settings">
+            {/* CTL-911 / SURF3 — Settings opens the preferences surface (it was
+                a placeholder until this ticket). Active state reflects the open
+                Settings surface; mobile taps also close the sheet. */}
+            <SidebarMenuButton
+              tooltip="Settings"
+              isActive={settingsOpen}
+              onClick={() => {
+                openSettings();
+                if (isMobile) setOpenMobile(false);
+              }}
+            >
               <SettingsIcon />
               <span>Settings</span>
             </SidebarMenuButton>

@@ -4,11 +4,13 @@ import {
   LayoutGridIcon,
   ListOrderedIcon,
   SearchIcon,
+  SettingsIcon,
   UsersIcon,
 } from "lucide-react";
 
 import {
   SurfaceContext,
+  SETTINGS_BREADCRUMB,
   SURFACE_BREADCRUMB,
   SURFACE_CHORD,
   SURFACE_LABEL,
@@ -16,6 +18,10 @@ import {
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
+// CTL-911 / SURF3 — the persisted landing-surface preference (which OPERATE
+// surface opens first on a fresh load); the Settings surface writes it.
+import { readLandingSurface } from "@/lib/prefs";
+import { SettingsSurface } from "@/components/settings-surface";
 // CTL-898 / SHELL8 — the shell owns the NODE-SCOPE store (All-nodes by default).
 // Single-host is an identity no-op: the filter affordance is absent (the sidebar
 // gates it on the live cluster signal) so the scope stays All-nodes and nothing
@@ -73,7 +79,13 @@ const SURFACE_ICON: Record<Surface, typeof InboxIcon> = {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState<boolean>(readSidebarOpen);
-  const [surface, setSurface] = useState<Surface>("home");
+  // CTL-911 / SURF3 — the initial surface SEEDS from the persisted landing
+  // preference (defaults Home), then becomes ephemeral navigation state: jumping
+  // around does NOT rewrite the persisted default — only Settings changes it.
+  const [surface, setSurface] = useState<Surface>(readLandingSurface);
+  // CTL-911 / SURF3 — Settings is a FOOTER destination, not one of the four
+  // OPERATE landing surfaces; it takes over the inset via this open-flag.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   // CTL-898 / SHELL8 — the active node scope. Defaults to ALL_NODES (the cluster-
   // wide view); the sidebar's node filter sets it when N>1, and the sidebar also
@@ -132,6 +144,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         if (target) {
           e.preventDefault();
           setSurface(target);
+          setSettingsOpen(false); // jumping to a surface leaves Settings
         }
         chordArmed = false;
         clearTimeout(chordTimer);
@@ -189,16 +202,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const jumpTo = useCallback((s: Surface) => {
     setSurface(s);
+    setSettingsOpen(false);
     setPaletteOpen(false);
   }, []);
 
-  const surfaceCtx = useMemo(() => ({ surface, setSurface }), [surface]);
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+    setPaletteOpen(false);
+  }, []);
+
+  // The context's setSurface ALSO leaves Settings, so clicking an OPERATE nav
+  // item from the Settings surface returns to that surface (not a dead frame).
+  const selectSurface = useCallback((s: Surface) => {
+    setSurface(s);
+    setSettingsOpen(false);
+  }, []);
+
+  const surfaceCtx = useMemo(
+    () => ({ surface, setSurface: selectSurface, settingsOpen, openSettings }),
+    [surface, selectSurface, settingsOpen, openSettings],
+  );
   const nodeScopeCtx = useMemo(
     () => ({ scope: nodeScope, setScope: setNodeScope }),
     [nodeScope],
   );
 
-  const crumbs = SURFACE_BREADCRUMB[surface];
+  const crumbs = settingsOpen ? SETTINGS_BREADCRUMB : SURFACE_BREADCRUMB[surface];
 
   return (
     <SurfaceContext.Provider value={surfaceCtx}>
@@ -263,8 +292,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </header>
 
-          {/* The active surface renders edge-to-edge below the strip. */}
-          <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+          {/* The active surface renders edge-to-edge below the strip. The
+              Settings surface (CTL-911 / SURF3) takes over the inset when the
+              footer Settings item is open; otherwise the surface content
+              (children) renders. */}
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {settingsOpen ? <SettingsSurface /> : children}
+          </div>
         </SidebarInset>
       </SidebarProvider>
 
@@ -287,6 +321,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </CommandItem>
               );
             })}
+            {/* CTL-911 / SURF3 — Settings is reachable from ⌘K too (it's a
+                footer destination, not an OPERATE landing surface). */}
+            <CommandItem value="Settings" onSelect={openSettings}>
+              <SettingsIcon className="size-4" />
+              Settings
+            </CommandItem>
           </CommandGroup>
         </CommandList>
       </CommandDialog>
