@@ -174,6 +174,19 @@ if [ -d ".catalyst" ]; then
 	cp -R .catalyst "$WORKTREE_PATH/"
 fi
 
+# CTL-990: the cp -R above copies the MAIN checkout's working-tree versions of
+# git-TRACKED files (e.g. a locally-modified .claude/config.json) over the
+# freshly-checked-out branch versions — every new worktree then starts with
+# dirty tracked config, and the dispatch-time rebase refuses to start
+# ("you have unstaged changes"), which looped ADV-1326/ADV-1308. Restore
+# tracked paths to the branch state; untracked machine-local files
+# (settings.local.json, …) survive untouched.
+for CFG_DIR in .claude .catalyst; do
+	if [ -d "$WORKTREE_PATH/$CFG_DIR" ]; then
+		git -C "$WORKTREE_PATH" checkout --quiet -- "$CFG_DIR" 2>/dev/null || true
+	fi
+done
+
 # Pre-trust worktree in Claude Code so no trust dialog appears on first launch
 CLAUDE_JSON="$HOME/.claude.json"
 if [ -f "$CLAUDE_JSON" ]; then
