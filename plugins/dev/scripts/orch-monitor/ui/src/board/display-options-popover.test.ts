@@ -16,6 +16,9 @@ import {
   COLOR_BY_OPTIONS,
   ORDER_OPTIONS,
   LAYOUT_OPTIONS,
+  chipToDensity,
+  densityIsCompact,
+  visibleSections,
 } from "./display-options-popover";
 import {
   boardPrefsAtom,
@@ -118,6 +121,35 @@ describe("display-options-popover — selecting an option writes the atom (the p
     expect(prefs.layout).toBe("board");
     expect(prefs.swimlane).toBe("project");
     unsub();
+  });
+});
+
+// ── Phase 2 helpers ─────────────────────────────────────────────────────────
+
+describe("display-options-popover — chipToDensity / densityIsCompact (Phase 2)", () => {
+  it("chipToDensity(true) → 'compact', chipToDensity(false) → 'comfortable'", () => {
+    expect(chipToDensity(true)).toBe("compact");
+    expect(chipToDensity(false)).toBe("comfortable");
+  });
+
+  it("densityIsCompact round-trips: compact → true, comfortable → false", () => {
+    expect(densityIsCompact("compact")).toBe(true);
+    expect(densityIsCompact("comfortable")).toBe(false);
+  });
+
+  it("chipToDensity and densityIsCompact are inverses", () => {
+    expect(densityIsCompact(chipToDensity(true))).toBe(true);
+    expect(densityIsCompact(chipToDensity(false))).toBe(false);
+  });
+});
+
+describe("display-options-popover — visibleSections (Phase 2)", () => {
+  it("board → { color: true, emptyColumns: true }", () => {
+    expect(visibleSections("board")).toEqual({ color: true, emptyColumns: true });
+  });
+
+  it("list → { color: false, emptyColumns: false }", () => {
+    expect(visibleSections("list")).toEqual({ color: false, emptyColumns: false });
   });
 });
 

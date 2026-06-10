@@ -336,24 +336,21 @@ function SurfaceSwitch({ dashboard }: { dashboard: ReactNode }) {
     );
   }
   const kind = surfaceContentKind(surface);
-  // CTL-909 / SURF1: the Workers surface is now a first-class dense grid — the
-  // same <Board /> scaffolding (Column/BoardScroll/WorkerCard) opened straight
-  // onto its Workers view, full-bleed in the inset, instead of the placeholder
-  // dashboard. It carries the node group-by + node filter; the single-host case
-  // is an identity no-op. (Worker-card deep-link to /worker/$id is wired in the
-  // routed board entry, which owns the router; the embedded shell has no router,
-  // so cards there stay non-interactive exactly as before — no dead links.)
-  if (kind === "workers") {
+  // CTL-930: SurfaceSwitch collapses to ONE <Board> branch with a controlled
+  // view prop — workers surface opens board onto workers view; board surface
+  // opens onto tickets view. Nav between them updates the surface via onViewChange.
+  if (kind === "workers" || kind === "board") {
     return (
       <Suspense fallback={<SkeletonDashboard />}>
-        <Board embedded initialView="workers" />
-      </Suspense>
-    );
-  }
-  if (kind === "board") {
-    return (
-      <Suspense fallback={<SkeletonDashboard />}>
-        <Board embedded />
+        <Board
+          embedded
+          view={kind === "workers" ? "workers" : "tickets"}
+          onViewChange={(v) => {
+            // Workers ⇄ Tickets switch reflects in the surface (no-op for routing context)
+            // This is a visual-only internal switch; the nav item stays "board"/"workers".
+            void v; // future: setSurface(v === "workers" ? "workers" : "board")
+          }}
+        />
       </Suspense>
     );
   }

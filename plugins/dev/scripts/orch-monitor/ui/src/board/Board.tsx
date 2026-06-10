@@ -2,7 +2,6 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import { useAtom } from "jotai";
 import { TicketDetailDrawer } from "@/components/ticket-detail-drawer";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -762,8 +761,10 @@ export function QueueView({ data, embedded = false }: { data: BoardPayload; embe
   );
 }
 
-// ── shell (real shadcn Tabs + ToggleGroup, TooltipProvider) ─────────────────
-type View = "tickets" | "workers" | "queue";
+// ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
+// CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
+// Queue is now its own left-nav destination (QueueSurface), never a board view.
+type View = "tickets" | "workers";
 // WorkerGrouping ("status" | "phase" | "node") is now owned by worker-grouping.ts
 // (CTL-909 / SURF1) so the column derivation + the type stay in lock-step.
 function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: { k: T; label: string }[] }) {
@@ -781,20 +782,24 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
 // the inset's flex slot instead of overflowing the viewport by the strip height.
 // The data path (connectBoard / SharedWorker EventSource) is untouched in both.
 //
-// CTL-909 / SURF1:
-//   - `initialView` lets a host (e.g. the Workers app-shell surface) open the
-//     board straight onto the Workers grid instead of the Tickets default.
-//   - `onWorkerSelect` is the worker-card deep-link: the routed `/` board passes
-//     a `useNavigate`-backed callback to `/worker/$id`; when absent (the embedded
-//     mount has no router) the cards stay non-interactive, exactly as before.
+// CTL-930: Board.props changes from `initialView?: View` to `view?: View; onViewChange?`.
+// The SurfaceSwitch collapses to ONE <Board> branch; internal useState is the
+// uncontrolled fallback for standalone board.html mount.
 export function Board({
   embedded = false,
-  initialView = "tickets",
+  view: viewProp,
+  onViewChange,
   onWorkerSelect,
-}: { embedded?: boolean; initialView?: View; onWorkerSelect?: (name: string) => void } = {}) {
+}: { embedded?: boolean; view?: View; onViewChange?: (v: View) => void; onWorkerSelect?: (name: string) => void } = {}) {
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [view, setView] = useState<View>(initialView);
+  const [viewInternal, setViewInternal] = useState<View>("tickets");
+  // Controlled when viewProp is provided; uncontrolled (own state) otherwise.
+  const view = viewProp ?? viewInternal;
+  const setView = (v: View) => {
+    setViewInternal(v);
+    onViewChange?.(v);
+  };
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
@@ -870,36 +875,16 @@ export function Board({
     <TooltipProvider delayDuration={200}>
       <div style={{ [BOARD_VH_VAR]: boardRootHeight(embedded), background: C.s0, color: C.fg, height: `var(${BOARD_VH_VAR})`, display: "flex", flexDirection: "column", fontSize: 13, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif', overflow: "hidden" } as React.CSSProperties}>
         <style>{PULSE_CSS}</style>
-        {/* chrome */}
-        <header style={{ height: 48, display: "flex", alignItems: "center", gap: 18, padding: "0 16px", background: C.s1, borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, fontWeight: 600 }}>
-            <span style={{ width: 16, height: 16, borderRadius: 4, background: "linear-gradient(135deg,#4ea1ff,#39d07a)", boxShadow: "0 0 12px rgba(78,161,255,0.45)" }} />Catalyst
-          </div>
-          <div className="cat-nav">
-            <Tabs value={view} onValueChange={(v) => setView(v as View)}>
-              <TabsList>
-                <TabsTrigger value="tickets">Tickets</TabsTrigger>
-                <TabsTrigger value="workers">Workers</TabsTrigger>
-                <TabsTrigger value="queue">Queue</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-          <span style={{ flex: 1 }} />
-          <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11.5, color: C.fgMuted }}>
-            {data && <span style={{ display: "flex", alignItems: "center", gap: 6, color: C.fg }}><span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: LIVE, display: "inline-block" }} />{data.config.active} active{data.config.stuck > 0 ? ` · ${data.config.stuck} stuck` : ""}</span>}
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> daemon</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> broker</span>
-            <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Dot color={C.green} pulse /> monitor</span>
-            <span style={{ fontFamily: C.mono, fontSize: 10, letterSpacing: 1.5, color: status === "connected" ? C.green : C.red, border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`, borderRadius: 5, padding: "2px 6px" }}>{status === "connected" ? "LIVE" : "OFFLINE"}</span>
-          </div>
-        </header>
+        {/* CTL-930: in-board header (Catalyst swatch + Tabs nav + status cluster)
+            DELETED — the left sidebar is now the sole navigation and the app footer
+            carries the status cluster. The subhead carries only the view label,
+            description, display popover, and worker-grouping controls. */}
 
         {/* subhead */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
-          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : view === "workers" ? "Workers" : "Capacity & queue"}</h1>
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : view === "workers" ? "Workers the daemon has deployed — active vs stuck" : "What's on the plate, and what dispatches next"}</span>
+          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
+          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : "Workers the daemon has deployed — active vs stuck"}</span>
           <span style={{ flex: 1 }} />
-          {repos.length > 1 && <Seg value={repo} onChange={setRepo} options={[{ k: "all", label: "All" }, ...repos.map((r) => ({ k: r, label: r }))]} />}
           {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
               colorBy / repo-lanes) are folded into ONE Display-options popover —
               "density is a knob". The popover rides along in both the embedded
@@ -976,7 +961,8 @@ export function Board({
               )}
             />
           )}
-          {data && view === "queue" && <QueueView data={{ ...data, queue: data.queue.filter((q) => repo === "all" || q.repo === repo) }} />}
+          {/* CTL-930: queue view branch removed — Queue is now its own left-nav
+              destination (QueueSurface). Board view is narrowed to tickets|workers. */}
         </div>
         {selectedTicket && (
           <TicketDetailDrawer

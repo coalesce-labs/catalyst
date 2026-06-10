@@ -68,6 +68,27 @@ export const LAYOUT_OPTIONS: { k: Layout; label: string }[] = [
   { k: "list", label: "List" },
 ];
 
+// ── Phase 2 / CTL-930 exported helpers ───────────────────────────────────────
+
+/**
+ * Convert a chip's pressed state to a Density value.
+ * The Compact chip: pressed → "compact", unpressed → "comfortable".
+ */
+export const chipToDensity = (pressed: boolean): Density =>
+  pressed ? "compact" : "comfortable";
+
+/** True when the density is "compact" (drives the chip's pressed state). */
+export const densityIsCompact = (d: Density): boolean => d === "compact";
+
+/**
+ * Which sections are visible for a given layout.
+ * In List layout, Color and Empty-columns controls are hidden (BoardList uses neither).
+ */
+export function visibleSections(layout: Layout): { color: boolean; emptyColumns: boolean } {
+  if (layout === "board") return { color: true, emptyColumns: true };
+  return { color: false, emptyColumns: false };
+}
+
 export function DisplayOptionsPopover({
   repos = [],
 }: {

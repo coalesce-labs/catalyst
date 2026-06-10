@@ -11,13 +11,13 @@ import {
 import {
   SurfaceContext,
   SETTINGS_BREADCRUMB,
-  SURFACE_BREADCRUMB,
   SURFACE_CHORD,
   SURFACE_LABEL,
   SURFACES,
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
+import { breadcrumbFor, buildNavGroups, paletteEntries } from "@/lib/nav-model";
 // CTL-911 / SURF3 — the persisted landing-surface preference (which OPERATE
 // surface opens first on a fresh load); the Settings surface writes it.
 import { readLandingSurface } from "@/lib/prefs";
@@ -33,6 +33,9 @@ import {
   shouldToggleSidebar,
 } from "@/lib/sidebar-collapse";
 import { shouldOpenPalette } from "@/lib/command-palette";
+import { useAtom } from "jotai";
+import { repoScopeAtom } from "@/board/nav-store";
+import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -55,7 +58,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
-import { WorkspaceSwitcher } from "@/components/workspace-switcher";
+import { AppFooter } from "@/components/app-footer";
 
 // CTL-891 / SHELL1 — the full-viewport (h-screen, NO outer max-w / mx-auto)
 // frame, ported from the prototype `mockups/home-proto/src/components/AppShell`.
@@ -92,6 +95,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // resolves a stale focused scope back to ALL_NODES when its host leaves the
   // roster (a node going dark never strands the operator on an empty view).
   const [nodeScope, setNodeScope] = useState<NodeScope>(ALL_NODES);
+  // CTL-944 — the active repo scope for breadcrumbs + palette navigation.
+  const [repoScope, setRepoScope] = useAtom(repoScopeAtom);
+  // Repos from the board snapshot for palette navigation group construction.
+  const { payload } = useBoardSnapshot();
+  const repos = payload?.repos ?? [];
 
   // Persist collapse state across reloads (the controlled provider replaces the
   // primitive's cookie path; localStorage is the source of truth here). Logic +
@@ -160,11 +168,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // ⌘K / Ctrl+K and a bare `/` (outside a field) open the command palette — the
   // SINGLE search affordance for the shell (SHELL5 de-dups the prototype's two
-  // search bars). Clicks on the top-strip search field (data-cmdk-trigger) open
-  // it too. The open contract — including the "'/' never hijacks typing" guard —
-  // lives in lib/command-palette.ts (`shouldOpenPalette`) so it is unit-tested
-  // without a DOM, the same way `[` uses shouldToggleSidebar. ⌘K toggles; `/`
+  // search bars). The open contract lives in lib/command-palette.ts. ⌘K toggles; `/`
   // opens (a quick-open shouldn't re-close on a second slash).
+  // CTL-930: the click addEventListener for data-cmdk-trigger is REMOVED — the
+  // top-strip search button handles its own onClick via data-cmdk-trigger + the
+  // keydown listener. The WorkspaceSwitcher click path is gone with the switcher.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (
@@ -185,26 +193,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }
       }
     };
-    const onClick = (e: MouseEvent) => {
-      const el = e.target as HTMLElement | null;
-      if (el?.closest("[data-cmdk-trigger]")) {
-        e.preventDefault();
-        setPaletteOpen(true);
-      }
-    };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("click", onClick);
     return () => {
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("click", onClick);
     };
   }, []);
 
-  const jumpTo = useCallback((s: Surface) => {
+  // CTL-944: jumpTo now accepts a NavTarget (surface + scope) for project palette entries.
+  const jumpTo = useCallback((s: Surface, scope?: string) => {
     setSurface(s);
+    if (scope !== undefined) setRepoScope(scope);
     setSettingsOpen(false);
     setPaletteOpen(false);
-  }, []);
+  }, [setRepoScope]);
 
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
@@ -227,7 +228,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     [nodeScope],
   );
 
-  const crumbs = settingsOpen ? SETTINGS_BREADCRUMB : SURFACE_BREADCRUMB[surface];
+  // CTL-930/CTL-944: breadcrumbs are now scope-aware via breadcrumbFor.
+  const crumbs = settingsOpen ? SETTINGS_BREADCRUMB : breadcrumbFor(surface, repoScope);
 
   return (
     <SurfaceContext.Provider value={surfaceCtx}>
@@ -268,28 +270,25 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </BreadcrumbList>
             </Breadcrumb>
 
-            {/* CTL-897 / SHELL7 — the workspace switcher, ALSO duplicated into the
-                top strip (handoff cosmetic #6: the earlier "too much" call was
-                reversed — the operator now wants it in the top as well). It shares
-                the SAME active scope as the sidebar-header instance via the FND
-                `repoScopeAtom`, so a selection in one reflects in the other. */}
+            {/* CTL-930: WorkspaceSwitcher removed from top strip. Scope is communicated
+                via the project-grouped left nav. The ⌘K search button is the only right-side
+                affordance. It handles its own click to open the palette. */}
             <div className="ml-auto flex items-center">
-              <WorkspaceSwitcher placement="topstrip" />
+              {/* ⌘K search trigger. */}
+              <button
+                type="button"
+                data-cmdk-trigger
+                onClick={() => setPaletteOpen(true)}
+                className="flex h-7 items-center gap-2 rounded-md border border-border bg-secondary/30 px-2 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                aria-label="Search or jump to…"
+              >
+                <SearchIcon className="size-3.5" />
+                <span className="hidden sm:inline">Search…</span>
+                <kbd className="rounded border border-border bg-background/60 px-1 py-0.5 text-[10px]">
+                  ⌘K
+                </kbd>
+              </button>
             </div>
-
-            {/* ⌘K search trigger. */}
-            <button
-              type="button"
-              data-cmdk-trigger
-              className="ml-2 flex h-7 items-center gap-2 rounded-md border border-border bg-secondary/30 px-2 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-              aria-label="Search or jump to…"
-            >
-              <SearchIcon className="size-3.5" />
-              <span className="hidden sm:inline">Search…</span>
-              <kbd className="rounded border border-border bg-background/60 px-1 py-0.5 text-[10px]">
-                ⌘K
-              </kbd>
-            </button>
           </header>
 
           {/* The active surface renders edge-to-edge below the strip. The
@@ -299,30 +298,38 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <div className="min-h-0 flex-1 overflow-hidden">
             {settingsOpen ? <SettingsSurface /> : children}
           </div>
+
+          {/* CTL-930: AppFooter carries the status cluster (LIVE badge + activity +
+              health dots), moved from the in-board header and the sidebar footer. */}
+          <AppFooter />
         </SidebarInset>
       </SidebarProvider>
 
-      {/* ── ⌘K command palette — jump to any surface ───────────────────────── */}
+      {/* ── ⌘K command palette — project-grouped nav (CTL-944) ──────────────── */}
       <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
         <CommandInput placeholder="Jump to a surface or search a ticket…" />
         <CommandList>
           <CommandEmpty>No results.</CommandEmpty>
-          <CommandGroup heading="Go to">
-            {SURFACES.map((s) => {
-              const Icon = SURFACE_ICON[s];
-              return (
-                <CommandItem
-                  key={s}
-                  value={SURFACE_LABEL[s]}
-                  onSelect={() => jumpTo(s)}
-                >
-                  <Icon className="size-4" />
-                  {SURFACE_LABEL[s]}
-                </CommandItem>
-              );
-            })}
-            {/* CTL-911 / SURF3 — Settings is reachable from ⌘K too (it's a
-                footer destination, not an OPERATE landing surface). */}
+          {/* CTL-944: palette entries are project-grouped via paletteEntries(groups). */}
+          {paletteEntries(buildNavGroups(repos, {})).map((entry) => (
+            <CommandGroup key={entry.group} heading={entry.group}>
+              {entry.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <CommandItem
+                    key={`${entry.group}:${item.target.surface}`}
+                    value={`${entry.group} ${item.label}`}
+                    onSelect={() => jumpTo(item.target.surface, item.target.scope)}
+                  >
+                    <Icon className="size-4" />
+                    {item.label}
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+          ))}
+          {/* Settings is reachable from ⌘K too. */}
+          <CommandGroup heading="Settings">
             <CommandItem value="Settings" onSelect={openSettings}>
               <SettingsIcon className="size-4" />
               Settings

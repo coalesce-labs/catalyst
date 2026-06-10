@@ -21,10 +21,11 @@ export const SURFACES: readonly Surface[] = [
   "queue",
 ] as const;
 
-/** Human label per surface (sidebar item + command palette). */
+/** Human label per surface (sidebar item + command palette).
+ *  CTL-930: home → "Inbox", board → "Tickets" (internal union keys unchanged). */
 export const SURFACE_LABEL: Record<Surface, string> = {
-  home: "Home",
-  board: "Board",
+  home: "Inbox",
+  board: "Tickets",
   workers: "Workers",
   queue: "Queue",
 };
@@ -37,12 +38,13 @@ export const SURFACE_CHORD: Record<string, Surface> = {
   q: "queue",
 };
 
-/** Breadcrumb trail per surface — drives the top strip. */
+/** Breadcrumb trail per surface — scope-less fallback (used by tests + non-scoped contexts).
+ *  CTL-930: scope-aware breadcrumbs use lib/nav-model#breadcrumbFor instead. */
 export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
-  home: ["Home", "Inbox"],
-  board: ["Board"],
-  workers: ["Workers"],
-  queue: ["Queue"],
+  home: ["Overall", "Inbox"],
+  board: ["Overall", "Tickets"],
+  workers: ["Overall", "Workers"],
+  queue: ["Overall", "Queue"],
 };
 
 /**

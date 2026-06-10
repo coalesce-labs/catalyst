@@ -65,8 +65,8 @@ describe("surface contract (CTL-891)", () => {
       expect(SURFACE_LABEL[s]).toBeTruthy();
       expect(SURFACE_BREADCRUMB[s].length).toBeGreaterThan(0);
     }
-    // Home is the calm Inbox — its trail reads "Home · Inbox".
-    expect(SURFACE_BREADCRUMB.home).toEqual(["Home", "Inbox"]);
+    // CTL-930: home trail is now "Overall · Inbox" (scope-aware breadcrumbs).
+    expect(SURFACE_BREADCRUMB.home).toEqual(["Overall", "Inbox"]);
   });
 
   it("isTypingTarget guards INPUT/TEXTAREA/contentEditable so chords never steal typing", () => {
@@ -115,8 +115,9 @@ describe("shadcn Sidebar primitive is the foundation (CTL-891)", () => {
     }
   });
 
-  it("the OPERATE group lists Home, Board, Workers, Queue", () => {
-    for (const label of ["Home", "Board", "Workers", "Queue"]) {
+  it("the OPERATE group lists Inbox, Tickets, Workers, Queue", () => {
+    // CTL-930: surface labels renamed Home→Inbox, Board→Tickets.
+    for (const label of ["Inbox", "Tickets", "Workers", "Queue"]) {
       expect(sidebarComponentSrc).toContain(label);
     }
     expect(sidebarComponentSrc).toMatch(/Operate/i);
@@ -152,7 +153,9 @@ describe("one edge-to-edge shell hosts every surface (CTL-891)", () => {
   });
 
   it("AppShell binds the `[` collapse toggle and `g`-chord surface jumps", () => {
-    expect(shellSrc).toContain('"["');
+    // CTL-930: `[` handling delegated to shouldToggleSidebar (lib/sidebar-collapse.ts).
+    // The shell wires the predicate instead of inlining the key literal.
+    expect(shellSrc).toContain("shouldToggleSidebar");
     expect(shellSrc).toContain("isTypingTarget");
     expect(shellSrc).toContain("SURFACE_CHORD");
   });

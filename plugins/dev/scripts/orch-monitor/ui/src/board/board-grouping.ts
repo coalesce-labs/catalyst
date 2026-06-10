@@ -113,6 +113,60 @@ const LIVE_RANK = { live: 0, degraded: 1, offline: 2 } as const;
  * Single-lane collapse: a length-1 result means the caller (SwimlaneBoard) renders
  * the lane body with no header — the identity no-op.
  */
+// ── Phase 3 — showLaneChrome + singleLaneHint ────────────────────────────────
+
+/**
+ * Shared lane-chrome policy: headers render when the operator explicitly
+ * selected an axis AND at least one lane exists. axis="none" → no chrome.
+ * Zero lanes (empty entity set on a real axis) → no chrome.
+ *
+ * THE regression lock: an explicit axis (team/project/repo/host) ALWAYS renders
+ * lane chrome even for a single lane — swimlane=repo + single-repo scope collapses
+ * naturally to ONE labeled lane WITH header, never silently flattens.
+ */
+export function showLaneChrome(by: GroupBy, laneCount: number): boolean {
+  return by !== "none" && laneCount > 0;
+}
+
+/**
+ * Single-lane hint text, rendered inline after the count chip when laneCount === 1.
+ * null for axis="none" (no chrome at all). Uses singular/plural based on count.
+ */
+export function singleLaneHint(
+  by: GroupBy,
+  lane: Lane<unknown>,
+  noun: "ticket" | "worker",
+): string | null {
+  if (by === "none") return null;
+  const count = lane.items.length;
+  const isUnassigned = lane.key === UNASSIGNED;
+  const plural = count !== 1;
+  const subj = plural ? `All ${count} ${noun}s` : `The only ${noun} here`;
+  const predSuffix = plural ? "s" : "";
+
+  if (by === "team") {
+    return isUnassigned
+      ? `${subj} have no team`
+      : `${subj} ${plural ? "are" : "is"} in team ${lane.label}`;
+  }
+  if (by === "project") {
+    return isUnassigned
+      ? `${subj} have no project`
+      : `${subj} ${plural ? "are" : "is"} in project ${lane.label}`;
+  }
+  if (by === "repo") {
+    return isUnassigned
+      ? `${subj} have no repo`
+      : `${subj} ${plural ? "are" : "is"} in repo ${lane.label}`;
+  }
+  if (by === "host") {
+    return isUnassigned
+      ? `${subj} aren't attributed to a host yet`
+      : `${subj} ${plural ? "are" : "is"} on host ${lane.label}`;
+  }
+  return null;
+}
+
 export function buildLanes<T extends GroupableEntity>(
   items: T[],
   by: GroupBy,
