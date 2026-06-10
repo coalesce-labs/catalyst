@@ -48,6 +48,10 @@ import {
   type TailDiagnostics,
 } from "./live-tail-data";
 import { LIVE_CYAN } from "./detail-chrome";
+// CTL-938: the "Live screen" pane — the PRE-transcript wedge window (renders
+// the worker's `claude logs` screen buffer before any transcript exists, hands
+// off to the ActivityTail once live rows flow).
+import { LiveScreenPane } from "./live-screen-pane";
 import { Sparkline } from "../components/sparkline";
 import { fmtCost, fmtTokens } from "@/lib/formatters";
 
@@ -1089,6 +1093,15 @@ export function WorkerDetailBody({
       <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,320px)", gap: 12, alignItems: "start" }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
           <BurnStrip series={burnSeries} worker={worker} />
+          {/* CTL-938: the live SCREEN — visible from turn ZERO (before any
+              transcript exists, exactly when a session-start wedge is only
+              diagnosable from the rendered screen). transcriptLive is the SAME
+              "live rows have arrived" signal that lights the DiagnosticsRail —
+              once it flips, the pane hands off to the richer ActivityTail. */}
+          <LiveScreenPane
+            bgJobId={fields?.bgJobId ?? null}
+            transcriptLive={liveDiagnostics?.plumbed ?? false}
+          />
           <ActivityTail sessionId={scalars.sessionId} alive={alive} onDiagnostics={setLiveDiagnostics} />
           <SignalPanel signal={signal} label={phase ? `phase-${phase}.json` : ""} />
         </div>
