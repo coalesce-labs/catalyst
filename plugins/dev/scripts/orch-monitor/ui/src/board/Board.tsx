@@ -1197,7 +1197,19 @@ export function Board({
         {/* subhead */}
         <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>{view === "tickets" ? "Where each ticket sits in the pipeline · cyan = a worker is live on it now" : "Workers the daemon has deployed — active vs stuck"}</span>
+          {/* CTL-972: lens-aware tagline + quiet active-lens indicator */}
+          <span style={{ color: C.fgMuted, fontSize: 12 }}>
+            {view === "tickets"
+              ? lens === "phase"
+                ? "Which phase-agent is working each ticket · cyan = live worker"
+                : "Linear stage for each ticket · cyan = a worker is live on it now"
+              : "Workers the daemon has deployed — active vs stuck"}
+          </span>
+          {view === "tickets" && (
+            <span style={{ fontSize: 11, color: C.fgDim, background: C.s1, border: `1px solid ${C.border}`, borderRadius: 4, padding: "1px 6px", whiteSpace: "nowrap" }}>
+              {lens === "phase" ? "Pipeline phase" : "Linear stage"}
+            </span>
+          )}
           <span style={{ flex: 1 }} />
           {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
               colorBy / repo-lanes) are folded into ONE Display-options popover —
