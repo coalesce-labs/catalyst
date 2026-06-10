@@ -68,7 +68,11 @@ export async function killHungWorker(
       }).catch((err) => log.warn({ ticket, phase, err }, "ctl-729: revive reap emit failed"));
     }
     try {
-      reviveDispatch({ orchDir, ticket, phase, attempt });
+      // CTL-729 remediate: pass bgJobId so the scheduler's reviveDispatch closure
+      // can resolve the dead session to a `claude --resume` UUID (re-dispatch with
+      // continuity). orchDir is included for dispatchers that need it; the
+      // production closure (scheduler Pass 0w) closes over orchDir and ignores it.
+      reviveDispatch({ orchDir, ticket, phase, attempt, bgJobId });
     } catch (err) {
       log.warn({ ticket, phase, err: err.message }, "ctl-729: revive dispatch threw");
     }
@@ -77,7 +81,16 @@ export async function killHungWorker(
         join(orchDir, "workers", ticket, `.watchdog-revive-${phase}.${attempt}`),
         new Date(now()).toISOString(),
       );
-    } catch {}
+    } catch (err) {
+      // CTL-729 remediate: this marker is the SOLE persistence backing
+      // priorReviveCount, which enforces the revive-budget cap. A silent write
+      // failure makes the next tick read a lower count and revive the same worker
+      // again (potentially unbounded), so make the failure observable.
+      log.warn(
+        { ticket, phase, attempt, err: err.message },
+        "ctl-729: revive-marker write failed — revive cap may not hold",
+      );
+    }
     log.warn({ ticket, phase, attempt, reviveBudget }, "ctl-729: hung worker revived (budget)");
     return { outcome: "revived" };
   }

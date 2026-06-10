@@ -3,7 +3,7 @@
 // Uses a temp dir per test so marker files are fully isolated.
 
 import { describe, it, expect, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 

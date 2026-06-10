@@ -417,4 +417,15 @@ describe("phaseBudgetMs (CTL-729)", () => {
   test("missing/NaN turnCap → safe fallback budget", () => {
     expect(phaseBudgetMs("implement", undefined, { phaseBudgetMultiplier: 1.5 })).toBeGreaterThan(0);
   });
+  test("CTL-729 coverage: undefined turnCap → exact 90-min fallback (WATCHDOG_FALLBACK_BUDGET_MS)", () => {
+    // Pin the exact fallback so a regression swapping it for the 20-min floor or 0
+    // is caught (the toBeGreaterThan(0) assertion above would not notice).
+    expect(phaseBudgetMs("implement", undefined, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+  });
+  test("CTL-729 coverage: cap<=0 (zero/negative turnCap) → 90-min fallback, not the floor", () => {
+    // The `!Number.isFinite(cap) || cap <= 0` guard returns the fallback, NOT the
+    // 20-min floor — exercise both the zero and negative branches.
+    expect(phaseBudgetMs("implement", 0, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+    expect(phaseBudgetMs("implement", -5, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+  });
 });

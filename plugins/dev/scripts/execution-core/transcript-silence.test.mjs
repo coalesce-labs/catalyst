@@ -126,6 +126,41 @@ describe("transcriptAgeMs", () => {
     expect(transcriptAgeMs(null, { now: 1, resolveSession: resolver })).toBeNull();
     expect(transcriptAgeMs(undefined, { now: 1, resolveSession: resolver })).toBeNull();
   });
+
+  test("CTL-729 coverage: reads bg id from the liveness:{kind:'bg',value} shape (3rd fallback)", () => {
+    // The scheduler passes a parsed signal whose id may arrive via the liveness
+    // shape (signalLike.liveness.kind === 'bg'); only the flat {bgJobId} and
+    // {raw.bg_job_id} extraction paths were covered.
+    const parent = join(ROOT, "projects", PROJ, `${SID}.jsonl`);
+    writeFileSync(parent, "{}\n");
+    setMtime(parent, 1000);
+    expect(
+      transcriptAgeMs(
+        { liveness: { kind: "bg", value: SHORT } },
+        { now: 1_060_000, projectsRoot: join(ROOT, "projects"), resolveSession: resolver },
+      ),
+    ).toBe(60_000);
+  });
+
+  test("CTL-729 coverage: file resolves but stat throws → null (fail-safe = not silent)", () => {
+    // resolveTranscriptPath finds the file, but stat throws (e.g. deleted between
+    // resolve and stat) → mtimeMs returns 0 → newest is falsy → age is null. The
+    // watchdog must NOT treat an unstat-able transcript as silent.
+    const parent = join(ROOT, "projects", PROJ, `${SID}.jsonl`);
+    writeFileSync(parent, "{}\n");
+    const throwingStat = () => { throw new Error("ENOENT: stat raced a delete"); };
+    expect(
+      transcriptAgeMs(
+        { bgJobId: SHORT },
+        {
+          now: 1_060_000,
+          projectsRoot: join(ROOT, "projects"),
+          resolveSession: resolver,
+          stat: throwingStat,
+        },
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("resolveTranscriptPath", () => {

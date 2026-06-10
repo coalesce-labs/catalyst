@@ -78,6 +78,24 @@ describe("killHungWorker — escalated path", () => {
     });
     expect(existsSync(join(orchDir, "workers", T, ".linear-label-needs-human.applied"))).toBe(true);
   });
+
+  test("CTL-729 coverage: writes the .escalation-cooldowns marker carrying the hung_no_progress reason", async () => {
+    // recordEscalation runs on every escalate path (label-guard.mjs); a regression
+    // dropping the call would otherwise pass all the other assertions here. Guard
+    // the marker + its failureReason so the cooldown that throttles re-escalation
+    // (CTL-638) is provably written.
+    await killHungWorker(orchDir, T, writeSignal("running"), {
+      elapsedMin: 1080, commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1_700_000,
+    });
+    const marker = join(orchDir, ".escalation-cooldowns", `${T}-${PHASE}.json`);
+    expect(existsSync(marker)).toBe(true);
+    const envelope = JSON.parse(readFileSync(marker, "utf8"));
+    expect(envelope.reason).toBe(`hung_no_progress:${PHASE}:1080m_0_commits`);
+    expect(envelope.escalatedAt).toBe(1_700_000);
+  });
 });
 
 describe("killHungWorker — already-terminal guard", () => {
