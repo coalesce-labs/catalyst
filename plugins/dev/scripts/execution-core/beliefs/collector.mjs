@@ -246,7 +246,7 @@ function pruneRetention(db, now) {
   db.run("DELETE FROM intent WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)", [
     beliefCutoff,
   ]);
-  for (const t of ["obs_agent", "obs_job", "obs_signal", "obs_transcript", "obs_linear"]) {
+  for (const t of ["obs_agent", "obs_job", "obs_signal", "obs_transcript", "obs_linear", "obs_relation"]) {
     db.run(`DELETE FROM ${t} WHERE tick_id IN (SELECT tick_id FROM tick WHERE now_ms < ?)`, [
       obsCutoff,
     ]);
@@ -471,6 +471,57 @@ export function collectTickFacts({
             ins.run(tickId, String(s.ticket), state);
           } catch (err) {
             fail("linear", err);
+          }
+        }
+      }
+
+      // ── obs_relation — blocking edges from the TTL cache; insert-only ────
+      // collectBeliefsTick runs BEFORE schedulerTick refreshes the Linear cache
+      // this tick, so relations reflect the previous tick's fetch (within the
+      // 60s TTL) and are cold on the very first tick — acceptable, same
+      // staleness contract as obs_linear. Cold/stale cache (getRelations returns
+      // undefined) → no rows this tick; the null-is-unreadable contract applies.
+      //
+      // Normalization MATCHES lib/dependency-graph.mjs buildDependencyEdges:
+      //   relations.nodes type='blocks'      → (source=ticket, target=peer, 'blocks')
+      //   relations.nodes type='blocked_by'  → (source=peer,   target=ticket,'blocks')
+      //   relations.nodes type='related'/'duplicate' → (source=ticket, target=peer, type)
+      //   inverseRelations.nodes type='blocks'     → (source=peer,   target=ticket,'blocks')
+      //   inverseRelations.nodes type='blocked_by' → (source=ticket, target=peer, 'blocks')
+      // 'blocked_by' is never stored as a relation_type — always folded into
+      // 'blocks' by swapping direction. Nodes with missing peer identifier are
+      // skipped. The seen-set deduplicates symmetric relations/inverseRelations
+      // pairs identical to buildDependencyEdges.
+      {
+        const insRel = db.prepare(
+          "INSERT INTO obs_relation (tick_id, source_ticket, target_ticket, relation_type) VALUES (?, ?, ?, ?)",
+        );
+        const seenRel = new Set();
+        for (const s of signals) {
+          if (!s?.ticket || seenRel.has(s.ticket)) continue;
+          seenRel.add(s.ticket);
+          try {
+            const descriptor = linearCache?.getRelations?.(s.ticket);
+            if (descriptor == null) continue; // cold/stale cache → no rows this tick
+            const addEdge = (src, tgt, type) => {
+              if (!src || !tgt) return; // malformed node — missing peer identifier
+              insRel.run(tickId, String(src), String(tgt), String(type));
+            };
+            for (const node of descriptor?.relations?.nodes ?? []) {
+              const peer = node?.relatedIssue?.identifier;
+              if (!peer) continue;
+              if (node.type === "blocks") addEdge(s.ticket, peer, "blocks");
+              else if (node.type === "blocked_by") addEdge(peer, s.ticket, "blocks");
+              else if (node.type === "related" || node.type === "duplicate") addEdge(s.ticket, peer, node.type);
+            }
+            for (const node of descriptor?.inverseRelations?.nodes ?? []) {
+              const peer = node?.issue?.identifier;
+              if (!peer) continue;
+              if (node.type === "blocks") addEdge(peer, s.ticket, "blocks");
+              else if (node.type === "blocked_by") addEdge(s.ticket, peer, "blocks");
+            }
+          } catch (err) {
+            fail("relations", err);
           }
         }
       }
