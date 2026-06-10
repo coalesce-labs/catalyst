@@ -24,6 +24,8 @@ import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
 import { WorkerDetailBody } from "./worker-detail-body";
+import { WorkerRailExtra } from "./worker-rail-extra";
+import { useWorkerDetailModel } from "./use-worker-detail-model";
 import { readWorkerScalars } from "./worker-detail-data";
 
 // ── resident payload subscription (same transport as Board.tsx) ─────────────
@@ -180,6 +182,15 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
   const listIds = payload ? resolveListIds(payload, { kind, lens: search.lens, col: search.col }) : [];
   const worker = payload?.workers.find((w) => w.name === id);
 
+  // WORKER-DETAIL v2 Pass A (§1A): the live model is hoisted HERE (the parent of
+  // both the Shell rail and the body) and subscribed ONCE, so the rail's
+  // Diagnostics group and the body's Now view read the SAME SSE buffer — no second
+  // stream/signal/burn fetch. The rail consolidates to ONE column: the shared
+  // Properties rows (workerRows) PLUS the worker-only Diagnostics + Timeline groups
+  // passed through Shell's `railExtra` slot (the ticket page's rail is untouched —
+  // it never sets railExtra).
+  const model = useWorkerDetailModel(worker);
+
   return (
     <>
       <Shell
@@ -190,9 +201,17 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
         live={{ working: worker?.working ?? false, activeState: worker?.activeState ?? null }}
         title={worker?.name ?? id}
         properties={workerRows(worker)}
+        railExtra={
+          <WorkerRailExtra
+            worker={worker}
+            signal={model.signal}
+            liveDiagnostics={model.liveDiagnostics}
+            currentPhase={worker?.phase ?? "—"}
+          />
+        }
         streamHealth={health}
       >
-        <WorkerDetailBody id={id} worker={worker} />
+        <WorkerDetailBody id={id} worker={worker} model={model} search={search} />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "worker", id }} />
     </>
