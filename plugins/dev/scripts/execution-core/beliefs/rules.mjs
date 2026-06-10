@@ -15,11 +15,23 @@
 //   S2 liveness verdicts             R4 R5 R6 R9   (negation over S1 beliefs)
 //   S3 capacity aggregation          R8            (aggregate over S2 + obs_agent)
 //   S4 escalation ladder             R10 R11 R12   (negation over intent)
+//   S5 recursive dependency beliefs  R13 R14 R15   (read obs_relation + obs_linear
+//                                                   EDB only; intra-stratum reads)
 //
 // No recursion crosses a negation. Each stratum's statements read only the
 // strata strictly below it (and the obs_* EDB), so when an S2 rule's NOT EXISTS
 // queries belief WHERE name='turn_started', every S1 belief for the tick has
 // ALREADY been inserted — the complete-lower-stratum invariant the tests pin.
+//
+// S5 (CTL-965) is recursive over obs_relation alone (transitive blocker
+// closure via WITH RECURSIVE) and contains NO negation over any belief — it
+// reads only the obs_relation + obs_linear EDB. It is placed BELOW nothing that
+// negates it (no rule in S1–S4 references blocker_rank/cycle_detected/ready), so
+// there is no negation cycle: the recursion is confined inside each statement's
+// own CTE, and the only cross-statement reads (R15 ready may reference the
+// transitive closure shape) stay within obs_relation. Termination is guaranteed
+// by UNION (not UNION ALL) in the CTE — the working set dedupes, so even a cyclic
+// graph (A→B→A) halts once the (A,A)/(B,B) closure pairs stop being new.
 //
 // Provenance contract (spec §4): source_fact_ids is a json_array of the
 // fact_id / belief_id refs the rule actually consumed, built INSIDE the SELECT
@@ -36,7 +48,7 @@
 // kind prefix, per source TABLE, so the trace is unambiguous and deterministic:
 //   b belief   t tick   i intent
 //   s obs_signal   a obs_agent   j obs_job   r obs_transcript
-//   h obs_heartbeat   l obs_linear
+//   h obs_heartbeat   l obs_linear   x obs_relation   (x = CTL-965 S5 dep rules)
 // json_array values become these tagged TEXT tokens; why.mjs maps prefix→table.
 //
 // Subject convention:
@@ -367,6 +379,155 @@ JOIN belief ai ON ai.tick_id = t.tick_id AND ai.name = 'action_ineffective'
               AND ai.subject = 'wake-diagnostician:' || wd.subject
 WHERE t.tick_id = :tick`;
 
+// ── Stratum 5: recursive dependency beliefs (CTL-965 belief-store Step 2) ─────
+//
+// DIRECTION (load-bearing — getting it wrong inverts every downstream verdict):
+// obs_relation is canonicalized at ingest (collector.mjs) so that EVERY stored
+// 'blocks' row means "source_ticket BLOCKS target_ticket". A ticket that is
+// blocked cannot proceed until its blocker is done, i.e. the BLOCKED ticket
+// DEPENDS ON its blocker. Therefore, reading a row obs_relation(source=B,
+// target=A, 'blocks'): B blocks A  ⇒  A depends_on B  ⇒  B is a blocker of A.
+// In the closure below the DEPENDENT is the EDB row's `target_ticket` and the
+// DEPENDENCY (blocker) is the EDB row's `source_ticket`. (The research-doc
+// pseudocode depends_on(A,B):-obs_relation(_,A,B) is direction-ambiguous; this
+// is the implemented-semantics-derived answer.)
+//
+// TERMINATION (the research doc left this OPEN — this is the settled answer):
+// transitive reachability is computed with WITH RECURSIVE using UNION (NOT
+// UNION ALL) so the working set DEDUPES. On a cyclic graph (A→B→A) the pairs
+// (A,A)/(A,B)/(B,A)/(B,B) are each produced ONCE; re-deriving an existing pair
+// adds nothing new, so the recursion reaches a fixpoint and halts. A defensive
+// depth cap (depth < edge_count + 1) is belt-and-braces only; UNION is what
+// guarantees termination. Every statement operates over a SINGLE tick via the
+// :tick bind, with relation_type='blocks' only (related/duplicate are not deps).
+//
+// READ-ONLY / derive-only: these beliefs are CONCLUSIONS (a cycle alert is a
+// derived belief; the executor MAY emit an operator event from it). They are
+// NEVER a Linear write or a dispatch — no actuation lives here.
+//
+// Provenance: obs_relation refs are tagged 'x' (REF TAGGING block above); each
+// rule emits 'x' || fact_id for every blocking edge it consumed. why.mjs maps
+// the 'x' prefix back to obs_relation so `catalyst why` renders the dep chain.
+
+// transClosure(:tick) — the shared transitive-blocker closure CTE body, inlined
+// into each S5 rule (constant SQL, single :tick bind). dependent=target,
+// dependency=source. `path_ids` accumulates the json_array of obs_relation
+// fact_ids ('x'-tagged) consumed along each derivation, so provenance survives
+// the recursion. UNION (deduping) over (dependent, dependency) — path_ids is
+// carried but NOT part of the dedup key conceptually; we dedup on the closure
+// pair by selecting DISTINCT downstream, while the CTE itself UNIONs full rows
+// (so a longer path to the same pair is still deduped once its tuple repeats).
+// Defensive depth cap: depth < (edge count for the tick) + 1.
+const TRANS_CLOSURE_CTE = `
+WITH RECURSIVE
+  edges(dependent, dependency, fact_id) AS (
+    SELECT target_ticket, source_ticket, fact_id
+      FROM obs_relation
+     WHERE tick_id = :tick AND relation_type = 'blocks'
+  ),
+  closure(dependent, dependency, depth) AS (
+    -- base: each direct edge (A depends_on B) is depth 1
+    SELECT dependent, dependency, 1 FROM edges
+    UNION
+    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C
+    SELECT c.dependent, e.dependency, c.depth + 1
+      FROM closure c
+      JOIN edges e ON e.dependent = c.dependency
+     WHERE c.depth < (SELECT COUNT(*) FROM edges) + 1
+  )`;
+
+// R13 blocker_rank — for every ticket A with >= 1 direct blocker: rank = count
+// of DISTINCT transitive blockers; direct = json_array of immediate blockers;
+// transitive = json_array of all transitive blockers (direct ⊆ transitive).
+// Subject = ticket A. One row per A (UNIQUE(tick_id,name,subject)).
+//   blocker_rank(A) :- direct-blocker(A,_).
+//   rank(A) = |{ B : A depends_on⁺ B }|   (transitive closure, deduped)
+const R13_blocker_rank = `
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+${TRANS_CLOSURE_CTE}
+SELECT :tick, 5, 'blocker_rank', cl.dependent,
+       json_object(
+         'rank', COUNT(DISTINCT cl.dependency),
+         'direct', (SELECT json_group_array(e.dependency)
+                      FROM edges e WHERE e.dependent = cl.dependent),
+         'transitive', json_group_array(DISTINCT cl.dependency)),
+       'R13',
+       (SELECT json_group_array('x' || e.fact_id)
+          FROM edges e WHERE e.dependent = cl.dependent)
+FROM closure cl
+GROUP BY cl.dependent`;
+
+// R14 cycle_detected — a ticket A that transitively depends on itself: the
+// closure contains the pair (A, A). members = the cycle members reachable from
+// A that loop back (every dependency D of A that itself depends back on A,
+// i.e. (A,D) and (D,A) both in the closure), plus A. Subject = ticket A.
+//   cycle_detected(A) :- depends_on⁺(A, A).
+const R14_cycle_detected = `
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+${TRANS_CLOSURE_CTE},
+  -- A is in a cycle iff (A,A) is in the closure
+  self_cycle(t) AS (SELECT DISTINCT dependent FROM closure WHERE dependent = dependency)
+SELECT :tick, 5, 'cycle_detected', sc.t,
+       json_object('members',
+         (SELECT json_group_array(DISTINCT m) FROM (
+            SELECT sc.t AS m
+            UNION
+            -- every D that A reaches AND that reaches back to A
+            SELECT c1.dependency AS m
+              FROM closure c1
+              JOIN closure c2 ON c2.dependent = c1.dependency
+                             AND c2.dependency = sc.t
+             WHERE c1.dependent = sc.t
+         ))),
+       'R14',
+       (SELECT json_group_array('x' || e.fact_id) FROM edges e)
+FROM self_cycle sc`;
+
+// R15 ready — a ticket A in the eligible Linear state (cfg eligible_state,
+// default 'Todo') that has NO direct blocker whose obs_linear state is
+// non-terminal (terminal = Done/Canceled/Cancelled). A blocker in a terminal
+// state does NOT hold A back, so a ticket whose only blockers are all Done is
+// ready. Subject = ticket A; value = {ready:1}. (obs_linear is sparse some
+// ticks → ready may legitimately be empty that tick; that is acceptable.)
+//   ready(A) :- obs_linear(A, eligible_state),
+//       not exists direct-blocker B of A with obs_linear(B, S), S non-terminal.
+//
+// "no direct blocker whose state is non-terminal" includes the case of NO
+// direct blockers at all (vacuously true) and the case where a blocker's
+// obs_linear state is unknown this tick — an unknown (no obs_linear row, or
+// NULL) blocker state is NOT counted as a non-terminal blocker (we only block
+// on a blocker we can SEE is non-terminal), matching the null-is-unreadable
+// contract: we never assert "blocked" from an absence of information.
+const R15_ready = `
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 5, 'ready', la.ticket,
+       json_object('ready', 1),
+       'R15',
+       COALESCE(
+         (SELECT json_group_array('x' || r.fact_id)
+            FROM obs_relation r
+           WHERE r.tick_id = t.tick_id AND r.relation_type = 'blocks'
+             AND r.target_ticket = la.ticket),
+         json_array())
+FROM tick t
+JOIN cfg es ON es.key = 'eligible_state'
+JOIN obs_linear la ON la.tick_id = t.tick_id
+                  AND la.state IS NOT NULL
+                  AND la.state = es.value_text
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (
+    -- a direct blocker B of A (obs_relation source=B, target=A) whose OWN
+    -- obs_linear state this tick is non-terminal
+    SELECT 1
+      FROM obs_relation r
+      JOIN obs_linear lb ON lb.tick_id = t.tick_id
+                        AND lb.ticket = r.source_ticket
+                        AND lb.state IS NOT NULL
+                        AND lb.state NOT IN ('Done','Canceled','Cancelled')
+     WHERE r.tick_id = t.tick_id
+       AND r.relation_type = 'blocks'
+       AND r.target_ticket = la.ticket)`;
+
 // STRATA — the run order. Each inner array is one stratum; statements within a
 // stratum run in array order (R6 after R5; R10b after R10a) so same-stratum
 // negation sees the complete lower set. The tick loop runs strata in order
@@ -395,6 +556,13 @@ export const STRATA = [
     ["R11", R11_action_ineffective],
     ["R12", R12_escalate_human],
   ],
+  // S5 recursive dependency beliefs (read obs_relation + obs_linear EDB only;
+  // no negation over any belief, so no negation cycle — see header)
+  [
+    ["R13", R13_blocker_rank],
+    ["R14", R14_cycle_detected],
+    ["R15", R15_ready],
+  ],
 ];
 
 // CFG_SEED additions the rules need beyond schema.mjs's CFG_SEED. openBeliefsDb
@@ -405,6 +573,13 @@ export const RULE_CFG_SEED = [
   ["max_attempts", 2], // R11 — 2 ineffective attempts → escalate (CTL stop-storm)
 ];
 
+// CTL-965 — R15 ready needs the eligible Linear state as a fact. Seeded into
+// cfg.value_text (not value_int). Default 'Todo' = the daemon's code-default
+// eligible status (CTL-731; 'Ready' removed 2026-06-02). Operator-tunable like
+// every other cfg. Seeded separately because RULE_CFG_SEED's loop binds
+// value_int; this loop binds value_text.
+export const RULE_CFG_SEED_TEXT = [["eligible_state", "Todo"]];
+
 // evaluateBeliefs — run all four strata over ONE tick, inside the caller's
 // transaction. Pure given the tick row's facts (no clock read; recency uses
 // tick.now_ms via the SQL). Returns { inserted } counts per rule_id for the
@@ -414,6 +589,9 @@ export function evaluateBeliefs(db, tickId) {
   // Ensure rule-only cfg exists (idempotent; never clobbers tuned values).
   const seed = db.prepare("INSERT OR IGNORE INTO cfg (key, value_int) VALUES (?, ?)");
   for (const [key, valueInt] of RULE_CFG_SEED) seed.run(key, valueInt);
+  // CTL-965 — text-valued cfg (eligible_state) seeded via value_text.
+  const seedText = db.prepare("INSERT OR IGNORE INTO cfg (key, value_text) VALUES (?, ?)");
+  for (const [key, valueText] of RULE_CFG_SEED_TEXT) seedText.run(key, valueText);
 
   const inserted = {};
   for (const stratum of STRATA) {
