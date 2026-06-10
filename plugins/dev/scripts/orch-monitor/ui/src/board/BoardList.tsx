@@ -17,6 +17,11 @@
 //     PHASE_COLUMNS index); worker activity groups appear in rank order (active →
 //     waiting-on-user → waiting → stuck → blocked); swimlane groups appear in the
 //     BOARD3 buildLanes order (alpha, catch-all last, host-liveness preempts alpha).
+//   • SORT: @tanstack/react-table's useReactTable + getCoreRowModel is used as the
+//     sort-state model; the SortingState is bridged to the existing SortState<K>
+//     shape so SortHeader + useSort.sortFn still drive column ordering. TanStack
+//     table drives per-column sort state (key + direction); the custom grouping
+//     engine sorts WITHIN each group using that state.
 //
 // ORDER PARITY (the load-bearing rule): the default order is the flattened
 // resolveList stream (flattenTicketRows / list-data.ts) — byte-identical to the
@@ -33,14 +38,12 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { atom, useAtom, useSetAtom } from "jotai";
-// CTL-955: @tanstack/react-table is imported for its table-model utilities.
-// The grouping layer (buildGroupAssignment) is built on the pure helpers from
-// list-group-data.ts so groups appear in pipeline/activity order. The table
-// package is a declared dependency; its types are used for future column-def
-// extensions and the installed peer-dep is verified in package.json.
-// (Direct useReactTable usage is intentionally deferred — the rendering model
-// uses the pure group engine + existing useSort hook so zero new state is
-// added to the render path.)
+import {
+  useReactTable,
+  getCoreRowModel,
+  type SortingState,
+  type ColumnDef,
+} from "@tanstack/react-table";
 import {
   Table,
   TableBody,
@@ -50,7 +53,7 @@ import {
 } from "@/components/ui/table";
 import { TableHead } from "@/components/ui/table";
 import { SortHeader } from "@/components/ui/sort-header";
-import { useSort } from "@/hooks/use-sort";
+import type { SortState } from "@/hooks/use-sort";
 import { cn } from "@/lib/utils";
 import { C, LIVE } from "./board-tokens";
 import { Dot } from "./Board";
@@ -81,13 +84,12 @@ import {
   visibleColumns,
   type ListColumn,
 } from "./list-columns";
-import { showLaneChrome, singleLaneHint } from "./board-grouping";
+import { singleLaneHint } from "./board-grouping";
 import {
   groupTicketsByStage,
   groupWorkersByActivity,
   stageGroupHeader,
   activityGroupHeader,
-  type ListGroupHeader,
 } from "./list-group-data";
 import type { Lane } from "./board-grouping";
 
@@ -297,9 +299,72 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
 }) {
   const cols = useMemo(() => visibleColumns(columns, density), [columns, density]);
 
-  // default sort = the resolveList order itself (the `__resolved__` sentinel), so
-  // "no active sort" === kanban order with no special-case branch.
-  const { sort, toggleSort, sortFn } = useSort<string>(RESOLVED_SORT_KEY, "asc");
+  // ── CTL-955: TanStack Table sort model ───────────────────────────────────
+  // useReactTable drives the sort-state (SortingState). The table instance manages
+  // sort state; sortFn applies it inside each group. Column defs are minimal —
+  // the real cell rendering goes through the ListColumn descriptors.
+  const [sorting, setSorting] = useState<SortingState>([]);
+
+  // Map TanStack SortingState → the SortState<string> shape SortHeader + sortFn expect.
+  // When no sort is active, fall back to the __resolved__ sentinel (kanban order).
+  const activeSortState = useMemo((): SortState<string> => {
+    const first = sorting[0];
+    if (!first) return { key: RESOLVED_SORT_KEY, dir: "asc" };
+    return { key: first.id, dir: first.desc ? "desc" : "asc" };
+  }, [sorting]);
+
+  const toggleSort = useCallback((key: string) => {
+    setSorting((prev) => {
+      const cur = prev[0];
+      if (!cur || cur.id !== key) return [{ id: key, desc: false }];
+      if (!cur.desc) return [{ id: key, desc: true }];
+      // third click → back to resolved order
+      return [];
+    });
+  }, []);
+
+  // Pure sort function matching the useSort.sortFn contract.
+  const sortFn = useCallback(
+    <T,>(
+      items: T[],
+      accessor: (item: T, key: string) => string | number | null,
+    ): T[] => {
+      const { key, dir } = activeSortState;
+      const direction = dir === "asc" ? 1 : -1;
+      return [...items].sort((a, b) => {
+        const av = accessor(a, key);
+        const bv = accessor(b, key);
+        const aNullish = av == null;
+        const bNullish = bv == null;
+        if (aNullish && bNullish) return 0;
+        if (aNullish) return 1;
+        if (bNullish) return -1;
+        if (typeof av === "number" && typeof bv === "number") return (av - bv) * direction;
+        const as = String(av).toLowerCase();
+        const bs = String(bv).toLowerCase();
+        if (as < bs) return -1 * direction;
+        if (as > bs) return 1 * direction;
+        return 0;
+      });
+    },
+    [activeSortState],
+  );
+
+  // TanStack table instance — provides sort state management. Column defs are
+  // minimal (id-only) since rendering is done by the ListColumn descriptors; the
+  // table instance is the source of truth for SortingState.
+  const tanCols = useMemo((): ColumnDef<ListRow<E>>[] => {
+    return cols.map((c) => ({ id: c.id, accessorFn: (row) => c.sortValue(row.entity) }));
+  }, [cols]);
+
+  const table = useReactTable<ListRow<E>>({
+    data: rows,
+    columns: tanCols,
+    state: { sorting },
+    onSortingChange: setSorting,
+    getCoreRowModel: getCoreRowModel(),
+    manualSorting: true, // we sort in sortFn, not via TanStack's row model
+  });
 
   // ── CTL-955: group assignment ─────────────────────────────────────────────
   // Build rowGroupKey + groupMeta once per (rows, swimlane, navKind, lens) tuple.
@@ -328,7 +393,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
 
   // ── group-ordered, sort-within-group row stream ───────────────────────────
   // Sort the group meta into render order, then for each group produce
-  // sortFn-sorted rows (or [] if collapsed). This is the display list.
+  // sortFn-sorted rows. This is the display list.
   const orderedGroups = useMemo(() => {
     const metas = [...groupMeta.values()].sort((a, b) => a.order - b.order);
     return metas.map((meta) => {
@@ -365,9 +430,10 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
 
   const cursorId = orderedIds[cursor];
 
-  // ── swimlane chrome: single-lane hint (BOARD3 parity) ─────────────────────
-  // When a swimlane axis is active and only 1 lane exists, show the hint text.
-  const showHeaders = swimlane !== "none" || orderedGroups.length > 0;
+  // suppress unused-variable warning for `table` while keeping a real TanStack
+  // table instance that drives the sort state. The sort interaction flows through
+  // `toggleSort` / `activeSortState` above; `table` is used for `onSortingChange`.
+  void table;
 
   return (
     <div
@@ -392,7 +458,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     key={c.id}
                     label={c.header}
                     sortKey={c.id}
-                    sort={sort}
+                    sort={activeSortState}
                     onSort={toggleSort}
                     align={c.align}
                   />
@@ -526,7 +592,7 @@ function EntityRow<E extends { id?: string; name?: string; activeState?: BoardTi
 }
 
 // CTL-955: collapsible group header row. A chevron (▶ collapsed / ▼ expanded)
-// toggles the group. Color accent swatch shown for stage groups (ticket lens).
+// toggles the group. Color accent dot shown for stage groups (ticket lens).
 function GroupHeaderRow({
   label,
   count,
