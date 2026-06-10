@@ -1,9 +1,12 @@
-// CTL-974: supplemental estimate fallback — tests for linear-estimate-fallback.mjs
+// CTL-974 / CTL-976: supplemental estimate fallback — tests for linear-estimate-fallback.mjs
 //
 // Three concerns:
 //  1. fillEstimateFallback fires when cache null, does NOT re-fetch cached IDs.
 //  2. Cached result is served on second call (no re-fetch within TTL).
-//  3. estimateDisplay is correct per method (fibonacci → number, tShirt → label).
+//  3. The GraphQL query uses team key + number filter (NOT the invalid 'identifier' filter
+//     that caused 400s — CTL-976 fix).
+//  4. Mocked Linear responses keyed by number + team.key map back to the correct identifier.
+//  5. estimateDisplay is correct per method (fibonacci → number, tShirt → label).
 
 import { describe, it, expect, beforeEach } from "bun:test";
 import {
@@ -19,13 +22,13 @@ import {
 
 function mockFetch(responseData: unknown) {
   let callCount = 0;
-  const calls: string[] = [];
+  const calls: Array<{ query: string; variables: unknown }> = [];
   const originalFetch = globalThis.fetch;
 
   const spy = async (url: string | URL | Request, init?: RequestInit) => {
     callCount++;
     const body = init?.body ? JSON.parse(init.body as string) : {};
-    calls.push(JSON.stringify({ query: body.query?.split("\n")[0], variables: body.variables }));
+    calls.push({ query: body.query ?? "", variables: body.variables });
     return {
       ok: true,
       json: async () => responseData,
@@ -50,31 +53,92 @@ function mockFetchFail() {
 
 // ── (1) fillEstimateFallback fires when cache null ────────────────────────────
 
-describe("CTL-974: fillEstimateFallback — estimate fetched and cached", () => {
+describe("CTL-976: fillEstimateFallback — query uses team+number NOT identifier", () => {
   beforeEach(() => {
     _clearEstimateCache();
     _clearMethodCache();
   });
 
-  it("fetches estimates for null-cache IDs and returns them", async () => {
+  it("sends a query with teamKey + numbers (not identifier)", async () => {
     const spy = mockFetch({
       data: {
         issues: {
           nodes: [
-            { identifier: "CTL-774", estimate: 8 },
-            { identifier: "CTL-100", estimate: 3 },
+            { number: 774, estimate: 8, team: { key: "CTL" } },
           ],
         },
       },
     });
 
     try {
-      const result = await fillEstimateFallback(["CTL-774", "CTL-100"]);
-      expect(result["CTL-774"]).toBe(8);
-      expect(result["CTL-100"]).toBe(3);
-      expect(spy.callCount).toBe(1); // batched — one call for both IDs
+      await fillEstimateFallback(["CTL-774"]);
+      expect(spy.callCount).toBe(1);
+      const call = spy.calls[0];
+      // Query must NOT use 'identifier' filter
+      expect(call.query).not.toContain("identifier");
+      // Query must use number + team key filters
+      expect(call.query).toContain("number");
+      expect(call.query).toContain("teamKey");
+      // Variables must contain the team key and the number
+      const vars = call.variables as { teamKey?: string; numbers?: number[] };
+      expect(vars.teamKey).toBe("CTL");
+      expect(vars.numbers).toContain(774);
     } finally {
       spy.restore();
+    }
+  });
+
+  it("maps Linear response (number + team.key) back to the correct identifier", async () => {
+    const spy = mockFetch({
+      data: {
+        issues: {
+          nodes: [
+            { number: 774, estimate: 8, team: { key: "CTL" } },
+            { number: 930, estimate: 5, team: { key: "CTL" } },
+            { number: 908, estimate: 3, team: { key: "CTL" } },
+          ],
+        },
+      },
+    });
+
+    try {
+      const result = await fillEstimateFallback(["CTL-774", "CTL-930", "CTL-908"]);
+      expect(result["CTL-774"]).toBe(8);
+      expect(result["CTL-930"]).toBe(5);
+      expect(result["CTL-908"]).toBe(3);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("groups cross-team IDs into separate per-team queries", async () => {
+    const calls: Array<{ teamKey?: string; numbers?: number[] }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(init.body as string) : {};
+      calls.push(body.variables as { teamKey?: string; numbers?: number[] });
+      // Return the appropriate team's issues
+      const teamKey = body.variables?.teamKey as string;
+      const nodes = teamKey === "CTL"
+        ? [{ number: 774, estimate: 8, team: { key: "CTL" } }]
+        : [{ number: 1, estimate: 2, team: { key: "ADV" } }];
+      return {
+        ok: true,
+        json: async () => ({ data: { issues: { nodes } } }),
+      } as Response;
+    }) as typeof fetch;
+
+    try {
+      const result = await fillEstimateFallback(["CTL-774", "ADV-1"]);
+      // Two separate queries (one per team)
+      expect(calls.length).toBe(2);
+      const teamKeys = calls.map((c) => c.teamKey).sort();
+      expect(teamKeys).toEqual(["ADV", "CTL"]);
+      // Results map back correctly
+      expect(result["CTL-774"]).toBe(8);
+      expect(result["ADV-1"]).toBe(2);
+    } finally {
+      globalThis.fetch = originalFetch;
     }
   });
 
@@ -95,10 +159,32 @@ describe("CTL-974: fillEstimateFallback — estimate fetched and cached", () => 
     }
   });
 
+  it("fetches estimates for null-cache IDs and returns them", async () => {
+    const spy = mockFetch({
+      data: {
+        issues: {
+          nodes: [
+            { number: 774, estimate: 8, team: { key: "CTL" } },
+            { number: 100, estimate: 3, team: { key: "CTL" } },
+          ],
+        },
+      },
+    });
+
+    try {
+      const result = await fillEstimateFallback(["CTL-774", "CTL-100"]);
+      expect(result["CTL-774"]).toBe(8);
+      expect(result["CTL-100"]).toBe(3);
+      expect(spy.callCount).toBe(1); // batched — one call for both IDs (same team)
+    } finally {
+      spy.restore();
+    }
+  });
+
   it("does NOT re-fetch cached IDs (cache hit — no second fetch)", async () => {
     // Prime the cache with one fetch.
     const spy1 = mockFetch({
-      data: { issues: { nodes: [{ identifier: "CTL-500", estimate: 5 }] } },
+      data: { issues: { nodes: [{ number: 500, estimate: 5, team: { key: "CTL" } }] } },
     });
     await fillEstimateFallback(["CTL-500"]);
     spy1.restore();
@@ -117,24 +203,24 @@ describe("CTL-974: fillEstimateFallback — estimate fetched and cached", () => 
   it("only fetches the un-cached subset when called with mixed IDs", async () => {
     // Prime cache for CTL-1.
     const spy1 = mockFetch({
-      data: { issues: { nodes: [{ identifier: "CTL-1", estimate: 1 }] } },
+      data: { issues: { nodes: [{ number: 1, estimate: 1, team: { key: "CTL" } }] } },
     });
     await fillEstimateFallback(["CTL-1"]);
     spy1.restore();
 
     // Now call with CTL-1 (cached) + CTL-2 (not cached).
     const spy2 = mockFetch({
-      data: { issues: { nodes: [{ identifier: "CTL-2", estimate: 2 }] } },
+      data: { issues: { nodes: [{ number: 2, estimate: 2, team: { key: "CTL" } }] } },
     });
     try {
       const result = await fillEstimateFallback(["CTL-1", "CTL-2"]);
       expect(result["CTL-1"]).toBe(1); // from cache
       expect(result["CTL-2"]).toBe(2); // from fresh fetch
       expect(spy2.callCount).toBe(1); // only one batch fetch (for CTL-2 only)
-      // The fetch should NOT have included CTL-1 in its variables.
-      const call = JSON.parse(spy2.calls[0]);
-      expect(call.variables.ids).not.toContain("CTL-1");
-      expect(call.variables.ids).toContain("CTL-2");
+      // The fetch should NOT have included CTL-1's number in the variables.
+      const vars = spy2.calls[0].variables as { teamKey?: string; numbers?: number[] };
+      expect(vars.numbers).not.toContain(1);
+      expect(vars.numbers).toContain(2);
     } finally {
       spy2.restore();
     }
@@ -144,8 +230,18 @@ describe("CTL-974: fillEstimateFallback — estimate fetched and cached", () => 
     const spy = mockFetchFail();
     try {
       const result = await fillEstimateFallback(["CTL-FAIL"]);
-      // fail-open: null for the ID, no throw
+      // CTL-FAIL does not parse as a valid identifier (no numeric suffix) → null
       expect(result["CTL-FAIL"]).toBeNull();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("is fail-open for valid IDs: returns null on network failure", async () => {
+    const spy = mockFetchFail();
+    try {
+      const result = await fillEstimateFallback(["CTL-9999"]);
+      expect(result["CTL-9999"]).toBeNull();
     } finally {
       spy.restore();
     }
@@ -157,8 +253,8 @@ describe("CTL-974: fillEstimateFallback — estimate fetched and cached", () => 
       data: {
         issues: {
           nodes: [
-            { identifier: "CTL-10", estimate: 10 },
-            { identifier: "CTL-20", estimate: null }, // Linear returns null estimate
+            { number: 10, estimate: 10, team: { key: "CTL" } },
+            { number: 20, estimate: null, team: { key: "CTL" } }, // Linear returns null estimate
           ],
         },
       },

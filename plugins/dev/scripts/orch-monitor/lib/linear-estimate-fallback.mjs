@@ -61,14 +61,42 @@ function methodCachePath(teamId) {
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
 const BATCH_CHUNK_SIZE = 250;
 
-// The estimate query: filter by identifier (the human-readable key like "CTL-774")
-// since the board only knows identifiers, not internal UUIDs.
-// identifier contains "CTL-774" and similar.
-const ESTIMATE_QUERY = `query FallbackEstimates($ids: [String!]) {
-  issues(filter: { identifier: { in: $ids } }, first: ${BATCH_CHUNK_SIZE}) {
+// parseIdentifier — splits "CTL-774" into { teamKey: "CTL", number: 774 }.
+// Returns null if the identifier does not match the expected format.
+function parseIdentifier(id) {
+  if (typeof id !== "string") return null;
+  const match = id.match(/^([A-Za-z][A-Za-z0-9]*)-(\d+)$/);
+  if (!match) return null;
+  return { teamKey: match[1].toUpperCase(), number: parseInt(match[2], 10) };
+}
+
+// groupByTeam — partitions an array of identifier strings by their team key.
+// Identifiers that don't parse (no dash, non-numeric suffix) are silently skipped.
+// Returns a Map<teamKey, number[]>.
+function groupByTeam(ids) {
+  const groups = new Map();
+  for (const id of ids) {
+    const parsed = parseIdentifier(id);
+    if (!parsed) continue;
+    const { teamKey, number } = parsed;
+    if (!groups.has(teamKey)) groups.set(teamKey, []);
+    groups.get(teamKey).push(number);
+  }
+  return groups;
+}
+
+// The estimate query: filter by team key + issue numbers (valid Linear IssueFilter
+// fields).  The old `identifier: { in: $ids }` filter is NOT a valid IssueFilter
+// field and causes a 400 on every call (CTL-976).
+// We run one query per team key so cross-team boards (CTL + ADV, etc.) all resolve.
+const ESTIMATE_QUERY_FOR_TEAM = `query FallbackEstimates($teamKey: String!, $numbers: [Float!]) {
+  issues(filter: { team: { key: { eq: $teamKey } }, number: { in: $numbers } }, first: ${BATCH_CHUNK_SIZE}) {
     nodes {
-      identifier
+      number
       estimate
+      team {
+        key
+      }
     }
   }
 }`;
@@ -199,32 +227,44 @@ export async function fillEstimateFallback(ticketIds) {
 
   if (toFetch.length === 0) return result;
 
-  // Chunk into batches of BATCH_CHUNK_SIZE.
-  const chunks = [];
-  for (let i = 0; i < toFetch.length; i += BATCH_CHUNK_SIZE) {
-    chunks.push(toFetch.slice(i, i + BATCH_CHUNK_SIZE));
+  // Group uncached IDs by team key (e.g. "CTL" → [774, 930, ...]).
+  // IDs that don't parse are quietly stored as null (can't query them).
+  const teamGroups = groupByTeam(toFetch);
+  const unparseable = toFetch.filter((id) => parseIdentifier(id) === null);
+  for (const id of unparseable) {
+    _estimateCache.set(id, { estimate: null, ts: Date.now() });
+    result[id] = null;
+  }
+
+  // For each team key, chunk its numbers and fire one query per chunk.
+  const perTeamChunks = [];
+  for (const [teamKey, numbers] of teamGroups) {
+    for (let i = 0; i < numbers.length; i += BATCH_CHUNK_SIZE) {
+      perTeamChunks.push({ teamKey, numbers: numbers.slice(i, i + BATCH_CHUNK_SIZE) });
+    }
   }
 
   await Promise.allSettled(
-    chunks.map(async (chunk) => {
-      const data = await graphql(ESTIMATE_QUERY, { ids: chunk });
+    perTeamChunks.map(async ({ teamKey, numbers }) => {
+      const data = await graphql(ESTIMATE_QUERY_FOR_TEAM, { teamKey, numbers });
       const nodes = data?.issues?.nodes ?? [];
 
-      // Build a set of IDs that came back from Linear.
-      const fetched = new Set();
+      // Build a set of numbers returned for this team.
+      const fetchedNumbers = new Set();
       for (const node of nodes) {
-        const id = node.identifier;
-        if (!id) continue;
+        if (typeof node.number !== "number") continue;
+        const returnedKey = node.team?.key?.toUpperCase() ?? teamKey;
+        const id = `${returnedKey}-${node.number}`;
         const estimate = typeof node.estimate === "number" ? node.estimate : null;
         _estimateCache.set(id, { estimate, ts: Date.now() });
         result[id] = estimate;
-        fetched.add(id);
+        fetchedNumbers.add(node.number);
       }
 
-      // IDs that Linear did not return (ticket not found, or genuinely no estimate)
-      // are stored as null so we don't re-fetch every board refresh.
-      for (const id of chunk) {
-        if (!fetched.has(id)) {
+      // Numbers that Linear did not return → honest null (not found or unset).
+      for (const num of numbers) {
+        if (!fetchedNumbers.has(num)) {
+          const id = `${teamKey}-${num}`;
           _estimateCache.set(id, { estimate: null, ts: Date.now() });
           result[id] = null;
         }
