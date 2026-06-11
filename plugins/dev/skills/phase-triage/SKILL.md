@@ -273,6 +273,8 @@ fi
 # already on disk; the canonical pipeline contract is
 # `phase.triage.complete.<TICKET>` (see CTL-452). A comment-post failure must
 # NOT escalate the ticket to `needs-human`.
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${__PT_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-triage}" --ticket "$TICKET" || exit 10
 __PT_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
 if [[ ! -x "$__PT_COMMENT_POST" ]]; then __PT_COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
 if [[ -n "$__PT_COMMENT_POST" && -x "$__PT_COMMENT_POST" ]] && "$__PT_COMMENT_POST" "${TICKET}" "${COMMENT_BODY}" >/dev/null 2>&1; then

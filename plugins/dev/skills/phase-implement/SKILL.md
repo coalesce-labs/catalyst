@@ -227,6 +227,8 @@ Fail-open and idempotent via the per-phase marker file. Uniquely-named
 fence so the e2e test can extract just this block.
 
 ```bash phase-implement-mirror
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
 if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
   BASE_REF=""

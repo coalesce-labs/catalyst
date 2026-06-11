@@ -1961,6 +1961,36 @@ assert_eq "rebase_refused_dirty_tree" "$(jq -r '.failureReason' "$SIGNAL" 2>/dev
 	"precheck park: signal failureReason = rebase_refused_dirty_tree (typed, not continue_failed cascade)"
 
 echo ""
+echo "Test 63 (CTL-864): CATALYST_CLUSTER_GENERATION is included in .settings.env when set"
+fresh_env t63
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_CLUSTER_GENERATION=7 \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+			>/dev/null 2>&1)
+SETTINGS_T63="$(settings_json_from_log)"
+T63_VAL=$(echo "$SETTINGS_T63" | jq -r '.env["CATALYST_CLUSTER_GENERATION"] // empty' 2>/dev/null)
+T63_HAS_GEN=$(echo "$SETTINGS_T63" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T63_VALID=$(echo "$SETTINGS_T63" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "7" "$T63_VAL" "CATALYST_CLUSTER_GENERATION=7 present in .settings.env"
+assert_eq "true" "$T63_HAS_GEN" "CATALYST_GENERATION still present alongside cluster generation"
+assert_eq "yes" "$T63_VALID" "settings JSON valid with CATALYST_CLUSTER_GENERATION set"
+
+echo ""
+echo "Test 64 (CTL-864): CATALYST_CLUSTER_GENERATION is OMITTED from .settings.env when unset"
+fresh_env t64
+(cd "${TEST_DIR}/proj" &&
+	unset CATALYST_CLUSTER_GENERATION 2>/dev/null || true
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_T64="$(settings_json_from_log)"
+T64_HAS=$(echo "$SETTINGS_T64" | jq -r '.env | has("CATALYST_CLUSTER_GENERATION")' 2>/dev/null)
+T64_HAS_GEN=$(echo "$SETTINGS_T64" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T64_VALID=$(echo "$SETTINGS_T64" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T64_HAS" "CATALYST_CLUSTER_GENERATION absent when unset (no null key)"
+assert_eq "true" "$T64_HAS_GEN" "CATALYST_GENERATION still present alongside the absent cluster key"
+assert_eq "yes" "$T64_VALID" "settings JSON valid with CATALYST_CLUSTER_GENERATION absent"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then

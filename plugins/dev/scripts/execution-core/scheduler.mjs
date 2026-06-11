@@ -359,6 +359,52 @@ export function writeWorkerPriority(orchDir, ticket, { priority, createdAt }) {
   }
 }
 
+// readClusterGeneration / writeClusterGeneration (CTL-864 remediation) — the
+// persisted cross-host fence token for a ticket.
+//
+// Why persist-and-reinject. The won cross-host claim generation is captured ONCE
+// at the new-work claim (the ONLY claimDispatch site, schedulerTick new-work
+// pull). The 5 guarded phase skills, however, run as LATER phases dispatched by
+// the advancement + revive sweeps — which never re-forward the token, so the
+// CTL-864 fence was inert in production. We persist the won generation here so
+// those later sweeps can re-inject the SAME token into each guarded worker's
+// CATALYST_CLUSTER_GENERATION env.
+//
+// Critically, we re-inject the generation THIS host *won* — NOT a fresh read of
+// the current Linear generation. A takeover (CTL-863) bumps the Linear
+// generation; the re-injected (now-stale) token no longer matches and the
+// worker's cluster-fence-guard bows out. Reading the *current* generation here
+// would always match and silently defeat the fence — so the persisted value is
+// written once at claim-win and only ever read back, never refreshed.
+//
+// Single-host installs never win a claim → never write the file → reads return
+// null → the dispatch forwards no token → exact no-op (matches CTL-864's gate).
+export function readClusterGeneration(orchDir, ticket) {
+  try {
+    const raw = readFileSync(join(orchDir, "workers", ticket, "cluster-generation.json"), "utf8");
+    const g = JSON.parse(raw);
+    return Number.isFinite(g?.generation) ? g.generation : null;
+  } catch {
+    return null;
+  }
+}
+
+// Idempotent overwrite via tmp+rename. A non-finite generation (single-host /
+// null claim) is never persisted, so a later read stays a clean no-op. Silently
+// no-ops on a missing worker dir or I/O failure (best-effort, like
+// writeWorkerPriority) — call only after the dispatch verified the signal exists.
+export function writeClusterGeneration(orchDir, ticket, generation) {
+  if (!Number.isFinite(generation)) return;
+  const p = join(orchDir, "workers", ticket, "cluster-generation.json");
+  try {
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify({ generation }));
+    renameSync(tmp, p);
+  } catch {
+    // best-effort — missing worker dir or I/O failure; the later sweep forwards null
+  }
+}
+
 // buildGlobalRanking — assemble a descriptor array for every in-flight ticket
 // AND every eligible-but-not-started queued ticket, sorted by rankTickets.
 // Descriptor shape: {identifier, priority, createdAt, stage, inFlight}.
@@ -2176,6 +2222,7 @@ export function schedulerTick(
     {
       dispatch,
       resumeSession, // optional; dispatchTicket only adds the key when truthy
+      clusterGeneration, // CTL-864: optional cross-host fence token; dispatchTicket only adds the key when != null
       requestedReason, // reason field for the dispatch-requested event
       preDispatch, // optional () => boolean; a false return aborts (→ { aborted: true })
       fullFailureLadder = true, // Pass 1.5 passes false for its reduced ladder
@@ -2193,7 +2240,9 @@ export function schedulerTick(
     // return (reset write failed) aborts so the caller can `continue`.
     if (preDispatch && preDispatch() === false) return { aborted: true };
 
-    const r = dispatchTicket(orchDir, ticket, phase, { dispatch, resumeSession });
+    // CTL-864: forward the cross-host fence token. dispatchTicket drops the key
+    // when clusterGeneration == null (single-host / no persisted claim → no-op).
+    const r = dispatchTicket(orchDir, ticket, phase, { dispatch, resumeSession, clusterGeneration });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before
       // declaring success. A --dry-run leak / mark_launch_failed half-write
@@ -3072,8 +3121,15 @@ export function schedulerTick(
     // CTL-826: the dispatch→verify core is shared (requested-emit, dispatch,
     // verify, success cooldown-clear + launched-emit, full failure ladder). The
     // advance-specific follow-ups stay here, keyed off the returned result.
+    // CTL-864 remediation: re-inject the cross-host fence token won at new-work
+    // claim. The 4 advancement-dispatched guarded phases (implement/pr/
+    // monitor-merge/monitor-deploy) need it to fence themselves; without this the
+    // CTL-864 guard was inert. Multi-host only; null on single-host or when no
+    // claim was persisted → dispatchTicket drops the key (exact no-op).
+    const clusterGeneration = multiHost ? readClusterGeneration(orchDir, ticket) : null;
     const dv = dispatchAndVerify(orchDir, ticket, next, {
       dispatch,
+      clusterGeneration,
       requestedReason: "advance",
       failLogMsg: "scheduler: advance dispatch failed",
     });
@@ -3163,9 +3219,15 @@ export function schedulerTick(
         // (returning false on a failed reset aborts → `continue`); the reduced
         // failure ladder (fullFailureLadder:false) preserves this sweep's lighter
         // failure handling (no escalation/circuit-breaker/cooldown-escalation).
+        // CTL-864 remediation: re-inject the won fence token on resume too — a
+        // parked guarded phase (e.g. monitor-merge) resumed after preemption must
+        // still bow out if a takeover superseded this host. Multi-host only; null
+        // → dispatchTicket drops the key (single-host / no persisted claim no-op).
+        const clusterGeneration = multiHost ? readClusterGeneration(orchDir, pd.identifier) : null;
         const dv = dispatchAndVerify(orchDir, pd.identifier, parkedPhase, {
           dispatch,
           resumeSession,
+          clusterGeneration,
           requestedReason: "resume-after-preemption",
           fullFailureLadder: false,
           preDispatch: () => {
@@ -3409,6 +3471,7 @@ export function schedulerTick(
     // Fail-closed: claimDispatch returns won:false on any error (never
     // double-dispatch on a transient Linear hiccup). Placed before the
     // dispatch-requested emit so a lost claim never emits a phantom "requested".
+    let clusterGeneration = null; // CTL-864: forwarded only when a multi-host claim is won
     if (multiHost) {
       const claim = claimDispatch({
         ticket: t.identifier,
@@ -3422,13 +3485,18 @@ export function schedulerTick(
         );
         continue;
       }
+      clusterGeneration = claim.generation; // CTL-864: the fencing token for this worker
     }
     // CTL-826: shared dispatch→verify core (requested-emit "new-work", dispatch,
     // verify, success cooldown-clear + launched-emit, full failure ladder). The
     // new-work-specific success follow-ups stay here. Pass 2's original rc!=0 log
     // omits the phase field (failLogIncludePhase:false) to stay byte-identical.
+    // CTL-864: forward the won cross-host fence token through the shared helper
+    // into the worker's CATALYST_CLUSTER_GENERATION env (null on single-host →
+    // dispatchTicket drops the key → exact no-op).
     const dv = dispatchAndVerify(orchDir, t.identifier, NEW_WORK_ENTRY_PHASE, {
       dispatch,
+      clusterGeneration,
       requestedReason: "new-work",
       failLogMsg: "scheduler: dispatch failed",
       failLogIncludePhase: false,
@@ -3441,6 +3509,11 @@ export function schedulerTick(
         priority: t.priority,
         createdAt: t.createdAt ?? null,
       });
+      // CTL-864 remediation: persist the won cross-host fence token now that the
+      // worker dir provably exists (dispatchAndVerify's verify passed). The
+      // advancement + revive sweeps re-inject it into later guarded phases. No-op
+      // on single-host (clusterGeneration === null → writeClusterGeneration skips).
+      writeClusterGeneration(orchDir, t.identifier, clusterGeneration);
       // CTL-558: write the entry-phase (`research`) status for the new ticket.
       // CTL-757: audit it as a scheduler-advance state write (new work entering
       // the pipeline is the entry-phase forward advance).
