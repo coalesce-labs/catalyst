@@ -23,6 +23,10 @@ import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
+// CTL-1020: project Linear blocked-by/blocks relations into per-ticket blockers[]
+// so the dependency graph draws edges for tickets WITHOUT a triage.json (queued /
+// relation-only). Additive — triage-derived blockers stay authoritative.
+import { buildBlockerMapFromRelations, mergeBlockers } from "./relation-blockers.mjs";
 // CTL-1015: the ONE canonical dispatch-order comparator (mirrors
 // execution-core/scheduler-rank.mjs compareTickets, parity-tested). The queue's
 // global rank is exactly the order the scheduler dispatches in.
@@ -202,7 +206,7 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
-export function synthesizeQueuedTicket(e, linfo) {
+export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map()) {
   const li = linfo[e.id] ?? {};
   return {
     id: e.id,
@@ -239,7 +243,10 @@ export function synthesizeQueuedTicket(e, linfo) {
     // impossible — but it CAN carry a needs-human/needs-input escalation label.
     // attentionSince has no durable label-applied stamp here → null (honest).
     ...deriveAttention({ waitingOnUser: false, labels: li.labels, needsHumanMarker: false }),
-    blockers: [],
+    // CTL-1020: a queued ticket has no triage.json, but its Linear blocked-by/blocks
+    // relations (carried on the eligible projection) ARE projected here so the dep
+    // graph can draw its edges. Empty when the ticket has no relation in the cache.
+    blockers: mergeBlockers([], relationBlockerMap.get(e.id)),
     // CTL-901 (HOME3): a queued ticket has no worker dir / phase signal, so it
     // has no current-phase start (null). Its held duration, when held, comes from
     // the durable ticket_state heldSince the broker projected (BFF11) — honest
@@ -920,6 +927,12 @@ export async function assembleBoard() {
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
+  // CTL-1020: dependency edges derived from Linear blocked-by/blocks relations,
+  // projected once from the enrichment cache into Map<ticketId, Set<blockerId>>.
+  // Tickets without a triage.json (queued / relation-only) get their blockers[]
+  // from here so the dep graph can draw their edges.
+  const relationBlockerMap = buildBlockerMapFromRelations(linfo);
+
   // workers (live background agents that map to a ticket:phase)
   const now = Date.now();
   const parsed = agents
@@ -1104,7 +1117,10 @@ export async function assembleBoard() {
       // `blockers` names the dependencies a `blocked` hold is waiting on (only
       // meaningful when held === "blocked"); empty otherwise.
       held: heldFor(linfo[id]?.labels),
-      blockers: ticketBlockers(triage),
+      // CTL-1020: triage-derived blockers (authoritative) ∪ Linear relation-derived
+      // blockers, so the dep graph draws an edge even when the dependency was set as
+      // a Linear "blocked by" relation rather than scraped into triage.json.
+      blockers: mergeBlockers(ticketBlockers(triage), relationBlockerMap.get(id)),
       // CTL-901 (HOME3): per-row "how long has this needed me / been running"
       // durations, sourced from DURABLE read-model timestamps only — never
       // fabricated. `heldSince` is the applied-at of the held (blocked/waiting)
@@ -1169,7 +1185,7 @@ export async function assembleBoard() {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo));
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
