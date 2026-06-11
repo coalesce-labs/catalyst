@@ -3,8 +3,8 @@ import { resolveEntityIcon, liveBadgeKind, groupIconSrc } from "./entity-icon";
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 
 const ICONS: RepoIconMap = {
-  catalyst: { autoDataUrl: "data:image/png;base64,AAA", override: null },
-  adva: { autoDataUrl: null, override: null },
+  catalyst: { autoDataUrl: "data:image/png;base64,AAA", override: null, candidates: [], selectedPath: null },
+  adva: { autoDataUrl: null, override: null, candidates: [], selectedPath: null },
 };
 
 describe("resolveEntityIcon", () => {
@@ -49,7 +49,7 @@ describe("groupIconSrc", () => {
 });
 
 describe("EntityMarker decision (pure inputs)", () => {
-  const MARKER_ICONS: RepoIconMap = { catalyst: { autoDataUrl: "data:x", override: null } };
+  const MARKER_ICONS: RepoIconMap = { catalyst: { autoDataUrl: "data:x", override: null, candidates: [], selectedPath: null } };
   it("icon present → render icon, badge follows liveBadgeKind", () => {
     expect(resolveEntityIcon("catalyst", MARKER_ICONS)).toBe("data:x");
     expect(liveBadgeKind("active")).toBe("live");
@@ -62,7 +62,7 @@ describe("EntityMarker decision (pure inputs)", () => {
 });
 
 describe("groupIconSrc axis gating (regression guard)", () => {
-  const GATE_ICONS: RepoIconMap = { catalyst: { autoDataUrl: "data:x", override: null } };
+  const GATE_ICONS: RepoIconMap = { catalyst: { autoDataUrl: "data:x", override: null, candidates: [], selectedPath: null } };
   it("repo axis with favicon → src", () => expect(groupIconSrc("repo", "catalyst", GATE_ICONS)).toBe("data:x"));
   it("every non-repo axis → null", () => {
     (["none", "team", "project", "host"] as const).forEach((a) =>
