@@ -134,8 +134,18 @@ import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolv
 import { evaluateHungWorker } from "./hung-detector.mjs";
 import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
 import { killHungWorker as defaultKillEscalate } from "./watchdog-action.mjs";
-import { readWatchdogConfig, phaseBudgetMs } from "./config.mjs";
+import { readWatchdogConfig, phaseBudgetMs, readStallJanitorConfig } from "./config.mjs";
 import { defaultProgressMark } from "./work-done-probes.mjs";
+// CTL-1004: stall-janitor (terminal-state leftover collapser) — runs as Pass 0j,
+// shadow-first. The pure decision + action driver live in stall-janitor.mjs; the
+// census + emit + intent seams are injected here so the bare tick stays inert.
+// The default (read-only) census producers are wired into runTick below so the
+// daemon exercises the pass in SHADOW by default.
+import {
+  runStallJanitorPass,
+  defaultCollectOrphanCandidates,
+  defaultCollectGhostCandidates,
+} from "./stall-janitor.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -2085,6 +2095,43 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
+// defaultJanitorKillIntentRecorder — CTL-1004 J2's intent-recording seam, backed
+// by the CTL-936 intentDb (beliefs.db) already threaded into the tick. Records a
+// 'kill' intent pinned to the ghost session's bgJobId, with the same
+// sessionNotRegistered postcondition + open-intent de-dupe as recovery.mjs's
+// intentAwareKill — so the next-tick reconciler checks whether the session left
+// the agents listing and the reconciler (NOT this janitor) issues the stop. When
+// intentDb is null (CATALYST_BELIEFS_SHADOW=0, the collector never opened it) the
+// recorder is a no-op: the kill-intent is dropped, fail-open, the same direction
+// as intentAwareKill's null-db fallback. NEVER shells out to `claude stop`.
+function defaultJanitorKillIntentRecorder(intentDb) {
+  return ({ subject, bgJobId }) => {
+    if (!intentDb || !subject || !bgJobId) return false;
+    try {
+      // Skip if an open kill-intent already exists for this subject (idempotent).
+      const open = intentDb
+        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+        .get(subject);
+      if (open) return false;
+      const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+      if (!tickRow) return false;
+      intentDb.run(
+        `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
+         VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
+        [
+          tickRow.tick_id,
+          subject,
+          JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
+        ],
+      );
+      return true;
+    } catch (err) {
+      log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw (CTL-1004)");
+      return false;
+    }
+  };
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -2238,6 +2285,20 @@ export function schedulerTick(
       killEscalate: _killEscalate = defaultKillEscalate,
       now: _watchdogNow = Date.now,
       emit: _watchdogEmit = emitReapIntent,
+    } = {},
+    // CTL-1004: stall-janitor seams (Pass 0j). Defaults keep the bare unit tick
+    // inert — no census producers means nothing to collapse — so a direct
+    // schedulerTick caller that does not opt in gets a no-op pass. Production wires
+    // the real census (terminal-Done worktrees + idle ghost sessions) + the
+    // emit / intent seams via startScheduler. Mode resolves from
+    // readStallJanitorConfig() (env > Layer-2 > shadow) unless overridden here.
+    stallJanitor: {
+      mode: _janitorMode = undefined, // resolved inside the pass
+      terminalIdleMs: _janitorTerminalIdleMs = undefined,
+      collectOrphanCandidates: _collectOrphanCandidates = undefined,
+      collectGhostCandidates: _collectGhostCandidates = undefined,
+      emit: _janitorEmit = emitReapIntent,
+      recordKillIntent: _recordKillIntent = undefined,
     } = {},
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
@@ -2594,6 +2655,70 @@ export function schedulerTick(
       }
     }
   }
+
+  // (0j) CTL-1004 stall-janitor. Collapse already-terminal, unambiguous leftovers
+  // the event-driven reaper never names: J1 orphan worktrees (teardown=done +
+  // .terminal-done.applied, on disk, no live session, clean, CTL-791 evidence) →
+  // a TARGETED orphans.reap-requested (the REAPER owns removal); J2 idle ghost
+  // sessions (terminal signal >=600s + an idle background session) → a kill-INTENT
+  // via the intent system (the reconciler executes the stop — NEVER `claude stop`).
+  // SHADOW-FIRST: default mode is "shadow" (emit janitor.would.*, mutate nothing).
+  // The census producers + emit/intent seams are injected from startScheduler;
+  // a bare unit tick that does not opt in collects nothing (empty census → no-op).
+  // Mirrors Pass 0w: the report is built SYNCHRONOUSLY (emits are fire-and-forget),
+  // so the tick can read it in the same pass. Wrapped so a census/seam throw never
+  // aborts the tick.
+  let janitorReaped = [];
+  let janitorWouldReap = [];
+  let janitorKillIntents = [];
+  let janitorWouldKill = [];
+  let janitorDeferred = [];
+  {
+    const jcfg = readStallJanitorConfig();
+    const jMode = _janitorMode ?? jcfg.mode;
+    // Only run when an opt-in census producer is wired (production via
+    // startScheduler, or a test injecting it). A bare tick has none → skip cleanly.
+    if (jMode !== "off" && (_collectOrphanCandidates || _collectGhostCandidates)) {
+      try {
+        const jreport = runStallJanitorPass({
+          mode: jMode,
+          terminalIdleMs: _janitorTerminalIdleMs ?? jcfg.terminalIdleMs,
+          collectOrphanCandidates: _collectOrphanCandidates ?? (() => []),
+          collectGhostCandidates: _collectGhostCandidates ?? (() => []),
+          emit: _janitorEmit,
+          // Default intent recorder: thread the CTL-936 intentDb if present, else a
+          // no-op (a kill-intent with no db to record into is dropped — fail-open,
+          // the same direction as intentAwareKill's null-db fallback).
+          recordKillIntent:
+            _recordKillIntent ?? defaultJanitorKillIntentRecorder(intentDb),
+        });
+        janitorReaped = jreport.reaped;
+        janitorWouldReap = jreport.wouldReap;
+        janitorKillIntents = jreport.killIntents;
+        janitorWouldKill = jreport.wouldKill;
+        janitorDeferred = jreport.deferred;
+        if (janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length || janitorWouldKill.length) {
+          log.info(
+            {
+              mode: jMode,
+              reaped: janitorReaped.length,
+              wouldReap: janitorWouldReap.length,
+              killIntents: janitorKillIntents.length,
+              wouldKill: janitorWouldKill.length,
+              deferred: janitorDeferred.length,
+            },
+            "scheduler: stall-janitor pass (CTL-1004)"
+          );
+        }
+      } catch (err) {
+        log.warn(
+          { step: "stall-janitor", err: err.message },
+          "scheduler: stall-janitor pass failed — continuing tick (CTL-1004)"
+        );
+      }
+    }
+  }
+
   // CTL-644: per-tick approval poll — dispatch any gated tickets that now have an
   // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
   // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
@@ -3949,6 +4074,11 @@ export function schedulerTick(
     quarantinedPhantoms, // CTL-671 — phantom worker dirs stalled this tick
     watchdogKilled,      // CTL-729 — kill-attempts DISPATCHED this tick (enforce mode); not confirmed kills (see Pass 0w)
     watchdogWouldKill,   // CTL-729 — workers that WOULD be killed (shadow mode)
+    janitorReaped,       // CTL-1004 — targeted orphan reap-requests EMITTED this tick (enforce)
+    janitorWouldReap,    // CTL-1004 — orphan worktrees that WOULD be reap-requested (shadow)
+    janitorKillIntents,  // CTL-1004 — ghost-session kill-intents RECORDED this tick (enforce)
+    janitorWouldKill,    // CTL-1004 — ghost sessions that WOULD get a kill-intent (shadow)
+    janitorDeferred,     // CTL-1004 — dirty worktrees deferred (no removal, no queue)
     advanced,
     dispatched,
     freeSlots,
@@ -4213,6 +4343,25 @@ function runTick() {
       // CATALYST_BELIEFS_SHADOW=0 (collector never opened it) — intentAwareKill
       // falls back to plain killBgJob in that case, preserving legacy behaviour.
       intentDb: getBeliefsDb(),
+      // CTL-1004: wire the read-only stall-janitor census so the daemon exercises
+      // Pass 0j (SHADOW by default). The census producers are closures over the
+      // warm agents snapshot + project registry + the orchDir's in-flight set, so
+      // a single tick re-reads them lazily (the pass only invokes them when the
+      // resolved mode is not "off"). Mode/emit/intent default inside schedulerTick.
+      stallJanitor: runningOpts.stallJanitor ?? {
+        collectOrphanCandidates: () =>
+          defaultCollectOrphanCandidates({
+            orchDir: runningOpts.orchDir,
+            projects: listProjects(),
+            agents: getAgentsCached().agents,
+            inFlightTickets: listInFlightTickets(runningOpts.orchDir),
+          }),
+        collectGhostCandidates: () =>
+          defaultCollectGhostCandidates({
+            orchDir: runningOpts.orchDir,
+            agents: getAgentsCached().agents,
+          }),
+      },
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the

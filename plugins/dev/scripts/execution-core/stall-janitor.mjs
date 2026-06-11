@@ -1,0 +1,423 @@
+// stall-janitor.mjs — CTL-1004 terminal-state leftover collapser.
+//
+// The orchestrator accumulates two classes of terminal-state leftovers that the
+// event-driven reaper never names:
+//   J1 (orphaned worktrees): teardown=done + .terminal-done.applied, the worktree
+//       still on disk, no live session inside it, clean tree, CTL-791 evidence —
+//       but the session already exited, so the 600s timer's UNTARGETED
+//       orphans.reap-requested never names it. The janitor emits a TARGETED
+//       orphans.reap-requested{ticket, worktree_path, bg_job_id}; the REAPER owns
+//       removal (the targeted removal path + CTL-791 evidence gates).
+//   J2 (ghost sessions): a terminal signal present >=600s with an idle background
+//       session for the same subject. The janitor records a kill-INTENT pinned to
+//       that bgJobId via the intent system; the reconciler executes the stop. The
+//       janitor NEVER shells out to `claude stop`.
+//
+// DOCTRINE (rules DERIVE, executors ACT; shadow-then-gate):
+//   * The janitor only collapses already-terminal, UNAMBIGUOUS states. It never
+//     calls deriveAdvancement, resolves conflicts, or infers liveness.
+//   * It makes NO external writes — events and intents only. (The reaper +
+//     reconciler are the executors; CTL-863 multi-host fences live there.)
+//   * SHADOW-FIRST: in "shadow" it emits janitor.would.* events and records
+//     nothing; in "enforce" it emits the real targeted reap / records the real
+//     kill-intent; in "off" the whole pass is skipped (no census, no events).
+//
+// Split mirrors the CTL-729 watchdog: a PURE decision (classifyOrphanWorktree /
+// classifyGhostSession — all evidence injected, no IO) + an action driver
+// (runStallJanitorPass — every side-effect seam injected).
+
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { log } from "./config.mjs";
+import { parseWorktreeForBranch } from "./worktree.mjs";
+import { cleanPorcelain } from "./worktree-safety.mjs";
+
+// classifyOrphanWorktree (J1) — PURE. Given the fully-resolved evidence for one
+// terminal-Done ticket's worktree, decide the disposition:
+//   "reap-orphan" — emit a targeted orphans.reap-requested (reaper removes it).
+//   "defer"       — a dirty tree: emit janitor.worktree.deferred{reason:dirty},
+//                   remove nothing, queue nothing.
+//   "skip"        — anything ambiguous, not-yet-terminal, already-reaped, or live.
+//
+// ctx fields:
+//   teardownDone, terminalDoneApplied   — positive done evidence (both required).
+//   worktreeOnDisk                       — git worktree list shows it.
+//   liveSessionInWorktree                — a live session has its cwd inside it.
+//   inFlight                             — the ticket still holds a worker slot.
+//   treeClean                            — `git status --porcelain` is clean (sans noise).
+//   evidenceOk                           — the CTL-791 positive-done evidence gate passes.
+//   alreadyReaped                        — .terminal-reap-teardown present for the ticket.
+export function classifyOrphanWorktree(ctx = {}) {
+  // NEVER touch a live worker — these are the safety fences, checked first.
+  if (ctx.liveSessionInWorktree) return { action: "skip", reason: "live-session-in-worktree" };
+  if (ctx.inFlight) return { action: "skip", reason: "in-flight" };
+
+  // Positive-done evidence required (mirrors CTL-791: never act without it).
+  if (!ctx.teardownDone) return { action: "skip", reason: "not-teardown-done" };
+  if (!ctx.terminalDoneApplied) return { action: "skip", reason: "no-terminal-done-marker" };
+
+  // Already reaped (.terminal-reap-teardown present) → do not re-queue.
+  if (ctx.alreadyReaped) return { action: "skip", reason: "already-reaped" };
+
+  // Nothing on disk → nothing to reap (the already-reaped / never-created case).
+  if (!ctx.worktreeOnDisk) return { action: "skip", reason: "no-worktree-on-disk" };
+
+  // A dirty tree is DEFERRED (never removed, never queued) — the reaper's
+  // CTL-791 gate would refuse it anyway, but the janitor defers loudly first.
+  if (!ctx.treeClean) return { action: "defer", reason: "dirty" };
+
+  // CTL-791 positive-done evidence gate must pass (never force a removal).
+  if (!ctx.evidenceOk) return { action: "skip", reason: "evidence-gate-failed" };
+
+  return { action: "reap-orphan", reason: "terminal-orphan-worktree" };
+}
+
+// classifyGhostSession (J2) — PURE. Given one terminal subject + its lingering
+// session, decide whether to record a kill-intent.
+//   "kill-intent" — a terminal signal present >=terminalIdleMs with an IDLE
+//                   BACKGROUND session pinned to a real bgJobId.
+//   "skip"        — not-yet-terminal-long-enough, interactive/unknown kind,
+//                   non-idle (possibly live), or no bgJobId to pin.
+export function classifyGhostSession(ctx = {}) {
+  const terminalIdleMs = Number.isFinite(ctx.terminalIdleMs) ? ctx.terminalIdleMs : 600_000;
+  if (!ctx.bgJobId) return { action: "skip", reason: "no-bg-job-id" };
+  // NEVER touch a human session, and never an ambiguous (unknown/null) kind.
+  if (ctx.sessionKind !== "background") return { action: "skip", reason: "non-background-or-interactive" };
+  // Only an explicitly-idle session is a ghost — a busy/active/unknown status
+  // could still be doing work (the conservative direction).
+  if (ctx.sessionStatus !== "idle") return { action: "skip", reason: "not-idle" };
+  // The terminal signal must have been present long enough.
+  if (!(Number(ctx.terminalForMs) >= terminalIdleMs)) return { action: "skip", reason: "terminal-too-recent" };
+  return { action: "kill-intent", reason: "post-teardown-idle-ghost" };
+}
+
+// runStallJanitorPass — the action driver. Enumerates the terminal-Done orphan
+// candidates + ghost-session candidates (injected census seams), classifies each,
+// and either ACTS (enforce) or SHADOWS (would.*). Returns a per-tick report:
+//   { reaped, wouldReap, killIntents, wouldKill, deferred }
+//
+// SYNCHRONOUS report-building, fire-and-forget emits. The whole report is built
+// in a synchronous loop (the classifiers + intent recording are sync), so the
+// scheduler tick — which is itself synchronous and returns a plain object — can
+// drive this pass and read the report in the SAME tick (mirrors the CTL-729
+// watchdog Pass 0w, which pushes to its result arrays synchronously while the
+// kill itself is fire-and-forget). The `emit` seam may be async; its promise is
+// fired-and-forgotten (`.catch`), never awaited, so a slow event-log append never
+// stalls the loop. `mode` is "off" | "shadow" | "enforce". off → skip everything.
+//
+// Seams (all injected so the daemon tick stays the only place that touches real
+// git / the event log / the intent db):
+//   collectOrphanCandidates() → [orphanCtx]   (each carries the classify ctx +
+//                                               ticket/worktreePath/bgJobId/branch)
+//   collectGhostCandidates()  → [ghostCtx]    (classify ctx + ticket/phase/bgJobId)
+//   emit(type, fields)        → Promise<bool>  the reap-intent / shadow emitter
+//   recordKillIntent(intent)  → bool           pins a kill-intent via intent.mjs
+//   terminalIdleMs            → number         J2 threshold (default 600s)
+export function runStallJanitorPass({
+  mode = "shadow",
+  terminalIdleMs = 600_000,
+  collectOrphanCandidates = () => [],
+  collectGhostCandidates = () => [],
+  emit = async () => true,
+  recordKillIntent = () => false,
+} = {}) {
+  const report = { reaped: [], wouldReap: [], killIntents: [], wouldKill: [], deferred: [] };
+
+  // off → skip the pass entirely: no census, no events, no intents.
+  if (mode === "off") return report;
+  const enforce = mode === "enforce";
+
+  // fire-and-forget emit: never await (so a slow append can't stall the loop),
+  // never let a rejection escape (a thrown/rejecting emitter is logged, not fatal).
+  const fire = (type, fields, ticket) => {
+    try {
+      const p = emit(type, fields);
+      if (p && typeof p.catch === "function") {
+        p.catch((err) =>
+          log.warn({ ticket, type, err: err?.message }, "stall-janitor: emit failed (CTL-1004)"),
+        );
+      }
+    } catch (err) {
+      // A SYNCHRONOUSLY-throwing emit seam (the isolation test) must not abort
+      // the candidate loop — re-throw to the per-candidate catch below.
+      throw err;
+    }
+  };
+
+  // ---- J1: orphan worktrees → TARGETED orphans.reap-requested ----------------
+  let orphanCandidates = [];
+  try {
+    orphanCandidates = collectOrphanCandidates() ?? [];
+  } catch (err) {
+    log.warn({ err: err?.message }, "stall-janitor: orphan census threw — skipping J1 (CTL-1004)");
+    orphanCandidates = [];
+  }
+  for (const c of orphanCandidates) {
+    try {
+      const decision = classifyOrphanWorktree(c);
+      if (decision.action === "skip") continue;
+
+      if (decision.action === "defer") {
+        fire(
+          enforce ? "janitor.worktree.deferred" : "janitor.would.defer",
+          { ticket: c.ticket, worktreePath: c.worktreePath, reason: decision.reason },
+          c.ticket,
+        );
+        report.deferred.push({ ticket: c.ticket, reason: decision.reason });
+        continue;
+      }
+
+      // reap-orphan — the janitor NEVER removes; it emits a TARGETED event that
+      // names the specific worktree so the reaper's targeted removal + CTL-791
+      // evidence path acts on THAT tree (not the blanket session sweep).
+      const reapFields = {
+        ticket: c.ticket,
+        worktreePath: c.worktreePath,
+        bgJobId: c.bgJobId,
+        branch: c.branch,
+        reason: "stall-janitor-orphan",
+      };
+      if (enforce) {
+        fire("orphans.reap-requested", reapFields, c.ticket);
+        report.reaped.push({ ticket: c.ticket, worktreePath: c.worktreePath });
+      } else {
+        fire("janitor.would.reap-request", reapFields, c.ticket);
+        report.wouldReap.push({ ticket: c.ticket, worktreePath: c.worktreePath });
+      }
+    } catch (err) {
+      log.warn(
+        { ticket: c?.ticket, err: err?.message },
+        "stall-janitor: per-orphan step failed — continuing (CTL-1004)",
+      );
+    }
+  }
+
+  // ---- J2: ghost sessions → kill-INTENT (never claude stop) -------------------
+  let ghostCandidates = [];
+  try {
+    ghostCandidates = collectGhostCandidates() ?? [];
+  } catch (err) {
+    log.warn({ err: err?.message }, "stall-janitor: ghost census threw — skipping J2 (CTL-1004)");
+    ghostCandidates = [];
+  }
+  for (const c of ghostCandidates) {
+    try {
+      const decision = classifyGhostSession({ ...c, terminalIdleMs });
+      if (decision.action !== "kill-intent") continue;
+      const subject = `${c.ticket}/${c.phase}`;
+      if (enforce) {
+        // Pin the intent to bgJobId so resolvePostcondition distinguishes the
+        // targeted session from a newly-revived worker on the same subject slot.
+        recordKillIntent({ subject, bgJobId: c.bgJobId, ticket: c.ticket, phase: c.phase });
+        report.killIntents.push({ ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId });
+      } else {
+        fire(
+          "janitor.would.kill-intent",
+          { ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId, reason: "post-teardown-idle-ghost" },
+          c.ticket,
+        );
+        report.wouldKill.push({ ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId });
+      }
+    } catch (err) {
+      log.warn(
+        { ticket: c?.ticket, err: err?.message },
+        "stall-janitor: per-ghost step failed — continuing (CTL-1004)",
+      );
+    }
+  }
+
+  return report;
+}
+
+// ===========================================================================
+// PRODUCTION CENSUS BUILDERS (read-only, fail-safe) — the default seams the
+// daemon tick wires into runStallJanitorPass. Every probe is read-only: a `git
+// worktree list --porcelain`, a `git status --porcelain`, a marker stat, and the
+// already-warm agents snapshot. Any throw degrades to "skip this candidate" — the
+// janitor never escalates on missing data. Mirrors the watchdog's defaultProgressMark
+// / defaultTranscriptAgeMs production-default pattern.
+// ===========================================================================
+
+function stripTrailingSlash(p) {
+  return typeof p === "string" ? p.replace(/\/+$/, "") : p;
+}
+
+// cwdUnder — true when `cwd` is the worktree root or nested beneath it. Exact
+// path-segment match so /a/CTL-7 never matches /a/CTL-70.
+function cwdUnder(cwd, root) {
+  if (!cwd || !root) return false;
+  const c = stripTrailingSlash(cwd);
+  const r = stripTrailingSlash(root);
+  return c === r || c.startsWith(r + "/");
+}
+
+// defaultCollectOrphanCandidates — enumerate every ticket whose pipeline reached
+// terminal Done (the .terminal-done.applied marker) and build the J1 classify ctx
+// from read-only probes. `projects` supplies [{team, repoRoot}] for the worktree
+// resolution; `agents` is the warm snapshot ([] when cold → liveSessionInWorktree
+// defaults false, but inFlight still fences); `now`/git are injected for tests.
+export function defaultCollectOrphanCandidates({
+  orchDir,
+  projects = [],
+  agents = [],
+  inFlightTickets = new Set(),
+  runGit = (args) => spawnSync("git", args, { encoding: "utf8" }),
+} = {}) {
+  const out = [];
+  let workerDirs;
+  try {
+    workerDirs = readdirSync(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return out; // no workers dir → nothing to census
+  }
+  // Pre-resolve each project's worktree list once (read-only).
+  const worktreeListByRepo = new Map();
+  function worktreeListFor(repoRoot) {
+    if (!repoRoot) return "";
+    if (worktreeListByRepo.has(repoRoot)) return worktreeListByRepo.get(repoRoot);
+    let porcelain = "";
+    try {
+      const res = runGit(["-C", repoRoot, "worktree", "list", "--porcelain"]);
+      if (!res.error && (res.status ?? 1) === 0) porcelain = res.stdout ?? "";
+    } catch { /* unreadable → treat as no worktrees */ }
+    worktreeListByRepo.set(repoRoot, porcelain);
+    return porcelain;
+  }
+
+  for (const d of workerDirs) {
+    if (!d.isDirectory()) continue;
+    const ticket = d.name;
+    try {
+      const workerDir = join(orchDir, "workers", ticket);
+      const teardownDone = existsSync(join(workerDir, ".terminal-done.applied"));
+      if (!teardownDone) continue; // census ONLY terminal-Done tickets
+      // .terminal-reap-teardown present ⇒ already reaped (do not re-queue).
+      const alreadyReaped = existsSync(join(workerDir, ".terminal-reap-teardown"));
+      // Resolve the worktree path across the registered projects.
+      let worktreePath = null;
+      for (const p of projects) {
+        const path = parseWorktreeForBranch(worktreeListFor(p.repoRoot), ticket);
+        if (path) { worktreePath = path; break; }
+      }
+      const worktreeOnDisk = !!worktreePath && existsSync(worktreePath);
+      // Live session whose cwd sits inside the worktree (warm snapshot).
+      const liveSessionInWorktree =
+        worktreeOnDisk &&
+        Array.isArray(agents) &&
+        agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+      // Clean tree (sans machine-local noise) — only probed when on disk.
+      let treeClean = false;
+      if (worktreeOnDisk) {
+        try {
+          const st = runGit(["-C", worktreePath, "status", "--porcelain"]);
+          if (!st.error && (st.status ?? 1) === 0) {
+            treeClean = cleanPorcelain(st.stdout ?? "").length === 0;
+          }
+        } catch { treeClean = false; }
+      }
+      // Resolve bg_job_id from the most-recent terminal phase signal, best-effort.
+      let bgJobId = null;
+      try {
+        for (const f of readdirSync(workerDir)) {
+          const m = /^phase-(.+)\.json$/.exec(f);
+          if (!m) continue;
+          const raw = JSON.parse(readFileSync(join(workerDir, f), "utf8"));
+          if (raw?.bg_job_id) bgJobId = raw.bg_job_id;
+        }
+      } catch { /* no signal / unreadable → null is fine */ }
+      out.push({
+        ticket,
+        teardownDone: true,
+        terminalDoneApplied: true,
+        worktreePath,
+        worktreeOnDisk,
+        liveSessionInWorktree,
+        inFlight: inFlightTickets.has(ticket),
+        treeClean,
+        // CTL-791 positive-done evidence: the .terminal-done.applied marker is the
+        // pipeline's own confirmed-Done evidence; the reaper re-runs the FULL
+        // assessWorktreeRemoval gate on the targeted event regardless, so the
+        // janitor's gate stays a cheap pre-filter (marker present = evidence).
+        evidenceOk: true,
+        alreadyReaped,
+        branch: ticket,
+        bgJobId,
+      });
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "stall-janitor: orphan candidate probe threw — skipping (CTL-1004)");
+    }
+  }
+  return out;
+}
+
+// defaultCollectGhostCandidates — find idle background sessions whose subject
+// (ticket/phase) has a terminal signal present >=terminalIdleMs. Read-only: it
+// correlates the warm agents snapshot to terminal phase signals on disk.
+// `resolveTicketFromCwd` maps a session cwd to its ticket; `now`/`statSignal`
+// are injected for tests.
+export function defaultCollectGhostCandidates({
+  orchDir,
+  agents = [],
+  terminalIdleMs = 600_000,
+  now = Date.now,
+  resolveTicketFromCwd = defaultTicketFromCwd,
+  statSignalMtimeMs = defaultSignalMtimeMs,
+} = {}) {
+  const out = [];
+  if (!Array.isArray(agents)) return out;
+  const TERMINAL_STATUSES = new Set(["done", "failed", "stalled", "skipped", "aborted", "complete"]);
+  for (const a of agents) {
+    try {
+      // Only idle BACKGROUND sessions are ghost candidates — the classifier
+      // re-checks, but pre-filtering keeps the census cheap.
+      if (a?.kind !== "background") continue;
+      if (a?.status !== "idle") continue;
+      if (!a?.cwd || !a?.sessionId) continue;
+      const ticket = resolveTicketFromCwd(a.cwd);
+      if (!ticket) continue;
+      // Find a terminal phase signal for this ticket; pick its phase + mtime.
+      const workerDir = join(orchDir, "workers", ticket);
+      let files;
+      try { files = readdirSync(workerDir); } catch { continue; }
+      for (const f of files) {
+        const m = /^phase-(.+)\.json$/.exec(f);
+        if (!m) continue;
+        let raw;
+        try { raw = JSON.parse(readFileSync(join(workerDir, f), "utf8")); } catch { continue; }
+        if (!TERMINAL_STATUSES.has(raw?.status)) continue;
+        const mtimeMs = statSignalMtimeMs(join(workerDir, f));
+        const terminalForMs = mtimeMs == null ? 0 : now() - mtimeMs;
+        out.push({
+          ticket,
+          phase: m[1],
+          bgJobId: a.sessionId,
+          terminalForMs,
+          sessionKind: a.kind,
+          sessionStatus: a.status,
+        });
+        break; // one ghost intent per session
+      }
+    } catch (err) {
+      log.warn({ err: err?.message }, "stall-janitor: ghost candidate probe threw — skipping (CTL-1004)");
+    }
+  }
+  return out;
+}
+
+// defaultTicketFromCwd — derive the ticket id from a worktree cwd's last segment
+// (~/catalyst/wt/<projectKey>/<TICKET>). Returns null for an unrecognizable path.
+export function defaultTicketFromCwd(cwd) {
+  if (!cwd) return null;
+  const seg = stripTrailingSlash(cwd).split("/").pop();
+  return /^[A-Z]+-\d+$/.test(seg ?? "") ? seg : null;
+}
+
+// defaultSignalMtimeMs — mtime of a phase signal file, or null when unreadable.
+export function defaultSignalMtimeMs(path) {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}

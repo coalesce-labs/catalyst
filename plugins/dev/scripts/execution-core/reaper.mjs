@@ -446,7 +446,18 @@ export class Reaper {
     });
   }
 
-  async _handleOrphansSweep(_event) {
+  async _handleOrphansSweep(event) {
+    // CTL-1004: the orphans.reap-requested event is dual-purpose, disambiguated by
+    // a `worktree_path` target. The legacy 600s timer emits an UNTARGETED event
+    // (payload {}) → blanket scanOrphans (find every session whose cwd vanished).
+    // The stall-janitor's J1 emits a TARGETED event naming a specific terminal-Done
+    // worktree → route it through the targeted removal path (_handlePrMergedCleanup),
+    // which presweeps, runs the CTL-791 positive-done evidence gate, archives, then
+    // removes. The reaper owns removal; the janitor only names the target.
+    if (event && event.worktree_path) {
+      await this._handlePrMergedCleanup(event);
+      return;
+    }
     await this.scanOrphans();
   }
 

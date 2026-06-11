@@ -476,3 +476,46 @@ export function phaseBudgetMs(phase, turnCap, cfg = readWatchdogConfig()) {
   const mult = Number(cfg?.phaseBudgetMultiplier) || 1.5;
   return Math.max(cap * WATCHDOG_MINUTES_PER_TURN * mult * 60_000, WATCHDOG_MIN_PHASE_BUDGET_MS);
 }
+
+// --- Stall-janitor for terminal-state leftovers (CTL-1004) ---
+// SHADOW-FIRST. Same three-layer precedence as the CTL-729 watchdog (env >
+// Layer-2 catalyst.stallJanitor.* > code default), and the SAME conservative
+// default — "shadow": detect + log janitor.would.* events, mutate nothing, until
+// an operator flips it to "enforce". The janitor only collapses already-terminal,
+// unambiguous leftovers (orphan worktrees + idle ghost sessions); it never infers
+// liveness or advancement (that is belief-rule territory).
+const STALL_JANITOR_MODES = new Set(["off", "shadow", "enforce"]);
+// terminalIdleMs — how long a terminal phase signal must have been present before
+// an idle background session for the same subject is treated as a ghost (J2). The
+// Gherkin pins this at >=600s; matches the orphan-reaper's 600s timer cadence.
+const STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS = 600_000;
+
+function readLayer2StallJanitor() {
+  try {
+    const sj = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stallJanitor;
+    return sj && typeof sj === "object" ? sj : {};
+  } catch { return {}; }
+}
+
+export function readStallJanitorConfig() {
+  const l2 = readLayer2StallJanitor();
+  // CATALYST_STALL_JANITOR is the single operator knob (mirrors CATALYST_WATCHDOG):
+  //   "0" → off (kill-switch / back-compat with the ticket's default 0),
+  //   off|shadow|enforce → that mode, anything else → shadow.
+  const env = process.env.CATALYST_STALL_JANITOR ?? process.env.EXECUTION_CORE_STALL_JANITOR_MODE;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && STALL_JANITOR_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && STALL_JANITOR_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "shadow"; // conservative default: shadow-first, never act until flipped
+  }
+  const terminalIdleMs =
+    Number(process.env.EXECUTION_CORE_STALL_JANITOR_TERMINAL_IDLE_MS) ||
+    (Number(l2.terminalIdleSeconds) || 0) * 1000 ||
+    STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS;
+  return { mode, terminalIdleMs };
+}
