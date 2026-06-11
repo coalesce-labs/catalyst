@@ -114,30 +114,42 @@ function EmptyCard({ slotLabel, first }: { slotLabel: string; first: boolean }) 
       style={{
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 4,
         background: "transparent",
         border: `1px dashed ${C.borderSubtle}`,
         borderRadius: 10,
         padding: "10px 12px",
         minHeight: 96,
-        textAlign: "center",
       }}
     >
-      {/* CTL-1035: vacant slots keep their slot number so the deck reads as N
-          fixed numbered slots, some open — "SLOT 4 · Open". */}
-      <span style={{ fontSize: 12, color: C.fgDim }}>
-        <span style={{ letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono, fontSize: 10 }}>
+      {/* CTL-1054: open cards share the occupied-card anatomy — "SLOT N" sits in
+          the upper-LEFT corner exactly like OccupiedCard's slot-label row (same
+          mono/uppercase/tracking), so a vacant slot reads as the SAME kind of
+          object as an occupied one. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, color: C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
           {slotLabel}
         </span>
-        {" · Open"}
-      </span>
-      {first && (
-        <span style={{ fontSize: 11, color: C.fgDim, opacity: 0.7 }}>
-          next eligible ticket dispatches here
-        </span>
-      )}
+      </div>
+      {/* "Open" reads as the status, centered in the card body; the first vacant
+          slot keeps its dispatch hint underneath. */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 4,
+          flex: 1,
+          textAlign: "center",
+        }}
+      >
+        <span style={{ fontSize: 12, color: C.fgDim }}>Open</span>
+        {first && (
+          <span style={{ fontSize: 11, color: C.fgDim, opacity: 0.7 }}>
+            next eligible ticket dispatches here
+          </span>
+        )}
+      </div>
     </motion.div>
   );
 }

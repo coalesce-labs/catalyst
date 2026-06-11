@@ -94,14 +94,14 @@ describe("nav-model — buildNavGroups", () => {
     expect(repoGroups.map((g) => g.scope)).toEqual(["catalyst", "adva"]);
   });
 
-  it("Overall group has exactly 4 items: Inbox, Tickets, Workers, Queue", () => {
+  it("Overall group has exactly 4 items: Inbox, Tickets, Workers, Dispatch", () => {
     const groups = buildNavGroups(["catalyst"], repoColors);
     const overall = groups.find((g) => g.scope === "all")!;
     expect(overall.items.map((i) => i.target.surface)).toEqual([
       "home", "board", "workers", "queue",
     ]);
     expect(overall.items.map((i) => i.label)).toEqual([
-      "Inbox", "Tickets", "Workers", "Queue",
+      "Inbox", "Tickets", "Workers", "Dispatch",
     ]);
   });
 
@@ -184,16 +184,16 @@ describe("nav-model — breadcrumbFor", () => {
     expect(breadcrumbFor("workers", "all")).toEqual(["Overall", "Workers"]);
   });
 
-  it("overall queue → ['Overall', 'Queue']", () => {
-    expect(breadcrumbFor("queue", "all")).toEqual(["Overall", "Queue"]);
+  it("overall queue → ['Overall', 'Dispatch']", () => {
+    expect(breadcrumbFor("queue", "all")).toEqual(["Overall", "Dispatch"]);
   });
 
   it("project board → ['catalyst', 'Tickets']", () => {
     expect(breadcrumbFor("board", "catalyst")).toEqual(["catalyst", "Tickets"]);
   });
 
-  it("project queue → ['adva', 'Queue']", () => {
-    expect(breadcrumbFor("queue", "adva")).toEqual(["adva", "Queue"]);
+  it("project queue → ['adva', 'Dispatch']", () => {
+    expect(breadcrumbFor("queue", "adva")).toEqual(["adva", "Dispatch"]);
   });
 });
 
