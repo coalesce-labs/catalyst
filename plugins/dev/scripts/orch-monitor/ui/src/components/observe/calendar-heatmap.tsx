@@ -7,16 +7,7 @@
 // The value → opacity-bucket mapping is extracted into a PURE exported function
 // (heatmapBucket) so it is unit-testable in isolation (observe-kit.test.ts).
 
-import { cn } from "@/lib/utils";
 
-export interface HeatmapDatum {
-  /** Column key (e.g. a time bucket / hour). */
-  x: string;
-  /** Row key (e.g. a worker name / weekday). */
-  y: string;
-  /** Intensity — mapped to one of 5 opacity buckets relative to the max. */
-  value: number;
-}
 
 // 5-level opacity ramp. Bucket 0 = "empty / silence" (near-transparent), 4 = max.
 export const HEATMAP_OPACITY_RAMP = [0.06, 0.28, 0.5, 0.72, 1] as const;
