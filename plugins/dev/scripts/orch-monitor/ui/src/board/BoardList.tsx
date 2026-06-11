@@ -56,6 +56,7 @@ import { SortHeader } from "@/components/ui/sort-header";
 import type { SortState } from "@/hooks/use-sort";
 import { cn } from "@/lib/utils";
 import { C, LIVE } from "./board-tokens";
+import { laneSurfaceBg } from "./lane-surface";
 import { Dot } from "./Board";
 import {
   useReducedMotion,
@@ -139,6 +140,8 @@ export interface BoardListProps {
   ) => void;
   /** standalone (board.html, full viewport) vs embedded (the app-shell inset). */
   embedded?: boolean;
+  /** CTL-1027: repoKey → hue bg hex. When present, per-project group header rows are tinted. */
+  laneColors?: Record<string, string>;
 }
 
 // CTL-1033: list table header + group-band rows sit on `subtle` — a visible step
@@ -155,6 +158,7 @@ export function BoardList({
   swimlane,
   onOpen,
   embedded = false,
+  laneColors = {},
 }: BoardListProps) {
   // ── resolve the flattened, kanban-ordered stream (the single resolveList seam) ──
   // For the ticket lens this is flattenTicketRows (concat of the board's own
@@ -197,6 +201,7 @@ export function BoardList({
         lens={lens}
         onOpen={onOpen}
         embedded={embedded}
+        laneColors={laneColors}
       />
     );
   }
@@ -210,6 +215,7 @@ export function BoardList({
       lens={lens}
       onOpen={onOpen}
       embedded={embedded}
+      laneColors={laneColors}
     />
   );
 }
@@ -316,6 +322,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
   lens,
   onOpen,
   embedded,
+  laneColors = {},
 }: {
   rows: ListRow<E>[];
   columns: readonly ListColumn<E>[];
@@ -329,6 +336,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
     ctx: { ids: string[]; lens?: ListLens; col?: string },
   ) => void;
   embedded: boolean;
+  laneColors?: Record<string, string>;
 }) {
   const cols = useMemo(() => visibleColumns(columns, density), [columns, density]);
 
@@ -527,6 +535,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     onToggle={() => toggleCollapse(meta.key)}
                     hint={hint}
                     iconSrc={laneIconSrc(swimlane, meta.repo, icons)}
+                    laneBg={swimlane !== "none" ? laneSurfaceBg(meta.repo, laneColors) : undefined}
                   />
                   {/* CTL-952: AnimatePresence enables enter/exit for rows that
                       appear / disappear as priority or state changes. `initial=false`
@@ -643,6 +652,7 @@ function GroupHeaderRow({
   onToggle,
   hint,
   iconSrc,
+  laneBg,
 }: {
   label: string;
   count: number;
@@ -654,6 +664,8 @@ function GroupHeaderRow({
   onToggle: () => void;
   hint?: string | null;
   iconSrc?: string | null;
+  /** CTL-1027: per-project tinted background for swimlane group rows. */
+  laneBg?: string;
 }) {
   // heartbeat dot uses status-dot semantics (green live / amber degraded / muted
   // offline) — cyan is reserved for the LIVE entity signal only (design §4.3/§5.2),
@@ -663,7 +675,7 @@ function GroupHeaderRow({
     live === "live" ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : (color ?? C.blue);
   return (
     <TableRow
-      style={{ background: C.subtle, cursor: "pointer" }}
+      style={{ background: laneBg ?? C.subtle, cursor: "pointer" }}
       onClick={onToggle}
       aria-expanded={!collapsed}
       role="button"
