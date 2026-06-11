@@ -44,27 +44,29 @@ describe("classifyKey — the pre-existing bindings still work unchanged", () =>
 });
 
 // ── CTL-1049: Escape = back, but NEVER while typing ──────────────────────────
+// CTL-1025 unified the guard into lib/typing-target — the classifier takes the
+// focused-element shape ({ tagName, isContentEditable }) instead of (tag, flag).
 describe("classifyKey — Escape-means-back is input/contentEditable guarded (CTL-1049)", () => {
   it("Escape with focus NOT in a typing target classifies as `escape` (→ history back)", () => {
-    expect(classifyKey(bare("Escape"), "DIV", false).type).toBe("escape");
+    expect(classifyKey(bare("Escape"), { tagName: "DIV" }, false).type).toBe("escape");
     expect(classifyKey(bare("Escape"), null, false).type).toBe("escape");
   });
 
   it("Escape while an INPUT/TEXTAREA is focused is swallowed (`none`) — no navigation", () => {
     // the Gherkin: "Escape means back — focus not in an input". A focused field
     // must keep Escape for its own dismissal (and never silently navigate away).
-    expect(classifyKey(bare("Escape"), "INPUT", false).type).toBe("none");
-    expect(classifyKey(bare("Escape"), "TEXTAREA", false).type).toBe("none");
+    expect(classifyKey(bare("Escape"), { tagName: "INPUT" }, false).type).toBe("none");
+    expect(classifyKey(bare("Escape"), { tagName: "TEXTAREA" }, false).type).toBe("none");
   });
 
   it("a focused contentEditable host is a typing target too (Escape swallowed)", () => {
-    expect(isTypingTarget("DIV", true)).toBe(true);
-    expect(isTypingTarget("DIV", false)).toBe(false);
+    expect(isTypingTarget({ tagName: "DIV", isContentEditable: true })).toBe(true);
+    expect(isTypingTarget({ tagName: "DIV", isContentEditable: false })).toBe(false);
     // a DIV with isContentEditable=true swallows Escape (and every other shortcut).
-    expect(classifyKey(bare("Escape"), "DIV", false, true).type).toBe("none");
-    expect(classifyKey(bare("j"), "DIV", false, true).type).toBe("none");
+    expect(classifyKey(bare("Escape"), { tagName: "DIV", isContentEditable: true }, false).type).toBe("none");
+    expect(classifyKey(bare("j"), { tagName: "DIV", isContentEditable: true }, false).type).toBe("none");
     // a plain (non-editable) DIV still lets the shortcuts through.
-    expect(classifyKey(bare("Escape"), "DIV", false, false).type).toBe("escape");
+    expect(classifyKey(bare("Escape"), { tagName: "DIV", isContentEditable: false }, false).type).toBe("escape");
   });
 });
 
