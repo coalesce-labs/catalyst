@@ -21,6 +21,7 @@
 // reader · OBS-15" locked state — never blank, never fabricated.
 import { useEffect, useMemo, useState } from "react";
 import { useAtom } from "jotai";
+import { HeaderActions } from "@/components/header-actions";
 import type { OtelHealth, OtelLogEntry } from "@/lib/types";
 import type { BoardPayload, BoardConfig, BoardTicket } from "@/board/types";
 import {
@@ -207,14 +208,13 @@ export function UtilizationSurface() {
         };
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Utilization</h1>
-          <p className="text-[12px] text-muted">
-            Am I getting value from the slots I'm paying for?
-          </p>
-        </div>
+    <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
+      {/* CTL-1018: surface header folded into the SINGLE breadcrumb row (OBSERVE
+          › Utilization). Subtitle + time-range control move up. One per surface. */}
+      <HeaderActions>
+        <span className="hidden text-[12px] text-muted-foreground lg:inline">
+          Am I getting value from the slots I&apos;m paying for?
+        </span>
         <ToggleGroup
           type="single"
           variant="outline"
@@ -229,7 +229,7 @@ export function UtilizationSurface() {
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
-      </header>
+      </HeaderActions>
 
       {/* HERO — full-width, the ONE answer (occupancy %), before any scroll. */}
       <UtilizationHero

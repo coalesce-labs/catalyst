@@ -472,7 +472,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
 
   return (
     <div
-      className="cat-scroll"
+      className="cat-overlay-scroll"
       style={{
         overflowY: "auto",
         height: embedded ? "100%" : "calc(var(--cat-board-vh, 100vh) - 104px)",

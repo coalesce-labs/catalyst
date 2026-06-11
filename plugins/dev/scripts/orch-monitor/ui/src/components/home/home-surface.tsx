@@ -185,7 +185,7 @@ function InboxList({
       {/* Flat bare-row list — sections are hairline-divided groups, NOT cards.
           When nothing needs the operator, the calm all-clear list replaces the
           sections entirely (the relief payoff). */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="cat-overlay-scroll min-h-0 flex-1 overflow-y-auto">
         {isAllClear(counts) ? (
           <AllClearList counts={counts} />
         ) : (

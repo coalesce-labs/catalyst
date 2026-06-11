@@ -7,6 +7,7 @@ import {
   ordinal,
   fmtAge,
   assignSlots,
+  slotLabel,
   groupHoldingBuckets,
   holdingTicketIds,
   deadWorkers,
@@ -196,6 +197,42 @@ describe("groupHoldingBuckets", () => {
     const queueIds = new Set(["CTL-10", "CTL-11"]); // eligible, none held
     const b = groupHoldingBuckets(tickets, [], 4);
     for (const id of holdingTicketIds(b)) expect(queueIds.has(id)).toBe(false);
+  });
+});
+
+describe("slotLabel — vacant slots keep their numbers (CTL-1035)", () => {
+  it("labels a 1-based slot position", () => {
+    expect(slotLabel(1)).toBe("SLOT 1");
+    expect(slotLabel(4)).toBe("SLOT 4");
+  });
+
+  it("vacant slots read SLOT 4/5/6 when 3 of 6 are occupied", () => {
+    // 6 max-parallel slots with 3 occupied → vacant slots carry the numbers they
+    // would hold if filled: occupied.length + emptyIndex + 1.
+    const a = assignSlots(
+      [
+        w({ name: "w1", ticket: "A", startedAt: 1 }),
+        w({ name: "w2", ticket: "B", startedAt: 2 }),
+        w({ name: "w3", ticket: "C", startedAt: 3 }),
+      ],
+      6,
+    );
+    expect(a.occupied).toHaveLength(3);
+    expect(a.emptyCount).toBe(3);
+    const occupiedLabels = a.occupied.map((_, i) => slotLabel(i + 1));
+    const emptyLabels = Array.from({ length: a.emptyCount }, (_, i) =>
+      slotLabel(a.occupied.length + i + 1),
+    );
+    expect(occupiedLabels).toEqual(["SLOT 1", "SLOT 2", "SLOT 3"]);
+    expect(emptyLabels).toEqual(["SLOT 4", "SLOT 5", "SLOT 6"]);
+  });
+
+  it("an all-empty deck numbers every open slot from 1", () => {
+    const a = assignSlots([], 4);
+    const emptyLabels = Array.from({ length: a.emptyCount }, (_, i) =>
+      slotLabel(a.occupied.length + i + 1),
+    );
+    expect(emptyLabels).toEqual(["SLOT 1", "SLOT 2", "SLOT 3", "SLOT 4"]);
   });
 });
 

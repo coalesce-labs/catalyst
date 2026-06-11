@@ -213,6 +213,57 @@ describe("one header: no search box, no SidebarTrigger collapse icon (CTL-1003)"
   });
 });
 
+// ── CTL-1018: ONE header per surface — no second toolbar bar below the shell ──
+// The board, the queue control tower, and the four OBSERVE surfaces each used to
+// stack a SECOND header bar (a "Tickets"/"Capacity & queue"/"Telemetry" toolbar)
+// below the app-shell breadcrumb row. CTL-1018 folds each one's controls into the
+// SINGLE header row via the HeaderActions portal. Static source analysis (no DOM):
+// each surface must portal through HeaderActions and must NOT render its own
+// stacked header. Detail pages are intentionally excluded (already single-header
+// via the CTL-1003 chrome="bare" path).
+describe("one header per surface — secondary toolbar bars folded up (CTL-1018)", () => {
+  const boardSrc = read("board/Board.tsx");
+  const queueSrc = read("components/queue/queue-surface.tsx");
+  const observe = [
+    "components/observe/telemetry-surface.tsx",
+    "components/observe/finops-surface.tsx",
+    "components/observe/utilization-surface.tsx",
+    "components/observe/fleetops-surface.tsx",
+  ].map((p) => [p, read(p)] as const);
+
+  it("the board portals its controls into the shell header (no second subhead bar)", () => {
+    // Controls now reach the single header via the portal…
+    expect(boardSrc).toContain("HeaderActions");
+    expect(boardSrc).toContain("@/components/header-actions");
+    // …and the old standalone subhead <h1>{view === "tickets" ? "Tickets"…} bar is gone.
+    expect(stripComments(boardSrc)).not.toContain(
+      'view === "tickets" ? "Tickets" : "Workers"',
+    );
+  });
+
+  it("the queue control tower portals its subtitle + LIVE badge (no Capacity header bar)", () => {
+    expect(queueSrc).toContain("HeaderActions");
+    // The "Capacity & queue" <h1> header bar is removed.
+    expect(stripComments(queueSrc)).not.toContain("Capacity &amp; queue");
+  });
+
+  it("every OBSERVE surface portals its controls (no stacked <header> title bar)", () => {
+    for (const [path, src] of observe) {
+      expect(src, `${path} must import HeaderActions`).toContain(
+        "@/components/header-actions",
+      );
+      expect(src, `${path} must portal via HeaderActions`).toContain(
+        "<HeaderActions>",
+      );
+      // The old `<header …><h1>…</h1></header>` surface title bar is gone.
+      expect(
+        stripComments(src),
+        `${path} must not render its own <header> title bar`,
+      ).not.toMatch(/<header\b/);
+    }
+  });
+});
+
 // ── CTL-1003 §A1: detailCrumbFor — the final ticket/worker breadcrumb crumb ───
 describe("detailCrumbFor — pure final-crumb resolver (CTL-1003)", () => {
   it("returns the decoded id for a ticket/worker detail path", () => {

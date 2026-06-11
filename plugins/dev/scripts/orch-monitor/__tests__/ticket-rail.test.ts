@@ -125,8 +125,10 @@ describe("ticket-rail.tsx — floating cards + readable relations (CTL-1003)", (
     expect(railSrc).toContain("writeRailCollapsed");
   });
 
-  it("the rail aside is transparent + no-scrollbar (floating cards, no rail panel)", () => {
-    expect(railSrc).toContain('className="no-scrollbar"');
+  it("the rail aside is transparent + overlay-scroll (floating cards, no rail panel)", () => {
+    // CTL-1036: the rail now uses the shared overlay-scrollbar utility (hidden at
+    // rest, slim thumb while scrolling) instead of the permanent-hide .no-scrollbar.
+    expect(railSrc).toContain('className="cat-overlay-scroll"');
     expect(railSrc).toMatch(/background: "transparent"/);
     expect(railSrc).not.toMatch(/borderLeft/);
   });

@@ -555,6 +555,48 @@ body {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * .cat-overlay-scroll — CTL-1036: the ONE shared overlay-scrollbar behaviour.
+ * Hidden at rest; a slim overlay thumb appears WHILE scrolling and fades ~1s
+ * after the gesture ends. The reveal is driven by the `cat-scrolling` marker
+ * class, which lib/overlay-scroll.ts's single global listener toggles. Overlay,
+ * NOT a gutter — the bar never takes layout width, so its appearance/disappearance
+ * causes no reflow. Applied to every scroller (board canvas, lanes, detail prose,
+ * control tower, OBSERVE panels) — one definition, no per-component copies.
+ *
+ * Firefox has no per-element overlay-while-scrolling primitive, so it stays
+ * permanently bar-less here (scrollbar-width: none) — scrolling is unharmed; only
+ * the transient thumb is a WebKit nicety.
+ * ────────────────────────────────────────────────────────────────────────── */
+.cat-overlay-scroll {
+  scrollbar-width: none; /* Firefox: no chrome at rest (no overlay primitive) */
+  -ms-overflow-style: none;
+}
+.cat-overlay-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.cat-overlay-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* At rest: the thumb is fully transparent (overlay, no chrome). The track keeps
+ * its width so revealing the thumb shifts no layout. */
+.cat-overlay-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background-color 0.35s ease;
+}
+/* While scrolling (marker class present) OR on hover: reveal the slim thumb. */
+.cat-overlay-scroll.cat-scrolling::-webkit-scrollbar-thumb,
+.cat-overlay-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+}
+.cat-overlay-scroll.cat-scrolling:hover::-webkit-scrollbar-thumb {
+  background-color: var(--color-muted);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
  * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
  * client pass). Composes ON TOP of .md-content (reuses its table rules; the
  * description div carries BOTH classes) and overrides the rest to match Linear:

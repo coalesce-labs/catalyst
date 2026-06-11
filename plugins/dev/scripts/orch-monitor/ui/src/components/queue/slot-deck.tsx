@@ -18,7 +18,7 @@ import {
   useReducedMotion,
 } from "../../board/motion-utils";
 import type { BoardWorker, BoardTicket, BoardConfig } from "../../board/types";
-import { assignSlots, isLiveWorker } from "./queue-model";
+import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
 
 // The state word + its color for a slot's worker (mirrors workerStatusText).
@@ -102,7 +102,7 @@ function OccupiedCard({
   );
 }
 
-function EmptyCard({ first }: { first: boolean }) {
+function EmptyCard({ slotLabel, first }: { slotLabel: string; first: boolean }) {
   const reduced = useReducedMotion();
   return (
     <motion.div
@@ -125,7 +125,14 @@ function EmptyCard({ first }: { first: boolean }) {
         textAlign: "center",
       }}
     >
-      <span style={{ fontSize: 12, color: C.fgDim }}>Open</span>
+      {/* CTL-1035: vacant slots keep their slot number so the deck reads as N
+          fixed numbered slots, some open — "SLOT 4 · Open". */}
+      <span style={{ fontSize: 12, color: C.fgDim }}>
+        <span style={{ letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono, fontSize: 10 }}>
+          {slotLabel}
+        </span>
+        {" · Open"}
+      </span>
       {first && (
         <span style={{ fontSize: 11, color: C.fgDim, opacity: 0.7 }}>
           next eligible ticket dispatches here
@@ -189,12 +196,16 @@ export function SlotDeck({
               key={`slot-${w.name}`}
               w={w}
               ticket={infoById.get(w.ticket)}
-              slotLabel={`SLOT ${i + 1}`}
+              slotLabel={slotLabel(i + 1)}
               onOpenTicket={onOpenTicket}
             />
           ))}
           {Array.from({ length: emptyCount }).map((_, i) => (
-            <EmptyCard key={`empty-${i}`} first={i === 0} />
+            <EmptyCard
+              key={`empty-${i}`}
+              slotLabel={slotLabel(occupied.length + i + 1)}
+              first={i === 0}
+            />
           ))}
           {overCapacity.map((w) => (
             <OccupiedCard
