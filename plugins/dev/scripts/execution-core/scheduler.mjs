@@ -135,6 +135,7 @@ import { fenceGuard } from "./fence-guard.mjs";
 // runTransition (would double-audit the triage path, which keeps its own
 // phase.triage.linear-transition event). Best-effort: swallow-on-error.
 import { appendLinearStateWriteEvent } from "./linear-state-write-event.mjs";
+import { resolveTicketType } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 // CTL-642 + CTL-758: the SHARED Linear terminal-state predicate. isLinearTerminal
 // ({Done,Canceled} — its OWN set) backs both the reconcile-backstop's
 // "live state !terminal" check and the recovery short-circuit threaded into
@@ -2189,6 +2190,8 @@ export function schedulerTick(
         applied: writerResult.applied ?? false,
         verified: writerResult.verified ?? false,
         reason: writerResult.reason ?? null,
+        // CTL-1023: post-triage state writes always have a classification.
+        ticketType: resolveTicketType(orchDir, ticket),
       },
       { ticket, phase, source }
     );
@@ -2245,7 +2248,7 @@ export function schedulerTick(
     // CTL-660: record the dispatch DECISION before the spawn. Best-effort.
     safeEmit(
       appendDispatchRequestedEvent,
-      { orchId: ticket, ticket, target_phase: phase, reason: requestedReason },
+      { orchId: ticket, orchDir, ticket, target_phase: phase, reason: requestedReason },
       { ticket, phase }
     );
     // Pass 1.5: reset the parked signal to "stalled" before dispatch; a false
@@ -2269,6 +2272,7 @@ export function schedulerTick(
           appendDispatchLaunchedEvent,
           {
             orchId: ticket,
+            orchDir,
             ticket,
             target_phase: phase,
             bg_job_id: signal?.bg_job_id,
