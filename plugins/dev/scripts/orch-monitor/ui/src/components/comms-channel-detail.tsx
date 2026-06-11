@@ -92,7 +92,7 @@ export function CommsChannelDetail({
               "inline-block h-2 w-2 rounded-full",
               live
                 ? "bg-green shadow-[0_0_6px_theme(colors.green)]"
-                : "bg-[#6b7280]",
+                : "bg-muted-foreground/70",
             )}
           />
           <span>{live ? "Live" : "Disconnected"}</span>

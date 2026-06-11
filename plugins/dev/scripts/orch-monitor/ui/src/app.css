@@ -7,16 +7,20 @@
 @plugin "@tailwindcss/typography";
 
 @theme inline {
-  /* CTL-930 Phase 4: raised dark ramp, muted-pop accents (board-tokens.ts is the source). */
-  --color-surface-0: #0e1116;
-  --color-surface-1: #151a21;
-  --color-surface-2: #1b212a;
-  --color-surface-3: #242c37;
-  --color-surface-4: #2e3845;
-  --color-border: #333e4d;
-  --color-border-subtle: #273039;
-  --color-fg: #edf1f7;
-  --color-muted: #9ba6b5;
+  /* CTL-1013: elevation surfaces are now theme-aware aliases of per-theme CSS vars
+     (defined in :root / .dark below) so `bg-surface-*` / `text-fg` / `text-muted` /
+     `border-*` utilities flip with the theme. This fixes the dark elevation ladder
+     (chrome darkest → content → cards) AND makes warm-light coherent in one
+     mechanism. Accent colors stay literal — they are not elevation surfaces. */
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+  --color-border: var(--border-strong);
+  --color-border-subtle: var(--border-subtle);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
   --color-accent: #5e9ee8;
   --color-green: #41bd7d;
   --color-red: #e36b6b;
@@ -102,11 +106,24 @@
   --color-light-muted: #76705f;
   --color-light-accent: #1f6feb;
 
-  --background: var(--color-light-surface-0);
+  /* CTL-1013: warm-light elevation ladder (same upward direction as dark):
+     chrome darkest-tinted → canvas lighter → cards lightest (raised paper).
+     These per-theme vars feed the theme-aware @theme inline aliases above. */
+  --surface-0: #ece7dd; /* chrome (sidebar/nav/footer), visibly tinted */
+  --surface-1: #faf7f2; /* content canvas */
+  --surface-2: #fffdf9; /* cards / panels / popovers — raised warm paper */
+  --surface-3: #ece7dd; /* raised-inset (code blocks, pills) — tinted chips */
+  --surface-4: #d8d1c2; /* hover / tracks */
+  --border-strong: #ddd5c7;
+  --border-subtle: #e7e1d4; /* hairline card edge on paper */
+  --fg: #2b2722;
+  --fg-muted: #76705f;
+
+  --background: var(--surface-1);
   --foreground: var(--color-light-fg);
-  --card: var(--color-light-surface-1);
+  --card: var(--surface-2);
   --card-foreground: var(--color-light-fg);
-  --popover: var(--color-light-surface-1);
+  --popover: var(--surface-2);
   --popover-foreground: var(--color-light-fg);
   --primary: var(--color-light-accent);
   --primary-foreground: #ffffff;
@@ -129,7 +146,7 @@
   --chart-5: #53cde2;
   --chart-6: #a98ee3;
 
-  --sidebar: var(--color-light-surface-1);
+  --sidebar: var(--surface-0); /* CTL-1013: chrome visibly tinted (#ece7dd) */
   --sidebar-foreground: var(--color-light-fg);
   --sidebar-primary: var(--color-light-accent);
   --sidebar-primary-foreground: #ffffff;
@@ -143,20 +160,34 @@
    exact dark mappings that previously lived on `:root` (CTL-891 / SHELL1),
    now scoped to `.dark` so the toggle can flip between the two themes. */
 .dark {
-  --background: var(--color-surface-0);
+  /* CTL-1013: per-theme dark elevation ladder (feeds the theme-aware @theme inline
+     aliases). Surfaces stack UPWARD: s0 chrome (darkest) → s1 canvas → s2 cards →
+     s3 raised/popover → s4 hover/tracks. Same hexes as before — role reassignment
+     fixes the previous inversion (chrome was lighter than content). */
+  --surface-0: #0e1116; /* chrome (darkest) */
+  --surface-1: #151a21; /* content canvas */
+  --surface-2: #1b212a; /* cards */
+  --surface-3: #242c37; /* raised / popover / pills / code */
+  --surface-4: #2e3845; /* hover / tracks */
+  --border-strong: #333e4d;
+  --border-subtle: #273039;
+  --fg: #edf1f7;
+  --fg-muted: #9ba6b5;
+
+  --background: var(--surface-1); /* CTL-1013: canvas lightens one step (was s0) */
   --foreground: var(--color-fg);
-  --card: var(--color-surface-1);
+  --card: var(--surface-2); /* CTL-1013: cards one step above canvas (was s1) */
   --card-foreground: var(--color-fg);
-  --popover: var(--color-surface-2);
+  --popover: var(--surface-3); /* CTL-1013: popovers float above cards (was s2) */
   --popover-foreground: var(--color-fg);
   --primary: var(--color-accent);
-  --primary-foreground: var(--color-surface-0);
-  --secondary: var(--color-surface-3);
+  --primary-foreground: var(--surface-0);
+  --secondary: var(--surface-3);
   --secondary-foreground: var(--color-fg);
   --muted-foreground: var(--color-muted);
   --accent-foreground: var(--color-fg);
   --destructive: var(--color-red);
-  --input: var(--color-border);
+  --input: var(--border-strong);
   --ring: var(--color-accent);
 
   /* OBS-1: categorical chart palette (same values as :root — the palette is
@@ -168,15 +199,16 @@
   --chart-5: #53cde2;
   --chart-6: #a98ee3;
 
-  /* CTL-891 / SHELL1: sidebar surface — the rail sits one step up from the
-     base surface so the SidebarInset (background) reads as a raised card. */
-  --sidebar: var(--color-surface-1);
+  /* CTL-1013: sidebar/nav is the DARKEST chrome (surface-0); the SidebarInset
+     (background) now sits one step LIGHTER as the content canvas — surfaces stack
+     upward like Linear (was inverted: rail lighter than content). */
+  --sidebar: var(--surface-0); /* chrome darkens to the base shade */
   --sidebar-foreground: var(--color-fg);
   --sidebar-primary: var(--color-accent);
-  --sidebar-primary-foreground: var(--color-surface-0);
-  --sidebar-accent: var(--color-surface-3);
+  --sidebar-primary-foreground: var(--surface-0);
+  --sidebar-accent: var(--surface-2); /* gentler active-item lift on the darker rail */
   --sidebar-accent-foreground: var(--color-fg);
-  --sidebar-border: var(--color-border);
+  --sidebar-border: var(--border-subtle); /* seam already separated by luminance */
   --sidebar-ring: var(--color-accent);
 }
 
@@ -604,4 +636,11 @@ body {
   padding-left: 14px;
   margin: 0.8em 0;
   color: var(--color-muted);
+}
+
+/* CTL-1015: /queue control-tower row hover — soft s1 fill, calm (no border flash).
+   The dispatches-next / bucket rows keep their inline background; this only sets
+   the hover state, so a highlighted row's tint and the hover blend gracefully. */
+.cat-queue-row:hover {
+  background: #151a21;
 }

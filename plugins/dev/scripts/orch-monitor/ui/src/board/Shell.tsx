@@ -588,7 +588,7 @@ export function Shell({
         flexDirection: "column",
         height: "100%",
         minHeight: "100vh",
-        background: C.s0,
+        background: C.s1,
         color: C.fg,
         overflow: "hidden",
       }}

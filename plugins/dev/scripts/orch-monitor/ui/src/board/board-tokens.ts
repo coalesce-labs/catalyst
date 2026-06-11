@@ -7,11 +7,15 @@
 // and the "N active" header). Decorative chrome must never reach for it.
 
 export const C = {
-  s0: "#0e1116",
-  s1: "#151a21",
-  s2: "#1b212a",
-  s3: "#242c37",
-  s4: "#2e3845",
+  // CTL-1013 elevation ladder (dark): surfaces stack UPWARD, darkest → lightest.
+  // s0 = chrome (darkest: sidebar/nav/footer). s1 = content canvas. s2 = cards.
+  // s3 = raised (popovers/pills/code). s4 = hover/tracks (top). Role reassignment,
+  // not a re-ramp — hexes unchanged; chrome-level elements keep s0, content uses s1.
+  s0: "#0e1116", // chrome (darkest)
+  s1: "#151a21", // content canvas
+  s2: "#1b212a", // cards
+  s3: "#242c37", // raised / popover / pills / code
+  s4: "#2e3845", // hover / tracks
   borderSubtle: "#273039",
   border: "#333e4d",
   fg: "#edf1f7",
