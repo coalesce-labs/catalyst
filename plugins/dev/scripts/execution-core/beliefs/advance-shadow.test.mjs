@@ -11,7 +11,14 @@ import { tmpdir } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
 import { evaluateBeliefs } from "./rules.mjs";
-import { runAdvanceShadow, readAdvanceBeliefs, compareAdvancement } from "./advance-shadow.mjs";
+import {
+  runAdvanceShadow,
+  readAdvanceBeliefs,
+  compareAdvancement,
+  readSignalsFromEdb,
+  readVerdictFromEdb,
+  readCycleFromEdb,
+} from "./advance-shadow.mjs";
 import { deriveAdvancement } from "../scheduler.mjs";
 import { REMEDIATE_CYCLE_CAP } from "../../lib/phase-fsm.mjs";
 
@@ -215,6 +222,87 @@ describe("runAdvanceShadow — robustness + no-act contract", () => {
     const summary = events.find((e) => e["event.name"] === "beliefs.advance_shadow.tick");
     expect(summary).toBeTruthy();
     expect(summary.payload).toEqual({ agree: 1, disagree: 0 });
+  });
+});
+
+describe("EDB-backed oracle readers", () => {
+  test("readSignalsFromEdb reconstructs { phase: status } tick-locked", () => {
+    const t = tick();
+    signal(t, "CTL-1", "research", "done");
+    signal(t, "CTL-1", "plan", "running");
+    signal(t, "CTL-2", "plan", "done"); // other ticket — must not leak
+    expect(readSignalsFromEdb(db, t, "CTL-1")).toEqual({ research: "done", plan: "running" });
+  });
+
+  test("readSignalsFromEdb returns {} for unknown tick/ticket and null db", () => {
+    const t = tick();
+    expect(readSignalsFromEdb(db, t, "NOPE")).toEqual({});
+    expect(readSignalsFromEdb(db, 999999, "CTL-1")).toEqual({});
+    expect(readSignalsFromEdb(null, t, "CTL-1")).toEqual({});
+    expect(readSignalsFromEdb(db, null, "CTL-1")).toEqual({});
+  });
+
+  test("readSignalsFromEdb tie-breaks duplicate (tick,ticket,phase) deterministically by MIN(fact_id)", () => {
+    const t = tick();
+    signal(t, "CTL-1", "plan", "running"); // lower fact_id — wins
+    signal(t, "CTL-1", "plan", "done");
+    expect(readSignalsFromEdb(db, t, "CTL-1")).toEqual({ plan: "running" });
+  });
+
+  test("readVerdictFromEdb returns pass/fail and null when no row", () => {
+    const t = tick();
+    verdict(t, "CTL-1", "fail");
+    expect(readVerdictFromEdb(db, t, "CTL-1")).toBe("fail");
+    expect(readVerdictFromEdb(db, t, "CTL-2")).toBe(null);
+    expect(readVerdictFromEdb(null, t, "CTL-1")).toBe(null);
+  });
+
+  test("readCycleFromEdb returns remediate_count, 0 when no row", () => {
+    const t = tick();
+    cycle(t, "CTL-1", 2);
+    expect(readCycleFromEdb(db, t, "CTL-1")).toBe(2);
+    expect(readCycleFromEdb(db, t, "CTL-2")).toBe(0);
+    expect(readCycleFromEdb(null, t, "CTL-1")).toBe(0);
+  });
+});
+
+describe("CTL-1058: input-skew no longer fires a false disagreement", () => {
+  test("EDB says plan=running (no advance_to belief); disk-style stub says plan=done → NO disagreement", () => {
+    const t = tick();
+    // Tick-start snapshot: plan still running → R16 produces NO advance_to belief.
+    signal(t, "CTL-1", "plan", "running");
+    evaluateBeliefs(db, t);
+
+    const events = [];
+    // Wire the EDB-backed readers (production behaviour after this fix) instead of
+    // the in-memory disk stub. Even if disk had since flipped to plan=done, the
+    // oracle reads the tick-locked snapshot → plan=running → agrees with belief.
+    const res = runAdvanceShadow(db, t, {
+      orchDir: "/fake",
+      listInFlight: () => ["CTL-1"],
+      readSignals: (_od, ticket) => readSignalsFromEdb(db, t, ticket),
+      readVerdict: ({ ticket }) => readVerdictFromEdb(db, t, ticket),
+      countCycles: ({ ticket }) => readCycleFromEdb(db, t, ticket),
+      deriveAdvancement,
+      cap: REMEDIATE_CYCLE_CAP,
+      appendEvent: (e) => events.push(e),
+    });
+
+    expect(res.disagree).toBe(0);
+    expect(events.filter((e) => e["event.name"] === "beliefs.advance_shadow.disagree")).toHaveLength(0);
+  });
+
+  test("control: the SAME EDB state with a disk stub returning plan=done DOES disagree (proves the test is load-bearing)", () => {
+    const t = tick();
+    signal(t, "CTL-1", "plan", "running");
+    evaluateBeliefs(db, t);
+
+    const events = [];
+    const res = runAdvanceShadow(db, t, {
+      ...makeSeams({ "CTL-1": { plan: "done" } }, { events }), // OLD disk behaviour
+    });
+
+    expect(res.disagree).toBe(1); // demonstrates the bug the fix removes
   });
 });
 

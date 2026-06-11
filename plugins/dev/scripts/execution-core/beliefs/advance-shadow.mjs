@@ -53,6 +53,47 @@ export function readAdvanceBeliefs(db, tickId) {
   return { advanceTo, cycleExhausted };
 }
 
+// readSignalsFromEdb — reconstruct the { phase: status } map the belief saw for one
+// ticket from the tick-locked obs_signal snapshot. Same shape readPhaseSignals returns,
+// but sourced from the EDB (no live-disk read) → no mid-tick input skew (CTL-1058).
+// Deterministic MIN(fact_id) tie-break on duplicate (tick_id,ticket,phase), matching
+// R16's latest_sig CTE (rules.mjs:632).
+export function readSignalsFromEdb(db, tickId, ticket) {
+  const out = {};
+  if (!db || tickId == null) return out;
+  const rows = db
+    .query(
+      "SELECT phase, status FROM obs_signal WHERE tick_id = ? AND ticket = ? ORDER BY fact_id ASC",
+    )
+    .all(tickId, ticket);
+  for (const r of rows) {
+    if (!Object.prototype.hasOwnProperty.call(out, r.phase)) {
+      out[r.phase] = r.status ?? null; // first (MIN fact_id) wins
+    }
+  }
+  return out;
+}
+
+// readVerdictFromEdb — the verify verdict the belief saw for one ticket, from the
+// tick-locked obs_verdict snapshot. Null verdicts have no row ⇒ return null.
+export function readVerdictFromEdb(db, tickId, ticket) {
+  if (!db || tickId == null) return null;
+  const row = db
+    .query("SELECT verdict FROM obs_verdict WHERE tick_id = ? AND ticket = ? LIMIT 1")
+    .get(tickId, ticket);
+  return row?.verdict ?? null;
+}
+
+// readCycleFromEdb — the remediate cycle count the belief saw for one ticket, from the
+// tick-locked obs_cycle snapshot. No row ⇒ 0 (count=0 is normally inserted, but stay safe).
+export function readCycleFromEdb(db, tickId, ticket) {
+  if (!db || tickId == null) return 0;
+  const row = db
+    .query("SELECT remediate_count FROM obs_cycle WHERE tick_id = ? AND ticket = ? LIMIT 1")
+    .get(tickId, ticket);
+  return row?.remediate_count ?? 0;
+}
+
 // signalsSummary — a compact { phase: status } map for the disagreement payload.
 function signalsSummary(signals) {
   const out = {};
