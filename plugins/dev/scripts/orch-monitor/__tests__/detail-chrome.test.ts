@@ -152,7 +152,8 @@ describe("resolveLiveDot — cyan reserved to working && active", () => {
     expect(dot.kind).toBe("live");
     if (dot.kind === "live") {
       expect(dot.color).toBe(LIVE_CYAN);
-      expect(dot.color).toBe("#5be0ff");
+      // CTL-1033: LIVE_CYAN is now the canonical LIVE token (#53cde2).
+      expect(dot.color).toBe("#53cde2");
       expect(dot.breathing).toBe(true);
     }
   });
@@ -162,7 +163,8 @@ describe("resolveLiveDot — cyan reserved to working && active", () => {
     expect(dot.kind).toBe("stuck");
     if (dot.kind === "stuck") {
       expect(dot.color).toBe(STUCK_RED);
-      expect(dot.color).toBe("#ef5d5d");
+      // CTL-1033: STUCK_RED is now the canonical C.red token (#e36b6b).
+      expect(dot.color).toBe("#e36b6b");
       expect(dot.breathing).toBe(false);
     }
   });
@@ -177,7 +179,8 @@ describe("resolveLiveDot — cyan reserved to working && active", () => {
   });
 
   it("the chrome's non-live accents are blue, NEVER the cyan live token", () => {
-    expect(CHROME_BLUE).toBe("#4ea1ff");
+    // CTL-1033: CHROME_BLUE is now the canonical C.blue token (#5e9ee8).
+    expect(CHROME_BLUE).toBe("#5e9ee8");
     expect(CHROME_BLUE).not.toBe(LIVE_CYAN);
   });
 });

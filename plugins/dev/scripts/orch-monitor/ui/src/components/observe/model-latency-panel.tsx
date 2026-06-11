@@ -90,7 +90,7 @@ export function ModelLatencyPanel({ rows, onSelectModel }: ModelLatencyPanelProp
         <span>model · p50 · p95</span>
         <span>error%</span>
       </div>
-      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-0">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-2">
         {rows.map((row) => (
           <ModelRow
             key={row.model}

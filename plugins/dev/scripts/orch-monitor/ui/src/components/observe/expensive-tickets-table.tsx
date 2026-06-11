@@ -133,8 +133,10 @@ export function ExpensiveTicketsTable({
     }
   }
 
+  // CTL-1033 component-surface standard: the table BODY sits on the PANEL surface
+  // (card), not below it — was bg-surface-0 → darker than its panel header.
   return (
-    <ScrollArea className="h-full min-h-0 rounded-md border border-border bg-surface-0">
+    <ScrollArea className="h-full min-h-0 rounded-md border border-border bg-surface-2">
       <Table className="text-[12px]">
         <TableHeader>
           <TableRow className="border-border/60 hover:bg-transparent">

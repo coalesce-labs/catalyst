@@ -16,6 +16,7 @@
 // (unit-tested); this component is the fetch + the skin.
 
 import { useEffect, useState } from "react";
+import { C } from "./board-tokens";
 import {
   resolveSubagentOrchId,
   countSubagents,
@@ -25,15 +26,6 @@ import {
   type SubagentsResponse,
 } from "./subagent-data";
 
-const C = {
-  s2: "#161a21",
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 type FetchState =
   | { kind: "idle" }

@@ -16,6 +16,7 @@
 // Dependencies card is omitted when there is no resident ticket / payload).
 
 import { useState, type ReactNode } from "react";
+import { C } from "./board-tokens";
 import { Link } from "@tanstack/react-router";
 import { Box, ChevronDown, ChevronsUpDown } from "lucide-react";
 import {
@@ -47,14 +48,6 @@ import type {
   LinearTicketState,
 } from "@/components/use-linear-ticket";
 
-const C = {
-  s1: "#111318",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 const PRIORITY_LABEL = ["No priority", "Urgent", "High", "Medium", "Low"];
 

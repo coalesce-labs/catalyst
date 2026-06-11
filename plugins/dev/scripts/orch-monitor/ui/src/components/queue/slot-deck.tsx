@@ -5,7 +5,7 @@
 // here (assignSlots excludes them). Plain data props only — no snapshot hook, no
 // router — so CTL-1016's Workers surface can mount it with its own payload slice.
 import { AnimatePresence, motion } from "motion/react";
-import { C, LIVE, PHASE } from "../../board/board-tokens";
+import { C, LIVE, PHASE, CARD_LIFT } from "../../board/board-tokens";
 import {
   EntityMarker,
 } from "../../board/entity-marker";
@@ -70,6 +70,7 @@ function OccupiedCard({
         borderRadius: 10,
         padding: "10px 12px",
         minHeight: 96,
+        boxShadow: CARD_LIFT, // CTL-1033: control-tower slot cards float off the canvas
         cursor: onOpenTicket ? "pointer" : "default",
       }}
     >

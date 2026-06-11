@@ -143,7 +143,7 @@ export function SettingsSurface() {
   const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
 
   return (
-    <div className="h-full min-h-0 overflow-y-auto bg-surface-0">
+    <div className="h-full min-h-0 overflow-y-auto bg-surface-1">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-5 py-6">
         <header>
           <h1 className="text-lg font-semibold text-fg">Settings</h1>

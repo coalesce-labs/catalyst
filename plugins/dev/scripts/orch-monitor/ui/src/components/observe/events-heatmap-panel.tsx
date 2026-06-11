@@ -65,7 +65,7 @@ export function EventsHeatmapPanel({
         </span>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border bg-surface-0 p-2">
+      <div className="min-h-0 flex-1 overflow-auto rounded-md border border-border bg-surface-2 p-2">
         <div className="flex flex-col gap-1">
           {model.rows.map((row) => (
             <div

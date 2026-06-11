@@ -19,6 +19,7 @@
 // The raw SignalPanel below this (in the body) is the always-available escape hatch.
 
 import { useEffect, useState } from "react";
+import { C } from "./board-tokens";
 import { Link } from "@tanstack/react-router";
 import type { BoardTicket } from "./types";
 import type { DetailSearch } from "./route-search";
@@ -31,17 +32,6 @@ import {
   type PhaseSectionKind,
 } from "./phase-outcome-data";
 
-const C = {
-  s2: "#161a21",
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 // ── artifacts (the research/plan doc preview) ────────────────────────────────
 interface TicketArtifact {
