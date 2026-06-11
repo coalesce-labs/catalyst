@@ -108,7 +108,7 @@ describe("pickBestCandidate", () => {
     const cands = [mk("unknown-a.svg"), mk("unknown-b.svg")];
     const result = pickBestCandidate(cands);
     expect(result).not.toBeNull();
-    expect(["unknown-a.svg", "unknown-b.svg"]).toContain(result?.path);
+    expect(["unknown-a.svg", "unknown-b.svg"]).toContain(result?.path ?? "");
   });
 });
 
