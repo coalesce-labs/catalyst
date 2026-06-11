@@ -158,9 +158,16 @@ export function activePhaseForTicket(signals) {
 //                                             without OS/socket reboot. Resuming
 //                                             here is exactly Scenario 1.
 //   • report.daemonBounce === true          — explicit override seam.
-// An OS-warm, non-bounce object ({ coldStart: false, epochSource: "os-boot" })
-// stays a no-op — honoring Scenario 1's "solely because the daemon restarted":
-// only genuine cold starts / bounces are eligible.
+// PRODUCTION REALITY (review finding, CTL-1006): on current detectColdStart
+// behavior the exec-core epoch wins on effectively every daemon start, so in
+// practice every production start — cold or bounce — is ELIGIBLE. That is the
+// intended Scenario-1 posture: boot-resume reconciles in-flight tickets on
+// every start. Scenario 4's "chronic failures stay escalated" is therefore
+// carried NOT by this predicate but by the explicit guards downstream: the
+// needs-human marker skip in selectBootResumeCandidates and the
+// expensive-phase .boot-resume-pending-approval gate. A non-eligible object
+// shape (e.g. { coldStart: false, epochSource: "os-boot" }) remains a no-op
+// for synthetic/test inputs and any future detectColdStart change.
 export function isBootResumeEligible(report) {
   if (!report) return false;
   const cs = report.coldStart;
@@ -281,11 +288,28 @@ export function selectBootResumeCandidates({
       );
       continue;
     }
+    // CTL-1006 Scenario 4 (chronic-failure invariant): a ticket the escalation
+    // path already flagged needs-human must NOT be silently auto-resumed by a
+    // bounce — with boot-resume now actually running in production, eligibility
+    // alone no longer carries this invariant. The marker is the same one
+    // label-guard writes (workers/<T>/.linear-label-needs-human.applied); the
+    // operator clears it (with the label) when re-arming a ticket.
+    if (existsSync(join(orchDir, "workers", ticket, ".linear-label-needs-human.applied"))) {
+      logger.warn(
+        { ticket, phase: active.phase },
+        "boot-resume: ticket is escalated to needs-human — not auto-resuming, operator owns re-arm"
+      );
+      continue;
+    }
     // CTL-1006 Scenario 2: phase-regression guard. activePhaseForTicket is
-    // recency-ranked, so a stale earlier phase left non-terminal (triage=running)
-    // can shadow a later terminal phase (research=stalled). Re-dispatching the
-    // earlier phase would be the CTL-997/998 regression — drop the candidate and
-    // surface a phase_regression observation instead.
+    // recency-ranked, so a stale earlier phase left non-terminal can shadow a
+    // later TERMINAL phase. Re-dispatching the earlier phase would be the
+    // CTL-997/998 regression class — drop the candidate and surface a
+    // phase_regression observation instead. (NOTE: the literal CTL-997/998
+    // fixture — research=stalled + triage=running — is already excluded
+    // upstream by isTicketInFlight, which drops tickets with stalled/failed
+    // phases; this guard is defense-in-depth for the in-flight variant: a
+    // later phase terminal-done shadowed by a stale earlier non-terminal one.)
     const dominant = supersededByTerminalPhase(allByTicket.get(ticket) ?? [], active.phase);
     if (dominant) {
       onPhaseRegression({ ticket, phase: active.phase, dominantPhase: dominant });

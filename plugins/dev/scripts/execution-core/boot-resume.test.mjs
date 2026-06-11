@@ -1059,6 +1059,34 @@ describe("selectBootResumeCandidates — phase-regression guard (CTL-1006)", () 
     expect(observed).toEqual([]);
   });
 
+  // CTL-1006 Scenario 4 (review HIGH finding): with boot-resume now actually
+  // running in production, an already-escalated needs-human ticket must not be
+  // silently auto-resumed on a bounce — the chronic-failure invariant is
+  // carried by this marker skip, not by eligibility.
+  test("escalated needs-human ticket is NOT auto-resumed (marker skip)", () => {
+    writeSignal(orchDir, "CTL-996", "implement", {
+      status: "running",
+      worktreePath: "/wt/CTL-996",
+      updatedAt: "2026-05-27T04:00:00Z",
+    });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-996", ".linear-label-needs-human.applied"),
+      "applied\n"
+    );
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => c.ticket)).not.toContain("CTL-996");
+  });
+
+  test("clearing the needs-human marker re-arms the ticket for resume", () => {
+    writeSignal(orchDir, "CTL-996", "implement", {
+      status: "running",
+      worktreePath: "/wt/CTL-996",
+      updatedAt: "2026-05-27T04:00:00Z",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => c.ticket)).toContain("CTL-996");
+  });
+
   test("negative control: forward resume — implement=running with earlier phases done ⇒ selected", () => {
     writeSignal(orchDir, "CTL-999", "triage", { status: "done", worktreePath: "/wt/CTL-999" });
     writeSignal(orchDir, "CTL-999", "research", { status: "done", worktreePath: "/wt/CTL-999" });
