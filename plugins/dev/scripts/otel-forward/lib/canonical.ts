@@ -1,4 +1,5 @@
 import type { CanonicalEvent } from "../../orch-monitor/lib/canonical-event.ts";
+import { hostName, hostId } from "../../orch-monitor/lib/canonical-event-shared.ts";
 
 // Shared canonical-envelope builder for in-process event emission.
 // Mirrors the structure of broker/router.mjs:buildCanonicalEnvelope so all
@@ -43,8 +44,10 @@ export function buildCanonicalEnvelope(opts: BuildOpts): CanonicalEvent {
     spanId: null,
     resource: {
       "service.name": opts.serviceName,
-      "service.namespace": opts.serviceNamespace ?? "catalyst",
+      "service.namespace": "catalyst" as const,
       "service.version": opts.serviceVersion ?? "0.0.0",
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     attributes: {
       "event.name": opts.eventName,

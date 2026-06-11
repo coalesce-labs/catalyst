@@ -10,11 +10,18 @@ describe("checkpoint persists real read offset (CTL-766)", () => {
     const dir = mkdtempSync(join(tmpdir(), "ckoff-"));
     const file = join(dir, "2026-05.jsonl");
     const ckPath = join(dir, "otel-forward.checkpoint.json");
-    const line = JSON.stringify({ ts: "2026-05-08T00:00:01Z", attributes: { "event.name": "t" } }) + "\n";
+    const line =
+      JSON.stringify({ ts: "2026-05-08T00:00:01Z", attributes: { "event.name": "t" } }) + "\n";
     writeFileSync(file, line);
 
     const ac = new AbortController();
-    const tailer = createTailer({ filePath: file, offset: 0, onLine: () => {}, signal: ac.signal, pollMs: 10 });
+    const tailer = createTailer({
+      filePath: file,
+      offset: 0,
+      onLine: () => {},
+      signal: ac.signal,
+      pollMs: 10,
+    });
     await tailer.drain();
     ac.abort();
 
@@ -31,8 +38,25 @@ describe("checkpoint persists real read offset (CTL-766)", () => {
 describe("daemon integration", () => {
   test("processLine normalizes flat reap-intent lines and counts them as processed", async () => {
     const mod = await import("./index.ts");
-    const flatLine = JSON.stringify({ ts: "2026-05-08T00:00:00Z", event: "phase.terminal.reap-requested", ticket: "CTL-1008" });
-    const canonicalLine = JSON.stringify({ ts: "2026-05-08T00:00:01Z", attributes: { "event.name": "t" }, resource: { "service.name": "s", "service.namespace": "catalyst", "service.version": "1.0.0" }, severityText: "INFO", severityNumber: 9, traceId: null, spanId: null, body: {} });
+    const flatLine = JSON.stringify({
+      ts: "2026-05-08T00:00:00Z",
+      event: "phase.terminal.reap-requested",
+      ticket: "CTL-1008",
+    });
+    const canonicalLine = JSON.stringify({
+      ts: "2026-05-08T00:00:01Z",
+      attributes: { "event.name": "t" },
+      resource: {
+        "service.name": "s",
+        "service.namespace": "catalyst",
+        "service.version": "1.0.0",
+      },
+      severityText: "INFO",
+      severityNumber: 9,
+      traceId: null,
+      spanId: null,
+      body: {},
+    });
 
     const statsBefore = mod.getStats();
     mod.processLine(flatLine);
@@ -60,7 +84,10 @@ describe("daemon integration", () => {
 
   test("processLine normalized flat event has correct service.name and event.name in buffer", async () => {
     const mod = await import("./index.ts");
-    const flatLine = JSON.stringify({ ts: "2026-05-08T00:00:01Z", event: "worktree.cleanup-deferred" });
+    const flatLine = JSON.stringify({
+      ts: "2026-05-08T00:00:01Z",
+      event: "worktree.cleanup-deferred",
+    });
 
     // We verify by calling processLine and checking stats; the buffer contents
     // are tested at the normalize.ts unit level

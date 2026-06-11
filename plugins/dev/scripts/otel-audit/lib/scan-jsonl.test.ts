@@ -10,11 +10,39 @@ describe("scanJsonlFile", () => {
     const file = join(dir, "2026-06.jsonl");
     const lines = [
       // canonical
-      JSON.stringify({ ts: "2026-06-01T00:00:00Z", id: "1", attributes: { "event.name": "node.heartbeat" }, resource: {}, severityText: "INFO", severityNumber: 9, traceId: null, spanId: null, body: {} }),
-      JSON.stringify({ ts: "2026-06-01T00:00:01Z", id: "2", attributes: { "event.name": "node.heartbeat" }, resource: {}, severityText: "INFO", severityNumber: 9, traceId: null, spanId: null, body: {} }),
+      JSON.stringify({
+        ts: "2026-06-01T00:00:00Z",
+        id: "1",
+        attributes: { "event.name": "node.heartbeat" },
+        resource: {},
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: null,
+        spanId: null,
+        body: {},
+      }),
+      JSON.stringify({
+        ts: "2026-06-01T00:00:01Z",
+        id: "2",
+        attributes: { "event.name": "node.heartbeat" },
+        resource: {},
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: null,
+        spanId: null,
+        body: {},
+      }),
       // flat reap-intent
-      JSON.stringify({ ts: "2026-06-01T00:00:02Z", event: "phase.terminal.reap-requested", ticket: "CTL-1008" }),
-      JSON.stringify({ ts: "2026-06-01T00:00:03Z", event: "phase.terminal.reap-requested", ticket: "CTL-1009" }),
+      JSON.stringify({
+        ts: "2026-06-01T00:00:02Z",
+        event: "phase.terminal.reap-requested",
+        ticket: "CTL-1008",
+      }),
+      JSON.stringify({
+        ts: "2026-06-01T00:00:03Z",
+        event: "phase.terminal.reap-requested",
+        ticket: "CTL-1009",
+      }),
       JSON.stringify({ ts: "2026-06-01T00:00:04Z", event: "worktree.cleanup-deferred" }),
       // malformed — should be tolerated
       "not-json{{{",

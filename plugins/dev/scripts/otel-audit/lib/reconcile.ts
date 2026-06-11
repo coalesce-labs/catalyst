@@ -25,7 +25,7 @@ export function normalizeEventName(name: string): string {
 export function reconcile(
   jsonlCounts: Map<string, number>,
   lokiCounts: Map<string, number>,
-  opts: ReconcileOpts = {},
+  opts: ReconcileOpts = {}
 ): ReconcileRow[] {
   const lagTolerancePct = opts.lagTolerancePct ?? 10;
   const rows: ReconcileRow[] = [];

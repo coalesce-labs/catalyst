@@ -8,7 +8,10 @@ import { buildCanonicalEnvelope } from "../canonical.ts";
 
 const destLog = log.child({ destination: "otlp" });
 
-interface OtlpAttr { key: string; value: { stringValue?: string; intValue?: number; doubleValue?: number } }
+interface OtlpAttr {
+  key: string;
+  value: { stringValue?: string; intValue?: number; doubleValue?: number };
+}
 
 // CTL-812: fractional numbers MUST map to doubleValue. The collector's OTLP/JSON
 // decoder hard-rejects a float inside intValue ("assertInteger: can not decode
@@ -29,22 +32,28 @@ function toAttrArray(obj: Record<string, unknown>): OtlpAttr[] {
 export function buildOtlpPayload(events: CanonicalEvent[]): unknown {
   return {
     resourceLogs: events.map((ev) => ({
-      resource: { attributes: toAttrArray((ev.resource as unknown as Record<string, unknown>) ?? {}) },
-      scopeLogs: [{
-        scope: { name: "catalyst.otel-forward" },
-        logRecords: [{
-          timeUnixNano: Date.parse(ev.ts) * 1_000_000,
-          observedTimeUnixNano: Date.parse(ev.observedTs ?? ev.ts) * 1_000_000,
-          severityNumber: ev.severityNumber,
-          severityText: ev.severityText,
-          ...(ev.traceId ? { traceId: ev.traceId } : {}),
-          ...(ev.spanId ? { spanId: ev.spanId } : {}),
-          // CTL-344: per-event UUID maps to OTel LogRecord.logRecordUid.
-          ...(ev.id ? { logRecordUid: ev.id } : {}),
-          body: { stringValue: ev.body?.message ?? ev.attributes?.["event.name"] ?? "" },
-          attributes: toAttrArray((ev.attributes as unknown as Record<string, unknown>) ?? {}),
-        }],
-      }],
+      resource: {
+        attributes: toAttrArray((ev.resource as unknown as Record<string, unknown>) ?? {}),
+      },
+      scopeLogs: [
+        {
+          scope: { name: "catalyst.otel-forward" },
+          logRecords: [
+            {
+              timeUnixNano: Date.parse(ev.ts) * 1_000_000,
+              observedTimeUnixNano: Date.parse(ev.observedTs ?? ev.ts) * 1_000_000,
+              severityNumber: ev.severityNumber,
+              severityText: ev.severityText,
+              ...(ev.traceId ? { traceId: ev.traceId } : {}),
+              ...(ev.spanId ? { spanId: ev.spanId } : {}),
+              // CTL-344: per-event UUID maps to OTel LogRecord.logRecordUid.
+              ...(ev.id ? { logRecordUid: ev.id } : {}),
+              body: { stringValue: ev.body?.message ?? ev.attributes?.["event.name"] ?? "" },
+              attributes: toAttrArray((ev.attributes as unknown as Record<string, unknown>) ?? {}),
+            },
+          ],
+        },
+      ],
     })),
   };
 }
@@ -63,7 +72,7 @@ export interface OtlpSenderOpts {
 // at most one failure-event per failed batch, and failure of that event's
 // own flush does not spawn another.
 function isSelfBatch(batch: CanonicalEvent[]): boolean {
-  return batch.every(ev => ev.resource?.["service.name"] === "catalyst.otel-forward");
+  return batch.every((ev) => ev.resource?.["service.name"] === "catalyst.otel-forward");
 }
 
 export class OtlpSender {
@@ -73,23 +82,27 @@ export class OtlpSender {
     const url = `${this.opts.endpoint.replace(/:4317/, ":4318").replace(/\/$/, "")}/v1/logs`;
     const retryDelays = this.opts.retryDelaysMs ?? [...DEFAULT_RETRY_DELAYS_MS];
     try {
-      await withRetry(async () => {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildOtlpPayload(batch)),
-          signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
-        });
-        if (!res.ok) throw new Error(`OTLP HTTP ${res.status}`);
-        for (const dlqBatch of drainDlq(this.opts.dlqPath)) {
-          await this.flush(dlqBatch as CanonicalEvent[]);
-        }
-      }, 3, retryDelays);
+      await withRetry(
+        async () => {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildOtlpPayload(batch)),
+            signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
+          });
+          if (!res.ok) throw new Error(`OTLP HTTP ${res.status}`);
+          for (const dlqBatch of drainDlq(this.opts.dlqPath)) {
+            await this.flush(dlqBatch as CanonicalEvent[]);
+          }
+        },
+        3,
+        retryDelays
+      );
     } catch (err) {
       appendToDlq(this.opts.dlqPath, batch);
       destLog.error(
         { batchSize: batch.length, err: err instanceof Error ? err.message : String(err) },
-        "flush failed, wrote events to DLQ",
+        "flush failed, wrote events to DLQ"
       );
       // CTL-1008 Phase 4: emit a canonical forward_failed event for subscriber visibility.
       // Loop guard: skip if the failed batch is already self-emitted failure events to

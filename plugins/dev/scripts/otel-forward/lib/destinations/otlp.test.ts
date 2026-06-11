@@ -13,7 +13,13 @@ const SAMPLE_EVENT: CanonicalEvent = {
   severityNumber: 9,
   traceId: "3c9646213b6ef69ae96bf35ac676db11",
   spanId: "e63ffe96eec0a8ae",
-  resource: { "service.name": "catalyst.session", "service.namespace": "catalyst", "service.version": "8.2.0" },
+  resource: {
+    "service.name": "catalyst.session",
+    "service.namespace": "catalyst" as const,
+    "service.version": "8.2.0",
+    "host.name": "test-host",
+    "host.id": "test-id-0000",
+  },
   attributes: { "event.name": "session.heartbeat", "catalyst.session.id": "sess_123" },
   body: { message: "heartbeat", payload: null },
 };
@@ -47,7 +53,7 @@ describe("buildOtlpPayload", () => {
       ...SAMPLE_EVENT,
       resource: {
         ...SAMPLE_EVENT.resource,
-        "project": "catalyst-workspace",
+        project: "catalyst-workspace",
         "linear.key": "CTL-636",
         "catalyst.orchestration": "CTL-636",
       },
@@ -70,7 +76,10 @@ describe("buildOtlpPayload", () => {
   });
 
   test("maps integer attributes to intValue", () => {
-    const event: CanonicalEvent = { ...SAMPLE_EVENT, attributes: { "event.name": "test", "vcs.pr.number": 42 } };
+    const event: CanonicalEvent = {
+      ...SAMPLE_EVENT,
+      attributes: { "event.name": "test", "vcs.pr.number": 42 },
+    };
     const payload = buildOtlpPayload([event]) as any;
     const attrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
     const prNum = attrs.find((a: any) => a.key === "vcs.pr.number");
@@ -82,7 +91,7 @@ describe("buildOtlpPayload", () => {
     // ("assertInteger: can not decode float as int" → HTTP 400) and the whole
     // batch dead-letters. catalyst-agent metrics (host.cpu_pct, ratelimit
     // paces) are fractional, so they MUST ride as doubleValue.
-    const event: CanonicalEvent = {
+    const event = {
       ...SAMPLE_EVENT,
       attributes: {
         "event.name": "host.metrics.sampled",
@@ -90,7 +99,7 @@ describe("buildOtlpPayload", () => {
         "host.load1": 6.02,
         "ratelimit.seven_day_pace": -0.344,
       },
-    };
+    } as unknown as CanonicalEvent;
     const payload = buildOtlpPayload([event]) as any;
     const attrs = payload.resourceLogs[0].scopeLogs[0].logRecords[0].attributes;
     const get = (k: string) => attrs.find((a: any) => a.key === k)?.value;
@@ -119,20 +128,29 @@ describe("buildOtlpPayload", () => {
 
 describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "otlp-fail-test-")); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "otlp-fail-test-"));
+  });
 
   function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
     return { ...SAMPLE_EVENT, ...overrides };
   }
 
   test("appends a forward_failed canonical event after all retries exhausted", async () => {
-    global.fetch = mock(() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
+    global.fetch = mock(() =>
+      Promise.reject(new Error("connection refused"))
+    ) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const eventLogPath = join(dir, "events.jsonl");
     const dlqPath = join(dir, "dlq.jsonl");
 
-    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:1", dlqPath, eventLogPath, retryDelaysMs: [0, 0, 0] });
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      eventLogPath,
+      retryDelaysMs: [0, 0, 0],
+    });
     await sender.flush([makeEvent()]);
 
     expect(existsSync(eventLogPath)).toBe(true);
@@ -147,19 +165,34 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
   });
 
   test("does NOT emit failure event for a batch of forward_failed events (loop guard)", async () => {
-    global.fetch = mock(() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
+    global.fetch = mock(() =>
+      Promise.reject(new Error("connection refused"))
+    ) as unknown as typeof fetch;
 
     const { OtlpSender } = await import("./otlp.ts");
     const eventLogPath = join(dir, "events2.jsonl");
     const dlqPath = join(dir, "dlq2.jsonl");
 
-    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:1", dlqPath, eventLogPath, retryDelaysMs: [0, 0, 0] });
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      eventLogPath,
+      retryDelaysMs: [0, 0, 0],
+    });
 
     // Batch that already consists of forward_failed events
-    const failureBatch = [makeEvent({
-      resource: { "service.name": "catalyst.otel-forward", "service.namespace": "catalyst", "service.version": "1.0.0" },
-      attributes: { "event.name": "catalyst.observability.forward_failed" },
-    })];
+    const failureBatch = [
+      makeEvent({
+        resource: {
+          "service.name": "catalyst.otel-forward",
+          "service.namespace": "catalyst" as const,
+          "service.version": "1.0.0",
+          "host.name": "test-host",
+          "host.id": "test-id",
+        },
+        attributes: { "event.name": "catalyst.observability.forward_failed" },
+      }),
+    ];
 
     await sender.flush(failureBatch);
 

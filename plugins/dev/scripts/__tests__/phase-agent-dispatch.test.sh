@@ -990,9 +990,11 @@ seed_local_plan_commit
 (cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
 	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
 SIGNAL="${WORKER_DIR}/phase-implement.json"
-LOG_PRESENT="no"; [[ -s $CLAUDE_STUB_LOG ]] && LOG_PRESENT="yes"
+LOG_PRESENT="no"
+[[ -s $CLAUDE_STUB_LOG ]] && LOG_PRESENT="yes"
 assert_eq "yes" "$LOG_PRESENT" "clean rebase: claude --bg WAS invoked"
-BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+BASE_PRESENT="no"
+[[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "clean rebase: worktree HEAD now carries the new origin/main commit"
 assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "clean rebase: signal is the normal launched status (not stalled)"
 
@@ -1014,7 +1016,8 @@ ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 RC29=$?
 SIGNAL="${WORKER_DIR}/phase-implement.json"
 assert_eq "1" "$RC29" "conflict park: dispatcher exits 1"
-CLAUDE_INVOKED="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
+CLAUDE_INVOKED="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
 assert_eq "no" "$CLAUDE_INVOKED" "conflict park: claude --bg was NOT invoked"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "conflict park: signal status = stalled"
 assert_eq "source_conflict_ctl708_unavailable" "$(jq -r '.failureReason' "$SIGNAL")" \
@@ -1096,7 +1099,8 @@ printf '{"committed":false,"dirty":true}\n' >"${GWORK}/.catalyst/config.json"
 assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "noise: dispatch still launched (clean rebase)"
 assert_eq '{"committed":false,"dirty":true}' "$(cat "${GWORK}/.catalyst/config.json")" \
 	"noise: dirty .catalyst/config.json content intact after the rebase"
-BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+BASE_PRESENT="no"
+[[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "noise: rebase still advanced onto the new base"
 
 # ─── Test 34 (CTL-689): machine-level config fallback resolves keys absent from
@@ -1360,7 +1364,7 @@ LOG38="$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")"
 assert_not_contains "$LOG38" "--resume" "recreate: no --resume-session in claude invocation"
 # New worktree HEAD should differ from original (recreated from origin/main).
 NEW_HEAD="$(cd "$GWORK" && git rev-parse HEAD 2>/dev/null || echo missing)"
-assert_eq "yes" "$([[ "$NEW_HEAD" != "$ORIG_HEAD" ]] && echo yes || echo no)" \
+assert_eq "yes" "$([[ $NEW_HEAD != "$ORIG_HEAD" ]] && echo yes || echo no)" \
 	"recreate: worktree HEAD changed (recreated from origin/main)"
 unset CATALYST_DIR
 unset CATALYST_RECREATE_WORKTREE_DIR
@@ -1419,7 +1423,7 @@ IDEMPOTENT_COUNT=0
 for f in "${TEST_DIR}/c1.out" "${TEST_DIR}/c2.out"; do
 	S=$(jq -r '.status // empty' "$f" 2>/dev/null || echo "")
 	[[ $S == "running" ]] && RUNNING_COUNT=$((RUNNING_COUNT + 1))
-	[[ "$(jq -r '.idempotent // false' "$f" 2>/dev/null || echo false)" == "true" ]] && \
+	[[ "$(jq -r '.idempotent // false' "$f" 2>/dev/null || echo false)" == "true" ]] &&
 		IDEMPOTENT_COUNT=$((IDEMPOTENT_COUNT + 1))
 done
 assert_eq "1" "$RUNNING_COUNT" "exactly one dispatch reports status=running (the winner)"
@@ -1462,7 +1466,7 @@ assert_eq "no" "$([[ -e "${WORKER_DIR}/triage.claim.2" ]] && echo yes || echo no
 	"fresh dispatch did NOT advance to gen 2 (proves target is fixed, not high-water+1)"
 assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo no)" \
 	"loser writes no signal file (bows out before the signal write)"
-assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
 
 # ─── CTL-837: pre-spawn orphan claim is GC'd; live/young claims still bow out ──
 # A dispatcher that O_EXCL-created <phase>.claim.1 then DIED before writing the
@@ -1487,13 +1491,13 @@ SIGNAL="${WORKER_DIR}/phase-triage.json"
 assert_eq "0" "$RC43B" "orphan-reap dispatch exits 0"
 assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
 	"orphan-reap dispatch proceeds to spawn (status=running, NOT claim-lost)"
-assert_eq "yes" "$([[ -f "$SIGNAL" ]] && echo yes || echo no)" \
+assert_eq "yes" "$([[ -f $SIGNAL ]] && echo yes || echo no)" \
 	"orphan-reap dispatch writes the signal file (the wedge is cleared)"
 assert_eq "running" "$(jq -r '.status' "$SIGNAL" 2>/dev/null || echo missing)" \
 	"orphan-reap signal reaches status=running"
 assert_eq "1" "$(jq -r '.generation' "$SIGNAL" 2>/dev/null || echo missing)" \
 	"orphan-reap keeps the FIXED generation 1 (does not advance off high-water mark)"
-assert_eq "yes" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
 	"orphan-reap dispatch DID spawn claude --bg"
 
 echo ""
@@ -1514,7 +1518,7 @@ RC43C=$?
 # claim. Assert on the no-spawn + claim-survival invariant, which holds for both
 # the status short-circuit and the claim-lost branch.
 assert_eq "0" "$RC43C" "claim-with-signal dispatch exits 0 (no-op)"
-assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
 	"claim-with-signal dispatch did NOT spawn a duplicate worker (single-flight)"
 assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
 	"claim-with-signal: orphan-GC did NOT delete a claim that has a live signal"
@@ -1540,7 +1544,7 @@ RC43C2=$?
 assert_eq "0" "$RC43C2" "revive-orphan dispatch exits 0"
 assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
 	"revive-orphan is reaped → dispatch proceeds (status=running, NOT claim-lost)"
-assert_eq "yes" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
 	"revive-orphan dispatch DID spawn claude --bg (the gen-2 wedge is cleared)"
 assert_eq "2" "$(jq -r '.generation' "${WORKER_DIR}/phase-triage.json")" \
 	"revive-orphan: signal rewritten at the revive generation 2 (authoritative source)"
@@ -1577,7 +1581,7 @@ RC43D=$?
 assert_eq "0" "$RC43D" "young-orphan dispatch exits 0"
 assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" \
 	"young-orphan dispatch bows out as claim-lost (within grace → don't reap a just-won claim)"
-assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" \
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
 	"young-orphan dispatch did NOT spawn claude --bg"
 assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
 	"young-orphan claim survives (a just-won claim is not reaped)"
@@ -1931,7 +1935,8 @@ ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 RC61=$?
 SIGNAL="${WORKER_DIR}/phase-research.json"
 assert_eq "1" "$RC61" "recreate guard: dispatcher exits 1 (parked, not exec-looped)"
-CLAUDE61="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE61="yes"
+CLAUDE61="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE61="yes"
 assert_eq "no" "$CLAUDE61" "recreate guard: claude --bg was NOT invoked"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "recreate guard: signal status = stalled"
 NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
@@ -1954,7 +1959,8 @@ printf 'uncommitted-dirty-edit\n' >"${GWORK}/shared.txt"
 RC62=$?
 SIGNAL="${WORKER_DIR}/phase-implement.json"
 assert_eq "1" "$RC62" "precheck park: dispatcher exits 1"
-CLAUDE62="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE62="yes"
+CLAUDE62="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE62="yes"
 assert_eq "no" "$CLAUDE62" "precheck park: claude --bg was NOT invoked"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "precheck park: signal status = stalled"
 assert_eq "rebase_refused_dirty_tree" "$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)" \
@@ -1976,9 +1982,9 @@ cat >"${CONFIG_DIR}/config.json" <<'EOF'
 EOF
 DRY63=$(cd "${TEST_DIR}/proj" &&
 	CATALYST_DISPATCH_MODE=execution-core \
-	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL63="$(echo "$DRY63" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
-if [[ "$OTEL63" == *"catalyst.dispatch_mode=execution-core"* ]]; then
+if [[ $OTEL63 == *"catalyst.dispatch_mode=execution-core"* ]]; then
 	pass "catalyst.dispatch_mode=execution-core present when CATALYST_DISPATCH_MODE set"
 else
 	fail "catalyst.dispatch_mode=execution-core MISSING from OTEL attrs: $OTEL63"
@@ -1998,7 +2004,7 @@ EOF
 DRY64=$(cd "${TEST_DIR}/proj" &&
 	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
 OTEL64="$(echo "$DRY64" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
-if [[ "$OTEL64" == *"catalyst.dispatch_mode"* ]]; then
+if [[ $OTEL64 == *"catalyst.dispatch_mode"* ]]; then
 	fail "catalyst.dispatch_mode should be ABSENT when not configured, but found: $OTEL64"
 else
 	pass "catalyst.dispatch_mode correctly absent when neither env nor config provides it"

@@ -7,11 +7,7 @@ import { reconcile, type ReconcileRow } from "./lib/reconcile.ts";
 import { LokiClient, type ILokiClient } from "./lib/loki.ts";
 
 // Known service streams for Loki queries.
-const KNOWN_SERVICES = [
-  "catalyst.execution-core",
-  "catalyst.broker",
-  "catalyst.otel-forward",
-];
+const KNOWN_SERVICES = ["catalyst.execution-core", "catalyst.broker", "catalyst.otel-forward"];
 
 function parseArgs(argv: string[]): { windowHours: number; out: string; help: boolean } {
   let windowHours = 168; // 7-day default
@@ -27,9 +23,10 @@ function parseArgs(argv: string[]): { windowHours: number; out: string; help: bo
 
 function buildMarkdownTable(rows: ReconcileRow[]): string {
   const header = "| Event Kind | JSONL Count | Loki Count | Status |";
-  const sep    = "|------------|-------------|------------|--------|";
-  const lines = rows.map(r =>
-    `| ${r.kind} | ${r.jsonlCount.toLocaleString()} | ${r.lokiCount.toLocaleString()} | ${r.status} |`
+  const sep = "|------------|-------------|------------|--------|";
+  const lines = rows.map(
+    (r) =>
+      `| ${r.kind} | ${r.jsonlCount.toLocaleString()} | ${r.lokiCount.toLocaleString()} | ${r.status} |`
   );
   return [header, sep, ...lines].join("\n");
 }
@@ -51,8 +48,8 @@ async function main(lokiClient?: ILokiClient): Promise<void> {
   let monthFiles: string[] = [];
   try {
     monthFiles = readdirSync(eventsDir)
-      .filter(f => f.endsWith(".jsonl"))
-      .filter(f => {
+      .filter((f) => f.endsWith(".jsonl"))
+      .filter((f) => {
         // include if file YYYY-MM.jsonl is within window
         const m = f.match(/^(\d{4})-(\d{2})\.jsonl$/);
         if (!m) return false;
@@ -134,11 +131,13 @@ an OTL ticket for each:
   mkdirSync(dirname(out), { recursive: true });
   writeFileSync(out, content);
   console.log(`Audit written to ${out}`);
-  console.log(`Summary: ${statusCounts.OK} OK, ${statusCounts.MISSING} MISSING, ${statusCounts.DRIFT} DRIFT, ${statusCounts.LOKI_ONLY} LOKI_ONLY`);
+  console.log(
+    `Summary: ${statusCounts.OK} OK, ${statusCounts.MISSING} MISSING, ${statusCounts.DRIFT} DRIFT, ${statusCounts.LOKI_ONLY} LOKI_ONLY`
+  );
 }
 
 if (import.meta.main) {
-  main().catch(err => {
+  main().catch((err) => {
     console.error(err);
     process.exit(1);
   });

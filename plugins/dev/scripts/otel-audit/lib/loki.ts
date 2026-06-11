@@ -45,7 +45,7 @@ export class LokiClient implements ILokiClient {
     const start = end - windowHours * 3600;
 
     // Query: stream selector + json pipe filter, aggregate by event.name
-    const query = `sum by (event_name) (count_over_time({service_name="${service}"} | json | __error__="" [${ windowHours }h]))`;
+    const query = `sum by (event_name) (count_over_time({service_name="${service}"} | json | __error__="" [${windowHours}h]))`;
     const url = new URL("/loki/api/v1/query_range", this.endpoint);
     url.searchParams.set("query", query);
     url.searchParams.set("start", String(start));
@@ -55,10 +55,10 @@ export class LokiClient implements ILokiClient {
     try {
       const res = await fetch(url.toString(), {
         signal: AbortSignal.timeout(this.timeoutMs),
-        headers: { "Accept": "application/json" },
+        headers: { Accept: "application/json" },
       });
       if (!res.ok) return counts;
-      const body = await res.json() as {
+      const body = (await res.json()) as {
         data?: {
           result?: Array<{
             metric?: Record<string, string>;

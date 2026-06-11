@@ -14,8 +14,9 @@ import { isFlatEvent, normalizeFlatEvent } from "./lib/normalize.ts";
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
 const CHECKPOINT_PATH = join(CATALYST_DIR, "otel-forward.checkpoint.json");
-const CONFIG_PATH = process.env.CATALYST_CONFIG_PATH
-  ?? join(homedir(), ".config/catalyst/config-catalyst-workspace.json");
+const CONFIG_PATH =
+  process.env.CATALYST_CONFIG_PATH ??
+  join(homedir(), ".config/catalyst/config-catalyst-workspace.json");
 const PROJECT_KEY = process.env.CATALYST_PROJECT_KEY ?? "catalyst-workspace";
 
 const cfg = loadForwarderConfig(CONFIG_PATH, PROJECT_KEY);
@@ -23,8 +24,11 @@ const ck = readCheckpoint(CHECKPOINT_PATH);
 
 let stats = { processed: 0, skipped: 0 };
 
-const buffers: { otlp: CanonicalEvent[]; posthog: CanonicalEvent[]; cae: CanonicalEvent[] } =
-  { otlp: [], posthog: [], cae: [] };
+const buffers: { otlp: CanonicalEvent[]; posthog: CanonicalEvent[]; cae: CanonicalEvent[] } = {
+  otlp: [],
+  posthog: [],
+  cae: [],
+};
 
 const CURRENT_MONTH = () => {
   const now = new Date();
@@ -33,28 +37,50 @@ const CURRENT_MONTH = () => {
 const EVENT_LOG_PATH = join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
 
 const senders = {
-  otlp: cfg.otlp.enabled ? new OtlpSender({
-    endpoint: cfg.otlp.endpoint,
-    dlqPath: join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl"),
-    eventLogPath: EVENT_LOG_PATH,
-  }) : null,
-  posthog: cfg.posthog.enabled ? new PosthogSender({ apiKey: cfg.posthog.apiKey, host: cfg.posthog.host, dlqPath: join(CATALYST_DIR, "otel-forward-dlq-posthog.jsonl") }) : null,
-  cae: cfg.cloudflareAE.enabled ? new CloudflareAESender({ accountId: cfg.cloudflareAE.accountId, apiToken: cfg.cloudflareAE.apiToken, dataset: cfg.cloudflareAE.dataset, dlqPath: join(CATALYST_DIR, "otel-forward-dlq-cae.jsonl") }) : null,
+  otlp: cfg.otlp.enabled
+    ? new OtlpSender({
+        endpoint: cfg.otlp.endpoint,
+        dlqPath: join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl"),
+        eventLogPath: EVENT_LOG_PATH,
+      })
+    : null,
+  posthog: cfg.posthog.enabled
+    ? new PosthogSender({
+        apiKey: cfg.posthog.apiKey,
+        host: cfg.posthog.host,
+        dlqPath: join(CATALYST_DIR, "otel-forward-dlq-posthog.jsonl"),
+      })
+    : null,
+  cae: cfg.cloudflareAE.enabled
+    ? new CloudflareAESender({
+        accountId: cfg.cloudflareAE.accountId,
+        apiToken: cfg.cloudflareAE.apiToken,
+        dataset: cfg.cloudflareAE.dataset,
+        dlqPath: join(CATALYST_DIR, "otel-forward-dlq-cae.jsonl"),
+      })
+    : null,
 };
 
 export function processLine(line: string): void {
   try {
     let ev = JSON.parse(line) as CanonicalEvent;
     if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
-    if (!ev.attributes) { stats.skipped++; return; }
+    if (!ev.attributes) {
+      stats.skipped++;
+      return;
+    }
     stats.processed++;
     if (senders.otlp) buffers.otlp.push(ev);
     if (senders.posthog) buffers.posthog.push(ev);
     if (senders.cae) buffers.cae.push(ev);
-  } catch { stats.skipped++; }
+  } catch {
+    stats.skipped++;
+  }
 }
 
-export function getStats() { return { ...stats }; }
+export function getStats() {
+  return { ...stats };
+}
 
 async function flush(): Promise<void> {
   const tasks: Promise<void>[] = [];
@@ -75,8 +101,12 @@ async function flush(): Promise<void> {
 
 if (import.meta.main) {
   const ac = new AbortController();
-  process.on("SIGTERM", () => { ac.abort(); });
-  process.on("SIGINT", () => { ac.abort(); });
+  process.on("SIGTERM", () => {
+    ac.abort();
+  });
+  process.on("SIGINT", () => {
+    ac.abort();
+  });
 
   const tailer = createTailer({
     eventsDir: EVENTS_DIR,
@@ -85,11 +115,18 @@ if (import.meta.main) {
     signal: ac.signal,
   });
 
-  const FLUSH_MS = Math.min(cfg.otlp.flushIntervalMs, cfg.posthog.flushIntervalMs, cfg.cloudflareAE.flushIntervalMs);
+  const FLUSH_MS = Math.min(
+    cfg.otlp.flushIntervalMs,
+    cfg.posthog.flushIntervalMs,
+    cfg.cloudflareAE.flushIntervalMs
+  );
   const flushTimer = setInterval(flush, FLUSH_MS);
 
   const ckTimer = setInterval(() => {
-    writeCheckpoint(CHECKPOINT_PATH, { path: tailer.currentPath(), offset: tailer.currentOffset() });
+    writeCheckpoint(CHECKPOINT_PATH, {
+      path: tailer.currentPath(),
+      offset: tailer.currentOffset(),
+    });
   }, 10_000);
 
   log.info(
@@ -98,7 +135,7 @@ if (import.meta.main) {
       posthogEnabled: cfg.posthog.enabled,
       cfaeEnabled: cfg.cloudflareAE.enabled,
     },
-    "started",
+    "started"
   );
 
   await tailer.run();
@@ -106,8 +143,5 @@ if (import.meta.main) {
   clearInterval(flushTimer);
   clearInterval(ckTimer);
   await flush();
-  log.info(
-    { processed: stats.processed, skipped: stats.skipped },
-    "stopped",
-  );
+  log.info({ processed: stats.processed, skipped: stats.skipped }, "stopped");
 }

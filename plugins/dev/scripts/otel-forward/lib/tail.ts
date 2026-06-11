@@ -37,19 +37,28 @@ export function createTailer(opts: TailerOpts): Tailer {
     try {
       const obj = JSON.parse(line);
       if (typeof obj !== "object" || obj === null) return false;
-      return "attributes" in obj || (typeof (obj as Record<string, unknown>).event === "string");
-    } catch { return false; }
+      return "attributes" in obj || typeof (obj as Record<string, unknown>).event === "string";
+    } catch {
+      return false;
+    }
   }
 
   function readNewLines(): void {
     if (!existsSync(currentPath)) return;
     const size = statSync(currentPath).size;
-    if (size < offset) { offset = 0; return; }
+    if (size < offset) {
+      offset = 0;
+      return;
+    }
     if (size === offset) return;
     const len = size - offset;
     const fd = openSync(currentPath, "r");
     const buf = Buffer.alloc(len);
-    try { readSync(fd, buf, 0, len, offset); } finally { closeSync(fd); }
+    try {
+      readSync(fd, buf, 0, len, offset);
+    } finally {
+      closeSync(fd);
+    }
     offset = size;
     const text = buf.toString("utf8");
     for (const line of text.split("\n")) {
@@ -64,11 +73,21 @@ export function createTailer(opts: TailerOpts): Tailer {
   async function run(): Promise<void> {
     while (!opts.signal.aborted) {
       const expected = monthFn();
-      if (expected !== currentPath) { currentPath = expected; offset = 0; }
+      if (expected !== currentPath) {
+        currentPath = expected;
+        offset = 0;
+      }
       readNewLines();
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, pollMs);
-        opts.signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+        opts.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            resolve();
+          },
+          { once: true }
+        );
       });
     }
   }
