@@ -16,7 +16,7 @@
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { C, LIVE } from "../board/board-tokens";
-import { useNavigate } from "@tanstack/react-router";
+import { useDetailEntryState } from "@/hooks/use-detail-entry-state";
 import {
   resolveHeldBanner,
   resolvePipelineRail,
@@ -43,7 +43,7 @@ import {
 } from "@/board/live-tail-data";
 import type { BoardTicket, BoardWorker } from "@/board/types";
 import type { LinearTicketState } from "./use-linear-ticket";
-import type { DetailSearch, DetailTab } from "@/board/route-search";
+import { TAB_VALUES, type DetailSearch, type DetailTab } from "@/board/route-search";
 import type { StreamEvent } from "@/lib/types";
 import { phaseColor, fmtCost, fmtTokens, statusSemantic, type StatusSemantic } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
@@ -788,24 +788,24 @@ export function TicketDetailPage({
     return map;
   }, [artifacts]);
 
-  // CTL-996: URL-DRIVEN tab state (URL = source of truth, CTL-989). The active
-  // tab is `search.tab` (absent = the `spec` default — `spec` is dropped from the
-  // URL to keep it clean, same idiom as scope:"all"). Writes via TanStack
-  // navigate with replace:true so tab switches don't pollute the back stack.
-  const navigate = useNavigate();
-  const value: "spec" | DetailTab = search.tab ?? "spec";
+  // CTL-1049: ENTRY-STATE-DRIVEN tab (back-stack entry state, NOT the URL). The
+  // active tab is keyed by the TanStack per-history-entry key via the shared
+  // back-stack scaffolding (useDetailEntryState) — so a FRESH navigation into any
+  // ticket lands on the `spec` default (the last tab choice can never leak across
+  // tickets, the CTL-1049 Gherkin), while a back/forward traverse restores the tab
+  // the operator left this entry on. This REPLACES the prior CTL-996 URL `?tab=`
+  // persistence (the relation-row `search={(prev)=>prev}` Links carried it forward,
+  // which WAS the sticky-tab leak). The PillTabs control is fully controlled, so
+  // sourcing `value`/`onValueChange` from the entry atom is a drop-in swap.
+  const { state: entryState, setState: setEntryState } = useDetailEntryState();
+  const value: "spec" | DetailTab = TAB_IS_VALID(entryState.activeTab)
+    ? (entryState.activeTab as "spec" | DetailTab)
+    : "spec";
   const setTab = useCallback(
     (next: string) => {
-      void navigate({
-        to: ".",
-        search: (prev) => ({
-          ...prev,
-          tab: next === "spec" ? undefined : (next as DetailTab),
-        }),
-        replace: true,
-      });
+      setEntryState((prev) => (prev.activeTab === next ? prev : { ...prev, activeTab: next }));
     },
-    [navigate],
+    [setEntryState],
   );
   const openLifecycle = useCallback(() => setTab("lifecycle"), [setTab]);
 
@@ -959,6 +959,13 @@ export function TicketDetailPage({
       </div>
     </div>
   );
+}
+
+/** Whether an entry-state `activeTab` string is a known tab value. An unknown
+ *  value (e.g. a stale atom from before a tab was renamed) falls back to `spec`,
+ *  keeping the read total — the same fail-safe idiom as validateDetailSearch. */
+function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
+  return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
 }
 
 /** The visible tab set (Spec default · Lifecycle · Cost · Activity). */

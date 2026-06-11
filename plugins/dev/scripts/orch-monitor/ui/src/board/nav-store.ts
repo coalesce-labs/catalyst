@@ -20,10 +20,11 @@
 // atom setter just calls it.
 
 import { atom } from "jotai";
-import { atomWithStorage } from "jotai/utils";
+import { atomFamily, atomWithStorage } from "jotai/utils";
 import type { ListKind, ListLens } from "./list-order";
 import { pushRecent, RECENTLY_VIEWED_KEY } from "./recents";
 import { REPO_SCOPE_ALL, type RepoScope } from "../lib/repo-scope";
+import { freshEntryState, type DetailEntryState } from "./detail-entry-state";
 
 // Re-export the recents constants/helper so consumers of the store have one
 // import surface; the testable logic itself lives in the jotai-free recents.ts.
@@ -163,3 +164,27 @@ export const recentlyViewedAtom = atomWithStorage<string[]>(RECENTLY_VIEWED_KEY,
 export const recordRecentAtom = atom(null, (get, set, id: string) => {
   set(recentlyViewedAtom, pushRecent(get(recentlyViewedAtom), id));
 });
+
+// ── back-stack entry state (CTL-1049) ─────────────────────────────────────────
+/**
+ * Per-history-entry transient detail-view state, keyed by the TanStack Router
+ * per-entry key (`location.state.__TSR_key`). This is the mechanism behind the
+ * CTL-1049 convention: a fresh PUSH navigation lands on a NEW key → a NEW atom →
+ * the fresh defaults (Spec tab, all rail sections open, top of scroll); a BACK /
+ * FORWARD traverse lands on the SAME key → the already-populated atom → the
+ * restored state. The push/pop distinction is structural (new key vs same key),
+ * not conditional — no `useNavigationType` branch needed.
+ *
+ * The DEFAULTS, the rail-section resolution, and the LRU eviction arithmetic live
+ * in the jotai-free `detail-entry-state.ts` so they unit-test under the root
+ * `bun test`; this family is the thin jotai wiring. Memory is bounded by
+ * `useDetailEntryState` (use-detail-entry-state.ts), which calls
+ * `detailEntryStateFamily.remove(key)` for keys evicted past the LRU cap.
+ *
+ * `atomFamily` is the documented jotai primitive for a dynamic, param-keyed set
+ * of atoms (jotai.org/docs/utilities/family). Each `__TSR_key` gets its own
+ * independent atom seeded from a FRESH defaults copy.
+ */
+export const detailEntryStateFamily = atomFamily((_key: string) =>
+  atom<DetailEntryState>(freshEntryState()),
+);
