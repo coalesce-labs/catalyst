@@ -388,13 +388,3 @@ export function buildRegistry(cfg: ServiceHealthConfig): ServiceDescriptor[] {
 }
 
 /** The order services render in the strip (catalyst plane, then telemetry). */
-export const SERVICE_ORDER: readonly ServiceId[] = [
-  "monitor",
-  "broker",
-  "execution-core",
-  "webhook",
-  "otel-collector",
-  "loki",
-  "prometheus",
-  "grafana",
-] as const;
