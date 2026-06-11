@@ -57,6 +57,48 @@ describe("readEmissionAge", () => {
   });
 });
 
+describe("broker / execution-core recency uses catalyst.* service names", () => {
+  it("broker shows up when catalyst.broker emitted recently", async () => {
+    // The catalyst event log records service.name as "catalyst.broker" (prefixed),
+    // not the bare "broker". The RECENCY_MATCHERS must use the prefixed form.
+    const now = Date.parse("2026-06-11T12:00:00.000Z");
+    writeEvent("2026-06-11T11:59:00.000Z", "catalyst.broker"); // 1m ago → within 3m degraded
+    const monitor = createServiceHealthMonitor({
+      config: {
+        lokiUrl: null,
+        prometheusUrl: null,
+        grafanaUrl: null,
+        collectorHealthUrl: null,
+        webhookConfigured: false,
+      },
+      catalystDir,
+      now: () => now,
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "broker")!.severity).toBe("up");
+  });
+
+  it("execution-core shows up when catalyst.execution-core emitted recently", async () => {
+    const now = Date.parse("2026-06-11T12:00:00.000Z");
+    writeEvent("2026-06-11T11:59:30.000Z", "catalyst.execution-core"); // 30s ago
+    const monitor = createServiceHealthMonitor({
+      config: {
+        lokiUrl: null,
+        prometheusUrl: null,
+        grafanaUrl: null,
+        collectorHealthUrl: null,
+        webhookConfigured: false,
+      },
+      catalystDir,
+      now: () => now,
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "execution-core")!.severity).toBe("up");
+  });
+});
+
 describe("collector recency fallback — no cascade", () => {
   it("marks collector unknown (not down) when Loki itself is down", async () => {
     // Loki probe always fails → after 3 ticks Loki is down. No ingest events at
@@ -79,6 +121,27 @@ describe("collector recency fallback — no cascade", () => {
     const snap = monitor.snapshot();
     expect(snap.services.find((s) => s.id === "loki")!.severity).toBe("down");
     expect(snap.services.find((s) => s.id === "otel-collector")!.severity).toBe("unknown");
+  });
+
+  it("marks collector up when Loki is up (no direct probe configured)", async () => {
+    // When collectorHealthUrl is absent and the catalyst event log doesn't carry
+    // claude-code telemetry (it goes direct to Loki via OTel), the collector
+    // recency fallback infers liveness from Loki: Loki up → collector up.
+    const monitor = createServiceHealthMonitor({
+      config: {
+        lokiUrl: "http://loki",
+        prometheusUrl: null,
+        grafanaUrl: null,
+        collectorHealthUrl: null,
+        webhookConfigured: false,
+      },
+      catalystDir,
+      fetcher: () => Promise.resolve(new Response(null, { status: 200 })),
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "loki")!.severity).toBe("up");
+    expect(snap.services.find((s) => s.id === "otel-collector")!.severity).toBe("up");
   });
 });
 
