@@ -93,6 +93,8 @@ import {
   activityGroupHeader,
 } from "./list-group-data";
 import type { Lane } from "./board-grouping";
+import { useRepoIconMap } from "./repo-icon-context";
+import { groupIconSrc } from "./entity-icon";
 
 // ── collapse state (CTL-955) ─────────────────────────────────────────────────
 // Jotai atom: a Map<navKind → Set<groupKey>> of collapsed group keys. Atom lives
@@ -387,6 +389,8 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
     manualSorting: true, // we sort in sortFn, not via TanStack's row model
   });
 
+  const icons = useRepoIconMap();
+
   // ── CTL-955: group assignment ─────────────────────────────────────────────
   // Build rowGroupKey + groupMeta once per (rows, swimlane, navKind, lens) tuple.
   const { rowGroupKey, groupMeta } = useMemo(
@@ -508,6 +512,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     collapsed={collapsed}
                     onToggle={() => toggleCollapse(meta.key)}
                     hint={hint}
+                    iconSrc={groupIconSrc(swimlane, meta.key, icons)}
                   />
                   {/* CTL-952: AnimatePresence enables enter/exit for rows that
                       appear / disappear as priority or state changes. `initial=false`
@@ -623,6 +628,7 @@ function GroupHeaderRow({
   collapsed,
   onToggle,
   hint,
+  iconSrc,
 }: {
   label: string;
   count: number;
@@ -633,6 +639,7 @@ function GroupHeaderRow({
   collapsed: boolean;
   onToggle: () => void;
   hint?: string | null;
+  iconSrc?: string | null;
 }) {
   // heartbeat dot uses status-dot semantics (green live / amber degraded / muted
   // offline) — cyan is reserved for the LIVE entity signal only (design §4.3/§5.2),
@@ -667,7 +674,10 @@ function GroupHeaderRow({
           >
             ▼
           </span>
-          {live === "live" ? (
+          {iconSrc ? (
+            <img src={iconSrc} alt="" aria-hidden
+              style={{ width: 14, height: 14, borderRadius: 4, objectFit: "contain" }} />
+          ) : live === "live" ? (
             <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, display: "inline-block" }} />
           ) : (
             <Dot color={dotColor} />

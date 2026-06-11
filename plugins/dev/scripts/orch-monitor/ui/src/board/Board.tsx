@@ -113,6 +113,7 @@ import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 // flattened into one ordered, sortable, swimlane-sectioned table. BoardList owns
 // its own swimlane sectioning (groupListRows), so it is NOT wrapped in SwimlaneBoard.
 import { BoardList } from "./BoardList";
+import { EntityMarker } from "./entity-marker";
 import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
@@ -483,7 +484,7 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
     >
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7 }}>
-        <ActivityDot state={t.activeState} fallback={accent} />
+        <EntityMarker repo={t.repo} state={t.activeState} fallback={accent} />
         <span style={{ fontFamily: C.mono, fontSize: 11.5, fontWeight: 600, color: C.blue }}>{t.id}</span>
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
@@ -602,7 +603,7 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-        <ActivityDot state={w.activeState} fallback={accent} />
+        <EntityMarker repo={w.repo} state={w.activeState} fallback={accent} />
         <span style={{ fontFamily: C.mono, fontSize: 12.5, fontWeight: 700, color: C.blue }}>{w.ticket}</span>
         {w.sessionId && (
           <Tooltip><TooltipTrigger asChild>
@@ -916,7 +917,7 @@ function InflightWorkerRow({ w, ticket, blockers }: {
       // CTL-978: dead workers are de-emphasized (more so than stuck — they are corpses).
       style={{ opacity: w.activeState === "dead" ? 0.4 : w.activeState === "stuck" ? 0.6 : 1 }}
     >
-      <TableCell><ActivityDot state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
+      <TableCell><EntityMarker repo={w.repo} state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
       <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
       <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
       <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>

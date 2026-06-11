@@ -68,6 +68,7 @@ import {
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppFooter } from "@/components/app-footer";
 import { HeaderActionsSlot } from "@/components/header-actions";
+import { RepoIconProvider } from "@/board/repo-icon-context";
 
 // CTL-891 / SHELL1 — the full-viewport (h-screen, NO outer max-w / mx-auto)
 // frame, ported from the prototype `mockups/home-proto/src/components/AppShell`.
@@ -358,7 +359,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               the full height of the inset content area (the board-height fix
               chain — completed in Pass B). */}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            {children}
+            <RepoIconProvider repos={repos}>
+              {children}
+            </RepoIconProvider>
           </div>
 
           {/* CTL-930: AppFooter carries the status cluster (LIVE badge + activity +
