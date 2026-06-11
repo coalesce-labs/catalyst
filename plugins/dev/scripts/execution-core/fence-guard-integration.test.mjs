@@ -9,6 +9,10 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+// CTL-703: the terminal sweep keys off signals[TERMINAL_PHASE] (now `teardown`,
+// formerly `monitor-deploy`). Drive the site-1 tests off the canonical constant so
+// a future pipeline change can't silently stop exercising terminalDoneOnce.
+import { TERMINAL_PHASE } from "../lib/workflow-descriptor.mjs";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -111,11 +115,11 @@ describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
     else process.env.CATALYST_DIR = prevCatalystDir;
   });
 
-  test("single-host: monitor-deploy done → applyTerminalDone called", () => {
+  test("single-host: terminal phase done → applyTerminalDone called", () => {
     const workerDir = join(orchDir, "workers", "CTL-S1");
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
-      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    writeFileSync(join(workerDir, `phase-${TERMINAL_PHASE}.json`),
+      JSON.stringify({ ticket: "CTL-S1", phase: TERMINAL_PHASE, status: "done" }));
     const doneCalls = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -135,8 +139,8 @@ describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
   test("multi-host + stale fence (no generation in signal) → applyTerminalDone suppressed", () => {
     const workerDir = join(orchDir, "workers", "CTL-S1");
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
-      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    writeFileSync(join(workerDir, `phase-${TERMINAL_PHASE}.json`),
+      JSON.stringify({ ticket: "CTL-S1", phase: TERMINAL_PHASE, status: "done" }));
     const doneCalls = [];
     schedulerTick(orchDir, {
       readEligible: () => [],

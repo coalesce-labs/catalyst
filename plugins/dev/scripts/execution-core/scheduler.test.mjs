@@ -8366,6 +8366,51 @@ describe("CTL-925: dependency cycle hardening", () => {
     expect(applied.filter((l) => l.label === "needs-human")).toHaveLength(0);
   });
 
+  // CTL-863: the sweep-2 cycle escalation is a Linear write and must sit behind
+  // the cluster fence (parity with STEP A.5). A superseded host (multi-host, no
+  // won fence generation in any signal → readSignalGeneration null → fail-closed)
+  // must NOT stamp needs-human on the ring members.
+  test("Gap 1 + CTL-863: multi-host stale fence suppresses sweep-2 needs-human escalation", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-2")]),
+      elig("CTL-2", [blocksRel("CTL-1")], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+      hosts: ["host-A", "host-B"], // multiHost → fence enforced; no signal → stale
+    });
+    expect(dispatch.calls).toEqual([]);
+    // Fence is stale (no generation) → both needs-human writes suppressed.
+    expect(applied.filter((l) => l.label === "needs-human")).toHaveLength(0);
+  });
+
+  test("Gap 1 + CTL-863: single-host bypasses the fence and still escalates the ring", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-2")]),
+      elig("CTL-2", [blocksRel("CTL-1")], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+      hosts: ["single-host"], // single-host → fence skipped, label applies
+    });
+    expect(dispatch.calls).toEqual([]);
+    const nhTickets = applied.filter((l) => l.label === "needs-human").map((l) => l.ticket).sort();
+    expect(nhTickets).toContain("CTL-1");
+    expect(nhTickets).toContain("CTL-2");
+  });
+
   // Helper: write a triage.json for STEP E dep persistence tests (requires
   // worker dir already created via writeSignal).
   function writeTriageDepsE(ticket, dependencies) {

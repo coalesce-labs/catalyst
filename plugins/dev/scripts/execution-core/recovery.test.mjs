@@ -4207,9 +4207,12 @@ describe("survivingRoster — in-memory dead-host removal (CTL-863)", () => {
 });
 
 describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
+  // Canonical pipeline phase order — KEEP IN SYNC with lib/workflow-descriptor.mjs
+  // PHASES. CTL-703 appended `teardown` as the terminal phase after monitor-deploy,
+  // so the "all done" walk must drive every phase (incl. teardown) to return null.
   const allPhases = [
     "triage", "research", "plan", "implement", "verify", "review",
-    "pr", "monitor-merge", "monitor-deploy",
+    "pr", "monitor-merge", "monitor-deploy", "teardown",
   ];
 
   test("plan done, implement not → resume at implement", async () => {
@@ -4238,6 +4241,16 @@ describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
     const probes = Object.fromEntries(allPhases.map((p) => [p, async () => done.has(p)]));
     const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
     expect(next).toBe("monitor-deploy");
+  });
+
+  // CTL-703: teardown is the terminal phase appended after monitor-deploy. A run
+  // that completed through monitor-deploy but not teardown must resume at teardown,
+  // not be treated as terminal — the reverse-walk must see the full PHASES list.
+  test("monitor-deploy done, teardown not → resume at teardown", async () => {
+    const done = new Set(["triage","research","plan","implement","verify","review","pr","monitor-merge","monitor-deploy"]);
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => done.has(p)]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("teardown");
   });
 
   test("only triage done → resume at research (entry phase)", async () => {
