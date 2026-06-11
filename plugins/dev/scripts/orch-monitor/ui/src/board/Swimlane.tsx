@@ -66,6 +66,7 @@ import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode 
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE } from "./board-tokens";
+import { laneSurfaceBg } from "./lane-surface";
 import {
   buildLanes,
   showLaneChrome,
@@ -234,15 +235,18 @@ function GroupLabelRow({
   live,
   hint,
   iconSrc,
+  laneBg,
 }: {
   label: string;
   count: number;
   live: Lane<unknown>["live"];
   hint: string | null;
   iconSrc?: string | null;
+  laneBg?: string;
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
+  const bg = laneBg ?? C.subtle;
   return (
     // Outer band: sticky-TOP only — holds its row position during vertical scroll;
     // scrolls horizontally with the column grid so the background fills the full width.
@@ -256,7 +260,8 @@ function GroupLabelRow({
         zIndex: 2,
         // CTL-1033: swimlane group bands sit on `subtle` — visibly lighter than
         // the sidebar chrome (the ticket bug: rows sat at sidebar darkness).
-        background: C.subtle,
+        // CTL-1027: tinted when the lane's project has a resolved hue.
+        background: bg,
         width: "max-content",
         minWidth: "100%",
       }}
@@ -275,7 +280,8 @@ function GroupLabelRow({
           left: 0,
           zIndex: 3,
           // CTL-1033: the dual-sticky chip paints over the band — same `subtle`.
-          background: C.subtle,
+          // CTL-1027: tinted to match the outer band when the lane has a hue.
+          background: bg,
         }}
       >
         {iconSrc ? (
@@ -335,11 +341,13 @@ function LaneCardsRow({
   laneKey,
   constrainCells = false,
   cellMax,
+  laneBg,
 }: {
   cells: LaneCell[];
   laneKey?: string;
   constrainCells?: boolean;
   cellMax?: number | null;
+  laneBg?: string;
 }) {
   return (
     <div
@@ -369,7 +377,8 @@ function LaneCardsRow({
             // visible canvas-colored gutter that separates adjacent columns; cards
             // (C.s2) sit one further step above this tray. The dashed-edge well + 8px
             // internal padding give the tray a Linear-style enclosed feel.
-            background: C.subtle,
+            // CTL-1027: tinted when the lane's project has a resolved hue.
+            background: laneBg ?? C.subtle,
             borderRadius: 10,
             border: `1px solid ${C.borderSubtle}`,
             padding: 8,
@@ -618,6 +627,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   deriveLane,
   entityNoun = "ticket",
   density = "comfortable",
+  laneColors = {},
 }: {
   items: T[];
   groupBy: GroupBy;
@@ -636,6 +646,8 @@ export function SwimlaneBoard<T extends GroupableEntity>({
    *  the water-fill; the real lane heights are measured from the DOM. Worker boards
    *  default to "comfortable". */
   density?: Density;
+  /** CTL-1027: repoKey → hue bg hex. When present, each lane's surfaces are tinted. */
+  laneColors?: Record<string, string>;
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
@@ -745,6 +757,8 @@ export function SwimlaneBoard<T extends GroupableEntity>({
         {chrome ? (
           lanes.map((lane) => {
             const cells = deriveLane(lane.items);
+            // CTL-1027: resolve the per-lane tint from the project's hue bg hex.
+            const laneBg = laneSurfaceBg(lane.repo, laneColors);
             return (
               <Fragment key={lane.key}>
                 <GroupLabelRow
@@ -756,6 +770,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                   iconSrc={laneIconSrc(groupBy, lane.repo, icons)}
+                  laneBg={laneBg}
                 />
                 {/* CTL-1010: cellMax = this lane's measured water-fill share
                     (allocs is null on the first frame → undefined → var() fallback). */}
@@ -764,6 +779,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   laneKey={lane.key}
                   constrainCells={constrainCells}
                   cellMax={allocs?.get(lane.key)}
+                  laneBg={laneBg}
                 />
               </Fragment>
             );

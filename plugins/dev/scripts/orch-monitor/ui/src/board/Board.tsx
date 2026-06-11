@@ -97,6 +97,7 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
 import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
+import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
 // dense BoardList table instead of the column kanban — the SAME resolved entities,
@@ -757,10 +758,11 @@ function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen,
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen, laneColors,
 }: {
   tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
   density: Density; order: Ordering; showEmpty: boolean; fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
+  laneColors?: Record<string, string>;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const blockedByIdx = buildBlockedByIndex(tickets);
@@ -792,6 +794,7 @@ function TicketSwimlaneBoard({
       // CTL-1010: density drives the per-lane MINIMUM in the water-fill (real
       // heights are measured); the card render already receives density above.
       density={density}
+      laneColors={laneColors}
     />
   );
 }
@@ -803,10 +806,11 @@ function TicketSwimlaneBoard({
 // swimlane is active the caller already falls the lens back to status/phase so
 // host is not double-encoded (rows AND columns).
 function WorkerSwimlaneBoard({
-  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen,
+  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen, laneColors,
 }: {
   workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
   fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
+  laneColors?: Record<string, string>;
 }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   // CTL-951: the worker detail pager walks the WHOLE rank-sorted worker queue
@@ -851,6 +855,7 @@ function WorkerSwimlaneBoard({
       entityNoun="worker"
       columns={columns}
       deriveLane={deriveLane}
+      laneColors={laneColors}
     />
   );
 }
@@ -961,6 +966,13 @@ export function Board({
   // within it — swimlane=repo under a single-repo scope collapses naturally to
   // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
   const swimlane: GroupBy = prefs.swimlane;
+
+  // CTL-1027: per-project swimlane tint — local picks layered over server defaults.
+  const resolvedColors = useResolvedRepoColors();
+  const laneColors = useMemo(
+    () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.bg])),
+    [resolvedColors],
+  );
 
   // CTL-989: the single card-open seam — a CLIENT-SIDE router navigation to the
   // detail page (no full-document reload; the left nav stays). The list-origin
@@ -1087,6 +1099,7 @@ export function Board({
                 swimlane={swimlane}
                 onOpen={onOpen}
                 embedded={embedded}
+                laneColors={laneColors}
               />
             ) : (
               // CTL-950: ONE sticky shared column-header row + ONE horizontal
@@ -1103,6 +1116,7 @@ export function Board({
                 fill
                 embedded={embedded}
                 onOpen={onOpen}
+                laneColors={laneColors}
               />
             )
           )}
@@ -1121,6 +1135,7 @@ export function Board({
               fill
               embedded={embedded}
               onOpen={onOpen}
+              laneColors={laneColors}
             />
           )}
           {/* CTL-930: queue view branch removed — Queue is now its own left-nav

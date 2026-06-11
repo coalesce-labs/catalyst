@@ -34,6 +34,12 @@ import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import { useRepoIcons } from "@/hooks/use-repo-icons";
 import { repoIconPicksAtom } from "@/lib/repo-icon-picks-store";
 import { buildIconPickerRows } from "@/components/icon-picker-model";
+import { NAMED_COLORS } from "@/lib/color-palette";
+import {
+  repoColorPicksAtom,
+  applyColorPick,
+  NAMED_COLOR_NAMES,
+} from "@/lib/repo-color-picks-store";
 
 // settings-surface.tsx — the Settings preferences surface (CTL-911 / SURF3).
 // Replaces the footer Settings placeholder (handoff next-step #4). Renders the
@@ -141,6 +147,10 @@ export function SettingsSurface() {
   const iconMap = useRepoIcons(repos);
   const [iconPicks, setIconPicks] = useAtom(repoIconPicksAtom);
   const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
+
+  // Project colors — per-repo hue picker (CTL-1027).
+  const [colorPicks, setColorPicks] = useAtom(repoColorPicksAtom);
+  const colorPickerRows = repos;
 
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-surface-1">
@@ -318,6 +328,72 @@ export function SettingsSurface() {
                         </ToggleGroupItem>
                       );
                     })}
+                  </ToggleGroup>
+                </div>
+              );
+            })
+          )}
+        </Section>
+
+        {/* ── Project colors ─────────────────────────────────────────────────── */}
+        <Section
+          title="Project colors"
+          description="Tint each project's swimlane rows with a color, or let Catalyst inherit the configured default. Saved in this browser."
+        >
+          {colorPickerRows.length === 0 ? (
+            <p className="py-3 text-xs text-muted">No projects to color yet.</p>
+          ) : (
+            colorPickerRows.map((repo) => {
+              const active = colorPicks[repo] ?? "auto";
+              return (
+                <div
+                  key={repo}
+                  className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-fg">{repo}</div>
+                  </div>
+                  <ToggleGroup
+                    type="single"
+                    value={active}
+                    onValueChange={(v) =>
+                      setColorPicks((p) => applyColorPick(p, repo, v))
+                    }
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                  >
+                    <ToggleGroupItem
+                      value="auto"
+                      className={cn(
+                        "text-xs",
+                        active === "auto" ? "text-fg" : "text-muted",
+                      )}
+                      title="Auto (inherit configured default)"
+                    >
+                      Auto
+                    </ToggleGroupItem>
+                    {NAMED_COLOR_NAMES.map((name) => (
+                      <ToggleGroupItem
+                        key={name}
+                        value={name}
+                        title={name}
+                        className={cn(
+                          "gap-1 text-xs",
+                          active === name ? "text-fg" : "text-muted",
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className="size-3 rounded-full"
+                          style={{
+                            background: NAMED_COLORS[name]?.bg,
+                            outline: "1px solid var(--border-subtle)",
+                          }}
+                        />
+                        {name}
+                      </ToggleGroupItem>
+                    ))}
                   </ToggleGroup>
                 </div>
               );

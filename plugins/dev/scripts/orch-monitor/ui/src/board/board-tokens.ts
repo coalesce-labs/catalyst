@@ -100,3 +100,21 @@ export const NODE_ACCENTS = [
   "#c98f63", // copper (was #5be0ff — cyan reserved for LIVE only)
   "#e0824f", // C.orange
 ] as const;
+
+/** CTL-1027: the barely-there per-project lane tint strength (%). Tuned to keep
+ *  lanes distinguishable without breaking the Linear-calm aesthetic. */
+export const LANE_TINT_PCT = 5;
+
+/**
+ * Compose a project hue over a base surface as a perceptually-even oklab tint.
+ * Returns the base unchanged when no hue is supplied, so colorless lanes stay
+ * byte-identical to today's `C.subtle`. Inline-style-safe (returns a CSS string).
+ */
+export function laneTint(
+  hueBg: string | null | undefined,
+  base: string,
+  pct: number = LANE_TINT_PCT,
+): string {
+  if (!hueBg) return base;
+  return `color-mix(in oklab, ${hueBg} ${pct}%, ${base})`;
+}
