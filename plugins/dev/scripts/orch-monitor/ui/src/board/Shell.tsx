@@ -450,7 +450,7 @@ export function Shell({
 
   // ── CTL-1049 back-stack entry state ─────────────────────────────────────────
   // The shared scaffolding owns the SCROLL half of the convention: it saves the
-  // single detail scroller's (`data-shell-scroll`) offset into the current history
+  // single detail scroller's (the scroll-body row) offset into the current history
   // entry's state on scroll-idle, and restores it on mount when the entry already
   // carries a non-default offset (a back/forward traverse). A fresh PUSH lands on
   // a new entry key whose `scrollY` is 0, so the page opens at the top. Both detail
@@ -693,6 +693,7 @@ export function Shell({
           overflow actually engages; `cat-overlay-scroll` keeps the CTL-1036 overlay
           scrollbar styling on the new scroller. */}
       <div
+        ref={scrollRef}
         data-shell-scroll
         className="cat-overlay-scroll"
         style={{ display: "flex", flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
