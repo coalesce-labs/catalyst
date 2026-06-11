@@ -434,7 +434,7 @@ describe("startDaemon", () => {
       watchRegistry: true,
       debounceMs: 20,
     });
-    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Ready" } });
+    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Todo" } });
     // Poll up to 2s rather than a fixed wait — fs.watch delivery latency plus
     // the debounce timer varies under concurrent full-suite load, so a fixed
     // 60ms wait is flaky. The reconcile only has to fire once.
@@ -674,7 +674,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
         orchestration: {
           executionCore: {
             maxParallel: 4,
-            eligibleQuery: { status: "Ready" },
+            eligibleQuery: { status: "Todo" },
           },
         },
       },
@@ -684,7 +684,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
     });
     expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
       maxParallel: 6,
-      eligibleQuery: { status: "Ready" },
+      eligibleQuery: { status: "Todo" },
     });
   });
 });

@@ -606,7 +606,7 @@ Edit `~/catalyst/execution-core/registry.json` directly or re-run the enrollment
 node plugins/dev/scripts/execution-core/registry.mjs upsert \
   --team CTL \
   --repo-root /path/to/repo \
-  --status Ready    # was: Todo
+  --status Todo
 ```
 
 The daemon reads `eligibleQuery.status` from the registry on each scheduler tick.

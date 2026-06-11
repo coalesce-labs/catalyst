@@ -175,7 +175,9 @@ if [[ -n $CONFIG_PATH ]]; then
 		# The contract states this check expects. Mirrors contract_states() in
 		# setup-execution-core-states.sh — keep the two in sync (different
 		# languages, so a shared constant is not possible).
-		EXECUTION_CORE_CONTRACT_STATES=(Ready Research Plan Implement Validate PR)
+		# CTL-722: Ready was archived on 2026-06-02; Todo is the post-cutover
+		# scheduler-eligible entry state.
+		EXECUTION_CORE_CONTRACT_STATES=(Todo Research Plan Implement Validate PR)
 		execution_core_gaps=0
 		for contract_state in "${EXECUTION_CORE_CONTRACT_STATES[@]}"; do
 			in_state_map=$(jq -r --arg s "$contract_state" \
