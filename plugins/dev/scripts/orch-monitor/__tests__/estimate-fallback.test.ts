@@ -25,14 +25,14 @@ function mockFetch(responseData: unknown) {
   const calls: Array<{ query: string; variables: unknown }> = [];
   const originalFetch = globalThis.fetch;
 
-  const spy = async (url: string | URL | Request, init?: RequestInit) => {
+  const spy = (url: string | URL | Request, init?: RequestInit) => {
     callCount++;
     const body = init?.body ? JSON.parse(init.body as string) : {};
     calls.push({ query: body.query ?? "", variables: body.variables });
-    return {
+    return Promise.resolve({
       ok: true,
-      json: async () => responseData,
-    } as Response;
+      json: () => Promise.resolve(responseData),
+    } as Response);
   };
 
   globalThis.fetch = spy as typeof fetch;
@@ -47,7 +47,7 @@ function mockFetch(responseData: unknown) {
 function mockFetchFail() {
   const originalFetch = globalThis.fetch;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  globalThis.fetch = (async () => { throw new Error("network failure"); }) as any;
+  globalThis.fetch = (() => Promise.reject(new Error("network failure"))) as any;
   return { restore() { globalThis.fetch = originalFetch; } };
 }
 
@@ -114,7 +114,7 @@ describe("CTL-976: fillEstimateFallback — query uses team+number NOT identifie
   it("groups cross-team IDs into separate per-team queries", async () => {
     const calls: Array<{ teamKey?: string; numbers?: number[] }> = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(init.body as string) : {};
       calls.push(body.variables as { teamKey?: string; numbers?: number[] });
       // Return the appropriate team's issues
@@ -122,10 +122,10 @@ describe("CTL-976: fillEstimateFallback — query uses team+number NOT identifie
       const nodes = teamKey === "CTL"
         ? [{ number: 774, estimate: 8, team: { key: "CTL" } }]
         : [{ number: 1, estimate: 2, team: { key: "ADV" } }];
-      return {
+      return Promise.resolve({
         ok: true,
-        json: async () => ({ data: { issues: { nodes } } }),
-      } as Response;
+        json: () => Promise.resolve({ data: { issues: { nodes } } }),
+      } as Response);
     }) as typeof fetch;
 
     try {

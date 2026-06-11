@@ -29,14 +29,14 @@ function mockFetch(responseData: unknown) {
   const calls: Array<{ query: string; variables: unknown }> = [];
   const originalFetch = globalThis.fetch;
 
-  const spy = async (_url: string | URL | Request, init?: RequestInit) => {
+  const spy = (_url: string | URL | Request, init?: RequestInit) => {
     callCount++;
     const body = init?.body ? JSON.parse(init.body as string) : {};
     calls.push({ query: body.query ?? "", variables: body.variables });
-    return {
+    return Promise.resolve({
       ok: true,
-      json: async () => responseData,
-    } as Response;
+      json: () => Promise.resolve(responseData),
+    } as Response);
   };
 
   globalThis.fetch = spy as typeof fetch;
@@ -57,9 +57,7 @@ function mockFetch(responseData: unknown) {
 function mockFetchFail() {
   const originalFetch = globalThis.fetch;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  globalThis.fetch = (async () => {
-    throw new Error("network failure");
-  }) as any;
+  globalThis.fetch = (() => Promise.reject(new Error("network failure"))) as any;
   return {
     restore() {
       globalThis.fetch = originalFetch;
@@ -145,7 +143,7 @@ describe("CTL-974: fillTitleDescriptionFallback — title+description resolver",
   it("groups cross-team IDs into separate per-team queries", async () => {
     const calls: Array<{ teamKey?: string; numbers?: number[] }> = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(init.body as string) : {};
       calls.push(body.variables as { teamKey?: string; numbers?: number[] });
       const teamKey = body.variables?.teamKey as string;
@@ -153,7 +151,7 @@ describe("CTL-974: fillTitleDescriptionFallback — title+description resolver",
         teamKey === "CTL"
           ? [{ number: 926, title: "CTL title", description: "ctl body", team: { key: "CTL" } }]
           : [{ number: 1, title: "ADV title", description: "adv body", team: { key: "ADV" } }];
-      return { ok: true, json: async () => ({ data: { issues: { nodes } } }) } as Response;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ data: { issues: { nodes } } }) } as Response);
     }) as typeof fetch;
     try {
       const result = await withToken(() =>
