@@ -1084,6 +1084,58 @@ export function defaultAppendAutotuneGaugeEvent({
   );
 }
 
+// CTL-1044: generic operator-event appender. The scheduler's `appendIntentEvent`
+// seam (scheduler.mjs:4300, threaded into the advance-shadow comparator, CTL-936
+// reconcileIntents, and executeEscalations) consumes a RAW operator-event object:
+//   { "event.name": string, payload: object }
+// This does NOT fit buildEventEnvelope's phase.<phase>.<action>.<ticket> schema
+// (those events are phase-keyed; operator telemetry is name-keyed), so it gets a
+// dedicated envelope builder here. The envelope carries `evt["event.name"]`
+// VERBATIM as attributes["event.name"] and `evt.payload` under body.payload —
+// matching the unified-event-log line shape every other daemon emitter writes
+// (ts/id/observedTs/severity/resource{service.name,namespace,host}/attributes/body).
+// Production wires this at daemon.mjs's schedulerFn({ appendIntentEvent }) call;
+// startScheduler keeps its null default (CTL-936 chose silence for legacy/tests).
+// Best-effort: a malformed evt or an unwriteable log never throws — operator
+// telemetry must never break a tick (the shadow contract). The broker's
+// shouldSkipEvent (broker/router.mjs:1395) does NOT skip beliefs.* names and no
+// handler keys off them, so these land in the log as inert telemetry — no loop.
+export function defaultAppendOperatorEvent(evt) {
+  try {
+    const name = evt?.["event.name"];
+    if (typeof name !== "string" || name.length === 0) return false;
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const line =
+      JSON.stringify({
+        ts,
+        id: randomBytes(8).toString("hex"),
+        observedTs: ts,
+        // Operator telemetry (shadow disagreements, intent.ineffective,
+        // escalations) is INFO — it records evidence; it is NOT a daemon-health
+        // warning. Matches the dispatch-lifecycle precedent (CTL-700 Item B).
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: randomBytes(16).toString("hex"),
+        spanId: randomBytes(8).toString("hex"),
+        resource: {
+          "service.name": "catalyst.execution-core",
+          "service.namespace": "catalyst",
+          "host.name": hostName(),
+          "host.id": hostId(),
+        },
+        attributes: {
+          "event.name": name,
+        },
+        body: { payload: evt?.payload ?? null },
+      }) + "\n";
+    return appendEnvelopeBestEffort(line, "operator-event");
+  } catch {
+    // Best-effort — a serialization failure (e.g. a circular payload) must
+    // never break the tick. The caller's own try/catch is a second backstop.
+    return false;
+  }
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass

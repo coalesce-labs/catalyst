@@ -41,6 +41,8 @@ import {
   clearProgressMarks,
   // CTL-1006
   defaultAppendBootResumePhaseRegressionEvent,
+  // CTL-1044
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -2983,6 +2985,101 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.load_per_core).toBe(0.3);
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+});
+
+// CTL-1044: the generic operator-event appender. This is the PRODUCTION default
+// for the scheduler's `appendIntentEvent` seam (advance-shadow disagree/tick,
+// CTL-936 intent.ineffective, executeEscalations). The seam contract is a RAW
+// `{ "event.name": string, payload: object }` object that does NOT fit
+// buildEventEnvelope's phase/action schema — so this helper wraps it in a valid
+// unified-event-log envelope, carrying event.name VERBATIM and payload intact.
+describe("defaultAppendOperatorEvent (CTL-1044)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1044-op-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes a parseable envelope carrying event.name verbatim and payload intact", () => {
+    // Exactly the object the advance-shadow comparator hands the seam
+    // (advance-shadow.mjs:177-180): the disagree event.
+    const disagreement = {
+      ticket: "CTL-9",
+      procedural: "research",
+      belief: null,
+      procedural_exhausted: false,
+      belief_exhausted: false,
+      signals: { triage: "done" },
+      differingInput: { verdict: null, remediateCycleCount: 0 },
+    };
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.disagree",
+      payload: disagreement,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // event.name is preserved VERBATIM — NOT mangled into phase.<phase>.<action>.
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.disagree");
+    // payload survives the round-trip byte-for-byte.
+    expect(env.body.payload).toEqual(disagreement);
+    // Same resource/service fields every other daemon emitter stamps.
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.resource["service.namespace"]).toBe("catalyst");
+    expect(env.resource["host.name"]).toBeTruthy();
+    expect(env.resource["host.id"]).toBeTruthy();
+    // Required envelope scaffold the log reader/otel-forward depend on.
+    expect(typeof env.id).toBe("string");
+    expect(env.id.length).toBeGreaterThan(0);
+    expect(env.ts).toBeTruthy();
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
+  });
+
+  test("writes the tick-summary event with its agree/disagree counts", () => {
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.tick",
+      payload: { agree: 3, disagree: 1 },
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.tick");
+    expect(env.body.payload).toEqual({ agree: 3, disagree: 1 });
+  });
+
+  test("is best-effort: returns false (never throws) on a malformed event with no event.name", () => {
+    expect(defaultAppendOperatorEvent({ payload: { x: 1 } })).toBe(false);
+    expect(defaultAppendOperatorEvent(null)).toBe(false);
+    expect(defaultAppendOperatorEvent({})).toBe(false);
+  });
+
+  test("is fail-open: returns false (never throws) when the log dir is unwriteable", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-op");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendOperatorEvent({
+        "event.name": "beliefs.advance_shadow.disagree",
+        payload: { ticket: "CTL-FAIL" },
+      }),
+    ).toBe(false);
   });
 });
 

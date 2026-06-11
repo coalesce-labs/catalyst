@@ -83,7 +83,7 @@ import {
   readAllEligibleTickets, // CTL-862: boot-log ownership count
   clearHoldStopCooldown, // CTL-768
 } from "./scheduler.mjs";
-import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume
+import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
@@ -541,7 +541,19 @@ export function startDaemon({
       // live in production, not just in unit tests.
       gateway: gatewayReader,
       isBgJobAlive,
-    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
+      // CTL-1044: provide the production operator-event appender for the
+      // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
+      // the seam is null and the advance-shadow comparator's disagree/tick
+      // events (beliefs/advance-shadow.mjs:177-198), CTL-936 intent.ineffective,
+      // and executeEscalations emissions all silently no-op — the bug this fixes
+      // (zero beliefs.* events ever reached the log despite the shadow window
+      // running live on mini). The seam contract is a raw
+      // { "event.name": string, payload: object } object, which does NOT fit
+      // buildEventEnvelope's phase/action schema — hence the dedicated
+      // operator-event envelope builder in recovery.mjs. startScheduler keeps
+      // its null default (CTL-936 chose silence for legacy/tests).
+      appendIntentEvent: defaultAppendOperatorEvent,
+    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 + CTL-1044 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read; appendIntentEvent wires operator telemetry to the event log)
     // CTL-684: start the side-car auto-tuner AFTER the scheduler so the
     // scheduler's first tick runs with the operator's current Layer-2 value
     // before any auto-tune adjustments. configPath + layer2Path are threaded
