@@ -228,6 +228,30 @@ describe("CTL-1045 J3 integration — new gates", () => {
   });
 });
 
+describe("CTL-1045 Bug 4 — once-marker withheld on failed needs-human clear", () => {
+  test("a FAILED needs-human clear withholds the once-marker (stalled signal still deleted)", () => {
+    seedStall();
+    const events = [];
+    // Wire removeLabel to return {removed: false} — simulates a Linear API failure.
+    const result = schedulerTick(
+      orchDir,
+      {
+        ...makeTickOpts({ mode: "enforce", events }),
+        writeStatus: {
+          applyLabel: () => ({ applied: true }),
+          removeLabel: () => ({ removed: false }), // label removal fails
+          runTransition: () => ({ applied: false }),
+        },
+      },
+    );
+    // The stalled signal IS deleted (the unstick happens regardless of label-clear).
+    expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(false);
+    // The once-marker is withheld — a future genuine escalation must be re-armable.
+    expect(existsSync(join(workerDir(), `.janitor-cleared-${PHASE}.applied`))).toBe(false);
+    expect(result.janitorStallsCleared).toEqual([{ ticket: TICKET, phase: PHASE }]);
+  });
+});
+
 describe("CTL-1005 J3 integration — shadow mutates nothing", () => {
   test("shadow emits janitor.would.clear but deletes no signal and writes no marker", () => {
     seedStall();
