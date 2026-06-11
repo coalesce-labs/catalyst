@@ -10,6 +10,7 @@ import {
   analyzeDependencyGraph,
   referencedBlockerIds,
   teamOf,
+  wouldCreateCycle,
 } from "./dependency-graph.mjs";
 
 // issue(id, state, relations[], inverseRelations[]) — terse fixture builder.
@@ -622,4 +623,80 @@ describe("null / undefined inputs degrade gracefully", () => {
   test("analyzeDependencyGraph(undefined) → empty result", () => {
     expect(analyzeDependencyGraph(undefined)).toEqual({ ready: [], blocked: [], anomalies: [] });
   });
+
+  test("wouldCreateCycle(undefined, ...) → false", () => {
+    expect(wouldCreateCycle(undefined, "A", "B")).toBe(false);
+  });
+});
+
+describe("wouldCreateCycle", () => {
+  const cases = [
+    {
+      name: "empty graph → no cycle",
+      edges: [],
+      from: "A", to: "B",
+      expected: false,
+    },
+    {
+      name: "direct 2-node back-edge → cycle (A blocks B, add B blocks A)",
+      edges: [{ from: "A", to: "B" }],
+      from: "B", to: "A",
+      expected: true,
+    },
+    {
+      name: "transitive 3-node back-edge → cycle (A→B→C, add C→A)",
+      edges: [{ from: "A", to: "B" }, { from: "B", to: "C" }],
+      from: "C", to: "A",
+      expected: true,
+    },
+    {
+      name: "forward edge in a chain → no cycle (A→B→C, add A→C)",
+      edges: [{ from: "A", to: "B" }, { from: "B", to: "C" }],
+      from: "A", to: "C",
+      expected: false,
+    },
+    {
+      name: "self-loop → cycle (add A→A)",
+      edges: [],
+      from: "A", to: "A",
+      expected: true,
+    },
+    {
+      name: "disjoint components closing a cycle (X→Y, add B→A where A→B exists)",
+      edges: [{ from: "X", to: "Y" }, { from: "A", to: "B" }],
+      from: "B", to: "A",
+      expected: true,
+    },
+    {
+      name: "disjoint, unrelated endpoints → no cycle (X→Y, add Q→Z)",
+      edges: [{ from: "X", to: "Y" }],
+      from: "Q", to: "Z",
+      expected: false,
+    },
+    {
+      name: "longer transitive chain (A→B→C→D, add D→A) → cycle",
+      edges: [
+        { from: "A", to: "B" }, { from: "B", to: "C" }, { from: "C", to: "D" },
+      ],
+      from: "D", to: "A",
+      expected: true,
+    },
+    {
+      name: "edge already present (idempotent, A→B exists, add A→B) → no new cycle",
+      edges: [{ from: "A", to: "B" }],
+      from: "A", to: "B",
+      expected: false,
+    },
+    {
+      name: "null edges defensive → no cycle",
+      edges: null,
+      from: "A", to: "B",
+      expected: false,
+    },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      expect(wouldCreateCycle(c.edges, c.from, c.to)).toBe(c.expected);
+    });
+  }
 });

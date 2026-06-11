@@ -31,6 +31,7 @@ import {
   referencedBlockerIds,
   buildDependencyEdges,
   DEFAULT_TERMINAL_STATUSES,
+  wouldCreateCycle,
 } from "../lib/dependency-graph.mjs";
 // teamOf (CTL-838 cross-team guard) is imported from ./dispatch.mjs below.
 // PHASES is still imported for deriveAdvancement; CTL-565 note: PHASES[0]
@@ -2665,6 +2666,13 @@ export function schedulerTick(
       const descriptorByTicket = new Map(
         waitingDescriptors.map((d) => [d.identifier, d]),
       );
+      // CTL-925 Gap 2: full-graph edge set for the transitive cycle guard below.
+      // waitingDescriptors carry relations/inverseRelations (inSet = the pool),
+      // so buildDependencyEdges yields the canonical {from,to} edges the detector
+      // uses. Built once and reused per (candidate, dep). The 2-node
+      // candidateBlocks.has shortcut remains as a backstop for direct out-of-pool
+      // back-edges; wouldCreateCycle adds transitive coverage over the pool.
+      const poolEdges = buildDependencyEdges(waitingDescriptors);
       // CTL-784: pre-collect every (non-cycle) candidate's triage.json deps and
       // resolve their live Linear states in ONE batched, cache-first request —
       // was one fetchTicketState per dep per candidate. The per-dep loop below
@@ -2743,12 +2751,15 @@ export function schedulerTick(
             );
             continue;
           }
-          if (candidateBlocks.has(dep)) {
-            // Persisting blocked_by(candidate ← dep) while candidate already
-            // blocks dep would close a cycle. Drop it (do not deadlock).
+          if (candidateBlocks.has(dep) || wouldCreateCycle(poolEdges, dep, candidate)) {
+            // Persisting blocked_by(candidate ← dep) would close a cycle of
+            // any length (2-node direct OR transitive through pool edges).
+            // CTL-925 supersedes the CTL-755 direct-only check with full
+            // reachability via wouldCreateCycle. candidateBlocks remains as a
+            // backstop for direct out-of-pool back-edges.
             log.warn(
               { candidate, dep },
-              "ctl-755 step-e: skipping dependency that would close a cycle",
+              "ctl-925 step-e: skipping dependency that would close a cycle (transitive)",
             );
             continue;
           }
@@ -3100,6 +3111,26 @@ export function schedulerTick(
   // CTL-695: per-tick reaper telemetry — otel-forward ships this pino line as a
   // gauge (same log-line-only convention as cache.stats / per-project slots).
   log.info(countReapOutcomes(), "scheduler: reap stats");
+  // CTL-925 Gap 1: a ring among ELIGIBLE tickets (not yet triaged-waiting) lands
+  // all members in `blocked`, none in `ready` — computeReadyTickets would
+  // silently skip them. Surface the anomalies here and escalate each cycle
+  // member to needs-human (labelOnce, apply-once), mirroring STEP A.5.
+  // Pure computeReadyTickets stays unchanged.
+  const eligibleGraph = analyzeDependencyGraph(eligible, { blockerStates });
+  if (eligibleGraph.anomalies.length > 0) {
+    const eligibleIds = new Set(eligible.map((t) => t.identifier).filter(Boolean));
+    for (const anomaly of eligibleGraph.anomalies) {
+      for (const member of anomaly.members) {
+        if (eligibleIds.has(member)) {
+          log.warn(
+            { member, members: anomaly.members },
+            "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human",
+          );
+          labelOnce(orchDir, member, "needs-human", writeStatus);
+        }
+      }
+    }
+  }
   // CTL-850: HRW ownership filter — keep only the tickets THIS host owns under
   // the cluster roster so freeSlots + per-project caps compute over owned work
   // only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds` drives
@@ -3185,7 +3216,33 @@ export function schedulerTick(
         );
       }
       if (validDeps.length > 0) {
+        // CTL-925 Gap 3: guard each sequencing write against closing a cycle.
+        // Build seqEdges from the candidate's relations (always available) plus
+        // any in-flight descriptor in the cache (best-effort transitive coverage).
+        // Raw edge extraction — no inSet filter, so candidate→in-flight edges
+        // survive even when the in-flight ticket is not in the eligible pool.
+        const seqRaw = [];
+        const addRawBlocks = (issue) => {
+          const self = issue?.identifier;
+          if (!self) return;
+          for (const node of issue?.relations?.nodes ?? []) {
+            const peer = node?.relatedIssue?.identifier;
+            if (node?.type === "blocks" && peer) seqRaw.push({ from: self, to: peer });
+          }
+        };
+        addRawBlocks(t);
+        for (const ifId of inFlightTickets) {
+          const d = cache?.get?.(ifId) ?? null;
+          if (d) addRawBlocks({ identifier: ifId, ...d });
+        }
         for (const dep of validDeps) {
+          if (wouldCreateCycle(seqRaw, dep.blocked_by, dep.candidate)) {
+            log.warn(
+              { candidate: dep.candidate, blockedBy: dep.blocked_by },
+              "ctl-925 sequencing: skipping hard_dependency that would close a cycle",
+            );
+            continue;
+          }
           safeWrite(
             () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
             { ticket: dep.candidate, phase: "sequencing" }

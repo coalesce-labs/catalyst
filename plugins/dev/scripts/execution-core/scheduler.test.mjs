@@ -7836,3 +7836,333 @@ describe("CTL-936: runTick production wiring — intentDb + appendIntentEvent se
     expect(opts.appendIntentEvent == null).toBe(true);
   });
 });
+
+// ── CTL-925: dependency cycle hardening ──
+//
+// Gap 1: eligible (new-work / sweep-2) ring escalation.
+// Gap 2: STEP E transitive cycle write guard.
+// Gap 3: CTL-537 sequencing seam cycle guard.
+describe("CTL-925: dependency cycle hardening", () => {
+  afterEach(() => __resetForTests());
+
+  // Minimal writeStatus spy tracking label and blockedBy writes.
+  function makeWS() {
+    const applied = [];
+    const blockedByWrites = [];
+    return {
+      ws: {
+        applyPhaseStatus: () => ({ applied: true, reason: null }),
+        applyTerminalDone: () => {},
+        applyEstimate: () => ({ applied: true }),
+        applyLabel: (a) => { applied.push(a); return { applied: true }; },
+        removeLabel: () => ({ removed: true }),
+        applyBlockedByRelation: (a) => { blockedByWrites.push(a); return { applied: true }; },
+      },
+      applied,
+      blockedByWrites,
+    };
+  }
+
+  // Eligible ticket fixture: identifier, state "Todo", optional relations.
+  function elig(identifier, rel = [], inv = []) {
+    return {
+      identifier,
+      priority: 2,
+      createdAt: "x",
+      state: { name: "Todo" },
+      relations: { nodes: rel },
+      inverseRelations: { nodes: inv },
+    };
+  }
+  const blocksRel = (id) => ({ type: "blocks", relatedIssue: { identifier: id } });
+  const blocksInv = (id) => ({ type: "blocks", issue: { identifier: id } });
+
+  // ── Gap 1: eligible ring escalation (sweep-2) ──
+
+  test("Gap 1: 2-node eligible ring → both escalated to needs-human, none dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // CTL-1 blocks CTL-2 AND CTL-2 blocks CTL-1 — a ring. Neither has a worker dir.
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-2")]),
+      elig("CTL-2", [blocksRel("CTL-1")], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+    });
+    expect(dispatch.calls).toEqual([]);
+    const nhLabels = applied.filter((l) => l.label === "needs-human");
+    const nhTickets = nhLabels.map((l) => l.ticket).sort();
+    expect(nhTickets).toContain("CTL-1");
+    expect(nhTickets).toContain("CTL-2");
+  });
+
+  test("Gap 1: 3-node eligible ring → all three escalated to needs-human, none dispatched", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // A→B→C→A
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], [blocksInv("CTL-3")]),
+      elig("CTL-2", [blocksRel("CTL-3")], [blocksInv("CTL-1")]),
+      elig("CTL-3", [blocksRel("CTL-1")], [blocksInv("CTL-2")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+    });
+    expect(dispatch.calls).toEqual([]);
+    const nhTickets = applied.filter((l) => l.label === "needs-human").map((l) => l.ticket).sort();
+    expect(nhTickets).toContain("CTL-1");
+    expect(nhTickets).toContain("CTL-2");
+    expect(nhTickets).toContain("CTL-3");
+  });
+
+  test("Gap 1 control: non-cyclic eligible chain dispatches normally, no needs-human", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 5 }));
+    // CTL-1 blocks CTL-2 (CTL-2 is blocked by CTL-1). CTL-1 is unblocked → dispatched.
+    const eligible = [
+      elig("CTL-1", [blocksRel("CTL-2")], []),
+      elig("CTL-2", [], [blocksInv("CTL-1")]),
+    ];
+    const dispatch = fakeDispatch();
+    const { ws, applied } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => eligible,
+      dispatch,
+      liveBackgroundCount: () => 0,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+    });
+    // CTL-1 has no blockers → dispatched; CTL-2 is blocked by CTL-1 → held.
+    expect(dispatch.calls.map((c) => c.ticket)).toContain("CTL-1");
+    expect(applied.filter((l) => l.label === "needs-human")).toHaveLength(0);
+  });
+
+  // Helper: write a triage.json for STEP E dep persistence tests (requires
+  // worker dir already created via writeSignal).
+  function writeTriageDepsE(ticket, dependencies) {
+    writeFileSync(
+      join(orchDir, "workers", ticket, "triage.json"),
+      JSON.stringify({ ticket, classification: "feature", dependencies }),
+    );
+  }
+
+  // ── Gap 2: STEP E transitive cycle write guard ──
+  //
+  // The transitive test requires ALL nodes in the cycle to be in waitingDescriptors
+  // (triaged-waiting), because buildDependencyEdges drops out-of-set edges. The
+  // dep target (CTL-300) must be triaged-waiting so the CTL-800→CTL-300 edge
+  // survives the inSet filter and wouldCreateCycle can detect the ring.
+
+  test("Gap 2: transitive A→B→C ring — writing A blocked_by C refused (ctl-925 step-e)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // All three are triaged-waiting so all land in waitingDescriptors (inSet).
+    writeSignal("CTL-700", "triage", "done");
+    writeSignal("CTL-800", "triage", "done");
+    writeSignal("CTL-300", "triage", "done");
+    // CTL-700's triage.json names CTL-300 as a dep.
+    writeTriageDepsE("CTL-700", ["CTL-300"]);
+
+    // CTL-700 blocks CTL-800 → edge CTL-700→CTL-800.
+    // CTL-800 blocks CTL-300 → edge CTL-800→CTL-300 (CTL-300 IS in-set → kept!).
+    // Writing CTL-700 blocked_by CTL-300 adds CTL-300→CTL-700, closing the ring.
+    const desc700 = {
+      state: "Triage", priority: 2, labels: [], parent: null,
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-800" } }] },
+      inverseRelations: { nodes: [] },
+    };
+    const desc800 = {
+      state: "Triage", priority: 2, labels: [], parent: null,
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-300" } }] },
+      inverseRelations: { nodes: [] },
+    };
+    const desc300 = {
+      state: "Triage", priority: 2, labels: [], parent: null,
+      relations: { nodes: [] }, inverseRelations: { nodes: [] },
+    };
+
+    const dispatch = fakeDispatch();
+    const { ws, blockedByWrites } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch({ "CTL-700": desc700, "CTL-800": desc800, "CTL-300": desc300 }),
+    });
+    // Writing CTL-700 blocked_by CTL-300 closes CTL-300→CTL-700→CTL-800→CTL-300.
+    // With the transitive guard it MUST NOT be written.
+    expect(blockedByWrites).not.toContainEqual({ ticket: "CTL-700", blockedBy: "CTL-300" });
+  });
+
+  test("Gap 2: direct 2-node back-edge still refused (candidateBlocks backstop)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    writeTriageDepsE("CTL-7", ["CTL-8"]);
+    // CTL-7 directly blocks CTL-8 → candidateBlocks.has("CTL-8") catches it.
+    const desc7 = {
+      state: "Triage", priority: 2, labels: [], parent: null,
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-8" } }] },
+      inverseRelations: { nodes: [] },
+    };
+    const desc8 = { state: "In Progress", priority: null, labels: [], parent: null,
+      relations: { nodes: [] }, inverseRelations: { nodes: [] } };
+
+    const dispatch = fakeDispatch();
+    const { ws, blockedByWrites } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch({ "CTL-7": desc7, "CTL-8": desc8 }),
+    });
+    expect(blockedByWrites).not.toContainEqual({ ticket: "CTL-7", blockedBy: "CTL-8" });
+  });
+
+  test("Gap 2 control: non-cycle-closing dep IS written", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-7", "triage", "done");
+    // CTL-7 blocks CTL-400 (unrelated to dep CTL-100). Writing CTL-7 blocked_by
+    // CTL-100 adds CTL-100→CTL-7. DFS from CTL-7: CTL-7→CTL-400, no path to
+    // CTL-100 → no cycle. CTL-400 is NOT in the pool so the edge is dropped by
+    // buildDependencyEdges — CTL-7 has no outgoing edges in poolEdges.
+    writeTriageDepsE("CTL-7", ["CTL-100"]);
+    const desc7 = {
+      state: "Triage", priority: 2, labels: [], parent: null,
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-400" } }] },
+      inverseRelations: { nodes: [] },
+    };
+    const desc100 = { state: "In Progress", priority: null, labels: [], parent: null,
+      relations: { nodes: [] }, inverseRelations: { nodes: [] } };
+
+    const dispatch = fakeDispatch();
+    const { ws, blockedByWrites } = makeWS();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      fetchBatch: mkBatch({ "CTL-7": desc7, "CTL-100": desc100 }),
+    });
+    expect(blockedByWrites).toContainEqual({ ticket: "CTL-7", blockedBy: "CTL-100" });
+  });
+
+  // ── Gap 3: CTL-537 sequencing seam cycle guard ──
+
+  test("Gap 3: sequencing verdict closing a cycle is refused (ctl-925 sequencing)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    // CTL-NEW is a new-work candidate (no worker dir). CTL-IN is in-flight.
+    writeSignal("CTL-IN", "implement", "running");
+    // Descriptor: CTL-IN already blocks CTL-NEW (CTL-IN → CTL-NEW).
+    // Writing CTL-NEW blocked_by CTL-IN = edge CTL-IN → CTL-NEW — but CTL-IN already
+    // blocks CTL-NEW (CTL-IN → CTL-NEW is in CTL-IN's relations). So writing
+    // blocked_by(CTL-NEW ← CTL-IN) adds CTL-IN → CTL-NEW, and DFS from CTL-NEW:
+    // CTL-NEW has no outgoing blocks edges, so no cycle... wait, we need a cycle.
+    //
+    // Correct setup: CTL-NEW blocks CTL-IN (CTL-NEW → CTL-IN), and verdict says
+    // CTL-NEW blocked_by CTL-IN. Then adding CTL-IN → CTL-NEW closes CTL-IN→CTL-NEW→CTL-IN.
+    const eligNew = {
+      identifier: "CTL-NEW",
+      priority: 2,
+      createdAt: "x",
+      state: { name: "Todo" },
+      // CTL-NEW blocks CTL-IN → edge CTL-NEW→CTL-IN
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-IN" } }] },
+      inverseRelations: { nodes: [] },
+    };
+    const descIN = {
+      state: "Implement", priority: 2, labels: [], parent: null,
+      relations: { nodes: [] },
+      // CTL-IN is NOT in eligible, its descriptor is fetched from cache.
+      // For seqEdges we need CTL-IN's relations — but if cache doesn't have it,
+      // seqEdges won't have that edge. The direct check via wouldCreateCycle
+      // over seqEdges built from the eligible pool should catch CTL-NEW→CTL-IN.
+      inverseRelations: { nodes: [] },
+    };
+
+    const blockedByWrites = [];
+    const ws = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: () => ({ applied: true }),
+      removeLabel: () => ({ removed: true }),
+      applyBlockedByRelation: (a) => { blockedByWrites.push(a); return { applied: true }; },
+    };
+
+    // checkSequencing verdict: CTL-NEW should be blocked_by CTL-IN.
+    const checkSequencing = () => ({
+      verdict: "hold",
+      hard_dependencies: [{ candidate: "CTL-NEW", blocked_by: "CTL-IN" }],
+    });
+
+    schedulerTick(orchDir, {
+      readEligible: () => [eligNew],
+      dispatch: fakeDispatch(),
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      fetchBatch: mkBatch({ "CTL-NEW": descIN, "CTL-IN": descIN }),
+      checkSequencing,
+    });
+    // Writing CTL-NEW blocked_by CTL-IN would close CTL-IN→CTL-NEW→CTL-IN.
+    // The guard must refuse it.
+    expect(blockedByWrites).not.toContainEqual({ ticket: "CTL-NEW", blockedBy: "CTL-IN" });
+  });
+
+  test("Gap 3 control: non-cycle-closing sequencing verdict IS written", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal("CTL-IN", "implement", "running");
+    // CTL-NEW has no existing blocks edges → writing CTL-NEW blocked_by CTL-IN
+    // adds CTL-IN→CTL-NEW. DFS from CTL-NEW: no outgoing edges → no cycle.
+    const eligNew = {
+      identifier: "CTL-NEW",
+      priority: 2,
+      createdAt: "x",
+      state: { name: "Todo" },
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    };
+    const descIN = {
+      state: "Implement", priority: 2, labels: [], parent: null,
+      relations: { nodes: [] }, inverseRelations: { nodes: [] },
+    };
+
+    const blockedByWrites = [];
+    const ws = {
+      applyPhaseStatus: () => ({ applied: true, reason: null }),
+      applyTerminalDone: () => {},
+      applyEstimate: () => ({ applied: true }),
+      applyLabel: () => ({ applied: true }),
+      removeLabel: () => ({ removed: true }),
+      applyBlockedByRelation: (a) => { blockedByWrites.push(a); return { applied: true }; },
+    };
+
+    const checkSequencing = () => ({
+      verdict: "hold",
+      hard_dependencies: [{ candidate: "CTL-NEW", blocked_by: "CTL-IN" }],
+    });
+
+    schedulerTick(orchDir, {
+      readEligible: () => [eligNew],
+      dispatch: fakeDispatch(),
+      writeStatus: ws,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 1,
+      fetchBatch: mkBatch({ "CTL-NEW": descIN, "CTL-IN": descIN }),
+      checkSequencing,
+    });
+    expect(blockedByWrites).toContainEqual({ ticket: "CTL-NEW", blockedBy: "CTL-IN" });
+  });
+});
