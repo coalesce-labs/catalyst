@@ -41,6 +41,7 @@ import {
   type ActiveNodeTail,
 } from "@/board/live-tail-data";
 import type { BoardTicket, BoardWorker } from "@/board/types";
+import type { LinearTicketState } from "./use-linear-ticket";
 import type { DetailSearch, DetailTab } from "@/board/route-search";
 import type { StreamEvent } from "@/lib/types";
 import { phaseColor, fmtCost, fmtTokens, statusSemantic, type StatusSemantic } from "@/lib/formatters";
@@ -509,8 +510,10 @@ function CostSummaryLine({ ticket }: { ticket: BoardTicket }) {
 // ── COMMS (the Activity tab is the disclosure — no inner Collapsible) ────────
 // v2: the Collapsible wrapper is dropped — opening the Activity tab IS the
 // disclosure, so Comms renders inline under its sub-label (design DETAIL2-v2 §6).
-function CommsSection({ ticket }: { ticket: BoardTicket }) {
-  const channel = orchChannelFor(ticket.id);
+// CTL-999: takes the ticket ID (not the resident BoardTicket) so it works
+// off-board (the live comms feed keys off the id alone).
+function CommsSection({ ticketId }: { ticketId: string }) {
+  const channel = orchChannelFor(ticketId);
   return (
     <section data-ticket-comms style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
@@ -524,8 +527,9 @@ function CommsSection({ ticket }: { ticket: BoardTicket }) {
 }
 
 // ── ACTIVITY (scoped live feed) ─────────────────────────────────────────────────
-function ActivitySection({ ticket }: { ticket: BoardTicket }) {
-  const predicate = activityPredicateForTicket(ticket.id);
+// CTL-999: takes the ticket ID so the live event feed works off-board too.
+function ActivitySection({ ticketId }: { ticketId: string }) {
+  const predicate = activityPredicateForTicket(ticketId);
   const { events, status, live } = useActivityStream(predicate);
   const repoColors = useRepoColors();
   // newest first (the backend returns chronological order, mirroring ActivityView)
@@ -733,32 +737,35 @@ function TelemetryStrip({ ticket }: { ticket: BoardTicket }) {
 // ── page body ─────────────────────────────────────────────────────────────────
 /**
  * The ticket detail page body. Renders inside the shared <Shell>'s <DetailBody>
- * slot (DETAIL1). `ticket` is the resident BoardTicket; when it is undefined (a
- * cold-linked Done ticket not in the resident payload) the body shows an honest
- * placeholder rather than a fabricated lifecycle (design §4 — resident-only).
+ * slot (DETAIL1).
+ *
+ * CTL-999: `ticket` is the resident BoardTicket OR undefined (an off-board Done/
+ * archived ticket that left the resident payload). When off-board the page STILL
+ * renders the full reading page (title · status row · markdown spec · rail) from
+ * the live Linear fetch (`linear`) alone; only the resident-only tabs (Lifecycle,
+ * Cost) degrade to honest empty states. Nothing is fabricated.
+ *
  * `workers` are the resident live bg workers (DETAIL7) — used to resolve the
  * running phase's sessionId so the active spine node can tail the live stream.
  */
 export function TicketDetailPage({
+  id,
   ticket,
   workers = [],
-  realTitle = null,
-  description = null,
-  descLoaded = false,
+  linear,
   search,
 }: {
+  /** The route `$id` — the source of truth for the comms/activity/Linear-link
+   *  off-board (where there is no resident `ticket.id`). */
+  id: string;
   ticket: BoardTicket | undefined;
   workers?: BoardWorker[];
-  /** CTL-974: the LIVE Linear title from /api/linear-ticket — wins over the
-   *  stale board title in the Header; null falls back to the board title. */
-  realTitle?: string | null;
-  /** CTL-974: the LIVE Linear markdown description — the Spec tab lead. */
-  description?: string | null;
-  /** CTL-974: whether the live fetch has resolved (drives the honest skeleton
-   *  vs honest-empty in the description block). */
-  descLoaded?: boolean;
-  /** CTL-996: the typed URL search params — `tab` drives the active tab and
-   *  `pipeline` drives the Q3 indicator variant (URL = source of truth). */
+  /** CTL-974/CTL-999: the LIVE Linear fetch ({title, description, labels,
+   *  relations, state, priority, project, estimate, loaded}). Drives the reading
+   *  page for both resident and off-board tickets. */
+  linear: LinearTicketState;
+  /** CTL-996: the typed URL search params — `tab` drives the active tab
+   *  (URL = source of truth). */
   search: DetailSearch;
 }) {
   // Spine node refs — LifecycleTimeline registers its nodes here (the Shell's
@@ -816,97 +823,150 @@ export function TicketDetailPage({
   );
   const openLifecycle = useCallback(() => setTab("lifecycle"), [setTab]);
 
-  if (!ticket) {
+  // CTL-999: off-board branches (no resident ticket).
+  //  - still loading the live fetch → honest loading skeleton (no fabricated body).
+  //  - loaded but Linear returned nothing → honest unavailable empty state.
+  // Otherwise (resident OR off-board-with-live-data) the FULL reading column
+  // renders below from the view-model.
+  if (!ticket && !linear.loaded) {
     return (
       <div
-        data-ticket-page-empty
-        style={{ color: C.fgDim, font: `12px ${C.mono}` }}
+        data-ticket-page-loading
+        style={{ maxWidth: 680, margin: "0 auto", paddingTop: 24 }}
       >
-        This ticket is not in the resident board payload — its lifecycle is not
-        available off resident data alone (a Done ticket off the board). Open it in
-        Linear from the header.
+        <DescriptionSkeleton />
       </div>
     );
   }
+  if (!ticket && linear.loaded && linear.title == null && linear.description == null) {
+    return (
+      <div
+        data-ticket-page-empty
+        style={{ maxWidth: 680, margin: "0 auto", paddingTop: 24 }}
+      >
+        <EmptyState
+          icon={Radio}
+          message={`Not on the live board and Linear returned nothing for ${id}.`}
+        />
+      </div>
+    );
+  }
+
+  // ── view-model (resident BoardTicket wins; off-board falls back to live) ──
+  const vmTitle = linear.title ?? ticket?.title ?? id;
+  const vmStateName = ticket?.linearState ?? linear.state?.name ?? null;
+  const vmPriority = ticket?.priority ?? linear.priority;
+  const vmEstimate = ticket?.estimate ?? linear.estimate;
+  const vmEstimateDisplay = ticket?.estimateDisplay ?? (linear.estimate != null ? String(linear.estimate) : null);
+  const vmTypeKind = ticket
+    ? (TYPE_KINDS as readonly string[]).includes(ticket.type)
+      ? ticket.type
+      : null
+    : typeKindFromLabels(linear.labels);
 
   return (
     // CTL-996 §B2: the 680px reading column, centered in the body area, 24px top
     // padding. The spec body is the hero; telemetry lives behind the Cost tab.
     <div
-      data-ticket-page={ticket.id}
+      data-ticket-page={ticket?.id ?? id}
+      data-off-board={ticket ? undefined : true}
       style={{ maxWidth: 680, margin: "0 auto", paddingTop: 24 }}
     >
       {/* The SINGLE title + status row (CTL-1003 §A4: type pill on the title
           line, signal-bars priority, board points pill, compact phase chip). The
-          SETTLED box + pipeline strip + floating mono key are gone. */}
+          SETTLED box + pipeline strip + floating mono key are gone. Generalised to
+          the view-model so off-board (CTL-999) renders from the live fetch. */}
       <ReadingHeader
-        id={ticket.id}
-        title={realTitle ?? ticket.title}
-        stateName={ticket.linearState}
-        priority={ticket.priority}
-        estimate={ticket.estimate}
-        estimateDisplay={ticket.estimateDisplay ?? null}
-        typeKind={(TYPE_KINDS as readonly string[]).includes(ticket.type) ? ticket.type : null}
+        id={ticket?.id ?? id}
+        title={vmTitle}
+        stateName={vmStateName}
+        priority={vmPriority}
+        estimate={vmEstimate}
+        estimateDisplay={vmEstimateDisplay}
+        typeKind={vmTypeKind}
         ticket={ticket}
         onOpenLifecycle={openLifecycle}
       />
 
-      {/* The HELD (blocked/waiting) banner stays in the reading view. */}
-      <div style={{ marginTop: 16 }}>
-        <HeldBanner ticket={ticket} />
-      </div>
+      {/* The HELD (blocked/waiting) banner stays in the reading view (resident-only). */}
+      {ticket && (
+        <div style={{ marginTop: 16 }}>
+          <HeldBanner ticket={ticket} />
+        </div>
+      )}
 
       {/* ── TABS — Spec (default) · Lifecycle · Cost · Activity ── */}
       <div style={{ marginTop: 20 }} data-ticket-tabs data-active-tab={value}>
         <PillTabs value={value} onValueChange={setTab} tabs={TAB_DEFS}>
-          {/* Spec: the description prose — the hero, nothing else. */}
+          {/* Spec: the description prose — works from the live fetch on/off board. */}
           <TabsContent value="spec">
             <div data-ticket-spec style={{ paddingTop: 16 }}>
-              {(description || descLoaded) && (
+              {(linear.description || linear.loaded) && (
                 <section data-ticket-description-section>
                   <Suspense fallback={<DescriptionSkeleton />}>
-                    <TicketDescription markdown={description} loaded={descLoaded} />
+                    <TicketDescription markdown={linear.description} loaded={linear.loaded} />
                   </Suspense>
                 </section>
               )}
             </div>
           </TabsContent>
 
-          {/* Lifecycle: educational phase stepper + the live LifecycleTimeline +
-              live tail + the Gantt (moved OUT of the reading column for good). */}
+          {/* Lifecycle: resident-only (phase stepper + LifecycleTimeline + Gantt).
+              Off-board → an honest "no resident telemetry" empty state (never
+              fabricated). */}
           <TabsContent value="lifecycle">
             <div data-ticket-lifecycle style={{ paddingTop: 16 }}>
-              <SectionLabel>The pipeline</SectionLabel>
-              <TicketPhaseStepper ticket={ticket} />
-              <SectionLabel>This ticket</SectionLabel>
-              <LifecycleTimeline
-                ticket={ticket}
-                registerNode={registerNode}
-                artifactsByKind={artifactsByKind}
-                renderActiveTail={
-                  activeNodeTail.hasRows ? <ActiveNodeTailView tail={activeNodeTail} /> : null
-                }
-              />
-              <section data-ticket-gantt-section style={{ marginTop: 16 }}>
-                <SectionLabel>Timeline</SectionLabel>
-                <TicketGantt ticket={ticket} phaseCosts={ticket.phaseCosts} />
-              </section>
+              {ticket ? (
+                <>
+                  <SectionLabel>The pipeline</SectionLabel>
+                  <TicketPhaseStepper ticket={ticket} />
+                  <SectionLabel>This ticket</SectionLabel>
+                  <LifecycleTimeline
+                    ticket={ticket}
+                    registerNode={registerNode}
+                    artifactsByKind={artifactsByKind}
+                    renderActiveTail={
+                      activeNodeTail.hasRows ? <ActiveNodeTailView tail={activeNodeTail} /> : null
+                    }
+                  />
+                  <section data-ticket-gantt-section style={{ marginTop: 16 }}>
+                    <SectionLabel>Timeline</SectionLabel>
+                    <TicketGantt ticket={ticket} phaseCosts={ticket.phaseCosts} />
+                  </section>
+                </>
+              ) : (
+                <EmptyState
+                  icon={Radio}
+                  message="No resident telemetry — this ticket is not in the live board payload"
+                />
+              )}
             </div>
           </TabsContent>
 
-          {/* Cost: the cost rollup line + the TelemetryStrip charts. */}
+          {/* Cost: resident-only (cost rollup + telemetry charts). Off-board →
+              honest empty. */}
           <TabsContent value="cost">
             <div style={{ paddingTop: 16 }}>
-              <CostSummaryLine ticket={ticket} />
-              <TelemetryStrip ticket={ticket} />
+              {ticket ? (
+                <>
+                  <CostSummaryLine ticket={ticket} />
+                  <TelemetryStrip ticket={ticket} />
+                </>
+              ) : (
+                <EmptyState
+                  icon={Radio}
+                  message="No resident telemetry — this ticket is not in the live board payload"
+                />
+              )}
             </div>
           </TabsContent>
 
-          {/* Activity: the comms + scoped event feed (chatter). */}
+          {/* Activity: the comms + scoped event feed — keyed off the id so the
+              live feed works off-board too (CTL-999). */}
           <TabsContent value="activity">
             <div style={{ paddingTop: 16 }}>
-              <CommsSection ticket={ticket} />
-              <ActivitySection ticket={ticket} />
+              <CommsSection ticketId={ticket?.id ?? id} />
+              <ActivitySection ticketId={ticket?.id ?? id} />
             </div>
           </TabsContent>
         </PillTabs>

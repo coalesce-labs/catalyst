@@ -165,18 +165,17 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         }
         streamHealth={health}
       >
-        {/* The ticket reading page — single title + status strip + Q3 indicator +
-            ShippedHero/Held + the Spec/Lifecycle/Cost/Activity tabs (CTL-996).
-            DETAIL7 (CTL-918): the resident workers are passed so the active
-            lifecycle node can tail the live stream. CTL-974: realTitle +
-            description + descLoaded carry the LIVE Linear title (<h1>) and markdown
-            (Spec tab). CTL-996: `search` drives the active tab + Q3 variant. */}
+        {/* The ticket reading page — title + status row + Held + the Spec/
+            Lifecycle/Cost/Activity tabs. DETAIL7 (CTL-918): the resident workers
+            are passed so the active lifecycle node can tail the live stream.
+            CTL-999: the whole `linear` fetch + the route `id` are passed so an
+            off-board (Done/archived) ticket still renders the full reading page
+            from the live fetch alone. CTL-996: `search` drives the active tab. */}
         <TicketDetailPage
+          id={id}
           ticket={ticket}
           workers={payload?.workers ?? []}
-          realTitle={linear.title}
-          description={linear.description}
-          descLoaded={linear.loaded}
+          linear={linear}
           search={search}
         />
       </Shell>
