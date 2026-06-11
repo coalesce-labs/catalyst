@@ -86,7 +86,12 @@ import { isIntentEffective, getMaxAttempts } from "./beliefs/intent.mjs";
 // deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
 // logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
 // dispatches/writes a signal/writes Linear).
-import { runAdvanceShadow } from "./beliefs/advance-shadow.mjs";
+import {
+  runAdvanceShadow,
+  readSignalsFromEdb,
+  readVerdictFromEdb,
+  readCycleFromEdb,
+} from "./beliefs/advance-shadow.mjs";
 // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
 import { processDiagnosticianWakes } from "./diagnostician.mjs";
 import { executeEscalations } from "./beliefs/escalate.mjs";
@@ -4438,9 +4443,12 @@ function runTick() {
           runAdvanceShadow(advDb, beliefsRes.tickId, {
             orchDir: runningOpts.orchDir,
             listInFlight: (od) => listInFlightTickets(od),
-            readSignals: (od, ticket) => readPhaseSignals(od, ticket),
-            readVerdict: ({ ticket, orchDir }) => readVerifyVerdict({ ticket, orchDir }),
-            countCycles: ({ ticket }) => countRemediateCycles({ ticket }),
+            // CTL-1058: oracle inputs come from the tick-locked EDB snapshot (the SAME rows
+            // the belief saw at collectBeliefsTick), not live disk — eliminates mid-tick
+            // input-skew false disagreements. Disk seams remain test-override hooks.
+            readSignals: (_od, ticket) => readSignalsFromEdb(advDb, beliefsRes.tickId, ticket),
+            readVerdict: ({ ticket }) => readVerdictFromEdb(advDb, beliefsRes.tickId, ticket),
+            countCycles: ({ ticket }) => readCycleFromEdb(advDb, beliefsRes.tickId, ticket),
             deriveAdvancement,
             cap: REMEDIATE_CYCLE_CAP,
             appendEvent: intentEventAppender,

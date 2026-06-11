@@ -14,16 +14,15 @@
 // contract); it additionally guards each ticket so one bad ticket can't abort the
 // comparison of the rest.
 //
-// TIMING (shadow fidelity, not a bug): this comparator runs AFTER collectBeliefsTick
-// (so the advance_to/cycle_exhausted beliefs for THIS tick exist) and BEFORE
-// schedulerTick (which runs maybeResetForRemediateCycle + the real dispatch). The
-// comparator re-reads the PRE-reset signals via the injected readSignals seam, so
-// its procedural oracle is computed over the SAME inputs the belief saw — a true
-// apples-to-apples belief-vs-oracle comparison. The sweep's own deriveAdvancement
-// (over POST-reset signals on a remediate→verify re-entry tick) is a different
-// call at a different point in the tick; this comparator deliberately does NOT
-// reproduce the reset (derive-only — it owns no file deletes), so a logged
-// disagreement always reflects a belief/oracle mismatch on identical inputs.
+// TIMING (shadow fidelity): this comparator runs AFTER collectBeliefsTick (so the
+// advance_to/cycle_exhausted beliefs for THIS tick exist) and BEFORE schedulerTick
+// (which runs maybeResetForRemediateCycle + the real dispatch). In production the
+// oracle reads its inputs from the tick-locked EDB snapshot (obs_signal/obs_verdict/
+// obs_cycle for this tickId) — the SAME rows the belief consumed at collectBeliefsTick.
+// This is a true apples-to-apples comparison: a logged disagreement reflects a genuine
+// belief/oracle mismatch on identical inputs, not mid-tick input skew from a phase
+// signal file mutating between Steps 2 and 4 (CTL-1058). The disk seams remain
+// available as test-override hooks; only the production wiring was changed.
 
 // readAdvanceBeliefs — for one tick, the advance_to + cycle_exhausted beliefs
 // keyed by ticket (subject). Returns { advanceTo: Map<ticket,{from,to}>,
@@ -51,6 +50,47 @@ export function readAdvanceBeliefs(db, tickId) {
     advanceTo.set(r.subject, v);
   }
   return { advanceTo, cycleExhausted };
+}
+
+// readSignalsFromEdb — reconstruct the { phase: status } map the belief saw for one
+// ticket from the tick-locked obs_signal snapshot. Same shape readPhaseSignals returns,
+// but sourced from the EDB (no live-disk read) → no mid-tick input skew (CTL-1058).
+// Deterministic MIN(fact_id) tie-break on duplicate (tick_id,ticket,phase), matching
+// R16's latest_sig CTE (rules.mjs:632).
+export function readSignalsFromEdb(db, tickId, ticket) {
+  const out = {};
+  if (!db || tickId == null) return out;
+  const rows = db
+    .query(
+      "SELECT phase, status FROM obs_signal WHERE tick_id = ? AND ticket = ? ORDER BY fact_id ASC",
+    )
+    .all(tickId, ticket);
+  for (const r of rows) {
+    if (!Object.prototype.hasOwnProperty.call(out, r.phase)) {
+      out[r.phase] = r.status ?? null; // first (MIN fact_id) wins
+    }
+  }
+  return out;
+}
+
+// readVerdictFromEdb — the verify verdict the belief saw for one ticket, from the
+// tick-locked obs_verdict snapshot. Null verdicts have no row ⇒ return null.
+export function readVerdictFromEdb(db, tickId, ticket) {
+  if (!db || tickId == null) return null;
+  const row = db
+    .query("SELECT verdict FROM obs_verdict WHERE tick_id = ? AND ticket = ? LIMIT 1")
+    .get(tickId, ticket);
+  return row?.verdict ?? null;
+}
+
+// readCycleFromEdb — the remediate cycle count the belief saw for one ticket, from the
+// tick-locked obs_cycle snapshot. No row ⇒ 0 (count=0 is normally inserted, but stay safe).
+export function readCycleFromEdb(db, tickId, ticket) {
+  if (!db || tickId == null) return 0;
+  const row = db
+    .query("SELECT remediate_count FROM obs_cycle WHERE tick_id = ? AND ticket = ? LIMIT 1")
+    .get(tickId, ticket);
+  return row?.remediate_count ?? 0;
 }
 
 // signalsSummary — a compact { phase: status } map for the disagreement payload.
