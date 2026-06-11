@@ -896,6 +896,17 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
   );
 }
 
+// defaultAppendHeldStoppedEvent — phase.<phase>.held-stopped.<TICKET>. Emitted
+// when the scheduler stops an idle needs-input worker to free its capacity slot
+// (CTL-768). bg_job_id preserved so the revive path resolves --resume. Never throws.
+export function defaultAppendHeldStoppedEvent({ orchId, ticket, phase, bgJobId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({ phase, ticket, orchId, action: "held-stopped",
+      payloadExtras: { bg_job_id: bgJobId } }),
+    "held-stopped",
+  );
+}
+
 // CTL-755: triage→research admission-hold event — phase.advance.held.<ticket>.
 // Emitted by the scheduler's STEP-A admission gate when a triage-complete ticket
 // is NOT promoted to research this tick. `reason` distinguishes the two hold

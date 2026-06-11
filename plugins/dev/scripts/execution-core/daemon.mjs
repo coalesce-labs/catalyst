@@ -81,8 +81,9 @@ import {
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
   readAllEligibleTickets, // CTL-862: boot-log ownership count
+  clearHoldStopCooldown, // CTL-768
 } from "./scheduler.mjs";
-import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
+import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
@@ -265,7 +266,7 @@ function ensureState(orchDir) {
 // and skipped, never fatal.
 export async function handleCommentWake(
   parsed,
-  { orchDir, dispatch, removeLabel, botUserId },
+  { orchDir, dispatch, removeLabel, botUserId, resolveSession = resolvePhaseSessionId },
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -298,13 +299,40 @@ export async function handleCommentWake(
     const parkedPhase = sig.parkedFrom ?? sig.phase;
     const handoffPath = sig.handoffPath ?? undefined;
 
+    // CTL-768: a held-stopped worker (process killed to free its slot) must be
+    // revived with --resume so it continues the paused conversation. Reset the
+    // signal to "stalled" first (so phase-agent-dispatch's idempotency guard
+    // accepts the re-dispatch — mirrors defaultReviveDispatch) and clear the
+    // marker so a future re-park starts clean. A still-alive worker
+    // (stoppedForHold falsy) keeps the exact legacy path — no resume, no reset.
+    let resumeSession;
+    if (sig.stoppedForHold === true) {
+      resumeSession = (sig.bg_job_id ? resolveSession(sig.bg_job_id) : null) ?? undefined;
+      const signalPath = join(workerDir, fname);
+      try {
+        const updated = {
+          ...sig, status: "stalled", stoppedForHold: false,
+          attentionReason: "ctl-768-hold-wake",
+          updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+        };
+        const tmp = `${signalPath}.tmp.${process.pid}`;
+        writeFileSync(tmp, JSON.stringify(updated, null, 2));
+        renameSync(tmp, signalPath);                            // atomic
+      } catch (err) {
+        log.warn({ ticket, phase: parkedPhase, err: err.message },
+          "handleCommentWake: hold-wake signal reset failed — skipping");
+        continue;
+      }
+      clearHoldStopCooldown(orchDir, ticket, parkedPhase);
+    }
+
     try {
       await removeLabel(ticket, "needs-human/question");
     } catch {
       /* fail-open */
     }
 
-    dispatch(orchDir, ticket, parkedPhase, { handoffPath });
+    dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
   }
 }
 
