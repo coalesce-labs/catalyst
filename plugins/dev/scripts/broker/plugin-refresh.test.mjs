@@ -167,6 +167,87 @@ describe("resolveRepoFullName", () => {
     });
     expect(name).toBeNull();
   });
+
+  // ── canonical catalyst.repository.{org,name} (CTL-1014) ────────────────────
+  //
+  // check-project-setup tells operators to set the canonical schema key
+  // catalyst.repository.{org,name}. The resolver MUST read it (joined as
+  // "org/name") — and prefer it over the legacy feedback.githubRepo /
+  // monitor.linear.teams[].vcsRepo keys — or repo identity resolves null on a
+  // canonically-configured host and isThisRepoMergeEvent rejects every merge,
+  // so the CTL-993 merge-to-main auto-pull never fires (verified live on mini).
+
+  test("reads canonical catalyst.repository.{org,name} joined as org/name", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":"coalesce-labs","name":"catalyst"}}}'
+          : "{}",
+    });
+    expect(name).toBe("coalesce-labs/catalyst");
+  });
+
+  test("canonical catalyst.repository WINS over legacy feedback.githubRepo when both set", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":"coalesce-labs","name":"catalyst"},"feedback":{"githubRepo":"legacy-org/legacy-repo"}}}'
+          : "{}",
+    });
+    expect(name).toBe("coalesce-labs/catalyst");
+  });
+
+  test("malformed canonical repository (missing name) falls through to legacy keys", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":"coalesce-labs"},"feedback":{"githubRepo":"coalesce-labs/catalyst"}}}'
+          : "{}",
+    });
+    expect(name).toBe("coalesce-labs/catalyst");
+  });
+
+  test("malformed canonical repository (empty org) falls through to legacy keys", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":"","name":"catalyst"},"feedback":{"githubRepo":"coalesce-labs/catalyst"}}}'
+          : "{}",
+    });
+    expect(name).toBe("coalesce-labs/catalyst");
+  });
+
+  test("malformed canonical repository (non-string org) falls through to legacy keys", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":42,"name":"catalyst"},"feedback":{"githubRepo":"coalesce-labs/catalyst"}}}'
+          : "{}",
+    });
+    expect(name).toBe("coalesce-labs/catalyst");
+  });
+
+  test("returns null when canonical is malformed AND no legacy key is set", () => {
+    const name = resolveRepoFullName({
+      machineConfigPath: "/cfg/machine.json",
+      repoConfigPath: "/repo/.catalyst/config.json",
+      readFileFn: (p) =>
+        p === "/repo/.catalyst/config.json"
+          ? '{"catalyst":{"repository":{"org":"coalesce-labs"}}}'
+          : "{}",
+    });
+    expect(name).toBeNull();
+  });
 });
 
 // ─── isThisRepoMergeEvent ────────────────────────────────────────────────────
