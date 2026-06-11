@@ -15,14 +15,14 @@
 // tested without a DOM; this file is the thin React skin over them.
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import {
-  resolvePipelineRail,
   resolveHeldBanner,
   resolveShippedStatus,
   linearDeepLink,
+  phaseLabel,
   orchChannelFor,
   activityPredicateForTicket,
-  type PipelineSegment,
   type ShippedStatus,
 } from "@/board/ticket-page-model";
 import {
@@ -41,17 +41,21 @@ import {
   type ActiveNodeTail,
 } from "@/board/live-tail-data";
 import type { BoardTicket, BoardWorker } from "@/board/types";
-// CTL-948: per-ticket dependency sub-graph
-import { TicketDepSubGraph } from "@/board/dependency-graph";
+import type { DetailSearch, DetailTab } from "@/board/route-search";
 import type { StreamEvent } from "@/lib/types";
-import { phaseColor, fmtCost, fmtTokens } from "@/lib/formatters";
+import { phaseColor, fmtCost, fmtTokens, statusSemantic, type StatusSemantic } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
 import { LifecycleTimeline } from "./ticket-lifecycle-timeline";
+import { TicketGantt } from "./ticket-gantt";
 import { CommsView } from "./comms-view";
 import { ActivityEventRow } from "./activity-event-row";
 import { useActivityStream } from "@/hooks/use-activity";
 import { useRepoColors } from "@/hooks/use-repo-colors";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
+import { TabsContent } from "./ui/tabs";
+import { AnimatedTabs, type AnimatedTab } from "./animated-tabs";
+import { TicketBadge } from "./ui/ticket-badge";
+import { TicketPipelineIndicator } from "./ticket-pipeline-indicator";
+import { TicketPhaseStepper } from "./ticket-phase-stepper";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
 
@@ -156,44 +160,90 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-// ── Header (real Linear title + meta) ────────────────────────────────────────
-// `realTitle` is the LIVE Linear title from /api/linear-ticket/<id> (CTL-974);
-// it WINS over `ticket.title` (the stale triage-summary-sourced board title).
-// Fail-open: a null realTitle falls back to ticket.title on the SAME line — no
-// layout shift (a same-line text swap when the live title arrives).
-function Header({ ticket, realTitle }: { ticket: BoardTicket; realTitle?: string | null }) {
+// ── status-strip helpers ─────────────────────────────────────────────────────
+/** A status semantic → its dark-token colour (for the icon + colored text in the
+ *  status strip — no pill bg, the Linear idiom). */
+const SEMANTIC_COLOR: Record<StatusSemantic, string> = {
+  success: C.green,
+  info: "#4ea1ff",
+  danger: C.red,
+  warning: C.yellow,
+  neutral: C.fgMuted,
+};
+
+function statusColorFor(linearState: string): string {
+  return SEMANTIC_COLOR[statusSemantic(linearState.toLowerCase())];
+}
+
+function priorityLabel(p: number): string {
+  return p > 0 ? `P${p}` : "—";
+}
+
+// ── Reading-column header: the SINGLE title <h1> + the status strip ──────────
+// CTL-996 §B2: one title (the Shell chrome no longer renders a bold title — it
+// shows only the live dot + mono id). No id prefix inside the h1 (the id lives in
+// the chrome + rail). 22px/600/1.3, letterSpacing -0.01em. `realTitle` (live
+// Linear) wins over the stale board title; fail-open falls back to it.
+function ReadingHeader({ ticket, realTitle }: { ticket: BoardTicket; realTitle?: string | null }) {
   const link = linearDeepLink(ticket.id);
   const title = realTitle ?? ticket.title;
   return (
-    <div data-ticket-header style={{ marginBottom: 14 }}>
-      {/* The real Linear title — big/bold/high-contrast, capped at the 680px
-          reading measure, wraps naturally. The id prefix is a small mono lead-in
-          (mono reserved for code/chips/ids); the title itself is SANS. */}
+    <div data-ticket-header style={{ marginBottom: 0 }}>
       <h1
         data-ticket-title
         style={{
-          margin: "0 0 8px",
-          maxWidth: 680,
+          margin: "0 0 16px",
           color: C.fg,
           letterSpacing: "-0.01em",
-          font: "600 28px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+          font: "600 22px/1.3 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
         }}
       >
-        <span
-          style={{ font: `13px ${C.mono}`, color: C.fgMuted, marginRight: 8, verticalAlign: "middle" }}
-        >
-          {ticket.id}
-        </span>
         {title}
       </h1>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ font: `12px ${C.mono}`, color: C.fgMuted }}>{ticket.type}</span>
-        <span style={{ color: C.fgDim }}>·</span>
-        <span style={{ font: `12px ${C.mono}`, color: C.fgMuted }}>{ticket.repo}</span>
-        <span style={{ color: C.fgDim }}>·</span>
-        <span style={{ font: `12px ${C.mono}`, color: C.fgMuted }}>{ticket.team}</span>
+      {/* Status strip: icon+colored-text (no pill bg) · phase · priority ·
+          estimate · type badge · ↗ Linear (right-aligned). Scope/T-shirt is GONE. */}
+      <div
+        data-ticket-status-strip
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 16,
+          flexWrap: "wrap",
+          fontSize: 12,
+        }}
+      >
+        {/* Status: colored dot + linearState in the status color, no bg. */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+          <span
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: "50%",
+              background: statusColorFor(ticket.linearState),
+              display: "inline-block",
+            }}
+          />
+          <span style={{ color: statusColorFor(ticket.linearState), fontWeight: 500 }}>
+            {ticket.linearState}
+          </span>
+        </span>
+        {/* Phase: dot in phaseColor + phaseLabel. */}
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: C.fgMuted }}>
+          <span
+            style={{ width: 8, height: 8, borderRadius: "50%", background: phaseColor(ticket.phase), display: "inline-block" }}
+          />
+          {phaseLabel(ticket.phase)}
+        </span>
+        {/* Priority (muted). */}
+        <span style={{ color: C.fgMuted }}>{priorityLabel(ticket.priority)}</span>
+        {/* Estimate — omitted entirely when null. */}
+        {ticket.estimate != null && (
+          <span style={{ color: C.fgMuted }}>{ticket.estimate} pts</span>
+        )}
+        {/* Type badge (the §B7 design system, used here). */}
+        <TicketBadge kind={ticket.type} />
         <span style={{ flex: 1 }} />
-        {/* ↗ Linear deep-link; absent id → plain text (never a dead arrow). */}
+        {/* ↗ Linear deep-link, right-aligned; absent id → plain text. */}
         {link ? (
           <a
             data-linear-link
@@ -209,74 +259,6 @@ function Header({ ticket, realTitle }: { ticket: BoardTicket; realTitle?: string
         )}
       </div>
     </div>
-  );
-}
-
-// ── PIPELINE rail ─────────────────────────────────────────────────────────────
-function PipelineRail({
-  ticket,
-  onSegmentClick,
-}: {
-  ticket: BoardTicket;
-  onSegmentClick: (phase: string) => void;
-}) {
-  const segments = resolvePipelineRail(ticket);
-  return (
-    <section data-ticket-pipeline style={{ marginBottom: 16 }}>
-      <SectionLabel>Pipeline</SectionLabel>
-      <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
-        {segments.map((seg, i) => (
-          <PipelineSegmentChip
-            key={seg.phase}
-            seg={seg}
-            isLast={i === segments.length - 1}
-            onClick={() => onSegmentClick(seg.phase)}
-          />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function PipelineSegmentChip({
-  seg,
-  isLast,
-  onClick,
-}: {
-  seg: PipelineSegment;
-  isLast: boolean;
-  onClick: () => void;
-}) {
-  const base = phaseColor(seg.phase);
-  // current = cyan (the reserved live signal); past = solid phase color; future
-  // = dotted ghost (muted, dashed border, no fill).
-  const isCurrent = seg.placement === "current";
-  const isFuture = seg.placement === "future";
-  return (
-    <>
-      <button
-        type="button"
-        data-pipeline-segment={seg.phase}
-        data-placement={seg.placement}
-        onClick={onClick}
-        title={`${seg.label}${seg.status ? ` · ${seg.status}` : ""} — click to scroll spine`}
-        style={{
-          font: `10px ${C.mono}`,
-          letterSpacing: 0.4,
-          padding: "2px 7px",
-          borderRadius: 4,
-          cursor: "pointer",
-          color: isFuture ? C.fgDim : isCurrent ? "#04222a" : C.fg,
-          background: isCurrent ? C.cyan : isFuture ? "transparent" : base + "33",
-          border: isFuture
-            ? `1px dashed ${C.border}`
-            : `1px solid ${isCurrent ? C.cyan : base + "55"}`,
-        }}
-      >
-        {seg.label}
-      </button>
-      {!isLast && <span style={{ color: C.fgDim, font: `10px ${C.mono}` }}>▸</span>}
-    </>
   );
 }
 
@@ -746,6 +728,7 @@ export function TicketDetailPage({
   realTitle = null,
   description = null,
   descLoaded = false,
+  search,
 }: {
   ticket: BoardTicket | undefined;
   workers?: BoardWorker[];
@@ -754,20 +737,21 @@ export function TicketDetailPage({
   /** CTL-974: the LIVE Linear title from /api/linear-ticket — wins over the
    *  stale board title in the Header; null falls back to the board title. */
   realTitle?: string | null;
-  /** CTL-974: the LIVE Linear markdown description — the Overview tab lead. */
+  /** CTL-974: the LIVE Linear markdown description — the Spec tab lead. */
   description?: string | null;
   /** CTL-974: whether the live fetch has resolved (drives the honest skeleton
    *  vs honest-empty in the description block). */
   descLoaded?: boolean;
+  /** CTL-996: the typed URL search params — `tab` drives the active tab and
+   *  `pipeline` drives the Q3 indicator variant (URL = source of truth). */
+  search: DetailSearch;
 }) {
-  // Spine node refs so a PIPELINE segment click smooth-scrolls to its node.
+  // Spine node refs — LifecycleTimeline registers its nodes here (the Shell's
+  // "g a" goto-active also relies on the data-spine-active attr these set).
   const nodeRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const registerNode = useCallback((phase: string, el: HTMLDivElement | null) => {
     if (el) nodeRefs.current.set(phase, el);
     else nodeRefs.current.delete(phase);
-  }, []);
-  const scrollToPhase = useCallback((phase: string) => {
-    nodeRefs.current.get(phase)?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, []);
 
   // DETAIL7: the running phase's session for the active-node live tail. Resolved
@@ -796,11 +780,26 @@ export function TicketDetailPage({
     return map;
   }, [artifacts]);
 
-  // CONTROLLED tab selection (mirrors now-panel.tsx:405): until the operator picks,
-  // the tab is "overview" — the consolidated timeline is the default answer to
-  // "where is it at", never gated behind a click.
-  const [picked, setPicked] = useState<"overview" | "cost" | "activity" | null>(null);
-  const value = picked ?? "overview";
+  // CTL-996: URL-DRIVEN tab state (URL = source of truth, CTL-989). The active
+  // tab is `search.tab` (absent = the `spec` default — `spec` is dropped from the
+  // URL to keep it clean, same idiom as scope:"all"). Writes via TanStack
+  // navigate with replace:true so tab switches don't pollute the back stack.
+  const navigate = useNavigate();
+  const value: "spec" | DetailTab = search.tab ?? "spec";
+  const setTab = useCallback(
+    (next: string) => {
+      void navigate({
+        to: ".",
+        search: (prev) => ({
+          ...prev,
+          tab: next === "spec" ? undefined : (next as DetailTab),
+        }),
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+  const openLifecycle = useCallback(() => setTab("lifecycle"), [setTab]);
 
   if (!ticket) {
     return (
@@ -816,86 +815,94 @@ export function TicketDetailPage({
   }
 
   return (
-    <div data-ticket-page={ticket.id}>
-      {/* ── ABOVE TABS — answers "where / shipped?" (never one click away) ── */}
-      <Header ticket={ticket} realTitle={realTitle} />
-      <ShippedHero ticket={ticket} />
-      <PipelineRail ticket={ticket} onSegmentClick={scrollToPhase} />
-      <HeldBanner ticket={ticket} />
+    // CTL-996 §B2: the 680px reading column, centered in the body area, 24px top
+    // padding. The spec body is the hero; telemetry lives behind the Cost tab.
+    <div
+      data-ticket-page={ticket.id}
+      style={{ maxWidth: 680, margin: "0 auto", paddingTop: 24 }}
+    >
+      {/* The SINGLE title + status strip (the Shell chrome no longer renders a
+          bold title — only the live dot + mono id). */}
+      <ReadingHeader ticket={ticket} realTitle={realTitle} />
 
-      {/* ── TABS — the detail (timeline · money · chatter) ── */}
-      <Tabs
-        value={value}
-        onValueChange={(v) => setPicked(v as "overview" | "cost" | "activity")}
-        data-ticket-tabs
-        data-active-tab={value}
-      >
-        <TabsList className="h-7">
-          <TabsTrigger value="overview" className="text-[11px] px-2">
-            Overview
-          </TabsTrigger>
-          <TabsTrigger value="cost" className="text-[11px] px-2">
-            Cost
-          </TabsTrigger>
-          <TabsTrigger value="activity" className="text-[11px] px-2">
-            Activity
-          </TabsTrigger>
-        </TabsList>
+      {/* Q3 "where it stands" indicator — URL-selected variant (default strip);
+          clicking it opens the Lifecycle tab. */}
+      <TicketPipelineIndicator
+        ticket={ticket}
+        variant={search.pipeline}
+        onOpenLifecycle={openLifecycle}
+      />
 
-        {/* Overview: the consolidated lifecycle timeline + cost rollup + deps */}
-        <TabsContent value="overview">
-          <div data-ticket-overview style={{ paddingTop: 12 }}>
-            {/* CTL-974: the LIVE Linear markdown description, Linear-style, as the
-                FIRST thing in Overview (above the lifecycle spine). Renders in its
-                capped 680px reading column; the lifecycle/deps below keep full
-                width. The honest skeleton reserves space so the spine never jumps
-                when prose arrives. Section renders once the fetch has started
-                (description present OR loaded) so the empty/loading state is
-                honest, never a flash of fabricated prose. */}
-            {(description || descLoaded) && (
-              <section data-ticket-description-section style={{ marginBottom: 20 }}>
-                <Suspense fallback={<DescriptionSkeleton />}>
-                  <TicketDescription markdown={description} loaded={descLoaded} />
-                </Suspense>
+      {/* The PM "is it shipped / held?" answer — between the indicator and the
+          tabs, constrained to the 680px column. */}
+      <div style={{ marginTop: 16 }}>
+        <ShippedHero ticket={ticket} />
+        <HeldBanner ticket={ticket} />
+      </div>
+
+      {/* ── TABS — Spec (default) · Lifecycle · Cost · Activity ── */}
+      <div style={{ marginTop: 20 }} data-ticket-tabs data-active-tab={value}>
+        <AnimatedTabs value={value} onValueChange={setTab} tabs={TAB_DEFS}>
+          {/* Spec: the description prose — the hero, nothing else. */}
+          <TabsContent value="spec">
+            <div data-ticket-spec style={{ paddingTop: 16 }}>
+              {(description || descLoaded) && (
+                <section data-ticket-description-section>
+                  <Suspense fallback={<DescriptionSkeleton />}>
+                    <TicketDescription markdown={description} loaded={descLoaded} />
+                  </Suspense>
+                </section>
+              )}
+            </div>
+          </TabsContent>
+
+          {/* Lifecycle: educational phase stepper + the live LifecycleTimeline +
+              live tail + the Gantt (moved OUT of the reading column for good). */}
+          <TabsContent value="lifecycle">
+            <div data-ticket-lifecycle style={{ paddingTop: 16 }}>
+              <SectionLabel>The pipeline</SectionLabel>
+              <TicketPhaseStepper ticket={ticket} />
+              <SectionLabel>This ticket</SectionLabel>
+              <LifecycleTimeline
+                ticket={ticket}
+                registerNode={registerNode}
+                artifactsByKind={artifactsByKind}
+                renderActiveTail={
+                  activeNodeTail.hasRows ? <ActiveNodeTailView tail={activeNodeTail} /> : null
+                }
+              />
+              <section data-ticket-gantt-section style={{ marginTop: 16 }}>
+                <SectionLabel>Timeline</SectionLabel>
+                <TicketGantt ticket={ticket} phaseCosts={ticket.phaseCosts} />
               </section>
-            )}
-            <SectionLabel>Lifecycle</SectionLabel>
-            <LifecycleTimeline
-              ticket={ticket}
-              registerNode={registerNode}
-              artifactsByKind={artifactsByKind}
-              renderActiveTail={
-                activeNodeTail.hasRows ? <ActiveNodeTailView tail={activeNodeTail} /> : null
-              }
-            />
-            <CostSummaryLine ticket={ticket} />
-            {/* CTL-948: per-ticket dep sub-graph — backward (blocked_by) + forward
-                (what this ticket blocks) up to 2 hops. It explains WHY a held
-                ticket is where it is, so it belongs on Overview. */}
-            {tickets.length > 0 && (
-              <section data-ticket-deps style={{ marginBottom: 8 }}>
-                <SectionLabel>Dependencies</SectionLabel>
-                <TicketDepSubGraph focusId={ticket.id} tickets={tickets} />
-              </section>
-            )}
-          </div>
-        </TabsContent>
+            </div>
+          </TabsContent>
 
-        {/* Cost: the TelemetryStrip charts (tiles + cost-by-phase + cost-by-model) */}
-        <TabsContent value="cost">
-          <div style={{ paddingTop: 12 }}>
-            <TelemetryStrip ticket={ticket} />
-          </div>
-        </TabsContent>
+          {/* Cost: the cost rollup line + the TelemetryStrip charts. */}
+          <TabsContent value="cost">
+            <div style={{ paddingTop: 16 }}>
+              <CostSummaryLine ticket={ticket} />
+              <TelemetryStrip ticket={ticket} />
+            </div>
+          </TabsContent>
 
-        {/* Activity: the event log + comms (chatter — least-often needed) */}
-        <TabsContent value="activity">
-          <div style={{ paddingTop: 12 }}>
-            <CommsSection ticket={ticket} />
-            <ActivitySection ticket={ticket} />
-          </div>
-        </TabsContent>
-      </Tabs>
+          {/* Activity: the comms + scoped event feed (chatter). */}
+          <TabsContent value="activity">
+            <div style={{ paddingTop: 16 }}>
+              <CommsSection ticket={ticket} />
+              <ActivitySection ticket={ticket} />
+            </div>
+          </TabsContent>
+        </AnimatedTabs>
+      </div>
     </div>
   );
 }
+
+/** The visible tab set (Spec default · Lifecycle · Cost · Activity). */
+const TAB_DEFS: AnimatedTab[] = [
+  { value: "spec", label: "Spec" },
+  { value: "lifecycle", label: "Lifecycle" },
+  { value: "cost", label: "Cost" },
+  { value: "activity", label: "Activity" },
+];

@@ -29,6 +29,16 @@ export type DetailFrom = (typeof FROM_VALUES)[number];
 export const LENS_VALUES = ["linear", "phase"] as const;
 export type DetailLens = (typeof LENS_VALUES)[number];
 
+/** Which ticket-detail tab is active. Absent on the URL = the `spec` default
+ *  (dropped from the URL to keep it clean, same idiom as scope:"all"). CTL-996. */
+export const TAB_VALUES = ["lifecycle", "cost", "activity"] as const;
+export type DetailTab = (typeof TAB_VALUES)[number];
+
+/** Which Q3 "where it stands" pipeline-indicator variant renders. Absent on the
+ *  URL = the `strip` default (recommended). CTL-996. */
+export const PIPELINE_VALUES = ["strip", "chip", "dots"] as const;
+export type DetailPipeline = (typeof PIPELINE_VALUES)[number];
+
 /**
  * The typed search params shared by `/ticket/$id` and `/worker/$id`.
  * Every field is optional: a degraded deep-link (a pasted bare URL) carries
@@ -41,6 +51,10 @@ export interface DetailSearch {
   lens?: DetailLens;
   col?: string;
   cursor?: number;
+  /** CTL-996: the active ticket-detail tab. Absent = the `spec` default. */
+  tab?: DetailTab;
+  /** CTL-996: the Q3 pipeline-indicator variant. Absent = the `strip` default. */
+  pipeline?: DetailPipeline;
 }
 
 function isDetailFrom(value: unknown): value is DetailFrom {
@@ -49,6 +63,14 @@ function isDetailFrom(value: unknown): value is DetailFrom {
 
 function isDetailLens(value: unknown): value is DetailLens {
   return typeof value === "string" && (LENS_VALUES as readonly string[]).includes(value);
+}
+
+function isDetailTab(value: unknown): value is DetailTab {
+  return typeof value === "string" && (TAB_VALUES as readonly string[]).includes(value);
+}
+
+function isDetailPipeline(value: unknown): value is DetailPipeline {
+  return typeof value === "string" && (PIPELINE_VALUES as readonly string[]).includes(value);
 }
 
 /**
@@ -91,5 +113,9 @@ export function validateDetailSearch(raw: unknown): DetailSearch {
   if (typeof record.col === "string" && record.col !== "") out.col = record.col;
   const cursor = coerceCursor(record.cursor);
   if (cursor !== undefined) out.cursor = cursor;
+  // CTL-996: invalid tab/pipeline values drop to undefined (→ the `spec`/`strip`
+  // defaults), keeping validation total + non-throwing.
+  if (isDetailTab(record.tab)) out.tab = record.tab;
+  if (isDetailPipeline(record.pipeline)) out.pipeline = record.pipeline;
   return out;
 }

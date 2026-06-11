@@ -142,10 +142,16 @@ describe("use-keyboard-nav.ts — extended in place, pre-existing bindings kept"
 
 // ── Gherkin: Properties rail never fabricates a value ───────────────────────
 describe("Shell.tsx — Properties rail dims unplumbed rows, never fabricates", () => {
-  it("renders the shared cheap rows (Status/Phase/Priority/Estimate/Scope/Project/Repo/Team/Updated/PR)", () => {
-    for (const label of ["Status", "Phase", "Priority", "Estimate", "Scope", "Project", "Repo", "Team", "Updated", "PR"]) {
+  // CTL-996: the T-shirt "Scope" row was REMOVED from the ticket rail (one
+  // complexity measure — the Fibonacci estimate — on this reading surface).
+  it("renders the shared cheap rows (Status/Phase/Priority/Estimate/Project/Repo/Team/Updated/PR)", () => {
+    for (const label of ["Status", "Phase", "Priority", "Estimate", "Project", "Repo", "Team", "Updated", "PR"]) {
       expect(detailRouteSrc).toContain(`label: "${label}"`);
     }
+  });
+
+  it("no longer renders the T-shirt Scope row on the ticket rail (CTL-996)", () => {
+    expect(detailRouteSrc).not.toContain(`label: "Scope"`);
   });
 
   it("labels the model row honestly as the CURRENT phase's signal only", () => {

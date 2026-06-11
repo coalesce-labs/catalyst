@@ -38,7 +38,7 @@ import {
   paletteOpenAtom,
   recordRecentAtom,
 } from "./nav-store";
-import type { DetailFrom, DetailLens } from "./route-search";
+import type { DetailSearch } from "./route-search";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
 
 // ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
@@ -90,15 +90,19 @@ export interface ShellProps {
   kind: ShellKind;
   /** The route `$id` (e.g. "CTL-845" or "CTL-845:2"). */
   id: string;
-  /** Typed search params off the URL (validated by route-search.ts). */
-  search: { from?: DetailFrom; lens?: DetailLens; col?: string; cursor?: number };
+  /** Typed search params off the URL (validated by route-search.ts). CTL-996:
+   *  the full DetailSearch (incl. tab/pipeline) so the walk pager preserves them. */
+  search: DetailSearch;
   /** The resident board id list for this context (resolved by the page via
    *  `resolveList(payload, ctx)`); `[]` for a cold-link until the stream rehydrates. */
   listIds: readonly string[];
   /** The entity's liveness signal (working + activeState) for the title dot. */
   live: LiveSignal;
-  /** The entity's display title prose. */
-  title: string;
+  /** The entity's display title prose. CTL-996: `null` renders the breadcrumb/
+   *  back chrome with ONLY the live/stuck dot + the mono `id` — no bold title
+   *  span — so the page body's <h1> owns the single visible title (ticket page);
+   *  the worker page still passes its name string. */
+  title: string | null;
   /** The shared Properties-rail rows (page may append more below the divider). */
   properties: PropertyRow[];
   /** Footer stream-health (defaults to `unknown` → dim, no fabricated "live"). */
@@ -217,7 +221,11 @@ function Breadcrumb({
 }
 
 // ── live-dot title anchor ─────────────────────────────────────────────────
-function LiveDotTitle({ id, title, live }: { id: string; title: string; live: LiveSignal }) {
+// CTL-996: a `null` title renders ONLY the live/stuck dot + the mono muted `id`
+// (the breadcrumb/back chrome) — no bold title span — so the ticket page's body
+// <h1> is the SINGLE visible title (kills the old duplicate-title rendering). The
+// worker page still passes its name string and renders the bold title as before.
+function LiveDotTitle({ id, title, live }: { id: string; title: string | null; live: LiveSignal }) {
   const dot = resolveLiveDot(live);
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
@@ -235,9 +243,11 @@ function LiveDotTitle({ id, title, live }: { id: string; title: string; live: Li
         />
       )}
       <span style={{ font: `11px ${C.mono}`, color: C.fgMuted, flex: "0 0 auto" }}>{id}</span>
-      <span style={{ color: C.fg, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-        {title}
-      </span>
+      {title != null && (
+        <span style={{ color: C.fg, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {title}
+        </span>
+      )}
     </div>
   );
 }

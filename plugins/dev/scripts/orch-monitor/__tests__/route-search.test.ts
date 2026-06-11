@@ -9,6 +9,8 @@ import {
   validateDetailSearch,
   FROM_VALUES,
   LENS_VALUES,
+  TAB_VALUES,
+  PIPELINE_VALUES,
   type DetailSearch,
 } from "../ui/src/board/route-search";
 
@@ -81,6 +83,52 @@ describe("validateDetailSearch — safe-defaults / never-throws (CTL-881)", () =
       expect(() => validateDetailSearch(input)).not.toThrow();
       expect(validateDetailSearch(input)).toEqual({});
     }
+  });
+});
+
+describe("validateDetailSearch — tab + pipeline params (CTL-996)", () => {
+  it("accepts every legal tab value", () => {
+    for (const tab of TAB_VALUES) {
+      expect(validateDetailSearch({ tab }).tab).toBe(tab);
+    }
+  });
+
+  it("accepts every legal pipeline value", () => {
+    for (const pipeline of PIPELINE_VALUES) {
+      expect(validateDetailSearch({ pipeline }).pipeline).toBe(pipeline);
+    }
+  });
+
+  it("drops the implicit `spec` tab default to undefined (kept out of the URL)", () => {
+    // `spec` is NOT a stored value — it is the absent default, so an explicit
+    // `tab=spec` is not a legal stored param and drops to undefined.
+    expect(validateDetailSearch({ tab: "spec" }).tab).toBeUndefined();
+  });
+
+  it("drops an unknown tab / pipeline to undefined (→ spec / strip defaults)", () => {
+    expect(validateDetailSearch({ tab: "overview" }).tab).toBeUndefined();
+    expect(validateDetailSearch({ tab: 7 }).tab).toBeUndefined();
+    expect(validateDetailSearch({ pipeline: "bars" }).pipeline).toBeUndefined();
+    expect(validateDetailSearch({ pipeline: {} }).pipeline).toBeUndefined();
+  });
+
+  it("keeps tab/pipeline alongside the FND1 context fields", () => {
+    const s = validateDetailSearch({
+      from: "board",
+      lens: "linear",
+      col: "Implement",
+      cursor: 2,
+      tab: "cost",
+      pipeline: "dots",
+    });
+    expect(s).toEqual({
+      from: "board",
+      lens: "linear",
+      col: "Implement",
+      cursor: 2,
+      tab: "cost",
+      pipeline: "dots",
+    });
   });
 });
 
