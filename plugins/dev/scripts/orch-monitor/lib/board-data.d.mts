@@ -385,3 +385,10 @@ export function peekTranscriptCache(sessionId: string): string | null;
  * Falls back to a single project-dir scan only on a cache miss.
  */
 export function resolveTranscript(sessionId: string): Promise<string | null>;
+
+/**
+ * CTL-954: derive the human-readable display string for an estimate value.
+ * Maps tShirt values to size labels ("XS"/"S"/"M"/"L"/"XL"), falls back to
+ * String(estimate) for other methods. Returns null when estimate is null.
+ */
+export function deriveEstimateDisplay(estimate: number | null, estimateMethod: string | null): string | null;

@@ -609,7 +609,7 @@ export async function recentTail(
     }
   }
   rows.sort((a, b) => b.ts - a.ts);
-  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0]!.ts) : null;
+  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0].ts) : null;
   return { rows, freshnessMs };
 }
 

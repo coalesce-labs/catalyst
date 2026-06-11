@@ -3491,7 +3491,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
                 inFlight = true;
                 void (async () => {
                   try {
-                    const rows = await tail!.poll();
+                    const rows = await tail.poll();
                     if (closed) return;
                     for (const row of rows) {
                       controller.enqueue(

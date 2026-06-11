@@ -20,10 +20,12 @@ import { Database } from "bun:sqlite";
 import { tmpdir } from "os";
 import { join } from "path";
 import { mkdtempSync, rmSync } from "fs";
+import type { BeliefTail as BeliefTailType } from "../lib/belief-reader.mjs";
 
-// We import the mjs module as `any` — it is plain JS with no .d.ts file.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const { BeliefTail } = (await import("../lib/belief-reader.mjs")) as any;
+const { BeliefTail } = await import("../lib/belief-reader.mjs");
+
+// Intersection type for reaching into the plain-JS private fields in tests.
+type TestBeliefTail = BeliefTailType & { _dbLoaded: boolean; _db: unknown };
 
 // --- helpers -----------------------------------------------------------------
 
@@ -76,10 +78,8 @@ function insertBelief(
  * in-memory Database so no real file is opened. We reach into the JS object's
  * properties directly (the class is plain JS, no private modifiers).
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeInMemoryTail(db: Database, pageSize = 200): any {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tail = new BeliefTail({ dbPath: ":memory:", pageSize }) as any;
+function makeInMemoryTail(db: Database, pageSize = 200): BeliefTailType {
+  const tail = new BeliefTail({ dbPath: ":memory:", pageSize }) as unknown as TestBeliefTail;
   // Inject the already-open in-memory DB so _ensureDb returns it immediately.
   tail._dbLoaded = true;
   tail._db = db;
@@ -90,8 +90,7 @@ function makeInMemoryTail(db: Database, pageSize = 200): any {
 
 describe("BeliefTail cursor logic (CTL-967)", () => {
   let db: Database;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let tail: any;
+  let tail: BeliefTailType;
 
   beforeEach(() => {
     db = openInMemory();
