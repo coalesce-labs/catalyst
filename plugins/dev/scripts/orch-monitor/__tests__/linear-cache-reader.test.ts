@@ -206,6 +206,11 @@ describe("readLinearCache end-to-end against a real filter-state.db", () => {
     dbPath = join(tmpDir, "filter-state.db");
     eligibleDir = join(tmpDir, "eligible");
     mkdirSync(eligibleDir, { recursive: true });
+    // openBrokerStateDb is a module-level singleton that IGNORES dbPath when a
+    // handle is already open — earlier test files that exercise server endpoints
+    // (cluster-signal-endpoints, cross-node-stream-endpoint) leave one open, so
+    // reset it first or the fixtures below land in the wrong (torn-down) db.
+    closeBrokerStateDb();
     openBrokerStateDb(dbPath);
     upsertTicketDescriptor({
       ticket: "CTL-100",

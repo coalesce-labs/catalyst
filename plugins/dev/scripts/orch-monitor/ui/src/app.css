@@ -507,7 +507,14 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 5px;
   padding: 12px;
+  /* CTL-1048: a code block scrolls HORIZONTALLY only. Setting overflow-x:auto with
+   * overflow-y left at its initial `visible` makes the browser COMPUTE overflow-y
+   * to `auto` (the CSS "visible-becomes-auto" rule when the other axis is scrollable)
+   * — which can make a tall code block capture vertical wheel and trap the page
+   * scroll. Pinning overflow-y:hidden keeps vertical wheel passing THROUGH to the
+   * shared detail scroller while the block still scrolls left/right. */
   overflow-x: auto;
+  overflow-y: hidden;
   font-size: 12px;
   line-height: 1.5;
 }

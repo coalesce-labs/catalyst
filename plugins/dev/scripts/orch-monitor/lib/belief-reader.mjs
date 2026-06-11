@@ -20,10 +20,6 @@ import { join } from "node:path";
 const HOME = homedir();
 const DEFAULT_BELIEFS_DB_PATH = join(HOME, "catalyst", "beliefs.db");
 
-// The computed specifier prevents esbuild from following the import into
-// bun:sqlite when evaluating ui/vite.config.ts. DO NOT inline to a literal.
-const SCHEMA_MODULE = [".", ".", ".", "execution-core", "beliefs", "schema.mjs"].join("/");
-
 // openBeliefsDbRO — lazily open beliefs.db READ-ONLY. Returns the db handle
 // or null if the file is absent / import fails. Callers should treat null as
 // "shadow disabled — degrade to empty".

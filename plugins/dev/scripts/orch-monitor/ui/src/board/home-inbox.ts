@@ -21,11 +21,19 @@
 // payload and NEVER reaches for Linear — exactly the CTL-899 "Inbox data comes
 // from the read-model, never a live Linear call" Gherkin.
 
-import type { BoardPayload, BoardTicket } from "./types";
+import type { BoardPayload, BoardServiceOutage, BoardTicket } from "./types";
 
 /** The kind of inbox section a row belongs to. CTL-729: 'attention' is the single
- *  needs-attention bucket (waiting-on-you ∪ needs-human), at the HEAD of the order. */
-export type InboxSectionKind = "attention" | "blocked" | "waiting" | "running" | "done";
+ *  needs-attention bucket (waiting-on-you ∪ needs-human), at the HEAD of the order.
+ *  CTL-1050: 'awareness' is the running-degraded service-outage bucket — between
+ *  'running' and 'done', NOT a needs-you section (no action required). */
+export type InboxSectionKind =
+  | "attention"
+  | "blocked"
+  | "waiting"
+  | "running"
+  | "awareness"
+  | "done";
 
 /**
  * Whether a section's rows carry a status accent (the only colored rows on the
@@ -65,8 +73,13 @@ export interface InboxRow {
   verb: string | null;
   /** The blocker ids a `blocked` row is waiting on (empty otherwise). */
   blockers: string[];
-  /** The underlying ticket, for the reading pane (HOME4). */
+  /** The underlying ticket, for the reading pane (HOME4). For an `awareness`
+   *  (service-outage) row this is a SYNTHETIC stub so existing ticket-reading
+   *  consumers never NPE — the real outage payload is on `outage`. */
   ticket: BoardTicket;
+  /** CTL-1050: the service outage backing an `awareness` row (absent on every
+   *  ticket-backed row). Row click navigates to /?surface=fleetops. */
+  outage?: BoardServiceOutage;
 }
 
 /** A grouped, titled section of the inbox (rendered as a bare list with a
@@ -100,6 +113,9 @@ export interface InboxCounts {
   blocked: number;
   waiting: number;
   running: number;
+  /** CTL-1050: current service outages (the awareness section) — NOT a needs-you
+   *  count and NOT folded into needsYou / the all-clear gate. */
+  awareness: number;
   done: number;
   /** attention + blocked + waiting — the single "N need you" figure in the header. */
   needsYou: number;
@@ -113,6 +129,8 @@ const SECTION_ORDER: readonly InboxSectionKind[] = [
   "blocked",
   "waiting",
   "running",
+  // CTL-1050: awareness (service outages) sits AFTER running, BEFORE done.
+  "awareness",
   "done",
 ] as const;
 
@@ -121,6 +139,7 @@ const SECTION_LABEL: Record<InboxSectionKind, string> = {
   blocked: "What's blocked",
   waiting: "What's waiting",
   running: "Running on its own",
+  awareness: "Awareness",
   done: "Done while you were away",
 };
 
@@ -174,6 +193,8 @@ function subLabelFor(kind: InboxSectionKind): string {
       return "waiting on you";
     case "running":
       return "running on its own";
+    case "awareness":
+      return "running degraded — no action needed";
     case "done":
       return "shipped";
   }
@@ -189,9 +210,65 @@ function verbFor(kind: InboxSectionKind): string | null {
     case "waiting":
       return "Answer";
     case "running":
+    case "awareness":
     case "done":
       return null;
   }
+}
+
+/** CTL-1050: the one-line copy for an awareness (service-outage) row — the body
+ *  the outage event carries, e.g. "Loki is unreachable since 14:32 — telemetry
+ *  views degraded". Falls back to the detail / a bare label when absent. */
+function outageTitle(o: BoardServiceOutage): string {
+  if (o.detail && o.detail.length > 0) return o.detail;
+  return `${o.label} is unreachable`;
+}
+
+/** A minimal synthetic BoardTicket for an awareness row, so the existing
+ *  ticket-reading consumers (reading pane, inbox-row) never NPE. Keyed by the
+ *  service id; carries only the safe display fields. */
+function syntheticOutageTicket(o: BoardServiceOutage): BoardTicket {
+  return {
+    id: o.id,
+    title: outageTitle(o),
+    type: "service",
+    repo: "",
+    team: "",
+    phase: "monitor-deploy",
+    status: "running",
+    model: null,
+    linearState: "",
+    workerStatus: null,
+    activeState: null,
+    working: false,
+    lastActiveMs: null,
+    priority: 0,
+    estimate: null,
+    scope: null,
+    project: null,
+    costUSD: null,
+    tokens: null,
+    turns: null,
+    phaseCosts: null,
+    phaseSummary: [],
+    pr: null,
+    updatedAt: new Date(o.downSince ?? Date.now()).toISOString(),
+  };
+}
+
+/** Build an awareness row from a current service outage. One row per service,
+ *  keyed by serviceId — updated in place across snapshots, dropped on recovery. */
+function outageRow(o: BoardServiceOutage): InboxRow {
+  return {
+    id: o.id,
+    title: outageTitle(o),
+    section: "awareness",
+    subLabel: subLabelFor("awareness"),
+    verb: null,
+    blockers: [],
+    ticket: syntheticOutageTicket(o),
+    outage: o,
+  };
 }
 
 /** Build the row view-model for one ticket in a given section. */
@@ -225,6 +302,7 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
     blocked: [],
     waiting: [],
     running: [],
+    awareness: [],
     done: [],
   };
 
@@ -233,6 +311,14 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
   for (const t of payload.tickets) {
     const kind = classifyTicket(t);
     buckets[kind].push(toRow(t, kind));
+  }
+
+  // CTL-1050 §3.2: the awareness section is STATE-DERIVED from the server-decorated
+  // current outages — one row per `down` service, structurally flap-proof (a
+  // recovered service simply drops out of the next snapshot). NEVER read from the
+  // event log here; the inbox renders live state, the event log records history.
+  for (const o of payload.serviceHealth?.outages ?? []) {
+    buckets.awareness.push(outageRow(o));
   }
 
   const sections: InboxSection[] = SECTION_ORDER.filter(
@@ -246,8 +332,11 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
     blocked: buckets.blocked.length,
     waiting: buckets.waiting.length,
     running: buckets.running.length,
+    awareness: buckets.awareness.length,
     done: buckets.done.length,
     // CTL-729: the single "N need you" figure absorbs the attention bucket.
+    // CTL-1050: awareness is DELIBERATELY excluded — a service outage is "no
+    // action needed", so it never inflates the needs-you figure or the all-clear gate.
     needsYou: buckets.attention.length + buckets.blocked.length + buckets.waiting.length,
   };
 
@@ -391,6 +480,11 @@ export function rowDurationAnchor(row: InboxRow): string | null {
       return row.ticket.heldSince ?? null;
     case "running":
       return row.ticket.currentPhaseSince ?? null;
+    case "awareness":
+      // An awareness row's "duration" is how long the outage has been down.
+      return row.outage?.downSince != null
+        ? new Date(row.outage.downSince).toISOString()
+        : null;
     case "done":
       return null;
   }

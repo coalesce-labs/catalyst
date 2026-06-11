@@ -195,6 +195,20 @@ export interface BoardConfig {
   dead?: number;
 }
 
+/** CTL-1050 §3.2: one current service outage, decorated onto the board payload
+ *  for the inbox awareness item. State-derived (current `down` entries only). */
+export interface BoardServiceOutage {
+  id: string;
+  label: string;
+  downSince: number | null;
+  detail: string | null;
+}
+
+export interface BoardServiceHealth {
+  generatedAt: number;
+  outages: BoardServiceOutage[];
+}
+
 export interface BoardPayload {
   generatedAt: string;
   config: BoardConfig;
@@ -202,6 +216,9 @@ export interface BoardPayload {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   queue: BoardQueueItem[];
+  /** CTL-1050: server-decorated current service outages (down only). Absent when
+   *  the registry has not resolved any down entry. */
+  serviceHealth?: BoardServiceHealth;
 }
 
 export const PHASE_ORDER: string[];
@@ -368,3 +385,10 @@ export function peekTranscriptCache(sessionId: string): string | null;
  * Falls back to a single project-dir scan only on a cache miss.
  */
 export function resolveTranscript(sessionId: string): Promise<string | null>;
+
+/**
+ * CTL-954: derive the human-readable display string for an estimate value.
+ * Maps tShirt values to size labels ("XS"/"S"/"M"/"L"/"XL"), falls back to
+ * String(estimate) for other methods. Returns null when estimate is null.
+ */
+export function deriveEstimateDisplay(estimate: number | null, estimateMethod: string | null): string | null;

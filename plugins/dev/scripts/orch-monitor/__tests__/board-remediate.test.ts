@@ -11,7 +11,6 @@ import {
   deriveCurrentPhase,
   derivePhaseWithRemediate,
   PHASE_ORDER,
-  TERMINAL,
   REMEDIATE_PHASE,
 } from "../lib/board-data.mjs";
 import {

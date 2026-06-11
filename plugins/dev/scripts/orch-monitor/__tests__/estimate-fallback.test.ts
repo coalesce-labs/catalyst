@@ -8,7 +8,7 @@
 //  4. Mocked Linear responses keyed by number + team.key map back to the correct identifier.
 //  5. estimateDisplay is correct per method (fibonacci → number, tShirt → label).
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
 import {
   fillEstimateFallback,
   getEstimationMethodAsync,
@@ -16,6 +16,23 @@ import {
   _clearMethodCache,
   _getEstimateCacheSize,
 } from "../lib/linear-estimate-fallback.mjs";
+
+// fillEstimateFallback fail-opens (no fetch at all) without a Linear token, and
+// CI has no real credentials — so pin a fake token for the whole file (every
+// fetch below is mocked). Without this the file only passes when an earlier
+// test file happens to leak a token into process.env.
+const PREV_TOKEN = process.env.LINEAR_API_TOKEN;
+const PREV_KEY = process.env.LINEAR_API_KEY;
+beforeAll(() => {
+  process.env.LINEAR_API_TOKEN = "lin_api_test_token";
+  delete process.env.LINEAR_API_KEY;
+});
+afterAll(() => {
+  if (PREV_TOKEN !== undefined) process.env.LINEAR_API_TOKEN = PREV_TOKEN;
+  else delete process.env.LINEAR_API_TOKEN;
+  if (PREV_KEY !== undefined) process.env.LINEAR_API_KEY = PREV_KEY;
+  else delete process.env.LINEAR_API_KEY;
+});
 
 // ── Helpers: mock the global fetch for testing ────────────────────────────────
 // We replace globalThis.fetch with a spy that records calls + returns a preset response.
@@ -25,14 +42,14 @@ function mockFetch(responseData: unknown) {
   const calls: Array<{ query: string; variables: unknown }> = [];
   const originalFetch = globalThis.fetch;
 
-  const spy = async (url: string | URL | Request, init?: RequestInit) => {
+  const spy = (url: string | URL | Request, init?: RequestInit) => {
     callCount++;
     const body = init?.body ? JSON.parse(init.body as string) : {};
     calls.push({ query: body.query ?? "", variables: body.variables });
-    return {
+    return Promise.resolve({
       ok: true,
-      json: async () => responseData,
-    } as Response;
+      json: () => Promise.resolve(responseData),
+    } as Response);
   };
 
   globalThis.fetch = spy as typeof fetch;
@@ -46,8 +63,8 @@ function mockFetch(responseData: unknown) {
 
 function mockFetchFail() {
   const originalFetch = globalThis.fetch;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  globalThis.fetch = (async () => { throw new Error("network failure"); }) as any;
+   
+  globalThis.fetch = (() => Promise.reject(new Error("network failure"))) as any;
   return { restore() { globalThis.fetch = originalFetch; } };
 }
 
@@ -114,7 +131,7 @@ describe("CTL-976: fillEstimateFallback — query uses team+number NOT identifie
   it("groups cross-team IDs into separate per-team queries", async () => {
     const calls: Array<{ teamKey?: string; numbers?: number[] }> = [];
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+    globalThis.fetch = ((_url: unknown, init?: RequestInit) => {
       const body = init?.body ? JSON.parse(init.body as string) : {};
       calls.push(body.variables as { teamKey?: string; numbers?: number[] });
       // Return the appropriate team's issues
@@ -122,10 +139,10 @@ describe("CTL-976: fillEstimateFallback — query uses team+number NOT identifie
       const nodes = teamKey === "CTL"
         ? [{ number: 774, estimate: 8, team: { key: "CTL" } }]
         : [{ number: 1, estimate: 2, team: { key: "ADV" } }];
-      return {
+      return Promise.resolve({
         ok: true,
-        json: async () => ({ data: { issues: { nodes } } }),
-      } as Response;
+        json: () => Promise.resolve({ data: { issues: { nodes } } }),
+      } as Response);
     }) as typeof fetch;
 
     try {
@@ -294,19 +311,22 @@ describe("CTL-974: getEstimationMethodAsync — team method resolution", () => {
 
 describe("CTL-974: estimateDisplay correct per estimation method", () => {
   it("fibonacci estimate 8 renders as '8'", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return; // not exported — rely on board-data's own tests
     expect(deriveEstimateDisplay(8, "fibonacci")).toBe("8");
   });
 
   it("tShirt estimate 2 renders as 'M'", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return;
     expect(deriveEstimateDisplay(2, "tShirt")).toBe("M");
   });
 
   it("null estimate renders as null regardless of method", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return;
     expect(deriveEstimateDisplay(null, "fibonacci")).toBeNull();
     expect(deriveEstimateDisplay(null, "tShirt")).toBeNull();

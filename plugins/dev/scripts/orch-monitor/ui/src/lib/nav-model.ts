@@ -64,7 +64,7 @@ const OPERATE_DEFS: Array<{ surface: Surface; label: string; icon: LucideIcon }>
   { surface: "home", label: "Inbox", icon: InboxIcon },
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
-  { surface: "queue", label: "Queue", icon: ListOrderedIcon },
+  { surface: "queue", label: "Dispatch", icon: ListOrderedIcon },
 ];
 
 const OBSERVE_DEFS: Array<{ label: string; icon: LucideIcon }> = [
@@ -201,7 +201,7 @@ const SURFACE_LABEL: Partial<Record<Surface, string>> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
-  queue: "Queue",
+  queue: "Dispatch",
 };
 
 /**

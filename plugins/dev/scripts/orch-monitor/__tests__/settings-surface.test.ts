@@ -17,7 +17,7 @@ import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { SETTINGS_BREADCRUMB } from "../ui/src/lib/surface";
+import { SETTINGS_BREADCRUMB, SURFACES, SURFACE_CHORD } from "../ui/src/lib/surface";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -64,13 +64,16 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
 
   it("Settings is a FOOTER destination, not an OPERATE landing surface", () => {
     // It must NOT be added to the Surface union / SURFACES / SURFACE_CHORD
-    // (those are the four landing surfaces). It has its own breadcrumb instead.
+    // (the nav/palette landing surfaces). It has its own breadcrumb instead.
+    // OBS-5 widened the union to the OBSERVE surfaces, so assert settings'
+    // EXCLUSION rather than pinning the exact member list.
     expect(SETTINGS_BREADCRUMB).toEqual(["Settings"]);
     expect(surfaceSrc).toContain("SETTINGS_BREADCRUMB");
-    // The Surface type stays exactly the four OPERATE surfaces.
-    expect(surfaceSrc).toMatch(
-      /export type Surface =\s*"home"\s*\|\s*"board"\s*\|\s*"workers"\s*\|\s*"queue";/,
-    );
+    expect(SURFACES.map(String)).not.toContain("settings");
+    expect(Object.values(SURFACE_CHORD).map(String)).not.toContain("settings");
+    const unionSrc = surfaceSrc.match(/export type Surface =([^;]*);/)?.[1] ?? "";
+    expect(unionSrc).toContain('"home"');
+    expect(unionSrc).not.toContain('"settings"');
     // The shell shows the Settings breadcrumb when settingsOpen.
     expect(shellSrc).toMatch(/settingsOpen\s*\?\s*SETTINGS_BREADCRUMB/);
   });
@@ -114,10 +117,15 @@ describe("Theme routes through the ONE theme system, @/lib/theme (CTL-911)", () 
     expect(settingsSrc).toContain("setTheme");
   });
 
-  it("the footer toggle still drives the SAME hook (SHELL3 wiring intact)", () => {
-    expect(sidebarSrc).toContain("useTheme");
-    expect(sidebarSrc).toContain("@/lib/theme");
-    expect(sidebarSrc).toMatch(/toggle:\s*toggleTheme/);
+  it("the theme control lives in Settings, not the sidebar footer (CTL-1052)", () => {
+    // CTL-1052 §5: the calm-dark ⇄ warm-light toggle moved OUT of the sidebar footer
+    // INTO the Settings surface (Theme → Appearance) so the footer keeps ONLY Settings.
+    // The Settings surface owns the wiring to the SAME @/lib/theme hook (SHELL3 intact);
+    // the sidebar no longer references the theme system at all.
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    expect(sidebarSrc).not.toContain("useTheme");
+    expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
   it("NO parallel data-theme system exists (the SURF3⇄SHELL3 clash resolution)", () => {

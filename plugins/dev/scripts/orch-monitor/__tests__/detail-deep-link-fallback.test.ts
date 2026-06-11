@@ -68,6 +68,8 @@ describe("isAppRoute (CTL-989)", () => {
       "/index.html",
       "/board",
       "/workers",
+      // CTL-1054: /dispatch is the canonical Dispatch route; /queue is a redirect alias.
+      "/dispatch",
       "/queue",
       "/telemetry",
       "/utilization",
@@ -164,6 +166,8 @@ describe("GET app-route SPA fallback serves index.html (CTL-989)", () => {
     for (const path of [
       "/board",
       "/workers",
+      // CTL-1054: /dispatch is canonical; /queue is the redirect alias (both serve index.html).
+      "/dispatch",
       "/queue",
       "/telemetry",
       "/utilization",

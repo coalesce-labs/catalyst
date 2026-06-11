@@ -265,6 +265,9 @@ export interface CollectedAttention {
 export interface OtelEndpointHealth {
   url: string | null;
   reachable: boolean;
+  /** CTL-1039: the SHARED severity from the service-health registry. Present when
+   *  the checker is wired to the registry tracker; the banner gates on "down". */
+  severity?: "up" | "degraded" | "down" | "unknown";
 }
 
 export interface OtelHealth {

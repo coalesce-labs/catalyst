@@ -448,15 +448,18 @@ export function TicketRailCards({
   const icons = useRepoIconMap();
   const iconSrc = resolveEntityIcon(ticket?.repo, icons);
   return (
+    // CTL-1048: the floating card rail is a plain flex column inside the Shell's
+    // single scrolling body row — it no longer owns its own `overflowY:auto`
+    // scroller. Wheeling over it scrolls the whole detail page (chains by
+    // construction), so there is no dead zone and no overscroll-behavior trap.
+    // Keeping a nested scroller here would re-split the context CTL-1048 unifies.
     <aside
       data-shell-rail
-      className="cat-overlay-scroll"
       style={{
         width: 280,
         flex: "0 0 280px",
         background: "transparent",
         padding: "12px 12px",
-        overflowY: "auto",
         display: "flex",
         flexDirection: "column",
         gap: 10,

@@ -91,8 +91,28 @@ export function defaultRunPhaseAgent(
     killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
     env,
   });
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
-  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  // CTL-1004/CTL-1056 Bug 2: thread the spawn error code (res.error?.code, e.g.
+  // ETIMEDOUT from the CTL-990 timeout) and the kill signal (res.signal, e.g.
+  // SIGKILL) up so the scheduler's "dispatch failed" log is diagnosable. On a
+  // spawn error preserve any stderr captured before the kill, falling back to
+  // the error message when the child wrote nothing. `signal` is carried on every
+  // result (null on a clean exit) so the scheduler reads one consistent shape.
+  if (res.error) {
+    const stderr = res.stderr && res.stderr.length ? res.stderr : res.error.message;
+    return {
+      code: 127,
+      stdout: res.stdout ?? "",
+      stderr,
+      spawnError: res.error.code ?? res.error.message,
+      signal: res.signal ?? null,
+    };
+  }
+  return {
+    code: res.status ?? 0,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    signal: res.signal ?? null,
+  };
 }
 
 // defaultDispatch — execution-core worker dispatch. Resolve the project, create

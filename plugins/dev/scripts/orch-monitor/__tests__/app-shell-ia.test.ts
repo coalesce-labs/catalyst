@@ -45,13 +45,14 @@ const sidebarCode = stripComments(sidebarSrc);
 
 // ── Scenario: OPERATE is the always-visible primary tier ─────────────────────
 describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
-  it("the OPERATE group lists Inbox, Tickets, Workers, Queue in nav order", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers, Dispatch in nav order", () => {
     // CTL-930: labels renamed Home→Inbox, Board→Tickets; array renamed OPERATE_ITEMS.
+    // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
     // OBSERVE is declared before OPERATE_ITEMS in source (observe first, items after).
     const operateBlock = sidebarSrc.slice(
       sidebarSrc.indexOf("const OPERATE_ITEMS"),
     );
-    const order = ["Inbox", "Tickets", "Workers", "Queue"].map((l) =>
+    const order = ["Inbox", "Tickets", "Workers", "Dispatch"].map((l) =>
       operateBlock.indexOf(`"${l}"`),
     );
     for (const i of order) expect(i).toBeGreaterThan(-1);
@@ -175,22 +176,33 @@ describe("brand header collapses gracefully (CTL-893)", () => {
     expect(header).toContain("group-data-[collapsible=icon]:hidden");
   });
 
-  it("the footer keeps Settings AND a theme toggle reachable", () => {
-    const footerBlock = sidebarSrc.slice(sidebarSrc.indexOf("SidebarFooter"));
+  it("the footer's bottom item is Settings; the theme toggle moved into Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the footer keeps ONLY Settings as its bottom item — the Warm-light
+    // toggle is relocated into the Settings surface (Theme → Appearance). So the footer
+    // block still references Settings, but no longer wires a theme toggle (toggleTheme).
+    const footerBlock = sidebarSrc.slice(sidebarSrc.indexOf("<SidebarFooter"));
     expect(footerBlock).toContain("Settings");
-    expect(footerBlock).toContain("useTheme");
+    expect(footerBlock).not.toContain("toggleTheme");
+    // The toggle still exists as a control — in the Settings surface, not the sidebar.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("Appearance");
   });
 });
 
 // ── Scenario: Theme toggle flips calm-dark and warm-light ────────────────────
 describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
-  it("the footer toggle is wired to the real theme system (useTheme), not re-implemented", () => {
-    expect(sidebarSrc).toContain("useTheme");
-    expect(sidebarSrc).toContain("@/lib/theme");
-    // The hook's toggle is destructured and bound to the footer button's onClick
-    // (renamed `toggle: toggleTheme` to disambiguate from the rail toggle).
-    expect(sidebarSrc).toMatch(/toggle:\s*toggleTheme/);
-    expect(sidebarSrc).toMatch(/onClick=\{toggleTheme\}/);
+  it("the theme control is wired to the real theme system (useTheme) in Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the theme control moved from the sidebar footer into the Settings
+    // surface (Theme → Appearance). It must still bind the REAL theme system (useTheme
+    // from @/lib/theme), not a re-implementation — now in settings-surface.tsx.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    // The Appearance field reads `theme` and writes via the hook's setTheme.
+    expect(settingsSrc).toMatch(/onChange=\{\(v\)\s*=>\s*setTheme\(v\)\}/);
+    // The sidebar no longer owns the toggle.
+    expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
   it("declares exactly the two themes calm-dark + warm-light", () => {
@@ -269,18 +281,15 @@ describe("left-nav restyle v2 (CTL-977)", () => {
     expect(triggerBase).not.toMatch(/\buppercase\b/);
   });
 
-  it("collapsible group chevron is right-aligned (ml-auto), not left (mr-*) (CTL-977)", () => {
-    // The twistie ChevronRightIcon inside collapsible triggers must use ml-auto
-    // (right-edge placement), not mr-1.5 or similar left-side gap.
-    // We check that ml-auto appears in the chevron className in the rendered groups.
-    expect(code).toContain("ml-auto");
-    // The old left-side pattern (mr-1.5 on the chevron) must be absent from the
-    // trigger rows. The favicon img may legitimately use mr-1.5 so we check the
-    // ChevronRightIcon className only.
+  it("collapsible group chevron sits ADJACENT to the label, not floated to the far edge (CTL-1052)", () => {
+    // CTL-1052 §3 OVERRIDES the CTL-977 → CTL-1034 ml-auto right-align convention:
+    // the twistie now sits immediately after the label text (spaced by the trigger's
+    // gap-*), NOT pinned to the right edge. So NO ChevronRightIcon className may carry
+    // ml-auto (the right-edge claim) any more — and none may use a left-margin mr-*
+    // either. The collapsed-section signal dot keeps the right edge (ml-auto lives in
+    // SectionSignalDot), but the chevron itself is label-adjacent.
     const chevronIdx = code.indexOf("ChevronRightIcon");
     expect(chevronIdx).toBeGreaterThan(-1);
-    // All ChevronRightIcon usages must NOT pair the icon with mr-* for left positioning
-    // (ml-auto is the right-edge pattern). Walk each occurrence.
     let idx = 0;
     while (true) {
       const pos = code.indexOf("ChevronRightIcon", idx);
@@ -290,10 +299,13 @@ describe("left-nav restyle v2 (CTL-977)", () => {
       if (classStart === -1) break;
       const classEnd = code.indexOf('"', classStart + 1);
       const classStr = code.slice(classStart + 1, classEnd);
-      // If this class string belongs to a ChevronRightIcon, it should use ml-auto.
+      // Chevron is label-adjacent: neither right-floated (ml-auto) nor left-margined.
+      expect(classStr).not.toContain("ml-auto");
       expect(classStr).not.toMatch(/^mr-[0-9]/);
       idx = pos + 1;
     }
+    // The right-edge ml-auto now belongs to the trailing section signal dot only.
+    expect(sidebarCode).toContain("ml-auto");
   });
 
   it("active item gets sidebar-primary accent color class (CTL-977)", () => {

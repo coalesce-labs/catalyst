@@ -781,6 +781,11 @@ function defaultAppendReviveSuppressedEvent({
 // being dispatched is carried in payload.target_phase so operators can filter.
 // Best-effort like every other audit emitter — return value lets the caller
 // log (no current caller gates on it; matches recordDispatchFailure shape).
+// CTL-1004/CTL-1056 Bug 2: stderr_tail / spawn_error / signal carry the captured
+// dispatch-failure diagnostics (last ~500 chars of the worker's stderr, the
+// spawn error code e.g. ETIMEDOUT, the kill signal e.g. SIGKILL) so the failure
+// is diagnosable from the unified event log. Each is included in payloadExtras
+// only when present (an empty/absent diagnostic produces no key — no noise).
 export function defaultAppendDispatchFailedEvent({
   orchId,
   ticket,
@@ -789,6 +794,9 @@ export function defaultAppendDispatchFailedEvent({
   reason,
   expiresAt,
   consecutiveFailures,
+  stderr_tail,
+  spawn_error,
+  signal,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -797,7 +805,15 @@ export function defaultAppendDispatchFailedEvent({
       orchId,
       action: "failed",
       reason,
-      payloadExtras: { target_phase, code, ...(expiresAt !== undefined && { expiresAt }), ...(consecutiveFailures !== undefined && { consecutiveFailures }) },
+      payloadExtras: {
+        target_phase,
+        code,
+        ...(expiresAt !== undefined && { expiresAt }),
+        ...(consecutiveFailures !== undefined && { consecutiveFailures }),
+        ...(stderr_tail !== undefined && stderr_tail !== "" && { stderr_tail }),
+        ...(spawn_error !== undefined && spawn_error !== "" && { spawn_error }),
+        ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
+      },
     }),
     "dispatch-failed",
   );

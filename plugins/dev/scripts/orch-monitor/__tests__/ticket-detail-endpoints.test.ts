@@ -199,14 +199,14 @@ type LinearTicketRouteResponse = {
 function mockLinearFetch(responseData: unknown) {
   const original = globalThis.fetch;
   let intercepted = false;
-  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = ((url: string | URL | Request, init?: RequestInit) => {
     const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
     if (urlStr.includes("api.linear.app")) {
       intercepted = true;
-      return { ok: true, json: async () => responseData } as Response;
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(responseData) } as Response);
     }
     // Pass through to the original fetch for server-to-server (localhost) calls.
-    return original(url as Parameters<typeof fetch>[0], init);
+    return original(url, init);
   }) as typeof fetch;
   return {
     get intercepted() { return intercepted; },
@@ -328,7 +328,7 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
       if (urlStr.includes("api.linear.app")) throw new Error("network failure");
-      return original(url as Parameters<typeof fetch>[0], init);
+      return original(url, init);
     }) as typeof fetch;
     try {
       const res = await fetch(`${baseUrl}/api/linear-ticket/CTL-996`);
