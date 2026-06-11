@@ -49,3 +49,22 @@ export function readTicketArtifacts(
   ticket: string,
   opts?: ReadTicketArtifactsOptions,
 ): Promise<TicketArtifacts>;
+
+/** A single artifact's resolved content (CTL-1042 by-kind deep-dive serve). */
+export interface TicketArtifactContent {
+  /** The artifact kind served. */
+  kind: "research" | "plan";
+  /** Repo-root-relative path the content was read from. */
+  path: string;
+  /** The full markdown file content. */
+  content: string;
+}
+
+/** Serve a single artifact's full CONTENT by kind for the reading-pane deep-dive
+ *  pills. Returns null when no artifact of that kind exists OR the file cannot be
+ *  read (the route maps null to a 404). */
+export function readTicketArtifactContent(
+  ticket: string,
+  kind: "research" | "plan",
+  opts?: ReadTicketArtifactsOptions,
+): Promise<TicketArtifactContent | null>;

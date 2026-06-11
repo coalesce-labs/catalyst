@@ -127,6 +127,10 @@ import {
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import type { InboxSummaryProvider } from "./lib/inbox-summary";
+import { createInboxSummaryProvider } from "./lib/inbox-summary";
+import { collectInboxItemState } from "./lib/inbox-state";
+import { loadAiConfig } from "./lib/ai-config";
 import type { SummarizeHandler } from "./lib/summarize";
 import { createSummarizeHandler } from "./lib/summarize";
 import { loadSummarizeConfig, type SummarizeConfig, type ProviderName } from "./lib/summarize/config";
@@ -256,7 +260,7 @@ import {
 // the local thoughts tree) and NEVER do a synchronous live Linear call per
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
-import { readTicketArtifacts } from "./lib/ticket-artifacts-reader.mjs";
+import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
 // CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
 // ticket-detail page. Board title is stale-sourced and the durable cache has no
 // description column, so both must be live-fetched (cached, TTL'd, fail-open).
@@ -328,6 +332,8 @@ export interface CreateServerOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
+  /** CTL-1042: per-inbox-item AI summary provider (GET /api/inbox/:ticket/summary). */
+  inboxSummaryProvider?: InboxSummaryProvider | null;
   summarizeHandler?: SummarizeHandler | null;
   summarizeConfig?: SummarizeConfig;
   prometheusUrl?: string | null;
@@ -738,6 +744,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     dbPath = null,
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
+    inboxSummaryProvider: inboxSummaryProviderOpt,
     summarizeHandler: summarizeHandlerOpt,
     summarizeConfig: summarizeConfigOpt,
     prometheusUrl,
@@ -807,6 +814,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const briefingProvider: BriefingProvider | null =
     briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
+
+  const inboxSummaryProvider: InboxSummaryProvider | null =
+    inboxSummaryProviderOpt === null ? null : (inboxSummaryProviderOpt ?? null);
 
   const summarizeHandler: SummarizeHandler | null =
     summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
@@ -1940,6 +1950,44 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(artifacts);
         }
 
+        // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
+        // the reading-pane deep-dive pills. The list route above is anchored at
+        // the ticket segment ($), so it never matches this two-segment path;
+        // this opens the actual markdown the pill links to (without it the pill
+        // hit the SPA/404 fallback). The served file path is resolved by our own
+        // glob over the local thoughts tree — not attacker-supplied — but we
+        // still validate both URL segments defensively.
+        const ticketArtifactByKindMatch = url.pathname.match(
+          /^\/api\/ticket-artifacts\/([^/]+)\/([^/]+)$/,
+        );
+        if (ticketArtifactByKindMatch) {
+          let ticket: string;
+          let kind: string;
+          try {
+            ticket = decodeURIComponent(ticketArtifactByKindMatch[1]);
+            kind = decodeURIComponent(ticketArtifactByKindMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (kind !== "research" && kind !== "plan") {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const doc = await readTicketArtifactContent(ticket, kind);
+          if (!doc) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return new Response(doc.content, {
+            headers: { "Content-Type": "text/markdown; charset=utf-8" },
+          });
+        }
+
         // CTL-889 (P12): cache-backed fuzzy ticket search for the ⌘K palette's
         // "Search all tickets in Linear" action. Fuzzy-matches the durable
         // ticket_state cache — NO per-keystroke live Linear API call. An empty
@@ -1987,6 +2035,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
             suggestedLabels: result.suggestedLabels,
             generatedAt: result.generatedAt,
           });
+        }
+
+        // CTL-1042: per-inbox-item AI summary — lazy, on operator select.
+        const inboxSummaryMatch =
+          req.method === "GET" && url.pathname.match(/^\/api\/inbox\/([^/]+)\/summary$/);
+        if (inboxSummaryMatch) {
+          let ticket: string;
+          try { ticket = decodeURIComponent(inboxSummaryMatch[1]); }
+          catch { return new Response("Bad Request", { status: 400 }); }
+          if (ticket.includes("..") || ticket.includes("/") || ticket.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!inboxSummaryProvider) return Response.json({ enabled: false });
+          const phase = url.searchParams.get("phase") ?? undefined;
+          const result = await inboxSummaryProvider.generate(ticket, phase);
+          if (!result) return Response.json({ enabled: true, ask: null, summary: null, options: null, blocker: null });
+          return Response.json({ enabled: true, ...result });
         }
 
         if (url.pathname === "/api/briefing/activity") {
@@ -3644,6 +3709,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
+    inboxSummaryProvider?.stop();
     void webhookTunnel?.stop();
     void linearWebhookTunnel?.stop();
     closeDb();
@@ -3771,6 +3837,27 @@ if (import.meta.main) {
     });
   }
 
+  // CTL-1042: per-inbox-item AI summary provider, built from the same two-layer
+  // config as the briefing provider (project .catalyst/config.json + secrets).
+  const aiCfg = loadAiConfig(
+    `${process.cwd()}/.catalyst/config.json`,
+    `${process.env.HOME ?? ""}/.config/catalyst/config-${detectProjectKey(process.cwd())}.json`,
+  );
+  const inboxSummaryProvider: InboxSummaryProvider | null = aiCfg.enabled
+    ? createInboxSummaryProvider(aiCfg, {
+        // The provider still accepts a `phase` on generate(), but collection is
+        // intentionally NOT phase-scoped: the cache key derives the phase from
+        // the held signal independently, so threading it here would be
+        // redundant. The closure drops the unused arg rather than imply it acts.
+        collectState: (ticket) =>
+          collectInboxItemState(ticket, {
+            workersDir: `${CATALYST_DIR}/execution-core/workers`,
+            projectsDir: `${process.env.HOME ?? ""}/.claude/projects`,
+            title: null,
+          }),
+      })
+    : null;
+
   if (terminalOnly) {
     const handle = startTerminalOnly(WT_DIR, renderOpts, RUNS_DIR);
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -3795,6 +3882,7 @@ if (import.meta.main) {
       renderOptions: renderOpts,
       summarizeHandler,
       summarizeConfig: summarizeCfg,
+      inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
     });
