@@ -193,6 +193,17 @@ import {
   createOtelHealthChecker,
   type OtelHealthChecker,
 } from "./lib/otel-health";
+// CTL-1050: the service-health registry (one severity model, shared with CTL-1039).
+import {
+  createServiceHealthMonitor,
+  type ServiceHealthMonitor,
+  type ServiceHealthConfig,
+} from "./lib/service-health-monitor";
+import {
+  createServiceHealthEmitter,
+  type ServiceHealthEmitter,
+} from "./lib/service-health-emitter";
+import { buildCanonicalEvent } from "./lib/canonical-event";
 import {
   costByTicket,
   costByTaskType,
@@ -205,6 +216,7 @@ import {
   modelLatency,
   toolLatency,
   apiErrors,
+  apiErrorCounts,
   recentTail,
   eventsHeatmap,
   costValidation,
@@ -319,9 +331,18 @@ export interface CreateServerOptions {
   summarizeConfig?: SummarizeConfig;
   prometheusUrl?: string | null;
   lokiUrl?: string | null;
+  /** CTL-1050: Grafana base URL for the service-health registry probe (null ⇒
+   *  the grafana entry renders unknown/grey, never red). */
+  grafanaUrl?: string | null;
+  /** CTL-1050: OTel collector health_check endpoint (null ⇒ the collector entry
+   *  falls back to telemetry-ingest event-recency). */
+  collectorHealthUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
   otelHealthChecker?: OtelHealthChecker | null;
+  /** CTL-1050: inject a pre-built service-health monitor (tests). Production
+   *  builds one from config + CATALYST_DIR. */
+  serviceHealthMonitor?: ServiceHealthMonitor | null;
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
@@ -720,9 +741,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
     summarizeConfig: summarizeConfigOpt,
     prometheusUrl,
     lokiUrl,
+    grafanaUrl = null,
+    collectorHealthUrl = null,
     prometheusFetcher: promFetcherOpt,
     lokiFetcher: lokiFetcherOpt,
     otelHealthChecker: otelHealthCheckerOpt,
+    serviceHealthMonitor: serviceHealthMonitorOpt,
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
@@ -799,11 +823,63 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
 
+  // CTL-1050: the service-health registry monitor — ONE severity model shared by
+  // the Fleet Ops strip, the outage emitter, the inbox decoration, AND the
+  // otel-health checker below. Targets read from config (NEVER hardcoded hosts).
+  const serviceHealthConfig: ServiceHealthConfig = {
+    lokiUrl: lokiUrl ?? null,
+    prometheusUrl: prometheusUrl ?? null,
+    grafanaUrl: grafanaUrl ?? null,
+    collectorHealthUrl: collectorHealthUrl ?? null,
+    webhookConfigured: webhookConfig !== null && webhookConfig !== undefined,
+  };
+  // The outage emitter appends a canonical envelope on enter-down / sustained
+  // recovery (CTL-1050 §3.1). Shares the CATALYST_DIR event log.
+  const serviceHealthEventLog: EventLogWriter = createEventLogWriter({
+    catalystDir: CATALYST_DIR,
+    logger: { warn: (m) => console.warn(m), error: (m) => console.error(m) },
+  });
+  const serviceHealthEmitter: ServiceHealthEmitter = createServiceHealthEmitter({
+    append: (t) => {
+      void serviceHealthEventLog.append(
+        buildCanonicalEvent({
+          ts: new Date().toISOString(),
+          severityText: t.severityText,
+          traceId: null,
+          spanId: null,
+          resource: { "service.name": "monitor" },
+          attributes: {
+            "event.name": "catalyst.service.health",
+            "event.entity": "service",
+            "event.action": t.action,
+            "event.label": t.serviceId,
+          },
+          body: { message: t.body },
+        }),
+      );
+    },
+  });
+  const serviceHealth: ServiceHealthMonitor =
+    serviceHealthMonitorOpt ??
+    createServiceHealthMonitor({
+      config: serviceHealthConfig,
+      catalystDir: CATALYST_DIR,
+      onTick: (snap) => serviceHealthEmitter.observe(snap.services),
+    });
+
   const otelHealth: OtelHealthChecker =
     otelHealthCheckerOpt ??
     createOtelHealthChecker({
       prometheusUrl: prometheusUrl ?? null,
       lokiUrl: lokiUrl ?? null,
+      // The single severity model: reachable + severity come from the registry.
+      severityTracker: {
+        lokiSeverity: () =>
+          serviceHealth.snapshot().services.find((s) => s.id === "loki")?.severity ?? null,
+        prometheusSeverity: () =>
+          serviceHealth.snapshot().services.find((s) => s.id === "prometheus")?.severity ??
+          null,
+      },
     });
 
   const previewFetcher: PreviewFetcher | null =
@@ -1112,6 +1188,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
       console.error(`[server] cluster signal assemble failed:`, err);
       return deriveClusterSignal(null);
     }
+  };
+
+  // CTL-1050 §3.2: decorate the board payload with the current `down` service
+  // outages so the inbox renders the awareness item from LIVE state (no broker
+  // change, no event-log read-back for the UI). One entry per service currently
+  // `down`; recovery resolves the row by simply dropping it from the next
+  // snapshot. PURE projection off the in-memory registry snapshot.
+  const decorateBoard = (board: BoardPayload | null): BoardPayload | null => {
+    if (board === null) return board;
+    const snap = serviceHealth.snapshot();
+    const outages = snap.services
+      .filter((s) => s.severity === "down")
+      .map((s) => ({
+        id: s.id,
+        label: s.label,
+        downSince: s.downSince,
+        detail: s.detail,
+      }));
+    return {
+      ...board,
+      serviceHealth: { generatedAt: snap.generatedAt, outages },
+    } as BoardPayload;
   };
 
   const unsubscribers: Array<() => void> = [];
@@ -1947,6 +2045,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(health);
         }
 
+        // CTL-1050: the service-health registry snapshot — every stack service's
+        // shared up|degraded|down|unknown severity, last-checked, target/source
+        // for the Fleet Ops strip hover. The registry reads ONLY the monitor's own
+        // probes/event-recency, so Fleet Ops stays Prometheus/Loki-FREE.
+        if (url.pathname === "/api/health/services") {
+          return Response.json(serviceHealth.snapshot());
+        }
+
         if (url.pathname === "/api/otel/cost") {
           if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "1h";
@@ -2092,8 +2198,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const range = url.searchParams.get("range") ?? "1h";
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
-          const result = await apiErrors(loki, range, limit);
-          return Response.json({ data: result });
+          // CTL-1039: alongside the panel's error rows, carry the proportional
+          // counts WITH EXPLICIT WINDOWS (15m + today) the hero reads to pick
+          // NOTED vs ERRORING. Backward-compatible: `data` stays the row array.
+          const [result, counts] = await Promise.all([
+            apiErrors(loki, range, limit),
+            apiErrorCounts(loki),
+          ]);
+          return Response.json({ data: result, counts });
         }
 
         // OBS-16 (UTILIZATION P_active): fleet-wide active-time ratio. A single
@@ -3123,7 +3235,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }
 
         if (url.pathname === "/api/board") {
-          return Response.json(await boardSnapshot.getLatest());
+          return Response.json(decorateBoard(await boardSnapshot.getLatest()));
         }
 
         // CTL-733: SSE push of the shared board snapshot. The client (Board.tsx /
@@ -3139,7 +3251,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
             if (closed) return;
             try {
               controller.enqueue(
-                encoder.encode(`event: board\ndata: ${JSON.stringify(snap)}\n\n`),
+                encoder.encode(
+                  `event: board\ndata: ${JSON.stringify(decorateBoard(snap))}\n\n`,
+                ),
               );
             } catch {
               // client went away between recompute and enqueue
@@ -3432,6 +3546,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   if (startWatcher) {
     watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs, runsDir });
+    // CTL-1050: start the service-health registry poller (30s tick). Off in
+    // tests (startWatcher=false) so they drive `tick()` deterministically.
+    serviceHealth.start();
   }
 
   if (webhookConfig && webhookHandler) {
@@ -3521,6 +3638,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     for (const u of unsubscribers) u();
     watcher?.stop();
     boardSnapshot.stop();
+    serviceHealth.stop();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();
@@ -3670,6 +3788,8 @@ if (import.meta.main) {
       pidFile: pidFilePath,
       prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
       lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
+      grafanaUrl: otelCfg.enabled ? otelCfg.grafanaUrl : null,
+      collectorHealthUrl: otelCfg.enabled ? otelCfg.collectorHealthUrl : null,
       terminal: useTerminal,
       renderOptions: renderOpts,
       summarizeHandler,

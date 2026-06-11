@@ -16,6 +16,51 @@ afterEach(() => {
   delete process.env.OTEL_ENABLED;
   delete process.env.PROMETHEUS_URL;
   delete process.env.LOKI_URL;
+  delete process.env.GRAFANA_URL;
+  delete process.env.OTEL_COLLECTOR_HEALTH_URL;
+});
+
+describe("loadOtelConfig — CTL-1050 grafana/collector keys", () => {
+  it("reads otel.grafanaUrl + otel.collectorHealthUrl from config.json", () => {
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      join(tmpDir, "config.json"),
+      JSON.stringify({
+        otel: {
+          enabled: true,
+          grafanaUrl: "http://file-grafana:3000/",
+          collectorHealthUrl: "http://file-collector:13133",
+        },
+      }),
+    );
+    const cfg = loadOtelConfig(tmpDir);
+    expect(cfg.grafanaUrl).toBe("http://file-grafana:3000");
+    expect(cfg.collectorHealthUrl).toBe("http://file-collector:13133");
+  });
+
+  it("absent keys ⇒ null (unknown/grey, never red)", () => {
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      join(tmpDir, "config.json"),
+      JSON.stringify({ otel: { enabled: true, lokiUrl: "http://loki" } }),
+    );
+    const cfg = loadOtelConfig(tmpDir);
+    expect(cfg.grafanaUrl).toBeNull();
+    expect(cfg.collectorHealthUrl).toBeNull();
+  });
+
+  it("env GRAFANA_URL / OTEL_COLLECTOR_HEALTH_URL override the file", () => {
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      join(tmpDir, "config.json"),
+      JSON.stringify({ otel: { grafanaUrl: "http://file:3000" } }),
+    );
+    process.env.GRAFANA_URL = "http://env-grafana:3000/";
+    process.env.OTEL_COLLECTOR_HEALTH_URL = "http://env-collector:13133/";
+    const cfg = loadOtelConfig(tmpDir);
+    expect(cfg.grafanaUrl).toBe("http://env-grafana:3000");
+    expect(cfg.collectorHealthUrl).toBe("http://env-collector:13133");
+  });
 });
 
 describe("loadOtelConfig", () => {

@@ -42,7 +42,11 @@ import { ToolMixPanel } from "@/components/observe/tool-mix-panel";
 import { ModelLatencyPanel } from "@/components/observe/model-latency-panel";
 import { errorTrendSparkline } from "@/components/observe/telemetry-panels";
 import { Sparkline } from "@/components/sparkline";
-import { heroState } from "@/components/observe/hero-state";
+import {
+  heroState,
+  isReconnecting,
+  type ServiceSeverity,
+} from "@/components/observe/hero-state";
 import { isErrorRow, type TailWorkerRef } from "@/components/observe/tail-group";
 import { EventsHeatmapPanel } from "@/components/observe/events-heatmap-panel";
 import type { HeatmapWorkerRef } from "@/components/observe/events-heatmap-data";
@@ -97,6 +101,13 @@ export function TelemetrySurface() {
   // latency. Each reads a [loki] route; the ChartCard owns the honesty states so a
   // null/empty result just degrades that one card.
   const [errors, setErrors] = useState<OtelLogEntry[]>([]);
+  // CTL-1039: the proportional error counts WITH WINDOWS (15m + today) from
+  // /api/otel/errors. null until the first load. The hero reads these to pick the
+  // neutral NOTED chip vs the red ERRORING gate.
+  const [errorCounts, setErrorCounts] = useState<{
+    count15m: number;
+    countToday: number;
+  } | null>(null);
   const [toolCounts, setToolCounts] = useState<Record<string, number>>({});
   const [toolLatency, setToolLatency] = useState<ToolLatencyMap>({});
   const [modelRows, setModelRows] = useState<ModelLatencyRow[]>([]);
@@ -206,8 +217,12 @@ export function TelemetrySurface() {
         if (!alive) return;
         if (resp.status === 503) return setErrorsReachable(false);
         if (!resp.ok) return;
-        const body = (await resp.json()) as { data: OtelLogEntry[] | null };
+        const body = (await resp.json()) as {
+          data: OtelLogEntry[] | null;
+          counts?: { count15m: number; countToday: number } | null;
+        };
         setErrors(body.data ?? []);
+        if (body.counts) setErrorCounts(body.counts);
         setErrorsReachable(true);
       } catch {
         if (alive) setErrorsReachable(false);
@@ -326,18 +341,44 @@ export function TelemetrySurface() {
       ? null
       : { ...health, loki: { ...health.loki, reachable: health.loki.reachable && reachable } };
 
-  // Loki reachability for the hero: health probe OR the tail's own 503 signal.
-  // health.loki.reachable is authoritative once the probe resolves; until then
-  // the tail's success is an optimistic stand-in (no DARK flash on first paint).
-  const lokiReachable =
-    health === null ? (tailReachable ? null : false) : health.loki.reachable && tailReachable;
+  // CTL-1039: the SHARED Loki severity for the hero (the single severity model),
+  // replacing the binary lokiReachable. Prefer the registry severity on
+  // health.loki.severity; fall back to the binary reachable (→ up/down) when a
+  // checker isn't wired to the registry. Until the first probe resolves
+  // (health === null) we stay optimistic (null), and a tail 503 forces down.
+  const lokiSeverity = useMemo<ServiceSeverity | null>(() => {
+    if (health === null) return tailReachable ? null : "down";
+    if (!tailReachable) return "down";
+    if (health.loki.severity !== undefined) return health.loki.severity;
+    return health.loki.reachable ? "up" : "down";
+  }, [health, tailReachable]);
+
+  // CTL-1039: the error counts the proportional gate reads — prefer the windowed
+  // server counts; until they land, fall back to the tail-derived 15m count.
+  const errorCount15m = errorCounts?.count15m ?? errorCount;
+  const errorCountToday = errorCounts?.countToday ?? errorCount;
 
   const state = heroState({
-    lokiReachable,
+    lokiSeverity,
     configured: health?.configured ?? true,
     freshnessMs: tail?.freshnessMs ?? null,
     errorRate,
+    errorCount15m,
   });
+
+  // CTL-1039: a quiet "reconnecting…" hint shows on a degraded source — never the
+  // banner / DARK (the proportional fix). The hero keeps its last data state.
+  const reconnecting = isReconnecting(lokiSeverity);
+
+  // CTL-1039: stamp WHEN the hero entered DARK so the badge reads "since HH:MM".
+  // Reset the instant it leaves DARK (recovery clears it without operator action).
+  const darkSinceRef = useRef<number | null>(null);
+  if (state === "DARK") {
+    if (darkSinceRef.current === null) darkSinceRef.current = Date.now();
+  } else {
+    darkSinceRef.current = null;
+  }
+  const darkSinceMs = darkSinceRef.current;
 
   return (
     <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
@@ -370,7 +411,11 @@ export function TelemetrySurface() {
         freshnessMs={tail?.freshnessMs ?? null}
         errorCount={errorCount}
         errorRate={errorRate}
+        errorCountToday={errorCountToday}
+        errorCount15m={errorCount15m}
+        reconnecting={reconnecting}
         lastGoodMs={lastGoodMs}
+        darkSinceMs={darkSinceMs}
       />
 
       {/* GRID — responsive 2-column (layout spec §2). Left col: P1 (tall) then the
