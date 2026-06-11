@@ -107,6 +107,55 @@ describe("CTL-981 nav final calibration — inactive label weight + contrast", (
   });
 });
 
+describe("CTL-1034 — project headers read as Title-Cased headings", () => {
+  it("the project header is rendered via displayCaseName (Title Case), not the raw repo key", () => {
+    // CTL-1034 §2: "adva" → "Adva". The per-project header must spell the repo
+    // short-name out through the CTL-1012 display-name helper, not render it verbatim.
+    expect(src).toContain("displayCaseName");
+    const projectBlock = src.slice(
+      src.indexOf("PER-PROJECT GROUPS"),
+      src.indexOf("OBSERVE — collapsible"),
+    );
+    // The header label is the display-cased repo, with a verbatim fallback.
+    expect(projectBlock).toContain("displayCaseName(repo)");
+    // The old raw `{repo}` label node (the minuscule lowercase row) is gone — the
+    // header now renders the display-cased {repoLabel} instead.
+    expect(projectBlock).toContain("{repoLabel}");
+  });
+
+  it("the project header trigger uses heading-grade weight/size, not the /45 11px row", () => {
+    // CTL-1034 §2: project headers sit at the weight/size of the SidebarGroupLabels
+    // (text-xs / font-medium), bumped to /80 contrast — NOT the muted /45 11px chrome
+    // the GROUP_TRIGGER_BASE rows use.
+    const headerTrigger = src.slice(
+      src.indexOf("PROJECT_HEADER_TRIGGER = cn("),
+      src.indexOf(");", src.indexOf("PROJECT_HEADER_TRIGGER = cn(")),
+    );
+    expect(headerTrigger).toContain("text-xs");
+    expect(headerTrigger).toContain("font-medium");
+    expect(headerTrigger).toContain("text-sidebar-foreground/80");
+    expect(headerTrigger).not.toContain("text-[11px]");
+  });
+
+  it("project children indent under a guide line (§3) — border-l on the child menu", () => {
+    const guide = src.slice(
+      src.indexOf("PROJECT_CHILD_GUIDE = cn("),
+      src.indexOf(");", src.indexOf("PROJECT_CHILD_GUIDE = cn(")),
+    );
+    expect(guide).toContain("border-l");
+    expect(guide).toContain("border-sidebar-border");
+  });
+});
+
+describe("CTL-1034 — collapsed-section signal dot (§4)", () => {
+  it("a SectionSignalDot rolls a collapsed section's child signal onto its header", () => {
+    expect(src).toContain("function SectionSignalDot");
+    expect(src).toContain("function sectionSignal");
+    // Rendered only while the section is collapsed (the !isOpen / !overallIsOpen guard).
+    expect(src).toMatch(/!isOpen && repoSignal && <SectionSignalDot/);
+  });
+});
+
 describe("CTL-980 nav proportion v3 — Projects section heading", () => {
   it("renders a 'Projects' section heading above the per-project groups", () => {
     expect(src).toContain("Projects");
