@@ -1205,6 +1205,154 @@ run "T59b-noremove: push fails -> no worktree remove in GIT_LOG" \
 rm -f "$MOCKBIN/git"
 rm -f "$MOCKBIN/pmset"
 
+# --- Phase 9: vector 2 summary event (T60-T66) ---
+
+# Reinstall git mock (same as Phase 8)
+cat > "$MOCKBIN/git" <<'GITEOF9'
+#!/usr/bin/env bash
+echo "$@" >> "${GIT_LOG}"
+subcmd=""
+cwd_path=""
+i=1
+while [[ $i -le $# ]]; do
+  arg="${!i}"
+  if [[ "$arg" == "-C" ]]; then
+    i=$((i+1))
+    cwd_path="${!i}"
+  elif [[ "$arg" != -* || "$arg" == "--"* ]]; then
+    subcmd="$arg"
+    break
+  fi
+  i=$((i+1))
+done
+case "$subcmd" in
+  status)
+    if [[ "${cwd_path:-}" == *"SALVAGE_DIRTY"* ]]; then echo "M some/file.txt"; fi
+    ;;
+  worktree)
+    i=$((i+1)); subcmd2="${!i}"
+    if [[ "$subcmd2" == "list" ]]; then
+      echo "worktree ${SCRATCH}/PRIMARY"
+      echo "HEAD abc1234"
+      echo "branch refs/heads/main"
+      echo ""
+    fi
+    ;;
+  push)
+    exit "${MOCK_PUSH_RC:-0}"
+    ;;
+  merge-base)
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then exit 1; fi
+    exit 0
+    ;;
+  for-each-ref)
+    echo "refs/remotes/origin/main"
+    ;;
+  rev-list)
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then echo "3"; else echo "0"; fi
+    ;;
+  branch)
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then echo ""; else echo "  origin/main"; fi
+    ;;
+  symbolic-ref)
+    echo "origin/main"
+    ;;
+  rev-parse)
+    echo "$(basename "${cwd_path:-unknown}")"
+    ;;
+esac
+exit 0
+GITEOF9
+chmod +x "$MOCKBIN/git"
+
+# Reinstall pmset mock (AC power)
+cat > "$MOCKBIN/pmset" <<'EOF'
+#!/usr/bin/env bash
+printf 'Now drawing from '\''%s'\'' (Mains)\n' "${PMSET_POWER:-AC Power}"
+EOF
+chmod +x "$MOCKBIN/pmset"
+
+# Reinstall presweep mock (exits 1 for PRESWEEP_FAIL paths)
+cat > "$MOCKBIN/worktree-presweep.sh" <<'EOF'
+#!/usr/bin/env bash
+path="${*: -1}"
+if [[ "$path" == *"PRESWEEP_FAIL"* ]]; then
+  echo "worktree-presweep: sessions remain" >&2
+  exit 1
+fi
+exit 0
+EOF
+chmod +x "$MOCKBIN/worktree-presweep.sh"
+
+# Fixture root for Phase 9
+P9_WT_ROOT="${SCRATCH}/p9-wt"
+mkdir -p "$P9_WT_ROOT"
+
+make_safe_wt_p9() {
+  local name="$1"
+  mkdir -p "${P9_WT_ROOT}/${name}/.git"
+  touch -t 202501010000 "${P9_WT_ROOT}/${name}" "${P9_WT_ROOT}/${name}/.git" 2>/dev/null || true
+}
+
+P9_SWEEP="SWEEP_WT_ROOT='${P9_WT_ROOT}' SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_IDLE_HOURS=9999 PMSET_POWER='AC Power' SWEEP_FORCE_POWER=1"
+
+# ----- T60: normal run -> "worktree.sweep.completed" appears in SCRATCH_OTEL_LOG -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 SAFE-T60
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+run "T60: normal run -> worktree.sweep.completed in OTEL log" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && grep -q 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}'"
+
+# ----- T61: log line contains all 6 attrs -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 SAFE-T61
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+run "T61: summary event has all 6 required attrs" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'reclaimedBytes=' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'removed=' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'salvageSkipped=' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'activeSkipped=' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'durationMs=' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -q 'host='"
+
+# ----- T62: run with 2 SAFE trees removed -> log has "removed=2" -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 SAFE-T62a
+make_safe_wt_p9 SAFE-T62b
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+SAFE_WT="${P9_WT_ROOT}/SAFE-T62a"
+run "T62: 2 SAFE trees removed -> removed=2 in OTEL log" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -qE '(^| )--attr removed=2( |$)'"
+
+# ----- T63: SWEEP_WT_ROOT=/nonexistent (0 trees) -> event still emitted with "removed=0" -----
+rm -f "$SCRATCH_OTEL_LOG"
+run "T63: no trees (nonexistent root) -> event emitted with removed=0" \
+  bash -c "SWEEP_WT_ROOT=/nonexistent SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_FORCE_POWER=1 bash '${SWEEP}' && grep -q 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -qE '(^| )--attr removed=0( |$)'"
+
+# ----- T64: SAFE tree with 64KB file -> "reclaimedBytes=" > 0 -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 SAFE-T64
+SAFE_WT="${P9_WT_ROOT}/SAFE-T64"
+dd if=/dev/urandom of="${SAFE_WT}/blob.bin" bs=1024 count=64 2>/dev/null || true
+touch -t 202501010000 "${SAFE_WT}/blob.bin" "${SAFE_WT}" 2>/dev/null || true
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+run "T64: SAFE tree with 64KB file -> reclaimedBytes > 0" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -qE 'reclaimedBytes=[1-9]'"
+
+# ----- T65: presweep-blocked tree -> "activeSkipped=[1-9]" -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 PRESWEEP_FAIL-T65
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+run "T65: presweep-blocked tree -> activeSkipped >= 1 in OTEL log" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && grep 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' | grep -qE 'activeSkipped=[1-9]'"
+
+# ----- T66: grep -c "worktree.sweep.completed" is exactly 1 (emitted once) -----
+rm -rf "$P9_WT_ROOT" && mkdir -p "$P9_WT_ROOT"
+make_safe_wt_p9 SAFE-T66a
+make_safe_wt_p9 SAFE-T66b
+rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
+run "T66: worktree.sweep.completed emitted exactly once" \
+  bash -c "eval \"${P9_SWEEP}\" bash '${SWEEP}' && count=\$(grep -c 'worktree.sweep.completed' '${SCRATCH_OTEL_LOG}' 2>/dev/null || echo 0); [[ \"\$count\" -eq 1 ]]"
+
+rm -f "$MOCKBIN/git"
+rm -f "$MOCKBIN/pmset"
+rm -f "$MOCKBIN/worktree-presweep.sh"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
