@@ -357,6 +357,8 @@ describe("classifyStallClear (CTL-1005 J3)", () => {
     artifactPresent: true,
     artifactComplete: true, // existence + non-truncation
     alreadyCleared: false, // no .janitor-cleared-<phase>.applied marker yet
+    dispatchFailureCode: 2,       // CTL-1045 Bug 2: benign prior-artifact-missing exit code
+    priorDoneSignalPresent: true, // CTL-1045 Bug 3: prior-phase done signal survives
   };
 
   test("retry-exhausted stall + complete artifact + non-terminal + no live session → clear", () => {
@@ -393,10 +395,25 @@ describe("classifyStallClear (CTL-1005 J3)", () => {
     expect(d.reason).toMatch(/live/);
   });
 
-  test("already cleared once (.janitor-cleared marker present) → skip (one clear per lifetime)", () => {
+  test("already cleared once (.janitor-cleared marker present) → skip (one clear per worker-dir lifetime)", () => {
     const d = classifyStallClear({ ...base, alreadyCleared: true });
     expect(d.action).toBe("skip");
     expect(d.reason).toMatch(/already-cleared/);
+  });
+
+  // CTL-1045 Bug 2: only exit code 2 (prior_artifact_missing) is clearable.
+  test("CTL-1045 Bug 2: clear requires dispatchFailureCode === 2 (benign prior-artifact-missing)", () => {
+    expect(classifyStallClear({ ...base, dispatchFailureCode: 2 }).action).toBe("clear");
+    expect(classifyStallClear({ ...base, dispatchFailureCode: 0 }).action).toBe("skip");   // verify_failed
+    expect(classifyStallClear({ ...base, dispatchFailureCode: 1 }).action).toBe("skip");   // crash
+    expect(classifyStallClear({ ...base, dispatchFailureCode: null }).action).toBe("skip"); // legacy signal
+  });
+
+  // CTL-1045 Bug 3: never empty a worker dir — prior-phase done signal must survive.
+  test("CTL-1045 Bug 3: clear declines when the prior-phase done signal is absent", () => {
+    const d = classifyStallClear({ ...base, priorDoneSignalPresent: false });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toBe("prior-done-signal-absent");
   });
 });
 
@@ -417,6 +434,8 @@ function makeStallWorld(overrides = {}) {
         artifactPresent: true,
         artifactComplete: true,
         alreadyCleared: false,
+        dispatchFailureCode: 2,       // CTL-1045 Bug 2
+        priorDoneSignalPresent: true, // CTL-1045 Bug 3
       },
     ],
     ...overrides,

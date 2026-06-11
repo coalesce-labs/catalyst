@@ -113,8 +113,10 @@ export function classifyGhostSession(ctx = {}) {
 // because the PRIOR-phase artifact was missing, then never re-checks whether the
 // artifact later arrived — the ticket freezes to needs-human permanently.
 //   "clear" — the prior artifact is now present AND complete (non-truncated), the
-//             Linear state is non-terminal, no live session owns the worktree, and
-//             we have not already cleared this phase once this daemon lifetime.
+//             Linear state is non-terminal, no live session owns the worktree,
+//             we have not already cleared this phase once this worker-dir lifetime,
+//             the stall was caused by prior-artifact-missing (exit code 2), and
+//             the prior-phase done signal still survives.
 //   "skip"  — anything else. Every gate fails CLOSED (stay frozen) — a borderline
 //             case is left for operator review, never force-unstuck.
 //
@@ -126,16 +128,32 @@ export function classifyGhostSession(ctx = {}) {
 //   artifactComplete       — …AND is non-truncated (existence alone is not enough;
 //                            re-walk artifact-validation precedent).
 //   alreadyCleared         — a .janitor-cleared-<phase>.applied marker is present.
+//   dispatchFailureCode    — CTL-1045 Bug 2: exit code that exhausted retries.
+//                            Only 2 (prior_artifact_missing) is clearable.
+//   priorDoneSignalPresent — CTL-1045 Bug 3: the prior-phase done signal survives;
+//                            without it a clear empties the worker dir → pipeline drop.
+
+// Exit code 2 is the phase-agent-dispatch structural refusal for a missing prior
+// artifact (PERMANENT_FAILURE_CODES in scheduler.mjs). It is the ONLY benign cause
+// that J3 is safe to auto-clear; any other code means re-dispatch would repeat the
+// same failure class.
+const PRIOR_ARTIFACT_MISSING_EXIT_CODE = 2;
+
 export function classifyStallClear(ctx = {}) {
   // Only the transient prior-artifact-retry-exhausted stall is auto-clearable.
   // A dispatch-circuit-breaker / phantom-ticket / any other stall is operator-owned.
   if (ctx.stalledReason !== "prior-artifact-retry-exhausted")
     return { action: "skip", reason: "not-retry-exhausted-reason" };
+  // CTL-1045 Bug 2: only the benign prior-artifact-missing exhaustion is clearable.
+  // A verify_failed (code 0) or crash (code ≠ 2) would re-dispatch into the same
+  // failure; a legacy signal (code null) is operator-owned (conservative default).
+  if (ctx.dispatchFailureCode !== PRIOR_ARTIFACT_MISSING_EXIT_CODE)
+    return { action: "skip", reason: "non-artifact-dispatch-cause" };
   // NEVER unstick a terminal/merged Linear ticket (the pipeline is genuinely done).
   if (ctx.linearTerminal) return { action: "skip", reason: "linear-terminal" };
   // NEVER touch a live worker (the safety fence, mirrors J1).
   if (ctx.liveSessionInWorktree) return { action: "skip", reason: "live-session-in-worktree" };
-  // One clear per ticket per phase per daemon lifetime — a re-stall after one
+  // One clear per ticket per phase per worker-dir lifetime — a re-stall after one
   // clear is left frozen for operator review (the Gherkin's re-stall scenario).
   if (ctx.alreadyCleared) return { action: "skip", reason: "already-cleared" };
   // The artifact must be PRESENT and COMPLETE — existence alone is not enough
@@ -143,6 +161,10 @@ export function classifyStallClear(ctx = {}) {
   // class; re-walk artifact-validation precedent).
   if (!ctx.artifactPresent) return { action: "skip", reason: "artifact-absent" };
   if (!ctx.artifactComplete) return { action: "skip", reason: "artifact-truncated" };
+  // CTL-1045 Bug 3: never empty a worker dir — the prior-phase done signal must
+  // survive the clear, else the next tick sees an empty signals map, isTicketInFlight
+  // returns false, and deriveAdvancement finds no `done` to advance from → silent drop.
+  if (!ctx.priorDoneSignalPresent) return { action: "skip", reason: "prior-done-signal-absent" };
   return { action: "clear", reason: "prior-artifact-now-complete" };
 }
 
@@ -638,7 +660,9 @@ export function defaultCollectStallClearCandidates({
     try {
       const workerDir = join(orchDir, "workers", ticket);
       // Find a `stalled` phase signal carrying the J3-relevant reason.
+      // Hoist stalledRaw so CTL-1045 Bug 2+3 can read its fields below.
       let stalledPhase = null;
+      let stalledRaw = null;
       for (const f of readdirSync(workerDir)) {
         const m = /^phase-(.+)\.json$/.exec(f);
         if (!m) continue;
@@ -646,6 +670,7 @@ export function defaultCollectStallClearCandidates({
         try { raw = JSON.parse(readFileSync(join(workerDir, f), "utf8")); } catch { continue; }
         if (raw?.status === "stalled" && raw?.stalledReason === "prior-artifact-retry-exhausted") {
           stalledPhase = m[1];
+          stalledRaw = raw;
           break;
         }
       }
@@ -668,6 +693,23 @@ export function defaultCollectStallClearCandidates({
         (artifactComplete ?? defaultPriorArtifactComplete)(probeCtx) === true;
       const present = artifactPresent ? artifactPresent(probeCtx) === true : complete;
 
+      // CTL-1045 Bug 2: read the persisted dispatch failure exit code from the signal.
+      // A signal without the field (older signals) gets null → treated as non-clearable.
+      const dispatchFailureCode =
+        typeof stalledRaw?.dispatchFailureCode === "number" ? stalledRaw.dispatchFailureCode : null;
+
+      // CTL-1045 Bug 3: verify the prior-phase done signal still exists.
+      // Without it, clearing the stalled signal leaves an empty worker dir → silent
+      // pipeline drop (isTicketInFlight sees no signals → deriveAdvancement finds no done).
+      const priorPhaseForStall = PRIOR_PHASE[stalledPhase];
+      let priorDoneSignalPresent = false;
+      if (priorPhaseForStall) {
+        try {
+          const pj = JSON.parse(readFileSync(join(workerDir, `phase-${priorPhaseForStall}.json`), "utf8"));
+          priorDoneSignalPresent = pj?.status === "done";
+        } catch { priorDoneSignalPresent = false; }
+      }
+
       out.push({
         ticket,
         phase: stalledPhase,
@@ -677,6 +719,8 @@ export function defaultCollectStallClearCandidates({
         artifactPresent: present,
         artifactComplete: complete,
         alreadyCleared,
+        dispatchFailureCode,       // CTL-1045 Bug 2
+        priorDoneSignalPresent,    // CTL-1045 Bug 3
         worktreePath,
       });
     } catch (err) {
