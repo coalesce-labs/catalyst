@@ -36,10 +36,10 @@ describe("CTL-980 nav proportion v3 — icon size", () => {
   });
 });
 
-describe("CTL-980 nav proportion v3 — twistie placement", () => {
+describe("CTL-1034 sidebar sections — twistie right-aligned (CTL-977 convention)", () => {
   // Extract ChevronRightIcon className attribute values (the actual class strings, not comments).
   function chevronClassNames(block: string): string[] {
-    const re = /<ChevronRightIcon\s+className=\{cn\(\s*"([^"]+)"/g;
+    const re = /<ChevronRightIcon\s+className=\{cn\(\s*\n?\s*"([^"]+)"/g;
     const re2 = /<ChevronRightIcon\s+className="([^"]+)"/g;
     const results: string[] = [];
     let m: RegExpExecArray | null;
@@ -48,46 +48,25 @@ describe("CTL-980 nav proportion v3 — twistie placement", () => {
     return results;
   }
 
-  it("per-project group ChevronRightIcon className does NOT start with ml-auto", () => {
+  it("per-project group ChevronRightIcon is right-aligned via ml-auto (CTL-1034)", () => {
+    // CTL-1034 §1: the twistie is RIGHT-aligned again (the CTL-977 convention) so each
+    // section header reads "Adva ········ ⌄". The ml-auto lives in the cn() conditional
+    // (ml-auto when there is no leading signal dot); assert the class is referenced.
     const projectBlock = src.slice(
       src.indexOf("PER-PROJECT GROUPS"),
       src.indexOf("OBSERVE — collapsible"),
     );
-    const classes = chevronClassNames(projectBlock);
-    expect(classes.length).toBeGreaterThan(0);
-    for (const cls of classes) {
-      expect(cls).not.toMatch(/\bml-auto\b/);
-    }
+    expect(projectBlock).toContain("ml-auto");
   });
 
-  it("per-project group ChevronRightIcon uses ml-1 (adjacent to label)", () => {
-    const projectBlock = src.slice(
-      src.indexOf("PER-PROJECT GROUPS"),
-      src.indexOf("OBSERVE — collapsible"),
-    );
-    const classes = chevronClassNames(projectBlock);
-    expect(classes.some((c) => c.includes("ml-1"))).toBe(true);
-  });
-
-  it("Observe section ChevronRightIcon className does NOT use ml-auto", () => {
+  it("Observe section ChevronRightIcon is right-aligned via ml-auto (CTL-1034)", () => {
     const observeBlock = src.slice(
       src.indexOf("OBSERVE — collapsible"),
       src.indexOf("FOOTER"),
     );
     const classes = chevronClassNames(observeBlock);
     expect(classes.length).toBeGreaterThan(0);
-    for (const cls of classes) {
-      expect(cls).not.toMatch(/\bml-auto\b/);
-    }
-  });
-
-  it("Observe section ChevronRightIcon uses ml-1", () => {
-    const observeBlock = src.slice(
-      src.indexOf("OBSERVE — collapsible"),
-      src.indexOf("FOOTER"),
-    );
-    const classes = chevronClassNames(observeBlock);
-    expect(classes.some((c) => c.includes("ml-1"))).toBe(true);
+    expect(classes.some((c) => c.includes("ml-auto"))).toBe(true);
   });
 });
 

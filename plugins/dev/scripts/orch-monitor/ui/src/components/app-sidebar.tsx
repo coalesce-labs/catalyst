@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useAtom } from "jotai";
 import {
   ActivityIcon,
@@ -37,8 +37,18 @@ import {
 } from "@/lib/cluster-signal";
 import { ALL_NODES, resolveNodeScope, useNodeScope } from "@/lib/node-scope";
 import { CatalystLogo } from "@/components/catalyst-logo";
-import { buildNavGroups } from "@/lib/nav-model";
-import { repoScopeAtom, navGroupsOpenAtom } from "@/board/nav-store";
+import {
+  buildNavGroups,
+  displayCaseName,
+  projectWorkerCount,
+  projectQueueDepth,
+} from "@/lib/nav-model";
+import {
+  repoScopeAtom,
+  navGroupsOpenAtom,
+  navOverallOpenAtom,
+  navObserveOpenAtom,
+} from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
 import { useRepoIcons } from "@/hooks/use-repo-icons";
@@ -89,6 +99,18 @@ import {
 //            color via currentColor, twistie beside label (not far-right), "Projects" heading.
 // CTL-981 — nav final calibration: inactive label weight 400→500 (font-medium) + contrast /60→/72
 //            so labels have body/presence and stop reading thin/small vs Linear's lch(60) baseline.
+// CTL-1034 — sidebar sections refinement (NOT a redesign — Linear-calm restraint):
+//   1. EVERY section collapses: Overall + each project + Observe each have a clickable
+//      header row that folds the section; the open/closed bit persists across reloads
+//      (navOverallOpenAtom / navGroupsOpenAtom / navObserveOpenAtom in nav-store).
+//   2. Project headers read as real headings: Title-Cased via displayCaseName ("adva"→
+//      "Adva", "catalyst"→"Catalyst") at heading weight/size on par with the "Overall"/
+//      "Projects" SidebarGroupLabels — not the tiny lowercase rows they were.
+//   3. Child hierarchy: project children indent under the header with a subtle guide
+//      line (border-l), mirroring how Linear nests team children.
+//   4. Signal survives collapse: a collapsed section whose children carry a live count /
+//      attention state shows a subtle dot on its header so signal is not lost.
+//   The twistie is RIGHT-ALIGNED (ml-auto) per the CTL-977 convention.
 
 /** A status dot overlaid on a nav icon (emerald = live, amber = anomaly). */
 function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
@@ -97,6 +119,25 @@ function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
       aria-hidden
       className={cn(
         "pointer-events-none absolute -top-0.5 -right-0.5 size-2 rounded-full ring-2 ring-sidebar",
+        kind === "live" ? "bg-green" : "bg-yellow",
+      )}
+    />
+  );
+}
+
+/**
+ * CTL-1034 §4 — a subtle attention dot rolled up onto a COLLAPSED section header
+ * so a live count / anomaly carried by a hidden child isn't lost. Kept calm: a
+ * small 6px dot pinned at the right edge (before the chevron), emerald for a live
+ * count, amber for an anomaly. Only rendered when the section is collapsed AND a
+ * child has signal (the caller gates this), so an expanded section stays clean.
+ */
+function SectionSignalDot({ kind }: { kind: "live" | "anomaly" }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "ml-auto size-1.5 shrink-0 rounded-full",
         kind === "live" ? "bg-green" : "bg-yellow",
       )}
     />
@@ -133,14 +174,40 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
 
 // CTL-977: Shared classes for collapsible group trigger rows.
 // Natural-case (no uppercase), quiet/muted color.
-// CTL-980: twistie is placed BESIDE the label text (no ml-auto), favicon LEFT of label.
+// CTL-1034: twistie is RIGHT-ALIGNED again (per the CTL-977 convention) so every
+// section header reads with the chevron pinned to the right edge; this also leaves
+// room for the collapsed-section signal dot just before it (§4). The Overall and
+// Observe section headers use this same trigger so all sections share one chrome.
 const GROUP_TRIGGER_BASE = cn(
   "flex h-7 w-full shrink-0 items-center rounded-md px-2 outline-hidden",
-  // CTL-977/CTL-980: no uppercase — render names in their natural case; muted color.
+  // CTL-977: no uppercase — render names in their natural case; muted/quiet color.
   "text-[11px] font-medium text-sidebar-foreground/45",
   "transition-[margin,opacity,color] duration-200 ease-linear",
   "cursor-pointer hover:text-sidebar-foreground/70 focus-visible:ring-2 focus-visible:ring-sidebar-ring",
   "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
+);
+
+// CTL-1034 §2: the PROJECT header trigger reads as a real section heading — at the
+// weight/size/contrast of the "Overall"/"Projects" SidebarGroupLabels
+// (text-xs / font-medium / text-sidebar-foreground/70), bumped a touch brighter
+// (/80) because it carries the project icon and anchors its child group. NOT the
+// minuscule /45 11px row it was. Linear-calm: weight & case over loudness — no
+// uppercase, no shouting color.
+const PROJECT_HEADER_TRIGGER = cn(
+  "flex h-8 w-full shrink-0 items-center gap-1.5 rounded-md px-2 outline-hidden",
+  "text-xs font-medium text-sidebar-foreground/80",
+  "transition-[margin,opacity,color] duration-200 ease-linear",
+  "cursor-pointer hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+  "group-data-[collapsible=icon]:-mt-8 group-data-[collapsible=icon]:opacity-0",
+);
+
+// CTL-1034 §3: project children indent under their header with a subtle guide line
+// (a left border), mirroring how Linear nests team children. Applied to the
+// SidebarMenu inside each project's CollapsibleContent. Reuses the sidebar-border
+// token + the SidebarMenuSub geometry (ml-3.5 / border-l / pl) so the guide reads
+// identically to the rest of the shell.
+const PROJECT_CHILD_GUIDE = cn(
+  "ml-3.5 border-l border-sidebar-border pl-2.5",
 );
 
 export function AppSidebar() {
@@ -150,7 +217,11 @@ export function AppSidebar() {
   const navigate = useNavigate();
   const { setOpenMobile, isMobile } = useSidebar();
   const { theme, toggle: toggleTheme } = useTheme();
-  const [observeOpen, setObserveOpen] = useState(false);
+  // CTL-1034: the Overall + Observe sections are now collapsible with persisted
+  // open-state (atomWithStorage), matching the per-project groups. Both default
+  // open; a section force-renders open when it contains the active surface.
+  const [overallOpen, setOverallOpen] = useAtom(navOverallOpenAtom);
+  const [observeOpen, setObserveOpen] = useAtom(navObserveOpenAtom);
   // CTL-945: consume from AppShell's shared contexts — no new EventSources opened.
   // CTL-896 / SHELL6 — the live nav signal off the read-model SSE projection.
   const nav = useNavSignalContext();
@@ -295,6 +366,34 @@ export function AppSidebar() {
     );
   }
 
+  // CTL-1034 §4 — roll a collapsed section's child signal up onto its header so a
+  // live count / anomaly carried by a hidden child isn't lost. "live" (emerald) when
+  // a child has running workers or queued work; "anomaly" (amber) when the board
+  // carries an anomaly. Returns null when there is no signal. The caller only renders
+  // the dot while the section is COLLAPSED — an open section shows its children, so a
+  // header dot would be redundant.
+  //   - "all"      → the global nav signal (workerCount / queueDepth / anomaly).
+  //   - repo scope → that repo's resident-payload worker/queue counts (the per-project
+  //                  BFF projection isn't wired yet, so derive from the board snapshot).
+  //   - "observe"  → OBSERVE surfaces carry no per-section count today → always null.
+  function sectionSignal(scopeVal: string): "live" | "anomaly" | null {
+    if (scopeVal === "all") {
+      if (!nav) return null;
+      if (nav.anomaly) return "anomaly";
+      if (nav.workerCount > 0 || nav.queueDepth > 0) return "live";
+      return null;
+    }
+    if (scopeVal === "observe") return null;
+    if (!payload) return null;
+    if (
+      projectWorkerCount(payload, scopeVal) > 0 ||
+      projectQueueDepth(payload, scopeVal) > 0
+    ) {
+      return "live";
+    }
+    return null;
+  }
+
   return (
     <Sidebar variant="inset" collapsible="offcanvas">
       {/* ── HEADER: chevron mark + wordmark ─────────────────────────────────── */}
@@ -310,19 +409,54 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        {/* ── OVERALL: flat always-expanded group (scope = "all") ──────────── */}
+        {/* ── OVERALL: collapsible all-projects group (scope = "all") ───────── */}
         {/* CTL-960: "Operate" renamed to "Overall" — single term for the all-projects
             scope consistent with the breadcrumb label from breadcrumbFor("*", "all"). */}
-        {/* CTL-977: SidebarGroupLabel renders with natural case; the shadcn label
-            component already uses muted/small styling — no custom overrides needed. */}
-        <SidebarGroup>
-          <SidebarGroupLabel>Overall</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {OPERATE_ITEMS.map((item) => renderOperateItem(item, "all"))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {/* CTL-1034 §1: Overall is now COLLAPSIBLE like every other section. Its header
+            uses SidebarGroupLabel (asChild → the CollapsibleTrigger) so the heading
+            chrome is identical to "Projects", the open-state persists (navOverallOpenAtom),
+            and the section force-opens when an "all"-scoped surface is active. */}
+        {(() => {
+          const overallForceOpen = groupContainsActive("all");
+          const overallIsOpen = overallForceOpen || overallOpen;
+          const overallSignal = sectionSignal("all");
+          return (
+            <Collapsible
+              open={overallIsOpen}
+              onOpenChange={(open) => {
+                if (!overallForceOpen) setOverallOpen(open);
+              }}
+              className="group/overall"
+            >
+              <SidebarGroup className="pb-0">
+                <SidebarGroupLabel asChild>
+                  <CollapsibleTrigger className="cursor-pointer">
+                    Overall
+                    {/* CTL-1034 §4: collapsed-section signal dot rolls child signal up. */}
+                    {!overallIsOpen && overallSignal && (
+                      <SectionSignalDot kind={overallSignal} />
+                    )}
+                    {/* CTL-1034: twistie right-aligned (CTL-977 convention). */}
+                    <ChevronRightIcon
+                      className={cn(
+                        "size-3 flex-shrink-0 transition-transform duration-200",
+                        overallIsOpen ? "rotate-90" : "",
+                        overallIsOpen || !overallSignal ? "ml-auto" : "ml-1",
+                      )}
+                    />
+                  </CollapsibleTrigger>
+                </SidebarGroupLabel>
+                <CollapsibleContent>
+                  <SidebarGroupContent>
+                    <SidebarMenu>
+                      {OPERATE_ITEMS.map((item) => renderOperateItem(item, "all"))}
+                    </SidebarMenu>
+                  </SidebarGroupContent>
+                </CollapsibleContent>
+              </SidebarGroup>
+            </Collapsible>
+          );
+        })()}
 
         {/* ── PER-PROJECT GROUPS: one collapsible per repo ────────────────── */}
         {/* CTL-980: "Projects" / "Your projects" section heading above the collapsible
@@ -333,9 +467,10 @@ export function AppSidebar() {
             <SidebarGroupLabel>Projects</SidebarGroupLabel>
           </SidebarGroup>
         )}
-        {/* CTL-977: natural-case repo name, favicon stays LEFT of the label.
-            CTL-980: twistie is now BESIDE the label (no ml-auto), placed right
-            after the label text with a small gap, so the row reads "adva ⌄". */}
+        {/* CTL-1034 §2: Title-Cased repo name (displayCaseName) at heading weight/size
+            (PROJECT_HEADER_TRIGGER), favicon stays LEFT of the label. §1: twistie is
+            RIGHT-aligned (ml-auto) per CTL-977. §3: children indented under a guide line.
+            §4: a collapsed project with live children shows a signal dot on its header. */}
         {repos.map((repo) => {
           // navGroups has the per-repo group; get its dotColor + iconDataUrl (CTL-961)
           const navGroup = navGroups.find((g) => g.scope === repo);
@@ -346,6 +481,10 @@ export function AppSidebar() {
           const forceOpen = groupContainsActive(repo);
           const isOpen = forceOpen || (groupsOpen[repo] ?? true); // default open
           const groupKey = repo.replace(/[^a-z0-9]/gi, "_");
+          // CTL-1034 §2: spell the repo short-name out as a heading ("adva" → "Adva").
+          const repoLabel = displayCaseName(repo) || repo;
+          // CTL-1034 §4: a collapsed project rolls its child signal up onto the header.
+          const repoSignal = sectionSignal(repo);
           return (
             <Collapsible
               key={repo}
@@ -358,7 +497,7 @@ export function AppSidebar() {
               className={`group/${groupKey}`}
             >
               <SidebarGroup className="pt-0">
-                <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
+                <CollapsibleTrigger className={PROJECT_HEADER_TRIGGER}>
                   {/* CTL-961: favicon takes priority over the color dot; only show dot
                       when no favicon is available. Never show a placeholder. */}
                   {iconDataUrl ? (
@@ -366,28 +505,33 @@ export function AppSidebar() {
                       src={iconDataUrl}
                       alt=""
                       aria-hidden
-                      className="mr-1.5 size-3.5 flex-shrink-0 rounded-sm object-contain"
+                      className="size-4 flex-shrink-0 rounded-sm object-contain"
                     />
                   ) : dotColor ? (
                     <span
                       aria-hidden
-                      className="mr-1.5 size-1.5 rounded-full flex-shrink-0 inline-block"
+                      className="size-2 rounded-full flex-shrink-0 inline-block"
                       style={{ background: dotColor }}
                     />
                   ) : null}
-                  {repo}
-                  {/* CTL-980: twistie immediately AFTER the label text (no ml-auto).
-                      A small ml-1 gap keeps it visually adjacent to the label. */}
+                  <span className="truncate">{repoLabel}</span>
+                  {/* CTL-1034 §4: collapsed-section signal dot. */}
+                  {!isOpen && repoSignal && <SectionSignalDot kind={repoSignal} />}
+                  {/* CTL-1034: twistie RIGHT-aligned (ml-auto) per CTL-977 convention;
+                      falls back to ml-1 when a signal dot already claimed ml-auto. */}
                   <ChevronRightIcon
                     className={cn(
-                      "ml-1 size-3 flex-shrink-0 transition-transform duration-200",
+                      "size-3 flex-shrink-0 transition-transform duration-200",
                       isOpen && "rotate-90",
+                      isOpen || !repoSignal ? "ml-auto" : "ml-1",
                     )}
                   />
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                   <SidebarGroupContent>
-                    <SidebarMenu>
+                    {/* CTL-1034 §3: indent + guide line so children read as subordinate
+                        to the project header (mirrors Linear's nested team children). */}
+                    <SidebarMenu className={PROJECT_CHILD_GUIDE}>
                       {OPERATE_ITEMS.map((item) => renderOperateItem(item, repo, true))}
                     </SidebarMenu>
                   </SidebarGroupContent>
@@ -412,8 +556,8 @@ export function AppSidebar() {
           <SidebarGroup className="pt-0">
             <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
               Observe
-              {/* CTL-980: twistie immediately after label (no ml-auto). */}
-              <ChevronRightIcon className="ml-1 size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
+              {/* CTL-1034: twistie RIGHT-aligned (ml-auto) per the CTL-977 convention. */}
+              <ChevronRightIcon className="ml-auto size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
             </CollapsibleTrigger>
             <CollapsibleContent>
               <SidebarGroupContent>
