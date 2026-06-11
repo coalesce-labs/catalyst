@@ -18,6 +18,7 @@ import {
   renameSync,
   unlinkSync,
   mkdirSync,
+  existsSync,
 } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +45,15 @@ export function listProjects() {
     if (!entry?.team || !entry?.repoRoot) {
       log.warn({ file }, "skipping registry entry missing team or repoRoot");
       continue;
+    }
+    if (!existsSync(entry.repoRoot)) {
+      // CTL-854: a copied/stale registry can carry a repoRoot absent on this host.
+      // Keep the entry (behavior unchanged) but flag the misconfiguration so it is
+      // visible instead of failing silently at dispatch time.
+      log.warn(
+        { file, team: entry.team, repoRoot: entry.repoRoot },
+        "registry entry repoRoot does not exist on this host",
+      );
     }
     projects.push({
       team: entry.team,

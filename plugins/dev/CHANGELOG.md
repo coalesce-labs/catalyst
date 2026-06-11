@@ -1,5 +1,100 @@
 # Changelog
 
+## [12.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.3.0...catalyst-dev-v12.4.0) (2026-06-09)
+
+
+### Features
+
+* **dev:** BFF1 cache-backed read-model core (CTL-883) ([#1559](https://github.com/coalesce-labs/catalyst/issues/1559)) ([417271b](https://github.com/coalesce-labs/catalyst/commit/417271b5529c614993e24b071a1aaf83400512f7))
+* **dev:** BFF11 broker fence projection into cache (CTL-923) ([#1563](https://github.com/coalesce-labs/catalyst/issues/1563)) ([de3d6b3](https://github.com/coalesce-labs/catalyst/commit/de3d6b3151659980ab76b7d539adc64aab47e758))
+* **dev:** BFF4 phase runs as run entities + verbatim signal (CTL-886) ([#1564](https://github.com/coalesce-labs/catalyst/issues/1564)) ([55e0bee](https://github.com/coalesce-labs/catalyst/commit/55e0bee3e77a61aeb2e69f0b3d69df14d184985e))
+* **dev:** BFF6 board payload model/startedAt/pid/sess_id (CTL-888) ([#1562](https://github.com/coalesce-labs/catalyst/issues/1562)) ([c234c74](https://github.com/coalesce-labs/catalyst/commit/c234c74017685d0ceb3680a61673623258b9bef8))
+* **dev:** BFF7 cache-backed ticket detail / artifacts / search endpoints (CTL-889) ([#1567](https://github.com/coalesce-labs/catalyst/issues/1567)) ([1179aa1](https://github.com/coalesce-labs/catalyst/commit/1179aa142af4251abb3ffd01619a0900ef538cb3))
+* **dev:** BFF9 retire legacy linearis poller onto durable cache (CTL-921) ([#1566](https://github.com/coalesce-labs/catalyst/issues/1566)) ([d9c050a](https://github.com/coalesce-labs/catalyst/commit/d9c050aeff039a797c41d11a3196abdf0c2585f4))
+* **dev:** FND1 deep-linkable routes (TanStack Router) (CTL-881) ([#1557](https://github.com/coalesce-labs/catalyst/issues/1557)) ([36348c2](https://github.com/coalesce-labs/catalyst/commit/36348c21f09fdefef0fa30dd56401d6d9a87626b))
+* **dev:** FND2 resolveList() + jotai nav store (CTL-882) ([#1565](https://github.com/coalesce-labs/catalyst/issues/1565)) ([633ad43](https://github.com/coalesce-labs/catalyst/commit/633ad43a36b47526115bf1dca38a9d01af2c5e65))
+* **dev:** HUD1 shared read-model client contract (CTL-919) ([#1568](https://github.com/coalesce-labs/catalyst/issues/1568)) ([2eda1de](https://github.com/coalesce-labs/catalyst/commit/2eda1de1d18a6587a9e1c3e60c566a2b44b20cc3))
+* **dev:** SHELL1 edge-to-edge app shell + left nav (CTL-891) ([#1569](https://github.com/coalesce-labs/catalyst/issues/1569)) ([41c1000](https://github.com/coalesce-labs/catalyst/commit/41c1000414fbe2b9d1d4a8712f5105bd79189869))
+
+
+### Bug Fixes
+
+* **dev:** CTL-838 stop inferring dependencies from prose — link them, triage analyzes for missed ones ([#1556](https://github.com/coalesce-labs/catalyst/issues/1556)) ([cf29cf0](https://github.com/coalesce-labs/catalyst/commit/cf29cf038905006c9377dcf5095551bc029ed81e))
+* **dev:** CTL-878 stop self-inflicted epic→child dependency deadlock ([#1510](https://github.com/coalesce-labs/catalyst/issues/1510)) ([5f2e388](https://github.com/coalesce-labs/catalyst/commit/5f2e3885a908a58649780a35fe59b0a66e8edc10))
+* **dev:** CTL-883 keep bun:sqlite out of the Node-loaded vite.config import graph ([#1561](https://github.com/coalesce-labs/catalyst/issues/1561)) ([03537d0](https://github.com/coalesce-labs/catalyst/commit/03537d0a120791c2584b905a4b41d443b01f1364))
+* **dev:** CTL-927 exempt doc-phase workers from the cold-snapshot zombie-floor mtime kill ([#1571](https://github.com/coalesce-labs/catalyst/issues/1571)) ([c3394f8](https://github.com/coalesce-labs/catalyst/commit/c3394f84d7c0285a912063dc27aaf7f28019bfb2))
+
+## [12.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.2.0...catalyst-dev-v12.3.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-880 wire gherkin-ticket standard into ticket-creation skills ([#1508](https://github.com/coalesce-labs/catalyst/issues/1508)) ([4b21363](https://github.com/coalesce-labs/catalyst/commit/4b21363b49ea74853f701d2329e07f61cd23334d))
+
+## [12.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.1.0...catalyst-dev-v12.2.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-877 gherkin-ticket skill — use-case-first ticket authoring ([#1504](https://github.com/coalesce-labs/catalyst/issues/1504)) ([e379efb](https://github.com/coalesce-labs/catalyst/commit/e379efbabbc77ebe2e97c50fbc292ed2b7347ef8))
+
+
+### Bug Fixes
+
+* **dev:** CTL-835 add scope to linear-comment-post OAuth mint (invalid_scope) ([#1491](https://github.com/coalesce-labs/catalyst/issues/1491)) ([42d20ac](https://github.com/coalesce-labs/catalyst/commit/42d20ac140cc53ec08c81a7f2d9602ce73870925))
+* **dev:** CTL-837 GC pre-spawn orphan phase claim → unwedge claim-lost loop ([#1492](https://github.com/coalesce-labs/catalyst/issues/1492)) ([f437290](https://github.com/coalesce-labs/catalyst/commit/f43729066b5e73fe7d2be4471a9923fd269a3bfc))
+* **dev:** CTL-841 self-heal missing wt/ dir in catalyst-monitor start ([#1497](https://github.com/coalesce-labs/catalyst/issues/1497)) ([a29c5f3](https://github.com/coalesce-labs/catalyst/commit/a29c5f3edd3bb88285286786c9bff91f4f97733c))
+* **dev:** CTL-867 escalate persistent per-team reconcile failure to a visible event ([#1494](https://github.com/coalesce-labs/catalyst/issues/1494)) ([8f57f41](https://github.com/coalesce-labs/catalyst/commit/8f57f4193bcc80cef92d20bc93db956022eb385a))
+* **dev:** CTL-868 — zombie-staleness hardening + orphan-detected sweep event ([#1487](https://github.com/coalesce-labs/catalyst/issues/1487)) ([b34e506](https://github.com/coalesce-labs/catalyst/commit/b34e5068f4570ddcf197b8f4dbdd7c0354c671db))
+* **dev:** CTL-869 detect proxy env leak into interactive shells (CTL-846 regression class) ([#1493](https://github.com/coalesce-labs/catalyst/issues/1493)) ([c604ebe](https://github.com/coalesce-labs/catalyst/commit/c604ebefefc961e76d4d4940a891efe19d98407f))
+* **dev:** CTL-874 preflight queries workspace-scoped labels (not --team) ([#1499](https://github.com/coalesce-labs/catalyst/issues/1499)) ([9d8fd84](https://github.com/coalesce-labs/catalyst/commit/9d8fd84fbb84018db59604b4e5c27e75413e214c))
+
+## [12.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.0.0...catalyst-dev-v12.1.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** auto-run compound learning per ticket + relocate stores to thoughts/shared/retros/ (CTL-831) ([#1428](https://github.com/coalesce-labs/catalyst/issues/1428)) ([c30ca97](https://github.com/coalesce-labs/catalyst/commit/c30ca97bc380f1e3fb65a8f58581f144db9dfa52))
+* **dev:** catalyst-agent — standalone host telemetry + multi-account Claude usage agent (CTL-812) ([#1413](https://github.com/coalesce-labs/catalyst/issues/1413)) ([a6d7921](https://github.com/coalesce-labs/catalyst/commit/a6d79210fdba69cabcb97ff0a7a3e3cd379dde34))
+* **dev:** CTL-639 clean cold-start recovery — CTL-646 label lifecycle + CTL-644 cheap/gate policy ([#1481](https://github.com/coalesce-labs/catalyst/issues/1481)) ([093f4c8](https://github.com/coalesce-labs/catalyst/commit/093f4c86f430e431d77d5982504fcce2502804f1))
+* **dev:** CTL-778 — halt-on-complete, daemon self-heal + reaper backstop ([#1486](https://github.com/coalesce-labs/catalyst/issues/1486)) ([d5f715d](https://github.com/coalesce-labs/catalyst/commit/d5f715d902e6b03a1d1a5d469af9609228bf1f18))
+* **dev:** CTL-783 draft-PR-early: implement opens draft on first commit; phase-pr flips ready ([#1419](https://github.com/coalesce-labs/catalyst/issues/1419)) ([f618445](https://github.com/coalesce-labs/catalyst/commit/f618445884727bc5a69272637b0f9aee036ae074))
+* **dev:** CTL-845 — vendor worktree-thoughts-init.sh, fix humanlayer crash on fresh install ([#1458](https://github.com/coalesce-labs/catalyst/issues/1458)) ([8ef8739](https://github.com/coalesce-labs/catalyst/commit/8ef873960cf6e579f3232d51642cecaf17e870fa))
+* **dev:** CTL-850 wire HRW ownership + Linear-CAS claim into new-work dispatch ([#1473](https://github.com/coalesce-labs/catalyst/issues/1473)) ([ceb7a79](https://github.com/coalesce-labs/catalyst/commit/ceb7a79c50ca8cad58b9140b3fc93a53c31f584a))
+* **dev:** CTL-854 — fresh-host registry bootstrap + silent-idle observability ([#1465](https://github.com/coalesce-labs/catalyst/issues/1465)) ([663f563](https://github.com/coalesce-labs/catalyst/commit/663f56337f37119b4755c9b9060c2c98ceb43c31))
+* **dev:** CTL-859 host identity + heartbeat foundation ([#1470](https://github.com/coalesce-labs/catalyst/issues/1470)) ([0174016](https://github.com/coalesce-labs/catalyst/commit/0174016ab6539dfc3d600756d224b5b03e6645b2))
+* **dev:** Gateway L1(a) — full-descriptor ticket_state schema + UUID→identifier index (CTL-821) ([#1414](https://github.com/coalesce-labs/catalyst/issues/1414)) ([3f17c67](https://github.com/coalesce-labs/catalyst/commit/3f17c67f77f2a167b89419bd795d48f522867952))
+* **dev:** Gateway L1(b) — webhook write-through with create/update/remove descriptor fold (CTL-822) ([#1415](https://github.com/coalesce-labs/catalyst/issues/1415)) ([1079c06](https://github.com/coalesce-labs/catalyst/commit/1079c06865649ce74ef815d73eb7d41895d30d26))
+* **dev:** Gateway L1(c) — daemon read client over the durable descriptor store (CTL-823) ([#1416](https://github.com/coalesce-labs/catalyst/issues/1416)) ([3dfe01a](https://github.com/coalesce-labs/catalyst/commit/3dfe01a01fdc212b6d7d6369cff81c06a8bfada3))
+* **dev:** make setup-catalyst.sh safe for headless environments (CTL-842) ([#1456](https://github.com/coalesce-labs/catalyst/issues/1456)) ([4dd39d5](https://github.com/coalesce-labs/catalyst/commit/4dd39d530367fe37292e892b318093c3f6310b2b))
+* **dev:** monitor board — add Todo + Triage columns + surface queued tickets (CTL-767) ([#1411](https://github.com/coalesce-labs/catalyst/issues/1411)) ([83526a3](https://github.com/coalesce-labs/catalyst/commit/83526a30f99ed10e60a704b4ba10e4544e8a7a8d))
+* **dev:** ticket-retro — cross-ticket retrospective view + briefing Plan-today callout (CTL-814) ([#1410](https://github.com/coalesce-labs/catalyst/issues/1410)) ([2e65659](https://github.com/coalesce-labs/catalyst/commit/2e6565902a0d2fd7468c12f40a54cc0093e3b512))
+* **pm:** close the estimation feedback loop — recurring corpus refresh from real actuals (CTL-813) ([#1400](https://github.com/coalesce-labs/catalyst/issues/1400)) ([f066c82](https://github.com/coalesce-labs/catalyst/commit/f066c82b6535574a4a74e279a62ddac7ab429f1f))
+
+
+### Bug Fixes
+
+* **catalyst-agent:** add PATH to launchd plist so usage domain works ([#1480](https://github.com/coalesce-labs/catalyst/issues/1480)) ([8e4aec8](https://github.com/coalesce-labs/catalyst/commit/8e4aec809cd8160d9077e314e72d70054abfda53))
+* **dev:** add turn-cap-exhausted to TERMINAL set in signal-reader (CTL-830) ([#1431](https://github.com/coalesce-labs/catalyst/issues/1431)) ([381cc27](https://github.com/coalesce-labs/catalyst/commit/381cc277aeaa5793da93c7da0d92162b4c28caf3))
+* **dev:** catalyst-agent disk probe reads the APFS Data volume on macOS (CTL-812) ([#1427](https://github.com/coalesce-labs/catalyst/issues/1427)) ([911fd89](https://github.com/coalesce-labs/catalyst/commit/911fd890b6c4dbaffa5764209a0bd3aa92d3ef52))
+* **dev:** catalyst-agent skips unlabeled usage samples + normalizes hostname (CTL-812) ([#1454](https://github.com/coalesce-labs/catalyst/issues/1454)) ([4002858](https://github.com/coalesce-labs/catalyst/commit/40028585eca162e6e8e78538dae58873f6424cf3))
+* **dev:** CTL-703 — invert no-linear-prose guard: teardown is the Done writer now ([#1399](https://github.com/coalesce-labs/catalyst/issues/1399)) ([dc77a0a](https://github.com/coalesce-labs/catalyst/commit/dc77a0a1569018fc4a70448ba95fde9b48c3daff))
+* **dev:** CTL-834 cool-down held-label converger + classify exclusive-group label conflicts ([#1483](https://github.com/coalesce-labs/catalyst/issues/1483)) ([4e117ef](https://github.com/coalesce-labs/catalyst/commit/4e117ef7bc757e89920cac8bdc567354f4d1b49e))
+* **dev:** CTL-844 fresh-machine installer gaps — no-sudo, npm humanlayer, real gh CLI, bun required ([#1457](https://github.com/coalesce-labs/catalyst/issues/1457)) ([0c5e94d](https://github.com/coalesce-labs/catalyst/commit/0c5e94d851e4dd34066baecb9401035883852989))
+* **dev:** CTL-846 liveness-gate proxy env at daemon launch + harden docs ([#1459](https://github.com/coalesce-labs/catalyst/issues/1459)) ([7bbb585](https://github.com/coalesce-labs/catalyst/commit/7bbb585a03ec46c07f70ecdee39bb092b2b1bbbf))
+* **dev:** fold reaper-metrics into O(1) counters, drop the unbounded events[] (CTL-793) ([#1383](https://github.com/coalesce-labs/catalyst/issues/1383)) ([4ac303c](https://github.com/coalesce-labs/catalyst/commit/4ac303c7168bbee0705b63f4db9918217d37c841))
+* **dev:** ghost-breaker — reclaim jobLifecycle-alive-but-FRESH-agents-absent workers (CTL-809) ([#1385](https://github.com/coalesce-labs/catalyst/issues/1385)) ([fca33be](https://github.com/coalesce-labs/catalyst/commit/fca33be0b73b39829c2c4eafcd3078814c55f011))
+* **dev:** hermetic CATALYST_DIR preload — tests can't pollute the real event log (CTL-810) ([#1412](https://github.com/coalesce-labs/catalyst/issues/1412)) ([eed3ae2](https://github.com/coalesce-labs/catalyst/commit/eed3ae253d08ca884493594c2afacbed74a21190))
+* **dev:** merge per-project secrets config to preserve unprompted keys (CTL-843) ([#1455](https://github.com/coalesce-labs/catalyst/issues/1455)) ([3956c9f](https://github.com/coalesce-labs/catalyst/commit/3956c9f5ad150f04262f9c0d15e98622e86218ce))
+* **dev:** otel-forward floats as doubleValue + agent OTLP body = event name (CTL-812) ([#1421](https://github.com/coalesce-labs/catalyst/issues/1421)) ([2032436](https://github.com/coalesce-labs/catalyst/commit/2032436dc14c2e8f33588c38245a441f1f5c421d))
+* **dev:** relocate CONCEPTS.md to thoughts/shared/ so it syncs (CTL-789) ([#1390](https://github.com/coalesce-labs/catalyst/issues/1390)) ([2deb8e0](https://github.com/coalesce-labs/catalyst/commit/2deb8e0f72a4c754154bc82b1a08eb9beb8bfd64))
+* **dev:** strengthen implementProbe with plan-phase completeness gate (CTL-663) ([#1434](https://github.com/coalesce-labs/catalyst/issues/1434)) ([0098e48](https://github.com/coalesce-labs/catalyst/commit/0098e484eb27fe7e78459b528ad56e32bf4618b2))
+
+
+### Performance Improvements
+
+* **dev:** incremental countTicketEventsInWindow — kill the per-tick full-log rescan (CTL-802) ([#1387](https://github.com/coalesce-labs/catalyst/issues/1387)) ([d2685ab](https://github.com/coalesce-labs/catalyst/commit/d2685ab8bfad0405d7adf515ccc40d7fbdab5af6))
+
 ## [12.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.1...catalyst-dev-v12.0.0) (2026-06-06)
 
 

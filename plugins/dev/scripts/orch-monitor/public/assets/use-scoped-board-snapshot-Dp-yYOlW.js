@@ -1,0 +1,1 @@
+import{ab as t,ac as p,r as c,ad as r}from"./main-Cl5Lx6d3.js";function d(){const{payload:o,status:e}=t(),a=(o==null?void 0:o.repos)??[],{scope:s}=p(a);return{payload:c.useMemo(()=>o?r(o,s):null,[o,s]),status:e}}export{d as u};

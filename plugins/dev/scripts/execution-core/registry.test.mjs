@@ -6,12 +6,12 @@
 // follow enrollment.test.mjs's fixture pattern — CATALYST_DIR redirection and
 // mkdtempSync temp dirs — so they never touch a real ~/catalyst.
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { getRegistryPath } from "./config.mjs";
+import { getRegistryPath, log } from "./config.mjs";
 import {
   listProjects,
   getProjectConfig,
@@ -96,6 +96,28 @@ describe("listProjects", () => {
   test("returns [] when projects key is absent", () => {
     writeRegistry({});
     expect(listProjects()).toEqual([]);
+  });
+
+  // CTL-854: stale-repoRoot observability — warn but keep
+  test("warns but KEEPS an entry whose repoRoot does not exist on disk", () => {
+    writeRegistry({
+      projects: [{ team: "CTL", repoRoot: "/nope/does/not/exist", eligibleQuery: null }],
+    });
+    const warn = spyOn(log, "warn");
+    const got = listProjects();
+    expect(got).toHaveLength(1);
+    expect(got[0].team).toBe("CTL");
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  test("does NOT warn when repoRoot exists", () => {
+    writeRegistry({ projects: [{ team: "CTL", repoRoot: catalystDir }] });
+    const warn = spyOn(log, "warn");
+    const got = listProjects();
+    expect(got).toHaveLength(1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });
 

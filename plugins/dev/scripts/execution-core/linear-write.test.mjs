@@ -11,6 +11,7 @@ import {
   applyEstimate,
   applyAssignee,
   teamOf,
+  classifyLabelFailure,
 } from "./linear-write.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -471,6 +472,35 @@ describe("applyLabel", () => {
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "transient" });
   });
+  test("CTL-834: an exclusive-group conflict stderr → reason:'exclusive-conflict'", () => {
+    // The held-label converger adds `blocked` while `needs-human`/`waiting`
+    // (same exclusive group) is present — Linear rejects with this exact form.
+    const exec = () => ({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GraphQL request failed: LabelIds not exclusive child labels - blocked is in an exclusive group already represented.",
+    });
+    const r = applyLabel({ ticket: "CTL-838", label: "blocked", exec });
+    expect(r).toEqual({ applied: false, reason: "exclusive-conflict" });
+  });
+});
+
+// CTL-834: classifyLabelFailure — stderr → tagged reason. Exported so the new
+// exclusive-conflict mapping (and the existing unrecoverable cases) are pinned
+// directly, independent of applyLabel's read-back wrapper.
+describe("classifyLabelFailure (CTL-834)", () => {
+  test("'not exclusive child' → 'exclusive-conflict'", () => {
+    expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+    expect(classifyLabelFailure("... not exclusive ...")).toBe("exclusive-conflict");
+  });
+  test("existing mappings are unchanged", () => {
+    expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("missing-label");
+    expect(classifyLabelFailure("Rate limit exceeded")).toBe("rate-limited");
+    expect(classifyLabelFailure("anything else")).toBe("transient");
+    expect(classifyLabelFailure(undefined)).toBe("transient");
+  });
 });
 
 // CTL-704: applyTriageStatus — verified Todo→Triage write-back with pre/post state reads.
@@ -701,12 +731,22 @@ describe("applyEstimate", () => {
     expect(r.reason).toBeTruthy();
   });
 
-  test("invalid estimate 4 → applied:false, reason:invalid-estimate, exec not called", () => {
+  // CTL-954: 4 is now valid (exponential scale). Use 11 (between 10 and 13)
+  // as the canonical "not in any scale" test value.
+  test("invalid estimate 11 → applied:false, reason:invalid-estimate, exec not called", () => {
     const calls = [];
     const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec });
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 11, exec });
     expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
     expect(calls).toHaveLength(0);
+  });
+
+  test("estimate 4 (exponential scale, CTL-954) → accepted, applied:true", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec, fetchLabels: () => [] });
+    expect(r.applied).toBe(true);
+    expect(calls[0].args).toContain("4");
   });
 
   test("null estimate → applied:false, reason:invalid-estimate, exec not called", () => {
@@ -725,8 +765,10 @@ describe("applyEstimate", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("all valid estimate values (1,3,5,8,13) are accepted", () => {
-    for (const est of [1, 3, 5, 8, 13]) {
+  // CTL-954: all scale values across fibonacci, tShirt, exponential, linear.
+  test("all valid estimate values across all scales are accepted (CTL-954)", () => {
+    // Union: fibonacci={1,2,3,5,8,13} tShirt={1,2,3,5} exp={1,2,4,8,16,32} lin={1..10}
+    for (const est of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 16, 32]) {
       const calls = [];
       const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
       const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec, fetchLabels: () => [] });

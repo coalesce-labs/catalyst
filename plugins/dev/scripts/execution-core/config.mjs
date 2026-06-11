@@ -20,15 +20,22 @@ import { readFileSync } from "node:fs";
 let log;
 try {
   const { default: pino } = await import("pino");
-  log = pino({
-    name: "execution-core",
-    level: process.env.LOG_LEVEL ?? "info",
-  });
+  // CTL-854: write to stderr so CLI commands that emit JSON to stdout are not
+  // polluted by log messages (previously pino defaulted to stdout). The daemon
+  // (nohup … >> daemon.log 2>&1) captures both streams; the CLI consumer only
+  // sees stdout, which stays pure JSON.
+  log = pino({ name: "execution-core", level: process.env.LOG_LEVEL ?? "info" }, process.stderr);
 } catch (err) {
   const emit = (level) => (...args) => {
     // pino-style: log.info(obj, msg) OR log.info(msg). Console-shim flattens.
+    // warn/error/fatal → stderr so CLI commands that write JSON to stdout are
+    // not polluted by log messages (CTL-854). info/debug/trace → stdout to
+    // preserve the existing observable behavior for test suites that capture
+    // stdout for informational output.
     const stream =
-      level === "error" || level === "fatal" ? process.stderr : process.stdout;
+      level === "warn" || level === "error" || level === "fatal"
+        ? process.stderr
+        : process.stdout;
     stream.write(
       `[execution-core:${level}] ${args
         .map((a) => (typeof a === "string" ? a : JSON.stringify(a)))
@@ -63,6 +70,20 @@ export function getExecutionCoreDir() {
 
 export function getEligibleDir() {
   return resolve(getExecutionCoreDir(), "eligible");
+}
+
+// CTL-867 — per-team reconcile-health dir. Holds <team>.json health markers
+// ({ team, lastSuccessTs, consecutiveFailures, alerting, updatedAt }) the
+// monitor writes on every reconcile and the orch-monitor /api/snapshot reads to
+// surface each team's "last successful eligible refresh age". This is a SEPARATE
+// marker from the eligible projection's content-keyed `updatedAt`: a healthy
+// reconcile of an unchanged eligible set skips the projection write entirely
+// (eligible-set.mjs skip-when-unchanged), so the projection timestamp can look
+// fresh while no poll has actually succeeded in hours. The health marker is
+// rewritten every reconcile regardless, so its lastSuccessTs is the truthful
+// staleness signal.
+export function getReconcileHealthDir() {
+  return resolve(getExecutionCoreDir(), "reconcile-health");
 }
 
 // The durable event-log tailer cursor — monitor.mjs persists its byte offset
@@ -185,6 +206,21 @@ export const HEARTBEAT_INTERVAL_MS =
 export const RECONCILE_INTERVAL_MS =
   Number(process.env.EXECUTION_CORE_RECONCILE_INTERVAL_MS) || 10 * 60_000;
 
+// CTL-867 — per-team reconcile-health escalation threshold. A team's
+// eligibleQuery can error every poll (e.g. its status references a removed
+// Linear state → `linearis issues list --team X --status Ready` exits 1). The
+// catch in reconcileProject preserves the prior eligible set and logs, which
+// is correct, but a *persistent* failure freezes that team's eligible
+// projection stale for hours while the daemon looks healthy — invisible
+// starvation. After this many CONSECUTIVE failures the monitor escalates beyond
+// the buried log.error to a canonical `monitor.reconcile.failing.<TEAM>` event
+// the orch-monitor dashboard surfaces. A recovering query clears the alert and
+// resets the counter. Default 3 (≈30 min of a 10-min reconcile) so a single
+// transient linearis hiccup never alerts, but a removed-state misconfig does.
+// Env-overridable for tuning/tests.
+export const RECONCILE_FAILURE_ALERT_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_RECONCILE_FAILURE_ALERT_THRESHOLD) || 3;
+
 // Debounce window: state_changed events that enter the eligible state coalesce
 // into one reconcile poll per affected project per burst.
 export const EVENT_DEBOUNCE_MS =
@@ -216,6 +252,18 @@ export const STALE_WORKER_CUTOFF_MS =
 export const BUSY_CEILING_MS =
   Number(process.env.EXECUTION_CORE_BUSY_CEILING_MS) || 6 * 60 * 60_000;
 
+// CTL-932 — turn-zero gate threshold. A healthy `claude --bg` worker creates
+// its session transcript ~0.3s after its first turn; a wedged one (slash
+// command failed to resolve at session start — "Unknown command:
+// /catalyst-dev:phase-*") never does and idles forever holding a concurrency
+// slot. A running-signal worker older than this with NO transcript AND a
+// FRESH `claude agents` snapshot state of "blocked" is classified
+// wedged-never-started (stop + replace via the normal revive path; escalate
+// needs-human after repeated ineffective replacements). 120s comfortably
+// exceeds registration + first-turn latency. Env-overridable.
+export const NEVER_STARTED_MS =
+  Number(process.env.CATALYST_NEVER_STARTED_MS) || 120_000;
+
 // CTL-809 — ghost-breaker just-dispatched grace. The reclaim alive-branch
 // cross-checks the FRESH `claude agents` snapshot to catch a jobLifecycle-alive
 // worker whose process is actually gone (CC 2.x never flips a crashed/wedged
@@ -226,6 +274,21 @@ export const BUSY_CEILING_MS =
 // registration latency + one warmer interval. Env-overridable.
 export const GHOST_GRACE_MS =
   Number(process.env.EXECUTION_CORE_GHOST_GRACE_MS) || 90_000;
+
+// CTL-868 — zombie state.json staleness floor. The CTL-809 ghost-breaker only
+// fires when the `claude agents` snapshot is FRESH (absent-from-fresh = ghost).
+// On a headless host that snapshot is unreliable (CTL-829: `claude agents --json`
+// under-reports the background flag), so a corpse stuck at state:"working" — the
+// dead-worker-classified-alive zombie that starves all slots — is never broken
+// out of `alive-suppressed`. When NO fresh snapshot is available, fall back to
+// this state.json mtime floor: a `working` job whose state.json has not been
+// rewritten in this long is a corpse (Claude rewrites state.json far more often
+// than this during real work — turn/heartbeat updates). Deliberately high (2h) so
+// a legitimate in-process sub-agent fan-out never trips it (CTL-662-safe); it is
+// ALSO subordinate to a fresh snapshot — a worker LISTED in a fresh snapshot is
+// busy and is never reclaimed by this floor, regardless of mtime. Env-overridable.
+export const ZOMBIE_STALE_FLOOR_MS =
+  Number(process.env.EXECUTION_CORE_ZOMBIE_STALE_FLOOR_MS) || 2 * 60 * 60_000;
 
 // CTL-735 — revival age ceiling (KEPT in CTL-736). `isTicketInFlight` treats any
 // ticket with a non-terminal signal as in-flight, so a worker that crashed at

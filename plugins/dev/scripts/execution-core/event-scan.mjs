@@ -69,15 +69,19 @@ function ticketOfPhaseEvent(name) {
   return name.slice(name.lastIndexOf(".") + 1);
 }
 
+// CTL-778: complete event name prefix — `phase.<phase>.complete.` (any phase).
+const COMPLETE_NAME_RE = /^phase\.[^.]+\.complete\./;
+
 // Per-path incremental index. We retain ONLY the two event families the counters
-// query plus the compact per-ticket {t,k} phase-event records (CTL-802) — a small
-// fraction of the log — so memory stays bounded as the file grows.
-const _index = new Map(); // path -> { cursor, leftover, events: [...], phaseEvents: [{ t, k }] }
+// query plus the compact per-ticket {t,k} phase-event records (CTL-802) and the
+// CTL-778 complete-event set — a small fraction of the log — so memory stays
+// bounded as the file grows.
+const _index = new Map(); // path -> { cursor, leftover, events: [...], phaseEvents: [{ t, k }], completes: Set }
 
 function isRelevant(name) {
   return (
     typeof name === "string" &&
-    (REVIVE_NAME_RE.test(name) || name.startsWith(REMEDIATE_NAME_PREFIX))
+    (REVIVE_NAME_RE.test(name) || name.startsWith(REMEDIATE_NAME_PREFIX) || COMPLETE_NAME_RE.test(name))
   );
 }
 
@@ -88,7 +92,7 @@ function isRelevant(name) {
 function refreshIndex(path) {
   let entry = _index.get(path);
   if (!entry) {
-    entry = { cursor: 0, leftover: "", events: [], phaseEvents: [] };
+    entry = { cursor: 0, leftover: "", events: [], phaseEvents: [], completes: new Set() };
     _index.set(path, entry);
   }
   let size;
@@ -103,6 +107,7 @@ function refreshIndex(path) {
     entry.leftover = "";
     entry.events = [];
     entry.phaseEvents = [];
+    entry.completes = new Set();
   }
   if (size === entry.cursor) return entry; // no new bytes — never re-reads
   const { endOffset, leftover } = scanEventsChunked({
@@ -118,6 +123,10 @@ function refreshIndex(path) {
           ts: ev?.ts,
           label: ev?.attributes?.["event.label"],
         });
+        // CTL-778: index complete events by their full name for hasCompleteEvent.
+        if (COMPLETE_NAME_RE.test(name)) {
+          entry.completes.add(name);
+        }
       }
       // CTL-802 — bucket every phase.*.<ticket> event for countTicketEventsInWindow,
       // so it no longer re-scans the whole file. Skip unparseable ts (matches the
@@ -208,6 +217,16 @@ export function countDistinctRevivingTickets({
     if (ev.label) seen.add(ev.label);
   }
   return seen.size;
+}
+
+// CTL-778: has a phase.<phase>.complete.<ticket> envelope been observed?
+// Rides the same incremental cursor as the revive/remediate counters. Exact
+// suffix match on the ticket (so CTL-9 never matches CTL-90).
+export function hasCompleteEvent({ ticket, phase, path = getEventLogPath() } = {}) {
+  if (!ticket || !phase) return false;
+  const entry = refreshIndex(path);
+  const name = `phase.${phase}.complete.${ticket}`;
+  return entry.completes?.has(name) ?? false;
 }
 
 // __resetEventScanIndexForTest — clear the per-path index so a suite starts from

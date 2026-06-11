@@ -1,12 +1,17 @@
 <!doctype html>
-<html lang="en">
+<!-- CTL-893 / SHELL3: boot calm-dark (matches board.html) so the app's default
+     theme is dark before lib/theme.ts mounts — avoids a warm-light flash now
+     that `:root` is the light theme and `.dark` is calm-dark. -->
+<html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Catalyst Monitor</title>
     <link rel="icon" type="image/svg+xml" href="/public/favicon.svg" />
   </head>
-  <body class="bg-[#0b0d10] text-[#e6e9ef] antialiased">
+  <!-- Use the semantic theme tokens (not hard-coded dark hex) so the body tracks
+       the active theme when the footer toggle flips calm-dark ⇄ warm-light. -->
+  <body class="bg-background text-foreground antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

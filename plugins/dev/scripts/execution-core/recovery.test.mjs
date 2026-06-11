@@ -30,6 +30,8 @@ import {
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendRunawayEvent,
+  defaultAppendOrphanDetectedEvent,
+  defaultAppendHeldStoppedEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -37,6 +39,8 @@ import {
   readBootSince,
   readExecCoreBootEpoch,
   clearProgressMarks,
+  // CTL-1006
+  defaultAppendBootResumePhaseRegressionEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -84,28 +88,24 @@ const bgSignal = (status, bgJobId) => ({
 // --- classifyWorker — pure given statJob ----------------------------------
 
 describe("classifyWorker", () => {
-  test("terminal status (done/failed/stalled/skipped) → 'terminal' (CTL-701)", () => {
-    for (const status of ["done", "failed", "stalled", "skipped"]) {
+  test("terminal status (done/failed/stalled/skipped/turn-cap-exhausted) → 'terminal' (CTL-830)", () => {
+    for (const status of ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]) {
       expect(
         classifyWorker(bgSignal(status, "job-x"), { statJob: () => null }),
       ).toBe("terminal");
     }
   });
 
-  test("turn-cap-exhausted is NOT terminal — classified by liveness (CTL-701)", () => {
-    // Live bg job → "running"
-    const live = classifyWorker(
-      bgSignal("turn-cap-exhausted", "alive"),
-      { statJob: () => ({ mtimeMs: Date.now() }) },
-    );
-    expect(live).toBe("running");
-
-    // Dead bg job → "dead" (reclaim-eligible)
-    const dead = classifyWorker(
-      bgSignal("turn-cap-exhausted", "gone"),
-      { statJob: () => null },
-    );
-    expect(dead).toBe("dead");
+  test("turn-cap-exhausted IS terminal — CTL-748 removed turn caps (CTL-830)", () => {
+    // Liveness is irrelevant: terminal short-circuits before the liveness probe.
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "alive"), {
+        statJob: () => ({ mtimeMs: Date.now() }),
+      }),
+    ).toBe("terminal");
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "gone"), { statJob: () => null }),
+    ).toBe("terminal");
   });
 
   test("non-terminal status + bg job dir present → 'running' (re-attached)", () => {
@@ -620,11 +620,12 @@ describe("reclaimDeadWorkIfPossible — monitor-deploy (CTL-701)", () => {
   });
 });
 
-// CTL-701 Phase 2: reclaim/revive for turn-cap-exhausted
-describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
+// CTL-830: turn-cap-exhausted is terminal since CTL-748 removed turn caps —
+// reclaim/revive no longer apply (terminal short-circuits to noop).
+describe("reclaimDeadWorkIfPossible — turn-cap-exhausted is terminal (CTL-830)", () => {
   const orch = "/orch";
 
-  test("reclaims turn-cap-exhausted/dead with commits ahead (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no reclaim probe, no emit", () => {
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
@@ -635,12 +636,12 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       postReclaimMirror: () => {},
       liveness: () => "absent",
     });
-    expect(r).toBe("reclaimed");
-    expect(probe.calls.length).toBe(1);
-    expect(emit.calls.length).toBe(1);
+    expect(r).toBe("noop");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
   });
 
-  test("revives turn-cap-exhausted/dead with --resume when no work done (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no revive dispatch", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
       statJob: () => null,
@@ -657,9 +658,8 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       resolveSession: () => "uuid-resume",
       liveness: () => "absent",
     });
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-    expect(reviveDispatch.calls[0][0].resumeSession).toBe("uuid-resume");
+    expect(r).toBe("noop");
+    expect(reviveDispatch.calls.length).toBe(0);
   });
 });
 
@@ -978,6 +978,180 @@ describe("reclaimDeadWorkIfPossible", () => {
     });
     expect(r).toBe("alive-suppressed"); // shortIdFromSessionId throws → caught → suppress
     expect(snapCalls).toBe(0);
+  });
+
+  // CTL-868 — ZOMBIE BREAKER. The CTL-809 ghost-breaker only fires on a FRESH
+  // `claude agents` snapshot; on a headless host that snapshot is unreliable
+  // (CTL-829), so a corpse stuck at state:"working" stays alive-suppressed and
+  // starves a slot forever. When no fresh snapshot is available, the alive branch
+  // falls back to a state.json mtime staleness floor. These prove the breaker fires
+  // for a genuine zombie yet never overrides a fresh "present" verdict (CTL-662).
+  const ZOMBIE_FLOOR = 2 * 60 * 60_000;
+
+  test("CTL-868: alive worker, state.json mtime past the zombie floor, NO fresh snapshot, work done → reclaimed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      // state=working (jobLifecycle → alive) but state.json untouched for 3h → corpse
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h past mtime > 2h floor, < 6h busy ceiling
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-868: alive worker mtime past the floor but PRESENT in a FRESH snapshot → still suppressed (CTL-662, fresh-present wins over mtime)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }), // 3h stale
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      // a FRESH snapshot lists the worker → busy fan-out, NOT a zombie (mtime ignored)
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-868: alive worker, mtime WITHIN the zombie floor, no fresh snapshot → still suppressed", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 30 * 60_000, // 30min stale < 2h floor
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  // CTL-927 — DOC-PHASE ZOMBIE-FLOOR EXEMPTION. The CTL-868 cold-snapshot mtime
+  // floor fires only when no FRESH `claude agents` snapshot exists (CTL-829, the
+  // headless mini). For long-fan-out doc phases (research/plan/triage/verify/review)
+  // the worker's state.json legitimately ages during a multi-minute in-process
+  // sub-agent fan-out, so the 2h mtime guess false-kills a LIVE worker → the observed
+  // fleet-wide no-progress storm. Doc phases use BUSY_CEILING_MS (6h) instead, where
+  // the busy-ceiling escalation routes to needs-human (escalate, never silent kill).
+  // implement/remediate keep the 2h floor.
+  const BUSY_CEILING = 6 * 60 * 60_000;
+  const docSignal = (phase, { bgJobId = "807b77bd", startedAt = STARTED } = {}) => ({
+    ticket: "CTL-9",
+    phase,
+    status: "running",
+    liveness: { kind: "bg", value: bgJobId },
+    signalPath: `/x/CTL-9/phase-${phase}.json`,
+    raw: {
+      ticket: "CTL-9",
+      phase,
+      orchestrator: "CTL-9",
+      status: "running",
+      bg_job_id: bgJobId,
+      catalystSessionId: "sess_CTL-9_abc",
+      startedAt,
+    },
+  });
+
+  test("CTL-927: research worker, state.json mtime 3h stale, NO fresh snapshot → alive-suppressed (doc phase exempt from the 2h zombie floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      // state=working (jobLifecycle → alive); state.json untouched 3h (sub-agent fan-out)
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) }, // research doc not written yet (artifact-bytes = 0)
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold (CTL-829)
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR, // 2h
+      busyCeilingMs: BUSY_CEILING, // 6h
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h: past the 2h floor, under the 6h ceiling
+    });
+    expect(r).toBe("alive-suppressed"); // pre-fix: the 2h zombie-floor wrongly reclaims it
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: implement worker, mtime 3h stale, NO fresh snapshot, work done → still reclaimed (implement keeps the 2h floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("implement"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-927 regression: research worker mtime 3h stale but PRESENT in a FRESH snapshot → alive-suppressed (fresh-present still wins; ghost-breaker unchanged)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: research worker ABSENT from a FRESH snapshot, past grace, work done → ghost-breaker still reclaims (doc exemption only relaxes the COLD path)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "deadbeef-1111-2222-3333-444444444444" }], // our worker absent
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
   });
 
   test("'noop' for an unknown signal (no bg_job_id)", () => {
@@ -2666,6 +2840,61 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
   });
 
+  test("CTL-868: defaultAppendOrphanDetectedEvent writes a phase.<phase>.orphan-detected.<ticket> envelope", () => {
+    const ok = defaultAppendOrphanDetectedEvent({
+      phase: "implement",
+      ticket: "CTL-OD-1",
+      orchId: "orch-od",
+      reason: "stalled-no-recovery",
+      stalled_phases: ["implement", "verify"],
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // The real builder output (not a spy) — guards the event.name convention and
+    // the stalled_phases payload the orch-monitor dashboard consumes.
+    expect(env.attributes["event.name"]).toBe("phase.implement.orphan-detected.CTL-OD-1");
+    expect(env.attributes["event.action"]).toBe("orphan-detected");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("orphan-detected");
+    expect(env.body.payload.reason).toBe("stalled-no-recovery");
+    expect(env.body.payload.stalled_phases).toEqual(["implement", "verify"]);
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-od");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent writes a phase.<phase>.held-stopped.<ticket> envelope", () => {
+    // Exercises the REAL emitter (not the scheduler's stub seam): guards the
+    // buildEventEnvelope output — event.name convention, action, and the
+    // bg_job_id payload the revive --resume path + HUD/audit consumers read.
+    const ok = defaultAppendHeldStoppedEvent({
+      orchId: "orch-hs",
+      ticket: "CTL-HS-1",
+      phase: "implement",
+      bgJobId: "deadbeef",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.implement.held-stopped.CTL-HS-1");
+    expect(env.attributes["event.action"]).toBe("held-stopped");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("held-stopped");
+    expect(env.body.payload.bg_job_id).toBe("deadbeef");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-hs");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent is fail-open — returns falsy, never throws, on an unwriteable log dir", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-hs");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendHeldStoppedEvent({
+        orchId: "orch-hs",
+        ticket: "CTL-HS-FAIL",
+        phase: "implement",
+        bgJobId: "deadbeef",
+      }),
+    ).toBe(false);
+  });
+
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {
     // Point CATALYST_DIR at a path whose parent is a regular file, so the
     // events/ mkdir + append cannot succeed. Mirrors appendEnvelopeBestEffort's
@@ -2718,6 +2947,69 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.load_per_core).toBe(0.3);
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+});
+
+// CTL-1006 Scenario 2: boot-resume phase-regression audit envelope. Emitted when
+// boot-resume would have re-dispatched an EARLIER phase whose ticket already has
+// a LATER terminal phase signal — surfaces the regression for forensics INSTEAD
+// of spawning a fresh earlier-phase worker. Audit-only: distinct action
+// (broker-ignored) + NOT counted by countReviveEvents (the Scenario-4 invariant —
+// a regression must never consume the chronic-failure revive budget).
+describe("boot-resume phase-regression event envelope (CTL-1006)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1006-pr-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes phase.<phase>.boot-resume-phase-regression.<ticket> with dominantPhase payload", () => {
+    const ok = defaultAppendBootResumePhaseRegressionEvent({
+      phase: "triage",
+      ticket: "CTL-997",
+      dominantPhase: "research",
+      orchId: "orch-1006",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe(
+      "phase.triage.boot-resume-phase-regression.CTL-997"
+    );
+    expect(env.attributes["event.action"]).toBe("boot-resume-phase-regression");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("boot-resume-phase-regression");
+    expect(env.body.payload.dominantPhase).toBe("research");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-1006");
+  });
+
+  test("Scenario-4 invariant: NOT counted by countReviveEvents (revive budget preserved)", async () => {
+    const { countReviveEvents } = await import("./event-scan.mjs");
+    // Use the implement phase so the event.name collides with the implement-only
+    // revive shape if the action were mis-named — countReviveEvents must still 0.
+    defaultAppendBootResumePhaseRegressionEvent({
+      phase: "implement",
+      ticket: "CTL-RG-1006",
+      dominantPhase: "verify",
+      orchId: "orch-1006",
+    });
+    expect(countReviveEvents({ ticket: "CTL-RG-1006" })).toBe(0);
   });
 });
 
@@ -3753,5 +4045,105 @@ Final polish, documentation, and code cleanup.
     }));
     expect(r).toBe("reclaimed");
     expect(emit.calls.length).toBe(1);
+  });
+});
+
+// CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
+// phase.<phase>.complete AND whose probe passes is reconciled without waiting
+// for it to die. The completeEventSeen seam is the precise disambiguator
+// between "done-but-idle" (reclaim) and "busy fan-out" (suppress).
+describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
+  const orch = "/orch";
+  const STARTED = "2026-06-08T00:00:00Z";
+
+  test("CTL-778: alive + complete event seen + probe done → reclaimed", () => {
+    const emit = recorder({ code: 0 });
+    const reap = recorder(Promise.resolve());
+    const appendEvent = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }), // jobLifecycle → alive
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      emitReapIntent: reap,
+      appendEvent,
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(reap.calls[0][0]).toBe("phase.reclaim.reap-requested");
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("CTL-778: alive + probe done but NO complete event → still alive-suppressed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: probe },
+      completeEventSeen: () => false, // gate closed
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event seen but probe NOT done → alive-suppressed (no false flip)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(false) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event + probe done but emitComplete fails → reclaim-failed, no mirror", () => {
+    const mirror = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: recorder({ code: 1 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: mirror,
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(mirror.calls.length).toBe(0);
+  });
+
+  // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults
+  // to a fn that returns false from an empty/absent log) must still pass unchanged.
+  test("CTL-736 regression: alive worker without complete event is still alive-suppressed, probe never called", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000, state: "working" }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      now: () => 1_000 + 60 * 60 * 1000,
+      // completeEventSeen NOT injected — defaults to hasCompleteEvent({path}) → false (empty log)
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
   });
 });

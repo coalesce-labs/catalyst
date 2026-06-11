@@ -85,7 +85,7 @@ done
 header "Catalyst CLI Install"
 
 CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
-CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack)
+CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-why catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack)
 
 if [[ -d "$CLI_BIN_DIR" ]]; then
     pass "Bin dir exists: $CLI_BIN_DIR"
@@ -598,6 +598,105 @@ else
             pass "NODE_USE_ENV_PROXY=1 (Node fetch will honor the proxy)"
         fi
     fi
+fi
+
+# ─── 7d. Proxy leak into interactive shells (CTL-869, CTL-846 regression class) ──
+#
+# The mitmproxy HTTP(S)_PROXY in execution-core.env is DAEMON-launch-scoped only:
+# catalyst-execution-core cmd_start sources the file right before nohup'ing the
+# daemon, so the proxy lives only in the daemon's process tree. If instead a shell
+# profile (~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.bashrc, ~/.bash_profile, ~/.profile)
+# `source`s execution-core.env — or exports HTTP(S)_PROXY directly — the proxy
+# leaks into EVERY interactive shell. A fresh terminal then routes all traffic
+# (including interactive `claude`) through mitmproxy, and when the proxy is down
+# every API call dies with "connection refused". This check catches that leak and
+# prints the exact one-line removal. No repo script writes such a line — it is
+# always a hand-edit — so the fix is to delete it from the profile, never to widen
+# the daemon env's reach.
+header "Proxy Leak Into Interactive Shells (CTL-869)"
+
+# de_proxy is set in section 7c only when the daemon env file exists; default it
+# here so the messages below are safe under `set -u` when the file is absent.
+de_proxy="${de_proxy:-(the daemon proxy)}"
+leak_found=""
+# (a) Any profile that sources the daemon env file directly leaks every export in
+#     it (proxy + CA) into interactive shells. The grep ignores commented lines.
+PROFILE_CANDIDATES=(
+    "$HOME/.zshenv"
+    "$HOME/.zprofile"
+    "$HOME/.zshrc"
+    "$HOME/.bash_profile"
+    "$HOME/.bashrc"
+    "$HOME/.profile"
+)
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    # Match a non-comment line that sources execution-core.env (with or without
+    # the `source`/`.` builtin spelled out, quoted or not).
+    if grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof sources the DAEMON-only env file into every interactive shell (line ${leak_line%%:*})"
+        info "This leaks HTTP(S)_PROXY=$de_proxy into all terminals — fresh shells get 'connection refused' when mitmproxy is down (CTL-846 regression class)"
+        info "REMOVE this line from $prof:"
+        info "    ${leak_line#*:}"
+        info "The daemon already sources this file itself at launch (catalyst-execution-core cmd_start) — the proxy stays daemon-scoped without it."
+    fi
+done
+
+# (b) A profile may also export HTTP(S)_PROXY directly (not via the env file).
+#     Flag any non-comment proxy export in a profile.
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    if grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof exports a proxy var into every interactive shell (line ${leak_line%%:*})"
+        info "REMOVE: ${leak_line#*:}"
+        info "Proxy belongs ONLY in the daemon launch env (execution-core.env, sourced by catalyst-execution-core at start), never in a shell profile."
+    fi
+done
+
+# (c) Live check: this very (interactive) shell already has a proxy set. This is
+#     only a *leak* worth hard-failing on if the proxy is the catalyst mitmproxy
+#     audit proxy (matching the daemon env's de_proxy, or the conventional
+#     mitmproxy host:port) — a developer behind a legitimate corporate proxy
+#     (HTTPS_PROXY=http://corp-proxy:…) must NOT get a false-positive failure
+#     (and an untrue "routes through mitmproxy" claim) that flips the whole
+#     health check non-zero. So: fail only on a confirmed mitmproxy match,
+#     otherwise emit an informational note. (CTL-869)
+live_proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+if [[ -n "$live_proxy" ]]; then
+    # de_proxy is the daemon env's configured proxy when the env file exists; it
+    # is the literal placeholder "(the daemon proxy)" otherwise (set at line ~620
+    # under set -u). Treat the live proxy as the catalyst mitmproxy when it equals
+    # that real de_proxy, or when it points at the conventional mitmproxy host:port
+    # (127.0.0.1:8080 / localhost:8080), the default this repo's tooling uses.
+    is_catalyst_proxy=""
+    if [[ "$de_proxy" != "(the daemon proxy)" && "$live_proxy" == "$de_proxy" ]]; then
+        is_catalyst_proxy="yes"
+    elif [[ "$live_proxy" == *"127.0.0.1:8080"* || "$live_proxy" == *"localhost:8080"* ]]; then
+        is_catalyst_proxy="yes"
+    fi
+
+    if [[ -n "$is_catalyst_proxy" ]]; then
+        leak_found="yes"
+        fail "HTTP(S)_PROXY is set in THIS shell ($live_proxy) — interactive processes (incl. claude) route through the catalyst mitmproxy"
+        info "If mitmproxy is down, every API call here fails with 'connection refused'. Find and remove the export/source from your shell profile (see above), then open a fresh terminal."
+    else
+        # An unrelated proxy (e.g. a corporate HTTP proxy). Do NOT hard-fail the
+        # whole health check on it; just note it in case it is in fact a down
+        # catalyst audit proxy under a non-default address.
+        info "A proxy is set in this shell ($live_proxy) — if it is the catalyst mitmproxy audit proxy and it is down, interactive claude calls will fail with connection refused. If it is an unrelated (e.g. corporate) proxy, this is fine."
+    fi
+fi
+
+if [[ -z "$leak_found" ]]; then
+    pass "No proxy leak into interactive shells (proxy stays daemon-launch-scoped)"
 fi
 
 # ─── 8. direnv ──────────────────────────────────────────────────────────────

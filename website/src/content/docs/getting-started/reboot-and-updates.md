@@ -19,39 +19,85 @@ That's it. The command is idempotent — already-running services are skipped. C
 catalyst-stack status
 ```
 
+## Plugin source checkout
+
+Workers run their plugin code (skills, scripts, agents) from a dedicated
+**pristine, main-only checkout** of the catalyst repo — registered as
+`catalyst.orchestration.pluginDirs` and resolved by `phase-agent-dispatch` when
+it builds each worker's `--plugin-dir` flags. Keeping the source on a clean,
+single-branch `main` checkout (separate from any worktree you develop in) means
+updates are a simple `git pull --ff-only` and there is never local drift between
+what you edit and what workers execute.
+
+Provision it once:
+
+```bash
+plugins/dev/scripts/setup-plugin-source.sh
+```
+
+This clones the repo (main, single-branch) to `~/catalyst/plugin-source` and
+registers `~/catalyst/plugin-source/plugins/dev` as `pluginDirs` in your machine
+config. Choose a different location with `--path DIR` (or
+`$CATALYST_PLUGIN_SOURCE`). Re-running is idempotent: it ff-only pulls the
+existing checkout and leaves an already-correct registration untouched (use
+`--force` to point `pluginDirs` at a new path).
+
+The script **refuses** to register a linked git worktree or a checkout on any
+branch other than `main` — the plugin source must be pristine so the unattended
+ff-only auto-pull always succeeds.
+
+Keep it fresh with `catalyst-stack hotpatch` (below) — and, once it ships, the
+broker auto-refreshes it on every merge to `main`. `catalyst-stack parity`
+flags it as drift if the checkout ever ends up off `main` or becomes a linked
+worktree.
+
 ## After merging or pulling new code
 
-The fastest way to apply an update to the live plugin cache and restart:
+The fastest way to refresh the plugin-source checkout and restart:
 
 ```bash
 catalyst-stack restart --hotpatch
 ```
 
-This does three things in sequence:
+This does two things in sequence:
 
-1. `git pull --ff-only origin main` in your catalyst repo checkout.
-2. `rsync -ac --exclude=node_modules` from `plugins/dev/` into the resolved plugin-cache version directory.
-3. Stops and restarts the stack.
+1. `git pull --ff-only origin main` in each `pluginDirs` checkout (resolved via
+   `lib/plugin-dirs.sh`: `CATALYST_PLUGIN_DIRS` env → repo `.catalyst/config.json`
+   → machine config). It refuses dirty or diverged checkouts and emits a
+   `node.checkout.updated` event recording the old → new commit.
+2. Stops and restarts the stack.
 
-If the pull fails (non-fast-forward), the command aborts before touching the cache. Resolve the conflict manually, then retry.
+If the pull fails (non-fast-forward), the command aborts before restarting.
+Resolve the conflict manually, then retry.
 
-The default repo path is `~/code-repos/github/coalesce-labs/catalyst`. Override with `CATALYST_REPO_DIR`:
+> The legacy marketplace-cache `rsync` flow survives only behind
+> `catalyst-stack hotpatch --legacy-rsync` and is deprecated — migrate the node
+> to the one-checkout model above.
+
+## Debugging Linear API rate-limiting (mitmproxy, opt-in)
+
+The mitmproxy audit is **off by default** and is a rare diagnostic tool — use it for a short window
+when you need to inspect Linear API traffic or rate-limit headers, then turn it off.
+
+**Turn ON:**
 
 ```bash
-CATALYST_REPO_DIR=/path/to/catalyst catalyst-stack restart --hotpatch
+catalyst-stack restart --proxy
 ```
 
-## Linear traffic capture (optional)
-
-To log every Linear API call with rate-limit headers and caller attribution, opt in to the mitmproxy proxy:
+**Turn OFF:**
 
 ```bash
-catalyst-stack start --proxy
+catalyst-stack restart
 ```
 
-On first use, this offers to install mitmproxy via `brew install mitmproxy` if absent, generates the CA cert, and copies the vendored addon to `~/catalyst/mitm_linear_addon.py`. Traffic is written to `~/catalyst/linear-proxy.jsonl`.
+On first use, `catalyst-stack --proxy` installs mitmproxy via `brew install mitmproxy` if absent,
+generates the CA cert, and copies the vendored addon to `~/catalyst/mitm_linear_addon.py`. Traffic
+is written to `~/catalyst/linear-proxy.jsonl`.
 
-The proxy is **off by default**. The execution-core daemon runs correctly without it.
+The proxy vars (`HTTPS_PROXY`, `NODE_USE_ENV_PROXY`, `NODE_EXTRA_CA_CERTS`, `NO_PROXY`) are
+injected only as an inline env prefix for the daemon process — they are never written to disk and
+disappear on the next plain `catalyst-stack restart`.
 
 ## Boot-resume guarantee
 

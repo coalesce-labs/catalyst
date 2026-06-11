@@ -27,11 +27,12 @@ const ARTIFACT_NAMES = new Set([
 // event arrived before the timeout (phase-monitor-deploy SKILL.md). Ranked
 // the same as 'done' by byActivePhase: a skipped terminal must never shadow
 // an in-flight phase.
-// CTL-484 / CTL-701: 'turn-cap-exhausted' is NOT terminal — the worker's bg
-// session ended at the turn cap but the phase awaits continuation; reclaim /
-// revive probes work-done state to decide reclaim-as-done vs
-// `claude --bg --resume`.
-const TERMINAL = new Set(["done", "failed", "stalled", "skipped"]);
+// CTL-484 / CTL-701: 'turn-cap-exhausted' was excluded while orchestrate-revive
+// could dispatch `claude --bg --resume` continuations. CTL-748 (2026-06-02)
+// disabled per-phase turn caps — new workers never emit this status and no
+// continuation path remains — so it is terminal for all consumers (sessions
+// display, boot-resume, reclaim/revive, merge-state, stall-detection). CTL-830.
+const TERMINAL = new Set(["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]);
 
 // readWorkerSignals — glob both layouts under ${orchDir}/workers/ and return
 // a canonical WorkerSignal per worker:
@@ -58,6 +59,54 @@ export function readWorkerSignals(orchDir) {
     } else if (e.isDirectory() && e.name !== "output") {
       const nested = readNestedDir(join(workersDir, e.name));
       if (nested) out.push(nested);
+    }
+  }
+  return out;
+}
+
+// readAllPhaseSignals — like readWorkerSignals, but returns EVERY per-file
+// signal rather than one canonical active-phase row per ticket. For flat
+// (legacy oneshot) workers this is the single workers/<T>.json (there is no
+// per-phase fan-out); for nested phase-agent workers it is every
+// workers/<T>/phase-<name>.json (artifacts and yield tombstones excluded).
+//
+// CTL-934 rationale: the belief rules join obs_signal(T, P, …) per phase, so
+// the collector must observe superseded/terminal SIBLING phases (e.g. an
+// orphan-takeover where bg_job_id flipped between phases), not just the
+// freshest active one byActivePhase picks. readWorkerSignals stays the
+// canonical active-phase projection for the scheduler; this is the strictly
+// wider observation set the fact collector records.
+export function readAllPhaseSignals(orchDir) {
+  const workersDir = join(orchDir, "workers");
+  const out = [];
+  let entries;
+  try {
+    entries = readdirSync(workersDir, { withFileTypes: true });
+  } catch {
+    return out; // no workers/ dir yet → []
+  }
+
+  for (const e of entries) {
+    if (
+      e.isFile() &&
+      e.name.endsWith(".json") &&
+      !e.name.endsWith(".json.projected")
+    ) {
+      const sig = parseSignal(join(workersDir, e.name), "flat");
+      if (sig) out.push(sig);
+    } else if (e.isDirectory() && e.name !== "output") {
+      const dir = join(workersDir, e.name);
+      let names;
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!isPhaseSignalFile(name)) continue;
+        const sig = parseSignal(join(dir, name), "nested");
+        if (sig) out.push(sig);
+      }
     }
   }
   return out;

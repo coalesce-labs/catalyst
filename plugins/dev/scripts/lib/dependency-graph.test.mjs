@@ -9,6 +9,8 @@ import {
   detectCycles,
   analyzeDependencyGraph,
   referencedBlockerIds,
+  teamOf,
+  wouldCreateCycle,
 } from "./dependency-graph.mjs";
 
 // issue(id, state, relations[], inverseRelations[]) — terse fixture builder.
@@ -98,6 +100,54 @@ describe("buildDependencyEdges", () => {
       issues: [{ identifier: "CTL-1", state: { name: "Backlog" } }],
       expected: [],
     },
+    {
+      // CTL-878: a child's blocks edge from its own parent epic is hierarchy, not
+      // a dependency — dropped so a never-worked tracking epic can't deadlock it.
+      name: "CTL-878: a `blocks` edge from the target's parent epic is dropped",
+      issues: [
+        {
+          identifier: "CTL-863",
+          state: { name: "Todo" },
+          parent: "CTL-859",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [inv("blocks", "CTL-859")] },
+        },
+        issue("CTL-859", "Backlog"),
+      ],
+      expected: [],
+    },
+    {
+      // CTL-878: only the PARENT edge is dropped — a real sibling dependency on the
+      // same child survives (mirrors CTL-866: parent CTL-859 + sibling CTL-863).
+      name: "CTL-878: parent edge dropped, sibling dependency edge kept",
+      issues: [
+        {
+          identifier: "CTL-866",
+          state: { name: "Todo" },
+          parent: "CTL-859",
+          relations: { nodes: [] },
+          inverseRelations: { nodes: [inv("blocks", "CTL-859"), inv("blocks", "CTL-863")] },
+        },
+        issue("CTL-863", "Todo"),
+        issue("CTL-859", "Backlog"),
+      ],
+      expected: [{ from: "CTL-863", to: "CTL-866" }],
+    },
+    {
+      // CTL-878: the drop must also fire when the parent epic is genuinely a child
+      // of a sibling (forward `blocks` direction, parent declared on the child).
+      name: "CTL-878: parent edge dropped via forward `blocks` from the parent node",
+      issues: [
+        {
+          identifier: "CTL-859",
+          state: { name: "Backlog" },
+          relations: { nodes: [rel("blocks", "CTL-863")] },
+          inverseRelations: { nodes: [] },
+        },
+        { identifier: "CTL-863", state: { name: "Todo" }, parent: "CTL-859" },
+      ],
+      expected: [],
+    },
   ];
 
   for (const c of cases) {
@@ -105,6 +155,70 @@ describe("buildDependencyEdges", () => {
       expect(sortEdges(buildDependencyEdges(c.issues))).toEqual(sortEdges(c.expected));
     });
   }
+
+  // CTL-878: the deadlock case is an OUT-OF-SET parent epic — the child is in the
+  // eligible/admission pool but the epic (Backlog, never dispatched) is hydrated
+  // only as an externalId. Without the parent guard the externalId rule keeps the
+  // edge; with it the edge is dropped because the child carries parent === epic.
+  test("CTL-878: parent-epic edge dropped even when the parent is an out-of-set externalId", () => {
+    const issues = [
+      {
+        identifier: "CTL-722",
+        state: { name: "Todo" },
+        parent: "CTL-718",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "CTL-718")] },
+      },
+    ];
+    // CTL-718 is out-of-set but declared as an external blocker (D5 hydration).
+    expect(buildDependencyEdges(issues, { externalIds: ["CTL-718"] })).toEqual([]);
+  });
+
+  test("CTL-878: an issue with no parent field is unaffected (backward compat)", () => {
+    const issues = [
+      issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]),
+      issue("CTL-2", "Todo"),
+    ];
+    expect(buildDependencyEdges(issues)).toEqual([{ from: "CTL-1", to: "CTL-2" }]);
+  });
+
+  // CTL-838: a cross-team blocker (different identifier prefix) is dropped — the
+  // daemon orchestrates one team and can't work another's ticket to terminal, so
+  // the edge can only deadlock. The blocker is out-of-set, so declare it external
+  // to prove the drop is the CROSS-TEAM rule, not the out-of-set rule.
+  test("CTL-838: a cross-team blocks edge is dropped even when declared as an externalId", () => {
+    const issues = [
+      {
+        identifier: "CTL-838",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "OTL-4")] },
+      },
+    ];
+    expect(buildDependencyEdges(issues, { externalIds: ["OTL-4"] })).toEqual([]);
+  });
+
+  test("CTL-838: a same-team edge is unaffected by the cross-team guard", () => {
+    const issues = [
+      issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]),
+      issue("CTL-2", "Todo"),
+    ];
+    expect(buildDependencyEdges(issues)).toEqual([{ from: "CTL-1", to: "CTL-2" }]);
+  });
+});
+
+describe("teamOf (CTL-838)", () => {
+  test("extracts the team prefix from an identifier", () => {
+    expect(teamOf("CTL-863")).toBe("CTL");
+    expect(teamOf("OTL-4")).toBe("OTL");
+    expect(teamOf("ADV-1278")).toBe("ADV");
+  });
+  test("degrades safely on malformed input", () => {
+    expect(teamOf("")).toBe("");
+    expect(teamOf(null)).toBe("");
+    expect(teamOf(undefined)).toBe("");
+    expect(teamOf("NODASH")).toBe("NODASH");
+  });
 });
 
 describe("computeReadySet", () => {
@@ -452,6 +566,42 @@ describe("analyzeDependencyGraph", () => {
     const issues = [issue("CTL-1", "Backlog", [rel("blocks", "CTL-2")]), issue("CTL-2", "Backlog")];
     expect(analyzeDependencyGraph(issues).anomalies).toEqual([]);
   });
+
+  // CTL-878 end-to-end: a Todo child whose ONLY blocker is its Backlog parent epic
+  // (an out-of-set, non-terminal blocker) must be READY, not blocked. This is the
+  // exact production deadlock (CTL-859→863, CTL-718→722) the parent guard fixes.
+  test("CTL-878: a child blocked only by its non-terminal parent epic is ready, not blocked", () => {
+    const issues = [
+      {
+        identifier: "CTL-863",
+        state: { name: "Todo" },
+        parent: "CTL-859",
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "CTL-859")] },
+      },
+    ];
+    const result = analyzeDependencyGraph(issues, { blockerStates: { "CTL-859": "Backlog" } });
+    expect(result.ready).toEqual(["CTL-863"]);
+    expect(result.blocked).toEqual([]);
+    expect(result.anomalies).toEqual([]);
+  });
+
+  // CTL-838 end-to-end: a ticket whose only blocker is a non-terminal CROSS-TEAM
+  // ticket (e.g. CTL-838 ⟵ OTL-4[Implement]) must be ready — the daemon can't work
+  // OTL-4, so honoring the edge would deadlock CTL-838 forever.
+  test("CTL-838: a ticket blocked only by a non-terminal cross-team blocker is ready, not blocked", () => {
+    const issues = [
+      {
+        identifier: "CTL-838",
+        state: { name: "Todo" },
+        relations: { nodes: [] },
+        inverseRelations: { nodes: [inv("blocks", "OTL-4")] },
+      },
+    ];
+    const result = analyzeDependencyGraph(issues, { blockerStates: { "OTL-4": "Implement" } });
+    expect(result.ready).toEqual(["CTL-838"]);
+    expect(result.blocked).toEqual([]);
+  });
 });
 
 // CTL-530 verify phase: null/undefined inputs must degrade gracefully rather
@@ -473,4 +623,80 @@ describe("null / undefined inputs degrade gracefully", () => {
   test("analyzeDependencyGraph(undefined) → empty result", () => {
     expect(analyzeDependencyGraph(undefined)).toEqual({ ready: [], blocked: [], anomalies: [] });
   });
+
+  test("wouldCreateCycle(undefined, ...) → false", () => {
+    expect(wouldCreateCycle(undefined, "A", "B")).toBe(false);
+  });
+});
+
+describe("wouldCreateCycle", () => {
+  const cases = [
+    {
+      name: "empty graph → no cycle",
+      edges: [],
+      from: "A", to: "B",
+      expected: false,
+    },
+    {
+      name: "direct 2-node back-edge → cycle (A blocks B, add B blocks A)",
+      edges: [{ from: "A", to: "B" }],
+      from: "B", to: "A",
+      expected: true,
+    },
+    {
+      name: "transitive 3-node back-edge → cycle (A→B→C, add C→A)",
+      edges: [{ from: "A", to: "B" }, { from: "B", to: "C" }],
+      from: "C", to: "A",
+      expected: true,
+    },
+    {
+      name: "forward edge in a chain → no cycle (A→B→C, add A→C)",
+      edges: [{ from: "A", to: "B" }, { from: "B", to: "C" }],
+      from: "A", to: "C",
+      expected: false,
+    },
+    {
+      name: "self-loop → cycle (add A→A)",
+      edges: [],
+      from: "A", to: "A",
+      expected: true,
+    },
+    {
+      name: "disjoint components closing a cycle (X→Y, add B→A where A→B exists)",
+      edges: [{ from: "X", to: "Y" }, { from: "A", to: "B" }],
+      from: "B", to: "A",
+      expected: true,
+    },
+    {
+      name: "disjoint, unrelated endpoints → no cycle (X→Y, add Q→Z)",
+      edges: [{ from: "X", to: "Y" }],
+      from: "Q", to: "Z",
+      expected: false,
+    },
+    {
+      name: "longer transitive chain (A→B→C→D, add D→A) → cycle",
+      edges: [
+        { from: "A", to: "B" }, { from: "B", to: "C" }, { from: "C", to: "D" },
+      ],
+      from: "D", to: "A",
+      expected: true,
+    },
+    {
+      name: "edge already present (idempotent, A→B exists, add A→B) → no new cycle",
+      edges: [{ from: "A", to: "B" }],
+      from: "A", to: "B",
+      expected: false,
+    },
+    {
+      name: "null edges defensive → no cycle",
+      edges: null,
+      from: "A", to: "B",
+      expected: false,
+    },
+  ];
+  for (const c of cases) {
+    test(c.name, () => {
+      expect(wouldCreateCycle(c.edges, c.from, c.to)).toBe(c.expected);
+    });
+  }
 });

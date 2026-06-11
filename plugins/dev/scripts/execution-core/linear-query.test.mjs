@@ -185,6 +185,24 @@ describe("runEligibleQuery", () => {
     expect(t.relations).toEqual(relations);
     expect(t.inverseRelations).toEqual({ nodes: [] });
   });
+
+  // CTL-878: the eligible/Pass-2 path carries the parent epic id so
+  // buildDependencyEdges can drop a parent→child blocks edge for a Todo child.
+  test("CTL-878: captures the parent epic identifier (nested) for an eligible ticket", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        { identifier: "CTL-863", state: { name: "Todo" }, parent: { identifier: "CTL-859" } },
+      ]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].parent).toBe("CTL-859");
+  });
+
+  test("CTL-878: parent is null when an eligible ticket has no parent (never undefined)", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].parent).toBeNull();
+  });
 });
 
 // CTL-565 D5 — fetchTicketState wraps `linearis issues read <id>` to hydrate
@@ -358,11 +376,25 @@ describe("fetchTicketRelations (CTL-755)", () => {
     expect(calls[0].args).toEqual(["issues", "read", "ADV-1277"]);
     expect(rel).toEqual({
       state: "Triage",
+      parent: null, // CTL-878: ADV-1277 has no parent → null
       relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "ADV-1280" } }] },
       inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "ADV-1276" } }] },
       priority: 2,
       labels: ["feature", "orchestrator"],
     });
+  });
+
+  test("CTL-878: carries the parent epic identifier when `linearis issues read` emits it", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-863",
+        state: { name: "Todo" },
+        parent: { identifier: "CTL-859" },
+      }),
+      stderr: "",
+    });
+    expect(fetchTicketRelations("CTL-863", { exec }).parent).toBe("CTL-859");
   });
 
   test("parses a blocked-by edge out of inverseRelations.nodes", () => {
@@ -492,10 +524,11 @@ describe("fetchTicketRelations (CTL-755)", () => {
 describe("fetchTicketsBatch (CTL-784)", () => {
   // A node in the batched GraphQL shape (same nested shape `linearis issues read`
   // returns): state{name}, labels{nodes{name}}, relations{nodes{...}}.
-  const node = (identifier, { state = "Triage", priority = 2, labels = [], blockedBy } = {}) => ({
+  const node = (identifier, { state = "Triage", priority = 2, labels = [], blockedBy, parent } = {}) => ({
     identifier,
     priority,
     state: { name: state },
+    ...(parent ? { parent: { identifier: parent } } : {}),
     labels: { nodes: labels.map((name) => ({ name })) },
     relations: { nodes: [] },
     inverseRelations: blockedBy
@@ -521,12 +554,19 @@ describe("fetchTicketsBatch (CTL-784)", () => {
     const desc = fetchTicketsBatch(["CTL-1"], { exec }).get("CTL-1");
     expect(desc).toEqual({
       state: "In Progress",
+      parent: null, // CTL-878: no parent on this node → null
       relations: { nodes: [] },
       inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-9" } }] },
       priority: 1,
       labels: ["blocked"],
     });
     expect("identifier" in desc).toBe(false); // shape parity with fetchTicketRelations
+  });
+
+  test("CTL-878: carries the parent epic identifier from a batched node", () => {
+    const exec = (ids) => ids.map((id) => node(id, { parent: "CTL-859" }));
+    const desc = fetchTicketsBatch(["CTL-863"], { exec }).get("CTL-863");
+    expect(desc.parent).toBe("CTL-859");
   });
 
   test("dedupes identifiers before the exec", () => {

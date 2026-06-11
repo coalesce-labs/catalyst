@@ -18,6 +18,7 @@ import {
   getTicketState,
   upsertTicketDescriptor,
   getTicketDescriptor,
+  getAllTicketDescriptors,
   getTicketDescriptorByUuid,
   markTicketRemovedByUuid,
 } from "./broker-state.mjs";
@@ -113,6 +114,37 @@ describe("upsertTicketDescriptor / getTicketDescriptor", () => {
   test("duplicate uuid on a second ticket fails loud (UNIQUE index)", () => {
     upsertTicketDescriptor(FULL);
     expect(() => upsertTicketDescriptor({ ticket: "CTL-999", uuid: FULL.uuid })).toThrow();
+  });
+});
+
+// ─── bulk read (CTL-883 read-model cache) ────────────────────────────────────
+
+describe("getAllTicketDescriptors", () => {
+  test("returns every present descriptor in one pass, ticket-sorted", () => {
+    upsertTicketDescriptor({ ticket: "CTL-3", state: "Implement", priority: 2 });
+    upsertTicketDescriptor({ ticket: "CTL-1", state: "Done", labels: ["feature"] });
+    upsertTicketDescriptor({ ticket: "CTL-2", state: "PR", assignee: "bot" });
+    const all = getAllTicketDescriptors();
+    expect(all.map((d) => d.ticket)).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+    const byId = Object.fromEntries(all.map((d) => [d.ticket, d]));
+    expect(byId["CTL-1"].labels).toEqual(["feature"]);
+    expect(byId["CTL-2"].assignee).toBe("bot");
+    expect(byId["CTL-3"].priority).toBe(2);
+  });
+
+  test("empty table yields an empty array", () => {
+    expect(getAllTicketDescriptors()).toEqual([]);
+  });
+
+  test("removed rows are excluded by default, included on request", () => {
+    upsertTicketDescriptor({ ticket: "CTL-10", uuid: "u-10", state: "Done" });
+    upsertTicketDescriptor({ ticket: "CTL-11", uuid: "u-11", state: "Todo" });
+    markTicketRemovedByUuid("u-10");
+    const present = getAllTicketDescriptors();
+    expect(present.map((d) => d.ticket)).toEqual(["CTL-11"]);
+    const withRemoved = getAllTicketDescriptors({ includeRemoved: true });
+    expect(withRemoved.map((d) => d.ticket)).toEqual(["CTL-10", "CTL-11"]);
+    expect(withRemoved.find((d) => d.ticket === "CTL-10").removed).toBe(true);
   });
 });
 

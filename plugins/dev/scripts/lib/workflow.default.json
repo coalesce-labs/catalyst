@@ -5,7 +5,7 @@
   "trigger": { "kind": "linear.ready" },
   "linearMirror": true,
   "entryStep": "research",
-  "terminalStep": "monitor-deploy",
+  "terminalStep": "teardown",
   "steps": [
     { "id": "triage",         "rank": 0, "preemptable": false, "linearKey": null,          "next": "research" },
     { "id": "research",       "rank": 1, "linearKey": "research",   "next": "plan" },
@@ -64,7 +64,8 @@
       ] },
     { "id": "pr",             "rank": 7, "linearKey": "inReview",   "next": "monitor-merge" },
     { "id": "monitor-merge",  "rank": 8, "linearKey": "inReview",   "next": "monitor-deploy" },
-    { "id": "monitor-deploy", "rank": 9, "preemptable": false, "linearKey": "inReview", "next": null }
+    { "id": "monitor-deploy", "rank": 9, "preemptable": false, "linearKey": "inReview", "next": "teardown" },
+    { "id": "teardown",       "rank": 10, "preemptable": false, "linearKey": "inReview", "next": null }
   ],
   "ancillarySteps": [
     { "id": "remediate", "rank": 4, "linearKey": "remediating", "cycleWith": "verify" }
