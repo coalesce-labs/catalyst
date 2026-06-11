@@ -13,6 +13,7 @@
 import { useCallback } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { HeaderActions } from "@/components/header-actions";
 import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
 import { C } from "../../board/board-tokens";
 import { queueHostMode } from "../../board/queue-grouping";
@@ -46,33 +47,29 @@ export function QueueSurface() {
             '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}
       >
-        {/* Calm one-line surface header (matches the dashboard meta row tone).
-            CTL-1033: content shell = canvas (not chrome); hairline via border-subtle. */}
-        <div
-          className="flex shrink-0 items-center gap-3 border-b border-subtle bg-surface-canvas px-4 py-3"
-        >
-          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
-            Capacity &amp; queue
-          </h1>
-          <span style={{ color: "#8b93a1", fontSize: 12 }}>
+        {/* CTL-1018: the "Capacity & queue" header bar is GONE — the breadcrumb
+            row (Overall › Queue) already names the surface. Its subtitle + the
+            LIVE/OFFLINE badge are portaled into that SINGLE header row. One header
+            per surface; tokens, no stale hex. */}
+        <HeaderActions>
+          <span className="hidden text-[12px] text-muted-foreground lg:inline">
             Who&apos;s working each slot, and what dispatches next
           </span>
-          <span style={{ flex: 1 }} />
           <span
             style={{
-              fontFamily:
-                "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+              fontFamily: C.mono,
               fontSize: 10,
               letterSpacing: 1.5,
-              color: status === "connected" ? "#39d07a" : "#ef5d5d",
-              border: `1px solid ${status === "connected" ? "rgba(57,208,122,0.35)" : "rgba(239,93,93,0.35)"}`,
+              color: status === "connected" ? C.green : C.red,
+              border: `1px solid ${status === "connected" ? C.green : C.red}`,
               borderRadius: 5,
               padding: "2px 6px",
+              opacity: 0.92,
             }}
           >
             {status === "connected" ? "LIVE" : "OFFLINE"}
           </span>
-        </div>
+        </HeaderActions>
 
         {/* The control-tower body, filling the inset below the header. */}
         <div className="cat-overlay-scroll min-h-0 flex-1" style={{ overflowY: "auto" }}>
@@ -106,7 +103,7 @@ export function QueueSurface() {
               </div>
             </div>
           ) : (
-            <div style={{ color: "#8b93a1", padding: 24 }}>
+            <div style={{ color: C.fgMuted, padding: 24 }}>
               Connecting to execution-core…
             </div>
           )}

@@ -17,6 +17,7 @@
 // cache-ROI follow the picker via TIME_RANGE_TO_PROM.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAtom } from "jotai";
+import { HeaderActions } from "@/components/header-actions";
 import type {
   OtelHealth,
   CostTodaySummary,
@@ -321,13 +322,12 @@ export function FinopsSurface() {
 
   return (
     <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">FinOps</h1>
-          <p className="text-[12px] text-muted">
-            How much did I spend today, and is that normal?
-          </p>
-        </div>
+      {/* CTL-1018: surface header folded into the SINGLE breadcrumb row (OBSERVE
+          › FinOps). Subtitle + time-range control move up. One header per surface. */}
+      <HeaderActions>
+        <span className="hidden text-[12px] text-muted-foreground lg:inline">
+          How much did I spend today, and is that normal?
+        </span>
         <ToggleGroup
           type="single"
           variant="outline"
@@ -342,7 +342,7 @@ export function FinopsSurface() {
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
-      </header>
+      </HeaderActions>
 
       {/* HERO — the full-width dollar+ROI band, the surface's ONE answer
           (Principle 1). Wrapped in a [prom] ChartCard so a no-Prometheus install

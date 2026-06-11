@@ -21,6 +21,7 @@
 // disk/load/version cell render the dashed "needs event-log reader · OBS-15"
 // locked state — never blank, never fabricated.
 import { useEffect, useMemo, useState } from "react";
+import { HeaderActions } from "@/components/header-actions";
 import type { BoardConfig, BoardWorker } from "@/board/types";
 import type { ClusterSignal } from "@/lib/cluster-signal";
 import { ChartCard } from "@/components/observe/chart-card";
@@ -127,19 +128,18 @@ export function FleetOpsSurface() {
 
   return (
     <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Fleet Ops</h1>
-          <p className="text-[12px] text-muted">
-            Is my hardware healthy and do I need to intervene?
-          </p>
-        </div>
+      {/* CTL-1018: surface header folded into the SINGLE breadcrumb row (OBSERVE
+          › Fleet Ops). Subtitle + the pinned-NOW chip move up. One per surface. */}
+      <HeaderActions>
+        <span className="hidden text-[12px] text-muted-foreground lg:inline">
+          Is my hardware healthy and do I need to intervene?
+        </span>
         {/* Time is pinned NOW (a stateful matrix, not a time series) — a static
             chip, NOT a ToggleGroup. */}
         <span className="rounded-md border border-border bg-surface-1 px-2.5 py-1 font-mono text-[11px] tracking-wide text-muted">
           📌 NOW
         </span>
-      </header>
+      </HeaderActions>
 
       {/* HERO — full-width shrink-0, the ONE answer, before any scroll. Live =
           the calm green ALL SYSTEMS GO line (the success case, not empty). */}
