@@ -1713,6 +1713,24 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
     escalateDispatchExhausted(orchDir, "CTL-712", "pr");
     expect(existsSync(dispatchCooldownPath(orchDir, "CTL-712", "pr"))).toBe(false);
   });
+
+  // CTL-1045 Bug 2: persist the dispatch failure exit code + cause so J3 can
+  // tell the benign prior-artifact-missing case (code 2) from verify_failed (0)
+  // or crash (≠ 2). A legacy signal without code stays operator-owned.
+  test("CTL-1045 Bug 2: persists dispatchFailureCode + dispatchFailureCause when provided", () => {
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr", { code: 2, cause: "prior_artifact_missing:research_doc" });
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8"));
+    expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
+    expect(sig.dispatchFailureCode).toBe(2);
+    expect(sig.dispatchFailureCause).toBe("prior_artifact_missing:research_doc");
+  });
+
+  test("CTL-1045 Bug 2: defaults dispatchFailureCode / dispatchFailureCause to null when omitted (back-compat)", () => {
+    escalateDispatchExhausted(orchDir, "CTL-712", "pr");
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8"));
+    expect(sig.dispatchFailureCode).toBeNull();
+    expect(sig.dispatchFailureCause).toBeNull();
+  });
 });
 
 // ─── CTL-712: dispatch retry ceiling wired into schedulerTick ───

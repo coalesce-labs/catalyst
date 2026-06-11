@@ -1645,7 +1645,7 @@ export function escalateDispatchExhausted(
   orchDir,
   ticket,
   phase,
-  { writeFile = writeFileSync, readFile = readFileSync } = {}
+  { writeFile = writeFileSync, readFile = readFileSync, code = null, cause = null } = {}
 ) {
   const dir = join(orchDir, "workers", ticket);
   const p = join(dir, `phase-${phase}.json`);
@@ -1666,6 +1666,8 @@ export function escalateDispatchExhausted(
         phase,
         status: "stalled",
         stalledReason: "prior-artifact-retry-exhausted",
+        dispatchFailureCode: code,   // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
+        dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
         updatedAt: new Date().toISOString(),
       })
     );
@@ -2544,7 +2546,7 @@ export function schedulerTick(
       const cd = recordDispatchFailure(orchDir, ticket, phase, 0, now());
       if (fullFailureLadder) {
         if (cd.consecutiveFailures >= getMaxDispatchRetries())
-          escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+          escalateDispatchExhausted(orchDir, ticket, phase, { code: 0, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
         maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
         appendDispatchFailedEvent({
           orchId: ticket,
@@ -2580,7 +2582,7 @@ export function schedulerTick(
     const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
     if (fullFailureLadder) {
       if (cd.consecutiveFailures >= getMaxDispatchRetries())
-        escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+        escalateDispatchExhausted(orchDir, ticket, phase, { code: r.code, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
       maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
       // CTL-611 Gap 2: surface the silent drop as an event.
       appendDispatchFailedEvent({
