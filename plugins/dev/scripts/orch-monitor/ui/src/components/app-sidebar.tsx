@@ -196,7 +196,7 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
   { surface: "home", label: "Inbox", icon: InboxIcon },
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
-  { surface: "queue", label: "Queue", icon: ListOrderedIcon },
+  { surface: "queue", label: "Dispatch", icon: ListOrderedIcon },
 ];
 
 // CTL-977: Shared classes for collapsible group trigger rows.

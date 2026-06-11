@@ -140,7 +140,8 @@ describe("shadcn Sidebar primitive is the foundation (CTL-891)", () => {
 
   it("the OPERATE group lists Inbox, Tickets, Workers, Queue", () => {
     // CTL-930: surface labels renamed Home→Inbox, Board→Tickets.
-    for (const label of ["Inbox", "Tickets", "Workers", "Queue"]) {
+    // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
+    for (const label of ["Inbox", "Tickets", "Workers", "Dispatch"]) {
       expect(sidebarComponentSrc).toContain(label);
     }
     expect(sidebarComponentSrc).toMatch(/Operate/i);
