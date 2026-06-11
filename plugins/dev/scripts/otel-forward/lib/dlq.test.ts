@@ -12,8 +12,8 @@ describe("dlq", () => {
     appendToDlq(path, [{ ts: "c" }] as any);
     const batches = drainDlq(path);
     expect(batches.length).toBe(2);
-    expect(batches[0][0].ts).toBe("a");
-    expect(batches[1][0].ts).toBe("c");
+    expect((batches[0][0] as { ts: string }).ts).toBe("a");
+    expect((batches[1][0] as { ts: string }).ts).toBe("c");
     rmSync(dir, { recursive: true });
   });
 

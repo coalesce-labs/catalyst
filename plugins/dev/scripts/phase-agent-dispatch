@@ -308,7 +308,7 @@ compose_otel_resource_attrs() {
 		# CTL-582: execution-core dispatches one worktree per ticket
 		# (~/catalyst/wt/<key>/<TICKET>, no orchId prefix); the legacy/phase-agents
 		# path keeps the <orchId>-<ticket> worker-worktree convention.
-		if [[ -n ${CATALYST_EXECUTION_CORE:-} ]]; then
+		if [[ -n ${CATALYST_EXECUTION_CORE-} ]]; then
 			worker_wt="${HOME}/catalyst/wt/${project_key}/${TICKET}"
 		else
 			worker_wt="${HOME}/catalyst/wt/${project_key}/${ORCH_ID}-${TICKET}"
@@ -317,7 +317,7 @@ compose_otel_resource_attrs() {
 			worker_branch="$(git -C "$worker_wt" branch --show-current 2>/dev/null || true)"
 		fi
 		if [[ -z $worker_branch ]]; then
-			if [[ -n ${CATALYST_EXECUTION_CORE:-} ]]; then
+			if [[ -n ${CATALYST_EXECUTION_CORE-} ]]; then
 				worker_branch="${TICKET}"
 			else
 				worker_branch="${ORCH_ID}-${TICKET}"
@@ -337,6 +337,14 @@ compose_otel_resource_attrs() {
 	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
 	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
 	attrs="${attrs},catalyst.exec_context=phase-bg"
+	# CTL-1008 Phase 3: resolve dispatch_mode from env then config; omit when empty
+	# so no empty key pollutes the attribute string.
+	local dispatch_mode
+	dispatch_mode="${CATALYST_DISPATCH_MODE-}"
+	if [[ -z $dispatch_mode ]] && command -v jq >/dev/null 2>&1; then
+		dispatch_mode="$(config_value '.catalyst.orchestration.dispatchMode' '' 2>/dev/null || true)"
+	fi
+	[[ -n $dispatch_mode ]] && attrs="${attrs},catalyst.dispatch_mode=${dispatch_mode}"
 	printf '%s\n' "$attrs"
 }
 
@@ -351,23 +359,23 @@ DESCRIPTOR_MODEL="$DEFAULT_MODEL"
 WORKER_EFFORT=""
 APPEND_SYSTEM_PROMPT=""
 _WF_RULES="${SCRIPT_DIR}/lib/workflow-rules.mjs"
-if [[ -f "$_WF_RULES" ]] && command -v bun >/dev/null 2>&1; then
+if [[ -f $_WF_RULES ]] && command -v bun >/dev/null 2>&1; then
 	_TRIAGE_JSON="${ORCH_DIR}/workers/${TICKET}/triage.json"
 	_TRIAGE_SCOPE=""
 	_TRIAGE_ESTIMATE=""
-	if [[ -f "$_TRIAGE_JSON" ]]; then
+	if [[ -f $_TRIAGE_JSON ]]; then
 		_TRIAGE_SCOPE="$(jq -r '.estimated_scope // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
 		_TRIAGE_ESTIMATE="$(jq -r '.estimate // empty' "$_TRIAGE_JSON" 2>/dev/null || true)"
 	fi
 	_WF_RESOLVED="$(bun "$_WF_RULES" resolve --phase "$PHASE" --ticket "$TICKET" \
 		--scope "$_TRIAGE_SCOPE" --estimate "$_TRIAGE_ESTIMATE" 2>/dev/null || true)"
-	if [[ -n "$_WF_RESOLVED" ]]; then
+	if [[ -n $_WF_RESOLVED ]]; then
 		_WF_M="$(jq -r '.model // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
 		_WF_E="$(jq -r '.effort // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
 		_WF_A="$(jq -r '.appendSystemPrompt // empty' <<<"$_WF_RESOLVED" 2>/dev/null || true)"
-		[[ -n "$_WF_M" ]] && DESCRIPTOR_MODEL="$_WF_M"
-		[[ -n "$_WF_E" ]] && WORKER_EFFORT="$_WF_E"
-		[[ -n "$_WF_A" ]] && APPEND_SYSTEM_PROMPT="$_WF_A"
+		[[ -n $_WF_M ]] && DESCRIPTOR_MODEL="$_WF_M"
+		[[ -n $_WF_E ]] && WORKER_EFFORT="$_WF_E"
+		[[ -n $_WF_A ]] && APPEND_SYSTEM_PROMPT="$_WF_A"
 	fi
 fi
 
@@ -609,7 +617,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
 				SIG_IS_STALE=1
 			else
 				CUR_SIG_GEN=$(jq -r '.generation // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
-				if [[ "$CUR_SIG_GEN" =~ ^[0-9]+$ ]] && (( CUR_SIG_GEN < TARGET_GENERATION )); then
+				if [[ $CUR_SIG_GEN =~ ^[0-9]+$ ]] && ((CUR_SIG_GEN < TARGET_GENERATION)); then
 					SIG_IS_STALE=1
 				fi
 			fi
@@ -725,7 +733,7 @@ mark_launch_failed() {
 #                    prelude itself exits 137 AFTER flipping the signal to
 #                    `running`, exercising the revive path).
 # A non-matching phase or unset env falls through to the normal dispatch path.
-if [[ -n ${CATALYST_TEST_KILL_PHASE:-} ]]; then
+if [[ -n ${CATALYST_TEST_KILL_PHASE-} ]]; then
 	TK_PHASE="${CATALYST_TEST_KILL_PHASE%%:*}"
 	TK_MODE="${CATALYST_TEST_KILL_PHASE#*:}"
 	if [[ $TK_PHASE == "$PHASE" && $TK_MODE == "before-launch" ]]; then
@@ -798,17 +806,17 @@ compose_worker_settings_json() {
 	enable_telemetry="${CLAUDE_CODE_ENABLE_TELEMETRY:-1}"
 	metrics_exporter="${OTEL_METRICS_EXPORTER:-otlp}"
 	logs_exporter="${OTEL_LOGS_EXPORTER:-otlp}"
-	otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
-	otlp_protocol="${OTEL_EXPORTER_OTLP_PROTOCOL:-}"
+	otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT-}"
+	otlp_protocol="${OTEL_EXPORTER_OTLP_PROTOCOL-}"
 
 	# CTL-777: the same context values DISPATCH_ENV carries on the dropped env
 	# prefix — sourced from the dispatcher's own resolved vars.
-	local orch_dir="${ORCH_DIR:-}"
-	local orch_id="${ORCH_ID:-}"
-	local phase_val="${PHASE:-}"
-	local ticket_val="${TICKET:-}"
-	local generation_val="${GENERATION:-}"
-	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION:-}"   # CTL-864
+	local orch_dir="${ORCH_DIR-}"
+	local orch_id="${ORCH_ID-}"
+	local phase_val="${PHASE-}"
+	local ticket_val="${TICKET-}"
+	local generation_val="${GENERATION-}"
+	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION-}" # CTL-864
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -867,7 +875,7 @@ DISPATCH_ENV=(
 	"CATALYST_GENERATION=${GENERATION}"
 	# CTL-864: cross-host cluster fencing token (distinct from the host-local
 	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
-	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION:-}"
+	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION-}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
@@ -879,7 +887,7 @@ DISPATCH_ENV=(
 # Short and grep-able; no redundant orch-id prefix (under execution-core
 # ORCH_ID == ticket, so the old `o-<orchId>:<ticket>:...` repeated the ticket).
 SESSION_NAME="${TICKET} ${PHASE}"
-if [[ "${ATTEMPT}" -gt 1 ]]; then
+if [[ ${ATTEMPT} -gt 1 ]]; then
 	SESSION_NAME="${SESSION_NAME} #${ATTEMPT}"
 fi
 
@@ -965,15 +973,15 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 		# invisible to every scheduler cooldown. CATALYST_RECREATE_ATTEMPTED
 		# survives the exec; a second rc=2 parks as stalled instead.
 		# thoughts conflict (rc 3) or rc 2 on non-research/plan → park as stalled.
-		if [[ $REBASE_RC -eq 2 ]] && [[ -z ${CATALYST_RECREATE_ATTEMPTED:-} ]] \
-			&& { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
+		if [[ $REBASE_RC -eq 2 ]] && [[ -z ${CATALYST_RECREATE_ATTEMPTED-} ]] &&
+			{ [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
 			# CTL-707 Layer 3: destroy and recreate the worktree from origin/<base>.
 			# Derive the main checkout root from this worktree's git common dir.
 			_REPO_ROOT=""
-			if _GCD="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n "$_GCD" ]]; then
+			if _GCD="$(git rev-parse --git-common-dir 2>/dev/null)" && [[ -n $_GCD ]]; then
 				_REPO_ROOT="$(cd "${_GCD}/.." && pwd 2>/dev/null)" || true
 			fi
-			if [[ -z "$_REPO_ROOT" || ! -d "$_REPO_ROOT" ]]; then
+			if [[ -z $_REPO_ROOT || ! -d $_REPO_ROOT ]]; then
 				echo "phase-agent-dispatch: recreate: cannot resolve repo root; parking instead" >&2
 			else
 				_WT_PATH="$(pwd)"
@@ -983,13 +991,13 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 				# testing — passes --worktree-dir so create-worktree.sh uses the
 				# test-local scratch dir instead of the default ~/catalyst/wt/.
 				_RECREATE_WT_DIR_FLAG=""
-				[[ -n "${CATALYST_RECREATE_WORKTREE_DIR:-}" ]] && \
+				[[ -n ${CATALYST_RECREATE_WORKTREE_DIR-} ]] &&
 					_RECREATE_WT_DIR_FLAG="--worktree-dir ${CATALYST_RECREATE_WORKTREE_DIR}"
-				_NEW_WT_OUT="$(cd "$_REPO_ROOT" && \
+				_NEW_WT_OUT="$(cd "$_REPO_ROOT" &&
 					"${SCRIPT_DIR}/create-worktree.sh" \
-					"$TICKET" "$BASE_BRANCH" --reuse-existing ${_RECREATE_WT_DIR_FLAG} 2>/dev/null)"
+						"$TICKET" "$BASE_BRANCH" --reuse-existing ${_RECREATE_WT_DIR_FLAG} 2>/dev/null)"
 				_NEW_WT="$(printf '%s\n' "$_NEW_WT_OUT" | grep '^WORKTREE_PATH=' | cut -d= -f2)"
-				if [[ -n "$_NEW_WT" && -d "$_NEW_WT" ]]; then
+				if [[ -n $_NEW_WT && -d $_NEW_WT ]]; then
 					# Delete the signal file so the second dispatch's idempotency
 					# guard finds no file and writes a fresh one (not "dispatched"
 					# which would short-circuit the re-exec as idempotent).
@@ -1075,10 +1083,10 @@ spawn_claude_bg() {
 	# but is lost to the frozen daemon env on the far side). Threaded immediately
 	# after --model in BOTH branches so every spawn site (fresh, resume,
 	# resume-fallback) inherits it.
-	if [[ -n "$WORKER_EFFORT" || -n "$APPEND_SYSTEM_PROMPT" ]]; then
+	if [[ -n $WORKER_EFFORT || -n $APPEND_SYSTEM_PROMPT ]]; then
 		local _levers=()
-		[[ -n "$WORKER_EFFORT" ]] && _levers+=(--effort "$WORKER_EFFORT")
-		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
+		[[ -n $WORKER_EFFORT ]] && _levers+=(--effort "$WORKER_EFFORT")
+		[[ -n $APPEND_SYSTEM_PROMPT ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
 			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" \
