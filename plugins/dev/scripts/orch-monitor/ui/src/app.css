@@ -272,6 +272,17 @@
   box-sizing: border-box;
 }
 
+/* CTL-1033: card-lift utility classes (the embossing cure). `.shadow-card` is the
+   canonical card lift; `.shadow-elevated` is the popover/palette tier. They read the
+   per-theme --shadow-card / --shadow-elevated vars (:root / .dark) so the lift flips
+   with the theme (inset top-highlight + ambient in dark; soft warm shadow in light). */
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+.shadow-elevated {
+  box-shadow: var(--shadow-elevated);
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
