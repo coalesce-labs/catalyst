@@ -32,13 +32,14 @@ describe("classifyKey — the pre-existing bindings still work unchanged", () =>
   });
 
   it("the input-focus guard swallows everything while an INPUT/TEXTAREA/SELECT is focused", () => {
-    expect(isTypingTarget("INPUT")).toBe(true);
-    expect(isTypingTarget("TEXTAREA")).toBe(true);
-    expect(isTypingTarget("SELECT")).toBe(true);
-    expect(isTypingTarget("DIV")).toBe(false);
+    // CTL-1025: migrated from string tag to TypingTargetLike structural form.
+    expect(isTypingTarget({ tagName: "INPUT" })).toBe(true);
+    expect(isTypingTarget({ tagName: "TEXTAREA" })).toBe(true);
+    expect(isTypingTarget({ tagName: "SELECT" })).toBe(true);
+    expect(isTypingTarget({ tagName: "DIV" })).toBe(false);
     // a literal `/` or `j` typed into an input is NOT a shortcut.
-    expect(classifyKey(bare("/"), "INPUT", false).type).toBe("none");
-    expect(classifyKey(bare("j"), "TEXTAREA", false).type).toBe("none");
+    expect(classifyKey(bare("/"), { tagName: "INPUT" }, false).type).toBe("none");
+    expect(classifyKey(bare("j"), { tagName: "TEXTAREA" }, false).type).toBe("none");
   });
 });
 
@@ -96,7 +97,7 @@ describe("classifyKey — ⌘K / Ctrl-K toggles the palette (NEW)", () => {
   });
 
   it("⌘K is reachable EVEN while an input is focused (the one shortcut that pierces the guard)", () => {
-    expect(classifyKey(bare("k", { metaKey: true }), "INPUT", false).type).toBe("palette");
+    expect(classifyKey(bare("k", { metaKey: true }), { tagName: "INPUT" }, false).type).toBe("palette");
   });
 
   it("a bare `k` (no modifier) is prev, NOT the palette", () => {
@@ -122,7 +123,7 @@ describe("classifyKey — g-chords g t / g w / g a (NEW)", () => {
 
   it("the chord does not fire while an input is focused", () => {
     // even with a pending chord, a focused input swallows the second key.
-    expect(classifyKey(bare("t"), "INPUT", true).type).toBe("none");
+    expect(classifyKey(bare("t"), { tagName: "INPUT" }, true).type).toBe("none");
   });
 
   it("exposes a chord window constant for the hook timer", () => {

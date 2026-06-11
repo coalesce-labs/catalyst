@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { classifyKey, CHORD_WINDOW_MS } from "./key-nav";
+import type { TypingTargetLike } from "../lib/typing-target";
 
 interface KeyboardNavOptions {
   // ── pre-existing callbacks (unchanged) ──────────────────────────────────────
@@ -59,13 +60,9 @@ export function useKeyboardNav(options: KeyboardNavOptions): void {
     };
 
     function handleKeyDown(e: KeyboardEvent) {
-      const active = document.activeElement as HTMLElement | null;
-      const focusedTag = active?.tagName;
-      // CTL-1049: also guard a focused contentEditable host so Escape-means-back
-      // (and the other shortcuts) never fire while the operator edits rich text.
-      const focusedEditable = active?.isContentEditable === true;
+      const focused = document.activeElement as TypingTargetLike | null;
       const wasChordPending = chordPending;
-      const action = classifyKey(e, focusedTag, wasChordPending, focusedEditable);
+      const action = classifyKey(e, focused, wasChordPending);
 
       // Any resolved keystroke (the second key of a chord, or a non-`g` key)
       // clears a pending chord before we dispatch. `chord-start` re-arms below.
