@@ -8087,6 +8087,25 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
     expect(dispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "research" });
   });
 
+  test("CTL-1057: single-host ready filter keeps tickets even when hostName != roster entry", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["mini"],
+      hostName: "RyansMini250233.rozich",
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(claimDispatch.calls).toHaveLength(0); // multiHost gate skipped the claim
+    expect(dispatch.calls).toHaveLength(1); // HRW single-host → dispatched
+    expect(dispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "research" });
+  });
+
   test("multi-host: a ticket OWNED by this host is dispatched (HRW keeps it)", () => {
     writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
     const dispatch = fakeDispatch({ code: 0 });

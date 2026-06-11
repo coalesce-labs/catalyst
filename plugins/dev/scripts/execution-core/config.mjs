@@ -194,6 +194,21 @@ export function getClusterHosts() {
   return [getHostName()];
 }
 
+// CTL-1057: a multi-host roster that does NOT include this host means every
+// ticket HRW-routes to some OTHER host and this daemon silently owns nothing.
+// Returns a human warning string in that case, null otherwise. Single-host
+// (roster.length <= 1) → null — Phase 1 makes that a deliberate no-op and
+// a name mismatch there is not an error worth surfacing.
+export function hostMembershipWarning(roster, self) {
+  if (!Array.isArray(roster) || roster.length <= 1) return null;
+  if (roster.includes(self)) return null;
+  return (
+    `host "${self}" is not in the cluster roster [${roster.join(", ")}] — ` +
+    `this daemon will own zero tickets under HRW. Set catalyst.host.name ` +
+    `(Layer-2 config) to a roster entry or fix .catalyst/hosts.json.`
+  );
+}
+
 // CTL-859 — node-heartbeat cadence. The daemon appends one node.heartbeat event
 // to the unified event log every interval so a future liveness reader can decide
 // "dead" = no heartbeat for a generous grace window (see the design doc: 5–10 min
