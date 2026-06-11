@@ -94,6 +94,7 @@ import {
   countBackgroundAgents,
   getAgentsCached,
   isBgJobAlive as defaultIsBgJobAlive,
+  livenessForBgJob as defaultLivenessForBgJob,   // CTL-768
 } from "./claude-agents.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
@@ -114,6 +115,7 @@ import {
   defaultKillBgJob,
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
+  defaultAppendHeldStoppedEvent,
   resolvePhaseSessionId as defaultResolveSession,
   defaultAppendCooldownGcEvent,
   defaultAppendCooldownEscalatedEvent,
@@ -1431,6 +1433,53 @@ export function clearDispatchCooldown(orchDir, ticket, phase) {
   }
 }
 
+// CTL-768: hold-stop cooldown — prevents stop/revive thrash on a needs-input
+// worker that re-parks immediately after a human-reply revive. Window: 3 ticks
+// (90s default) — comfortably longer than one revive→re-park cycle, short
+// enough to re-free the slot promptly. Env-overridable. File-backed (NOT an
+// in-memory Map) so the guard survives a daemon restart (watch-mode crashes).
+const HOLD_STOP_COOLDOWN_MS =
+  Number(process.env.SCHEDULER_HOLD_STOP_COOLDOWN_MS) || 90_000;
+
+// Marker lives under orchDir/.hold-stop-cooldowns/<ticket>-<phase>.json — outside
+// workers/<T>/ (same reasoning as .dispatch-cooldowns, CTL-624: never manufacture
+// a worker dir for a cooldown).
+export function holdStopCooldownPath(orchDir, ticket, phase) {
+  return join(orchDir, ".hold-stop-cooldowns", `${ticket}-${phase}.json`);
+}
+
+export function inHoldStopCooldown(orchDir, ticket, phase, now) {
+  let stoppedAt;
+  try {
+    stoppedAt = JSON.parse(
+      readFileSync(holdStopCooldownPath(orchDir, ticket, phase), "utf8"),
+    )?.stoppedAt;
+  } catch {
+    return false; // absent / malformed → not in cooldown
+  }
+  if (typeof stoppedAt !== "number") return false;
+  return now - stoppedAt < HOLD_STOP_COOLDOWN_MS;
+}
+
+export function recordHoldStop(orchDir, ticket, phase, now) {
+  try {
+    mkdirSync(join(orchDir, ".hold-stop-cooldowns"), { recursive: true });
+    writeFileSync(
+      holdStopCooldownPath(orchDir, ticket, phase),
+      JSON.stringify({ ticket, phase, stoppedAt: now }),
+    );
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message },
+      "scheduler: hold-stop cooldown write failed — continuing");
+  }
+}
+
+export function clearHoldStopCooldown(orchDir, ticket, phase) {
+  try {
+    rmSync(holdStopCooldownPath(orchDir, ticket, phase), { force: true });
+  } catch { /* best-effort */ }
+}
+
 // CTL-713: garbage-collect expired cooldown markers whose ticket has left the
 // eligible set (Done/Canceled). Both conditions required: an eligible ticket
 // still failing must keep its marker so consecutiveFailures accrues toward
@@ -1959,6 +2008,13 @@ export function schedulerTick(
     killBgJob = defaultKillBgJob,
     appendPreemptedEvent = defaultAppendPreemptedEvent,
     appendResumedAfterPreemptionEvent = defaultAppendResumedAfterPreemptionEvent,
+    // CTL-768 held-worker stop seams.
+    // livenessForHeld — idle/busy/absent on a needs-input bg process; the
+    //   mid-turn guard. Default injects the warm getAgentsCached snapshot so the
+    //   hot path never spawns `claude agents` per signal. Tests inject a stub.
+    livenessForHeld = (bgJobId) =>
+      defaultLivenessForBgJob(bgJobId, { agents: getAgentsCached().agents }),
+    appendHeldStoppedEvent = defaultAppendHeldStoppedEvent,
     // CTL-705 Phase 5: resume resolver — maps a dead bg_job_id to a claude
     // --resume UUID. Null return → cold re-dispatch (no --resume-session).
     resolveSession = defaultResolveSession,
@@ -2355,6 +2411,12 @@ export function schedulerTick(
     // it wins the race every tick. (The advancement guard at the (1) sweep only
     // stops false advancement, not false reclaim — both are needed.)
     if (sig.status === PREEMPTED_STATUS) continue;
+    // CTL-768: a needs-input worker that was intentionally stopped by the
+    // held-stop sweep (stoppedForHold: true) must not be reclaimed — its slot
+    // is already freed and it will be revived with --resume by handleCommentWake
+    // when the human replies. Reclaiming it here would re-spawn the worker and
+    // defeat the slot-freeing mechanism entirely.
+    if (sig.status === "needs-input" && sig.raw?.stoppedForHold) continue;
     try {
       const team = teamOf(sig.ticket);
       const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
@@ -2904,6 +2966,61 @@ export function schedulerTick(
     }
   }
 
+  // (0.75) CTL-768 held-worker stop sweep — free the slot held by an idle
+  // needs-input worker so other work can proceed while it awaits a human reply.
+  // Runs AFTER preemption (never double-kill a just-parked worker) and BEFORE
+  // advancement. Status stays "needs-input" (reclaim/advancement/in-flight
+  // guards already cover it); a stoppedForHold marker tells handleCommentWake to
+  // revive with --resume. Natural idempotency: a stopped process reads "absent",
+  // so the idle gate skips it next tick; the cooldown guards the snapshot-lag race.
+  let heldStopCount = 0;
+  {
+    const nowMs = now();
+    for (const sig of readWorkerSignals(orchDir)) {
+      if (!inFlightTickets.has(sig.ticket)) continue;
+      if (sig.status !== "needs-input") continue;
+      const bgJobId = sig.raw?.bg_job_id ?? null;
+      if (!bgJobId) continue;                                   // no process to stop
+      if (inHoldStopCooldown(orchDir, sig.ticket, sig.phase, nowMs)) continue;
+      if (livenessForHeld(bgJobId) !== "idle") continue;        // mid-turn / absent guard
+
+      // CTL-768 (verify remediation): persist the durable stoppedForHold marker
+      // BEFORE the irreversible kill so the sweep is crash-safe. If the marker
+      // write throws, we `continue` while the worker is STILL alive+idle (it is
+      // simply retried next tick) — rather than killing first and stranding a
+      // markerless needs-input worker that handleCommentWake would later revive
+      // COLD (no --resume), silently defeating the CTL-768 warm-revive contract
+      // and losing the paused turn context. A persisted marker GUARANTEES the
+      // --resume path. Marker-on-still-running is safe: status stays needs-input
+      // so no other sweep acts on it, and killBgJob is idempotent.
+      const signalPath = join(orchDir, "workers", sig.ticket, `phase-${sig.phase}.json`);
+      try {
+        const updated = {
+          ...sig.raw,                                           // preserves bg_job_id
+          stoppedForHold: true,
+          holdStoppedAt: new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z"),
+        };
+        const tmp = `${signalPath}.tmp.${process.pid}`;
+        writeFileSync(tmp, JSON.stringify(updated));
+        renameSync(tmp, signalPath);                            // atomic
+      } catch (err) {
+        log.warn({ ticket: sig.ticket, phase: sig.phase, err: err.message },
+          "scheduler: held-stop signal write failed — skipping (CTL-768)");
+        continue;
+      }
+      recordHoldStop(orchDir, sig.ticket, sig.phase, nowMs);
+
+      killBgJob({ bgJobId });
+
+      safeEmit(appendHeldStoppedEvent,
+        { orchId: sig.ticket, ticket: sig.ticket, phase: sig.phase, bgJobId },
+        { ticket: sig.ticket, phase: sig.phase });
+      heldStopCount++;
+      log.info({ ticket: sig.ticket, phase: sig.phase, bgJobId },
+        "scheduler: held needs-input worker stopped to free slot (CTL-768)");
+    }
+  }
+
   // (1) Advancement sweep — dispatch the FSM-owed next phase per in-flight ticket.
   // CTL-705: preempted workers are skipped — their active status is not "done" so
   // deriveAdvancement returns null, but an early continue makes the intent explicit
@@ -3163,12 +3280,21 @@ export function schedulerTick(
   // dispatched this tick took slots that liveCount (read before STEP B) does not
   // yet reflect, so without this term sweep 2 over-admits into them (the same
   // double-fill class CTL-705's resumedCount term fixed; one symmetric extra term).
+  // CTL-768 (verify remediation): do NOT subtract heldStopCount here. resumedCount
+  // and promotedCount correct for NEW same-tick spawns NOT yet in liveCount — a
+  // subtract is right. A held-stop is a KILL that is STILL in liveCount this tick
+  // (`claude stop` does not deregister within the same tick — scheduler.mjs:2525-2527),
+  // so computeFreeSlots(maxParallel, inFlightCount) already withholds its slot;
+  // subtracting heldStopCount removed that slot a SECOND time, over-suppressing
+  // genuinely-free capacity at maxParallel>=2 (a transient single-tick throughput
+  // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots = livenessFresh
-    ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
+    ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount)
+        - resumedCount - promotedCount)
     : 0;
   if (!livenessFresh) {
     log.warn(
-      { maxParallel, inFlightCount, resumedCount, promotedCount },
+      { maxParallel, inFlightCount, resumedCount, promotedCount, heldStopCount },
       "scheduler: liveness snapshot stale/cold — holding new-work dispatch (CTL-731)",
     );
   }

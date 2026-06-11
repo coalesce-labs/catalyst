@@ -36,6 +36,12 @@ import {
 } from "./daemon.mjs";
 import { getEventLogPath, log } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
+import {
+  recordHoldStop,
+  holdStopCooldownPath,
+  inHoldStopCooldown,
+  clearHoldStopCooldown,
+} from "./scheduler.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
@@ -1181,6 +1187,90 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0].ticket).toBe("CTL-1");
     expect(dispatched[0].phase).toBe("implement");
+  });
+
+  test("CTL-768: stoppedForHold → dispatch with resumeSession from resolveSession", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push({ p, opts }),
+      removeLabel: async () => {},
+      resolveSession: (bg) => (bg === "held1234" ? "uuid-resume" : null),
+    });
+    expect(dispatched[0].opts.resumeSession).toBe("uuid-resume");
+    expect(dispatched[0].p).toBe("implement");
+  });
+
+  test("CTL-768: stoppedForHold → signal reset to stalled, marker cleared", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    recordHoldStop(orch, "CTL-1", "implement", 1_000);
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: () => {},
+      removeLabel: async () => {},
+      resolveSession: () => "uuid",
+    });
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.stoppedForHold).toBe(false);     // cleared
+    expect(inHoldStopCooldown(orch, "CTL-1", "implement", 2_000)).toBe(false); // cooldown cleared
+  });
+
+  test("CTL-768: stoppedForHold but resolveSession null → dispatch WITHOUT resume (cold fallback)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: () => null,
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+  });
+
+  test("CTL-768: no stoppedForHold → backward-compat (no resume, signal unchanged)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "x" }),
+    );
+    const dispatched = [];
+    const resolveSpy = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: (bg) => { resolveSpy.push(bg); return "x"; },
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+    expect(resolveSpy).toEqual([]);             // resolveSession never called
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("needs-input");     // not reset
   });
 });
 

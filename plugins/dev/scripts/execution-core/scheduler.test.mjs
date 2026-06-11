@@ -68,6 +68,8 @@ import {
   // CTL-834: held-label apply cool-down
   convergeHeldLabel,
   labelCooldownPath,
+  // CTL-768: hold-stop cooldown helpers
+  holdStopCooldownPath, inHoldStopCooldown, recordHoldStop, clearHoldStopCooldown,
 } from "./scheduler.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse tests drive the real batch
@@ -864,6 +866,37 @@ describe("dispatch cool-down helpers", () => {
       JSON.stringify({ phase: "research", code: 1, failedAt: 5_000 }));
     expect(inDispatchCooldown(orchDir, "CTL-9", "research", 35_000)).toBe(true);
     expect(inDispatchCooldown(orchDir, "CTL-9", "research", 66_000)).toBe(false);
+  });
+});
+
+// ── CTL-768: hold-stop cooldown helpers ──
+describe("hold-stop cooldown helpers (CTL-768)", () => {
+  let ctl768Dir;
+  beforeEach(() => { ctl768Dir = mkdtempSync(join(tmpdir(), "ctl768-")); });
+  afterEach(() => { rmSync(ctl768Dir, { recursive: true, force: true }); });
+
+  test("absent marker → not in cooldown", () => {
+    expect(inHoldStopCooldown(ctl768Dir, "CTL-1", "research", 5_000)).toBe(false);
+  });
+  test("recordHoldStop writes a marker with stoppedAt", () => {
+    recordHoldStop(ctl768Dir, "CTL-1", "research", 5_000);
+    const m = JSON.parse(readFileSync(holdStopCooldownPath(ctl768Dir, "CTL-1", "research"), "utf8"));
+    expect(m.stoppedAt).toBe(5_000);
+  });
+  test("within window → in cooldown; past window → not", () => {
+    recordHoldStop(ctl768Dir, "CTL-1", "research", 5_000);
+    expect(inHoldStopCooldown(ctl768Dir, "CTL-1", "research", 5_000 + 45_000)).toBe(true);  // <90s
+    expect(inHoldStopCooldown(ctl768Dir, "CTL-1", "research", 5_000 + 95_000)).toBe(false); // >90s
+  });
+  test("clearHoldStopCooldown removes the marker", () => {
+    recordHoldStop(ctl768Dir, "CTL-1", "research", 5_000);
+    clearHoldStopCooldown(ctl768Dir, "CTL-1", "research");
+    expect(inHoldStopCooldown(ctl768Dir, "CTL-1", "research", 5_001)).toBe(false);
+  });
+  test("malformed marker → not in cooldown (fail-open)", () => {
+    mkdirSync(join(ctl768Dir, ".hold-stop-cooldowns"), { recursive: true });
+    writeFileSync(holdStopCooldownPath(ctl768Dir, "CTL-1", "research"), "{not json");
+    expect(inHoldStopCooldown(ctl768Dir, "CTL-1", "research", 5_000)).toBe(false);
   });
 });
 
@@ -5379,6 +5412,160 @@ describe("preemption sweep (CTL-705 Phase 4)", () => {
     expect(r.advanced.find((a) => a.ticket === "CTL-Adv")).toBeUndefined();
     // No dispatch call at all for CTL-Adv when saturated
     expect(dispatch.calls.find((c) => c.ticket === "CTL-Adv")).toBeUndefined();
+  });
+});
+
+// ─── CTL-768: held-worker stop sweep ───
+
+describe("held-worker stop sweep (CTL-768)", () => {
+  // writeSignalRaw is already available from the scheduler.test.mjs context.
+  // But we also need a helper for writing needs-input signals.
+  function writeNeedsInputSignal(ticket, phase, overrides = {}) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status: "needs-input", ...overrides }),
+    );
+  }
+
+  const noopReclaim = () => "noop";
+
+  test("idle needs-input worker is stopped, signal annotated, event emitted", async () => {
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = []; const events = [];
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1, maxParallel: 1,
+      livenessForHeld: () => "idle",
+      killBgJob: ({ bgJobId }) => kill.push(bgJobId),
+      appendHeldStoppedEvent: (p) => { events.push(p); return true; },
+      reclaimDeadWork: noopReclaim,
+      now: () => 1_000,
+    });
+    expect(kill).toEqual(["held1234"]);
+    const sig = JSON.parse(readFileSync(join(orchDir, "workers/CTL-1/phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("needs-input");          // status unchanged
+    expect(sig.stoppedForHold).toBe(true);           // marker set
+    expect(sig.bg_job_id).toBe("held1234");          // preserved for resolvePhaseSessionId
+    expect(events).toHaveLength(1);
+    // cooldown marker written:
+    expect(existsSync(holdStopCooldownPath(orchDir, "CTL-1", "implement"))).toBe(true);
+  });
+
+  test("mid-turn (busy) worker is NOT stopped", async () => {
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "busy1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = [];
+    schedulerTick(orchDir, { liveBackgroundCount: () => 1, maxParallel: 1,
+      livenessForHeld: () => "busy", killBgJob: ({ bgJobId }) => kill.push(bgJobId),
+      reclaimDeadWork: noopReclaim, now: () => 1_000 });
+    expect(kill).toEqual([]);
+  });
+
+  test("absent worker is NOT stopped (reclaim handles dead workers)", async () => {
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "gone1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const kill = [];
+    schedulerTick(orchDir, { liveBackgroundCount: () => 1, maxParallel: 1,
+      livenessForHeld: () => "absent", killBgJob: ({ bgJobId }) => kill.push(bgJobId),
+      reclaimDeadWork: noopReclaim, now: () => 1_000 });
+    expect(kill).toEqual([]);
+  });
+
+  test("cooldown guard: not re-stopped within HOLD_STOP_COOLDOWN_MS", async () => {
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    recordHoldStop(orchDir, "CTL-1", "implement", 1_000);   // stopped 30s ago
+    const kill = [];
+    schedulerTick(orchDir, { liveBackgroundCount: () => 1, maxParallel: 1,
+      livenessForHeld: () => "idle", killBgJob: ({ bgJobId }) => kill.push(bgJobId),
+      reclaimDeadWork: noopReclaim, now: () => 31_000 });  // within 90s window
+    expect(kill).toEqual([]);
+  });
+
+  test("freeSlots accounting: heldStopCount blocks same-tick new-work double-fill", async () => {
+    // One needs-input worker (alive, count=1) + one queued new-work ticket.
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    writeEligibleProjection("CTL", {
+      tickets: [{ identifier: "CTL-2", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    });
+    const dispatched = [];
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1, maxParallel: 1,        // liveCount=1 BEFORE stop deregisters
+      livenessForHeld: () => "idle", killBgJob: () => {},
+      reclaimDeadWork: noopReclaim,
+      dispatch: (d, t) => { dispatched.push(t); return { code: 0, stdout: "", stderr: "" }; },
+      now: () => 1_000,
+    });
+    // freeSlots = computeFreeSlots(1, liveCount=1) = 0 → no new dispatch. The
+    // held worker is still in liveCount this tick (claude stop doesn't deregister
+    // same-tick), so computeFreeSlots alone already withholds the slot. (CTL-768
+    // remediation removed the redundant `- heldStopCount` term — see the
+    // maxParallel=2 regression below for why the term over-suppressed.)
+    expect(dispatched).not.toContain("CTL-2");
+  });
+
+  test("CTL-768 freeSlots regression: at maxParallel=2 a genuinely-free slot is dispatched the same tick a held-stop fires (no double-suppression)", async () => {
+    // One held idle needs-input worker (CTL-1, still in liveCount=1) + one
+    // genuinely-empty slot + one queued ticket (CTL-2). The corrected accounting
+    // is freeSlots = computeFreeSlots(2, liveCount=1) = 1: computeFreeSlots
+    // already withholds the held worker's slot (it's still in liveCount this
+    // tick), so CTL-2 MUST be dispatched into the second, genuinely-free slot.
+    // The pre-remediation `- heldStopCount` term gave max(0, (2-1) - 1) = 0 and
+    // wrongly suppressed this dispatch — this test fails on that old code.
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeEligibleProjection("CTL", {
+      tickets: [{ identifier: "CTL-2", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    });
+    const dispatched = [];
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1, maxParallel: 2,        // liveCount=1 (held worker still counted)
+      livenessForHeld: () => "idle", killBgJob: () => {},
+      reclaimDeadWork: noopReclaim,
+      dispatch: (args) => { dispatched.push(args.ticket); return { code: 0, stdout: "", stderr: "" }; },
+      now: () => 1_000,
+    });
+    expect(dispatched).toContain("CTL-2");                // the free slot IS used
+    // No over-spawn: held worker still in liveCount (1) + 1 new dispatch = 2 = maxParallel.
+    expect(dispatched).toHaveLength(1);
+  });
+
+  test("needs-input + stoppedForHold signal is NOT revived (reclaimDeadWork returns noop)", () => {
+    // The reclaimDeadWorkIfPossible guard (recovery.mjs:1708) returns "noop" for
+    // needs-input signals — it does NOT revive them. This test uses the real
+    // reclaimDeadWork (no injection) to pin that invariant. No dispatch must fire.
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234", stoppedForHold: true });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1,
+      livenessForHeld: () => "absent",  // already stopped — absent
+      dispatch,
+      // reclaimDeadWork not injected → real reclaimDeadWorkIfPossible runs.
+      // It returns "noop" for needs-input signals — no revive dispatch fires.
+      now: () => 100_000, // past cooldown
+    });
+    // No revive dispatch for the held-stopped worker (noop reclaim)
+    const reviveCallsForCTL1 = dispatch.calls.filter((c) => c.ticket === "CTL-1");
+    expect(reviveCallsForCTL1).toHaveLength(0);
+  });
+
+  test("needs-input + stoppedForHold signal is NOT advanced (guard regression)", () => {
+    writeNeedsInputSignal("CTL-1", "implement", { stoppedForHold: true });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch();
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1,
+      livenessForHeld: () => "absent",
+      dispatch,
+      reclaimDeadWork: noopReclaim,
+      now: () => 100_000,
+    });
+    const advancedForCTL1 = dispatch.calls.filter((c) => c.ticket === "CTL-1");
+    expect(advancedForCTL1).toHaveLength(0); // not advanced
   });
 });
 
