@@ -363,6 +363,16 @@ function LaneCardsRow({
             flexDirection: "column",
             gap: 8,
             minWidth: 0,
+            // CTL-1033 column-tray: each column's track is its OWN `subtle`-level
+            // surface (one step ABOVE the canvas) so columns read as discrete
+            // trays, not one continuous slab. The COL_GAP between grid tracks is the
+            // visible canvas-colored gutter that separates adjacent columns; cards
+            // (C.s2) sit one further step above this tray. The dashed-edge well + 8px
+            // internal padding give the tray a Linear-style enclosed feel.
+            background: C.subtle,
+            borderRadius: 10,
+            border: `1px solid ${C.borderSubtle}`,
+            padding: 8,
             // CTL-958 / CTL-1010: per-cell constrained height with overscroll
             // chaining. Only applied when multiple groups are present
             // (constrainCells=true). The cap is the lane's measured water-fill share.
@@ -384,7 +394,11 @@ function LaneCardsRow({
           }}
         >
           {cell.count === 0 ? (
-            <div style={{ color: C.fgDim, fontSize: 11.5, padding: "10px 0", border: `1px dashed ${C.borderSubtle}`, borderRadius: 8, textAlign: "center" }}>—</div>
+            // CTL-1033: the empty marker no longer carries its own dashed border —
+            // the column tray (the C.subtle cell surface) now defines the column
+            // edge, so a nested border would read as a double frame. A quiet
+            // centered "—" sits inside the tray as "nothing in this phase here".
+            <div style={{ color: C.fgDim, fontSize: 11.5, padding: "8px 0", textAlign: "center" }}>—</div>
           ) : (
             // CTL-952: AnimatePresence enables enter/exit animations on the motion
             // card elements inside (TicketCard / WorkerCard). Cards moving between
