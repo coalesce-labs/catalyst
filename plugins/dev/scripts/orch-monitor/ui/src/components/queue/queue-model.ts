@@ -88,6 +88,18 @@ export function assignSlots(
   return { occupied, emptyCount, overCapacity };
 }
 
+/**
+ * The deck slot label for a 1-based slot position: `slotLabel(1) === "SLOT 1"`.
+ * CTL-1035: BOTH occupied and vacant slots carry this — the deck reads as N
+ * fixed numbered slots, some open. Occupied card i (0-based) is `slotLabel(i+1)`;
+ * the j-th empty (0-based) after `occupied.length` filled is
+ * `slotLabel(occupied.length + j + 1)`, so an open slot keeps the same number it
+ * would carry if it were filled.
+ */
+export function slotLabel(slot: number): string {
+  return `SLOT ${slot}`;
+}
+
 // ── holding buckets ("why work isn't moving") ──────────────────────────────────
 
 export type HoldingBucketKind = "needs-you" | "blocked" | "waiting";

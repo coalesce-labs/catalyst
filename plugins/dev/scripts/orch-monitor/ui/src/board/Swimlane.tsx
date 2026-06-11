@@ -328,8 +328,8 @@ function GroupLabelRow({
 //   • `null` (alloc ≥ demand) → no maxHeight (uncapped — shows everything);
 //   • number → that px cap (the lane's water-fill share).
 // The lane row carries `data-lane-key` (matched by the hook) and constrained cells
-// add className="cat-scroll" so internal scrollbars use the existing thin 9px
-// themed idiom (Board.tsx PULSE_CSS). No new affordances (no fades, no "+N more").
+// add className="cat-overlay-scroll" (CTL-1036) so internal scrollbars stay hidden
+// at rest and reveal a slim overlay thumb only while scrolling. No new affordances.
 function LaneCardsRow({
   cells,
   laneKey,
@@ -357,7 +357,7 @@ function LaneCardsRow({
         <div
           key={i}
           data-lane-cell="true"
-          className={constrainCells ? "cat-scroll" : undefined}
+          className={constrainCells ? "cat-overlay-scroll" : undefined}
           style={{
             display: "flex",
             flexDirection: "column",
@@ -688,7 +688,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   return (
     <div
       ref={scrollRef}
-      className="cat-scroll cat-board-scroll"
+      className="cat-overlay-scroll cat-board-scroll"
       data-board-scroll="true"
       // CTL-989: register this scroller with TanStack Router's scroll restoration
       // (router scrollRestoration:true) so back-from-detail restores its offset

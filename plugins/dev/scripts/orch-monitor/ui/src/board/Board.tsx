@@ -80,6 +80,9 @@ import {
 // in-column order) lives in board-display.ts so the Gherkin is DOM-free testable.
 import { boardPrefsAtom, type Density } from "./prefs-store";
 import { DisplayOptionsPopover } from "./display-options-popover";
+// CTL-1018: portal the board's controls into the SINGLE app-shell header row
+// (the breadcrumb bar) so the board has no second toolbar bar below it.
+import { HeaderActions } from "@/components/header-actions";
 // CTL-950: shared-header column derivation. `visibleColumnDefs` picks the single
 // column SET the shared header shows (over EVERY lane combined); `laneColumns`
 // distributes ONE lane's tickets across that fixed set (empty cells kept, aligned).
@@ -206,11 +209,11 @@ export const fmtMsAgo = (ms: number) => {
 // (cubic-bezier jolt) is the visual analog of the iOS rubber-band that the CSS
 // contain alone can't provide in Safari. Gated on prefers-reduced-motion: under
 // reduce, the translateX is 0 (no motion) and only the edge shadow remains.
+// CTL-1036: the board-local always-visible 9px .cat-scroll bar is retired — every
+// board/lane scroller now uses the shared .cat-overlay-scroll utility (app.css),
+// hidden at rest and revealed transiently while scrolling. PULSE_CSS keeps only
+// the rubber-band bump classes.
 const PULSE_CSS = `
-.cat-scroll::-webkit-scrollbar { width:9px; height:9px; }
-.cat-scroll::-webkit-scrollbar-thumb { background:${C.s4}; border-radius:6px; }
-.cat-scroll::-webkit-scrollbar-track { background:transparent; }
-
 @media (prefers-reduced-motion: no-preference) {
   .cat-board-bump-left  { transform: translateX(4px);  transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
   .cat-board-bump-right { transform: translateX(-4px); transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
@@ -998,11 +1001,15 @@ export function Board({
             carries the status cluster. The subhead carries only the view label,
             description, display popover, and worker-grouping controls. */}
 
-        {/* subhead */}
-        <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
-          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
-          {/* CTL-972: lens-aware tagline + quiet active-lens indicator */}
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>
+        {/* CTL-1018: the board's second toolbar bar is GONE. The surface subtitle
+            (lens-aware tagline + quiet lens chip) and ALL controls (Display popover
+            / worker group-by + node filter / Dep Graph) are portaled into the
+            SINGLE app-shell header row (the breadcrumb bar already names the
+            surface). One header per surface; behavior + persistence unchanged. */}
+        <HeaderActions>
+          {/* CTL-972: lens-aware tagline + quiet active-lens indicator. Muted, and
+              hidden on narrow widths so the header stays calm. */}
+          <span className="hidden text-[12px] text-muted-foreground lg:inline">
             {view === "tickets"
               ? lens === "phase"
                 ? "Which phase-agent is working each ticket · cyan = live worker"
@@ -1014,11 +1021,8 @@ export function Board({
               {lens === "phase" ? "Pipeline phase" : "Linear stage"}
             </span>
           )}
-          <span style={{ flex: 1 }} />
-          {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
-              colorBy / repo-lanes) are folded into ONE Display-options popover —
-              "density is a knob". The popover lives in Board's own subhead and
-              reads/writes the persisted boardPrefsAtom. */}
+          {/* BOARD2 / CTL-906: the lens / colorBy / repo-lanes toggles folded into
+              ONE Display-options popover, reading/writing the persisted prefs. */}
           {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
           {view === "workers" && <>
             {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
@@ -1034,28 +1038,24 @@ export function Board({
               />
             )}
           </>}
-          {/* CTL-948 / CTL-989: dep-graph link. The Board is always inside the
-              unified router now, so the jump is a client-side navigate to
-              /dep-graph (an `onDepGraph` prop, if supplied, still wins for back-
-              compat callers). */}
-          {(
-            <button
-              onClick={() =>
-                onDepGraph
-                  ? onDepGraph()
-                  : void navigate({ to: "/dep-graph", search: (prev) => prev })
-              }
-              style={{
-                fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
-                background: "transparent", border: `1px solid ${C.border}`,
-                color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
-              }}
-              title="Open backlog dependency graph"
-            >
-              Dep Graph
-            </button>
-          )}
-        </div>
+          {/* CTL-948 / CTL-989: dep-graph link — a client-side navigate to
+              /dep-graph (an `onDepGraph` prop still wins for back-compat callers). */}
+          <button
+            onClick={() =>
+              onDepGraph
+                ? onDepGraph()
+                : void navigate({ to: "/dep-graph", search: (prev) => prev })
+            }
+            style={{
+              fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
+              background: "transparent", border: `1px solid ${C.border}`,
+              color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
+            }}
+            title="Open backlog dependency graph"
+          >
+            Dep Graph
+          </button>
+        </HeaderActions>
 
         {/* body — CTL-989 board-height fix: a flex COLUMN so the scroller child can
             `flex:1; minHeight:0` and FILL the remaining space below the subhead

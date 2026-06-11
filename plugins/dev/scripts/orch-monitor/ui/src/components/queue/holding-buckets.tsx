@@ -40,10 +40,14 @@ function BucketRow({
   item,
   withTopHairline,
   onOpenTicket,
+  titleByTicket,
 }: {
   item: HoldingBucketItem;
   withTopHairline: boolean;
   onOpenTicket?: (key: string) => void;
+  /** CTL-1041: resolve a worker row's ticket TITLE (the read-model's BoardTicket
+   *  carries it) so the row leads with the title, not the bare ticket key. */
+  titleByTicket: Map<string, string>;
 }) {
   const reduced = useReducedMotion();
   const wrap = (children: React.ReactNode) => (
@@ -66,7 +70,7 @@ function BucketRow({
         state={w.activeState}
         ticketKey={w.ticket}
         priority={0}
-        title={w.ticket}
+        title={titleByTicket.get(w.ticket) || w.ticket}
         withTopHairline={withTopHairline}
         onClick={onOpenTicket ? () => onOpenTicket(w.ticket) : undefined}
         meta={
@@ -102,7 +106,15 @@ function BucketRow({
   );
 }
 
-function Bucket({ bucket, onOpenTicket }: { bucket: HoldingBucket; onOpenTicket?: (key: string) => void }) {
+function Bucket({
+  bucket,
+  onOpenTicket,
+  titleByTicket,
+}: {
+  bucket: HoldingBucket;
+  onOpenTicket?: (key: string) => void;
+  titleByTicket: Map<string, string>;
+}) {
   if (bucket.items.length === 0) return null;
   return (
     <div style={{ marginTop: 12 }}>
@@ -118,6 +130,7 @@ function Bucket({ bucket, onOpenTicket }: { bucket: HoldingBucket; onOpenTicket?
             item={item}
             withTopHairline={i > 0}
             onOpenTicket={onOpenTicket}
+            titleByTicket={titleByTicket}
           />
         ))}
       </AnimatePresence>
@@ -137,6 +150,9 @@ export function HoldingBuckets({
   onOpenTicket?: (key: string) => void;
 }) {
   const buckets = groupHoldingBuckets(tickets, workers, maxParallel);
+  // CTL-1041: worker rows carry only a ticket key; resolve the ticket TITLE from
+  // the same read-model BoardTicket[] so every holding row leads with the title.
+  const titleByTicket = new Map(tickets.map((t) => [t.id, t.title]));
   return (
     <section>
       <div style={{ fontSize: 13, fontWeight: 600, color: C.fg, marginBottom: 2 }}>Why work isn&apos;t moving</div>
@@ -146,9 +162,9 @@ export function HoldingBuckets({
         </div>
       ) : (
         <>
-          <Bucket bucket={buckets.needsYou} onOpenTicket={onOpenTicket} />
-          <Bucket bucket={buckets.blocked} onOpenTicket={onOpenTicket} />
-          <Bucket bucket={buckets.waiting} onOpenTicket={onOpenTicket} />
+          <Bucket bucket={buckets.needsYou} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.blocked} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.waiting} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
         </>
       )}
     </section>

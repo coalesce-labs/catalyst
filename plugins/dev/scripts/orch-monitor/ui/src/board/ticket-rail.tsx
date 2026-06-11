@@ -450,7 +450,7 @@ export function TicketRailCards({
   return (
     <aside
       data-shell-rail
-      className="no-scrollbar"
+      className="cat-overlay-scroll"
       style={{
         width: 280,
         flex: "0 0 280px",

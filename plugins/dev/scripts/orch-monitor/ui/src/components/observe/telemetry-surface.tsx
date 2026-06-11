@@ -17,6 +17,7 @@ import { useAtom } from "jotai";
 // CTL-989: the Telemetry surface is inside the unified router, so the worker
 // drill-down is a client-side navigate (no full-document reload, left nav stays).
 import { useNavigate } from "@tanstack/react-router";
+import { HeaderActions } from "@/components/header-actions";
 import type {
   OtelHealth,
   OtelLogEntry,
@@ -339,14 +340,14 @@ export function TelemetrySurface() {
   });
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Telemetry</h1>
-          <p className="text-[12px] text-muted">
-            Is work actually flowing right now?
-          </p>
-        </div>
+    <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
+      {/* CTL-1018: the surface's own header bar is GONE — the breadcrumb row names
+          it (OBSERVE › Telemetry). Its subtitle + time-range control move into that
+          SINGLE header row. One header per surface. */}
+      <HeaderActions>
+        <span className="hidden text-[12px] text-muted-foreground lg:inline">
+          Is work actually flowing right now?
+        </span>
         <ToggleGroup
           type="single"
           variant="outline"
@@ -361,7 +362,7 @@ export function TelemetrySurface() {
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
-      </header>
+      </HeaderActions>
 
       {/* HERO — full-width, top, the surface's ONE answer (Principle 1). */}
       <TelemetryHero

@@ -690,9 +690,20 @@ function ticketUpdatedAt(phaseSigs) {
   return max;
 }
 
-function ticketTitle(ticket, triage, eligibleIndex) {
-  if (triage && (triage.title || triage.summary)) return triage.title || triage.summary;
-  if (eligibleIndex[ticket]?.title) return eligibleIndex[ticket].title;
+// CTL-1041: the TITLE is the outcome line and must lead on every surface (slot
+// cards, inbox detail, holding rows). The triage `summary` is the DESCRIPTION
+// (e.g. "Live probe confirmed the unified event log…") and must NEVER stand in
+// for the title — leading with it is the CTL-1041 bug. Priority:
+//   1. an explicit triage.title (a real title the triage pass recorded),
+//   2. the authoritative Linear title (durable cache via linfo, else the
+//      eligible projection),
+//   3. only then the triage.summary (last-ditch when no Linear title exists),
+//   4. the ticket key itself.
+export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
+  if (triage?.title) return triage.title;
+  const linearTitle = linfo[ticket]?.title ?? eligibleIndex[ticket]?.title ?? null;
+  if (linearTitle) return linearTitle;
+  if (triage?.summary) return triage.summary;
   return ticket;
 }
 const ticketType = (triage) => triage?.classification || triage?.type || "task";
@@ -1071,7 +1082,7 @@ export async function assembleBoard() {
       needsHumanSince: null,
     });
     return {
-      id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
+      id, title: ticketTitle(id, triage, eligibleIndex, linfo), type: ticketType(triage),
       repo: repoFor(id), team: teamFor(id),
       phase: cur.phase, status: cur.status, model: cur.model,
       linearState: PHASE_TO_LINEAR[cur.phase] || "Research",

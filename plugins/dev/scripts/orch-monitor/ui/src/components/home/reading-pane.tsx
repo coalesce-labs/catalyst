@@ -23,6 +23,29 @@
 // background TINT + a left accent BAR (the attention-bar pattern) — NEVER a
 // bordered sub-card, never cyan (cyan is reserved for the live signal).
 import { CheckCircle2, ExternalLink as ExternalLinkIcon } from "lucide-react";
+
+// CTL-1041: a small, restrained Claude logomark for the View-in-Claude pill — the
+// Anthropic "spark" burst rendered as a single inline SVG (no asset, no network,
+// inherits currentColor). Tasteful, not branded-loud: it sits as the leading mark
+// on the pill, the external-link chevron stays as the trailing affordance.
+function ClaudeMark({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* A 12-spoke radial burst (the Claude spark): four cardinal long spokes
+          plus eight shorter diagonals, all from the center. */}
+      <g stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+        <path d="M12 3.5V9M12 15v5.5M3.5 12H9M15 12h5.5" />
+        <path d="M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" opacity="0.85" />
+      </g>
+    </svg>
+  );
+}
 import { isNeedsYouSection, type InboxRow } from "@/board/home-inbox";
 import { isDoneStatus, isPhase, phaseIndexOf, PHASE_LABEL } from "@/board/phase-model";
 import {
@@ -290,6 +313,7 @@ export function ReadingPane({
                 rel="noopener noreferrer"
                 title="Open this agent's Claude Code session in a new tab"
               >
+                <ClaudeMark className="size-3.5" />
                 View in Claude
                 <ExternalLinkIcon className="size-3.5" />
               </a>
