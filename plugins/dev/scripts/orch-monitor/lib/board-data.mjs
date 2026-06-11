@@ -23,6 +23,15 @@ import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
+// CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
+// CTL records carry their title via the eligible projection (eligible/CTL.json),
+// but ADV records reach the payload only through ticket_state (no title column)
+// and have NO eligible entry → linfo[id].title === null → ticketTitle() falls
+// through to triage.summary (the DESCRIPTION), which is the CTL-1046 bug. This
+// batched, TTL-cached, fail-open fetcher (already cross-team aware) fills title
+// for ALL teams at the DATA layer so the CTL-1041 title-preferred component logic
+// renders correctly without another component fallback.
+import { fillTitleDescriptionFallback } from "./linear-title-description-fallback.mjs";
 // CTL-1020: project Linear blocked-by/blocks relations into per-ticket blockers[]
 // so the dependency graph draws edges for tickets WITHOUT a triage.json (queued /
 // relation-only). Additive — triage-derived blockers stay authoritative.
@@ -713,6 +722,43 @@ export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
   if (triage?.summary) return triage.summary;
   return ticket;
 }
+
+// CTL-1046: which board IDs need a supplemental Linear-title fetch. A title is
+// "present" if EITHER source ticketTitle() consults has it (durable linfo cache
+// OR the eligible projection). CTL tickets carry their title via the eligible
+// projection; cross-team (ADV) records reach the payload only through ticket_state
+// (no title column) and have no eligible entry → both sources null → fetch needed.
+// Returns a de-duped array (order preserved).
+export function collectNullTitleIds(boardIds, linfo = {}, eligibleIndex = {}) {
+  return [
+    ...new Set(
+      boardIds.filter(
+        (id) => (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null,
+      ),
+    ),
+  ];
+}
+
+// CTL-1046: merge fetched Linear titles into linfo in-place (mirrors the
+// estimate-fallback merge). For each null-title ID, write the fetched title onto
+// linfo[id], creating a linfo entry first if the ticket was eligible-only (no
+// ticket_state row). A ticket Linear genuinely has no title for is left untouched
+// (honest null) so ticketTitle()'s summary/key fallback still runs. Returns linfo.
+export function mergeTitleFallback(linfo, nullTitleIds, fetched) {
+  for (const id of nullTitleIds) {
+    const fetchedTitle = fetched?.[id]?.title ?? null;
+    if (fetchedTitle === null) continue; // Linear has no title → leave honest null
+    if (!linfo[id]) {
+      linfo[id] = {
+        priority: 0, estimate: null, project: null, labels: [], relations: null,
+        assignee: null, linearState: null, title: null,
+        ownerHost: null, generation: null, fencePhase: null, claimedAt: null, heldSince: null,
+      };
+    }
+    linfo[id] = { ...linfo[id], title: fetchedTitle };
+  }
+  return linfo;
+}
 const ticketType = (triage) => triage?.classification || triage?.type || "task";
 // CTL-755: the scraped dependency ids triage recorded (flat string[] or rich
 // [{id}] — readTriageDependencies in the scheduler tolerates both, so we do too).
@@ -1072,6 +1118,34 @@ export async function assembleBoard() {
         estimateMethod: linfo[id].estimateMethod ?? method?.type ?? null,
       };
     }
+  })();
+
+  // CTL-1046: supplemental TITLE fallback — the same data-layer pattern as the
+  // estimate fallback above. CTL tickets carry their Linear title via the eligible
+  // projection (eligibleIndex[id].title), but cross-team records (e.g. ADV) reach
+  // the payload only through ticket_state, which has NO title column, AND have no
+  // eligible entry (ADV's eligible/<TEAM>.json is empty) → linfo[id].title === null.
+  // Without this, ticketTitle() falls through to triage.summary (the description),
+  // which is the CTL-1046 bug (ADV rows rendered descriptions). Collect every board
+  // ticket ID whose title is null, batch-fetch from Linear (5-min TTL, fail-open,
+  // cross-team aware), and merge the real title into linfo so ticketTitle() returns
+  // the Linear title for ALL teams. A ticket genuinely missing a Linear title still
+  // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
+  await (async () => {
+    const allBoardIds = [
+      ...[...cardTicketIds],
+      ...eligible.map((e) => e.id),
+    ];
+    // Only fetch titles for IDs that have NO title from either source the title
+    // resolver consults (durable linfo cache OR the eligible projection).
+    const nullTitleIds = collectNullTitleIds(allBoardIds, linfo, eligibleIndex);
+    if (nullTitleIds.length === 0) return;
+
+    // Batch-fetch titles (and descriptions/labels/relations) for null-title IDs,
+    // then merge the real titles into linfo (in-place — linfo is a plain object,
+    // never shared with the broker DB or cache reader, so mutation here is safe).
+    const fallback = await fillTitleDescriptionFallback(nullTitleIds);
+    mergeTitleFallback(linfo, nullTitleIds, fallback);
   })();
 
   let tickets = await Promise.all([...cardTicketIds].map(async (id) => {

@@ -322,6 +322,23 @@ export function ticketTitle(
   eligibleIndex: Record<string, { title?: string | null } | undefined>,
   linfo?: Record<string, { title?: string | null } | undefined>,
 ): string;
+/** CTL-1046: board IDs whose title is null in BOTH sources ticketTitle() consults
+ *  (durable linfo cache + eligible projection) — i.e. cross-team (ADV) records that
+ *  reach the payload via ticket_state (no title column) with no eligible entry.
+ *  De-duped, order preserved. */
+export function collectNullTitleIds(
+  boardIds: string[],
+  linfo?: Record<string, { title?: string | null } | undefined>,
+  eligibleIndex?: Record<string, { title?: string | null } | undefined>,
+): string[];
+/** CTL-1046: merge fetched Linear titles into linfo in-place (creates a linfo entry
+ *  for eligible-only tickets). A null fetched title is left untouched (honest null).
+ *  Returns the mutated linfo. */
+export function mergeTitleFallback(
+  linfo: Record<string, { title?: string | null } & Record<string, unknown>>,
+  nullTitleIds: string[],
+  fetched: Record<string, { title?: string | null } | undefined>,
+): Record<string, { title?: string | null } & Record<string, unknown>>;
 export function assembleBoard(): Promise<BoardPayload>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
