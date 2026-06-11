@@ -60,16 +60,25 @@ describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
     expect(sidebarCode).toMatch(/Operate/);
   });
 
-  it("OPERATE is a plain (always-expanded) SidebarGroup, NOT wrapped in a Collapsible", () => {
-    // The OPERATE group must render outside any Collapsible — only per-project and
-    // OBSERVE groups collapse. CTL-960: the label was renamed "Overall" (from "Operate").
-    // Check for "Overall" — the current label — to verify it's the non-collapsible group.
-    const operateGroupIdx = sidebarSrc.indexOf("Overall</SidebarGroupLabel>");
-    const firstCollapsibleIdx = sidebarSrc.indexOf("<Collapsible");
-    expect(operateGroupIdx).toBeGreaterThan(-1);
-    expect(firstCollapsibleIdx).toBeGreaterThan(-1);
-    // OPERATE's label appears BEFORE the first <Collapsible> in source.
-    expect(operateGroupIdx).toBeLessThan(firstCollapsibleIdx);
+  it("Overall is the FIRST section and is itself collapsible (CTL-1034)", () => {
+    // CTL-1034 §1: EVERY top-level section now collapses — including Overall, which
+    // was previously a plain always-expanded SidebarGroup. Overall keeps its
+    // SidebarGroupLabel heading ("Overall") but the label is now `asChild` over a
+    // CollapsibleTrigger, and the whole group is wrapped in a Collapsible. The
+    // ">Overall<" heading text node must still be the FIRST section in source —
+    // before the per-project groups and Observe.
+    // The "Overall" heading text node sits inside the CollapsibleTrigger (tolerant
+    // of the JSX newline between the trigger open-tag and the text).
+    const overallMatch = /<CollapsibleTrigger[^>]*>\s*Overall\b/.exec(sidebarSrc);
+    expect(overallMatch).not.toBeNull();
+    const overallHeadingIdx = overallMatch ? overallMatch.index : -1;
+    // Overall opens before the Projects heading and the Observe block.
+    const projectsHeadingIdx = sidebarSrc.indexOf(">Projects<");
+    const observeBlockIdx = sidebarSrc.indexOf("OBSERVE — collapsible");
+    expect(overallHeadingIdx).toBeLessThan(projectsHeadingIdx);
+    expect(overallHeadingIdx).toBeLessThan(observeBlockIdx);
+    // Overall persists its open-state via the dedicated nav-store atom.
+    expect(sidebarSrc).toContain("navOverallOpenAtom");
   });
 
   it("Tickets is a first-class top-tier OPERATE item, not buried under OBSERVE", () => {
@@ -121,12 +130,16 @@ describe("OBSERVE is a recessed collapsible go-deeper tier (CTL-893)", () => {
     expect(liveDecl).toContain('"Telemetry"');
   });
 
-  it("OBSERVE defaults collapsed (the toggle state initialises closed)", () => {
-    // useState(false) → collapsed by default; open is bound to the Collapsible.
-    // OBS-5: the Collapsible force-opens when a live OBSERVE surface is active
-    // (open={observeOpen || observeContainsActive}), so the selected item is never
-    // hidden inside a collapsed group — but observeOpen still drives the default.
-    expect(sidebarSrc).toMatch(/useState\(\s*false\s*\)/);
+  it("OBSERVE is collapsible with a persisted, default-open state (CTL-1034)", () => {
+    // CTL-1034 §1: every section (incl. Observe) collapses and PERSISTS its
+    // open-state across reloads via an atomWithStorage atom — the ephemeral
+    // useState(false) that defaulted Observe collapsed is gone. All sections now
+    // default OPEN; collapsing is an explicit operator gesture.
+    // OBS-5: the Collapsible still force-opens when a live OBSERVE surface is active
+    // (open={observeOpen || observeContainsActive}) so the selected item is never
+    // hidden inside a collapsed group.
+    expect(sidebarSrc).toContain("navObserveOpenAtom");
+    expect(sidebarSrc).not.toMatch(/useState\(\s*false\s*\)/);
     expect(sidebarSrc).toMatch(/open=\{observeOpen/);
   });
 });
