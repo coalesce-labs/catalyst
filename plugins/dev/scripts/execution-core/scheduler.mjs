@@ -145,6 +145,7 @@ import {
   runStallJanitorPass,
   defaultCollectOrphanCandidates,
   defaultCollectGhostCandidates,
+  defaultCollectStallClearCandidates, // CTL-1005 J3
 } from "./stall-janitor.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -2095,40 +2096,117 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
-// defaultJanitorKillIntentRecorder — CTL-1004 J2's intent-recording seam, backed
-// by the CTL-936 intentDb (beliefs.db) already threaded into the tick. Records a
-// 'kill' intent pinned to the ghost session's bgJobId, with the same
-// sessionNotRegistered postcondition + open-intent de-dupe as recovery.mjs's
-// intentAwareKill — so the next-tick reconciler checks whether the session left
-// the agents listing and the reconciler (NOT this janitor) issues the stop. When
-// intentDb is null (CATALYST_BELIEFS_SHADOW=0, the collector never opened it) the
-// recorder is a no-op: the kill-intent is dropped, fail-open, the same direction
-// as intentAwareKill's null-db fallback. NEVER shells out to `claude stop`.
-function defaultJanitorKillIntentRecorder(intentDb) {
+// defaultJanitorKillIntentRecorder — CTL-1004 J2's kill seam, backed by the
+// CTL-936 intentDb (beliefs.db) already threaded into the tick. Mirrors
+// recovery.mjs's intentAwareKill EXACTLY: it BOTH issues the real stop
+// (killBgJob) AND records the pinned 'kill' intent in the same call.
+//
+// CTL-1004 J2-enforce DEFECT FIX (adversarial-review finding): the original
+// recorder ONLY inserted an intent row and assumed the reconciler would execute
+// the stop. It does NOT — reconcileIntents (beliefs/intent.mjs) is a
+// postcondition VERIFIER (satisfied / retry / ineffective), not an executor; it
+// never calls killBgJob. So the ghost session never died, and worse the intent
+// aged to 'ineffective' and (under CATALYST_INTENTS_ENFORCE=1) recovery.mjs's
+// isIntentEffective guard would then SUPPRESS a later legitimate kill on the
+// same subject. The fix threads killBgJob in so the enforce path actually stops
+// the ghost — exactly like intentAwareKill does for the revive path.
+//
+// The intent row is still recorded (pinned to bgJobId, sessionNotRegistered
+// postcondition, open-intent de-dupe) so the reconciler can VERIFY the session
+// left the agents listing next tick and so the CTL-936 retry-suppression
+// bookkeeping stays consistent across both kill sites. When intentDb is null
+// (CATALYST_BELIEFS_SHADOW=0) we still issue the kill (fail-open, the same
+// direction as intentAwareKill's null-db fallback) and simply skip the record.
+function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob) {
   return ({ subject, bgJobId }) => {
-    if (!intentDb || !subject || !bgJobId) return false;
-    try {
-      // Skip if an open kill-intent already exists for this subject (idempotent).
-      const open = intentDb
-        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
-        .get(subject);
-      if (open) return false;
-      const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
-      if (!tickRow) return false;
-      intentDb.run(
-        `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
-         VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
-        [
-          tickRow.tick_id,
-          subject,
-          JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
-        ],
-      );
-      return true;
-    } catch (err) {
-      log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw (CTL-1004)");
-      return false;
+    if (!subject || !bgJobId) return false;
+    // Issue the real stop FIRST so a record-failure can never swallow the kill
+    // (intentAwareKill records-then-kills, but its record path is best-effort and
+    // never short-circuits the kill either — here the kill is the load-bearing act).
+    let recorded = false;
+    if (intentDb) {
+      try {
+        // Skip the INSERT if an open kill-intent already exists (idempotent).
+        const open = intentDb
+          .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+          .get(subject);
+        const tickRow = open
+          ? null
+          : intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+        if (!open && tickRow) {
+          intentDb.run(
+            `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
+             VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
+            [
+              tickRow.tick_id,
+              subject,
+              JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
+            ],
+          );
+          recorded = true;
+        }
+      } catch (err) {
+        log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw — continuing kill (CTL-1004)");
+      }
     }
+    // Execute the stop — the actual ghost-session reap (mirrors intentAwareKill).
+    try {
+      killBgJob({ bgJobId });
+    } catch (err) {
+      log.warn({ subject, bgJobId, err: err?.message }, "stall-janitor: killBgJob threw (CTL-1004)");
+      return recorded;
+    }
+    return true;
+  };
+}
+
+// defaultClearStall — CTL-1005 J3's unstick seam. Clears a
+// `prior-artifact-retry-exhausted` stall MINIMALLY and lets the scheduler's normal
+// path re-dispatch: the stalled signal is the ONLY thing making isTicketInFlight
+// false + tripping the needs-human terminal sweep, so deleting it (with the
+// completed prior-phase signals still present) lets deriveAdvancement re-derive the
+// next phase on the next tick. Mirrors clearDispatchCooldown's best-effort,
+// never-throw discipline.
+//
+// The clear, per the CTL-1005 Gherkin:
+//   1. delete the synthetic phase-<phase>.json stalled signal (the unstick);
+//   2. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
+//      marker (clearStalledLabel) so a future genuine escalation can re-apply;
+//   3. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
+//      orphan-detected event instead of being silently suppressed;
+//   4. write the .janitor-cleared-<phase>.applied once-marker so a re-stall on the
+//      same phase this daemon lifetime is NOT re-cleared (operator review).
+// The once-marker is written LAST and unconditionally so even a partial clear is
+// not retried into a clear-storm — the gate is "did we ever clear this phase".
+function defaultClearStall(orchDir, writeStatus) {
+  return ({ ticket, phase }) => {
+    if (!ticket || !phase) return false;
+    const workerDir = join(orchDir, "workers", ticket);
+    // 1. delete the synthetic stalled signal (the actual unstick).
+    try {
+      rmSync(join(workerDir, `phase-${phase}.json`), { force: true });
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: stalled-signal delete failed (CTL-1005)");
+    }
+    // 2. clear the needs-human label + its once-marker (re-arms a future escalation).
+    try {
+      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: needs-human clear failed (CTL-1005)");
+    }
+    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    try {
+      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
+    } catch { /* best-effort */ }
+    // 4. write the .janitor-cleared-<phase>.applied once-marker LAST (one clear per
+    //    ticket per phase per daemon lifetime — a re-stall is left for operators).
+    try {
+      mkdirSync(workerDir, { recursive: true });
+      writeFileSync(join(workerDir, `.janitor-cleared-${phase}.applied`), "");
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: cleared-marker write failed (CTL-1005)");
+    }
+    return true;
   };
 }
 
@@ -2297,6 +2375,12 @@ export function schedulerTick(
       terminalIdleMs: _janitorTerminalIdleMs = undefined,
       collectOrphanCandidates: _collectOrphanCandidates = undefined,
       collectGhostCandidates: _collectGhostCandidates = undefined,
+      // CTL-1005 J3: stall-clear census + unstick seams. Defaults undefined →
+      // the pass collects no J3 candidates (a bare unit tick stays inert);
+      // production wires defaultCollectStallClearCandidates + defaultClearStall
+      // below. Tests inject stubs to drive J3 in isolation.
+      collectStallClearCandidates: _collectStallClearCandidates = undefined,
+      clearStall: _clearStall = undefined,
       emit: _janitorEmit = emitReapIntent,
       recordKillIntent: _recordKillIntent = undefined,
     } = {},
@@ -2660,8 +2744,10 @@ export function schedulerTick(
   // the event-driven reaper never names: J1 orphan worktrees (teardown=done +
   // .terminal-done.applied, on disk, no live session, clean, CTL-791 evidence) →
   // a TARGETED orphans.reap-requested (the REAPER owns removal); J2 idle ghost
-  // sessions (terminal signal >=600s + an idle background session) → a kill-INTENT
-  // via the intent system (the reconciler executes the stop — NEVER `claude stop`).
+  // sessions (terminal signal >=600s + an idle background session) → the janitor
+  // issues killBgJob AND records a pinned kill-intent (mirrors recovery.mjs
+  // intentAwareKill). The reconciler only VERIFIES the stop landed — it is a
+  // postcondition verifier, never an executor, so the JANITOR performs the stop.
   // SHADOW-FIRST: default mode is "shadow" (emit janitor.would.*, mutate nothing).
   // The census producers + emit/intent seams are injected from startScheduler;
   // a bare unit tick that does not opt in collects nothing (empty census → no-op).
@@ -2673,31 +2759,50 @@ export function schedulerTick(
   let janitorKillIntents = [];
   let janitorWouldKill = [];
   let janitorDeferred = [];
+  let janitorStallsCleared = [];
+  let janitorWouldClear = [];
   {
     const jcfg = readStallJanitorConfig();
     const jMode = _janitorMode ?? jcfg.mode;
     // Only run when an opt-in census producer is wired (production via
     // startScheduler, or a test injecting it). A bare tick has none → skip cleanly.
-    if (jMode !== "off" && (_collectOrphanCandidates || _collectGhostCandidates)) {
+    if (
+      jMode !== "off" &&
+      (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates)
+    ) {
       try {
         const jreport = runStallJanitorPass({
           mode: jMode,
           terminalIdleMs: _janitorTerminalIdleMs ?? jcfg.terminalIdleMs,
           collectOrphanCandidates: _collectOrphanCandidates ?? (() => []),
           collectGhostCandidates: _collectGhostCandidates ?? (() => []),
+          // CTL-1005 J3: stall-clear census + unstick seams.
+          collectStallClearCandidates: _collectStallClearCandidates ?? (() => []),
+          // Default clear seam: deletes the synthetic stalled signal, clears
+          // needs-human (+ marker) + .orphan-detected.applied, writes the
+          // .janitor-cleared-<phase>.applied once-marker, and lets the scheduler's
+          // normal path re-dispatch. writeStatus carries the removeLabel seam.
+          clearStall: _clearStall ?? defaultClearStall(orchDir, writeStatus),
           emit: _janitorEmit,
-          // Default intent recorder: thread the CTL-936 intentDb if present, else a
-          // no-op (a kill-intent with no db to record into is dropped — fail-open,
-          // the same direction as intentAwareKill's null-db fallback).
+          // Default kill seam: BOTH issues killBgJob AND records the pinned
+          // intent (mirrors recovery.mjs intentAwareKill). CTL-1004 J2-enforce
+          // defect fix — the reconciler is a verifier, not an executor, so the
+          // janitor itself must issue the stop. killBgJob is the same tick seam
+          // the reclaim path uses (defaultKillBgJob in production, a spy in tests).
           recordKillIntent:
-            _recordKillIntent ?? defaultJanitorKillIntentRecorder(intentDb),
+            _recordKillIntent ?? defaultJanitorKillIntentRecorder(intentDb, killBgJob),
         });
         janitorReaped = jreport.reaped;
         janitorWouldReap = jreport.wouldReap;
         janitorKillIntents = jreport.killIntents;
         janitorWouldKill = jreport.wouldKill;
         janitorDeferred = jreport.deferred;
-        if (janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length || janitorWouldKill.length) {
+        janitorStallsCleared = jreport.stallsCleared;
+        janitorWouldClear = jreport.wouldClear;
+        if (
+          janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length ||
+          janitorWouldKill.length || janitorStallsCleared.length || janitorWouldClear.length
+        ) {
           log.info(
             {
               mode: jMode,
@@ -2706,8 +2811,10 @@ export function schedulerTick(
               killIntents: janitorKillIntents.length,
               wouldKill: janitorWouldKill.length,
               deferred: janitorDeferred.length,
+              stallsCleared: janitorStallsCleared.length,
+              wouldClear: janitorWouldClear.length,
             },
-            "scheduler: stall-janitor pass (CTL-1004)"
+            "scheduler: stall-janitor pass (CTL-1004/CTL-1005)"
           );
         }
       } catch (err) {
@@ -4079,6 +4186,8 @@ export function schedulerTick(
     janitorKillIntents,  // CTL-1004 — ghost-session kill-intents RECORDED this tick (enforce)
     janitorWouldKill,    // CTL-1004 — ghost sessions that WOULD get a kill-intent (shadow)
     janitorDeferred,     // CTL-1004 — dirty worktrees deferred (no removal, no queue)
+    janitorStallsCleared, // CTL-1005 — prior-artifact-retry-exhausted stalls CLEARED this tick (enforce)
+    janitorWouldClear,   // CTL-1005 — stalls that WOULD be cleared (shadow)
     advanced,
     dispatched,
     freeSlots,
@@ -4361,6 +4470,26 @@ function runTick() {
             orchDir: runningOpts.orchDir,
             agents: getAgentsCached().agents,
           }),
+        // CTL-1005 J3: wire the read-only stall-clear census + the production
+        // unstick seam. The census only resolves Linear state for tickets that
+        // ALREADY carry a prior-artifact-retry-exhausted stall (rare), so the
+        // bounded extra fetchTicketState reads never storm the API. The clear
+        // seam deletes the synthetic stalled signal + re-arms needs-human; the
+        // scheduler's normal path re-dispatches next tick.
+        collectStallClearCandidates: () =>
+          defaultCollectStallClearCandidates({
+            orchDir: runningOpts.orchDir,
+            projects: listProjects(),
+            agents: getAgentsCached().agents,
+            isLinearTerminal: (id) => {
+              // fetchTicketState with no gateway behaves as the plain cache-first
+              // read (the daemon's runTick does not thread a gateway, matching the
+              // CTL-642 terminal short-circuit at the reconcile backstop).
+              const state = fetchTicketState(id);
+              return state != null && isLinearTerminal(state);
+            },
+          }),
+        clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
       },
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
