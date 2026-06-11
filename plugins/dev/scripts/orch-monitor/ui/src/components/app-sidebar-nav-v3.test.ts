@@ -170,3 +170,60 @@ describe("CTL-980 nav proportion v3 — Projects section heading", () => {
     expect(projectsHeadingIdx).toBeLessThan(reposMapIdx);
   });
 });
+
+// ── CTL-1037 — per-project presence + honest counts + tooltips + inbox badges ──
+describe("CTL-1037 §A — per-project worker presence dot", () => {
+  it("the presence dot is computed per scope, not gated to 'all'", () => {
+    // The old code rendered the dot only when `scopeVal === "all"`; CTL-1037 lights
+    // it for every Workers row, so the render guard is just `{dot && <StatusDot`.
+    expect(src).toContain("{dot && <StatusDot kind={dot} />}");
+    expect(src).not.toContain('dot && scopeVal === "all" && <StatusDot');
+    // liveDot now takes the scope and keys off the per-scope row count.
+    expect(src).toMatch(/function liveDot\(s: Surface, scopeVal: string\)/);
+  });
+});
+
+describe("CTL-1037 §B — honest nav counts + clarifying tooltips", () => {
+  it("Workers/Queue counts come from the resident snapshot (overall + per-project)", () => {
+    // Derived from payload via the honest CTL-1032 classification, NOT the server's
+    // workers.length nav-signal.
+    expect(src).toContain("overallWorkerCount(payload)");
+    expect(src).toContain("projectWorkerCount(payload, scopeVal)");
+    expect(src).toContain("overallQueueDepth(payload)");
+    expect(src).toContain("projectQueueDepth(payload, scopeVal)");
+  });
+
+  it("the Workers row count hides the zero, the Queue row keeps it", () => {
+    // Workers: only assigned when > 0.
+    expect(src).toContain("if (workerN > 0) countBadge = workerN");
+    // Queue: assigned unconditionally so the 0 stays visible (capacity signal).
+    expect(src).toContain("countBadge = queueN");
+  });
+
+  it("rows carry an unambiguous hover tooltip", () => {
+    expect(src).toContain("active worker");
+    expect(src).toContain("waiting for a slot");
+    // The tooltip string is threaded into the SidebarMenuButton.
+    expect(src).toContain("tooltip={rowTooltip}");
+  });
+});
+
+describe("CTL-1037 (C) — inbox attention badges", () => {
+  it("an amber AttentionBadge renders only when the needs-you count is > 0", () => {
+    expect(src).toContain("function AttentionBadge");
+    // Amber vocabulary (semantic yellow token), distinct from the neutral count badge.
+    expect(src).toContain("bg-yellow/15");
+    // Visibility gate: shown only when attentionN > 0.
+    expect(src).toMatch(/attentionN > 0 && \(\s*<AttentionBadge/);
+  });
+
+  it("the inbox count is the needs-you bucket, scoped per section", () => {
+    expect(src).toContain("inboxAttentionCount(payload, scopeVal)");
+  });
+
+  it("collapsed-section signal dots roll up inbox attention as amber", () => {
+    // sectionSignal returns 'anomaly' (amber) when a hidden child needs the operator.
+    expect(src).toContain('inboxAttentionCount(payload, "all") > 0');
+    expect(src).toMatch(/inboxAttentionCount\(payload, scopeVal\) > 0\) return "anomaly"/);
+  });
+});
