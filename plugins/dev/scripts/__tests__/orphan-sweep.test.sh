@@ -489,6 +489,87 @@ run "T24: real run exits 0" bash "$SWEEP"
 run "T24b: otel log contains worktree vector" \
   bash -c "grep -q 'worktree' '${SCRATCH_OTEL_LOG}' 2>/dev/null || true; test -f '${SCRATCH_OTEL_LOG}'"
 
+# --- Phase 6: config precedence + noise classification (T30-T40) ---
+
+SWEEP_CFG_SCRATCH="${SCRATCH}/cfg"
+mkdir -p "${SWEEP_CFG_SCRATCH}"
+out=""  # pre-declare so set -u is satisfied when double-quoted bash -c strings expand $out
+
+run "T30: config defaults (idle=48 interval=2 salvage=0 max=20)" bash -c "
+  out=\$(SWEEP_CONFIG_PATH='/nonexistent/c.json' bash '${SWEEP}' --print-config 2>/dev/null)
+  echo \"\$out\" | grep -q 'SWEEP_IDLE_HOURS=48' &&
+  echo \"\$out\" | grep -q 'SWEEP_INTERVAL_HOURS=2' &&
+  echo \"\$out\" | grep -q 'SWEEP_SALVAGE_PUSH=0' &&
+  echo \"\$out\" | grep -q 'SWEEP_MAX_REMOVALS=20'
+"
+
+printf '%s' '{"catalyst":{"sweep":{"idleHours":72,"intervalHours":3,"salvagePush":true,"maxRemovalsPerRun":5}}}' > "${SWEEP_CFG_SCRATCH}/config.json"
+run "T31: values from config file" bash -c "
+  out=\$(SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/config.json' bash '${SWEEP}' --print-config 2>/dev/null)
+  echo \"\$out\" | grep -q 'SWEEP_IDLE_HOURS=72' &&
+  echo \"\$out\" | grep -q 'SWEEP_INTERVAL_HOURS=3' &&
+  echo \"\$out\" | grep -q 'SWEEP_SALVAGE_PUSH=1' &&
+  echo \"\$out\" | grep -q 'SWEEP_MAX_REMOVALS=5'
+"
+
+run "T32: env overrides config" bash -c "
+  out=\$(SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/config.json' SWEEP_IDLE_HOURS=24 SWEEP_SALVAGE_PUSH=0 bash '${SWEEP}' --print-config 2>/dev/null)
+  echo \"\$out\" | grep -q 'SWEEP_IDLE_HOURS=24' &&
+  echo \"\$out\" | grep -q 'SWEEP_SALVAGE_PUSH=0' &&
+  echo \"\$out\" | grep -q 'SWEEP_INTERVAL_HOURS=3'
+"
+
+printf '%s' '{"catalyst":{"sweep":{"salvagePush":false}}}' > "${SWEEP_CFG_SCRATCH}/false.json"
+run "T33a: salvagePush:false -> SWEEP_SALVAGE_PUSH=0 (jq falsy guard)" bash -c "
+  SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/false.json' bash '${SWEEP}' --print-config 2>/dev/null | grep -q 'SWEEP_SALVAGE_PUSH=0'
+"
+
+printf '%s' '{"catalyst":{"sweep":{"salvagePush":true}}}' > "${SWEEP_CFG_SCRATCH}/true.json"
+run "T33b: salvagePush:true -> SWEEP_SALVAGE_PUSH=1" bash -c "
+  SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/true.json' bash '${SWEEP}' --print-config 2>/dev/null | grep -q 'SWEEP_SALVAGE_PUSH=1'
+"
+
+printf '%s' '{"catalyst":{"sweep":{"intervalHours":7}}}' > "${SWEEP_CFG_SCRATCH}/bad.json"
+run "T34: intervalHours=7 invalid -> fallback=2 + warning" bash -c "
+  out=\$(SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/bad.json' bash '${SWEEP}' --print-config 2>&1)
+  echo \"\$out\" | grep -q 'SWEEP_INTERVAL_HOURS=2' &&
+  echo \"\$out\" | grep -qiE 'interval.*invalid|falling back|default'
+"
+
+run "T35a: intervalHours=1 accepted" bash -c "
+  SWEEP_CONFIG_PATH='/nonexistent/c.json' SWEEP_INTERVAL_HOURS=1 bash '${SWEEP}' --print-config 2>/dev/null | grep -q 'SWEEP_INTERVAL_HOURS=1'
+"
+run "T35b: intervalHours=3 accepted" bash -c "
+  SWEEP_CONFIG_PATH='/nonexistent/c.json' SWEEP_INTERVAL_HOURS=3 bash '${SWEEP}' --print-config 2>/dev/null | grep -q 'SWEEP_INTERVAL_HOURS=3'
+"
+
+printf '%s' '{not valid json' > "${SWEEP_CFG_SCRATCH}/broken.json"
+run "T36: malformed config -> all defaults exit 0" bash -c "
+  out=\$(SWEEP_CONFIG_PATH='${SWEEP_CFG_SCRATCH}/broken.json' bash '${SWEEP}' --print-config 2>/dev/null)
+  echo \"\$out\" | grep -q 'SWEEP_IDLE_HOURS=48' &&
+  echo \"\$out\" | grep -q 'SWEEP_INTERVAL_HOURS=2'
+"
+
+run "T37: only-noise porcelain -> count=0" bash -c "
+  printf ' M .catalyst/config.json\n?? node_modules/x\n?? .DS_Store\n M dist/app.js\n?? build/out\n?? foo.log\n M bun.lock\n' \
+    | bash '${SWEEP}' --count-dirty 2>/dev/null | grep -qx 0
+"
+
+run "T38: mixed noise+real -> count=2" bash -c "
+  printf ' M .catalyst/config.json\n?? node_modules/x\n M src/index.ts\n?? newfile.md\n' \
+    | bash '${SWEEP}' --count-dirty 2>/dev/null | grep -qx 2
+"
+
+run "T39: rename dest + quoted path = 2 real" bash -c "
+  printf 'R  old.ts -> src/renamed.ts\n?? path.ts\n M node_modules/pkg/index.js\n' \
+    | bash '${SWEEP}' --count-dirty 2>/dev/null | grep -qx 2
+"
+
+run "T40: node_modules_local/ is real (segment-anchored)" bash -c "
+  printf '?? node_modules_local/real.ts\n' \
+    | bash '${SWEEP}' --count-dirty 2>/dev/null | grep -qx 1
+"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
