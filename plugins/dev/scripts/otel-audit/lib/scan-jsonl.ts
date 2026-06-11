@@ -2,7 +2,6 @@ import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { normalizeEventName } from "./reconcile.ts";
 
-// A line is canonical iff it has an `attributes` key (mirrors the forwarder's isCanonical).
 function isCanonical(obj: unknown): obj is { attributes: Record<string, unknown> } {
   return typeof obj === "object" && obj !== null && "attributes" in obj;
 }

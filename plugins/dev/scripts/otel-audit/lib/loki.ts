@@ -36,15 +36,11 @@ export class LokiClient implements ILokiClient {
     this.timeoutMs = opts?.timeoutMs ?? 30_000;
   }
 
-  // Query Loki for event_name counts using a pipe filter over a time window.
-  // Uses LogQL pipe filter (not label selector) because /label/event_name/values
-  // returns empty by design.
   async queryEventNames(service: string, windowHours: number): Promise<Map<string, number>> {
     const counts = new Map<string, number>();
     const end = Math.floor(Date.now() / 1000);
     const start = end - windowHours * 3600;
 
-    // Query: stream selector + json pipe filter, aggregate by event.name
     const query = `sum by (event_name) (count_over_time({service_name="${service}"} | json | __error__="" [${windowHours}h]))`;
     const url = new URL("/loki/api/v1/query_range", this.endpoint);
     url.searchParams.set("query", query);

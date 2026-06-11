@@ -41,8 +41,7 @@ export function reconcile(
     } else if (jsonlCount === 0 && lokiCount > 0) {
       status = "LOKI_ONLY";
     } else {
-      // Both sides have data — check lag tolerance
-      const lagPct = ((jsonlCount - lokiCount) / jsonlCount) * 100;
+      const lagPct = (Math.abs(jsonlCount - lokiCount) / jsonlCount) * 100;
       status = lagPct <= lagTolerancePct ? "OK" : "DRIFT";
     }
     rows.push({ kind, jsonlCount, lokiCount, status });

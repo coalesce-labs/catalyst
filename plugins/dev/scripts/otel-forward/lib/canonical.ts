@@ -44,7 +44,7 @@ export function buildCanonicalEnvelope(opts: BuildOpts): CanonicalEvent {
     spanId: null,
     resource: {
       "service.name": opts.serviceName,
-      "service.namespace": "catalyst" as const,
+      "service.namespace": "catalyst",
       "service.version": opts.serviceVersion ?? "0.0.0",
       "host.name": hostName(),
       "host.id": hostId(),

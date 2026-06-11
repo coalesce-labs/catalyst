@@ -53,8 +53,10 @@ async function main(lokiClient?: ILokiClient): Promise<void> {
         // include if file YYYY-MM.jsonl is within window
         const m = f.match(/^(\d{4})-(\d{2})\.jsonl$/);
         if (!m) return false;
-        const fileMonth = new Date(Number(m[1]), Number(m[2]) - 1);
-        const windowStart = new Date(windowStartDate.getFullYear(), windowStartDate.getMonth());
+        const fileMonth = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1));
+        const windowStart = new Date(
+          Date.UTC(windowStartDate.getUTCFullYear(), windowStartDate.getUTCMonth())
+        );
         return fileMonth >= windowStart;
       })
       .sort();
