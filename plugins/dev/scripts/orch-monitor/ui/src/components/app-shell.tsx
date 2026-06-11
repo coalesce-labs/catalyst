@@ -44,8 +44,15 @@ import {
 } from "@/lib/sidebar-collapse";
 import { shouldOpenPalette } from "@/lib/command-palette";
 import { installOverlayScroll } from "@/lib/overlay-scroll";
-import { useAtom } from "jotai";
+import { useAtom, useSetAtom } from "jotai";
 import { repoScopeAtom } from "@/board/nav-store";
+import { boardPrefsAtom, patchBoardPrefs } from "@/board/prefs-store";
+import { buildSettingsActions } from "@/lib/settings-actions";
+import { visibleActions } from "@/lib/action-registry";
+import { useTicketSearch } from "@/hooks/use-ticket-search";
+import { ticketSearchItems } from "@/lib/ticket-search-items";
+import { ticketDetailHref } from "@/board/detail-nav";
+import { useTheme } from "@/lib/theme";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import {
   Breadcrumb,
@@ -117,6 +124,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // state).
   const surface: Surface = derived === "settings" ? "board" : derived;
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [query, setQuery] = useState("");
   // CTL-898 / SHELL8 — the active node scope. Defaults to ALL_NODES (the cluster-
   // wide view); the sidebar's node filter sets it when N>1, and the sidebar also
   // resolves a stale focused scope back to ALL_NODES when its host leaves the
@@ -274,6 +282,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setPaletteOpen(false);
   }, [navigate]);
 
+  // CTL-1024: theme toggle, sidebar toggle, and board-display commands in the palette.
+  const { toggle: toggleTheme } = useTheme();
+  const setBoardPrefs = useSetAtom(boardPrefsAtom);
+  const settingsActions = useMemo(
+    () =>
+      visibleActions(
+        buildSettingsActions({
+          toggleTheme,
+          toggleSidebar: () => setOpen((o) => !o),
+          setGroupBy: (groupBy) => setBoardPrefs((p) => patchBoardPrefs(p, { groupBy })),
+          setOrder: (order) => setBoardPrefs((p) => patchBoardPrefs(p, { order })),
+          setLayout: (layout) => setBoardPrefs((p) => patchBoardPrefs(p, { layout })),
+        }),
+        { surface },
+      ),
+    [toggleTheme, setBoardPrefs, surface],
+  );
+
+  // CTL-1024: live ticket search via /api/search, debounced in the hook.
+  const { results: ticketResults } = useTicketSearch(query);
+  const ticketRows = ticketSearchItems(ticketResults);
+
+  // CTL-1024: fire an action entry and close + reset the palette.
+  const runAction = useCallback((handler: () => void) => {
+    handler();
+    setPaletteOpen(false);
+    setQuery("");
+  }, []);
+
   // CTL-989: nav items navigate via router.navigate (AppSidebar uses the router
   // directly through useSurface()/useNavigate) — there is no SurfaceContext to
   // provide anymore. The active surface is derived from the route everywhere.
@@ -378,12 +415,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </SidebarInset>
       </SidebarProvider>
 
-      {/* ── ⌘K command palette — project-grouped nav (CTL-944) ──────────────── */}
-      <CommandDialog open={paletteOpen} onOpenChange={setPaletteOpen}>
-        <CommandInput placeholder="Jump to a surface or search a ticket…" />
+      {/* ── ⌘K command palette — project-grouped nav + settings + ticket search (CTL-1024) ── */}
+      <CommandDialog
+        open={paletteOpen}
+        onOpenChange={(o) => { setPaletteOpen(o); if (!o) setQuery(""); }}
+      >
+        {/* CTL-1024: controlled input drives both cmdk fuzzy filter and ticket search. */}
+        <CommandInput
+          placeholder="Jump to a surface or search a ticket…"
+          value={query}
+          onValueChange={setQuery}
+        />
         <CommandList>
           <CommandEmpty>No results.</CommandEmpty>
-          {/* CTL-944: palette entries are project-grouped via paletteEntries(groups). */}
+          {/* CTL-944: project-grouped surface nav. */}
           {paletteEntries(buildNavGroups(repos, {})).map((entry) => (
             <CommandGroup key={entry.group} heading={entry.group}>
               {entry.items.map((item) => {
@@ -401,12 +446,45 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               })}
             </CommandGroup>
           ))}
-          {/* Settings is reachable from ⌘K too. */}
+          {/* CTL-1024: live ticket search results from /api/search (debounced 150ms).
+              keywords={[query]} prevents cmdk's built-in filter from hiding server-
+              ranked results whose ticket ID doesn't substring-match the input. */}
+          {ticketRows.length > 0 && (
+            <CommandGroup heading="Tickets">
+              {ticketRows.map((row) => (
+                <CommandItem
+                  key={row.id}
+                  value={row.id}
+                  keywords={[query]}
+                  onSelect={() => {
+                    void navigate({ to: ticketDetailHref(row.id) });
+                    setPaletteOpen(false);
+                    setQuery("");
+                  }}
+                >
+                  {row.label}
+                  {row.meta && (
+                    <span className="ml-auto text-xs text-muted-foreground">{row.meta}</span>
+                  )}
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          )}
+          {/* CTL-1024: settings + board-display commands (board-scoped entries hidden off-board). */}
           <CommandGroup heading="Settings">
             <CommandItem value="Settings" onSelect={openSettings}>
               <SettingsIcon className="size-4" />
               Settings
             </CommandItem>
+            {settingsActions.map((entry) => (
+              <CommandItem
+                key={entry.id}
+                value={`${entry.title} ${(entry.keywords ?? []).join(" ")}`}
+                onSelect={() => runAction(entry.handler)}
+              >
+                {entry.title}
+              </CommandItem>
+            ))}
           </CommandGroup>
         </CommandList>
       </CommandDialog>
