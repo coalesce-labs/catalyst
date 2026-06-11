@@ -106,6 +106,7 @@ phase_default_turn_cap() {
 	monitor-merge) echo 50 ;;
 	monitor-deploy) echo 30 ;;
 	remediate) echo 40 ;; # CTL-653: fix-scoped — smaller than implement's 75
+	teardown) echo 15 ;;
 	*) echo "$DEFAULT_TURN_CAP" ;;
 	esac
 }
@@ -127,6 +128,7 @@ prior_artifact_for_phase() {
 	monitor-merge) echo "signal:phase-pr.json" ;;
 	monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
 	remediate) echo "signal:verify.json" ;; # CTL-653: reads verify's findings[], NOT review.json
+	teardown) echo "signal:phase-monitor-deploy.json" ;;
 	*) echo "" ;;
 	esac
 }
@@ -566,20 +568,80 @@ if [[ $DRY_RUN -eq 0 ]]; then
 		#     dispatch here would strand the phase. Log and fall through to spawn
 		#     un-fenced (degraded, matching the no-runtime fallback).
 		if [[ -e $CLAIM_FILE ]]; then
-			jq -nc \
-				--arg ticket "$TICKET" \
-				--arg phase "$PHASE" \
-				--arg model "$MODEL" \
-				--argjson turnCap "$TURN_CAP" \
-				--arg signal "$SIGNAL_FILE" \
-				--argjson generation "$TARGET_GENERATION" \
-				--argjson dryRun "$DRY_RUN" \
-				'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
+			# ─── CTL-837: pre-spawn orphan claim GC ─────────────────────────────
+			#
+			# Because TARGET_GENERATION is FIXED (1 for a fresh dispatch — see the
+			# CTL-736 invariant above; it must NOT be derived from the claim-file
+			# high-water mark), a claim file orphaned by a dispatcher that DIED
+			# after the O_EXCL create but BEFORE writing the signal/spawning the
+			# worker wedges the phase forever: every later fresh dispatch recomputes
+			# the SAME generation, re-collides with the tombstone, and bows out as
+			# `claim-lost` — with no live worker behind it to ever finish.
+			#
+			# Detect that pre-spawn orphan and reap it. The signal file is written
+			# (status="dispatched" at the won generation) strictly BEFORE the worker
+			# is spawned, so a pre-spawn orphan at TARGET_GENERATION is:
+			#   • signal ABSENT — fresh (gen 1) dispatch whose claimant died, OR
+			#   • signal present but at a PRIOR generation (< TARGET) — a REVIVE
+			#     (gen ≥ 2): the stalled/failed signal that triggered the revive is
+			#     still on disk at gen N, and the gen N+1 worker died before writing
+			#     its own signal. (A signal already AT TARGET means a live worker
+			#     won + advanced its signal — never reaped.)
+			# AND the claim must be OLDER than a grace window — not a sibling that
+			# just-now won the O_EXCL race and is milliseconds from its signal-write
+			# (sub-second window; grace is 2m). A young claim, or a signal already at
+			# TARGET, stays claim-lost so single-flight (CTL-736) is preserved.
+			#
+			# CTL-837 (review fix): the reap MUST be atomic, or two concurrent
+			# dispatchers could both pass the read-only guard, both rm, and both
+			# re-create → double spawn (re-opening the very race CTL-736 closed). Use
+			# rename-to-private: only ONE concurrent reaper's `mv` of the same inode
+			# succeeds; a loser's source is already gone → mv fails → it bows out.
+			# The single winner alone re-creates the claim via the same O_EXCL create:
+			#   • re-create WINS  → fall through to the signal-write + spawn below.
+			#   • re-create EEXISTs → a concurrent dispatcher re-won in the gap →
+			#     emit claim-lost as before (single-flight holds).
+			# Pure bash (jq read + find + mv + the same noclobber create) — no
+			# node/bun startup is added to the dispatch path (cf. CTL-736 above).
+			REAPED_ORPHAN=0
+			SIG_IS_STALE=0
+			if [[ ! -e $SIGNAL_FILE ]]; then
+				SIG_IS_STALE=1
+			else
+				CUR_SIG_GEN=$(jq -r '.generation // empty' "$SIGNAL_FILE" 2>/dev/null || echo "")
+				if [[ "$CUR_SIG_GEN" =~ ^[0-9]+$ ]] && (( CUR_SIG_GEN < TARGET_GENERATION )); then
+					SIG_IS_STALE=1
+				fi
+			fi
+			if [[ $SIG_IS_STALE -eq 1 ]] && [[ -n "$(find "$CLAIM_FILE" -mmin +2 2>/dev/null)" ]]; then
+				REAP_TMP="${CLAIM_FILE}.reap.$$"
+				if mv "$CLAIM_FILE" "$REAP_TMP" 2>/dev/null; then
+					rm -f "$REAP_TMP"
+					echo "phase-agent-dispatch: reaped pre-spawn orphan claim ${CLAIM_FILE} (signal stale/absent, older than grace) for ${TICKET}/${PHASE}; retrying claim" >&2
+					if (set -o noclobber && printf '%s\n' "$CLAIM_BODY" >"$CLAIM_FILE") 2>/dev/null; then
+						REAPED_ORPHAN=1 # this dispatcher alone re-won → fall through to spawn
+					fi
+				fi
+			fi
+			if [[ $REAPED_ORPHAN -eq 0 ]]; then
+				# A live/in-flight worker (signal present, or young claim), OR a
+				# concurrent dispatcher re-won the reaped generation → bow out.
+				jq -nc \
+					--arg ticket "$TICKET" \
+					--arg phase "$PHASE" \
+					--arg model "$MODEL" \
+					--argjson turnCap "$TURN_CAP" \
+					--arg signal "$SIGNAL_FILE" \
+					--argjson generation "$TARGET_GENERATION" \
+					--argjson dryRun "$DRY_RUN" \
+					'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
           bg_job_id: null, signalFile: $signal, status: "claim-lost", idempotent: true,
           generation: $generation, dryRun: ($dryRun == 1)}'
-			exit 0
+				exit 0
+			fi
+		else
+			echo "phase-agent-dispatch: claim write failed (no claim file at ${CLAIM_FILE}, not a lost race) for ${TICKET}/${PHASE}; proceeding un-fenced (generation=${GENERATION})" >&2
 		fi
-		echo "phase-agent-dispatch: claim write failed (no claim file at ${CLAIM_FILE}, not a lost race) for ${TICKET}/${PHASE}; proceeding un-fenced (generation=${GENERATION})" >&2
 	fi
 fi
 
@@ -746,6 +808,7 @@ compose_worker_settings_json() {
 	local phase_val="${PHASE:-}"
 	local ticket_val="${TICKET:-}"
 	local generation_val="${GENERATION:-}"
+	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION:-}"   # CTL-864
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -761,6 +824,7 @@ compose_worker_settings_json() {
 		--arg phase "$phase_val" \
 		--arg ticket "$ticket_val" \
 		--arg generation "$generation_val" \
+		--arg cluster_generation "$cluster_generation_val" \
 		--arg statusline_cmd "$statusline_script" \
 		--argjson have_statusline "$([[ -f $statusline_script ]] && echo true || echo false)" \
 		'{
@@ -778,6 +842,7 @@ compose_worker_settings_json() {
          + (if $phase == "" then {} else { "CATALYST_PHASE": $phase } end)
          + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
          + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
+         + (if $cluster_generation == "" then {} else { "CATALYST_CLUSTER_GENERATION": $cluster_generation } end)
        )
      }
      + (if $have_statusline
@@ -800,6 +865,9 @@ DISPATCH_ENV=(
 	# fence-check) before emitting any outcome — a stale (false-dead-revived)
 	# generation bows out instead of double-completing.
 	"CATALYST_GENERATION=${GENERATION}"
+	# CTL-864: cross-host cluster fencing token (distinct from the host-local
+	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
+	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION:-}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")
@@ -815,6 +883,35 @@ if [[ "${ATTEMPT}" -gt 1 ]]; then
 	SESSION_NAME="${SESSION_NAME} #${ATTEMPT}"
 fi
 
+# ─── Per-host plugin directories (--plugin-dir) ──────────────────────────────
+# Load the catalyst plugin into each worker session directly from a checkout
+# (`claude --plugin-dir`), bypassing the marketplace cache. A local plugin of
+# the same name takes precedence over the marketplace install for that session,
+# so this doubles as a per-dispatch override for testing a fix branch
+# (CATALYST_PLUGIN_DIRS=<worktree>/plugins/dev). Resolution precedence:
+# CATALYST_PLUGIN_DIRS env (colon-separated) > repo .catalyst/config.json
+# `.catalyst.orchestration.pluginDirs` > machine config (the CTL-689 path).
+# Empty (the default) = no flags; marketplace behavior unchanged. Entries that
+# are not directories are skipped loudly — a typo must not silently change
+# which plugin the fleet loads.
+# NOTE (CTL-940): lib/plugin-dirs.sh mirrors this resolution for update-side
+# consumers (catalyst-stack hotpatch/parity). The jq program and precedence
+# here MUST stay in sync with resolve_plugin_dirs() there — the dir hotpatch
+# updates must be exactly the dir this dispatcher hands to workers.
+PLUGIN_DIRS_RESOLVED="${CATALYST_PLUGIN_DIRS:-$(config_value '.catalyst.orchestration.pluginDirs | if type=="array" then join(":") else . end' "")}"
+PLUGIN_DIR_ARGS=()
+if [[ -n $PLUGIN_DIRS_RESOLVED ]]; then
+	IFS=':' read -r -a _PDIRS <<<"$PLUGIN_DIRS_RESOLVED"
+	for _PD in "${_PDIRS[@]}"; do
+		[[ -z $_PD ]] && continue
+		if [[ -d $_PD ]]; then
+			PLUGIN_DIR_ARGS+=(--plugin-dir "$_PD")
+		else
+			echo "phase-agent-dispatch: pluginDirs entry is not a directory — skipping: ${_PD}" >&2
+		fi
+	done
+fi
+
 if [[ $DRY_RUN -eq 1 ]]; then
 	# Dry-run prints the command it would have run without spawning anything.
 	jq -nc \
@@ -827,12 +924,14 @@ if [[ $DRY_RUN -eq 1 ]]; then
 		--arg sessionName "$SESSION_NAME" \
 		--argjson attempt "$ATTEMPT" \
 		--arg resumeSession "$RESUME_SESSION" \
+		--arg pluginDirs "$PLUGIN_DIRS_RESOLVED" \
 		--argjson env "$(printf '%s\n' "${DISPATCH_ENV[@]}" | jq -R . | jq -s .)" \
 		--argjson settings "$(printf '%s' "$WORKER_SETTINGS_JSON" | jq -e . >/dev/null 2>&1 && printf '%s' "$WORKER_SETTINGS_JSON" || echo '{}')" \
 		'{ticket: $ticket, phase: $phase, model: $model, turnCap: $turnCap,
       bg_job_id: null, prompt: $prompt, signalFile: $signal,
       sessionName: $sessionName, attempt: $attempt,
       resumeSession: (if $resumeSession == "" then null else $resumeSession end),
+      pluginDirs: (if $pluginDirs == "" then [] else ($pluginDirs | split(":")) end),
       env: $env, settings: $settings, status: "dispatched", dryRun: true}'
 	exit 0
 fi
@@ -849,16 +948,25 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 	rebase_onto_base_classified "$BASE_BRANCH"
 	REBASE_RC=$?
 	if [[ $REBASE_RC -eq 2 || $REBASE_RC -eq 3 ]]; then
-		# Determine the stall reason from the rc.
+		# Determine the stall reason from the rc. CTL-990: the rebase lib exports
+		# the TRUE typed reason (rebase_refused_dirty_tree, continue_failed,
+		# source_conflict_ctl708_unavailable, …) in REBASE_LAST_STALL_REASON —
+		# park with that instead of mislabeling every rc=2 as a source conflict.
 		if [[ $REBASE_RC -eq 3 ]]; then
 			STALL_REASON="thoughts_conflict_with_origin_main"
 		else
-			STALL_REASON="source_conflict_ctl708_unavailable"
+			STALL_REASON="${REBASE_LAST_STALL_REASON:-source_conflict_ctl708_unavailable}"
 		fi
 
-		# research/plan + source conflict (rc 2) → destroy+recreate worktree.
-		# thoughts conflict (rc 3) or source on non-research/plan → park as stalled.
-		if [[ $REBASE_RC -eq 2 ]] && { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
+		# research/plan + rc 2 → destroy+recreate worktree, AT MOST ONCE per
+		# dispatch chain (CTL-990): the recreated worktree used to come back
+		# dirty (create-worktree cp -R), rc=2 again, recreate again — an
+		# in-process exec recursion (~2.5s/cycle, 1,300+ events on ADV-1308)
+		# invisible to every scheduler cooldown. CATALYST_RECREATE_ATTEMPTED
+		# survives the exec; a second rc=2 parks as stalled instead.
+		# thoughts conflict (rc 3) or rc 2 on non-research/plan → park as stalled.
+		if [[ $REBASE_RC -eq 2 ]] && [[ -z ${CATALYST_RECREATE_ATTEMPTED:-} ]] \
+			&& { [[ $PHASE == "research" ]] || [[ $PHASE == "plan" ]]; }; then
 			# CTL-707 Layer 3: destroy and recreate the worktree from origin/<base>.
 			# Derive the main checkout root from this worktree's git common dir.
 			_REPO_ROOT=""
@@ -892,6 +1000,9 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 					rm -f "${WORKER_DIR}/${PHASE}.claim."* 2>/dev/null || true
 					echo "phase-agent-dispatch: recreated worktree at ${_NEW_WT}; re-dispatching ${TICKET}/${PHASE}" >&2
 					cd "$_NEW_WT"
+					# CTL-990: mark the recreate as spent — survives the exec, so a
+					# second rc=2 in the re-dispatched run parks instead of looping.
+					export CATALYST_RECREATE_ATTEMPTED=1
 					exec "$0" --phase "$PHASE" --ticket "$TICKET" \
 						--orch-dir "$ORCH_DIR" --orch-id "$ORCH_ID"
 				else
@@ -970,12 +1081,14 @@ spawn_claude_bg() {
 		[[ -n "$APPEND_SYSTEM_PROMPT" ]] && _levers+=(--append-system-prompt "$APPEND_SYSTEM_PROMPT")
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "${_levers[@]}" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" \
+			${PLUGIN_DIR_ARGS[@]+"${PLUGIN_DIR_ARGS[@]}"} "${_levers[@]}" "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	else
 		env "${DISPATCH_ENV[@]}" \
 			"$CLAUDE_BIN" --bg --name "$SESSION_NAME" --dangerously-skip-permissions \
-			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" "$@" \
+			--model "$MODEL" --settings "$WORKER_SETTINGS_JSON" \
+			${PLUGIN_DIR_ARGS[@]+"${PLUGIN_DIR_ARGS[@]}"} "$@" \
 			>"$BG_OUT" 2>"$BG_ERR" </dev/null
 	fi
 }

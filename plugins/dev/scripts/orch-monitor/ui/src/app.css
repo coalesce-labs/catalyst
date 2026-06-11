@@ -1,21 +1,45 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* CTL-1003 §A2: Tailwind typography for the Linear-style prose reading column
+   (.ticket-desc carries `prose prose-invert`; .ticket-desc unlayered rules below
+   map the plugin's --tw-prose-invert-* vars to the app tokens + keep the existing
+   code-chip/pre/hljs/ticket-ref overrides winning). */
+@plugin "@tailwindcss/typography";
 
 @theme inline {
-  --color-surface-0: #0b0d10;
-  --color-surface-1: #111318;
-  --color-surface-2: #16191f;
-  --color-surface-3: #1c2028;
-  --color-surface-4: #232a33;
-  --color-border: #262d36;
-  --color-border-subtle: #1e242c;
-  --color-fg: #e6e9ef;
-  --color-muted: #8a93a1;
-  --color-accent: #4ea1ff;
-  --color-green: #39d07a;
-  --color-red: #ef5d5d;
-  --color-yellow: #eabc3b;
-  --color-blue: #4ea1ff;
+  /* CTL-930 Phase 4: raised dark ramp, muted-pop accents (board-tokens.ts is the source). */
+  --color-surface-0: #0e1116;
+  --color-surface-1: #151a21;
+  --color-surface-2: #1b212a;
+  --color-surface-3: #242c37;
+  --color-surface-4: #2e3845;
+  --color-border: #333e4d;
+  --color-border-subtle: #273039;
+  --color-fg: #edf1f7;
+  --color-muted: #9ba6b5;
+  --color-accent: #5e9ee8;
+  --color-green: #41bd7d;
+  --color-red: #e36b6b;
+  --color-yellow: #d9a843;
+  --color-blue: #5e9ee8;
+  --color-purple: #a98ee3;
+  /* LIVE is reserved for the in-loop signal — NOT used as a theme accent. */
+  --color-live: #53cde2;
+  /* Soft semantic pill classes (lib/formatters.ts). */
+  --color-red-soft: #f0a8a8;
+  --color-yellow-soft: #e9d08e;
+  --color-green-soft: #9ce3bd;
+  --color-blue-soft: #aecdf2;
+  --color-purple-soft: #cdb4f0;
+
+  /* OBS-1: shadcn chart color utilities — categorical series palette.
+     Aliased to the --chart-1..6 tokens defined in :root and .dark below. */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
 
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
@@ -36,6 +60,18 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
+  /* CTL-891 / SHELL1: shadcn `sidebar` primitive tokens, bridged to the
+     orch-monitor surface system below (reconciles the prototype's base-nova
+     drift onto this ui's new-york tokens). */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -45,8 +81,68 @@
 /* shadcn/ui semantic tokens mapped to orch-monitor surface system.
    shadcn treats muted/accent as background-role tokens; our muted/accent
    tokens remain unchanged and continue to resolve text color utilities
-   (text-muted, text-accent) through the @theme inline block above. */
+   (text-muted, text-accent) through the @theme inline block above.
+
+   CTL-893 / SHELL3 — two themes now exist. `:root` is the WARM-LIGHT theme
+   (the default the footer toggle reveals when the `dark` class is absent); the
+   `.dark` block below restores the original CALM-DARK surfaces. The app still
+   boots calm-dark — board.html ships `class="dark"` and lib/theme.ts defaults to
+   applying `dark` — so this adds the light theme WITHOUT regressing the dark
+   default. Removing `dark` from <html> (the toggle) switches to warm light. */
 :root {
+  /* Warm-light surfaces — a paper-warm neutral ramp, not pure white, so the
+     light theme reads "warm" rather than clinical. */
+  --color-light-surface-0: #faf7f2;
+  --color-light-surface-1: #f3efe7;
+  --color-light-surface-2: #ece7dd;
+  --color-light-surface-3: #e3ddd1;
+  --color-light-surface-4: #d8d1c2;
+  --color-light-border: #ddd5c7;
+  --color-light-fg: #2b2722;
+  --color-light-muted: #76705f;
+  --color-light-accent: #1f6feb;
+
+  --background: var(--color-light-surface-0);
+  --foreground: var(--color-light-fg);
+  --card: var(--color-light-surface-1);
+  --card-foreground: var(--color-light-fg);
+  --popover: var(--color-light-surface-1);
+  --popover-foreground: var(--color-light-fg);
+  --primary: var(--color-light-accent);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-light-surface-3);
+  --secondary-foreground: var(--color-light-fg);
+  --muted-foreground: var(--color-light-muted);
+  --accent-foreground: var(--color-light-fg);
+  /* Pin --destructive to a stable value independent of the dark red retune so the
+     warm-light theme's destructive color doesn't follow the Phase 4 red change. */
+  --destructive: #ef5d5d;
+  --input: var(--color-light-border);
+  --ring: var(--color-light-accent);
+  --radius: 0.5rem;
+
+  /* OBS-1: categorical chart palette (shared across both themes). */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #53cde2;
+  --chart-6: #a98ee3;
+
+  --sidebar: var(--color-light-surface-1);
+  --sidebar-foreground: var(--color-light-fg);
+  --sidebar-primary: var(--color-light-accent);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--color-light-surface-3);
+  --sidebar-accent-foreground: var(--color-light-fg);
+  --sidebar-border: var(--color-light-border);
+  --sidebar-ring: var(--color-light-accent);
+}
+
+/* CTL-893 / SHELL3 — the CALM-DARK theme (the boot default). These are the
+   exact dark mappings that previously lived on `:root` (CTL-891 / SHELL1),
+   now scoped to `.dark` so the toggle can flip between the two themes. */
+.dark {
   --background: var(--color-surface-0);
   --foreground: var(--color-fg);
   --card: var(--color-surface-1);
@@ -62,7 +158,26 @@
   --destructive: var(--color-red);
   --input: var(--color-border);
   --ring: var(--color-accent);
-  --radius: 0.5rem;
+
+  /* OBS-1: categorical chart palette (same values as :root — the palette is
+     theme-independent; status color is reserved for health, not series). */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #53cde2;
+  --chart-6: #a98ee3;
+
+  /* CTL-891 / SHELL1: sidebar surface — the rail sits one step up from the
+     base surface so the SidebarInset (background) reads as a raised card. */
+  --sidebar: var(--color-surface-1);
+  --sidebar-foreground: var(--color-fg);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--color-surface-0);
+  --sidebar-accent: var(--color-surface-3);
+  --sidebar-accent-foreground: var(--color-fg);
+  --sidebar-border: var(--color-border);
+  --sidebar-ring: var(--color-accent);
 }
 
 * {
@@ -201,6 +316,45 @@ body {
   animation: drawer-in 0.2s ease-out both;
 }
 
+/* CTL-930 Phase 4: hoisted live-signal keyframes.
+   Previously lived inside Board.tsx PULSE_CSS (only loaded on board surfaces).
+   Now in app.css so every surface (AppFooter, detail pages) gets the animation. */
+
+/* Live card ring (TicketCard / WorkerCard .catalyst-live) */
+@keyframes catalystLiveRing {
+  0%, 100% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.30), 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  50% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.55), 0 2px 12px rgba(0, 0, 0, 0.35), 0 0 12px rgba(83, 205, 226, 0.10);
+  }
+}
+.catalyst-live {
+  animation: catalystLiveRing 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live {
+    animation: none;
+    /* Constant 2px left-edge so liveness reads with animation off. */
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.45);
+  }
+}
+
+/* Live status dot (.catalyst-live-dot) — used in LaneHeader, AppFooter, column headers */
+@keyframes catalystLivePing {
+  0% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(83, 205, 226, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0); }
+}
+.catalyst-live-dot {
+  animation: catalystLivePing 1.9s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live-dot {
+    animation: none;
+  }
+}
+
 /* Markdown rendered content */
 .md-content {
   color: var(--color-fg);
@@ -286,4 +440,168 @@ body {
 }
 .md-content th {
   background: var(--color-surface-3);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .no-scrollbar — hide the scrollbar while KEEPING scroll (CTL-1003 §A2). The
+ * reading column + the floating rail use this so the Linear-calm surface has no
+ * visible scrollbar chrome (scrolling still works via wheel/trackpad/keys).
+ * ────────────────────────────────────────────────────────────────────────── */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
+ * client pass). Composes ON TOP of .md-content (reuses its table rules; the
+ * description div carries BOTH classes) and overrides the rest to match Linear:
+ * a capped ~680px reading measure, large semibold section headings WITHOUT the
+ * .md-content underline, inline-code chips, themed hljs code blocks, and
+ * internal ticket-ref pills. All colours via @theme tokens (light + dark
+ * inherit the token values). --color-live (cyan) stays RESERVED for live
+ * signals — the description never uses it.
+ * ────────────────────────────────────────────────────────────────────────── */
+.ticket-desc {
+  max-width: 680px;
+  color: var(--color-fg);
+  font-size: 15px;
+  line-height: 1.6;
+  /* CTL-1003 §A2: map the @tailwindcss/typography prose-invert vars to the app
+     tokens so `prose prose-invert` inherits the Linear-calm palette. The
+     unlayered .ticket-desc rules below still beat the layered plugin utilities,
+     so the existing code-chip / pre / hljs / ticket-ref overrides keep winning. */
+  --tw-prose-invert-body: var(--color-fg);
+  --tw-prose-invert-headings: var(--color-fg);
+  --tw-prose-invert-bold: var(--color-fg);
+  --tw-prose-invert-code: var(--color-fg);
+  --tw-prose-invert-links: var(--color-accent);
+  --tw-prose-invert-quotes: var(--color-muted);
+  --tw-prose-invert-counters: var(--color-muted);
+  --tw-prose-invert-bullets: var(--color-muted);
+  --tw-prose-invert-quote-borders: var(--color-border);
+  --tw-prose-invert-hr: var(--color-border);
+  --tw-prose-invert-th-borders: var(--color-border);
+  --tw-prose-invert-td-borders: var(--color-border);
+  --tw-prose-invert-pre-bg: var(--color-surface-1);
+  --tw-prose-invert-pre-code: var(--color-fg);
+}
+.ticket-desc p {
+  margin: 0.7em 0;
+}
+/* section headings: semibold, NO underline (Linear), generous top rhythm */
+.ticket-desc h1,
+.ticket-desc h2 {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.4em 0 0.5em;
+  border: 0;
+  padding: 0;
+  line-height: 1.3;
+}
+.ticket-desc h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.2em 0 0.4em;
+}
+.ticket-desc strong {
+  font-weight: 600;
+  color: var(--color-fg);
+}
+.ticket-desc ul,
+.ticket-desc ol {
+  margin: 0.6em 0;
+  padding-left: 1.5em;
+}
+.ticket-desc li {
+  margin: 0.3em 0;
+}
+/* inline code CHIP (mono, subtle rounded bg) — only OUTSIDE <pre> */
+.ticket-desc :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-fg);
+}
+/* code BLOCK — rounded, bordered, themed */
+.ticket-desc pre {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0.9em 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.ticket-desc pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--color-fg);
+}
+/* hljs token theme → app tokens (no vendor stylesheet imported) */
+.ticket-desc .hljs-keyword,
+.ticket-desc .hljs-built_in {
+  color: var(--color-purple);
+}
+.ticket-desc .hljs-string,
+.ticket-desc .hljs-regexp {
+  color: var(--color-green-soft);
+}
+.ticket-desc .hljs-title,
+.ticket-desc .hljs-title.function_ {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-number,
+.ticket-desc .hljs-literal {
+  color: var(--color-yellow-soft);
+}
+.ticket-desc .hljs-comment {
+  color: var(--color-muted);
+  font-style: italic;
+}
+.ticket-desc .hljs-attr,
+.ticket-desc .hljs-property {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-addition {
+  color: var(--color-green);
+}
+.ticket-desc .hljs-deletion {
+  color: var(--color-red);
+}
+/* ticket-ref PILL → /ticket/<id> (SPA) */
+.ticket-desc a.ticket-ref-pill {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.3;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ticket-desc a.ticket-ref-pill:hover {
+  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
+}
+.ticket-desc a:not(.ticket-ref-pill) {
+  color: var(--color-accent);
+}
+.ticket-desc blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 14px;
+  margin: 0.8em 0;
+  color: var(--color-muted);
 }

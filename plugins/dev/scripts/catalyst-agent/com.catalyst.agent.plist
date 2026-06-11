@@ -4,8 +4,8 @@
 <!--
   LaunchAgent template for catalyst-agent (macOS) — CTL-812.
 
-  This is a TEMPLATE. install.sh substitutes the two REPLACE_WITH_* tokens for
-  the real absolute paths before copying it into ~/Library/LaunchAgents/. Run
+  This is a TEMPLATE. install.sh substitutes the REPLACE_WITH_* tokens for
+  real values before copying it into ~/Library/LaunchAgents/. Run
   `node catalyst-agent.mjs --install` for the manual instructions.
 
   StartInterval (seconds) drives the launchd-side cadence. The agent itself runs
@@ -27,6 +27,14 @@
 
   <key>StartInterval</key>
   <integer>300</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <key>HOME</key>
+    <string>REPLACE_WITH_HOME</string>
+  </dict>
 
   <key>RunAtLoad</key>
   <true/>

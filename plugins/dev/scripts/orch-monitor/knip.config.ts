@@ -2,6 +2,13 @@ import type { KnipConfig } from "knip";
 
 const config: KnipConfig = {
   ignoreExportsUsedInFile: true,
+  // Tags: honour @ignore JSDoc annotation on exports (e.g. DetailBody, contract types).
+  tags: ["-ignore"],
+  // Unused files (dead code from prior tickets — pending cleanup):
+  ignoreFiles: [
+    "ui/src/components/layout/sidebar.tsx",
+    "ui/src/components/workspace-switcher.tsx",
+  ],
   workspaces: {
     ".": {
       entry: [
@@ -19,6 +26,9 @@ const config: KnipConfig = {
         "tailwindcss",
         "tw-animate-css",
         "class-variance-authority",
+        // CTL-1003: loaded via `@plugin "@tailwindcss/typography"` in app.css —
+        // knip doesn't parse CSS @plugin imports, so it can't see the usage.
+        "@tailwindcss/typography",
       ],
     },
   },

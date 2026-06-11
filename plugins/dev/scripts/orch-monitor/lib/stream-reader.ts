@@ -28,6 +28,9 @@ interface StreamEvent {
     | "tool_start"
     | "tool_end"
     | "text"
+    // CTL-887 (BFF5): assistant `thinking` blocks from the EC transcript tail
+    // surface as `reasoning` rows (◌ thinking…).
+    | "reasoning"
     | "turn"
     | "init"
     | "retry"

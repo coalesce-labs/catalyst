@@ -107,6 +107,21 @@ function StreamEventRow({ event }: { event: StreamEvent }) {
           </span>
         </div>
       );
+    // CTL-887 (BFF5): ◌ thinking… reasoning rows from the EC transcript tail.
+    case "reasoning":
+      return (
+        <div className="flex items-start gap-2 py-1">
+          <span className="mt-0.5 shrink-0 font-mono text-[11px] leading-none text-muted">
+            ◌
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[11px] italic text-muted">
+            {event.text?.slice(0, 100) || "thinking…"}
+          </span>
+          <span className="shrink-0 font-mono text-[10px] text-muted tabular-nums">
+            {fmtSince(age)}
+          </span>
+        </div>
+      );
     case "turn": {
       const hasTools = event.turnTools && event.turnTools.length > 0;
       const hasText = event.text && event.text.length > 0;

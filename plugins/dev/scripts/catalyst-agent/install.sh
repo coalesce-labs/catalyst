@@ -29,10 +29,15 @@ mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/catalyst"
 # Substitute the template tokens into the destination plist. Using a temp file
 # then mv keeps the install atomic.
 TMP="$(mktemp)"
+# Capture the current PATH so the launchd agent can find `claude`, `node`, etc.
+# that live outside /usr/bin:/bin:/usr/sbin:/sbin (the launchd default).
+INSTALL_PATH="${PATH}"
+
 sed \
   -e "s|REPLACE_WITH_NODE|${NODE_BIN}|g" \
   -e "s|REPLACE_WITH_AGENT|${AGENT}|g" \
   -e "s|REPLACE_WITH_HOME|${HOME}|g" \
+  -e "s|REPLACE_WITH_PATH|${INSTALL_PATH}|g" \
   "${TEMPLATE}" > "${TMP}"
 mv "${TMP}" "${DEST}"
 echo "install.sh: wrote ${DEST}"

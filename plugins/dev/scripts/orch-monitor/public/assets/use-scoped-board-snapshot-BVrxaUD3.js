@@ -1,0 +1,1 @@
+import{aF as t,r,bp as a}from"./app-DM63d3JO.js";import{u as c}from"./main-DzsiKCAw.js";function m(){const{payload:o,status:e}=c(),p=(o==null?void 0:o.repos)??[],{scope:s}=t(p);return{payload:r.useMemo(()=>o?a(o,s):null,[o,s]),status:e}}export{m as u};

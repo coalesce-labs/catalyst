@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { buildPhaseSummary, PHASE_ORDER } from "../lib/board-data.mjs";
 
-type Sig = { status: string; startedAt?: string; completedAt?: string } | null;
+type Sig = { status: string; startedAt?: string; completedAt?: string; model?: string } | null;
 
 const NOW = Date.parse("2026-06-02T10:00:00Z");
 
@@ -11,7 +11,7 @@ test("terminal phase uses completedAt - startedAt for duration", () => {
   const out = buildPhaseSummary(sigs, NOW);
   expect(out).toEqual([{
     phase: "triage", status: "done", durationMs: 112_000,
-    startedAt: "2026-06-02T09:28:09Z", completedAt: "2026-06-02T09:30:01Z",
+    startedAt: "2026-06-02T09:28:09Z", completedAt: "2026-06-02T09:30:01Z", model: null,
   }]);
 });
 
@@ -21,7 +21,7 @@ test("running (non-terminal, no completedAt) phase measures now - startedAt", ()
   const out = buildPhaseSummary(sigs, NOW);
   expect(out).toEqual([{
     phase: "plan", status: "running", durationMs: 60_000,
-    startedAt: "2026-06-02T09:59:00Z", completedAt: null,
+    startedAt: "2026-06-02T09:59:00Z", completedAt: null, model: null,
   }]);
 });
 
@@ -30,7 +30,7 @@ test("terminal phase WITHOUT completedAt yields null duration (not now-based)", 
   sigs[4] = { status: "failed", startedAt: "2026-06-02T09:00:00Z" }; // verify, terminal
   expect(buildPhaseSummary(sigs, NOW)).toEqual([{
     phase: "verify", status: "failed", durationMs: null,
-    startedAt: "2026-06-02T09:00:00Z", completedAt: null,
+    startedAt: "2026-06-02T09:00:00Z", completedAt: null, model: null,
   }]);
 });
 
@@ -54,7 +54,7 @@ test("unparseable completedAt yields null duration (not a now-anchored value)", 
   sigs[0] = { status: "done", startedAt: "2026-06-02T09:00:00Z", completedAt: "not-a-date" };
   expect(buildPhaseSummary(sigs, NOW)).toEqual([{
     phase: "triage", status: "done", durationMs: null,
-    startedAt: "2026-06-02T09:00:00Z", completedAt: null,
+    startedAt: "2026-06-02T09:00:00Z", completedAt: null, model: null,
   }]);
 });
 
@@ -67,7 +67,7 @@ test("completedAt earlier than startedAt yields null duration but raw timestamps
   sigs[0] = { status: "done", startedAt: "2026-06-02T09:30:00Z", completedAt: "2026-06-02T09:28:00Z" };
   expect(buildPhaseSummary(sigs, NOW)).toEqual([{
     phase: "triage", status: "done", durationMs: null,
-    startedAt: "2026-06-02T09:30:00Z", completedAt: "2026-06-02T09:28:00Z",
+    startedAt: "2026-06-02T09:30:00Z", completedAt: "2026-06-02T09:28:00Z", model: null,
   }]);
 });
 
@@ -83,6 +83,34 @@ test("startedAt and completedAt echoed verbatim from signal (raw string preserva
   const out = buildPhaseSummary(sigs, NOW);
   expect(out).toEqual([{
     phase: "research", status: "done", durationMs: 330_000,
-    startedAt: "2026-06-02T08:00:00Z", completedAt: "2026-06-02T08:05:30Z",
+    startedAt: "2026-06-02T08:00:00Z", completedAt: "2026-06-02T08:05:30Z", model: null,
   }]);
+});
+
+// ── BFF6 / CTL-888 P5: per-phase model on BoardPhaseTiming ──────────────────
+// sig.model is already read into deriveCurrentPhase's intermediate (:215/:217)
+// but was dropped at the buildPhaseSummary return. Surface it so the ticket
+// spine + gantt can render the per-phase model (◆sonnet/◆opus).
+test("BFF6: sig.model is surfaced onto BoardPhaseTiming.model", () => {
+  const sigs: Sig[] = PHASE_ORDER.map(() => null);
+  sigs[0] = { status: "done", startedAt: "2026-06-02T09:00:00Z", completedAt: "2026-06-02T09:01:00Z", model: "sonnet" };
+  sigs[3] = { status: "running", startedAt: "2026-06-02T09:59:00Z", model: "opus" }; // implement
+  const out = buildPhaseSummary(sigs, NOW);
+  expect(out).toEqual([
+    {
+      phase: "triage", status: "done", durationMs: 60_000,
+      startedAt: "2026-06-02T09:00:00Z", completedAt: "2026-06-02T09:01:00Z", model: "sonnet",
+    },
+    {
+      phase: "implement", status: "running", durationMs: 60_000,
+      startedAt: "2026-06-02T09:59:00Z", completedAt: null, model: "opus",
+    },
+  ]);
+});
+
+test("BFF6: a signal without a model yields model:null (no fabrication)", () => {
+  const sigs: Sig[] = PHASE_ORDER.map(() => null);
+  sigs[0] = { status: "done", startedAt: "2026-06-02T09:00:00Z", completedAt: "2026-06-02T09:01:00Z" };
+  const out = buildPhaseSummary(sigs, NOW);
+  expect(out[0]?.model).toBeNull();
 });

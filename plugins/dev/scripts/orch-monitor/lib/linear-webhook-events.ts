@@ -71,6 +71,12 @@ export type LinearWebhookEvent =
       description: string | null;
       /** True when "description" key appears in updatedFrom (description was edited). CTL-749. */
       descriptionChanged: boolean;
+      /**
+       * Current estimate (numeric story points) from data.estimate; null when
+       * explicitly unset; undefined (field absent) when `estimate` was not present
+       * in the webhook payload — KEY-PRESENCE: absent → keep stored value. CTL-957.
+       */
+      toEstimate?: number | null;
     }
   | {
       kind: "comment";
@@ -196,6 +202,13 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     projectObj !== null ? getOptStr(projectObj, "id") : getOptStr(data, "projectId");
   const description = getOptStr(data, "description") ?? null; // CTL-749
   const descriptionChanged = updatedFromKeys.includes("description"); // CTL-749
+  // CTL-957: estimate (numeric story points) — Linear sends data.estimate as a
+  // number (or omits it). "estimate" key in updatedFrom means it changed; even
+  // when not in updatedFrom the full snapshot always carries the current value
+  // when present, so we read it unconditionally when the key exists in data.
+  const toEstimate = "estimate" in data
+    ? (typeof data.estimate === "number" ? data.estimate : null)
+    : undefined; // absent → keep stored value
   return {
     kind: "issue",
     action,
@@ -217,6 +230,7 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     previousFromValues: updatedFrom,
     description,
     descriptionChanged,
+    toEstimate,
   };
 }
 

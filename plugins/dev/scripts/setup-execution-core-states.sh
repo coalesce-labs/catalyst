@@ -4,7 +4,7 @@
 #
 # For an execution-core repo this script, idempotently:
 #   1. Ensures the contract workflow states exist for the team
-#      (Ready + Research, Plan, Implement, Validate, PR — Triage already exists).
+#      (Todo + Research, Plan, Implement, Validate, PR — Triage already exists).
 #      Missing states are created via raw `workflowStateCreate` GraphQL; on a
 #      permission/transport failure it prints admin-in-app fallback instructions.
 #   2. Writes the execution-core stateMap — the 9-phase -> 5-state collapse —
@@ -30,13 +30,38 @@
 set -uo pipefail
 
 # --- The contract -----------------------------------------------------------
+
+# CTL-722: decide whether to (over)write the stateMap.
+# Detect the legacy default by VALUES: "In Progress" / "In Review" mark the old
+# 8-key template. A map that already satisfies the contract — or any
+# user-customised map without those legacy values — is preserved untouched.
+# Returns 0 (needs write) or 1 (skip).
+statemap_needs_write() {
+  local current="$1"
+  [[ -z $current || $current == "null" || $current == "{}" ]] && return 0
+  # contract satisfied? (all 6 values present) -> skip
+  if jq -e '
+        [to_entries[].value] as $v
+        | (["Todo","Research","Plan","Implement","Validate","PR"]
+           | all(. as $s | $v | index($s)))' <<<"$current" >/dev/null 2>&1; then
+    return 1
+  fi
+  # legacy signature present? -> rewrite
+  if jq -e '[to_entries[].value] | (index("In Progress") or index("In Review"))' \
+        <<<"$current" >/dev/null 2>&1; then
+    return 0
+  fi
+  # non-legacy, non-contract custom map -> preserve
+  return 1
+}
+
 # The execution-core 9-phase -> 5-state collapse map. `todo` maps to the
-# pickable contract state `Ready`; verify+review collapse to `Validate`;
+# pickable contract state `Todo`; verify+review collapse to `Validate`;
 # pr+monitor-merge+monitor-deploy collapse to `PR`.
 build_execution_core_state_map() {
   jq -nc '{
     backlog: "Backlog",
-    todo: "Ready",
+    todo: "Todo",
     triage: "Triage",
     research: "Research",
     planning: "Plan",
@@ -54,7 +79,7 @@ build_execution_core_state_map() {
 # Triage is intentionally excluded — it already exists in every team workflow.
 contract_states() {
   jq -nc '[
-    { name: "Ready",     type: "unstarted" },
+    { name: "Todo",      type: "unstarted" },
     { name: "Research",  type: "unstarted" },
     { name: "Plan",      type: "started"   },
     { name: "Implement", type: "started"   },
@@ -380,7 +405,7 @@ main() {
   # defaults it to "Triage" too, but pin it here so the registry entry is
   # self-describing.
   registry_query=$(jq -nc \
-    '{ status: "Ready", triageStatus: "Triage", project: null, label: null, priority: null }')
+    '{ status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null }')
 
   # --- dry-run: report intent, write nothing ---
   if [[ $dry_run -eq 1 ]]; then
@@ -457,10 +482,16 @@ main() {
     echo "  OLD fallback: set catalyst.monitor.linear.botUserId in $config" >&2
   fi
 
-  # --- write the execution-core stateMap (atomic tmp + mv) ---
-  jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
-    "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-  echo "Wrote execution-core stateMap to $config"
+  # --- write the execution-core stateMap (atomic tmp + mv), only if needed (CTL-722) ---
+  local current_map
+  current_map="$(jq -c '.catalyst.linear.stateMap // {}' "$config" 2>/dev/null || echo '{}')"
+  if statemap_needs_write "$current_map"; then
+    jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
+      "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    echo "Wrote execution-core stateMap to $config"
+  else
+    echo "stateMap already satisfies the contract or is user-customised — preserved ($config)"
+  fi
 
   # --- refresh the machine-local stateIds cache via resolve-linear-ids.sh --force ---
   # CTL-577: stateIds is cached in ~/.config/catalyst/linear-state-ids.json,

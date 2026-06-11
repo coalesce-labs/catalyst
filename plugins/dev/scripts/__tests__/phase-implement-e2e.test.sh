@@ -208,9 +208,9 @@ if [[ -f "$SKILL_MONITOR_MERGE" ]]; then
   assert_grep 'catalyst-events wait-for' "$SKILL_MONITOR_MERGE" "uses catalyst-events wait-for (event-driven loop)"
   assert_grep 'github\.pr\.merged|github\.check_suite|github\.pr_review' "$SKILL_MONITOR_MERGE" \
     "references GitHub PR-lifecycle event names"
-  # Transitions Linear to done on merge (per plan §Linear Integration table).
-  assert_grep 'linear-transition\.sh' "$SKILL_MONITOR_MERGE" "calls linear-transition.sh"
-  assert_grep '\bdone\b' "$SKILL_MONITOR_MERGE" "transitions Linear to done"
+  # CTL-703: Linear Done is written by phase-teardown (10th phase), not phase-monitor-merge.
+  assert_not_grep 'linear-transition\.sh' "$SKILL_MONITOR_MERGE" \
+    "phase-monitor-merge does NOT transition Linear to done (CTL-703: teardown owns it)"
   assert_grep '^/goal' "$SKILL_MONITOR_MERGE" "declares a /goal line"
 fi
 
@@ -516,6 +516,8 @@ run_implement_mirror() {
   (
     cd "$repo_dir" || exit 1
     PATH="$case_dir/bin:$PATH" \
+      PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
+      CATALYST_COMMENT_POST_HELPER="$case_dir/bin/linear-comment-post.sh" \
       ORCH_DIR="${case_dir}/orch" \
       TICKET="CTL-449" \
       PHASE="implement" \
@@ -614,6 +616,8 @@ linear_comment_post_stub_install "$CASE_D_DIR/bin" "$CASE_D_DIR/comment-post-cal
 (
   cd "$REPO_D" || exit 1
   PATH="$CASE_D_DIR/bin:$PATH" \
+    PLUGIN_ROOT="${REPO_ROOT}/plugins/dev" \
+    CATALYST_COMMENT_POST_HELPER="$CASE_D_DIR/bin/linear-comment-post.sh" \
     ORCH_DIR="${CASE_D_DIR}/orch" \
     TICKET="CTL-449" \
     PHASE="implement" \

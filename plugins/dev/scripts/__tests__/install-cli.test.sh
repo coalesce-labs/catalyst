@@ -576,6 +576,14 @@ run "wrapper-mode: non-version args still forwarded to underlying CLI" bash -c "
   out=\$(HOME='$HOME29' '$BIN29/catalyst-events' run)
   echo \"\$out\" | grep -qF 'stub real'
 "
+# CTL-1000: with no pluginDirs configured, the wrapper resolves cache and does
+# NOT emit a degradation warning (cache is the legitimate default, not a fault).
+run "wrapper-mode: no pluginDirs → source: cache, no WARN" bash -c "
+  out=\$(HOME='$HOME29' XDG_CONFIG_HOME='$HOME29/.config-empty' \
+        '$BIN29/catalyst-events' --version 2>'$SCRATCH/out29v.err')
+  echo \"\$out\" | grep -qF 'source: cache' \\
+    && ! grep -q 'WARN' '$SCRATCH/out29v.err'
+"
 
 # ── Summary ────────────────────────────────────────────────────────────────
 echo ""

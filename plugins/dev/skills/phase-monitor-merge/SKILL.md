@@ -5,9 +5,10 @@ description: |
   Phase 3). Lifts the active listen loop from the legacy `oneshot` Phase 5
   body: event-driven wait on `catalyst-events wait-for`, inline resolution of
   CI fix-ups, bot review threads, and BEHIND rebases, then `gh pr merge
-  --squash --delete-branch` when the PR reaches CLEAN, then transitions
-  Linear to `done`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`,
-  which invokes it via slash command — hence `user-invocable: true`.
+  --squash --delete-branch` when the PR reaches CLEAN. Linear Done transition
+  and worktree teardown are owned by phase-teardown (CTL-703). Dispatched as
+  a `claude --bg` job by `phase-agent-dispatch`, which invokes it via slash
+  command — hence `user-invocable: true`.
 user-invocable: true
 disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
@@ -20,8 +21,9 @@ allowed-tools:
 # phase-monitor-merge
 
 The reactive half of the worker lifecycle. The PR exists (opened by
-[[phase-pr]]); this phase agent drives it to MERGED and transitions Linear
-to `done`. Implementation lifts the loop from `plugins/dev/skills/oneshot/SKILL.md`
+[[phase-pr]]); this phase agent drives it to MERGED. Linear Done transition
+and worktree teardown are owned by [[phase-teardown]] (CTL-703). Implementation
+lifts the loop from `plugins/dev/skills/oneshot/SKILL.md`
 §"Step 2: Active PR Listen Loop" — same event names, same `mergeable_state`
 state machine, same inline fix-up cap — wrapped in the phase-agent envelope
 (signal file, comms channel, terminal event emission).
@@ -97,7 +99,8 @@ Plan §"Per-phase /goal conditions":
 
 ```
 /goal "`gh pr view --json merged` returns `true` for the PR linked to
-       ${TICKET} (PR #${PR_NUMBER}) AND Linear state is `Done` (I have
+       ${TICKET} (PR #${PR_NUMBER}) AND I have posted the merge mirror
+       comment to Linear and emitted phase-monitor-merge.complete (I have
        printed both confirmations to my transcript);
        OR 24 wall-clock hours have elapsed without merge completion
        and I have recorded status:timeout."
@@ -149,11 +152,13 @@ Key elements that MUST be preserved:
    rendering bleed described in [[monitor-events]] § Narration). Shape:
    `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
-## Merge + Linear `done`
+## Merge
 
 Once `mergeable_state == "clean"` (and the PR isn't already merged):
 
 ```bash
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
@@ -170,80 +175,21 @@ jq --arg ts "$MERGED_AT" --arg sha "${MERGE_COMMIT_SHA:-}" \
     | .updatedAt = $ts' \
    "$SIGNAL_FILE" > "$TMP" && mv "$TMP" "$SIGNAL_FILE"
 
-# Transition Linear to done — worker-owned per plan §Linear Integration.
-LINEAR_TRANSITION="${PLUGIN_ROOT}/scripts/linear-transition.sh"
-if [[ -x "$LINEAR_TRANSITION" ]]; then
-  "$LINEAR_TRANSITION" --ticket "$TICKET" --transition done \
-    --config .catalyst/config.json 2>/dev/null || true
-fi
+# CTL-703: Linear Done is written by phase-teardown (10th phase), not here.
+echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}"
 
-echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}; Linear=done"
-
-# ── CTL-649: auto-teardown local worktree + branch on merge ──────────────────
-# Remote branch is already gone via `gh pr merge --delete-branch` above. The
-# local worktree + local branch are NOT — that's the secondary leak source
-# (20 worktrees pile up under ~/catalyst/wt/<key>/ on the affected host).
-#
-# Skipped when:
-#   - catalyst.orchestration.keepWorktreeAfterMerge=true
-#   - we can't `cd` out of the worktree we're about to delete
-#   - the worktree is dirty (we never roll back the merge itself; warn + skip)
-#
-# This skill runs INSIDE the worktree it's about to remove. `cd` to the
-# primary worktree first so `git worktree remove` doesn't try to yank our
-# own cwd.
-
-KEEP_WT="$(jq -r '.catalyst.orchestration.keepWorktreeAfterMerge // false' \
-  .catalyst/config.json 2>/dev/null || echo "false")"
-
-if [[ "$KEEP_WT" != "true" ]]; then
-  WORKTREE_PATH="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-  PRIMARY_WT="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
-  BRANCH_NAME="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-
-  if [[ -z "$PRIMARY_WT" || "$PRIMARY_WT" == "$WORKTREE_PATH" ]]; then
-    echo "phase-monitor-merge: cannot resolve primary worktree distinct from self; auto-teardown skipped" >&2
-  else
-    cd "$PRIMARY_WT" || {
-      echo "phase-monitor-merge: cannot cd to primary worktree; auto-teardown skipped" >&2
-      cd "$WORKTREE_PATH"  # restore, even on failure
-    }
-
-    if [[ "$PWD" == "$PRIMARY_WT" ]]; then
-      PRESWEEP_BIN="${PLUGIN_ROOT}/scripts/lib/worktree-presweep.sh"
-      # CTL-649: do NOT swallow presweep stderr — its "N session(s) still alive
-      # in <path>" diagnostic is the precise leak signal this teardown exists to
-      # surface. Let it flow straight through to the operator.
-      if [[ -x "$PRESWEEP_BIN" ]] && ! "$PRESWEEP_BIN" "$WORKTREE_PATH"; then
-        echo "phase-monitor-merge: presweep failed for $WORKTREE_PATH; auto-teardown skipped" >&2
-      else
-        # Capture the real `git worktree remove` stderr so a failed teardown
-        # reports the actual cause (dirty tree, locked, submodule, etc.) rather
-        # than guessing. The merge is NEVER rolled back — we only warn + skip.
-        WT_RM_ERR="$(git worktree remove "$WORKTREE_PATH" 2>&1)"
-        if [[ $? -eq 0 ]]; then
-          if [[ -n "$BRANCH_NAME" ]]; then
-            git branch -D "$BRANCH_NAME" 2>/dev/null \
-              || echo "phase-monitor-merge: local branch $BRANCH_NAME already gone" >&2
-          fi
-          echo "phase-monitor-merge: auto-teardown complete (worktree + branch removed)"
-        else
-          echo "phase-monitor-merge: git worktree remove failed; auto-teardown skipped (merge left intact): ${WT_RM_ERR}" >&2
-        fi
-      fi
-    fi
-  fi
-fi
+# CTL-703: worktree + branch removal moved to phase-teardown.
 ```
 
 Deployment verification (`skipDeployVerification=false`) is **not** in this
 phase's scope — that is `phase-monitor-deploy` (plan §Initiative 1 Phase 5).
-This skill exits cleanly the moment the merge + Linear transition land (the
+This skill exits cleanly the moment the merge lands and the End-block mirror is
+posted (CTL-703: Linear Done and worktree teardown happen in phase-teardown; the
 compound-log entry below is best-effort and never extends the phase on failure).
 
 ## Compound-log closing entry (CTL-813 — off the critical path)
 
-After the merge + Linear transition land, write the ticket's compound-log entry
+After the merge lands, write the ticket's compound-log entry
 so the estimation loop's sink fills autonomously (the unbuilt CTL-189 — in
 `merge-pr` a human answers these prompts; here YOU author them). **Best-effort:
 on ANY failure log one line and continue to the End block — never fail or
@@ -308,9 +254,9 @@ merge commit + base branch, the final CI check rollup (passed/total), and a
 count of bot reviews handled (e.g. Codex) whose threads were resolved before
 the merge. Merge metadata is re-read from the signal file (`.pr.mergeCommitSha`
 / `.pr.mergedAt`, written in the merge step above); CI + reviews are pulled once
-from `gh pr view`. Runs after the auto-teardown `cd` to the primary worktree —
-it relies only on absolute signal paths and the PR number, never the (possibly
-removed) ticket worktree. Body hard-truncated to 30,000 bytes. Fail-open and
+from `gh pr view`. Runs inside the ticket worktree (CTL-703: no auto-teardown
+`cd` here; the skill stays in the ticket worktree and relies on absolute
+signal paths and the PR number). Body hard-truncated to 30,000 bytes. Fail-open and
 idempotent via the per-phase marker file. Uniquely-named fence so the e2e test
 can extract just this block.
 

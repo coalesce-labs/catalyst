@@ -172,6 +172,8 @@ When an existing open PR is found, promote it (if draft) and finish — **withou
 `create-pr`. The promote-and-finish block is NOT side-effect-free.
 
 ```bash
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   echo "phase-pr: promoting existing PR #${EXISTING_PR_NUMBER} (draft=${EXISTING_PR_IS_DRAFT})" >&2
   if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
@@ -329,6 +331,14 @@ fi
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then
   "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status complete
+fi
+# Self-halt after complete to prevent zombie workers (CTL-778 step 2).
+# Read our own bg_job_id from the signal file and ask Claude to stop us.
+# Best-effort: a failed stop is covered by the daemon reaper backstop.
+if [[ -n "${ORCH_DIR:-}" && -f "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" ]]; then
+  _SELF_BG=$(jq -r '.bg_job_id // empty' \
+    "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" 2>/dev/null || true)
+  [[ -n "$_SELF_BG" ]] && claude stop "${_SELF_BG:0:8}" >/dev/null 2>&1 || true
 fi
 [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
 ```

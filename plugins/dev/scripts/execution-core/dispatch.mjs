@@ -52,8 +52,17 @@ function defaultResolveProject(ticket) {
 // the dead session) instead of a fresh phase-0 `$PROMPT` start. Omitted entirely
 // when null/undefined → today's fresh-start behaviour. `spawn` is injectable so
 // the unit test can assert the built arg array without a real spawn.
+// CTL-990: hard ceiling on the synchronous phase-agent-dispatch spawn. A
+// wedged dispatch (the recreate→rebase-refused exec recursion looped here for
+// hours, invisible — no rc, no failure ladder) must surface as a failed
+// dispatch, not block the daemon. Generous: worktree provisioning (bun
+// install et al) can legitimately take minutes. Read lazily so tests and
+// operators can override at runtime.
+const getDispatchTimeoutMs = () =>
+  Number(process.env.CATALYST_DISPATCH_TIMEOUT_MS) || 15 * 60 * 1000;
+
 export function defaultRunPhaseAgent(
-  { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt },
+  { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
   { spawn = spawnSync } = {},
 ) {
   const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
@@ -61,18 +70,28 @@ export function defaultRunPhaseAgent(
   if (attempt != null) args.push("--attempt", String(attempt)); // CTL-761
   const extraEnv = {};
   if (handoffPath) extraEnv.CATALYST_HANDOFF_PATH = handoffPath;
+  // CTL-864: cross-host fencing token. Present only on multi-host dispatch;
+  // absent → worker performs no fence check (single-host no-op).
+  if (clusterGeneration != null) extraEnv.CATALYST_CLUSTER_GENERATION = String(clusterGeneration);
+  const env = {
+    ...process.env,
+    CATALYST_ORCHESTRATOR_DIR: orchDir,
+    CATALYST_ORCHESTRATOR_ID: ticket,
+    CATALYST_PHASE: phase,
+    CATALYST_TICKET: ticket,
+    CATALYST_EXECUTION_CORE: "1",
+    ...extraEnv,
+  };
+  // CTL-990: the recreate-once marker is PER DISPATCH CHAIN — only the chain's
+  // own exec may set it. An ambient daemon-env value would pre-spend every
+  // fresh dispatch's single recreate attempt.
+  delete env.CATALYST_RECREATE_ATTEMPTED;
   const res = spawn(PHASE_AGENT_DISPATCH_BIN, args, {
     cwd: worktreePath,
     encoding: "utf8",
-    env: {
-      ...process.env,
-      CATALYST_ORCHESTRATOR_DIR: orchDir,
-      CATALYST_ORCHESTRATOR_ID: ticket,
-      CATALYST_PHASE: phase,
-      CATALYST_TICKET: ticket,
-      CATALYST_EXECUTION_CORE: "1",
-      ...extraEnv,
-    },
+    timeout: getDispatchTimeoutMs(), // CTL-990
+    killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
+    env,
   });
   if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
   return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
@@ -95,7 +114,7 @@ export function defaultRunPhaseAgent(
 // verbatim to runPhaseAgent so the spawned phase-agent-dispatch carries
 // `--resume-session`. Absent on every cold dispatch — only the revive path sets it.
 export function defaultDispatch(
-  { orchDir, ticket, phase, expectedWorktreePath, resumeSession, handoffPath, attempt },
+  { orchDir, ticket, phase, expectedWorktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
@@ -129,7 +148,7 @@ export function defaultDispatch(
       worktreePath: wt.worktreePath,
     };
   }
-  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession, handoffPath, attempt }); // CTL-761
+  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession, handoffPath, attempt, clusterGeneration }); // CTL-761, CTL-864
   return { ...res, worktreePath: wt.worktreePath };
 }
 
@@ -139,11 +158,12 @@ export function defaultDispatch(
 // green because the key is not added when the value is falsy.
 export function dispatchTicket(
   orchDir, ticket, phase,
-  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt } = {},
+  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {},
 ) {
   const args = { orchDir, ticket, phase };
   if (resumeSession) args.resumeSession = resumeSession;
   if (handoffPath) args.handoffPath = handoffPath;
   if (attempt != null) args.attempt = attempt; // CTL-761
+  if (clusterGeneration != null) args.clusterGeneration = clusterGeneration; // CTL-864
   return dispatch(args);
 }

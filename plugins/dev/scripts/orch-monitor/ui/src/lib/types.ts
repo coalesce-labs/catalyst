@@ -41,6 +41,9 @@ export interface StreamEvent {
     | "tool_start"
     | "tool_end"
     | "text"
+    // CTL-887 (BFF5): assistant `thinking` blocks from the EC transcript tail
+    // surface as `reasoning` rows (◌ thinking…).
+    | "reasoning"
     | "turn"
     | "init"
     | "retry"
@@ -274,6 +277,160 @@ export interface OtelLogEntry {
   timestamp: string;
   line: string;
   labels: Record<string, string>;
+}
+
+// ── OBS-6 (TELEMETRY): the grouped live tail wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts TailRow/TailResult on the server side. One parsed
+// claude-code Loki line; absent fields stay null (the renderer dims them, never
+// fabricates). sessionId/linearKey are the grouping keys lifted from the line.
+export interface TailRow {
+  /** Log timestamp (epoch ms). */
+  ts: number;
+  /** The OTEL event name (e.g. claude_code.tool_result), or null. */
+  eventName: string | null;
+  toolName: string | null;
+  toolInput: string | null;
+  durationMs: number | null;
+  costUsd: number | null;
+  tokens: number | null;
+  model: string | null;
+  success: boolean | null;
+  /** CC session UUID — the join key to a BoardWorker for grouping. */
+  sessionId: string | null;
+  /** Linear key — the human group label. */
+  linearKey: string | null;
+  /** CC prompt id (`prompt_id` structured-metadata label), or null. */
+  promptId?: string | null;
+}
+
+/** The /api/otel/tail payload: newest-first rows + fleet-wide freshness (age in
+ *  ms of the newest line, or null when no lines in the window → the hero reads
+ *  QUIET). */
+export interface TailResult {
+  rows: TailRow[];
+  freshnessMs: number | null;
+}
+
+// ── OBS-7 (TELEMETRY P4): per-model latency wire shape ───────────────────────
+// Mirrors lib/otel-queries.ts ModelLatencyRow. p50/p95 are ms (null when the model
+// had no unwrappable api_request samples in the window); errorRate is errors/
+// requests, or null when requests === 0 (the UI shows "—", never a fabricated 0%).
+export interface ModelLatencyRow {
+  model: string;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  requests: number;
+  errors: number;
+  errorRate: number | null;
+}
+
+// ── OBS-8 (TELEMETRY P5): events/min heatmap wire shape ──────────────────────
+// Mirrors lib/otel-queries.ts EventsHeatmap. `buckets` is the full 15m column axis
+// (epoch seconds, ascending) so the UI renders every column even where a session
+// was silent; `cells` carries only the positive-activity (session × bucket) counts.
+export interface HeatmapCell {
+  /** Bucket start, epoch seconds. */
+  x: number;
+  /** CC session UUID — joined to a board worker name for the row label. */
+  sessionId: string;
+  /** Count of claude-code log lines in this session × bucket. */
+  value: number;
+}
+
+export interface EventsHeatmap {
+  /** Bucket starts (epoch seconds), ascending — the full column axis. */
+  buckets: number[];
+  /** Activity cells (value > 0). Absent (session, bucket) pairs are honest silence. */
+  cells: HeatmapCell[];
+}
+
+// ── OBS-9/OBS-10 (FINOPS): the hero dollar band wire shape ───────────────────
+// Mirrors lib/otel-queries.ts CostTodaySummary. todayUsd is spend since local
+// midnight; avg7dUsd is the prior-7-FULL-day mean baseline (the delta vs);
+// deltaFraction is (today − avg7d)/avg7d, null when avg7d===0 (the UI shows "—",
+// never a divide-by-zero); projectionEodUsd extrapolates today's run-rate to 24h.
+export interface CostTodaySummary {
+  todayUsd: number;
+  avg7dUsd: number;
+  /** (today − avg7d) / avg7d, or null when there is no baseline to compare against. */
+  deltaFraction: number | null;
+  projectionEodUsd: number;
+  elapsedTodaySeconds: number;
+}
+
+// ── OBS-9/OBS-10 (FINOPS P-A): hourly spend-over-time + spike flag ───────────
+// Mirrors lib/otel-queries.ts CostSeriesPoint. `t` is epoch SECONDS (the Prom
+// matrix point ts); `usd` is the hour's spend; `isSpike` drives the `--chart-4`
+// dot ON that bar (the one status-color use in P-A).
+export interface CostSeriesPoint {
+  t: number;
+  usd: number;
+  isSpike: boolean;
+}
+
+// ── OBS-9/OBS-10 (FINOPS HERO-C, THE HEADLINE): cache-ROI $ wire shape ───────
+// Mirrors lib/otel-queries.ts CacheSavings. savedUsd is Σ_model cacheRead_tokens
+// × (input_price − cache_read_price); multiplier is savedUsd/actualSpendUsd, null
+// when actual spend is 0 (no base to multiply — the UI shows the $ without "Nx").
+export interface CacheSavingsModelRow {
+  model: string;
+  savedUsd: number;
+  cacheReadTokens: number;
+}
+
+export interface CacheSavings {
+  savedUsd: number;
+  actualSpendUsd: number;
+  /** savedUsd / actualSpendUsd, or null when actual spend is 0. */
+  multiplier: number | null;
+  cacheReadTokens: number;
+  /** Per-model saving, USD, descending — the drill behind the headline. */
+  byModel: CacheSavingsModelRow[];
+}
+
+// ── OBS-10 (FINOPS P-A drill): per-hour cost split wire shape ────────────────
+// Mirrors lib/otel-queries.ts CostAtHour. Clicking a spiking bar re-queries that
+// hour's by-ticket + by-model split (both zero-filtered) so the operator sees WHO
+// + WHICH MODEL drove the spike — one re-query, no fabricated rows.
+export interface CostAtHour {
+  /** Epoch seconds of the hour's END (the clicked bar's timestamp). */
+  hourEndSeconds: number;
+  /** linear_key → USD for the hour (zero-filtered). */
+  byTicket: Record<string, number>;
+  /** model → USD for the hour (zero-filtered). */
+  byModel: Record<string, number>;
+}
+
+// ── OBS-11 (FINOPS breakdown panels): wire shapes for the four breakdown routes ─
+// All four read EXISTING /api/otel/* routes — no new server plumbing (the OBS-9
+// zero-series filter already lives at the query layer for /cost and /cost-by-stage).
+//   P-C expensive tickets → /api/otel/cost           (linear_key → USD, zero-filtered)
+//   P-B by-stage          → /api/otel/cost-by-stage  (task_type → USD, zero-filtered)
+//   P-D by-model/agent    → /api/otel/cost           grouped by model / agent_name
+//   P-E token split       → /api/otel/tokens         (the 4 buckets + cacheHitRate)
+//   footer A8 drift       → /api/otel/cost-validation (signal vs OTEL per ticket)
+
+/** A label→USD cost map (the /api/otel/cost and /cost-by-stage payload `data`).
+ *  null when Prometheus is unavailable (the panel's ChartCard degrades). Every
+ *  value is already zero-filtered server-side, but the UI re-filters belt-and-braces. */
+export type CostMap = Record<string, number> | null;
+
+/** The /api/otel/tokens payload `data`: the four token buckets + the cache hit rate.
+ *  `tokens` keys are exactly input / output / cacheRead / cacheCreation (NEVER
+ *  collapsed). null tokens ⇒ Prometheus unavailable; cacheHitRate is 0..1 or null. */
+export interface TokenSplit {
+  tokens: Record<string, number> | null;
+  cacheHitRate: number | null;
+}
+
+/** One /api/otel/cost-validation row: signal-file cost vs OTEL cost for a ticket.
+ *  The footer A8 strip surfaces the worst absolute drift (best-in-class dashboards
+ *  own their measurement error). discrepancy = |signalCost − otelCost|. */
+export interface CostValidationRow {
+  ticket: string;
+  signalCost: number;
+  otelCost: number;
+  discrepancy: number;
 }
 
 export type CommsMessageType =

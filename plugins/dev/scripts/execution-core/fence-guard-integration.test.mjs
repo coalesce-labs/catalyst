@@ -111,11 +111,14 @@ describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
     else process.env.CATALYST_DIR = prevCatalystDir;
   });
 
-  test("single-host: monitor-deploy done → applyTerminalDone called", () => {
+  test("single-host: terminal phase done → applyTerminalDone called", () => {
+    // CTL-703 (taken wholesale at merge): the terminal-Done gate moved from
+    // `monitor-deploy` to the descriptor's TERMINAL_PHASE (`teardown`). Drive
+    // that phase so the terminalDoneOnce fence path (site 1) is exercised.
     const workerDir = join(orchDir, "workers", "CTL-S1");
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
-      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    writeFileSync(join(workerDir, "phase-teardown.json"),
+      JSON.stringify({ ticket: "CTL-S1", phase: "teardown", status: "done" }));
     const doneCalls = [];
     schedulerTick(orchDir, {
       readEligible: () => [],
@@ -133,10 +136,13 @@ describe("schedulerTick terminalDoneOnce fence guard (site 1, CTL-863)", () => {
   });
 
   test("multi-host + stale fence (no generation in signal) → applyTerminalDone suppressed", () => {
+    // CTL-703: terminal-Done gate is now the TERMINAL_PHASE (`teardown`). The
+    // signal carries no `generation`, so on a multi-host cluster the terminalDoneOnce
+    // fence (site 1) reads null → fail-closed → suppresses the terminal Done write.
     const workerDir = join(orchDir, "workers", "CTL-S1");
     mkdirSync(workerDir, { recursive: true });
-    writeFileSync(join(workerDir, "phase-monitor-deploy.json"),
-      JSON.stringify({ ticket: "CTL-S1", phase: "monitor-deploy", status: "done" }));
+    writeFileSync(join(workerDir, "phase-teardown.json"),
+      JSON.stringify({ ticket: "CTL-S1", phase: "teardown", status: "done" }));
     const doneCalls = [];
     schedulerTick(orchDir, {
       readEligible: () => [],

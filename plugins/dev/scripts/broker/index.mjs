@@ -82,11 +82,12 @@ import { defaultStatJob } from "../execution-core/recovery.mjs";
 
 // --- Public re-export barrel (CTL-529) ---
 // The execution-core split moved every public symbol into a named module.
-// index.mjs re-exports all 67 of them so the import surface — depended on by
+// index.mjs re-exports all 75 of them so the import surface — depended on by
 // the broker test suite — is byte-for-byte preserved. See barrel-exports.test.mjs.
 // CTL-532 added 12 worker-state-projection symbols: 9 store helpers (Phase 1),
 // the pure reduceWorkerStateEvent reducer (Phase 2), and the
 // projectWorkerStateEvent + replayWorkerStateProjection drivers (Phase 3).
+// CTL-993 added 7 plugin-refresh symbols (merge-to-main checkout refresh).
 export { readGroqConfig, readGroqApiKeyFromConfig } from "./config.mjs";
 export {
   getInterests,
@@ -149,6 +150,18 @@ export {
   handleWorkerStateChanged,
 } from "./router.mjs";
 export { loadExistingRegistrations } from "./tailer.mjs";
+// CTL-993: merge-to-main plugin-checkout refresh. router.mjs calls
+// handlePluginRefreshEvent in processEvent; the rest are pure units re-exported
+// through the barrel so the public import surface stays complete.
+export {
+  resolvePluginCheckoutRoots,
+  resolveRepoFullName,
+  isThisRepoMergeEvent,
+  refreshPluginCheckout,
+  handlePluginRefreshEvent,
+  PLUGIN_REFRESH_THROTTLE_MS,
+  __clearThrottleForTest,
+} from "./plugin-refresh.mjs";
 
 // Identity-stable aliases for the shared maps main()/shutdown() read.
 const interests = getInterests();

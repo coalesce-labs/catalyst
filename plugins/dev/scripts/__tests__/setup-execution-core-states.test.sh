@@ -49,8 +49,8 @@ run "state map is valid JSON" \
 run "state map has 12 keys" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e 'length == 12'"
 
-run "state map todo -> Ready" \
-  bash -c "echo '$STATE_MAP_JSON' | jq -e '.todo == \"Ready\"'"
+run "state map todo -> Todo" \
+  bash -c "echo '$STATE_MAP_JSON' | jq -e '.todo == \"Todo\"'"
 
 run "state map remediating -> Remediate (CTL-653)" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e '.remediating == \"Remediate\"'"
@@ -85,17 +85,17 @@ run "state map done -> Done" \
 run "state map canceled -> Canceled" \
   bash -c "echo '$STATE_MAP_JSON' | jq -e '.canceled == \"Canceled\"'"
 
-# contract_states — exactly Ready Research Plan Implement Validate PR (no Triage).
+# contract_states — exactly Todo Research Plan Implement Validate PR (no Triage).
 CONTRACT="$(contract_states)"
 
 run "contract_states lists the 6 contract names" \
-  bash -c "[ \"\$(echo '$CONTRACT' | jq -r '.[].name' | sort | tr '\n' ' ')\" = 'Implement Plan PR Ready Research Validate ' ]"
+  bash -c "[ \"\$(echo '$CONTRACT' | jq -r '.[].name' | sort | tr '\n' ' ')\" = 'Implement Plan PR Research Todo Validate ' ]"
 
 run "contract_states excludes Triage" \
   bash -c "! echo '$CONTRACT' | jq -e '.[] | select(.name == \"Triage\")'"
 
-run "contract_states: Ready is unstarted" \
-  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Ready\") | .type == \"unstarted\"'"
+run "contract_states: Todo is unstarted" \
+  bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Todo\") | .type == \"unstarted\"'"
 
 run "contract_states: Research is unstarted" \
   bash -c "echo '$CONTRACT' | jq -e '.[] | select(.name==\"Research\") | .type == \"unstarted\"'"
@@ -117,9 +117,9 @@ FETCHED_PARTIAL='[{"name":"Triage","type":"started"},{"name":"Research","type":"
 MISSING="$(missing_contract_states "$FETCHED_PARTIAL")"
 
 run "missing_contract_states returns the absent contract states" \
-  bash -c "[ \"\$(echo '$MISSING' | tr ' ' '\n' | grep -v '^\$' | sort | tr '\n' ' ')\" = 'Implement PR Ready Validate ' ]"
+  bash -c "[ \"\$(echo '$MISSING' | tr ' ' '\n' | grep -v '^\$' | sort | tr '\n' ' ')\" = 'Implement PR Todo Validate ' ]"
 
-FETCHED_ALL='[{"name":"Triage","type":"started"},{"name":"Ready","type":"unstarted"},{"name":"Research","type":"unstarted"},{"name":"Plan","type":"started"},{"name":"Implement","type":"started"},{"name":"Validate","type":"started"},{"name":"PR","type":"started"}]'
+FETCHED_ALL='[{"name":"Triage","type":"started"},{"name":"Todo","type":"unstarted"},{"name":"Research","type":"unstarted"},{"name":"Plan","type":"started"},{"name":"Implement","type":"started"},{"name":"Validate","type":"started"},{"name":"PR","type":"started"}]'
 
 run "missing_contract_states returns empty when all present (idempotent)" \
   bash -c "[ -z \"\$(missing_contract_states '$FETCHED_ALL' | tr -d '[:space:]')\" ]"
@@ -277,7 +277,7 @@ install_fake_curl() {
 
   local states_nodes
   if [ "$states" = "all" ]; then
-    states_nodes='{"id":"s-triage","name":"Triage","type":"started"},{"id":"s-ready","name":"Ready","type":"unstarted"},{"id":"s-research","name":"Research","type":"unstarted"},{"id":"s-plan","name":"Plan","type":"started"},{"id":"s-impl","name":"Implement","type":"started"},{"id":"s-val","name":"Validate","type":"started"},{"id":"s-pr","name":"PR","type":"started"},{"id":"s-backlog","name":"Backlog","type":"backlog"},{"id":"s-done","name":"Done","type":"completed"},{"id":"s-cancel","name":"Canceled","type":"canceled"}'
+    states_nodes='{"id":"s-triage","name":"Triage","type":"started"},{"id":"s-todo","name":"Todo","type":"unstarted"},{"id":"s-research","name":"Research","type":"unstarted"},{"id":"s-plan","name":"Plan","type":"started"},{"id":"s-impl","name":"Implement","type":"started"},{"id":"s-val","name":"Validate","type":"started"},{"id":"s-pr","name":"PR","type":"started"},{"id":"s-backlog","name":"Backlog","type":"backlog"},{"id":"s-done","name":"Done","type":"completed"},{"id":"s-cancel","name":"Canceled","type":"canceled"}'
   else
     states_nodes='{"id":"s-triage","name":"Triage","type":"started"},{"id":"s-research","name":"Research","type":"unstarted"},{"id":"s-plan","name":"Plan","type":"started"},{"id":"s-backlog","name":"Backlog","type":"backlog"},{"id":"s-done","name":"Done","type":"completed"}'
   fi
@@ -361,6 +361,22 @@ run "writes execution-core stateMap (inReview -> PR)" \
 run "upserts a registry entry for the team" \
   bash -c "jq -e '.projects[] | select(.team == \"CTL\")' '${SCRATCH}/ok/catalyst/execution-core/registry.json'"
 
+# ─── Unit tests: statemap_needs_write predicate (CTL-722) ────────────────────
+run "statemap_needs_write: legacy 8-key map (In Progress/In Review values) -> needs write" \
+  bash -c 'source '"$SCRIPT"'; statemap_needs_write '"'"'{"todo":"Todo","research":"In Progress","inReview":"In Review"}'"'"''
+
+run "statemap_needs_write: empty map -> needs write" \
+  bash -c 'source '"$SCRIPT"'; statemap_needs_write "{}"'
+
+run "statemap_needs_write: null/empty string -> needs write" \
+  bash -c 'source '"$SCRIPT"'; statemap_needs_write ""'
+
+run "statemap_needs_write: contract-satisfying map -> skip (return 1)" \
+  bash -c 'source '"$SCRIPT"'; ! statemap_needs_write '"'"'{"todo":"Todo","research":"Research","planning":"Plan","inProgress":"Implement","verifying":"Validate","reviewing":"Review","inReview":"PR"}'"'"''
+
+run "statemap_needs_write: user-customised non-legacy map without contract -> skip (return 1)" \
+  bash -c 'source '"$SCRIPT"'; ! statemap_needs_write '"'"'{"todo":"MyTodo","research":"MyResearch","planning":"Plan","inProgress":"Implement","verifying":"Validate","reviewing":"Review","inReview":"PR"}'"'"''
+
 # ─── Test: idempotent — re-run produces identical config ─────────────────────
 CONFIG_AFTER1="$(cat "${WORK_OK}/.catalyst/config.json")"
 HOME="$HOME_OK" PATH="$BIN_OK:$PATH" CATALYST_DIR="${SCRATCH}/ok/catalyst" \
@@ -368,6 +384,31 @@ HOME="$HOME_OK" PATH="$BIN_OK:$PATH" CATALYST_DIR="${SCRATCH}/ok/catalyst" \
 CONFIG_AFTER2="$(cat "${WORK_OK}/.catalyst/config.json")"
 run "re-run is idempotent (config unchanged)" \
   bash -c "[ \"\$CONFIG_AFTER1\" = \"\$CONFIG_AFTER2\" ]"
+
+# ─── Test: idempotency guard preserves user-customised stateMap (CTL-722) ────
+WORK_CUSTOM="${SCRATCH}/custom"
+BIN_CUSTOM="${SCRATCH}/custom/bin"
+HOME_CUSTOM="${SCRATCH}/custom/home"
+build_repo "$WORK_CUSTOM"
+build_secrets "$HOME_CUSTOM"
+install_fake_curl "$BIN_CUSTOM" "all" "ok"
+
+# First run: let the script write the contract map
+HOME="$HOME_CUSTOM" PATH="$BIN_CUSTOM:$PATH" CATALYST_DIR="${SCRATCH}/custom/catalyst" \
+  "$SCRIPT" --config "${WORK_CUSTOM}/.catalyst/config.json" > /dev/null 2>&1 || true
+
+# Mutate one value to a custom string (still satisfies contract so guard skips on re-run)
+jq '.catalyst.linear.stateMap.backlog = "MyCustomBacklog"' \
+  "${WORK_CUSTOM}/.catalyst/config.json" > "${WORK_CUSTOM}/.catalyst/config.json.tmp" \
+  && mv "${WORK_CUSTOM}/.catalyst/config.json.tmp" "${WORK_CUSTOM}/.catalyst/config.json"
+
+# Re-run — the guard must NOT overwrite since the contract is still satisfied
+HOME="$HOME_CUSTOM" PATH="$BIN_CUSTOM:$PATH" CATALYST_DIR="${SCRATCH}/custom/catalyst" \
+  "$SCRIPT" --config "${WORK_CUSTOM}/.catalyst/config.json" > /dev/null 2>&1 || true
+
+run "idempotency guard: user-customised stateMap preserved on re-run" \
+  bash -c "jq -e '.catalyst.linear.stateMap.backlog == \"MyCustomBacklog\"' \
+    '${WORK_CUSTOM}/.catalyst/config.json'"
 
 # ─── Test: workflowStateCreate fails -> states_incomplete + fallback printed ──
 WORK_FAIL="${SCRATCH}/fail"

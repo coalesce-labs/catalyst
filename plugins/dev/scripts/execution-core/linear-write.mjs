@@ -194,14 +194,19 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
 //                     Unrecoverable inside one daemon lifetime — callers
 //                     (scheduler.labelOnce) write a .skipped marker and do not
 //                     retry it this run.
+//   "exclusive-conflict" — CTL-834: the label is in an exclusive group whose
+//                     sibling is already on the ticket. Unrecoverable while the
+//                     sibling is present — callers back off (labelOnce writes
+//                     .skipped; convergeHeldLabel arms a cool-down).
 //   "rate-limited"  — Linear write rate-cap hit; retry next tick.
 //   "verify-failed" — write exited 0 but the read-back is missing the label
 //                     (the silent-success case) OR the read-back exec failed;
 //                     retry next tick.
 //   "transient"     — every other failure (network, spawn error, unknown
 //                     stderr, exec threw); retry next tick.
-// All reasons except "missing-label" are retryable next tick: labelOnce only
-// writes its .applied marker when applied: true, so a failure naturally retries.
+// Unrecoverable reasons ("missing-label", "exclusive-conflict") are NOT retried;
+// every other reason is retryable next tick (labelOnce only writes its .applied
+// marker when applied: true, so a failure naturally retries).
 export function applyLabel({ ticket, label, exec = defaultExec }) {
   try {
     const writeRes = exec("linearis", [
@@ -356,10 +361,18 @@ export function applyTriageStatus({
   }
 }
 
-// ALLOWED_ESTIMATE_POINTS — the Fibonacci-derived points scale used by the
-// reference-class lookup tool (CTL-751). Only these values are accepted by
-// applyEstimate; anything else is rejected without calling linearis.
-const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
+// ALLOWED_ESTIMATE_POINTS — union of all valid point values across every
+// estimation method Linear supports: fibonacci, tShirt, exponential, and
+// linear (CTL-751, CTL-954). Zero is intentionally excluded — Linear's
+// allowZero flag gates whether 0 is a legal input for a given team, but the
+// scheduler never writes 0 (the scope→estimate map starts at xs=1 for all
+// non-tShirt methods).  Any value not in this set is rejected without calling
+// linearis, guarding against garbage writes.
+const ALLOWED_ESTIMATE_POINTS = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // linear + overlapping scales
+  13,                              // fibonacci max
+  16, 32,                          // exponential extended
+]);
 
 // HUMAN_ESTIMATE_LABEL — tickets carrying this label have a hand-set estimate
 // that machine write-backs must never clobber (estimation-methodology.md §6b).
@@ -500,10 +513,17 @@ export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }
 //     stops the per-tick retry storm. (Observed on ADV tickets when the daemon
 //     orchestrates a team whose labels share names with the resolver's default
 //     team but have different UUIDs.)
-function classifyLabelFailure(stderr) {
+//   - "not exclusive child" (CTL-834): the label belongs to an EXCLUSIVE Linear
+//     label group and a SIBLING from that group is already on the ticket, so the
+//     add can never land while the sibling is present. Its own unrecoverable
+//     reason ("exclusive-conflict") so callers back off instead of re-issuing it
+//     every ~22s tick (observed: 218 fails / 44 min on the held-label converger —
+//     CTL-838 blocked↔needs-human, ADV-1295 blocked↔waiting).
+export function classifyLabelFailure(stderr) {
   const s = String(stderr ?? "");
   if (s.includes("not found")) return "missing-label";
   if (s.includes("incorrect team")) return "missing-label";
+  if (s.includes("not exclusive")) return "exclusive-conflict";
   if (s.includes("Rate limit")) return "rate-limited";
   return "transient";
 }

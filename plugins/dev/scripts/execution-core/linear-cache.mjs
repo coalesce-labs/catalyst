@@ -18,7 +18,7 @@
 //      relations store, so a setRelations() priming a state never trips an
 //      invalidation, and the monitor write-through stays byte-for-byte.
 //   2. `relationsEntries` — the FULL relation descriptor
-//      ({ state, relations, inverseRelations, priority, labels }) keyed by
+//      ({ state, parent, relations, inverseRelations, priority, labels }) keyed by
 //      identifier, with its own TTL. This is the read-through store
 //      fetchTicketsBatch / fetchTicketRelations populate and consult so the
 //      admission pool's per-tick relation reads collapse to one batched query

@@ -147,16 +147,16 @@ The source guard (`if ! (return 0 2>/dev/null); then main "$@"; fi`) replaces th
 `BASH_SOURCE[0]`-based check and works correctly in `curl | bash` pipelines where
 `BASH_SOURCE[0]` is unset.
 
-**Execution-core state contract (CTL-564).** When a repo's
-`catalyst.orchestration.dispatchMode` is `execution-core`, `setup-catalyst.sh`
-runs an extra step — `setup_execution_core_states` — right after the Linear
-workflow-state fetch. That step delegates to the standalone
+**Execution-core state contract (CTL-564).** `setup-catalyst.sh` runs an extra
+step — `setup_execution_core_states` — right after the Linear workflow-state
+fetch for every `--full` repo (CTL-722: not gated on `dispatchMode` any more).
+That step delegates to the standalone
 `plugins/dev/scripts/setup-execution-core-states.sh`, which ensures the team's
-contract workflow states exist (`Ready` + `Research`, `Plan`, `Implement`,
+contract workflow states exist (`Todo` + `Research`, `Plan`, `Implement`,
 `Validate`, `PR`; `Triage` already exists), writes the 9-phase → 5-state
-collapse `stateMap`, refreshes `stateIds`, and upserts the team's entry in the
-central `~/catalyst/execution-core/registry.json`. The step is a silent no-op
-for `phase-agents` / `oneshot-legacy` repos, and a Linear-permission failure in
+collapse `stateMap` (idempotent — preserves user-customised maps), refreshes
+`stateIds`, and upserts the team's entry in the central
+`~/catalyst/execution-core/registry.json`. A Linear-permission failure in
 the standalone script never aborts setup. The standalone script is also
 idempotent and can be run directly per team (`setup-execution-core-states.sh
 --config .catalyst/config.json [--dry-run] [--json]`).

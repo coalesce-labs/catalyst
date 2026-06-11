@@ -17,6 +17,24 @@ export function fmtDuration(ms: number): string {
   return h + "h " + (m % 60) + "m";
 }
 
+// CTL-901 (HOME3): a QUIET, single-coarsest-unit relative duration for the calm
+// inbox rows — "2h", "4m", "30s", "3d" — never the compound "2h 5m" the dense
+// board uses (fmtDuration). One unit keeps the row unalarming and matches the
+// Gherkin "a quiet relative duration like '2h'". A null/negative input (no honest
+// backing timestamp) yields null so the caller OMITS the cell rather than
+// rendering a fabricated "0s" — the "honest, never fabricated" acceptance line.
+export function fmtRelativeDuration(ms: number | null): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + "h";
+  const d = Math.floor(h / 24);
+  return d + "d";
+}
+
 export function fmtTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "—";
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
@@ -36,6 +54,15 @@ export function fmtClock(d: Date): string {
 export function fmtCost(n: number): string {
   if (!n || n <= 0) return "—";
   return "$" + n.toFixed(2);
+}
+
+// CTL-915 (DETAIL4): the per-phase model label, shared by the lifecycle spine
+// node and the compact gantt so they render the SAME value off the SAME function
+// (the Gherkin "the compact gantt shows the same per-phase model"). A null model
+// (the phase signal carried none — BFF6 leaves it null, never fabricated) renders
+// a dimmed em-dash; a present model gets the ◆ marker the spine already uses.
+export function phaseModelLabel(model: string | null | undefined): string {
+  return model ? "◆" + model : "—";
 }
 
 export type StatusSemantic = "success" | "info" | "danger" | "warning" | "neutral";
@@ -99,7 +126,7 @@ export const PHASE_COLORS: Record<string, string> = {
   done: "#6b7280",
   failed: "#ef4444",
   stalled: "#eab308",
-  // canonical 9-phase aliases (CTL-754) — keep in lock-step with Board.tsx PHASE_C
+  // canonical 10-phase aliases (CTL-754) — keep in lock-step with Board.tsx PHASE_C
   triage: "#64748b",
   research: "#3b82f6",
   plan: "#a855f7",
@@ -110,6 +137,7 @@ export const PHASE_COLORS: Record<string, string> = {
   pr: "#14b8a6",
   "monitor-merge": "#4ea1ff",
   "monitor-deploy": "#39d07a",
+  teardown: "#6b7280",
 };
 
 const FALLBACK_PHASE_COLOR = "#3b82f6";
