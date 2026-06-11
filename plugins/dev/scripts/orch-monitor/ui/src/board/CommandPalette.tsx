@@ -52,6 +52,7 @@ const PALETTE_CSS = `
 .cat-cmd [cmdk-item][data-disabled="true"] { color: ${C.fgDim}; cursor: not-allowed; opacity: .6; }
 .cat-cmd [cmdk-empty] { padding: 18px; text-align: center; color: ${C.fgDim}; font: 12px ${C.mono}; }
 .cat-cmd-meta { margin-left: auto; color: ${C.fgMuted}; font: 11px ${C.mono}; }
+.cat-cmd-kbd { margin-left: auto; color: ${C.fgDim}; font: 11px ${C.mono}; border: 1px solid ${C.border}; border-radius: 4px; padding: 1px 6px; letter-spacing: 0.05em; }
 .cat-cmd-soon { margin-left: auto; color: ${C.fgDim}; font: 10px ${C.mono}; border: 1px solid ${C.border}; border-radius: 4px; padding: 1px 5px; }
 .cat-cmd-live { width: 7px; height: 7px; border-radius: 50%; background: ${LIVE}; flex: 0 0 auto; }
 .cat-cmd-sep { height: 1px; margin: 6px 4px; background: ${C.border}; }
@@ -96,6 +97,8 @@ function Row({ row, onRun }: { row: PaletteItem; onRun: (r: PaletteItem) => void
         <span className="cat-cmd-soon" data-palette-soon>
           soon
         </span>
+      ) : row.keybinding ? (
+        <kbd className="cat-cmd-kbd" data-palette-keybinding={row.keybinding}>{row.keybinding}</kbd>
       ) : (
         row.meta && <span className="cat-cmd-meta">{row.meta}</span>
       )}
