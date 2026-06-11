@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 // CTL-989: the Board is now mounted INSIDE the single app-wide router, so card
 // opens + the dep-graph jump are client-side navigations (no full-doc reload).
 import { useNavigate } from "@tanstack/react-router";
@@ -7,7 +7,6 @@ import { useAtom } from "jotai";
 import { Badge } from "@/components/ui/badge";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 import { fmtDuration } from "../lib/formatters";
 import {
@@ -67,24 +66,11 @@ import {
   HOST_FILTER_ALL,
   UNATTRIBUTED_HOST,
 } from "./worker-grouping";
-// ── per-node queue grouping (CTL-910 / SURF2) ─────────────────────────────────
-// The waiting table attributes each row to its HRW owner host. queueHostMode is
-// the single-host identity-no-op detector (one/zero distinct host → no node
-// column, zero added noise); groupQueueByHost lifts the ranked queue into ordered
-// per-node buckets WITHOUT disturbing the scheduler's global rank.
-import {
-  queueHostMode,
-  groupQueueByHost,
-  type QueueHostGroup,
-} from "./queue-grouping";
-// ── CTL-947: in-flight worker activity grouping ────────────────────────────────
-// The in-flight table groups workers by activity state: active / waiting-on-user
-// / waiting / stuck / blocked (bottom). groupWorkersByActivity is PURE (no DOM),
-// unit-tested in queue-worker-grouping.test.ts.
-import {
-  groupWorkersByActivity,
-  type WorkerActivitySection,
-} from "./queue-worker-grouping";
+// CTL-1015: the /queue surface (capacity + waiting-queue rendering) was lifted
+// out of Board.tsx into the dedicated control-tower components under
+// components/queue/ (QueueView/WaitingTable/InflightWorkerRow + the SlotBar/Stat
+// cards are retired). The per-node queue grouping (queue-grouping.ts) and the
+// in-flight worker activity grouping (queue-worker-grouping.ts) now live there.
 // ── BOARD2 / CTL-906: the display-options popover + its persisted prefs ────────
 // One toolbar button owns every board display choice (density / grouping /
 // ordering / color / show-empty / repo-lanes). The three scattered subhead Seg
@@ -164,7 +150,6 @@ export type ColorBy = "phase" | "status" | "repo" | "type";
 // CTL-930 Phase 5: type/repo/node accents from canonical board-tokens.ts.
 const TYPE_C: Record<string, string> = TYPE_MAP;
 const repoColor = (repo: string) => (repo === "adva" ? C.purple : C.blue);
-const isActive = (s: ActiveState) => s === "active";
 // CTL-909 / SURF1: a stable per-node accent so the "group by Node" columns +
 // the host chip on each worker card carry a consistent color. Hashed from the
 // host name (the unattributed bucket reads dim) — deterministic, no palette
@@ -779,307 +764,6 @@ function WorkerSwimlaneBoard({
 // BOARD3 / CTL-907: the repo-only `Lane` component is replaced by the generalized
 // <Swimlane>/<SwimlaneBoard> (Swimlane.tsx), driven by the pure board-grouping
 // engine over the full none|repo|team|project|host axis.
-
-// ── capacity + queue ────────────────────────────────────────────────────────
-function SlotBar({ capacity, inFlight }: { capacity: number; inFlight: number }) {
-  const total = Math.max(capacity, inFlight, 1);
-  const free = Math.max(0, capacity - inFlight), over = Math.max(0, inFlight - capacity);
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: "flex", gap: 4 }}>
-        {Array.from({ length: total }).map((_, i) => {
-          const filled = i < inFlight, isOver = i >= capacity;
-          return <span key={i} style={{ flex: 1, height: 16, borderRadius: 4, background: filled ? (isOver ? C.red : C.blue) : "transparent", border: filled ? "none" : `1px solid ${C.border}` }} />;
-        })}
-      </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 7, fontFamily: C.mono, fontSize: 11, color: C.fgDim }}>
-        <span style={{ color: over ? C.red : C.fgDim }}>{inFlight} in flight{over ? ` · ${over} over capacity` : ""}</span>
-        <span>capacity {capacity} · {free} free</span>
-      </div>
-    </div>
-  );
-}
-function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 9, padding: "10px 14px", minWidth: 104 }}>
-      <div style={{ fontSize: 11, color: C.fgDim, textTransform: "uppercase", letterSpacing: 0.6 }}>{label}</div>
-      <div style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 22, fontWeight: 700, color: color || C.fg, marginTop: 2 }}>{value}</div>
-    </div>
-  );
-}
-const th = { color: C.fgDim, fontSize: 11, textTransform: "uppercase" as const, letterSpacing: 0.6, fontWeight: 500 };
-const td = { fontSize: 12.5, color: C.fg };
-const mono = { fontFamily: C.mono, fontVariantNumeric: "tabular-nums" as const };
-const ellip = { overflow: "hidden" as const, textOverflow: "ellipsis" as const, whiteSpace: "nowrap" as const };
-
-// ── waiting-queue row + grouped body (CTL-910 / SURF2) ───────────────────────
-// One waiting row. `showHost` adds the node column ONLY in a multi-node fleet —
-// single-host collapses it away so the column adds no visual noise (the identity
-// no-op). The host cell renders the owner name, or a dim "—" for an un-attributed
-// row (host:null, e.g. before a fence claim).
-// CTL-952: motion-enhanced TableRow for queue / in-flight animate-presence.
-const MotionTableRow = motion.create(TableRow);
-
-function QueueRow({ q, freeSlots, showHost }: { q: QueueItem; freeSlots: number; showHost: boolean }) {
-  const reduced = useReducedMotion();
-  const variants = reduced ? enterVariantsReduced : enterVariants;
-  const trans = reduceTransition(rowTransition, reduced);
-  return (
-    <MotionTableRow
-      variants={variants}
-      initial="initial"
-      animate="animate"
-      exit="exit"
-      transition={trans}
-      style={{ background: q.rank <= freeSlots ? "rgba(57,208,122,0.06)" : undefined }}
-    >
-      <TableCell style={{ ...mono, color: C.fgMuted }}>{q.rank}</TableCell>
-      <TableCell><PriorityIcon p={q.priority} /></TableCell>
-      <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{q.id}</TableCell>
-      <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>{q.title}</TableCell>
-      <TableCell><ScopeChip scope={q.scope} estimate={q.estimate} estimateDisplay={q.estimateDisplay} /></TableCell>
-      <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{q.repo}</TableCell>
-      {showHost && (
-        <TableCell style={{ ...mono, fontSize: 11, color: q.host ? C.fgMuted : C.fgDim }}>{q.host?.name ?? "—"}</TableCell>
-      )}
-    </MotionTableRow>
-  );
-}
-
-// The waiting table. `grouped` (only offered in a multi-node fleet) splits the
-// ranked queue into per-node sections so an operator can read per-node depth; the
-// global rank within each section is preserved (groupQueueByHost never re-sorts).
-function WaitingTable({ queue, freeSlots, showHost, grouped }: { queue: QueueItem[]; freeSlots: number; showHost: boolean; grouped: boolean }) {
-  const header = (
-    <TableHeader><TableRow style={{ background: C.s1 }}>
-      <TableHead style={{ ...th, width: 40 }}>#</TableHead><TableHead style={{ ...th, width: 44 }}>Pri</TableHead>
-      <TableHead style={{ ...th, width: 100 }}>Ticket</TableHead><TableHead style={th}>Title</TableHead>
-      <TableHead style={{ ...th, width: 70 }}>Size</TableHead><TableHead style={{ ...th, width: 84 }}>Repo</TableHead>
-      {showHost && <TableHead style={{ ...th, width: 130 }}>Node</TableHead>}
-    </TableRow></TableHeader>
-  );
-  const colSpan = showHost ? 7 : 6;
-  if (!grouped) {
-    return (
-      <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
-        <Table>
-          {header}
-          <TableBody>
-            {/* CTL-952: AnimatePresence for queue reorder enter/exit */}
-            <AnimatePresence initial={false}>
-              {queue.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
-            </AnimatePresence>
-          </TableBody>
-        </Table>
-      </div>
-    );
-  }
-  const groups: QueueHostGroup[] = groupQueueByHost(queue);
-  return (
-    <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden" }}>
-      <Table>
-        {header}
-        <TableBody>
-          {groups.map((g) => (
-            <Fragment key={g.host?.id ?? g.label}>
-              <TableRow style={{ background: C.s1 }}>
-                <TableCell colSpan={colSpan} style={{ ...mono, fontSize: 11, color: C.fgMuted, padding: "6px 12px" }}>
-                  <span style={{ color: g.host ? C.fg : C.fgDim, fontWeight: 600 }}>{g.label}</span>
-                  <span style={{ color: C.fgDim }}> · {g.items.length} queued</span>
-                </TableCell>
-              </TableRow>
-              {/* CTL-952: AnimatePresence for grouped queue reorder */}
-              <AnimatePresence initial={false}>
-                {g.items.map((q) => <QueueRow key={q.id} q={q} freeSlots={freeSlots} showHost={showHost} />)}
-              </AnimatePresence>
-            </Fragment>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
-  );
-}
-
-// CTL-952: in-flight worker row — extracted from the inline QueueView map so the
-// `useReducedMotion` hook call is valid (hooks must be called from a component).
-function InflightWorkerRow({ w, ticket, blockers }: {
-  w: Worker;
-  ticket: Ticket | undefined;
-  blockers: string[];
-}) {
-  const reduced = useReducedMotion();
-  const variants = reduced ? enterVariantsReduced : enterVariants;
-  const trans = reduceTransition(rowTransition, reduced);
-  return (
-    <MotionTableRow
-      variants={variants}
-      initial="initial"
-      animate="animate"
-      exit="exit"
-      transition={trans}
-      // CTL-978: dead workers are de-emphasized (more so than stuck — they are corpses).
-      style={{ opacity: w.activeState === "dead" ? 0.4 : w.activeState === "stuck" ? 0.6 : 1 }}
-    >
-      <TableCell><EntityMarker repo={w.repo} state={w.activeState} fallback={PHASE_C[w.phase] || C.blue} /></TableCell>
-      <TableCell><PriorityIcon p={ticket?.priority ?? 0} /></TableCell>
-      <TableCell style={{ ...mono, ...td, color: C.blue, fontWeight: 600 }}>{w.ticket}</TableCell>
-      <TableCell style={{ ...td, ...ellip, maxWidth: 0 }}>
-        {ticket?.title || ""}
-        {blockers.length > 0 && (
-          <span style={{ marginLeft: 8, fontFamily: C.mono, fontSize: 10, color: C.red }}>
-            blocked on: {blockers.join(", ")}
-          </span>
-        )}
-      </TableCell>
-      <TableCell><PhasePill phase={w.phase} /></TableCell>
-      <TableCell style={{ ...mono, fontSize: 11, color: isActive(w.activeState) ? LIVE : w.activeState === "stuck" ? C.red : w.waitingOnUser ? C.yellow : C.fgDim }}>
-        {workerStatusText(w)}
-      </TableCell>
-      <TableCell style={{ ...mono, fontSize: 11, color: C.fgDim }}>{fmtRuntime(w.runtimeMs)}</TableCell>
-    </MotionTableRow>
-  );
-}
-
-// CTL-910 / SURF2: the wide, ranked Queue surface. Promoted from the board's
-// internal Queue tab into the shell as its own route (see QueueSurface, which
-// connects the board transport and mounts this embedded). Reused near-verbatim
-// from the original board Queue tab: capacity Stats + SlotBar + an in-flight table
-// + a waiting ranked table. NEW for SURF2: an optional per-node column + a
-// group-by-node toggle, both gated behind queueHostMode so a single-host fleet is
-// an exact identity no-op (no node column, no toggle, no added noise).
-// CTL-947: accent color for each activity group section header.
-// CTL-978: "dead" uses fgDim — de-emphasized; these are not in-flight.
-const WORKER_GROUP_C: Record<string, string> = {
-  active: LIVE,
-  "waiting-on-user": C.yellow,
-  waiting: C.fgDim,
-  stuck: C.red,
-  blocked: C.red,
-  dead: C.fgDim,
-};
-
-// CTL-947: status cell text for a worker row.
-// CTL-978: "dead" surfaces as "dead" so the operator sees the state clearly.
-function workerStatusText(w: Worker): string {
-  if (w.activeState === "dead") return "dead";
-  if (isActive(w.activeState)) return w.working ? "working" : "active";
-  if (w.activeState === "stuck") return "stuck";
-  if (w.waitingOnUser) return "waiting on you";
-  return w.activeState ?? "idle";
-}
-
-export function QueueView({ data, embedded = false }: { data: BoardPayload; embedded?: boolean }) {
-  const { config, queue, workers, tickets } = data;
-  const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
-  // CTL-947: build the ticket held lookup so the grouper can sink blocked tickets.
-  const ticketHeld: Record<string, "blocked" | "waiting" | null | undefined> =
-    Object.fromEntries(tickets.map((t) => [t.id, t.held]));
-  // CTL-947: group in-flight workers by activity state. This replaces the flat
-  // sortWorkers call — groupWorkersByActivity sorts internally using rankWorker
-  // (which now includes waitingOnUser + blocked from the ticket held lookup).
-  // CTL-978: groupWorkersByActivity now routes dead workers (activeState === "dead")
-  // into their own "dead" section. inflightSections includes ALL sections (live +
-  // dead), but the in-flight header count and the capacity stats agree: only live
-  // workers (non-dead) count as in-flight.
-  const inflightSections: WorkerActivitySection[] = groupWorkersByActivity(workers, ticketHeld);
-  // CTL-978: in-flight = live workers only (dead excluded). config.inFlight already
-  // reflects this (deriveCapacity excludes dead); mirror it here so the section
-  // header "On the plate — in flight (N)" matches the capacity strip.
-  const inflightCount = workers.filter((w) => w.activeState !== "dead").length;
-  // SINGLE-HOST IDENTITY NO-OP: only surface the node column / group affordance
-  // when the queue spans two or more DISTINCT owner hosts. With hosts.json absent
-  // or length 1 every row resolves to one host (or none), so this is "single" and
-  // the table renders exactly as it did pre-SURF2.
-  const multiHost = queueHostMode(queue) === "multi";
-  const [groupByNode, setGroupByNode] = useState(false);
-  // The toggle only makes sense in a multi-node fleet; never grouped single-host.
-  const grouped = multiHost && groupByNode;
-  // Whether there are multiple non-empty groups (drives section header visibility:
-  // single-group = no chrome, multi-group = show labeled dividers).
-  // CTL-978: always show section headers when a dead section is present — even if
-  // it is the only section — so the operator knows those workers are NOT in-flight.
-  const hasDeadSection = inflightSections.some((s) => s.group === "dead");
-  const multiGroup = inflightSections.length > 1 || hasDeadSection;
-  return (
-    <div className="cat-scroll" style={{ overflowY: "auto", height: embedded ? "100%" : "calc(var(--cat-board-vh, 100vh) - 104px)", padding: "2px 16px 24px" }}>
-      <div style={{ maxWidth: 1040 }}>
-        <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
-          <Stat label="Max parallel" value={String(config.maxParallel)} />
-          <Stat label="In flight" value={String(config.inFlight)} color={config.inFlight > config.maxParallel ? C.red : config.freeSlots === 0 ? C.yellow : C.fg} />
-          <Stat label="Free slots" value={String(config.freeSlots)} color={config.freeSlots > 0 ? C.green : C.red} />
-          <Stat label="Active" value={String(config.active)} color={LIVE} />
-          <Stat label="Queued" value={String(queue.length)} />
-        </div>
-        <SlotBar capacity={config.maxParallel} inFlight={config.inFlight} />
-
-        <div style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted, margin: "0 0 8px" }}>On the plate — in flight ({inflightCount})</div>
-        <div style={{ border: `1px solid ${C.border}`, borderRadius: 10, overflow: "hidden", marginBottom: 22 }}>
-          <Table>
-            <TableHeader><TableRow style={{ background: C.s1 }}>
-              <TableHead style={{ ...th, width: 40 }}></TableHead><TableHead style={{ ...th, width: 44 }}>Pri</TableHead>
-              <TableHead style={{ ...th, width: 100 }}>Ticket</TableHead><TableHead style={th}>Title</TableHead>
-              <TableHead style={{ ...th, width: 130 }}>Phase</TableHead><TableHead style={{ ...th, width: 84 }}>Status</TableHead><TableHead style={{ ...th, width: 76 }}>Age</TableHead>
-            </TableRow></TableHeader>
-            <TableBody>
-              {inflightSections.map((section: WorkerActivitySection) => (
-                <Fragment key={section.group}>
-                  {/* CTL-947: section header row — only rendered when there are
-                      multiple non-empty groups, so a homogenous fleet (all active)
-                      renders exactly as before with no extra chrome. */}
-                  {multiGroup && (
-                    <TableRow style={{ background: C.s1 }}>
-                      <TableCell colSpan={7} style={{ ...mono, fontSize: 11, color: C.fgMuted, padding: "6px 12px" }}>
-                        <span style={{ color: WORKER_GROUP_C[section.group] ?? C.fgDim, fontWeight: 600 }}>{section.label}</span>
-                        <span style={{ color: C.fgDim }}> · {section.workers.length}</span>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                  {/* CTL-952: AnimatePresence for in-flight worker enter/exit
-                      (worker moves working<->waiting<->blocked). */}
-                  <AnimatePresence initial={false}>
-                  {section.workers.map((w) => {
-                    // CTL-947: blocked rows show the blocker ids inline.
-                    const ticket = infoById[w.ticket];
-                    const blockers: string[] = section.group === "blocked"
-                      ? (ticket?.blockers ?? [])
-                      : [];
-                    // per-row reduced-motion is resolved in QueueRow / MotionTableRow
-                    // wrappers; here we create the row inline so we call the hook once.
-                    return (
-                      <InflightWorkerRow
-                        key={w.name}
-                        w={w}
-                        ticket={ticket}
-                        blockers={blockers}
-                      />
-                    );
-                  })}
-                  </AnimatePresence>
-                </Fragment>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-
-        <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "0 0 8px" }}>
-          <span style={{ fontSize: 12, fontWeight: 600, color: C.fgMuted }}>Waiting in queue ({queue.length})</span>
-          <span style={{ flex: 1 }} />
-          {/* The group-by-node affordance only appears in a multi-node fleet
-              (queueHostMode === "multi"); single-host shows nothing here. */}
-          {multiHost && (
-            <Seg
-              value={groupByNode ? "node" : "rank"}
-              onChange={(v) => setGroupByNode(v === "node")}
-              options={[{ k: "rank", label: "Global rank" }, { k: "node", label: "By node" }]}
-            />
-          )}
-        </div>
-        <WaitingTable queue={queue} freeSlots={config.freeSlots} showHost={multiHost} grouped={grouped} />
-        <div style={{ marginTop: 12, fontSize: 11, color: C.fgDim }}>Global rank: priority → pipeline stage → created-at → id. Per-project caps apply after ranking. Highlighted rows dispatch next as slots free.{multiHost ? " Node = the HRW owner host for each queued ticket." : ""}</div>
-      </div>
-    </div>
-  );
-}
 
 // ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
 // CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
