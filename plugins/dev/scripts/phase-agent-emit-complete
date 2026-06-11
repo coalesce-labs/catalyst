@@ -173,6 +173,24 @@ resolve_project_key() {
 }
 PROJECT_KEY="$(resolve_project_key)"
 
+# ─── CTL-1023: resolve the work-type dimension (catalyst.ticket.type) ─────────
+#
+# Source of truth is triage.json `.classification` (bug|feature|chore|refactor|
+# docs|test) in the worker dir — written by phase-triage. Every phase terminal
+# event (complete / failed / turn-cap-exhausted / skipped / park) carries it so
+# DevOps/FinOps can group cost, effort, and throughput by work type. Fail-open
+# to empty; build_canonical_line then defaults the attribute to "unknown" — so a
+# pre-triage / unclassified ticket carries "unknown" rather than omitting the
+# attribute inconsistently (the gherkin contract).
+resolve_ticket_type() {
+	command -v jq >/dev/null 2>&1 || return 0
+	[[ -n $ORCH_DIR ]] || return 0
+	local triage="${ORCH_DIR}/workers/${TICKET}/triage.json"
+	[[ -f $triage ]] || return 0
+	jq -r '.classification // empty' "$triage" 2>/dev/null || true
+}
+TICKET_TYPE="$(resolve_ticket_type)"
+
 # ─── 0. CTL-736 Phase 1: fencing check (stale generation bows out) ───────────
 #
 # A worker carries its dispatch generation in CATALYST_GENERATION. If the phase
@@ -290,6 +308,7 @@ LINE=$(build_canonical_line \
 	--payload-json "$PAYLOAD" \
 	--phase-attempt "$PHASE_ATTEMPT" \
 	--phase-revive-count "$PHASE_REVIVE_COUNT" \
+	--ticket-type "$TICKET_TYPE" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
 if [[ -n $LINE ]]; then

@@ -40,6 +40,7 @@ import {
   NEVER_STARTED_MS,
 } from "./config.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
+import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
@@ -294,7 +295,12 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // revive, escalated, and revive-suppressed audit events (CTL-574 + CTL-587).
 // Shape mirrors lib/canonical-event.sh. Centralizing it here keeps the four
 // per-action helpers tiny and prevents shape drift between actions.
-function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13 }) {
+//
+// CTL-1023: every event carries `catalyst.ticket.type` (work-type dimension).
+// `ticketType` is resolved by the caller from triage.json (resolveTicketType);
+// when omitted it defaults to UNKNOWN_TICKET_TYPE so the attribute is ALWAYS
+// present, never inconsistently missing (the gherkin contract).
+function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13, ticketType = UNKNOWN_TICKET_TYPE }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
@@ -318,6 +324,7 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
+        "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
@@ -359,6 +366,7 @@ export function defaultAppendReclaimEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   death_signal,
   prev_state_json_mtime = null,
   probe_passed = true,
@@ -376,6 +384,7 @@ export function defaultAppendReclaimEvent({
       orchId,
       action: "reclaim",
       reason: "work-done-despite-dead-bg",
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: {
         death_signal,
         prev_state_json_mtime,
@@ -714,6 +723,7 @@ export function defaultAppendReviveEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   attempt,
   reason,
   prev_state_json_mtime,
@@ -726,6 +736,7 @@ export function defaultAppendReviveEvent({
       orchId,
       action: "revive",
       reason,
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
     }),
     "revive",
@@ -858,7 +869,7 @@ export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) 
 // defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
 // Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
 // `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
-export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_phase, reason }) {
+export function defaultAppendDispatchRequestedEvent({ orchId, orchDir, ticket, target_phase, reason }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase: "dispatch",
@@ -869,6 +880,8 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
       payloadExtras: { target_phase },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: resolves to "unknown" pre-triage (no triage.json yet) — correct.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-requested",
   );
@@ -880,6 +893,7 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
 // launched↔complete wall-clock can be computed downstream.
 export function defaultAppendDispatchLaunchedEvent({
   orchId,
+  orchDir,
   ticket,
   target_phase,
   bg_job_id,
@@ -894,6 +908,8 @@ export function defaultAppendDispatchLaunchedEvent({
       payloadExtras: { target_phase, bg_job_id, worktree_path },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: "unknown" until triage.json lands; full type post-triage.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-launched",
   );
@@ -1172,7 +1188,7 @@ export function defaultReviveDispatch(
   // then the verified launch after a clean dispatch. Both best-effort — the
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
   // proceeds regardless of either return value.
-  appendRequested({ orchId, ticket, target_phase: phase, reason: "revive" });
+  appendRequested({ orchId, orchDir, ticket, target_phase: phase, reason: "revive" });
   const res = dispatch(dispatchArgs);
   if (res && res.code === 0) {
     // Re-read the signal the dispatcher just rewrote (status dispatched/running
@@ -1185,6 +1201,7 @@ export function defaultReviveDispatch(
     }
     appendLaunched({
       orchId,
+      orchDir,
       ticket,
       target_phase: phase,
       bg_job_id: sig2?.bg_job_id,
@@ -1912,6 +1929,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal: "terminal-short-circuit",
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: false,
@@ -1986,6 +2004,7 @@ export function reclaimDeadWorkIfPossible(
         phase,
         ticket,
         orchId,
+        orchDir,
         death_signal: "alive-probe-done",
         prev_state_json_mtime: null,
         probe_passed: true,
@@ -2337,6 +2356,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal,
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: true,
@@ -2534,6 +2554,7 @@ export function reclaimDeadWorkIfPossible(
     phase,
     ticket,
     orchId,
+    orchDir,
     attempt,
     reason: "work-not-done-after-stale-bg",
     prev_state_json_mtime: prevStateJsonMtime,
