@@ -29,6 +29,8 @@ import { WorkerDetailBody } from "./worker-detail-body";
 import { WorkerRailExtra } from "./worker-rail-extra";
 import { useWorkerDetailModel } from "./use-worker-detail-model";
 import { readWorkerScalars } from "./worker-detail-data";
+import { useRepoIconMap } from "./repo-icon-context";
+import { resolveEntityIcon } from "./entity-icon";
 
 // ── resident payload subscription (same transport as Board.tsx) ─────────────
 function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth } {
@@ -70,15 +72,16 @@ function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth
 // CTL-1003 §B1: the TICKET property rows moved into ticket-rail.tsx's Properties
 // card (the floating rail). Only the WORKER rows remain here (the worker page
 // keeps the flat Shell PropertiesRail).
-function workerRows(w: BoardWorker | undefined): PropertyRow[] {
+function workerRows(w: BoardWorker | undefined, iconSrc: string | null): PropertyRow[] {
   // CTL-914 (DETAIL3): the worker rail's BoardWorker scalar fallbacks — every
   // value is the resident AVAILABLE-NOW field or an honest null/dimmed marker.
   const scalars = readWorkerScalars(w);
   return [
     { label: "Status", value: w ? activeLabel(w.activeState, w.working) : undefined },
     { label: "Phase", value: w?.phase },
-    { label: "Repo", value: w?.repo },
-    { label: "Team", value: w?.team },
+    // CTL-1012: Repo + Team orient by the project mark (resolved from the repo).
+    { label: "Repo", value: w?.repo, iconSrc },
+    { label: "Team", value: w?.team, iconSrc },
     { label: "Runtime", value: w?.runtimeMs != null ? fmtDuration(w.runtimeMs) : w ? null : undefined },
     { label: "Cost", value: scalars.costUSD != null ? `$${scalars.costUSD.toFixed(2)}` : w ? null : undefined },
     // CTL-915 (DETAIL4 / BFF6 P7): the OS pid of the bg worker. null when the
@@ -199,6 +202,11 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
   // it never sets railExtra).
   const model = useWorkerDetailModel(worker);
 
+  // CTL-1012: the project mark for the rail Repo/Team rows, resolved from the
+  // worker's repo (the shared icon context mounted by the AppShell route tree).
+  const icons = useRepoIconMap();
+  const iconSrc = resolveEntityIcon(worker?.repo, icons);
+
   return (
     <>
       <Shell
@@ -208,7 +216,7 @@ export function WorkerDetailRoute({ id, search }: { id: string; search: DetailSe
         listIds={listIds}
         live={{ working: worker?.working ?? false, activeState: worker?.activeState ?? null }}
         title={worker?.name ?? id}
-        properties={workerRows(worker)}
+        properties={workerRows(worker, iconSrc)}
         railExtra={
           <WorkerRailExtra
             worker={worker}

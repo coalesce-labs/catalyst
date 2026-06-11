@@ -86,6 +86,10 @@ export interface PropertyRow {
   /** A plumbed value (string), a plumbed-but-empty value (null), or an unplumbed
    *  field (undefined → dimmed placeholder, never fabricated). */
   value: string | null | undefined;
+  /** CTL-1012: an optional project-icon data URL rendered before the value (the
+   *  Repo/Team rows orient by the same brand the lane headers show). null/absent →
+   *  no icon. The icon is suppressed when the value is unplumbed/empty. */
+  iconSrc?: string | null;
 }
 
 export interface ShellProps {
@@ -335,6 +339,9 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
     >
       {rows.map((r) => {
         const unplumbed = r.value === undefined;
+        // CTL-1012: show the project mark only when both the icon AND a real value
+        // are present (never beside a dimmed "—").
+        const showIcon = r.iconSrc != null && r.value != null;
         return (
           <div
             key={r.label}
@@ -345,6 +352,10 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
             <span style={{ color: C.fgMuted }}>{r.label}</span>
             <span
               style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                minWidth: 0,
                 font: `11px ${C.mono}`,
                 color: unplumbed ? C.fgDim : C.fg,
                 textAlign: "right",
@@ -353,9 +364,19 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
                 whiteSpace: "nowrap",
               }}
             >
+              {showIcon && (
+                <img
+                  src={r.iconSrc ?? undefined}
+                  alt=""
+                  aria-hidden
+                  style={{ width: 14, height: 14, borderRadius: 3, objectFit: "contain", flex: "0 0 auto" }}
+                />
+              )}
               {/* unplumbed → dimmed em-dash placeholder, NEVER a fabricated value;
                   a plumbed-but-null value (e.g. no project) reads "—" too but lit. */}
-              {r.value == null ? "—" : r.value}
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {r.value == null ? "—" : r.value}
+              </span>
             </span>
           </div>
         );
