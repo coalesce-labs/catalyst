@@ -310,6 +310,27 @@ _parity_check_dir() {
   fi
   log "parity: checking $pd (checkout: $root)"
 
+  # Structural health (CTL-992): the checkout must be a pristine, standalone,
+  # main-only checkout. plugin_source_health surfaces these as typed lines; we
+  # consume the two NEW structural conditions here (LINKED_WORKTREE, OFF_MAIN).
+  # MISSING / NOT_A_CHECKOUT are already handled above; DIRTY stays inline below.
+  local _hline _htok _harg1 _harg2
+  while IFS= read -r _hline; do
+    [[ -z "$_hline" ]] && continue
+    _htok="${_hline%% *}"
+    _harg1="${_hline#"$_htok" }"
+    case "$_htok" in
+      LINKED_WORKTREE)
+        drift "pluginDirs checkout is a linked worktree, not a pristine main checkout: ${_harg1} — run setup-plugin-source.sh"
+        ;;
+      OFF_MAIN)
+        _harg2="${_harg1##* }"
+        _harg1="${_harg1% *}"
+        drift "pluginDirs checkout is on branch ${_harg2}, not main: ${_harg1} — run setup-plugin-source.sh"
+        ;;
+    esac
+  done < <(plugin_source_health "$pd")
+
   # Manifest must parse — a gutted/corrupt plugin dir wedges workers.
   local manifest="${pd}/.claude-plugin/plugin.json"
   if [[ ! -f "$manifest" ]]; then
