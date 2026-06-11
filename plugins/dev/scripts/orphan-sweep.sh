@@ -33,10 +33,14 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
+_PRINT_CONFIG=0
+_COUNT_DIRTY=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
+    --print-config) _PRINT_CONFIG=1; shift ;;
+    --count-dirty) _COUNT_DIRTY=1; shift ;;
     --help|-h)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -49,6 +53,80 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- config + noise classification (CTL-1030) ---
+# Segment-anchored noise (intentionally stricter than worktree-safety.mjs substring match)
+SWEEP_NOISE_PATHS=( node_modules .cache .trunk dist build .DS_Store bun.lock .session-id )
+
+_resolve_sweep_config_path() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" && -n "$dir" ]]; do
+    [[ -f "${dir}/.catalyst/config.json" ]] && { printf '%s' "${dir}/.catalyst/config.json"; return 0; }
+    dir="$(dirname "$dir")"
+  done
+  local repo_cfg="${SCRIPT_DIR}/../../../.catalyst/config.json"
+  [[ -f "$repo_cfg" ]] && { printf '%s' "$repo_cfg"; return 0; }
+  printf ''
+}
+
+_cfg_str() {
+  [[ -f "${SWEEP_CONFIG_PATH:-}" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+  jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf ''
+}
+
+_load_sweep_config() {
+  local v
+  if [[ -z "${SWEEP_IDLE_HOURS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.idleHours')"; SWEEP_IDLE_HOURS="${v:-48}"
+  fi
+  if [[ -z "${SWEEP_INTERVAL_HOURS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.intervalHours')"; SWEEP_INTERVAL_HOURS="${v:-2}"
+  fi
+  case "$SWEEP_INTERVAL_HOURS" in
+    1|2|3) ;;
+    *) log "sweep config: intervalHours='${SWEEP_INTERVAL_HOURS}' invalid (allowed 1|2|3); falling back to default 2" >&2
+       SWEEP_INTERVAL_HOURS=2 ;;
+  esac
+  # salvagePush: do NOT use jq // default (false is jq-falsy; see draft-pr.sh:146-147)
+  if [[ -z "${SWEEP_SALVAGE_PUSH:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.salvagePush')"
+    [[ "$v" == "true" ]] && SWEEP_SALVAGE_PUSH=1 || SWEEP_SALVAGE_PUSH=0
+  else
+    [[ "$SWEEP_SALVAGE_PUSH" == "true" || "$SWEEP_SALVAGE_PUSH" == "1" ]] && SWEEP_SALVAGE_PUSH=1 || SWEEP_SALVAGE_PUSH=0
+  fi
+  if [[ -z "${SWEEP_MAX_REMOVALS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.maxRemovalsPerRun')"; SWEEP_MAX_REMOVALS="${v:-20}"
+  fi
+}
+
+_porcelain_path() {
+  local body="${1:3}"
+  [[ "$body" == *" -> "* ]] && body="${body##* -> }"
+  body="${body#\"}" body="${body%\"}"
+  printf '%s' "$body"
+}
+
+_is_noise_path() {
+  local p="$1" n
+  [[ "$p" == *.log ]] && return 0
+  [[ "$p" == .catalyst/config.json ]] && return 0
+  for n in "${SWEEP_NOISE_PATHS[@]}"; do
+    [[ "$p" == "$n" || "$p" == "$n/"* || "$p" == *"/$n" || "$p" == *"/$n/"* ]] && return 0
+  done
+  return 1
+}
+
+_real_dirty_count_stdin() {
+  local line p count=0
+  while IFS= read -r line; do
+    [[ -z "${line// }" ]] && continue
+    p="$(_porcelain_path "$line")"
+    _is_noise_path "$p" || count=$((count+1))
+  done
+  printf '%s\n' "$count"
+}
+
+_real_dirty_count() { git -C "$1" status --porcelain 2>/dev/null | _real_dirty_count_stdin; }
+
 # ─── roots (overridable via env) ────────────────────────────────────────────
 
 _init_roots() {
@@ -59,9 +137,9 @@ _init_roots() {
   SWEEP_CACHE_MTIME_DAYS="${SWEEP_CACHE_MTIME_DAYS:-30}"
   SWEEP_LINEAR_TEAMS="${SWEEP_LINEAR_TEAMS:-CTL ADV}"
   SWEEP_RUN_ID="${SWEEP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+  SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  _load_sweep_config
 }
-
-_init_roots
 
 # global cache for live bg_job_ids (populated once per run by _live_bg_ids)
 _LIVE_BG_IDS=""
@@ -83,6 +161,8 @@ emit_reclaim() {
     --attr "vector=${vector}" \
     --attr "resource=${resource}" >/dev/null 2>&1 || true
 }
+
+_init_roots
 
 # ─── vector 4: trunk cache GC ───────────────────────────────────────────────
 
@@ -263,6 +343,13 @@ sweep_worktrees() {
 # ─── main ───────────────────────────────────────────────────────────────────
 
 main() {
+  if [[ "$_PRINT_CONFIG" == "1" ]]; then
+    printf 'SWEEP_IDLE_HOURS=%s\nSWEEP_INTERVAL_HOURS=%s\nSWEEP_SALVAGE_PUSH=%s\nSWEEP_MAX_REMOVALS=%s\n' \
+      "$SWEEP_IDLE_HOURS" "$SWEEP_INTERVAL_HOURS" "$SWEEP_SALVAGE_PUSH" "$SWEEP_MAX_REMOVALS"
+    exit 0
+  fi
+  [[ "$_COUNT_DIRTY" == "1" ]] && { _real_dirty_count_stdin; exit 0; }
+
   if is_dry; then
     log "=== DRY RUN — no changes will be made ==="
   fi
