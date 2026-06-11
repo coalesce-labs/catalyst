@@ -393,6 +393,34 @@ describe("refreshPluginCheckout", () => {
     });
     expect(emitted[0].detail.restart_needed).toBe(false);
   });
+
+  test("restart_needed only fires for the daemon's OWN checkout (loadedCommitRoot)", () => {
+    // The broker runs from checkout /broker-co; an unrelated pluginDirs
+    // checkout /co advancing must NOT flag the broker as stale.
+    const emittedOther = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn: makeGitFn({ before: "boot00", after: "fresh1" }),
+      emitFn: (e) => emittedOther.push(e),
+      loadedCommit: "boot00",
+      loadedCommitRoot: "/broker-co",
+    });
+    expect(emittedOther[0].event).toBe("plugin.checkout.updated");
+    expect(emittedOther[0].detail.restart_needed).toBe(false);
+
+    // Same checkout → skew DOES flag.
+    const emittedOwn = [];
+    refreshPluginCheckout({
+      root: "/broker-co",
+      now: 0,
+      gitFn: makeGitFn({ before: "boot00", after: "fresh1" }),
+      emitFn: (e) => emittedOwn.push(e),
+      loadedCommit: "boot00",
+      loadedCommitRoot: "/broker-co",
+    });
+    expect(emittedOwn[0].detail.restart_needed).toBe(true);
+  });
 });
 
 // ─── handlePluginRefreshEvent (orchestration) ────────────────────────────────

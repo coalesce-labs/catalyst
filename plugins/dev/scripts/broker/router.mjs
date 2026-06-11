@@ -125,7 +125,11 @@ function __repoFullName() {
 // The broker's own HEAD at boot (the code it is actually running). Lets the
 // refresh emit restart_needed when the checkout advances past it. Best-effort —
 // null when not in a checkout (skew simply not flagged). CTL-669 model.
+// __loadedCommitRoot pairs it with the broker's own checkout toplevel so
+// restart_needed only fires for THAT checkout — not for an unrelated
+// pluginDirs checkout that happens to advance.
 let __loadedCommitCached;
+let __loadedCommitRootCached;
 function __loadedCommit() {
   if (__loadedCommitCached === undefined) {
     try {
@@ -139,6 +143,20 @@ function __loadedCommit() {
     }
   }
   return __loadedCommitCached;
+}
+function __loadedCommitRoot() {
+  if (__loadedCommitRootCached === undefined) {
+    try {
+      __loadedCommitRootCached = execFileSync(
+        "git",
+        ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "--show-toplevel"],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      __loadedCommitRootCached = null;
+    }
+  }
+  return __loadedCommitRootCached;
 }
 
 // === Emission ===
@@ -1777,6 +1795,7 @@ export function processEvent(event) {
     repoConfigPath: __REPO_CONFIG_PATH,
     emitFn: appendEvent,
     loadedCommit: __loadedCommit(),
+    loadedCommitRoot: __loadedCommitRoot(),
   });
 
   if (name === "filter.register") {

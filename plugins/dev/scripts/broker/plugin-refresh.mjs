@@ -54,6 +54,13 @@ export function __clearThrottleForTest() {
 
 // --- default seams (production wiring) ---------------------------------------
 
+// GIT_TIMEOUT_MS — hard ceiling on every synchronous git call. The broker's
+// event loop runs these inline (execFileSync); a network-stalled `pull` with
+// no timeout would freeze the ENTIRE broker — the same daemon-wedging class
+// CTL-990 fixed in dispatch.mjs. A killed pull throws and surfaces as
+// refresh_failed; the next merge event retries after the throttle window.
+const GIT_TIMEOUT_MS = Number(process.env.CATALYST_PLUGIN_REFRESH_GIT_TIMEOUT_MS) || 20_000;
+
 // defaultGitFn — run a git subcommand in `root` and return trimmed stdout.
 // GIT_TERMINAL_PROMPT=0 so an auth-required fetch fails fast instead of hanging
 // a daemon with no tty/ssh-agent. Throws on non-zero exit (execFileSync), which
@@ -61,6 +68,8 @@ export function __clearThrottleForTest() {
 function defaultGitFn(root, args) {
   return execFileSync("git", ["-C", root, ...args], {
     encoding: "utf8",
+    timeout: GIT_TIMEOUT_MS,
+    killSignal: "SIGKILL",
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   }).trim();
 }
@@ -71,6 +80,8 @@ function defaultGitToplevelFn(pluginDir) {
   try {
     return execFileSync("git", ["-C", pluginDir, "rev-parse", "--show-toplevel"], {
       encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     }).trim();
   } catch {
     return null;
@@ -234,6 +245,7 @@ export function refreshPluginCheckout({
   gitFn = defaultGitFn,
   emitFn,
   loadedCommit = null,
+  loadedCommitRoot = null,
 }) {
   if (!root) return { pulled: false, throttled: false, changed: false, failed: false };
 
@@ -285,7 +297,15 @@ export function refreshPluginCheckout({
   // code it loaded at boot. Surface restart_needed so the operator/HUD can see
   // the skew (ties into the CTL-669 loadedCommit/restartNeeded model). Daemon
   // restart stays a gated OPERATOR action — never automated here.
-  const restartNeeded = loadedCommit != null && newSha != null && loadedCommit !== newSha;
+  // restart_needed only fires for the checkout the daemon itself runs from
+  // (loadedCommitRoot): a broker running from checkout A must not flag skew
+  // because an unrelated pluginDirs checkout B advanced. A null loadedCommitRoot
+  // (caller didn't resolve it) preserves the coarse loadedCommit comparison.
+  const restartNeeded =
+    loadedCommit != null &&
+    newSha != null &&
+    loadedCommit !== newSha &&
+    (loadedCommitRoot == null || loadedCommitRoot === root);
 
   emitFn({
     event: "plugin.checkout.updated",
@@ -321,6 +341,7 @@ export function handlePluginRefreshEvent({
   gitFn,
   emitFn,
   loadedCommit = null,
+  loadedCommitRoot = null,
 }) {
   try {
     if (!isThisRepoMergeEvent(event, { repoFullName })) return;
@@ -332,7 +353,7 @@ export function handlePluginRefreshEvent({
       gitToplevelFn,
     });
     for (const root of roots) {
-      refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit });
+      refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot });
     }
   } catch {
     // Best-effort — a refresh failure must never break event routing. Genuine

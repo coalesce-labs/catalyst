@@ -157,7 +157,11 @@ if [[ "$CURRENT" == "$TARGET_DIR" && $FORCE -eq 0 ]]; then
 	exit 0
 fi
 
-tmp="$(mktemp)"
+# Same-directory tmp so the final mv is an atomic same-filesystem rename
+# (a default mktemp lands on a different volume on macOS, making mv a
+# non-atomic copy+unlink — a crash mid-write would corrupt the config).
+tmp="$(mktemp "$(dirname "$MACHINE_CFG")/.config.json.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
 jq --arg pd "$TARGET_DIR" '
 	.catalyst //= {}
 	| .catalyst.orchestration //= {}
