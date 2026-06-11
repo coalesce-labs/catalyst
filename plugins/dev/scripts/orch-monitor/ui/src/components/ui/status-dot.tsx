@@ -22,7 +22,7 @@ export function StatusDot({ alive, className }: StatusDotProps) {
       <span
         className={cn(
           "absolute inset-0 rounded-full",
-          alive ? "bg-green shadow-[0_0_6px_theme(colors.green)]" : "bg-[#6b7280]",
+          alive ? "bg-green shadow-[0_0_6px_theme(colors.green)]" : "bg-muted-foreground/70",
         )}
       />
       {alive && (
@@ -58,7 +58,7 @@ export function ConnectionDot({ status }: { status: string }) {
       className={cn("inline-block h-2 w-2 rounded-full", {
         "bg-green shadow-[0_0_6px_theme(colors.green)]": status === "connected",
         "bg-red": status === "reconnecting",
-        "bg-[#6b7280]": status === "connecting",
+        "bg-muted-foreground/70": status === "connecting",
       })}
     />
   );
