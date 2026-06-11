@@ -201,6 +201,12 @@ export function getClusterHosts() {
 export const HEARTBEAT_INTERVAL_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_INTERVAL_MS) || 30_000;
 
+// HEARTBEAT_GRACE_MS — how long after the last heartbeat a host is considered
+// dead (CTL-863). 10 minutes is deliberately generous: a false eviction on a
+// live-but-slow host is worse than a slow takeover. Env-overridable for tests.
+export const HEARTBEAT_GRACE_MS =
+  Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
+
 // --- Intervals ---
 // The periodic reconcile poll — the missed-webhook correctness backstop.
 export const RECONCILE_INTERVAL_MS =

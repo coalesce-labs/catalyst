@@ -29,10 +29,13 @@ import { hostName, hostId } from "./lib/host-identity.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
+  getClusterHosts,
+  getHostName,
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
   GHOST_GRACE_MS,
+  HEARTBEAT_GRACE_MS,
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
 } from "./config.mjs";
@@ -53,7 +56,12 @@ import {
   describeProbe,
   defaultProgressMark,
 } from "./work-done-probes.mjs";
-import { defaultDispatch } from "./dispatch.mjs";
+import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
+import { ownerForTicket } from "./hrw.mjs";
+import { claimDispatchSync } from "./cluster-claim-sync.mjs";
+import { dispatchTicket, defaultDispatch } from "./dispatch.mjs";
+import { createWorktree } from "./worktree.mjs";
+import { fenceGuard } from "./fence-guard.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
@@ -591,10 +599,16 @@ export function defaultPostReclaimMirror(
       const helperPath = join(dirname(fileURLToPath(import.meta.url)), "../lib/linear-comment-post.sh");
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
+    multiHost = false,
   } = {},
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
+  // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
+  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+    log.warn({ ticket, phase }, "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)");
+    return;
+  }
   const bodyText = [
     "**Phase Reclaim**",
     "",
@@ -2668,4 +2682,179 @@ export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
     if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
   }
   return lastSeen;
+}
+
+// phaseAlreadyComplete — true when the unified event log already contains a
+// `phase.<phase>.complete.<ticket>` event. The resume path checks this before
+// re-dispatching so a survivor never re-emits a completion the dead host already
+// emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
+export function phaseAlreadyComplete(
+  ticket,
+  phase,
+  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {},
+) {
+  const needle = `phase.${phase}.complete.${ticket}`;
+  let raw;
+  try {
+    raw = readLog();
+  } catch {
+    return false;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line || !line.includes(needle)) continue;
+    try {
+      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+    } catch {
+      // partial/malformed line — skip
+    }
+  }
+  return false;
+}
+
+// RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
+// STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
+const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
+  .filter(([id]) => id !== "remediate")
+  .sort((a, b) => a[1] - b[1])
+  .map(([id]) => id);
+
+// deadHosts — given last-seen heartbeats, the roster, a grace window, and now,
+// return roster hosts whose newest heartbeat is older than (nowMs - graceMs).
+// A host ABSENT from lastSeen is NOT flagged dead: with per-host local logs the
+// survivor may simply never have seen it (Open Question 1). Conservative: unknown ⇒ alive.
+export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
+  const cutoff = nowMs - graceMs;
+  return roster.filter((h) => {
+    const seen = lastSeen[h];
+    if (!seen) return false; // never seen here ⇒ not our call to make
+    return Date.parse(seen) < cutoff; // last heartbeat older than grace ⇒ dead
+  });
+}
+
+// survivingRoster — roster minus the dead hosts. Pure; never mutates the input
+// (dead hosts stay in committed hosts.json; this is a transient in-memory subset).
+export function survivingRoster(roster, dead) {
+  const deadSet = new Set(dead);
+  return roster.filter((h) => !deadSet.has(h));
+}
+
+// inferResumePhase — walk the pipeline in REVERSE; the first probe that returns
+// true is the last completed phase, so resume at the phase after it. Returns the
+// entry phase when nothing is done, and null when every phase is complete (terminal).
+// The `probes` option accepts the same (ticket, opts) signature as WORK_DONE_PROBES;
+// tests inject uniform `async () => bool` fakes.
+export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd } = {}) {
+  for (let i = RESUME_PHASE_ORDER.length - 1; i >= 0; i--) {
+    const phase = RESUME_PHASE_ORDER[i];
+    const probe = probes[phase];
+    if (typeof probe !== "function") continue;
+    if (await probe(ticket, { cwd })) {
+      const next = RESUME_PHASE_ORDER[i + 1];
+      return next ?? null; // last phase done ⇒ terminal
+    }
+  }
+  return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
+}
+
+// defaultOwnedTicketsForHost — scan the local worker signal directory for non-terminal
+// signals dispatched from the given dead host. Local-only (no network). Returns ticket
+// IDs whose most-recent signal has host.name === deadHost and a non-terminal status.
+function defaultOwnedTicketsForHost(deadHost, { orchDir }) {
+  const signals = readWorkerSignals(orchDir);
+  const tickets = new Set();
+  for (const sig of signals) {
+    if (!sig.raw?.host?.name || sig.raw.host.name !== deadHost) continue;
+    // Only include non-terminal tickets — terminal ones are already done.
+    if (TERMINAL.has(sig.status)) continue;
+    tickets.add(sig.ticket);
+  }
+  return [...tickets];
+}
+
+// reclaimDeadHostWork — takeover sweep (CTL-863, Part A).
+//
+// When a host goes silent (heartbeat silence > graceMs), surviving hosts detect it,
+// re-own its tickets via HRW over the surviving roster, claim (gen+1) via CAS, infer
+// the last-completed phase from durable artifacts, and dispatch the next phase —
+// skipping any phase already present in the event log.
+//
+// SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
+// when `roster.length <= 1`. Every new behavior is gated on multiHost.
+//
+// All collaborators are injectable for unit tests (no network, fs, or subprocess
+// in tests — they inject fakes for every seam).
+export async function reclaimDeadHostWork(
+  { orchDir },
+  {
+    readHeartbeats = () => readClusterHeartbeats({}),
+    roster = getClusterHosts(),
+    self = getHostName(),
+    graceMs = HEARTBEAT_GRACE_MS,
+    nowMs = Date.now(),
+    ownedTicketsForHost = (deadHost) => defaultOwnedTicketsForHost(deadHost, { orchDir }),
+    ownerForTicket: ownerFn = ownerForTicket,
+    claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
+    inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
+    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    rebuildWorktree = (ticket) => {
+      const result = defaultRebuildWorktree(ticket, { orchDir });
+      return result;
+    },
+    dispatch = (od, ticket, phase, cwd) =>
+      dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+  } = {},
+) {
+  const taken = [];
+
+  // Single-host no-op (every new behavior gated on multiHost).
+  if (!Array.isArray(roster) || roster.length <= 1) return { taken };
+
+  const lastSeen = readHeartbeats();
+  const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
+  if (dead.length === 0) return { taken };
+
+  const survivors = survivingRoster(roster, dead);
+
+  for (const deadHost of dead) {
+    const tickets = ownedTicketsForHost(deadHost) ?? [];
+    for (const ticket of tickets) {
+      // HRW check: are we the new owner over the surviving roster?
+      if (ownerFn(ticket, survivors) !== self) continue;
+
+      // Soft-CAS claim: bump generation to take ownership.
+      const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
+      if (!claimRes?.won) continue;
+
+      // Rebuild the worktree on the ticket branch.
+      const wt = rebuildWorktree(ticket);
+      if (!wt?.ok) continue;
+
+      // Infer the next phase to dispatch from durable artifacts.
+      const phase = await inferResume(ticket, wt.cwd);
+      if (!phase) continue; // terminal — nothing to resume
+
+      // Dedup: skip if the dead host already emitted this phase's complete event.
+      if (alreadyComplete(ticket, phase)) continue;
+
+      const r = dispatch(orchDir, ticket, phase, wt.cwd);
+      if (r?.code === 0) {
+        taken.push({ ticket, phase, generation: claimRes.generation });
+      }
+    }
+  }
+
+  return { taken };
+}
+
+// defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
+// Best-effort; returns { ok, cwd }. Fail-open: errors produce { ok: false, cwd: null }.
+function defaultRebuildWorktree(ticket, { orchDir }) {
+  try {
+    const repoRoot = join(orchDir, "..", "..");
+    const res = createWorktree({ ticket, repoRoot });
+    if (res?.code === 0 && res.worktreePath) return { ok: true, cwd: res.worktreePath };
+    return { ok: false, cwd: null };
+  } catch {
+    return { ok: false, cwd: null };
+  }
 }

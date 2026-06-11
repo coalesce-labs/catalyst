@@ -4084,6 +4084,286 @@ Final polish, documentation, and code cleanup.
   });
 });
 
+// ─── CTL-863: deadHosts, survivingRoster, inferResumePhase ───────────────────
+
+import { deadHosts, survivingRoster, inferResumePhase } from "./recovery.mjs";
+
+describe("deadHosts — grace-window evaluation (CTL-863)", () => {
+  test("flags hosts past the grace window, keeps fresh ones", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-08T19:59:30Z",        // 30s ago — alive
+      "mac-studio": "2026-06-08T19:40:00Z", // 20m ago — dead
+    };
+    const dead = deadHosts({ lastSeen, roster: ["mini", "mac-studio"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual(["mac-studio"]);
+  });
+
+  test("a host absent from lastSeen is not flagged dead (no cross-host visibility)", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const dead = deadHosts({
+      lastSeen: { mini: "2026-06-08T19:59:55Z" },
+      roster: ["mini", "ghost"],
+      graceMs: 600_000,
+      nowMs: now,
+    });
+    expect(dead).toEqual([]);
+  });
+
+  test("empty roster returns empty dead list", () => {
+    const dead = deadHosts({ lastSeen: {}, roster: [], graceMs: 600_000, nowMs: Date.now() });
+    expect(dead).toEqual([]);
+  });
+
+  test("host exactly at the grace boundary (equal) is NOT dead", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const cutoff = now - 600_000; // exactly at boundary
+    const lastSeen = { mini: new Date(cutoff).toISOString() };
+    const dead = deadHosts({ lastSeen, roster: ["mini"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual([]);
+  });
+});
+
+describe("survivingRoster — in-memory dead-host removal (CTL-863)", () => {
+  test("removes dead hosts without mutating the roster", () => {
+    const roster = ["mini", "mac-studio", "laptop"];
+    const survivors = survivingRoster(roster, ["mac-studio"]);
+    expect(survivors).toEqual(["mini", "laptop"]);
+    expect(roster).toEqual(["mini", "mac-studio", "laptop"]); // unchanged
+  });
+
+  test("empty dead list returns a copy of the full roster", () => {
+    const roster = ["mini", "mac-studio"];
+    expect(survivingRoster(roster, [])).toEqual(["mini", "mac-studio"]);
+  });
+
+  test("all dead → empty survivors", () => {
+    expect(survivingRoster(["mini"], ["mini"])).toEqual([]);
+  });
+});
+
+describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
+  // CTL-703 (on main at merge): `teardown` is the descriptor's TERMINAL_PHASE,
+  // appended after monitor-deploy. inferResumePhase derives its walk order from
+  // STAGE_RANK, so the full phase set the probes must cover now ends in teardown
+  // (otherwise "all done" resumes at the unprobed teardown instead of terminating).
+  const allPhases = [
+    "triage", "research", "plan", "implement", "verify", "review",
+    "pr", "monitor-merge", "monitor-deploy", "teardown",
+  ];
+
+  test("plan done, implement not → resume at implement", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => {
+      const done = ["triage", "research", "plan"].includes(p);
+      return [p, async () => done];
+    }));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("implement");
+  });
+
+  test("nothing done → resume at entry phase (research)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => false]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+
+  test("all done → null (terminal; nothing to resume)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => true]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBeNull();
+  });
+
+  test("monitor-merge done, monitor-deploy not → resume at monitor-deploy", async () => {
+    const done = new Set(["triage","research","plan","implement","verify","review","pr","monitor-merge"]);
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => done.has(p)]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("monitor-deploy");
+  });
+
+  test("only triage done → resume at research (entry phase)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => p === "triage"]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+});
+
+// ─── CTL-863: phaseAlreadyComplete ───────────────────────────────────────────
+
+import { phaseAlreadyComplete } from "./recovery.mjs";
+
+describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
+  test("true when a matching complete event is in the log", () => {
+    const lines = [
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }),
+    ].join("\n");
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+
+  test("false when no matching event (different ticket)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-999" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false when no matching event (different phase)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false on missing/unreadable log (never throws)", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", {
+      readLog: () => { throw new Error("no file"); },
+    })).toBe(false);
+  });
+
+  test("false when log is empty", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => "" })).toBe(false);
+  });
+
+  test("handles malformed JSON lines gracefully", () => {
+    const lines = "not-json\n" + JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+});
+
+// ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
+
+import { reclaimDeadHostWork } from "./recovery.mjs";
+
+const nowISO = () => new Date().toISOString();
+const oldISO = () => new Date(Date.now() - 20 * 60_000).toISOString(); // 20m ago
+
+const makeBaseDeps = (overrides = {}) => ({
+  readHeartbeats: () => ({ mini: nowISO(), dead: oldISO() }),
+  roster: ["mini", "dead"],
+  self: "mini",
+  graceMs: 600_000,
+  nowMs: Date.now(),
+  ownedTicketsForHost: () => ["CTL-900"],
+  ownerForTicket: () => "mini",
+  claim: () => ({ won: true, generation: 5 }),
+  inferResume: async () => "implement",
+  alreadyComplete: () => false,
+  rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-900" }),
+  dispatch: () => ({ code: 0 }),
+  ...overrides,
+});
+
+describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
+  test("single-host roster → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ roster: ["mini"], dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("dead host owns a ticket we re-own → claim+infer+rebuild+dispatch, taken has entry", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(true);
+    expect(r.taken).toEqual([{ ticket: "CTL-900", phase: "implement", generation: 5 }]);
+  });
+
+  test("HRW says another survivor owns it → skip (no claim, no dispatch)", async () => {
+    let claimed = false;
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownerForTicket: () => "other-host",
+        claim: () => { claimed = true; return { won: true, generation: 5 }; },
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(claimed).toBe(false);
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("lost claim (another survivor won the read-back) → no dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        claim: () => ({ won: false, generation: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferred phase already complete in the log → dedup, skip dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        alreadyComplete: () => true,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferResume returns null (terminal) → nothing to resume", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        inferResume: async () => null,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("no dead hosts → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        readHeartbeats: () => ({ mini: nowISO(), dead: nowISO() }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("rebuildWorktree fails → skip dispatch for that ticket", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        rebuildWorktree: () => ({ ok: false, cwd: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("multiple tickets owned by dead host: processes all in taken", async () => {
+    const dispatches = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownedTicketsForHost: () => ["CTL-900", "CTL-901"],
+        dispatch: (od, t) => { dispatches.push(t); return { code: 0 }; },
+      }),
+    );
+    expect(dispatches.sort()).toEqual(["CTL-900", "CTL-901"]);
+    expect(r.taken).toHaveLength(2);
+  });
+});
+
 // CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
 // phase.<phase>.complete AND whose probe passes is reconciled without waiting
 // for it to die. The completeEventSeen seam is the precise disambiguator
