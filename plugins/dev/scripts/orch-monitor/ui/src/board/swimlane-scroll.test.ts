@@ -52,9 +52,10 @@ describe("CTL-958 — LANE_CELL_MAX constants (dual-sticky scroll knob)", () => 
     expect(LANE_CELL_MAX_VAR).toBe("--lane-cell-max");
   });
 
-  it("LANE_CELL_MAX_DEFAULT is a non-zero px value (300px — ~2.6 comfortable cards)", () => {
-    // The value must be a CSS pixel string large enough to show 2-3 cards but
-    // small enough for two groups to be visible on a 900-1080px viewport.
+  it("LANE_CELL_MAX_DEFAULT is a non-zero px value (300px — CTL-1010 pre-measurement fallback)", () => {
+    // CTL-1010: this is now ONLY the first-frame fallback applied before
+    // useLaneCellHeights measures + water-fills the lanes (the real per-lane caps).
+    // The value stays a CSS pixel string in the 2-4 card range as a safe placeholder.
     expect(LANE_CELL_MAX_DEFAULT).toMatch(/^\d+px$/);
     const px = parseInt(LANE_CELL_MAX_DEFAULT, 10);
     expect(px).toBeGreaterThan(200); // at minimum 2 cards
@@ -62,7 +63,8 @@ describe("CTL-958 — LANE_CELL_MAX constants (dual-sticky scroll knob)", () => 
   });
 
   it("the cell max-height CSS var reference embeds the var name correctly", () => {
-    // The Swimlane.tsx cell style uses:
+    // CTL-1010: the Swimlane.tsx cell style uses this var()/default only on the
+    // unmeasured first frame (cellMax === undefined):
     //   maxHeight: `var(${LANE_CELL_MAX_VAR}, ${LANE_CELL_MAX_DEFAULT})`
     // Verify the resulting string is well-formed CSS.
     const cssValue = `var(${LANE_CELL_MAX_VAR}, ${LANE_CELL_MAX_DEFAULT})`;

@@ -711,6 +711,9 @@ function TicketSwimlaneBoard({
       entityNoun="ticket"
       columns={columns}
       deriveLane={deriveLane}
+      // CTL-1010: density drives the per-lane MINIMUM in the water-fill (real
+      // heights are measured); the card render already receives density above.
+      density={density}
     />
   );
 }
