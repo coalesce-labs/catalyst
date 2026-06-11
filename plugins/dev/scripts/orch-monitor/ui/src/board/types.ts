@@ -223,6 +223,20 @@ export interface BoardConfig {
   dead?: number;
 }
 
+/** CTL-1050 §3.2: one current service outage decorated onto the board payload —
+ *  the inbox awareness item renders from these (state-derived, `down` only). */
+export interface BoardServiceOutage {
+  id: string;
+  label: string;
+  downSince: number | null;
+  detail: string | null;
+}
+
+export interface BoardServiceHealth {
+  generatedAt: number;
+  outages: BoardServiceOutage[];
+}
+
 export interface BoardPayload {
   generatedAt: string;
   config: BoardConfig;
@@ -230,6 +244,8 @@ export interface BoardPayload {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   queue: BoardQueueItem[];
+  /** CTL-1050: server-decorated current service outages (down only). */
+  serviceHealth?: BoardServiceHealth;
 }
 
 // ── SharedWorker ⇄ client message protocol (CTL-733 PR-2b) ──────────────────

@@ -195,6 +195,20 @@ export interface BoardConfig {
   dead?: number;
 }
 
+/** CTL-1050 §3.2: one current service outage, decorated onto the board payload
+ *  for the inbox awareness item. State-derived (current `down` entries only). */
+export interface BoardServiceOutage {
+  id: string;
+  label: string;
+  downSince: number | null;
+  detail: string | null;
+}
+
+export interface BoardServiceHealth {
+  generatedAt: number;
+  outages: BoardServiceOutage[];
+}
+
 export interface BoardPayload {
   generatedAt: string;
   config: BoardConfig;
@@ -202,6 +216,9 @@ export interface BoardPayload {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   queue: BoardQueueItem[];
+  /** CTL-1050: server-decorated current service outages (down only). Absent when
+   *  the registry has not resolved any down entry. */
+  serviceHealth?: BoardServiceHealth;
 }
 
 export const PHASE_ORDER: string[];
