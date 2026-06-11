@@ -43,12 +43,16 @@
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-926"). Value:
 //   { title: string|null, description: string|null,
-//     labels: Array<{name,color}>|null, relations: RelationMap|null, ts: number }.
+//     labels: Array<{name,color}>|null, relations: RelationMap|null,
+//     state: {name,type}|null, priority: number|null, project: string|null,
+//     estimate: number|null, ts: number, ttlMs: number }.
 // null means we fetched and Linear returned nothing; absent means uncached.
 //
-// RelationMap: { blockedBy: string[], blocks: string[], related: string[], duplicateOf: string[] }
+// RelationMap: { blockedBy: RelationTarget[], blocks: RelationTarget[], related: RelationTarget[], duplicateOf: RelationTarget[] }
+// RelationTarget: { identifier, title: string|null, state: {name,type}|null, priority: number|null, project: string|null }
 const TITLE_DESC_TTL_MS = 5 * 60 * 1000; // 5 minutes (match ESTIMATE_TTL_MS)
-const _titleDescCache = new Map(); // ticketId → { title, description, labels, relations, ts }
+const DONE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours for completed/canceled tickets (D4)
+const _titleDescCache = new Map(); // ticketId → { title, description, labels, relations, state, priority, project, estimate, ts, ttlMs }
 
 // ── Linear GraphQL helpers ────────────────────────────────────────────────────
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -80,14 +84,26 @@ function groupByTeam(ids) {
 // The title+description query: filter by team key + issue numbers (valid Linear
 // IssueFilter fields — the CTL-976 pattern; `identifier: { in }` is NOT valid
 // and 400s every call). One query per team key so cross-team boards resolve.
+// B3: expanded to include estimate, priority, project, state on the issue node,
+// and full relation-target details (title, state, priority, project) — one
+// batched call, no N+1.
 const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $numbers: [Float!]) {
   issues(filter: { team: { key: { eq: $teamKey } }, number: { in: $numbers } }, first: ${BATCH_CHUNK_SIZE}) {
     nodes {
       number
       title
       description
+      estimate
+      priority
       team {
         key
+      }
+      state {
+        name
+        type
+      }
+      project {
+        name
       }
       labels {
         nodes {
@@ -100,6 +116,15 @@ const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $n
           type
           relatedIssue {
             identifier
+            title
+            priority
+            state {
+              name
+              type
+            }
+            project {
+              name
+            }
           }
         }
       }
@@ -108,6 +133,15 @@ const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $n
           type
           issue {
             identifier
+            title
+            priority
+            state {
+              name
+              type
+            }
+            project {
+              name
+            }
           }
         }
       }
@@ -147,6 +181,34 @@ async function graphql(query, variables) {
 
 // ── Title+description fallback batch fetch ────────────────────────────────────
 
+// parseRelationIssue — maps a Linear relation-issue node to our RelationTarget shape.
+// Returns { identifier, title, state, priority, project } (all nullable except identifier).
+function parseRelationIssue(node) {
+  if (!node || typeof node.identifier !== "string") return null;
+  const title = typeof node.title === "string" && node.title.length > 0 ? node.title : null;
+  const state =
+    node.state && typeof node.state.name === "string" && typeof node.state.type === "string"
+      ? { name: node.state.name, type: node.state.type }
+      : null;
+  const priority = typeof node.priority === "number" ? node.priority : null;
+  const project = node.project && typeof node.project.name === "string" ? node.project.name : null;
+  return { identifier: node.identifier, title, state, priority, project };
+}
+
+// parseTicketMeta — extracts own-ticket state/priority/project/estimate from a node.
+// Returns { state, priority, project, estimate } (all nullable).
+function parseTicketMeta(node) {
+  const state =
+    node?.state && typeof node.state.name === "string" && typeof node.state.type === "string"
+      ? { name: node.state.name, type: node.state.type }
+      : null;
+  const priority = typeof node?.priority === "number" ? node.priority : null;
+  const project =
+    node?.project && typeof node.project.name === "string" ? node.project.name : null;
+  const estimate = typeof node?.estimate === "number" ? node.estimate : null;
+  return { state, priority, project, estimate };
+}
+
 // parseLabels — extracts labels array from a Linear issue node.
 // Returns Array<{name, color}> on success, null on any failure.
 function parseLabels(node) {
@@ -168,12 +230,14 @@ function parseLabels(node) {
 // parseRelations — maps Linear relations + inverseRelations onto our RelationMap.
 // Linear relation type values: "blocks", "duplicate", "related".
 //
-//   relations[{type:"blocks", relatedIssue:{identifier}}]       → this ticket blocks Y → blocks[]
-//   inverseRelations[{type:"blocks", issue:{identifier}}]        → Z blocks this ticket → blockedBy[]
-//   relations[{type:"duplicate", relatedIssue:{identifier}}]    → duplicateOf[]
-//   relations[{type:"related"}] + inverseRelations[{type:"related"}] → related[] (deduped)
+//   relations[{type:"blocks", relatedIssue:{...}}]        → this ticket blocks Y → blocks[]
+//   inverseRelations[{type:"blocks", issue:{...}}]         → Z blocks this ticket → blockedBy[]
+//   relations[{type:"duplicate", relatedIssue:{...}}]     → duplicateOf[]
+//   relations[{type:"related"}] + inverseRelations[{type:"related"}] → related[] (deduped by identifier)
 //
-// Returns RelationMap on success (empty arrays are fine), null on any failure.
+// B3: arrays are now RelationTarget[] (with identifier, title, state, priority, project)
+// rather than plain string[]. Returns RelationMap on success (empty arrays are fine),
+// null on any failure.
 function parseRelations(node) {
   try {
     const fwd = node?.relations?.nodes;
@@ -183,27 +247,36 @@ function parseRelations(node) {
     const blocks = [];
     const blockedBy = [];
     const duplicateOf = [];
-    const relatedSet = new Set();
+    // Dedup related by identifier (Set of identifiers, keep first-seen target).
+    const relatedByIdentifier = new Map();
 
     for (const r of Array.isArray(fwd) ? fwd : []) {
-      const id = r?.relatedIssue?.identifier;
-      if (typeof id !== "string") continue;
-      if (r.type === "blocks") blocks.push(id);
-      else if (r.type === "duplicate") duplicateOf.push(id);
-      else if (r.type === "related") relatedSet.add(id);
+      const target = parseRelationIssue(r?.relatedIssue);
+      if (!target) continue;
+      if (r.type === "blocks") blocks.push(target);
+      else if (r.type === "duplicate") duplicateOf.push(target);
+      else if (r.type === "related") {
+        if (!relatedByIdentifier.has(target.identifier)) {
+          relatedByIdentifier.set(target.identifier, target);
+        }
+      }
     }
 
     for (const r of Array.isArray(inv) ? inv : []) {
-      const id = r?.issue?.identifier;
-      if (typeof id !== "string") continue;
-      if (r.type === "blocks") blockedBy.push(id);
-      else if (r.type === "related") relatedSet.add(id);
+      const target = parseRelationIssue(r?.issue);
+      if (!target) continue;
+      if (r.type === "blocks") blockedBy.push(target);
+      else if (r.type === "related") {
+        if (!relatedByIdentifier.has(target.identifier)) {
+          relatedByIdentifier.set(target.identifier, target);
+        }
+      }
     }
 
     return {
       blockedBy,
       blocks,
-      related: Array.from(relatedSet),
+      related: Array.from(relatedByIdentifier.values()),
       duplicateOf,
     };
   } catch {
@@ -212,7 +285,17 @@ function parseRelations(node) {
 }
 
 // NULL_ENTRY — the fail-open value stored when a fetch fails or ID not found.
-const NULL_ENTRY = { title: null, description: null, labels: null, relations: null };
+// B3: gains state/priority/project/estimate fields; ttlMs defaults to 5m.
+const NULL_ENTRY = {
+  title: null,
+  description: null,
+  labels: null,
+  relations: null,
+  state: null,
+  priority: null,
+  project: null,
+  estimate: null,
+};
 
 // fillTitleDescriptionFallback — given an array of ticket IDs (or ticket objects
 // with an `id` field), enriches each with { title, description, labels, relations }.
@@ -236,8 +319,17 @@ export async function fillTitleDescriptionFallback(ticketIds) {
 
   for (const id of ids) {
     const cached = _titleDescCache.get(id);
-    if (cached !== undefined && now - cached.ts < TITLE_DESC_TTL_MS) {
-      result[id] = { title: cached.title, description: cached.description, labels: cached.labels, relations: cached.relations };
+    if (cached !== undefined && now - cached.ts < (cached.ttlMs ?? TITLE_DESC_TTL_MS)) {
+      result[id] = {
+        title: cached.title,
+        description: cached.description,
+        labels: cached.labels,
+        relations: cached.relations,
+        state: cached.state ?? null,
+        priority: cached.priority ?? null,
+        project: cached.project ?? null,
+        estimate: cached.estimate ?? null,
+      };
     } else {
       toFetch.push(id);
     }
@@ -252,6 +344,9 @@ export async function fillTitleDescriptionFallback(ticketIds) {
         t.description = r.description;
         t.labels = r.labels;
         t.relations = r.relations;
+        // B3: board-data mutation only touches title/description/labels/relations
+        // (board payload shape unchanged); state/priority/project/estimate are
+        // only on the returned map (for the linear-ticket route).
       }
     }
     return result;
@@ -262,7 +357,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
   const teamGroups = groupByTeam(toFetch);
   const unparseable = toFetch.filter((id) => parseIdentifier(id) === null);
   for (const id of unparseable) {
-    _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+    _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
     result[id] = { ...NULL_ENTRY };
   }
 
@@ -292,8 +387,15 @@ export async function fillTitleDescriptionFallback(ticketIds) {
             : null;
         const labels = parseLabels(node);
         const relations = parseRelations(node);
-        _titleDescCache.set(id, { title, description, labels, relations, ts: Date.now() });
-        result[id] = { title, description, labels, relations };
+        // B3: parse own-ticket meta fields.
+        const { state, priority, project, estimate } = parseTicketMeta(node);
+        // D4: completed/canceled tickets cached for 24h; all others 5m.
+        const ttlMs =
+          state?.type === "completed" || state?.type === "canceled"
+            ? DONE_TTL_MS
+            : TITLE_DESC_TTL_MS;
+        _titleDescCache.set(id, { title, description, labels, relations, state, priority, project, estimate, ts: Date.now(), ttlMs });
+        result[id] = { title, description, labels, relations, state, priority, project, estimate };
         fetchedNumbers.add(node.number);
       }
 
@@ -301,7 +403,7 @@ export async function fillTitleDescriptionFallback(ticketIds) {
       for (const num of numbers) {
         if (!fetchedNumbers.has(num)) {
           const id = `${teamKey}-${num}`;
-          _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+          _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
           result[id] = { ...NULL_ENTRY };
         }
       }
@@ -314,9 +416,18 @@ export async function fillTitleDescriptionFallback(ticketIds) {
     if (result[id] === undefined) {
       const cached = _titleDescCache.get(id);
       if (cached !== undefined) {
-        result[id] = { title: cached.title, description: cached.description, labels: cached.labels, relations: cached.relations };
+        result[id] = {
+          title: cached.title,
+          description: cached.description,
+          labels: cached.labels,
+          relations: cached.relations,
+          state: cached.state ?? null,
+          priority: cached.priority ?? null,
+          project: cached.project ?? null,
+          estimate: cached.estimate ?? null,
+        };
       } else {
-        _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+        _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now(), ttlMs: TITLE_DESC_TTL_MS });
         result[id] = { ...NULL_ENTRY };
       }
     }

@@ -20,7 +20,7 @@
 import { Link } from "@tanstack/react-router";
 import { TicketDepSubGraph } from "./dependency-graph";
 import type { BoardTicket } from "./types";
-import type { LinearLabel, LinearRelations } from "../components/use-linear-ticket";
+import type { LinearLabel, LinearRelationTarget, LinearRelations } from "../components/use-linear-ticket";
 
 const C = {
   border: "#262d36",
@@ -121,12 +121,16 @@ function RelationRow({ label, ids }: { label: string; ids: string[] }) {
 function RelationsGroup({ relations, loaded }: { relations: LinearRelations | null; loaded: boolean }) {
   // null + loaded → header + dimmed "—" (honest unavailable). null + !loaded →
   // also dim (still loading). Non-null → render only the non-empty sub-rows.
+  // B3: relation arrays are now RelationTarget[] — extract identifier for the row renderer.
+  function targets(arr: LinearRelationTarget[]): string[] {
+    return arr.map((t) => t.identifier);
+  }
   const rows: Array<{ label: string; ids: string[] }> = relations
     ? [
-        { label: "Blocked by", ids: relations.blockedBy },
-        { label: "Blocks", ids: relations.blocks },
-        { label: "Related", ids: relations.related },
-        { label: "Duplicate of", ids: relations.duplicateOf },
+        { label: "Blocked by", ids: targets(relations.blockedBy) },
+        { label: "Blocks", ids: targets(relations.blocks) },
+        { label: "Related", ids: targets(relations.related) },
+        { label: "Duplicate of", ids: targets(relations.duplicateOf) },
       ].filter((r) => r.ids.length > 0)
     : [];
 

@@ -341,15 +341,42 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
   });
 
   // Helper: build a full mock node with labels and relations.
+  // B3: relation nodes include title/state/priority/project on relatedIssue/issue.
   function makeNode(overrides: Record<string, unknown> = {}) {
     return {
       number: 996,
       title: "Ticket with labels",
       description: "body text",
       team: { key: "CTL" },
+      state: { name: "In Progress", type: "started" },
+      priority: 2,
+      project: { name: "Orch Monitor" },
+      estimate: 3,
       labels: { nodes: [{ name: "feature", color: "#8b5cf6" }, { name: "monitor", color: "#3b82f6" }] },
-      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-997" } }] },
-      inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-995" } }] },
+      relations: {
+        nodes: [{
+          type: "blocks",
+          relatedIssue: {
+            identifier: "CTL-997",
+            title: "Blocked ticket",
+            state: { name: "Todo", type: "unstarted" },
+            priority: 3,
+            project: { name: "Orch Monitor" },
+          },
+        }],
+      },
+      inverseRelations: {
+        nodes: [{
+          type: "blocks",
+          issue: {
+            identifier: "CTL-995",
+            title: "Blocking ticket",
+            state: { name: "Done", type: "completed" },
+            priority: 1,
+            project: { name: "Orch Monitor" },
+          },
+        }],
+      },
       ...overrides,
     };
   }
@@ -369,21 +396,32 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
     }
   });
 
-  it("parses forward blocks relation into .blocks[]", async () => {
+  it("parses forward blocks relation into .blocks[] as RelationTarget objects", async () => {
     const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
     try {
       const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
-      expect(result["CTL-996"].relations?.blocks).toEqual(["CTL-997"]);
+      const blocks = result["CTL-996"].relations?.blocks ?? [];
+      expect(blocks.length).toBe(1);
+      expect(blocks[0].identifier).toBe("CTL-997");
+      expect(blocks[0].title).toBe("Blocked ticket");
+      expect(blocks[0].state).toEqual({ name: "Todo", type: "unstarted" });
+      expect(blocks[0].priority).toBe(3);
+      expect(blocks[0].project).toBe("Orch Monitor");
     } finally {
       spy.restore();
     }
   });
 
-  it("parses inverse blocks relation into .blockedBy[]", async () => {
+  it("parses inverse blocks relation into .blockedBy[] as RelationTarget objects", async () => {
     const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
     try {
       const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
-      expect(result["CTL-996"].relations?.blockedBy).toEqual(["CTL-995"]);
+      const blockedBy = result["CTL-996"].relations?.blockedBy ?? [];
+      expect(blockedBy.length).toBe(1);
+      expect(blockedBy[0].identifier).toBe("CTL-995");
+      expect(blockedBy[0].title).toBe("Blocking ticket");
+      expect(blockedBy[0].state).toEqual({ name: "Done", type: "completed" });
+      expect(blockedBy[0].priority).toBe(1);
     } finally {
       spy.restore();
     }
@@ -395,7 +433,18 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
         issues: {
           nodes: [
             makeNode({
-              relations: { nodes: [{ type: "duplicate", relatedIssue: { identifier: "CTL-990" } }] },
+              relations: {
+                nodes: [{
+                  type: "duplicate",
+                  relatedIssue: {
+                    identifier: "CTL-990",
+                    title: "Original",
+                    state: { name: "Done", type: "completed" },
+                    priority: 0,
+                    project: null,
+                  },
+                }],
+              },
               inverseRelations: { nodes: [] },
             }),
           ],
@@ -404,24 +453,56 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
     });
     try {
       const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
-      expect(result["CTL-996"].relations?.duplicateOf).toEqual(["CTL-990"]);
+      const dups = result["CTL-996"].relations?.duplicateOf ?? [];
+      expect(dups.length).toBe(1);
+      expect(dups[0].identifier).toBe("CTL-990");
       expect(result["CTL-996"].relations?.blocks).toEqual([]);
     } finally {
       spy.restore();
     }
   });
 
-  it("dedupes related from both forward and inverse relations", async () => {
+  it("dedupes related from both forward and inverse relations by identifier", async () => {
     const spy = mockFetch({
       data: {
         issues: {
           nodes: [
             makeNode({
-              relations: { nodes: [{ type: "related", relatedIssue: { identifier: "CTL-880" } }] },
+              relations: {
+                nodes: [{
+                  type: "related",
+                  relatedIssue: {
+                    identifier: "CTL-880",
+                    title: "Related A",
+                    state: { name: "Todo", type: "unstarted" },
+                    priority: null,
+                    project: null,
+                  },
+                }],
+              },
               inverseRelations: {
                 nodes: [
-                  { type: "related", issue: { identifier: "CTL-880" } }, // dup
-                  { type: "related", issue: { identifier: "CTL-881" } },
+                  // dup of CTL-880 — should be deduped
+                  {
+                    type: "related",
+                    issue: {
+                      identifier: "CTL-880",
+                      title: "Related A (inv)",
+                      state: { name: "Todo", type: "unstarted" },
+                      priority: null,
+                      project: null,
+                    },
+                  },
+                  {
+                    type: "related",
+                    issue: {
+                      identifier: "CTL-881",
+                      title: "Related B",
+                      state: null,
+                      priority: null,
+                      project: null,
+                    },
+                  },
                 ],
               },
             }),
@@ -432,9 +513,11 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
     try {
       const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
       const related = result["CTL-996"].relations?.related ?? [];
-      expect(related).toContain("CTL-880");
-      expect(related).toContain("CTL-881");
-      expect(related.filter((x: string) => x === "CTL-880").length).toBe(1); // deduped
+      const identifiers = related.map((r: { identifier: string }) => r.identifier);
+      expect(identifiers).toContain("CTL-880");
+      expect(identifiers).toContain("CTL-881");
+      // deduped — only one entry for CTL-880
+      expect(identifiers.filter((x: string) => x === "CTL-880").length).toBe(1);
     } finally {
       spy.restore();
     }
@@ -495,7 +578,7 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
     }
   });
 
-  it("sends a query that includes labels, relations, and inverseRelations fields", async () => {
+  it("sends a query that includes labels, relations, inverseRelations, and relation-target detail fields", async () => {
     const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
     try {
       await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
@@ -504,6 +587,194 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
       expect(query).toContain("relations");
       expect(query).toContain("inverseRelations");
       expect(query).toContain("relatedIssue");
+      // B3: relation-target detail fields
+      expect(query).toContain("identifier");
+      expect(query).toContain("title");
+      expect(query).toContain("state");
+      expect(query).toContain("priority");
+      expect(query).toContain("project");
+      // B3: own-ticket meta fields
+      expect(query).toContain("estimate");
+    } finally {
+      spy.restore();
+    }
+  });
+});
+
+describe("CTL-1003 B3: fillTitleDescriptionFallback — parseTicketMeta + ttlMs + RelationTarget shape", () => {
+  beforeEach(() => {
+    _clearTitleDescCache();
+  });
+
+  function makeFullNode(overrides: Record<string, unknown> = {}) {
+    return {
+      number: 1003,
+      title: "Full ticket",
+      description: "A description",
+      team: { key: "CTL" },
+      state: { name: "In Progress", type: "started" },
+      priority: 2,
+      project: { name: "Orch Monitor" },
+      estimate: 5,
+      labels: { nodes: [] },
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+      ...overrides,
+    };
+  }
+
+  it("returns own-ticket state/priority/project/estimate in the result entry", async () => {
+    const spy = mockFetch({ data: { issues: { nodes: [makeFullNode()] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      const entry = result["CTL-1003"];
+      expect(entry.state).toEqual({ name: "In Progress", type: "started" });
+      expect(entry.priority).toBe(2);
+      expect(entry.project).toBe("Orch Monitor");
+      expect(entry.estimate).toBe(5);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("NULL_ENTRY shape: state/priority/project/estimate are all null", async () => {
+    // An ID that Linear returns no data for → null entry.
+    const spy = mockFetch({ data: { issues: { nodes: [] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-9999"]));
+      expect(result["CTL-9999"].state).toBeNull();
+      expect(result["CTL-9999"].priority).toBeNull();
+      expect(result["CTL-9999"].project).toBeNull();
+      expect(result["CTL-9999"].estimate).toBeNull();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("completed ticket → 24h ttlMs (served from cache on second call within 24h)", async () => {
+    const completedNode = makeFullNode({ state: { name: "Done", type: "completed" } });
+    const spy1 = mockFetch({ data: { issues: { nodes: [completedNode] } } });
+    await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+    spy1.restore();
+
+    // Second call immediately after — completed ticket should be served from 24h cache.
+    const spy2 = mockFetch({ data: { issues: { nodes: [] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      expect(spy2.callCount).toBe(0); // still cached (within 24h)
+      expect(result["CTL-1003"].state?.type).toBe("completed");
+    } finally {
+      spy2.restore();
+    }
+  });
+
+  it("canceled ticket → 24h ttlMs (served from cache)", async () => {
+    const canceledNode = makeFullNode({ state: { name: "Cancelled", type: "canceled" } });
+    const spy1 = mockFetch({ data: { issues: { nodes: [canceledNode] } } });
+    await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+    spy1.restore();
+
+    const spy2 = mockFetch({ data: { issues: { nodes: [] } } });
+    try {
+      await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      expect(spy2.callCount).toBe(0); // cached for 24h
+    } finally {
+      spy2.restore();
+    }
+  });
+
+  it("in-progress (started) ticket → 5m TTL (refetched after TTL)", async () => {
+    const startedNode = makeFullNode({ state: { name: "In Progress", type: "started" } });
+    const spy1 = mockFetch({ data: { issues: { nodes: [startedNode] } } });
+    await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+    spy1.restore();
+
+    // Simulate TTL expiry by evicting cache.
+    _clearTitleDescCache("CTL-1003");
+
+    const spy2 = mockFetch({ data: { issues: { nodes: [startedNode] } } });
+    try {
+      await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      expect(spy2.callCount).toBe(1); // re-fetched after eviction
+    } finally {
+      spy2.restore();
+    }
+  });
+
+  it("relation target missing title → title null in RelationTarget", async () => {
+    const node = makeFullNode({
+      relations: {
+        nodes: [{
+          type: "blocks",
+          relatedIssue: {
+            identifier: "CTL-100",
+            // no title field
+            state: { name: "Todo", type: "unstarted" },
+            priority: 0,
+            project: null,
+          },
+        }],
+      },
+    });
+    const spy = mockFetch({ data: { issues: { nodes: [node] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      const target = result["CTL-1003"].relations?.blocks?.[0];
+      expect(target?.identifier).toBe("CTL-100");
+      expect(target?.title).toBeNull();
+      expect(target?.state?.type).toBe("unstarted");
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("relation target with no state/project → both null in RelationTarget", async () => {
+    const node = makeFullNode({
+      relations: {
+        nodes: [{
+          type: "related",
+          relatedIssue: {
+            identifier: "CTL-200",
+            title: "Minimal",
+            // no state, no project
+            priority: null,
+            project: null,
+          },
+        }],
+      },
+      inverseRelations: { nodes: [] },
+    });
+    const spy = mockFetch({ data: { issues: { nodes: [node] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      const target = result["CTL-1003"].relations?.related?.[0];
+      expect(target?.identifier).toBe("CTL-200");
+      expect(target?.state).toBeNull();
+      expect(target?.project).toBeNull();
+      expect(target?.priority).toBeNull();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("own-ticket with no state/project/estimate → all null", async () => {
+    const node = {
+      number: 1003,
+      title: "Minimal ticket",
+      description: "body",
+      team: { key: "CTL" },
+      // no state, no project, no estimate, no priority
+      labels: { nodes: [] },
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    };
+    const spy = mockFetch({ data: { issues: { nodes: [node] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-1003"]));
+      expect(result["CTL-1003"].state).toBeNull();
+      expect(result["CTL-1003"].project).toBeNull();
+      expect(result["CTL-1003"].estimate).toBeNull();
+      expect(result["CTL-1003"].priority).toBeNull();
     } finally {
       spy.restore();
     }

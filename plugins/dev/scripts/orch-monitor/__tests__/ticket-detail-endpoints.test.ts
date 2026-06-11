@@ -170,17 +170,29 @@ describe("GET /api/ticket-artifacts/:id (P9)", () => {
 // We mock global.fetch to intercept the Linear GraphQL call so no real network
 // traffic occurs (the fallback lib uses module-level fetch).
 
+type LinearRelationTarget = {
+  identifier: string;
+  title: string | null;
+  state: { name: string; type: string } | null;
+  priority: number | null;
+  project: string | null;
+};
+
 type LinearTicketRouteResponse = {
   id: string;
   title: string | null;
   description: string | null;
   labels: Array<{ name: string; color: string }> | null;
   relations: {
-    blockedBy: string[];
-    blocks: string[];
-    related: string[];
-    duplicateOf: string[];
+    blockedBy: LinearRelationTarget[];
+    blocks: LinearRelationTarget[];
+    related: LinearRelationTarget[];
+    duplicateOf: LinearRelationTarget[];
   } | null;
+  state: { name: string; type: string } | null;
+  priority: number | null;
+  project: string | null;
+  estimate: number | null;
   source: "linear-live" | "unavailable";
 };
 
@@ -215,7 +227,7 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
     else delete process.env.LINEAR_API_TOKEN;
   });
 
-  it("returns labels and relations from Linear alongside title and description", async () => {
+  it("returns labels, relations, state, priority, project, estimate from Linear alongside title and description", async () => {
     const mock = mockLinearFetch({
       data: {
         issues: {
@@ -225,12 +237,34 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
               title: "CTL-996 title",
               description: "Spec body",
               team: { key: "CTL" },
+              state: { name: "In Review", type: "started" },
+              priority: 2,
+              project: { name: "Orch Monitor" },
+              estimate: 3,
               labels: { nodes: [{ name: "feature", color: "#8b5cf6" }] },
               relations: {
-                nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-997" } }],
+                nodes: [{
+                  type: "blocks",
+                  relatedIssue: {
+                    identifier: "CTL-997",
+                    title: "Blocked ticket",
+                    state: { name: "Todo", type: "unstarted" },
+                    priority: 3,
+                    project: { name: "Orch Monitor" },
+                  },
+                }],
               },
               inverseRelations: {
-                nodes: [{ type: "blocks", issue: { identifier: "CTL-995" } }],
+                nodes: [{
+                  type: "blocks",
+                  issue: {
+                    identifier: "CTL-995",
+                    title: "Blocker ticket",
+                    state: { name: "Done", type: "completed" },
+                    priority: 1,
+                    project: { name: "Orch Monitor" },
+                  },
+                }],
               },
             },
           ],
@@ -245,9 +279,21 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
       expect(body.title).toBe("CTL-996 title");
       expect(body.description).toBe("Spec body");
       expect(body.source).toBe("linear-live");
+      // Own-ticket meta (B3).
+      expect(body.state).toEqual({ name: "In Review", type: "started" });
+      expect(body.priority).toBe(2);
+      expect(body.project).toBe("Orch Monitor");
+      expect(body.estimate).toBe(3);
+      // Labels.
       expect(body.labels).toEqual([{ name: "feature", color: "#8b5cf6" }]);
-      expect(body.relations?.blocks).toContain("CTL-997");
-      expect(body.relations?.blockedBy).toContain("CTL-995");
+      // Relations are now RelationTarget objects.
+      expect(body.relations?.blocks).toHaveLength(1);
+      expect(body.relations?.blocks?.[0]?.identifier).toBe("CTL-997");
+      expect(body.relations?.blocks?.[0]?.title).toBe("Blocked ticket");
+      expect(body.relations?.blocks?.[0]?.state?.type).toBe("unstarted");
+      expect(body.relations?.blockedBy).toHaveLength(1);
+      expect(body.relations?.blockedBy?.[0]?.identifier).toBe("CTL-995");
+      expect(body.relations?.blockedBy?.[0]?.state?.type).toBe("completed");
       expect(body.relations?.related).toEqual([]);
       expect(body.relations?.duplicateOf).toEqual([]);
       expect(mock.intercepted).toBe(true);
@@ -256,7 +302,7 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
     }
   });
 
-  it("returns null labels and relations on unavailable ticket (always 200)", async () => {
+  it("returns null labels, relations, state, priority, project, estimate on unavailable ticket (always 200)", async () => {
     const mock = mockLinearFetch({ data: { issues: { nodes: [] } } });
     try {
       const res = await fetch(`${baseUrl}/api/linear-ticket/CTL-99999`);
@@ -268,12 +314,16 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
       // null on unavailable (no data returned)
       expect(body.labels).toBeNull();
       expect(body.relations).toBeNull();
+      expect(body.state).toBeNull();
+      expect(body.priority).toBeNull();
+      expect(body.project).toBeNull();
+      expect(body.estimate).toBeNull();
     } finally {
       mock.restore();
     }
   });
 
-  it("returns null labels and relations on network failure (always 200, fail-open)", async () => {
+  it("returns null labels, relations, state, priority, project, estimate on network failure (always 200, fail-open)", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
@@ -287,6 +337,10 @@ describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
       expect(body.source).toBe("unavailable");
       expect(body.labels).toBeNull();
       expect(body.relations).toBeNull();
+      expect(body.state).toBeNull();
+      expect(body.priority).toBeNull();
+      expect(body.project).toBeNull();
+      expect(body.estimate).toBeNull();
     } finally {
       globalThis.fetch = original;
     }
