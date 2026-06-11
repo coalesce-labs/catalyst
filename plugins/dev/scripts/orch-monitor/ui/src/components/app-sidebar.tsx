@@ -18,6 +18,7 @@ import { useNavigate } from "@tanstack/react-router";
 
 import { cn } from "@/lib/utils";
 import { useSurface, type Surface } from "@/lib/surface";
+import { surfaceKeybinding } from "@/lib/surface-actions";
 // CTL-989 — nav WRITES go through router.navigate (URL = source of truth for
 // location). The active surface + Settings-open are READ from the route via
 // useSurface(); scope is written onto the `?scope` typed search param.
@@ -408,6 +409,9 @@ export function AppSidebar() {
       countBadge = queueN; // keep the 0 — "nothing waiting" is real signal
       rowTooltip = `${queueN} waiting for a slot`;
     }
+    // CTL-1025: show the keybinding hint in the tooltip for nav items that have one.
+    const kb = surfaceKeybinding(item.surface);
+    if (kb) rowTooltip = `${rowTooltip} · ${kb}`;
 
     return (
       <SidebarMenuItem key={`${scopeVal}:${item.surface}`}>
@@ -416,6 +420,7 @@ export function AppSidebar() {
           tooltip={rowTooltip}
           size={compact ? "sm" : "default"}
           onClick={() => go(item.surface, scopeVal)}
+          data-keybinding={kb || undefined}
           // CTL-981: inactive = font-medium (weight 500) + text-sidebar-foreground/72
           // (raised from /60 for better label presence — matches Linear's lch(60) gray);
           // active = text-sidebar-primary (full accent, clearly brighter than /72).
@@ -689,12 +694,14 @@ export function AppSidebar() {
                       repo-scoped, so the active check is surface-only. */}
                   {OBSERVE_LIVE.map((item) => {
                     const active = surface === item.surface;
+                    const observeKb = surfaceKeybinding(item.surface);
                     return (
                       <SidebarMenuItem key={item.surface}>
                         <SidebarMenuButton
                           isActive={active}
-                          tooltip={item.label}
+                          tooltip={observeKb ? `${item.label} · ${observeKb}` : item.label}
                           onClick={() => go(item.surface)}
+                          data-keybinding={observeKb || undefined}
                           className={cn(
                             active
                               ? "text-sidebar-primary"
