@@ -42,10 +42,13 @@
 
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-926"). Value:
-//   { title: string|null, description: string|null, ts: number }.
+//   { title: string|null, description: string|null,
+//     labels: Array<{name,color}>|null, relations: RelationMap|null, ts: number }.
 // null means we fetched and Linear returned nothing; absent means uncached.
+//
+// RelationMap: { blockedBy: string[], blocks: string[], related: string[], duplicateOf: string[] }
 const TITLE_DESC_TTL_MS = 5 * 60 * 1000; // 5 minutes (match ESTIMATE_TTL_MS)
-const _titleDescCache = new Map(); // ticketId → { title, description, ts }
+const _titleDescCache = new Map(); // ticketId → { title, description, labels, relations, ts }
 
 // ── Linear GraphQL helpers ────────────────────────────────────────────────────
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
@@ -86,6 +89,28 @@ const TITLE_DESC_QUERY_FOR_TEAM = `query FallbackTitleDesc($teamKey: String!, $n
       team {
         key
       }
+      labels {
+        nodes {
+          name
+          color
+        }
+      }
+      relations {
+        nodes {
+          type
+          relatedIssue {
+            identifier
+          }
+        }
+      }
+      inverseRelations {
+        nodes {
+          type
+          issue {
+            identifier
+          }
+        }
+      }
     }
   }
 }`;
@@ -122,37 +147,123 @@ async function graphql(query, variables) {
 
 // ── Title+description fallback batch fetch ────────────────────────────────────
 
-// fillTitleDescriptionFallback — given an array of ticket IDs, return a map
-//   { [id]: { title: string|null, description: string|null } }.
+// parseLabels — extracts labels array from a Linear issue node.
+// Returns Array<{name, color}> on success, null on any failure.
+function parseLabels(node) {
+  try {
+    const nodes = node?.labels?.nodes;
+    if (!Array.isArray(nodes)) return null;
+    const labels = [];
+    for (const l of nodes) {
+      if (typeof l?.name === "string") {
+        labels.push({ name: l.name, color: typeof l.color === "string" ? l.color : "#8d8d8d" });
+      }
+    }
+    return labels;
+  } catch {
+    return null;
+  }
+}
+
+// parseRelations — maps Linear relations + inverseRelations onto our RelationMap.
+// Linear relation type values: "blocks", "duplicate", "related".
+//
+//   relations[{type:"blocks", relatedIssue:{identifier}}]       → this ticket blocks Y → blocks[]
+//   inverseRelations[{type:"blocks", issue:{identifier}}]        → Z blocks this ticket → blockedBy[]
+//   relations[{type:"duplicate", relatedIssue:{identifier}}]    → duplicateOf[]
+//   relations[{type:"related"}] + inverseRelations[{type:"related"}] → related[] (deduped)
+//
+// Returns RelationMap on success (empty arrays are fine), null on any failure.
+function parseRelations(node) {
+  try {
+    const fwd = node?.relations?.nodes;
+    const inv = node?.inverseRelations?.nodes;
+    if (!Array.isArray(fwd) && !Array.isArray(inv)) return null;
+
+    const blocks = [];
+    const blockedBy = [];
+    const duplicateOf = [];
+    const relatedSet = new Set();
+
+    for (const r of Array.isArray(fwd) ? fwd : []) {
+      const id = r?.relatedIssue?.identifier;
+      if (typeof id !== "string") continue;
+      if (r.type === "blocks") blocks.push(id);
+      else if (r.type === "duplicate") duplicateOf.push(id);
+      else if (r.type === "related") relatedSet.add(id);
+    }
+
+    for (const r of Array.isArray(inv) ? inv : []) {
+      const id = r?.issue?.identifier;
+      if (typeof id !== "string") continue;
+      if (r.type === "blocks") blockedBy.push(id);
+      else if (r.type === "related") relatedSet.add(id);
+    }
+
+    return {
+      blockedBy,
+      blocks,
+      related: Array.from(relatedSet),
+      duplicateOf,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// NULL_ENTRY — the fail-open value stored when a fetch fails or ID not found.
+const NULL_ENTRY = { title: null, description: null, labels: null, relations: null };
+
+// fillTitleDescriptionFallback — given an array of ticket IDs (or ticket objects
+// with an `id` field), enriches each with { title, description, labels, relations }.
+// When called with an array of objects, mutates each object in place AND returns
+// the ID-keyed map.  When called with an array of strings, returns the map only.
 //
 // - Hits are served from _titleDescCache (5-min TTL).
 // - Remaining IDs are batched into one Linear GraphQL call per team-chunk.
-// - { null, null } is stored for IDs Linear returned nothing for (not found),
+// - Null values are stored for IDs Linear returned nothing for (not found),
 //   so a subsequent call within the TTL does not re-fetch.
 // - Always resolves; never rejects (fail-open).
 export async function fillTitleDescriptionFallback(ticketIds) {
+  // Support being called with an array of objects (the board-data pattern) as
+  // well as an array of string IDs (the server.ts linear-ticket route pattern).
+  const isObjectArray = ticketIds.length > 0 && typeof ticketIds[0] === "object" && ticketIds[0] !== null;
+  const ids = isObjectArray ? ticketIds.map((t) => t.id ?? t.ticket ?? "") : ticketIds;
+
   const result = {};
   const toFetch = [];
   const now = Date.now();
 
-  for (const id of ticketIds) {
+  for (const id of ids) {
     const cached = _titleDescCache.get(id);
     if (cached !== undefined && now - cached.ts < TITLE_DESC_TTL_MS) {
-      result[id] = { title: cached.title, description: cached.description };
+      result[id] = { title: cached.title, description: cached.description, labels: cached.labels, relations: cached.relations };
     } else {
       toFetch.push(id);
     }
   }
 
-  if (toFetch.length === 0) return result;
+  if (toFetch.length === 0) {
+    if (isObjectArray) {
+      for (const t of ticketIds) {
+        const id = t.id ?? t.ticket ?? "";
+        const r = result[id] ?? NULL_ENTRY;
+        t.title = r.title;
+        t.description = r.description;
+        t.labels = r.labels;
+        t.relations = r.relations;
+      }
+    }
+    return result;
+  }
 
   // Group uncached IDs by team key. IDs that don't parse are stored as nulls
   // (can't query them).
   const teamGroups = groupByTeam(toFetch);
   const unparseable = toFetch.filter((id) => parseIdentifier(id) === null);
   for (const id of unparseable) {
-    _titleDescCache.set(id, { title: null, description: null, ts: Date.now() });
-    result[id] = { title: null, description: null };
+    _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+    result[id] = { ...NULL_ENTRY };
   }
 
   // For each team key, chunk its numbers and fire one query per chunk.
@@ -179,17 +290,19 @@ export async function fillTitleDescriptionFallback(ticketIds) {
           typeof node.description === "string" && node.description.length > 0
             ? node.description
             : null;
-        _titleDescCache.set(id, { title, description, ts: Date.now() });
-        result[id] = { title, description };
+        const labels = parseLabels(node);
+        const relations = parseRelations(node);
+        _titleDescCache.set(id, { title, description, labels, relations, ts: Date.now() });
+        result[id] = { title, description, labels, relations };
         fetchedNumbers.add(node.number);
       }
 
-      // Numbers Linear did not return → honest { null, null } (not found).
+      // Numbers Linear did not return → honest nulls (not found).
       for (const num of numbers) {
         if (!fetchedNumbers.has(num)) {
           const id = `${teamKey}-${num}`;
-          _titleDescCache.set(id, { title: null, description: null, ts: Date.now() });
-          result[id] = { title: null, description: null };
+          _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+          result[id] = { ...NULL_ENTRY };
         }
       }
     }),
@@ -201,11 +314,23 @@ export async function fillTitleDescriptionFallback(ticketIds) {
     if (result[id] === undefined) {
       const cached = _titleDescCache.get(id);
       if (cached !== undefined) {
-        result[id] = { title: cached.title, description: cached.description };
+        result[id] = { title: cached.title, description: cached.description, labels: cached.labels, relations: cached.relations };
       } else {
-        _titleDescCache.set(id, { title: null, description: null, ts: Date.now() });
-        result[id] = { title: null, description: null };
+        _titleDescCache.set(id, { ...NULL_ENTRY, ts: Date.now() });
+        result[id] = { ...NULL_ENTRY };
       }
+    }
+  }
+
+  // If called with objects, mutate them in place (board-data pattern).
+  if (isObjectArray) {
+    for (const t of ticketIds) {
+      const id = t.id ?? t.ticket ?? "";
+      const r = result[id] ?? NULL_ENTRY;
+      t.title = r.title;
+      t.description = r.description;
+      t.labels = r.labels;
+      t.relations = r.relations;
     }
   }
 

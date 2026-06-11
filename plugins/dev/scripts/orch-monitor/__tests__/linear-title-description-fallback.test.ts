@@ -102,7 +102,9 @@ describe("CTL-974: fillTitleDescriptionFallback — title+description resolver",
       await withToken(() => fillTitleDescriptionFallback(["CTL-926"]));
       expect(spy.callCount).toBe(1);
       const call = spy.calls[0];
-      expect(call.query).not.toContain("identifier");
+      // CTL-976 guard: the FILTER must not use `identifier: { in }` (that 400s).
+      // The query CAN use `identifier` as a FIELD name (e.g. relatedIssue.identifier).
+      expect(call.query).not.toMatch(/filter[^}]*identifier/);
       expect(call.query).toContain("number");
       expect(call.query).toContain("teamKey");
       expect(call.query).toContain("title");
@@ -329,6 +331,181 @@ describe("CTL-974: fillTitleDescriptionFallback — title+description resolver",
       expect(spy2.callCount).toBe(1);
     } finally {
       spy2.restore();
+    }
+  });
+});
+
+describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension", () => {
+  beforeEach(() => {
+    _clearTitleDescCache();
+  });
+
+  // Helper: build a full mock node with labels and relations.
+  function makeNode(overrides: Record<string, unknown> = {}) {
+    return {
+      number: 996,
+      title: "Ticket with labels",
+      description: "body text",
+      team: { key: "CTL" },
+      labels: { nodes: [{ name: "feature", color: "#8b5cf6" }, { name: "monitor", color: "#3b82f6" }] },
+      relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-997" } }] },
+      inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-995" } }] },
+      ...overrides,
+    };
+  }
+
+  it("parses labels from the response node", async () => {
+    const spy = mockFetch({
+      data: { issues: { nodes: [makeNode()] } },
+    });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].labels).toEqual([
+        { name: "feature", color: "#8b5cf6" },
+        { name: "monitor", color: "#3b82f6" },
+      ]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("parses forward blocks relation into .blocks[]", async () => {
+    const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].relations?.blocks).toEqual(["CTL-997"]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("parses inverse blocks relation into .blockedBy[]", async () => {
+    const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].relations?.blockedBy).toEqual(["CTL-995"]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("parses duplicate relation into .duplicateOf[]", async () => {
+    const spy = mockFetch({
+      data: {
+        issues: {
+          nodes: [
+            makeNode({
+              relations: { nodes: [{ type: "duplicate", relatedIssue: { identifier: "CTL-990" } }] },
+              inverseRelations: { nodes: [] },
+            }),
+          ],
+        },
+      },
+    });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].relations?.duplicateOf).toEqual(["CTL-990"]);
+      expect(result["CTL-996"].relations?.blocks).toEqual([]);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("dedupes related from both forward and inverse relations", async () => {
+    const spy = mockFetch({
+      data: {
+        issues: {
+          nodes: [
+            makeNode({
+              relations: { nodes: [{ type: "related", relatedIssue: { identifier: "CTL-880" } }] },
+              inverseRelations: {
+                nodes: [
+                  { type: "related", issue: { identifier: "CTL-880" } }, // dup
+                  { type: "related", issue: { identifier: "CTL-881" } },
+                ],
+              },
+            }),
+          ],
+        },
+      },
+    });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      const related = result["CTL-996"].relations?.related ?? [];
+      expect(related).toContain("CTL-880");
+      expect(related).toContain("CTL-881");
+      expect(related.filter((x: string) => x === "CTL-880").length).toBe(1); // deduped
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("fail-open: network failure → labels:null, relations:null, no throw", async () => {
+    const spy = mockFetchFail();
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].labels).toBeNull();
+      expect(result["CTL-996"].relations).toBeNull();
+      // title/description still null-caching
+      expect(result["CTL-996"].title).toBeNull();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("null-caching: fails-open within TTL (no re-fetch after network failure)", async () => {
+    const spy1 = mockFetchFail();
+    await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+    spy1.restore();
+
+    // Second call: node NOT re-fetched (null-cached from failure).
+    const spy2 = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(spy2.callCount).toBe(0); // served from null-cache
+      expect(result["CTL-996"].labels).toBeNull(); // cached null persists
+    } finally {
+      spy2.restore();
+    }
+  });
+
+  it("node with missing labels field → labels null", async () => {
+    const spy = mockFetch({
+      data: {
+        issues: {
+          nodes: [
+            {
+              number: 996,
+              title: "T",
+              description: "d",
+              team: { key: "CTL" },
+              // no labels field at all
+              relations: { nodes: [] },
+              inverseRelations: { nodes: [] },
+            },
+          ],
+        },
+      },
+    });
+    try {
+      const result = await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      expect(result["CTL-996"].labels).toBeNull();
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("sends a query that includes labels, relations, and inverseRelations fields", async () => {
+    const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
+    try {
+      await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
+      const query = spy.calls[0].query as string;
+      expect(query).toContain("labels");
+      expect(query).toContain("relations");
+      expect(query).toContain("inverseRelations");
+      expect(query).toContain("relatedIssue");
+    } finally {
+      spy.restore();
     }
   });
 });

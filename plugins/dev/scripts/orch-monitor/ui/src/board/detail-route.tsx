@@ -24,6 +24,7 @@ import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
 import { useLinearTicket } from "../components/use-linear-ticket";
+import { TicketRailExtra } from "./ticket-rail-extra";
 import { WorkerDetailBody } from "./worker-detail-body";
 import { WorkerRailExtra } from "./worker-rail-extra";
 import { useWorkerDetailModel } from "./use-worker-detail-model";
@@ -74,7 +75,8 @@ function ticketRows(t: BoardTicket | undefined): PropertyRow[] {
     { label: "Phase", value: t?.phase },
     { label: "Priority", value: t ? priorityLabel(t.priority) : undefined },
     { label: "Estimate", value: t?.estimate != null ? `${t.estimate} pts` : t ? null : undefined },
-    { label: "Scope", value: t ? (t.scope ?? null) : undefined },
+    // CTL-996: the T-shirt Scope row is GONE — one complexity measure (the
+    // Fibonacci estimate above) on this reading surface.
     { label: "Project", value: t ? (t.project ?? null) : undefined },
     { label: "Repo", value: t?.repo },
     { label: "Team", value: t?.team },
@@ -165,25 +167,34 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         search={search}
         listIds={listIds}
         live={{ working: ticket?.working ?? false, activeState: ticket?.activeState ?? null }}
-        title={linear.title ?? ticket?.title ?? id}
+        // CTL-996: the visible chrome title is null — the Shell renders only the
+        // live dot + mono id, and the body <h1> owns the SINGLE visible title.
+        title={null}
         properties={ticketRows(ticket)}
+        // CTL-996: the ticket rail-extra (Labels · Relations · Dependencies) —
+        // the worker-page rail idiom, now on tickets too (worker rail untouched).
+        railExtra={
+          <TicketRailExtra
+            linear={linear}
+            ticket={ticket}
+            tickets={payload?.tickets ?? []}
+          />
+        }
         streamHealth={health}
       >
-        {/* DETAIL2 (CTL-913): the lifecycle aggregate body — header · PIPELINE rail ·
-            HELD banner · LIFECYCLE SPINE + compact gantt · COMMS · ACTIVITY — all
-            off the RESIDENT BoardTicket + phaseSummary (zero new endpoints).
-            DETAIL7 (CTL-918): the resident workers are passed so the active spine
-            node can resolve its running phase's sessionId and tail the live
-            stream (the same BFF SSE the worker [live] tab consumes).
-            CTL-974: realTitle + description + descLoaded carry the LIVE Linear
-            title (Header <h1>) and markdown description (Overview lead). */}
+        {/* The ticket reading page — single title + status strip + Q3 indicator +
+            ShippedHero/Held + the Spec/Lifecycle/Cost/Activity tabs (CTL-996).
+            DETAIL7 (CTL-918): the resident workers are passed so the active
+            lifecycle node can tail the live stream. CTL-974: realTitle +
+            description + descLoaded carry the LIVE Linear title (<h1>) and markdown
+            (Spec tab). CTL-996: `search` drives the active tab + Q3 variant. */}
         <TicketDetailPage
           ticket={ticket}
           workers={payload?.workers ?? []}
-          tickets={payload?.tickets ?? []}
           realTitle={linear.title}
           description={linear.description}
           descLoaded={linear.loaded}
+          search={search}
         />
       </Shell>
       <DetailOverlays payload={payload} focus={{ kind: "ticket", id }} />
