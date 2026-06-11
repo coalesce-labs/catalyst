@@ -35,6 +35,7 @@ import {
   log,
   getHostName, // CTL-862
   getClusterHosts, // CTL-862
+  hostMembershipWarning, // CTL-1057
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
@@ -552,12 +553,21 @@ function dispatchTriage(
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
     return false;
   }
-  // CTL-862: HRW ownership filter. Resolve roster/self lazily per call so hot
-  // roster reloads need no restart. Single-host roster → ownedBy is identity.
+  // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call
+  // so hot roster reloads need no restart. Single-host (multiHost===false) is a
+  // TRUE no-op regardless of whether the lone roster entry string-matches the
+  // resolved hostName (stale/aliased hosts.json). HRW filtering engages only
+  // when roster.length > 1, matching the multiHost gate on the claim below.
   const roster = hosts ?? getClusterHosts();
   const self = hostName ?? getHostName();
   const multiHost = roster.length > 1;
-  if (!ownedBy(identifier, roster, self)) {
+  // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
+  const _mw = hostMembershipWarning(roster, self);
+  if (_mw && !globalThis.__ctl1057_monitor_warned) {
+    globalThis.__ctl1057_monitor_warned = true;
+    log.warn({ roster, self }, _mw);
+  }
+  if (multiHost && !ownedBy(identifier, roster, self)) {
     log.debug(
       { identifier, self, roster },
       "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"

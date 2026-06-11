@@ -174,7 +174,7 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts, hostMembershipWarning } from "./config.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
@@ -2445,6 +2445,12 @@ export function schedulerTick(
   const roster = hosts ?? getClusterHosts();
   const self = hostName ?? getHostName();
   const multiHost = roster.length > 1;
+  // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
+  const _smw = hostMembershipWarning(roster, self);
+  if (_smw && !globalThis.__ctl1057_scheduler_warned) {
+    globalThis.__ctl1057_scheduler_warned = true;
+    log.warn({ roster, self }, _smw);
+  }
   // CTL-757: emitStateWrite — caller-emit the canonical linear.state.write audit
   // event for ONE scheduler write site. `writerResult` is the runTransition return
   // ({applied, reason, from_state, to_state, ...}) from applyPhaseStatus /
@@ -3883,14 +3889,16 @@ export function schedulerTick(
       }
     }
   }
-  // CTL-850: HRW ownership filter — keep only the tickets THIS host owns under
-  // the cluster roster so freeSlots + per-project caps compute over owned work
-  // only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds` drives
-  // the phantom-quarantine sweep above — narrowing that would mis-quarantine a
-  // sibling host's worker dirs). Identity filter for a single-host roster
-  // (ownedBy is always true), so this is an exact no-op until a 2nd host joins.
-  const ready = computeReadyTickets(eligible, { blockerStates }).filter((t) =>
-    ownedBy(t.identifier, roster, self)
+  // CTL-850/CTL-1057: HRW ownership filter — keep only the tickets THIS host owns
+  // under the cluster roster so freeSlots + per-project caps compute over owned
+  // work only. Applied to `ready` (NOT the raw `eligible`, whose `eligibleIds`
+  // drives the phantom-quarantine sweep above — narrowing that would mis-quarantine
+  // a sibling host's worker dirs). Single-host (multiHost===false) is a TRUE no-op
+  // regardless of whether the lone roster entry string-matches the resolved
+  // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
+  // host actually joins (roster.length > 1).
+  const ready = computeReadyTickets(eligible, { blockerStates }).filter(
+    (t) => !multiHost || ownedBy(t.identifier, roster, self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal

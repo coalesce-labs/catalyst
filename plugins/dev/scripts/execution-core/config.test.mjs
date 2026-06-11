@@ -25,6 +25,7 @@ import {
   getHostName,
   getClusterHosts,
   HEARTBEAT_INTERVAL_MS,
+  hostMembershipWarning,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -427,5 +428,36 @@ describe("phaseBudgetMs (CTL-729)", () => {
     // 20-min floor — exercise both the zero and negative branches.
     expect(phaseBudgetMs("implement", 0, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
     expect(phaseBudgetMs("implement", -5, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+  });
+});
+
+describe("hostMembershipWarning (CTL-1057)", () => {
+  test("warns when multiHost and self not in roster", () => {
+    const w = hostMembershipWarning(["mini", "studio"], "laptop");
+    expect(w).toMatch(/not in the cluster roster/i);
+    expect(w).toContain("laptop");
+    expect(w).toContain("mini");
+    expect(w).toContain("studio");
+  });
+
+  test("no warning on single-host roster even when name mismatches", () => {
+    expect(hostMembershipWarning(["mini"], "RyansMini250233.rozich")).toBeNull();
+  });
+
+  test("no warning when self is the only roster entry (matches)", () => {
+    expect(hostMembershipWarning(["solo"], "solo")).toBeNull();
+  });
+
+  test("no warning when self is in a multi-host roster", () => {
+    expect(hostMembershipWarning(["mini", "studio"], "studio")).toBeNull();
+  });
+
+  test("no warning for empty roster", () => {
+    expect(hostMembershipWarning([], "laptop")).toBeNull();
+  });
+
+  test("no warning for non-array roster", () => {
+    expect(hostMembershipWarning(null, "laptop")).toBeNull();
+    expect(hostMembershipWarning(undefined, "laptop")).toBeNull();
   });
 });

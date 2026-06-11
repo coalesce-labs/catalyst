@@ -1865,6 +1865,25 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
     expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
   });
 
+  test("CTL-1057: single-host roster with a NON-matching hostName is still a no-op — dispatch proceeds, no claim", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["mini"],                   // roster entry...
+      hostName: "RyansMini250233.rozich", // ...does NOT match resolved host
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    // With the ungated filter this fails: dispatch is skipped because
+    // ownedBy("ENG-1", ["mini"], "RyansMini250233.rozich") === false.
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+    expect(claimDispatch.calls).toHaveLength(0); // single-host never touches Linear
+  });
+
   test("multi-host: a ticket OWNED by this host is dispatched + claim ran with phase 'triage'", () => {
     enroll("ENG", { status: "Ready" });
     const dispatch = mock(() => ({ code: 0 }));
