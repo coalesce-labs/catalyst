@@ -24,7 +24,7 @@ import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import type { DetailSearch } from "./route-search";
 import { TicketDetailPage } from "../components/ticket-detail-page";
 import { useLinearTicket } from "../components/use-linear-ticket";
-import { TicketRailExtra } from "./ticket-rail-extra";
+import { TicketRailCards } from "./ticket-rail";
 import { WorkerDetailBody } from "./worker-detail-body";
 import { WorkerRailExtra } from "./worker-rail-extra";
 import { useWorkerDetailModel } from "./use-worker-detail-model";
@@ -67,26 +67,9 @@ function useBoardPayload(): { payload: BoardPayload | null; health: StreamHealth
 }
 
 // ── property-row assembly (shared cheap rows; unplumbed → undefined → dimmed) ─
-function ticketRows(t: BoardTicket | undefined): PropertyRow[] {
-  // Every value is the AVAILABLE-NOW BoardTicket field, or `undefined` (dimmed)
-  // when the entity isn't in the resident payload yet (a cold-linked Done ticket).
-  return [
-    { label: "Status", value: t ? `${t.linearState} · ${activeLabel(t.activeState, t.working)}` : undefined },
-    { label: "Phase", value: t?.phase },
-    { label: "Priority", value: t ? priorityLabel(t.priority) : undefined },
-    { label: "Estimate", value: t?.estimate != null ? `${t.estimate} pts` : t ? null : undefined },
-    // CTL-996: the T-shirt Scope row is GONE — one complexity measure (the
-    // Fibonacci estimate above) on this reading surface.
-    { label: "Project", value: t ? (t.project ?? null) : undefined },
-    { label: "Repo", value: t?.repo },
-    { label: "Team", value: t?.team },
-    { label: "Updated", value: t?.updatedAt },
-    { label: "PR", value: t?.pr != null ? `#${t.pr}` : t ? null : undefined },
-    // `model` is the CURRENT phase's signal model only — labelled honestly.
-    { label: "Model (current phase)", value: t ? (t.model ?? null) : undefined },
-  ];
-}
-
+// CTL-1003 §B1: the TICKET property rows moved into ticket-rail.tsx's Properties
+// card (the floating rail). Only the WORKER rows remain here (the worker page
+// keeps the flat Shell PropertiesRail).
 function workerRows(w: BoardWorker | undefined): PropertyRow[] {
   // CTL-914 (DETAIL3): the worker rail's BoardWorker scalar fallbacks — every
   // value is the resident AVAILABLE-NOW field or an honest null/dimmed marker.
@@ -110,14 +93,10 @@ function workerRows(w: BoardWorker | undefined): PropertyRow[] {
   ];
 }
 
-function activeLabel(state: BoardTicket["activeState"], working: boolean): string {
+function activeLabel(state: BoardWorker["activeState"], working: boolean): string {
   if (state === "active") return working ? "Working" : "Active";
   if (state === "stuck") return "Stuck";
   return "Settled";
-}
-
-function priorityLabel(p: number): string {
-  return p > 0 ? `P${p}` : "—";
 }
 
 function fmtDuration(ms: number): string {
@@ -174,11 +153,11 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         // dot; the app shell's single header owns the breadcrumb + the prev/next
         // chevrons portal into its action slot.
         chrome="bare"
-        properties={ticketRows(ticket)}
-        // CTL-996: the ticket rail-extra (Labels · Relations · Dependencies) —
-        // the worker-page rail idiom, now on tickets too (worker rail untouched).
-        railExtra={
-          <TicketRailExtra
+        // CTL-1003 §B1: the floating rail cards (Properties · Labels · Project ·
+        // Relations · Dependencies) replace the flat Properties rail; worker rail
+        // untouched.
+        rail={
+          <TicketRailCards
             linear={linear}
             ticket={ticket}
             tickets={payload?.tickets ?? []}
