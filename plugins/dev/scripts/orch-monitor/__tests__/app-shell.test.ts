@@ -181,7 +181,13 @@ describe("one edge-to-edge shell hosts every surface (CTL-891)", () => {
     // The shell wires the predicate instead of inlining the key literal.
     expect(shellSrc).toContain("shouldToggleSidebar");
     expect(shellSrc).toContain("isTypingTarget");
-    expect(shellSrc).toContain("SURFACE_CHORD");
+    // CTL-1025: the `g`-chord surface jumps now route through the action registry —
+    // buildSurfaceActions (keyed off SURFACE_CHORD in surface-actions.ts) resolved by
+    // matchAction — instead of an inline SURFACE_CHORD lookup in the shell. The chord
+    // still yields t/w/a to the detail Shell on detail routes.
+    expect(shellSrc).toContain("buildSurfaceActions");
+    expect(shellSrc).toContain("matchAction");
+    expect(shellSrc).toContain("surfaceChordYieldsToDetail");
   });
 
   it("App.tsx renders the active surface INSIDE the shell (edge-to-edge inset)", () => {
