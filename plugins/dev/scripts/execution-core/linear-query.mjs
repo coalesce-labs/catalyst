@@ -29,6 +29,7 @@ const BATCH_QUERY = `query CtlBatchTickets($ids: [ID!]) {
       identifier
       priority
       state { name }
+      parent { identifier }
       labels(first: 50) { nodes { name } }
       relations(first: 100) { nodes { type relatedIssue { identifier } } }
       inverseRelations(first: 100) { nodes { type issue { identifier } } }
@@ -97,9 +98,16 @@ function normalizeTicket(node) {
     title: node.title ?? null,
     state: node.state?.name ?? node.state ?? null,
     priority: typeof node.priority === "number" ? node.priority : 0,
+    // CTL-957: Linear numeric estimate (story points). null when unset.
+    estimate: typeof node.estimate === "number" ? node.estimate : null,
     project: node.project?.name ?? node.project ?? null,
     updatedAt: node.updatedAt ?? null,
     createdAt: node.createdAt ?? null,
+    // CTL-878: the parent epic identifier (or null). buildDependencyEdges drops a
+    // `blocks` edge whose source is the target's parent — a Linear parent/child
+    // hierarchy link is NOT a dependency, so a never-worked tracking epic must not
+    // deadlock its own children. `linearis issues list` emits `parent { identifier }`.
+    parent: node.parent?.identifier ?? node.parent ?? null,
     relations: node.relations ?? { nodes: [] },
     inverseRelations: node.inverseRelations ?? { nodes: [] },
   };
@@ -160,11 +168,11 @@ export function fetchTicketState(
 }
 
 // fetchTicketRelations — the CTL-755 admission gate's single-read hydration of
-// one triaged-waiting candidate: its live workflow state, dependency edges,
-// priority, and labels, all parsed from ONE `linearis issues read <id>`. The
+// one triaged-waiting candidate: its live workflow state, parent epic, dependency
+// edges, priority, and labels, all parsed from ONE `linearis issues read <id>`. The
 // returned descriptor mirrors normalizeTicket (above) so the same
 // buildDependencyEdges / analyzeDependencyGraph / computeReadySet consume it:
-//   { state, relations, inverseRelations, priority, labels }
+//   { state, parent, relations, inverseRelations, priority, labels }
 // - state: node.state.name (or a flat string `state`), or null when absent.
 // - relations / inverseRelations: default { nodes: [] } so the graph builder
 //   reads `.nodes` unconditionally. VERIFIED (ADV-1277): the single-ticket read
@@ -209,15 +217,21 @@ export function fetchTicketRelations(identifier, { exec = defaultExec, cache } =
 
 // normalizeRelations — flatten one issue node (from `linearis issues read` OR
 // the batched GraphQL query — both return the same nested shape) into the
-// descriptor the admission gate consumes: { state, relations, inverseRelations,
-// priority, labels }. NOTE: deliberately does NOT include `identifier` so the
-// shape stays byte-identical to the legacy fetchTicketRelations return (callers
-// and tests rely on it); fetchTicketsBatch keys its Map on node.identifier
-// separately. A missing priority normalizes to null ("unknown"), matching
-// fetchTicketRelations (NOT normalizeTicket's eligible-set default of 0).
+// descriptor the admission gate consumes: { state, parent, relations,
+// inverseRelations, priority, labels }. NOTE: deliberately does NOT include
+// `identifier` so fetchTicketRelations and fetchTicketsBatch stay the SAME shape
+// (callers and tests rely on it); fetchTicketsBatch keys its Map on
+// node.identifier separately. A missing priority normalizes to null ("unknown"),
+// matching fetchTicketRelations (NOT normalizeTicket's eligible-set default of 0).
 function normalizeRelations(node) {
   return {
     state: node?.state?.name ?? node?.state ?? null,
+    // CTL-878: parent epic identifier (or null). Carried so the admission gate's
+    // buildDependencyEdges can drop a parent→child `blocks` edge AND STEP E can
+    // skip persisting a child→parent blocked_by (a parent/child hierarchy link is
+    // not a dependency). Both `linearis issues read` and the batch GraphQL query
+    // emit `parent { identifier }`.
+    parent: node?.parent?.identifier ?? node?.parent ?? null,
     relations: node?.relations ?? { nodes: [] },
     inverseRelations: node?.inverseRelations ?? { nodes: [] },
     priority: typeof node?.priority === "number" ? node.priority : null,

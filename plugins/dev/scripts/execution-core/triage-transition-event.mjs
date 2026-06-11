@@ -9,6 +9,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
 import { hostName, hostId } from "./lib/host-identity.mjs";
+import { UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 
 // defaultAppend — writes a JSONL line to the canonical event log.
 function defaultAppend(line) {
@@ -27,6 +28,10 @@ export function buildTriageTransitionEvent({
   verified = false,
   applied = false,
   reason = null,
+  // CTL-1023: this IS the triage phase — classification is still being decided,
+  // so the work-type dimension is "unknown" here by design. Param kept for shape
+  // parity with the other emitters; callers normally omit it.
+  ticketType = UNKNOWN_TICKET_TYPE,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
@@ -51,6 +56,7 @@ export function buildTriageTransitionEvent({
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
+        "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE, // CTL-1023
       },
       body: {
         payload: { phase: "triage", ticket, from_state, to_state, verified, applied, reason },

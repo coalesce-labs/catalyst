@@ -30,12 +30,31 @@
 // scheduler/signal-reader read helpers, and exhaustively unit-tested. The
 // reconcileBootResume orchestrator (Phase 2) wires in the side effects.
 
-import { readWorkerSignals, TERMINAL, byActivePhase } from "./signal-reader.mjs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+import {
+  readWorkerSignals,
+  readAllPhaseSignals,
+  TERMINAL,
+  byActivePhase,
+} from "./signal-reader.mjs";
 import { listInFlightTickets, readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
 import { log } from "./config.mjs";
+// CTL-1006: phaseIndex/isKnownPhase are the canonical phase-order comparators —
+// the same ones recovery's CTL-606 supersede guard uses (recovery.mjs:2219).
+import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import {
   defaultReviveDispatch,
   defaultAppendBootResumeEvent,
+  defaultAppendBootResumeGatedEvent,
+  defaultAppendBootResumePhaseRegressionEvent,
   resolvePhaseSessionId,
 } from "./recovery.mjs";
 import { defaultDispatch } from "./dispatch.mjs";
@@ -46,6 +65,53 @@ import { defaultDispatch } from "./dispatch.mjs";
 // Phase-1 exports import-light, but a lazy `import()` is async and the boot pass
 // must stay synchronous to complete before the monitor/scheduler start.)
 import { liveAgents } from "./cli/sessions.mjs";
+
+// ─── CTL-644: cheap/expensive classification ───────────────────────────────
+//
+// cheap = early phases whose work is cheap to re-run; auto-resume on cold start.
+// expensive = phases that edit application code or open PRs; require operator approval.
+// remediate is treated as expensive (edits app code, same cost class as implement).
+export const CHEAP_RESUME_PHASES = new Set(["triage", "research", "plan"]);
+export function isCheapPhase(phase) {
+  return CHEAP_RESUME_PHASES.has(phase);
+}
+
+// bootResumePendingPath — JSON marker written when a gated ticket is awaiting approval.
+// Schema: { ticket, phase, worktreePath, requestedAt }
+export function bootResumePendingPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".boot-resume-pending-approval");
+}
+
+// bootResumeApprovedPath — empty sentinel written by the operator (or a HUD button)
+// to approve re-dispatch of a gated ticket.
+export function bootResumeApprovedPath(orchDir, ticket) {
+  return join(orchDir, "workers", ticket, ".boot-resume-approved");
+}
+
+// ─── internal helpers ──────────────────────────────────────────────────────
+
+function writePendingMarker(orchDir, ticket, phase, worktreePath) {
+  const p = bootResumePendingPath(orchDir, ticket);
+  if (existsSync(p)) return false; // idempotent — do not re-emit
+  try {
+    writeFileSync(
+      p,
+      JSON.stringify({ ticket, phase, worktreePath, requestedAt: new Date().toISOString() })
+    );
+    return true;
+  } catch (err) {
+    log.warn({ ticket, phase, err: err?.message }, "boot-resume: pending marker write failed — continuing");
+    return false;
+  }
+}
+
+function readPendingMarker(orchDir, ticket) {
+  try {
+    return JSON.parse(readFileSync(bootResumePendingPath(orchDir, ticket), "utf8"));
+  } catch {
+    return null;
+  }
+}
 
 // hasLiveBgWorker — does `agents` contain a live BACKGROUND session whose cwd is
 // exactly `worktreePath`? This is the synchronous reduction of research §6's
@@ -71,6 +137,72 @@ export function activePhaseForTicket(signals) {
   const nonTerminal = (signals ?? []).filter((s) => s && !TERMINAL.has(s.status));
   if (nonTerminal.length === 0) return null;
   return nonTerminal.sort(byActivePhase)[0];
+}
+
+// isBootResumeEligible — boot-resume runs on a cold start OR a daemon bounce.
+// CTL-1006: report.coldStart is the detectColdStart OBJECT in production
+// (recovery.mjs:2576/2583) — { coldStart, epoch, epochSource, ... } — not a bare
+// boolean. The legacy `report.coldStart !== true` gate is therefore a permanent
+// no-op in production (an object is never === true), so boot-resume never ran on
+// a real start and the budget-gated per-tick reclaim sweep false-escalated
+// in-flight tickets to needs-human after a daemon bounce (the Scenario-1 bug).
+//
+// This predicate admits boot-resume when:
+//   • report.coldStart === true            — legacy synthetic boolean (back-compat;
+//                                             daemon.test.mjs + older boot-resume tests)
+//   • report.coldStart.coldStart === true  — the real object, genuine cold start
+//   • report.coldStart.epochSource ===
+//       "exec-core"                         — a DAEMON BOUNCE: the exec-core boot
+//                                             epoch won the cold-start verdict
+//                                             (CTL-701), i.e. a daemon restart
+//                                             without OS/socket reboot. Resuming
+//                                             here is exactly Scenario 1.
+//   • report.daemonBounce === true          — explicit override seam.
+// PRODUCTION REALITY (review finding, CTL-1006): on current detectColdStart
+// behavior the exec-core epoch wins on effectively every daemon start, so in
+// practice every production start — cold or bounce — is ELIGIBLE. That is the
+// intended Scenario-1 posture: boot-resume reconciles in-flight tickets on
+// every start. Scenario 4's "chronic failures stay escalated" is therefore
+// carried NOT by this predicate but by the explicit guards downstream: the
+// needs-human marker skip in selectBootResumeCandidates and the
+// expensive-phase .boot-resume-pending-approval gate. A non-eligible object
+// shape (e.g. { coldStart: false, epochSource: "os-boot" }) remains a no-op
+// for synthetic/test inputs and any future detectColdStart change.
+export function isBootResumeEligible(report) {
+  if (!report) return false;
+  const cs = report.coldStart;
+  if (cs === true) return true; // legacy synthetic boolean
+  if (cs && typeof cs === "object") {
+    if (cs.coldStart === true) return true; // real object cold start
+    if (cs.epochSource === "exec-core") return true; // CTL-701 daemon bounce
+  }
+  return report.daemonBounce === true; // explicit override seam
+}
+
+// supersededByTerminalPhase — CTL-1006 Scenario 2. Returns the dominant terminal
+// phase NAME iff some signal for the ticket is TERMINAL at a phase strictly LATER
+// than `phase` (the resume candidate), else null. Mirrors recovery's CTL-606
+// supersede guard (recovery.mjs:2219) but keyed on the resume candidate: a later
+// terminal phase (e.g. research=stalled) means re-dispatching an EARLIER phase
+// (triage left at `running`) is a phase regression — the CTL-997/998 bug — not a
+// resume. Unknown phase names are skipped via isKnownPhase so a tombstone / manual
+// operator file never throws (the CTL-702 defensive posture). `phaseIndex` ranks
+// remediate at verify's index, so equal-index terminals are NOT supersedes
+// (strictly-greater only).
+export function supersededByTerminalPhase(signals, phase) {
+  if (!isKnownPhase(phase)) return null;
+  const here = phaseIndex(phase);
+  let dominant = null;
+  let dominantIdx = here;
+  for (const s of signals ?? []) {
+    if (!s || !TERMINAL.has(s.status) || !isKnownPhase(s.phase)) continue;
+    const i = phaseIndex(s.phase);
+    if (i > dominantIdx) {
+      dominantIdx = i;
+      dominant = s.phase;
+    }
+  }
+  return dominant;
 }
 
 // selectBootResumeCandidates — the set of in-flight tickets that need a fresh
@@ -104,6 +236,11 @@ export function selectBootResumeCandidates({
   concurrency = {},
   maxParallel = readMaxParallel(orchDir, concurrency),
   logger = log,
+  // CTL-1006 Scenario 2: invoked (no-op by default, so the pure selection tests
+  // are unaffected) when a candidate is dropped because a LATER terminal phase
+  // supersedes its resume phase. reconcileBootResume threads a real callback that
+  // routes the regression to the audit log.
+  onPhaseRegression = () => {},
 } = {}) {
   const inFlight = listInFlightTickets(orchDir);
   if (inFlight.size === 0) return [];
@@ -114,6 +251,20 @@ export function selectBootResumeCandidates({
     const list = byTicket.get(sig.ticket) ?? [];
     list.push(sig);
     byTicket.set(sig.ticket, list);
+  }
+
+  // CTL-1006 Scenario 2: readWorkerSignals collapses each ticket to ONE active
+  // phase row, so it cannot reveal a sibling LATER-terminal phase. The
+  // phase-regression guard needs the FULL per-file signal set — read it once and
+  // index by ticket. (The collapsed `byTicket` above is kept verbatim so
+  // activePhaseForTicket's recency-ranked selection — and its 12 existing pure
+  // tests — are unchanged.)
+  const allByTicket = new Map();
+  for (const sig of readAllPhaseSignals(orchDir)) {
+    if (!sig?.ticket) continue;
+    const list = allByTicket.get(sig.ticket) ?? [];
+    list.push(sig);
+    allByTicket.set(sig.ticket, list);
   }
 
   let liveCount = 0;
@@ -134,6 +285,37 @@ export function selectBootResumeCandidates({
       logger.warn(
         { ticket, phase: active.phase },
         "boot-resume: in-flight ticket has no worktreePath — cannot revive safely, skipping"
+      );
+      continue;
+    }
+    // CTL-1006 Scenario 4 (chronic-failure invariant): a ticket the escalation
+    // path already flagged needs-human must NOT be silently auto-resumed by a
+    // bounce — with boot-resume now actually running in production, eligibility
+    // alone no longer carries this invariant. The marker is the same one
+    // label-guard writes (workers/<T>/.linear-label-needs-human.applied); the
+    // operator clears it (with the label) when re-arming a ticket.
+    if (existsSync(join(orchDir, "workers", ticket, ".linear-label-needs-human.applied"))) {
+      logger.warn(
+        { ticket, phase: active.phase },
+        "boot-resume: ticket is escalated to needs-human — not auto-resuming, operator owns re-arm"
+      );
+      continue;
+    }
+    // CTL-1006 Scenario 2: phase-regression guard. activePhaseForTicket is
+    // recency-ranked, so a stale earlier phase left non-terminal can shadow a
+    // later TERMINAL phase. Re-dispatching the earlier phase would be the
+    // CTL-997/998 regression class — drop the candidate and surface a
+    // phase_regression observation instead. (NOTE: the literal CTL-997/998
+    // fixture — research=stalled + triage=running — is already excluded
+    // upstream by isTicketInFlight, which drops tickets with stalled/failed
+    // phases; this guard is defense-in-depth for the in-flight variant: a
+    // later phase terminal-done shadowed by a stale earlier non-terminal one.)
+    const dominant = supersededByTerminalPhase(allByTicket.get(ticket) ?? [], active.phase);
+    if (dominant) {
+      onPhaseRegression({ ticket, phase: active.phase, dominantPhase: dominant });
+      logger.warn(
+        { ticket, phase: active.phase, dominantPhase: dominant },
+        "boot-resume: phase regression — later terminal phase supersedes resume candidate, skipping"
       );
       continue;
     }
@@ -185,6 +367,12 @@ export function reconcileBootResume({
   dispatch = defaultDispatch, // inner seam handed to reviveDispatch
   reviveDispatch = defaultReviveDispatch,
   appendEvent = defaultAppendBootResumeEvent,
+  // CTL-644: gated-event appender — emitted once per expensive ticket gated.
+  appendGatedEvent = defaultAppendBootResumeGatedEvent,
+  // CTL-1006 Scenario 2: phase-regression appender — emitted once per candidate
+  // dropped because a later terminal phase supersedes its resume phase. Audit-only
+  // (broker-ignored, uncounted by countReviveEvents), injectable for tests.
+  appendRegressionEvent = defaultAppendBootResumePhaseRegressionEvent,
   // CTL-690: session resolver — same helper recovery.mjs:1265 uses on the
   // per-tick reclaim path so boot-resume and reclaim share resume semantics.
   // Injectable so tests can drive both the resumable + unresumable branches
@@ -194,17 +382,46 @@ export function reconcileBootResume({
   orchId = undefined, // threaded into the audit envelope
   concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
 } = {}) {
-  if (!report || report.coldStart !== true) {
-    return { dispatched: 0, failed: 0, skipped: "not-cold-start" };
+  // CTL-1006 Scenario 1: eligible on a cold start OR a daemon bounce. The old
+  // `report.coldStart !== true` gate was a permanent production no-op because
+  // recoverStartup hands us the detectColdStart OBJECT, never a bare boolean —
+  // see isBootResumeEligible. A daemon bounce now resumes in-flight tickets
+  // instead of letting the budget-gated reclaim sweep false-escalate them.
+  if (!isBootResumeEligible(report)) {
+    return { dispatched: 0, failed: 0, gated: 0, skipped: "not-eligible" };
   }
 
   const liveAgentList = resolveAgents(agents);
-  const candidates = selectBootResumeCandidates({ orchDir, agents: liveAgentList, concurrency });
+  const candidates = selectBootResumeCandidates({
+    orchDir,
+    agents: liveAgentList,
+    concurrency,
+    // CTL-1006 Scenario 2: route a dropped earlier-phase candidate to the
+    // audit log instead of re-dispatching it behind a later terminal phase.
+    onPhaseRegression: ({ ticket, phase, dominantPhase }) =>
+      appendRegressionEvent({ phase, ticket, dominantPhase, orchId }),
+  });
 
   let dispatched = 0;
   let resumed = 0;
   let failed = 0;
-  for (const { ticket, phase, bgJobId } of candidates) {
+  let gated = 0;
+  for (const { ticket, phase, worktreePath, bgJobId } of candidates) {
+    // CTL-644: gate expensive phases behind operator approval; auto-dispatch cheap ones.
+    if (!isCheapPhase(phase)) {
+      const written = writePendingMarker(orchDir, ticket, phase, worktreePath);
+      if (written) {
+        gated++;
+        appendGatedEvent({ phase, ticket, orchId });
+        log.info(
+          { ticket, phase },
+          "boot-resume: expensive phase gated — awaiting operator approval"
+        );
+      }
+      continue;
+    }
+
+    // Cheap path — existing resume/dispatch logic unchanged.
     // CTL-690: try to map the dead worker's bg_job_id → resume UUID. Null
     // result (no bg id, no state.json, no/!.jsonl transcript) falls through
     // to the today-default fresh-dispatch path. The downstream stderr
@@ -243,8 +460,71 @@ export function reconcileBootResume({
   }
 
   log.info(
-    { dispatched, resumed, failed, candidates: candidates.length },
+    { dispatched, resumed, gated, failed, candidates: candidates.length },
     "boot-resume: cold-start reconciliation complete"
   );
-  return { dispatched, resumed, failed, candidates: candidates.length };
+  return { dispatched, resumed, gated, failed, candidates: candidates.length };
+}
+
+// processApprovedResumes — CTL-644. Dispatch gated tickets whose operator
+// approval sentinel exists. Called once at boot (after reconcileBootResume)
+// and each scheduler tick so a mid-run approval is honored without a restart.
+// Routes through reviveDispatch → same MAX_REVIVES / storm-breaker guards as
+// the cheap auto path. Clears both sentinels on a successful dispatch.
+export function processApprovedResumes({
+  orchDir,
+  reviveDispatch = defaultReviveDispatch,
+  dispatch = defaultDispatch,
+  appendEvent = defaultAppendBootResumeEvent,
+  orchId = undefined,
+} = {}) {
+  const workersDir = join(orchDir, "workers");
+  let tickets;
+  try {
+    // withFileTypes: filter to directories only — guards against non-directory
+    // entries at the workers/ level and prevents path-component confusion from
+    // any stray file whose name could produce an unexpected path join.
+    tickets = readdirSync(workersDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    return { dispatched: 0, failed: 0 };
+  }
+
+  let dispatched = 0;
+  let failed = 0;
+  for (const ticket of tickets) {
+    const pendingPath = bootResumePendingPath(orchDir, ticket);
+    const approvedPath = bootResumeApprovedPath(orchDir, ticket);
+    if (!existsSync(pendingPath) || !existsSync(approvedPath)) continue;
+
+    const pending = readPendingMarker(orchDir, ticket);
+    if (!pending) {
+      log.warn({ ticket }, "processApprovedResumes: pending marker unreadable — skipping");
+      continue;
+    }
+
+    const { phase, worktreePath } = pending;
+    let res;
+    try {
+      res = reviveDispatch({ orchDir, ticket, phase, resumeSession: null }, { dispatch });
+    } catch (err) {
+      res = { code: 1, stderr: err?.message ?? String(err) };
+    }
+
+    if (res?.code === 0) {
+      dispatched++;
+      appendEvent({ phase, ticket, orchId });
+      try { unlinkSync(pendingPath); } catch { /* best-effort */ }
+      try { unlinkSync(approvedPath); } catch { /* best-effort */ }
+    } else {
+      failed++;
+      log.warn(
+        { ticket, phase, code: res?.code, stderr: res?.stderr },
+        "processApprovedResumes: dispatch failed — sentinels retained for retry"
+      );
+    }
+  }
+
+  return { dispatched, failed };
 }

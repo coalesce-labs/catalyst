@@ -44,13 +44,15 @@ export default defineConfig({
     outDir: resolve(__dirname, "../public"),
     emptyOutDir: false,
     rollupOptions: {
-      // CTL-730: build BOTH entries. `index.html` is the legacy dashboard
-      // (served at /legacy); `board.html` is the CTL-727 board (the default
-      // page at /). Without this, Vite's single-entry default only emits
-      // index.html and the board is never produced for production.
+      // CTL-989: SINGLE entry. The two SPA bundles are unified into ONE TanStack
+      // Router mounted from index.html (→ main.tsx → RouterProvider, with AppShell
+      // as the rootRoute layout). The standalone board.html bundle is retired —
+      // its routes (/ticket/$id, /worker/$id, /dep-graph) are now child routes of
+      // the unified router and the server serves index.html for every app path
+      // (see server.ts isAppRoute). The detail + OBSERVE surface routes are
+      // code-split (React.lazy in app-router.tsx) so the main bundle stays lean.
       input: {
         main: resolve(__dirname, "index.html"),
-        board: resolve(__dirname, "board.html"),
       },
     },
   },

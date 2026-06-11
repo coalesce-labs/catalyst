@@ -1,5 +1,212 @@
 # Changelog
 
+## [12.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.4.0...catalyst-dev-v12.5.0) (2026-06-11)
+
+
+### Features
+
+* **dev:** belief store obs_relation — record blocking edges as facts each tick (CTL-964) ([#1690](https://github.com/coalesce-labs/catalyst/issues/1690)) ([df5bd89](https://github.com/coalesce-labs/catalyst/commit/df5bd89711cf466b3b2497623fad50777804aed3))
+* **dev:** belief-store Step 1 — per-tick liveness fact collector (CTL-933) ([#1630](https://github.com/coalesce-labs/catalyst/issues/1630)) ([bc853c5](https://github.com/coalesce-labs/catalyst/commit/bc853c50794b6e72c447b890ee3c04a845ada96e))
+* **dev:** beliefs SSE endpoint /api/beliefs/stream + BeliefTail cursor (CTL-967) ([#1700](https://github.com/coalesce-labs/catalyst/issues/1700)) ([baf71e5](https://github.com/coalesce-labs/catalyst/commit/baf71e5cda48aa46225cea18c881885efe5c3101))
+* **dev:** BFF10 per-entity host/team/generation (CTL-922) ([#1576](https://github.com/coalesce-labs/catalyst/issues/1576)) ([294bd81](https://github.com/coalesce-labs/catalyst/commit/294bd8124c0ac0f2b5c8531e0393bec686d895ea))
+* **dev:** BFF12 fence-aware Answer/Unblock read-model mutation endpoint (CTL-924) ([#1589](https://github.com/coalesce-labs/catalyst/issues/1589)) ([87a4c38](https://github.com/coalesce-labs/catalyst/commit/87a4c38ac043c92e935e8e0bc0d1823a575a0f04))
+* **dev:** BFF2 cluster grouping + liveness overlay (CTL-884) ([#1575](https://github.com/coalesce-labs/catalyst/issues/1575)) ([f766acf](https://github.com/coalesce-labs/catalyst/commit/f766acfbe04077788248a4017ccce2a801f0514a))
+* **dev:** BFF3 cross-node live-tail SSE fan-in (CTL-885) ([#1590](https://github.com/coalesce-labs/catalyst/issues/1590)) ([8d0e0a4](https://github.com/coalesce-labs/catalyst/commit/8d0e0a4a67b57a4b9c96d19e3f370cbddbb9610d))
+* **dev:** BFF5 live EC-worker transcript tail SSE (CTL-887) ([#1573](https://github.com/coalesce-labs/catalyst/issues/1573)) ([83332b3](https://github.com/coalesce-labs/catalyst/commit/83332b35beeddc01de140e45b5ef4d5aec7c96c7))
+* **dev:** BFF8 fence-aware stop-worker mutation (CTL-890) ([#1574](https://github.com/coalesce-labs/catalyst/issues/1574)) ([89714a2](https://github.com/coalesce-labs/catalyst/commit/89714a22fbe6e9d08ae689cf5d0e2690c45aa06e))
+* **dev:** board shared column headers + single horizontal scroll across swimlanes (CTL-950) ([#1656](https://github.com/coalesce-labs/catalyst/issues/1656)) ([6bc5de4](https://github.com/coalesce-labs/catalyst/commit/6bc5de4541f7d99ddcff04016722f8f1de40f0c8))
+* **dev:** board shows one method-correct estimate + dependency chips; estimate read-model projection (CTL-957) ([#1685](https://github.com/coalesce-labs/catalyst/issues/1685)) ([5180b85](https://github.com/coalesce-labs/catalyst/commit/5180b85b67a0fef090e13fd1bfb46622e2d56cec))
+* **dev:** BOARD2 display-options popover — density is a knob (CTL-906) ([#1609](https://github.com/coalesce-labs/catalyst/issues/1609)) ([e6e48bb](https://github.com/coalesce-labs/catalyst/commit/e6e48bb90ca727b37e8ac1d605d0b515ca27d8ac))
+* **dev:** BOARD3 row swimlanes by team / project / host-node (CTL-907) ([#1611](https://github.com/coalesce-labs/catalyst/issues/1611)) ([d7984ba](https://github.com/coalesce-labs/catalyst/commit/d7984ba306337a656d48335fb8d470be993aa24a))
+* **dev:** BOARD4 dense List view as an alternate board layout (CTL-908) ([#1613](https://github.com/coalesce-labs/catalyst/issues/1613)) ([7b4edd5](https://github.com/coalesce-labs/catalyst/commit/7b4edd5fc69c7bb749e349da9d07c7571a190f02))
+* **dev:** bounded stall-diagnostician wake wiring + evidence capture (CTL-937) ([#1641](https://github.com/coalesce-labs/catalyst/issues/1641)) ([410a3ac](https://github.com/coalesce-labs/catalyst/commit/410a3acdba527dc763bc6f2f51b71969012d8e47))
+* **dev:** closed-loop intent layer — stop-storm, fire-once, pager-fail (CTL-936) ([#1643](https://github.com/coalesce-labs/catalyst/issues/1643)) ([b4fe04b](https://github.com/coalesce-labs/catalyst/commit/b4fe04b0aff23f2a734fb98155fd89bb2825d626))
+* **dev:** CTL-1000 — wrappers resolve from healthy pristine checkout (cache fallback + loud warning + --version source) ([#1768](https://github.com/coalesce-labs/catalyst/issues/1768)) ([4665b14](https://github.com/coalesce-labs/catalyst/commit/4665b14195e116fa4531526abfccfaae59259867))
+* **dev:** CTL-1003 ticket detail v3 — Linear-parity chrome, prose, tabs, rail cards, relations (+CTL-999 off-board) ([#1758](https://github.com/coalesce-labs/catalyst/issues/1758)) ([ef8a8d9](https://github.com/coalesce-labs/catalyst/commit/ef8a8d96cabdac2c9c24c9aae2b08eee168634b1))
+* **dev:** CTL-1012 project branding in lane headers + detail rails ([#1769](https://github.com/coalesce-labs/catalyst/issues/1769)) ([b2f8d1f](https://github.com/coalesce-labs/catalyst/commit/b2f8d1fde1e4e65490638131c3633ad6773df477))
+* **dev:** CTL-768 — release parked worker slot (needs-input → hold-stop + revive-with-resume) ([#1736](https://github.com/coalesce-labs/catalyst/issues/1736)) ([c59c9be](https://github.com/coalesce-labs/catalyst/commit/c59c9be7464ce53241036ff860d7971975ca9321))
+* **dev:** CTL-864 — workers fence irreversible side-effects against cluster takeover (generation token through dispatch + 5 skill guards) ([#1780](https://github.com/coalesce-labs/catalyst/issues/1780)) ([f6affb5](https://github.com/coalesce-labs/catalyst/commit/f6affb5f008de493851a92051643f59421d70b21))
+* **dev:** CTL-966 advance_to phase-prediction shadow comparator ([#1704](https://github.com/coalesce-labs/catalyst/issues/1704)) ([c97dee7](https://github.com/coalesce-labs/catalyst/commit/c97dee753399dbfa552d9cdad27b62f50adcd851))
+* **dev:** CTL-981 nav final calibration — weight 500 + contrast /72 for label presence ([#1708](https://github.com/coalesce-labs/catalyst/issues/1708)) ([2cf8971](https://github.com/coalesce-labs/catalyst/commit/2cf8971e6791e790384bba3f2795bf5a229ef34e))
+* **dev:** CTL-989 unify app shell — single router, AppShell on every screen, URL=source-of-truth ([#1735](https://github.com/coalesce-labs/catalyst/issues/1735)) ([74e0a2c](https://github.com/coalesce-labs/catalyst/commit/74e0a2c741a73aaae5ddc48dd56638a250bd9cf9))
+* **dev:** CTL-996 ticket detail — Linear-calm reading column + right rail + visible tabs ([#1745](https://github.com/coalesce-labs/catalyst/issues/1745)) ([6436f1d](https://github.com/coalesce-labs/catalyst/commit/6436f1d6b68c797150bb0e51fb60585649a1a7dc))
+* **dev:** DETAIL1 shared detail chrome + pager + keyboard (CTL-912) ([#1584](https://github.com/coalesce-labs/catalyst/issues/1584)) ([de7911f](https://github.com/coalesce-labs/catalyst/commit/de7911f87ae572c31b3a451aa78fba1e485c1765))
+* **dev:** DETAIL2 ticket detail page skeleton (CTL-913) ([#1597](https://github.com/coalesce-labs/catalyst/issues/1597)) ([9c325f0](https://github.com/coalesce-labs/catalyst/commit/9c325f0187813a332b7272648efb641f151d61de))
+* **dev:** DETAIL3 worker page skeleton + Loki history tail (CTL-914) ([#1600](https://github.com/coalesce-labs/catalyst/issues/1600)) ([a21da5c](https://github.com/coalesce-labs/catalyst/commit/a21da5c41d8883e0627eaa84998a30b62c153002))
+* **dev:** DETAIL4 wire per-phase model/startedAt/pid/sess_id (CTL-915) ([#1602](https://github.com/coalesce-labs/catalyst/issues/1602)) ([84ea09d](https://github.com/coalesce-labs/catalyst/commit/84ea09d67956cbb47e872ea33e0c026411e5616f))
+* **dev:** DETAIL5 re-skinned command palette + cheatsheet (CTL-916) ([#1599](https://github.com/coalesce-labs/catalyst/issues/1599)) ([e191d5e](https://github.com/coalesce-labs/catalyst/commit/e191d5e7b19887f9ff594a5c6bb3f964b0a16660))
+* **dev:** DETAIL6 telemetry / burn metrics off OTEL (CTL-917) ([#1605](https://github.com/coalesce-labs/catalyst/issues/1605)) ([00f8288](https://github.com/coalesce-labs/catalyst/commit/00f82888e7e1833fe46a2092c60f571df523c145))
+* **dev:** DETAIL7 live activity tail (CTL-918) ([#1606](https://github.com/coalesce-labs/catalyst/issues/1606)) ([9a4ed26](https://github.com/coalesce-labs/catalyst/commit/9a4ed26a54c883b2e38041fa7ec42dbac229b4cc))
+* **dev:** dispatch workers with --plugin-dir from per-host pluginDirs config ([#1614](https://github.com/coalesce-labs/catalyst/issues/1614)) ([9f21ff3](https://github.com/coalesce-labs/catalyst/commit/9f21ff33f799cec92e38804de3c96c51c9bad92c))
+* **dev:** HOME1 calm master-detail Inbox home (CTL-899) ([#1581](https://github.com/coalesce-labs/catalyst/issues/1581)) ([9067471](https://github.com/coalesce-labs/catalyst/commit/90674713758abef13fab00a4e72f4e7512603ee9))
+* **dev:** HOME2 status glyph + phase strip (CTL-900) ([#1594](https://github.com/coalesce-labs/catalyst/issues/1594)) ([399d1d7](https://github.com/coalesce-labs/catalyst/commit/399d1d733442b0ee90acef33d7013ae2a00ce23a))
+* **dev:** HOME3 reframed groups + per-row durations (CTL-901) ([#1595](https://github.com/coalesce-labs/catalyst/issues/1595)) ([8129d78](https://github.com/coalesce-labs/catalyst/commit/8129d78d1dcbb8306dc8a878f01d0e9e4f97bd32))
+* **dev:** HOME4 reading pane — ask/options/About/View-in-Claude (CTL-902) ([#1601](https://github.com/coalesce-labs/catalyst/issues/1601)) ([1d5bef0](https://github.com/coalesce-labs/catalyst/commit/1d5bef023cf594573ae7201bc940b8bb7f0dbaee))
+* **dev:** HOME5 one verb clears item + resumes the paused agent (CTL-903) ([#1607](https://github.com/coalesce-labs/catalyst/issues/1607)) ([2a53fec](https://github.com/coalesce-labs/catalyst/commit/2a53fec5573c0cd8315c1d09a3c878f7245fe1c3))
+* **dev:** HOME6 calm all-clear empty state (CTL-904) ([#1593](https://github.com/coalesce-labs/catalyst/issues/1593)) ([b56d511](https://github.com/coalesce-labs/catalyst/commit/b56d511466c9fdf3ad80947acf87342b97ca898e))
+* **dev:** HUD2 terminal HUD consumes the shared read-model (CTL-920) ([#1583](https://github.com/coalesce-labs/catalyst/issues/1583)) ([fc7e1f9](https://github.com/coalesce-labs/catalyst/commit/fc7e1f947de4732499025580b0b66bf7a925f49d))
+* **dev:** left-nav restyle v2 — natural-case headers, right twistie, Linear selected state (CTL-977) ([#1701](https://github.com/coalesce-labs/catalyst/issues/1701)) ([fbdc1ae](https://github.com/coalesce-labs/catalyst/commit/fbdc1aec507fd79d89c6e54d3261f5377ae91ae9))
+* **dev:** LIFECYCLE SPINE real per-phase cost/tokens + artifact links + prominent Gantt (CTL-953) ([#1664](https://github.com/coalesce-labs/catalyst/issues/1664)) ([ec1f054](https://github.com/coalesce-labs/catalyst/commit/ec1f0548af5c25ce88ad2eb8f765243145210882))
+* **dev:** Linear-style board scroll — dual-sticky group labels + per-cell overscroll chaining (CTL-958) ([#1669](https://github.com/coalesce-labs/catalyst/issues/1669)) ([9463edb](https://github.com/coalesce-labs/catalyst/commit/9463edb2eaaf08d42b1f3d9d6f6276cd8f51e4e4))
+* **dev:** list view on TanStack Data Table — default stage/status grouping (CTL-955) ([#1663](https://github.com/coalesce-labs/catalyst/issues/1663)) ([c4dc73b](https://github.com/coalesce-labs/catalyst/commit/c4dc73bae5bbef12942a7a1ccacf4ecba8decef2))
+* **dev:** live terminal screen pane for pre-transcript workers (CTL-938) ([#1629](https://github.com/coalesce-labs/catalyst/issues/1629)) ([78f3edb](https://github.com/coalesce-labs/catalyst/commit/78f3edb16d12b95626594a8b81c8711125256816))
+* **dev:** motion — animate board/list/queue state & position transitions (CTL-952) ([#1659](https://github.com/coalesce-labs/catalyst/issues/1659)) ([2c57400](https://github.com/coalesce-labs/catalyst/commit/2c5740034882c5e0a75028e985ac2a6366e5333b))
+* **dev:** nav proportion v3 — 16px icons, muted labels, twistie beside label, Projects heading (CTL-980) ([#1706](https://github.com/coalesce-labs/catalyst/issues/1706)) ([5ad727a](https://github.com/coalesce-labs/catalyst/commit/5ad727a18a3e8698b07e76e97d5c2ccee2053739))
+* **dev:** OBSERVE FinOps surface — cost routes + hero(today-vs-7d + cache-ROI) + breakdowns (OBS-9/10/11) ([#1716](https://github.com/coalesce-labs/catalyst/issues/1716)) ([f0615c6](https://github.com/coalesce-labs/catalyst/commit/f0615c6f4a83ae1846a7b494eed52d3bcd1f5c82))
+* **dev:** OBSERVE FleetOps surface — host health + stuck/dead reap hints + reconcile (OBS-18) ([#1719](https://github.com/coalesce-labs/catalyst/issues/1719)) ([1f02983](https://github.com/coalesce-labs/catalyst/commit/1f02983e670da98930152f0655a17e3dacc006da))
+* **dev:** OBSERVE foundation — chart grammar + panel honesty kit + shell (OBS-1/2/5) ([#1713](https://github.com/coalesce-labs/catalyst/issues/1713)) ([7603f5f](https://github.com/coalesce-labs/catalyst/commit/7603f5f5860c23cbfb2681e01345473bf945ab25))
+* **dev:** OBSERVE Telemetry surface — hero + live tail + errors/tools/latency + events heatmap (OBS-6/7/8) ([#1714](https://github.com/coalesce-labs/catalyst/issues/1714)) ([3cd51ab](https://github.com/coalesce-labs/catalyst/commit/3cd51abf79d90f7ff3c6b0fa9d620973f2567663))
+* **dev:** one-checkout node updates — hotpatch pulls the pluginDirs checkout, parity reports drift (CTL-940, CTL-941) ([#1626](https://github.com/coalesce-labs/catalyst/issues/1626)) ([f704bb5](https://github.com/coalesce-labs/catalyst/commit/f704bb539c2ecbd062318844ad10a6dd244d105c))
+* **dev:** one-checkout node updates — hotpatch pulls the pluginDirs checkout, parity reports drift (CTL-940, CTL-941) ([#1627](https://github.com/coalesce-labs/catalyst/issues/1627)) ([b61524e](https://github.com/coalesce-labs/catalyst/commit/b61524e44912b03fe9ed8fec561b394ba45f82d6))
+* **dev:** one-nav board shell — project-grouped sidebar, quiet display popover, engaged swimlanes, contrast pass (CTL-930, CTL-944) ([#1636](https://github.com/coalesce-labs/catalyst/issues/1636)) ([78ec17b](https://github.com/coalesce-labs/catalyst/commit/78ec17b5ea91a038a455b847ac57527b733b6ba6))
+* **dev:** per-project nav icons — auto-detect repo favicon + manual override (CTL-961) ([#1682](https://github.com/coalesce-labs/catalyst/issues/1682)) ([d310722](https://github.com/coalesce-labs/catalyst/commit/d310722a6564ee6001f529631caa0788141a20ec))
+* **dev:** pristine main-only plugin-source checkout + merge-to-main auto-refresh (CTL-992, CTL-993) ([#1743](https://github.com/coalesce-labs/catalyst/issues/1743)) ([0280976](https://github.com/coalesce-labs/catalyst/commit/028097621c6c4a6935899f961c271dffff1c0dc6))
+* **dev:** queue — group workers by all activity states, blocked pinned bottom with blockers (CTL-947) ([#1654](https://github.com/coalesce-labs/catalyst/issues/1654)) ([5372b61](https://github.com/coalesce-labs/catalyst/commit/5372b61c072759d8ba17bca59933574aa469160f))
+* **dev:** React Flow dependency graph — backlog graph + per-ticket dep sub-graph (CTL-948) ([#1655](https://github.com/coalesce-labs/catalyst/issues/1655)) ([8a5d697](https://github.com/coalesce-labs/catalyst/commit/8a5d697471a9c36b58af1157db776b7362232830))
+* **dev:** recursive dependency beliefs over obs_relation — blocker_rank/cycle_detected/ready (CTL-965) ([#1699](https://github.com/coalesce-labs/catalyst/issues/1699)) ([e360841](https://github.com/coalesce-labs/catalyst/commit/e36084166074bc45d4c50050d48e84af1e217791))
+* **dev:** SHELL2 Dense Board inside the shell (CTL-892) ([#1579](https://github.com/coalesce-labs/catalyst/issues/1579)) ([657b740](https://github.com/coalesce-labs/catalyst/commit/657b740f1790bf8ef516708791bd17f9fb7a1444))
+* **dev:** SHELL3 OPERATE/OBSERVE nav IA + brand + footer (CTL-893) ([#1580](https://github.com/coalesce-labs/catalyst/issues/1580)) ([32fb41f](https://github.com/coalesce-labs/catalyst/commit/32fb41f9bc87f099dc83b472457e9d88d15125b1))
+* **dev:** SHELL5 top strip — single search palette + '/' open (CTL-895) ([#1588](https://github.com/coalesce-labs/catalyst/issues/1588)) ([ee4607c](https://github.com/coalesce-labs/catalyst/commit/ee4607c1ec8cd29342d3563f2d66ecad5af14b13))
+* **dev:** SHELL6 live nav badges/dots from read-model (CTL-896) ([#1591](https://github.com/coalesce-labs/catalyst/issues/1591)) ([05c5b67](https://github.com/coalesce-labs/catalyst/commit/05c5b67188ce45216dfc7ab242491b2df5d43661))
+* **dev:** SHELL7 config-driven workspace switcher (CTL-897) ([#1603](https://github.com/coalesce-labs/catalyst/issues/1603)) ([dde9d9f](https://github.com/coalesce-labs/catalyst/commit/dde9d9f8529f90e95885d9aae27b4c99fbd70948))
+* **dev:** SHELL8 footer per-node cluster health + node filter (CTL-898) ([#1604](https://github.com/coalesce-labs/catalyst/issues/1604)) ([da688e3](https://github.com/coalesce-labs/catalyst/commit/da688e3196cf06d63b2f9ac0d537d0c417b37e03))
+* **dev:** single-click opens detail page, drawer removed, Linear-style pager + Esc-restore (CTL-951) ([#1658](https://github.com/coalesce-labs/catalyst/issues/1658)) ([d22b6f3](https://github.com/coalesce-labs/catalyst/commit/d22b6f31c2eeb61ef3f96fe4e01cc1e1fc28192a))
+* **dev:** stratified belief rules + provenance + catalyst why (CTL-934) ([#1635](https://github.com/coalesce-labs/catalyst/issues/1635)) ([b9231bc](https://github.com/coalesce-labs/catalyst/commit/b9231bc75417bcfdbdc02a3985a8ca90dda803af))
+* **dev:** supplemental estimate fallback — board shows real Linear estimates for legacy tickets (CTL-974) ([#1692](https://github.com/coalesce-labs/catalyst/issues/1692)) ([bbe55d3](https://github.com/coalesce-labs/catalyst/commit/bbe55d317ffd63918914495126e824e1bd9d3583))
+* **dev:** SURF1 Workers grid grouped/filtered by host node (CTL-909) ([#1596](https://github.com/coalesce-labs/catalyst/issues/1596)) ([573bbbc](https://github.com/coalesce-labs/catalyst/commit/573bbbc153b5b9a94664f2adfc561ae73b398256))
+* **dev:** SURF2 wide ranked Queue depth surface (CTL-910) ([#1598](https://github.com/coalesce-labs/catalyst/issues/1598)) ([b04c883](https://github.com/coalesce-labs/catalyst/commit/b04c88310a87ca2524d80f67f50cbe2d708a9484))
+* **dev:** SURF3 Settings surface (persisted prefs) (CTL-911) ([#1585](https://github.com/coalesce-labs/catalyst/issues/1585)) ([5461865](https://github.com/coalesce-labs/catalyst/commit/546186562c9ed41a4e000765e8e53d29f5d56acd))
+* **dev:** ticket detail — real title + Linear-quality markdown description ([#1733](https://github.com/coalesce-labs/catalyst/issues/1733)) ([8973797](https://github.com/coalesce-labs/catalyst/commit/89737975f52b3204abd2ea555fdac3172deb85e7))
+* **dev:** ticket detail v2 — PM status hero + consolidated lifecycle + Cost/Activity tabs ([#1730](https://github.com/coalesce-labs/catalyst/issues/1730)) ([9eecfb5](https://github.com/coalesce-labs/catalyst/commit/9eecfb598e07df41085a34ba2d5e63c16ac7de4e))
+* **dev:** triage estimates in the project's estimation method, cached with TTL — one estimate not two (CTL-954) ([#1657](https://github.com/coalesce-labs/catalyst/issues/1657)) ([64b4b14](https://github.com/coalesce-labs/catalyst/commit/64b4b1476af8b914d5cd91a4422c56a853c24c8c))
+* **dev:** turn-zero gate — stop+replace workers that never start their first turn (CTL-932) ([#1631](https://github.com/coalesce-labs/catalyst/issues/1631)) ([0b34dd7](https://github.com/coalesce-labs/catalyst/commit/0b34dd71b3828f34ec8c9d681039f6d6feab73dc))
+* **dev:** worker detail v2 — one rail + ticket link + structured Now view + workflow telemetry ([#1729](https://github.com/coalesce-labs/catalyst/issues/1729)) ([5495905](https://github.com/coalesce-labs/catalyst/commit/549590534819be215180bde990c79104bafc2849))
+
+
+### Bug Fixes
+
+* **dev:** board surface SkeletonDashboard — free a connection slot for the lazy board chunk (CTL-945) ([#1639](https://github.com/coalesce-labs/catalyst/issues/1639)) ([cf44dde](https://github.com/coalesce-labs/catalyst/commit/cf44ddef016b77903a26a2afb041d1411b5fc51c))
+* **dev:** board swipe hijack — contain overscroll + edge bump (CTL-973) ([#1686](https://github.com/coalesce-labs/catalyst/issues/1686)) ([aeaa4ba](https://github.com/coalesce-labs/catalyst/commit/aeaa4ba0423d993b3e4217f064a9d3b7334e4162))
+* **dev:** board wheel guard froze horizontal scroll at the resting left edge ([#1710](https://github.com/coalesce-labs/catalyst/issues/1710)) ([5d8ddd1](https://github.com/coalesce-labs/catalyst/commit/5d8ddd1d23c82543f8189d3a0af4305ccedab02f))
+* **dev:** CTL-1006 — boot-resume on daemon bounces + phase-regression guard (no more restart-manufactured stalls) ([#1763](https://github.com/coalesce-labs/catalyst/issues/1763)) ([d8c6d5a](https://github.com/coalesce-labs/catalyst/commit/d8c6d5acf37d72e39cbbe73384428c496ab3361b))
+* **dev:** CTL-1010 swimlanes fill the board height — flex distribution + lane scroll ([#1765](https://github.com/coalesce-labs/catalyst/issues/1765)) ([a9fb26d](https://github.com/coalesce-labs/catalyst/commit/a9fb26d5c664f66a3788a39d009cfe566edde850))
+* **dev:** CTL-1014 — repo-identity resolver honors canonical catalyst.repository key ([#1772](https://github.com/coalesce-labs/catalyst/issues/1772)) ([924d65b](https://github.com/coalesce-labs/catalyst/commit/924d65bbeaeb63b68276f33029747bd127170210))
+* **dev:** CTL-926 — eligible projection refreshes when blocked_by relations change out-of-band ([#1771](https://github.com/coalesce-labs/catalyst/issues/1771)) ([5cdd6b1](https://github.com/coalesce-labs/catalyst/commit/5cdd6b16248df2d932b9b08a92dd982e43f06f38))
+* **dev:** CTL-928 truthful queue-board liveness — dead bg-workers excluded, idle-between-phases lane ([#1610](https://github.com/coalesce-labs/catalyst/issues/1610)) ([86e09b2](https://github.com/coalesce-labs/catalyst/commit/86e09b203391f2f5431717f7755d21f0cdb22795))
+* **dev:** CTL-929 exempt zero-dep tickets from the triage→research read-failure fail-safe hold ([#1592](https://github.com/coalesce-labs/catalyst/issues/1592)) ([6fe3a83](https://github.com/coalesce-labs/catalyst/commit/6fe3a838fbf4e7c32d4f1f05a8bdab04ee83f7c8))
+* **dev:** CTL-978 queue must not count dead workers as in-flight ([#1703](https://github.com/coalesce-labs/catalyst/issues/1703)) ([2bb64c7](https://github.com/coalesce-labs/catalyst/commit/2bb64c787f969e180aa676d4caf09216f43264af))
+* **dev:** CTL-979 ADVA favicon — case-normalize repo key + add monorepo icon paths ([#1702](https://github.com/coalesce-labs/catalyst/issues/1702)) ([3283ba1](https://github.com/coalesce-labs/catalyst/commit/3283ba17b4b31bbb5ecce09c44b2745adde2ea5b))
+* **dev:** CTL-990 — kill the dirty-worktree rebase loop (root fix + typed precheck + recreate guard + dispatch timeout) ([#1734](https://github.com/coalesce-labs/catalyst/issues/1734)) ([cd88a63](https://github.com/coalesce-labs/catalyst/commit/cd88a63ffc4d55bc1f18f7f20e81bd67db536096))
+* **dev:** dedupe obs_relation symmetric edges within a tick (CTL-964 follow-up) ([#1711](https://github.com/coalesce-labs/catalyst/issues/1711)) ([33fb204](https://github.com/coalesce-labs/catalyst/commit/33fb204f49cfb75a414ba5e5ffeb73ba55013df8))
+* **dev:** dependency graph — draw edges, scope labels, /dep-graph SPA fallback, knip cleanup (CTL-959) ([#1668](https://github.com/coalesce-labs/catalyst/issues/1668)) ([c70c65a](https://github.com/coalesce-labs/catalyst/commit/c70c65ab36b7dee01861ce82f5461448ef35a0ec))
+* **dev:** detail page fills full viewport height — no white gap (CTL-949) ([#1651](https://github.com/coalesce-labs/catalyst/issues/1651)) ([7974c7c](https://github.com/coalesce-labs/catalyst/commit/7974c7c1dde749fc38da04ecb937fccab25eba45))
+* **dev:** escalate stuck once — single escalate_human executor, exactly-once page (CTL-962) ([#1693](https://github.com/coalesce-labs/catalyst/issues/1693)) ([9e91c41](https://github.com/coalesce-labs/catalyst/commit/9e91c4121e3148f036a7cfad1132d084850e5e8f))
+* **dev:** estimate fallback query uses team+number filter — fixes 400 error (CTL-976) ([#1695](https://github.com/coalesce-labs/catalyst/issues/1695)) ([5c17b01](https://github.com/coalesce-labs/catalyst/commit/5c17b01fe2425a4575b1dcf1ff6287f2bb34de35))
+* **dev:** FinOps hero + spend cards collapsed to 2px (shrink-0 on scroll-column children) ([#1717](https://github.com/coalesce-labs/catalyst/issues/1717)) ([86a2bc6](https://github.com/coalesce-labs/catalyst/commit/86a2bc68bf244393cb824304ea5c5e424e363bfb))
+* **dev:** make Linear-audit mitmproxy strictly opt-in, add NO_PROXY safety guard (CTL-946) ([#1640](https://github.com/coalesce-labs/catalyst/issues/1640)) ([da51c5a](https://github.com/coalesce-labs/catalyst/commit/da51c5a12230eef036b8e2ea60b1b01fa0a55513))
+* **dev:** OBSERVE Telemetry Loki queries — model/tool latency + tail field extraction ([#1715](https://github.com/coalesce-labs/catalyst/issues/1715)) ([0275934](https://github.com/coalesce-labs/catalyst/commit/0275934022aebdea66eb1af0b43b9cff297d4ea0))
+* **dev:** restore board surface + scope + dual-axis scroll on detail return (CTL-971) ([#1683](https://github.com/coalesce-labs/catalyst/issues/1683)) ([5edc063](https://github.com/coalesce-labs/catalyst/commit/5edc0639f51c015edbc89e0e8b28621277814e05))
+* **dev:** turn-zero cap branch is terminal — no post-escalation respawn (CTL-932) ([#1633](https://github.com/coalesce-labs/catalyst/issues/1633)) ([8c7d3a0](https://github.com/coalesce-labs/catalyst/commit/8c7d3a0e50a202cfe77b1d7b47c3f24fc1dbd1c6))
+* **dev:** unify board phase with phase-agent-type + remediate column + lens label (CTL-972) ([#1687](https://github.com/coalesce-labs/catalyst/issues/1687)) ([09d6e4e](https://github.com/coalesce-labs/catalyst/commit/09d6e4e68de5a407555b368f77d81c8404a06bb3))
+* **dev:** wire applyNeedsHuman in scheduler + clean up dead code in diagnostician (CTL-937) ([#1642](https://github.com/coalesce-labs/catalyst/issues/1642)) ([2982ba6](https://github.com/coalesce-labs/catalyst/commit/2982ba62012f319112e1c00baa6d9c3ab78cd927))
+* **dev:** wire board→detail-page navigation + SPA fallback for /ticket /worker (CTL-942) ([#1632](https://github.com/coalesce-labs/catalyst/issues/1632)) ([1532302](https://github.com/coalesce-labs/catalyst/commit/1532302468ac869597d41dad731c3f5883e43cc6))
+* **dev:** wire intentDb + appendIntentEvent into runTick; pin bgJobId in kill postcondition (CTL-936) ([#1644](https://github.com/coalesce-labs/catalyst/issues/1644)) ([0a4e898](https://github.com/coalesce-labs/catalyst/commit/0a4e898379cd69d88c91b07b267c32f7646e6931))
+
+## [12.4.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.3.0...catalyst-dev-v12.4.0) (2026-06-09)
+
+
+### Features
+
+* **dev:** BFF1 cache-backed read-model core (CTL-883) ([#1559](https://github.com/coalesce-labs/catalyst/issues/1559)) ([417271b](https://github.com/coalesce-labs/catalyst/commit/417271b5529c614993e24b071a1aaf83400512f7))
+* **dev:** BFF11 broker fence projection into cache (CTL-923) ([#1563](https://github.com/coalesce-labs/catalyst/issues/1563)) ([de3d6b3](https://github.com/coalesce-labs/catalyst/commit/de3d6b3151659980ab76b7d539adc64aab47e758))
+* **dev:** BFF4 phase runs as run entities + verbatim signal (CTL-886) ([#1564](https://github.com/coalesce-labs/catalyst/issues/1564)) ([55e0bee](https://github.com/coalesce-labs/catalyst/commit/55e0bee3e77a61aeb2e69f0b3d69df14d184985e))
+* **dev:** BFF6 board payload model/startedAt/pid/sess_id (CTL-888) ([#1562](https://github.com/coalesce-labs/catalyst/issues/1562)) ([c234c74](https://github.com/coalesce-labs/catalyst/commit/c234c74017685d0ceb3680a61673623258b9bef8))
+* **dev:** BFF7 cache-backed ticket detail / artifacts / search endpoints (CTL-889) ([#1567](https://github.com/coalesce-labs/catalyst/issues/1567)) ([1179aa1](https://github.com/coalesce-labs/catalyst/commit/1179aa142af4251abb3ffd01619a0900ef538cb3))
+* **dev:** BFF9 retire legacy linearis poller onto durable cache (CTL-921) ([#1566](https://github.com/coalesce-labs/catalyst/issues/1566)) ([d9c050a](https://github.com/coalesce-labs/catalyst/commit/d9c050aeff039a797c41d11a3196abdf0c2585f4))
+* **dev:** FND1 deep-linkable routes (TanStack Router) (CTL-881) ([#1557](https://github.com/coalesce-labs/catalyst/issues/1557)) ([36348c2](https://github.com/coalesce-labs/catalyst/commit/36348c21f09fdefef0fa30dd56401d6d9a87626b))
+* **dev:** FND2 resolveList() + jotai nav store (CTL-882) ([#1565](https://github.com/coalesce-labs/catalyst/issues/1565)) ([633ad43](https://github.com/coalesce-labs/catalyst/commit/633ad43a36b47526115bf1dca38a9d01af2c5e65))
+* **dev:** HUD1 shared read-model client contract (CTL-919) ([#1568](https://github.com/coalesce-labs/catalyst/issues/1568)) ([2eda1de](https://github.com/coalesce-labs/catalyst/commit/2eda1de1d18a6587a9e1c3e60c566a2b44b20cc3))
+* **dev:** SHELL1 edge-to-edge app shell + left nav (CTL-891) ([#1569](https://github.com/coalesce-labs/catalyst/issues/1569)) ([41c1000](https://github.com/coalesce-labs/catalyst/commit/41c1000414fbe2b9d1d4a8712f5105bd79189869))
+
+
+### Bug Fixes
+
+* **dev:** CTL-838 stop inferring dependencies from prose — link them, triage analyzes for missed ones ([#1556](https://github.com/coalesce-labs/catalyst/issues/1556)) ([cf29cf0](https://github.com/coalesce-labs/catalyst/commit/cf29cf038905006c9377dcf5095551bc029ed81e))
+* **dev:** CTL-878 stop self-inflicted epic→child dependency deadlock ([#1510](https://github.com/coalesce-labs/catalyst/issues/1510)) ([5f2e388](https://github.com/coalesce-labs/catalyst/commit/5f2e3885a908a58649780a35fe59b0a66e8edc10))
+* **dev:** CTL-883 keep bun:sqlite out of the Node-loaded vite.config import graph ([#1561](https://github.com/coalesce-labs/catalyst/issues/1561)) ([03537d0](https://github.com/coalesce-labs/catalyst/commit/03537d0a120791c2584b905a4b41d443b01f1364))
+* **dev:** CTL-927 exempt doc-phase workers from the cold-snapshot zombie-floor mtime kill ([#1571](https://github.com/coalesce-labs/catalyst/issues/1571)) ([c3394f8](https://github.com/coalesce-labs/catalyst/commit/c3394f84d7c0285a912063dc27aaf7f28019bfb2))
+
+## [12.3.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.2.0...catalyst-dev-v12.3.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-880 wire gherkin-ticket standard into ticket-creation skills ([#1508](https://github.com/coalesce-labs/catalyst/issues/1508)) ([4b21363](https://github.com/coalesce-labs/catalyst/commit/4b21363b49ea74853f701d2329e07f61cd23334d))
+
+## [12.2.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.1.0...catalyst-dev-v12.2.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** CTL-877 gherkin-ticket skill — use-case-first ticket authoring ([#1504](https://github.com/coalesce-labs/catalyst/issues/1504)) ([e379efb](https://github.com/coalesce-labs/catalyst/commit/e379efbabbc77ebe2e97c50fbc292ed2b7347ef8))
+
+
+### Bug Fixes
+
+* **dev:** CTL-835 add scope to linear-comment-post OAuth mint (invalid_scope) ([#1491](https://github.com/coalesce-labs/catalyst/issues/1491)) ([42d20ac](https://github.com/coalesce-labs/catalyst/commit/42d20ac140cc53ec08c81a7f2d9602ce73870925))
+* **dev:** CTL-837 GC pre-spawn orphan phase claim → unwedge claim-lost loop ([#1492](https://github.com/coalesce-labs/catalyst/issues/1492)) ([f437290](https://github.com/coalesce-labs/catalyst/commit/f43729066b5e73fe7d2be4471a9923fd269a3bfc))
+* **dev:** CTL-841 self-heal missing wt/ dir in catalyst-monitor start ([#1497](https://github.com/coalesce-labs/catalyst/issues/1497)) ([a29c5f3](https://github.com/coalesce-labs/catalyst/commit/a29c5f3edd3bb88285286786c9bff91f4f97733c))
+* **dev:** CTL-867 escalate persistent per-team reconcile failure to a visible event ([#1494](https://github.com/coalesce-labs/catalyst/issues/1494)) ([8f57f41](https://github.com/coalesce-labs/catalyst/commit/8f57f4193bcc80cef92d20bc93db956022eb385a))
+* **dev:** CTL-868 — zombie-staleness hardening + orphan-detected sweep event ([#1487](https://github.com/coalesce-labs/catalyst/issues/1487)) ([b34e506](https://github.com/coalesce-labs/catalyst/commit/b34e5068f4570ddcf197b8f4dbdd7c0354c671db))
+* **dev:** CTL-869 detect proxy env leak into interactive shells (CTL-846 regression class) ([#1493](https://github.com/coalesce-labs/catalyst/issues/1493)) ([c604ebe](https://github.com/coalesce-labs/catalyst/commit/c604ebefefc961e76d4d4940a891efe19d98407f))
+* **dev:** CTL-874 preflight queries workspace-scoped labels (not --team) ([#1499](https://github.com/coalesce-labs/catalyst/issues/1499)) ([9d8fd84](https://github.com/coalesce-labs/catalyst/commit/9d8fd84fbb84018db59604b4e5c27e75413e214c))
+
+## [12.1.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.0.0...catalyst-dev-v12.1.0) (2026-06-08)
+
+
+### Features
+
+* **dev:** auto-run compound learning per ticket + relocate stores to thoughts/shared/retros/ (CTL-831) ([#1428](https://github.com/coalesce-labs/catalyst/issues/1428)) ([c30ca97](https://github.com/coalesce-labs/catalyst/commit/c30ca97bc380f1e3fb65a8f58581f144db9dfa52))
+* **dev:** catalyst-agent — standalone host telemetry + multi-account Claude usage agent (CTL-812) ([#1413](https://github.com/coalesce-labs/catalyst/issues/1413)) ([a6d7921](https://github.com/coalesce-labs/catalyst/commit/a6d79210fdba69cabcb97ff0a7a3e3cd379dde34))
+* **dev:** CTL-639 clean cold-start recovery — CTL-646 label lifecycle + CTL-644 cheap/gate policy ([#1481](https://github.com/coalesce-labs/catalyst/issues/1481)) ([093f4c8](https://github.com/coalesce-labs/catalyst/commit/093f4c86f430e431d77d5982504fcce2502804f1))
+* **dev:** CTL-778 — halt-on-complete, daemon self-heal + reaper backstop ([#1486](https://github.com/coalesce-labs/catalyst/issues/1486)) ([d5f715d](https://github.com/coalesce-labs/catalyst/commit/d5f715d902e6b03a1d1a5d469af9609228bf1f18))
+* **dev:** CTL-783 draft-PR-early: implement opens draft on first commit; phase-pr flips ready ([#1419](https://github.com/coalesce-labs/catalyst/issues/1419)) ([f618445](https://github.com/coalesce-labs/catalyst/commit/f618445884727bc5a69272637b0f9aee036ae074))
+* **dev:** CTL-845 — vendor worktree-thoughts-init.sh, fix humanlayer crash on fresh install ([#1458](https://github.com/coalesce-labs/catalyst/issues/1458)) ([8ef8739](https://github.com/coalesce-labs/catalyst/commit/8ef873960cf6e579f3232d51642cecaf17e870fa))
+* **dev:** CTL-850 wire HRW ownership + Linear-CAS claim into new-work dispatch ([#1473](https://github.com/coalesce-labs/catalyst/issues/1473)) ([ceb7a79](https://github.com/coalesce-labs/catalyst/commit/ceb7a79c50ca8cad58b9140b3fc93a53c31f584a))
+* **dev:** CTL-854 — fresh-host registry bootstrap + silent-idle observability ([#1465](https://github.com/coalesce-labs/catalyst/issues/1465)) ([663f563](https://github.com/coalesce-labs/catalyst/commit/663f56337f37119b4755c9b9060c2c98ceb43c31))
+* **dev:** CTL-859 host identity + heartbeat foundation ([#1470](https://github.com/coalesce-labs/catalyst/issues/1470)) ([0174016](https://github.com/coalesce-labs/catalyst/commit/0174016ab6539dfc3d600756d224b5b03e6645b2))
+* **dev:** Gateway L1(a) — full-descriptor ticket_state schema + UUID→identifier index (CTL-821) ([#1414](https://github.com/coalesce-labs/catalyst/issues/1414)) ([3f17c67](https://github.com/coalesce-labs/catalyst/commit/3f17c67f77f2a167b89419bd795d48f522867952))
+* **dev:** Gateway L1(b) — webhook write-through with create/update/remove descriptor fold (CTL-822) ([#1415](https://github.com/coalesce-labs/catalyst/issues/1415)) ([1079c06](https://github.com/coalesce-labs/catalyst/commit/1079c06865649ce74ef815d73eb7d41895d30d26))
+* **dev:** Gateway L1(c) — daemon read client over the durable descriptor store (CTL-823) ([#1416](https://github.com/coalesce-labs/catalyst/issues/1416)) ([3dfe01a](https://github.com/coalesce-labs/catalyst/commit/3dfe01a01fdc212b6d7d6369cff81c06a8bfada3))
+* **dev:** make setup-catalyst.sh safe for headless environments (CTL-842) ([#1456](https://github.com/coalesce-labs/catalyst/issues/1456)) ([4dd39d5](https://github.com/coalesce-labs/catalyst/commit/4dd39d530367fe37292e892b318093c3f6310b2b))
+* **dev:** monitor board — add Todo + Triage columns + surface queued tickets (CTL-767) ([#1411](https://github.com/coalesce-labs/catalyst/issues/1411)) ([83526a3](https://github.com/coalesce-labs/catalyst/commit/83526a30f99ed10e60a704b4ba10e4544e8a7a8d))
+* **dev:** ticket-retro — cross-ticket retrospective view + briefing Plan-today callout (CTL-814) ([#1410](https://github.com/coalesce-labs/catalyst/issues/1410)) ([2e65659](https://github.com/coalesce-labs/catalyst/commit/2e6565902a0d2fd7468c12f40a54cc0093e3b512))
+* **pm:** close the estimation feedback loop — recurring corpus refresh from real actuals (CTL-813) ([#1400](https://github.com/coalesce-labs/catalyst/issues/1400)) ([f066c82](https://github.com/coalesce-labs/catalyst/commit/f066c82b6535574a4a74e279a62ddac7ab429f1f))
+
+
+### Bug Fixes
+
+* **catalyst-agent:** add PATH to launchd plist so usage domain works ([#1480](https://github.com/coalesce-labs/catalyst/issues/1480)) ([8e4aec8](https://github.com/coalesce-labs/catalyst/commit/8e4aec809cd8160d9077e314e72d70054abfda53))
+* **dev:** add turn-cap-exhausted to TERMINAL set in signal-reader (CTL-830) ([#1431](https://github.com/coalesce-labs/catalyst/issues/1431)) ([381cc27](https://github.com/coalesce-labs/catalyst/commit/381cc277aeaa5793da93c7da0d92162b4c28caf3))
+* **dev:** catalyst-agent disk probe reads the APFS Data volume on macOS (CTL-812) ([#1427](https://github.com/coalesce-labs/catalyst/issues/1427)) ([911fd89](https://github.com/coalesce-labs/catalyst/commit/911fd890b6c4dbaffa5764209a0bd3aa92d3ef52))
+* **dev:** catalyst-agent skips unlabeled usage samples + normalizes hostname (CTL-812) ([#1454](https://github.com/coalesce-labs/catalyst/issues/1454)) ([4002858](https://github.com/coalesce-labs/catalyst/commit/40028585eca162e6e8e78538dae58873f6424cf3))
+* **dev:** CTL-703 — invert no-linear-prose guard: teardown is the Done writer now ([#1399](https://github.com/coalesce-labs/catalyst/issues/1399)) ([dc77a0a](https://github.com/coalesce-labs/catalyst/commit/dc77a0a1569018fc4a70448ba95fde9b48c3daff))
+* **dev:** CTL-834 cool-down held-label converger + classify exclusive-group label conflicts ([#1483](https://github.com/coalesce-labs/catalyst/issues/1483)) ([4e117ef](https://github.com/coalesce-labs/catalyst/commit/4e117ef7bc757e89920cac8bdc567354f4d1b49e))
+* **dev:** CTL-844 fresh-machine installer gaps — no-sudo, npm humanlayer, real gh CLI, bun required ([#1457](https://github.com/coalesce-labs/catalyst/issues/1457)) ([0c5e94d](https://github.com/coalesce-labs/catalyst/commit/0c5e94d851e4dd34066baecb9401035883852989))
+* **dev:** CTL-846 liveness-gate proxy env at daemon launch + harden docs ([#1459](https://github.com/coalesce-labs/catalyst/issues/1459)) ([7bbb585](https://github.com/coalesce-labs/catalyst/commit/7bbb585a03ec46c07f70ecdee39bb092b2b1bbbf))
+* **dev:** fold reaper-metrics into O(1) counters, drop the unbounded events[] (CTL-793) ([#1383](https://github.com/coalesce-labs/catalyst/issues/1383)) ([4ac303c](https://github.com/coalesce-labs/catalyst/commit/4ac303c7168bbee0705b63f4db9918217d37c841))
+* **dev:** ghost-breaker — reclaim jobLifecycle-alive-but-FRESH-agents-absent workers (CTL-809) ([#1385](https://github.com/coalesce-labs/catalyst/issues/1385)) ([fca33be](https://github.com/coalesce-labs/catalyst/commit/fca33be0b73b39829c2c4eafcd3078814c55f011))
+* **dev:** hermetic CATALYST_DIR preload — tests can't pollute the real event log (CTL-810) ([#1412](https://github.com/coalesce-labs/catalyst/issues/1412)) ([eed3ae2](https://github.com/coalesce-labs/catalyst/commit/eed3ae253d08ca884493594c2afacbed74a21190))
+* **dev:** merge per-project secrets config to preserve unprompted keys (CTL-843) ([#1455](https://github.com/coalesce-labs/catalyst/issues/1455)) ([3956c9f](https://github.com/coalesce-labs/catalyst/commit/3956c9f5ad150f04262f9c0d15e98622e86218ce))
+* **dev:** otel-forward floats as doubleValue + agent OTLP body = event name (CTL-812) ([#1421](https://github.com/coalesce-labs/catalyst/issues/1421)) ([2032436](https://github.com/coalesce-labs/catalyst/commit/2032436dc14c2e8f33588c38245a441f1f5c421d))
+* **dev:** relocate CONCEPTS.md to thoughts/shared/ so it syncs (CTL-789) ([#1390](https://github.com/coalesce-labs/catalyst/issues/1390)) ([2deb8e0](https://github.com/coalesce-labs/catalyst/commit/2deb8e0f72a4c754154bc82b1a08eb9beb8bfd64))
+* **dev:** strengthen implementProbe with plan-phase completeness gate (CTL-663) ([#1434](https://github.com/coalesce-labs/catalyst/issues/1434)) ([0098e48](https://github.com/coalesce-labs/catalyst/commit/0098e484eb27fe7e78459b528ad56e32bf4618b2))
+
+
+### Performance Improvements
+
+* **dev:** incremental countTicketEventsInWindow — kill the per-tick full-log rescan (CTL-802) ([#1387](https://github.com/coalesce-labs/catalyst/issues/1387)) ([d2685ab](https://github.com/coalesce-labs/catalyst/commit/d2685ab8bfad0405d7adf515ccc40d7fbdab5af6))
+
 ## [12.0.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v11.0.1...catalyst-dev-v12.0.0) (2026-06-06)
 
 

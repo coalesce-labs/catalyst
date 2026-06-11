@@ -165,6 +165,10 @@ synthesize_event_id() {
 #   --claude-ratelimit-7d-sonnet-pct N  claude.ratelimit.seven_day_sonnet_pct (integer, CTL-763)
 #   --phase-attempt N        phase.attempt (integer, CTL-761)
 #   --phase-revive-count N   phase.revive_count (integer, CTL-761)
+#   --ticket-type TYPE       catalyst.ticket.type (CTL-1023 work-type dimension;
+#                            bug|feature|chore|refactor|docs|test). Defaults to
+#                            "unknown" when omitted/empty so the attribute is
+#                            CONSISTENTLY present, never sometimes-missing.
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -183,6 +187,9 @@ build_canonical_line() {
   local claude_rl_7d_opus="" claude_rl_7d_sonnet=""
   # CTL-761: dispatch attempt + revive count (typed int attributes).
   local phase_attempt="" phase_revive_count=""
+  # CTL-1023: work-type dimension (catalyst.ticket.type). Default "unknown" so the
+  # attribute is consistently present even when the caller cannot resolve a type.
+  local ticket_type=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -221,6 +228,7 @@ build_canonical_line() {
       --claude-ratelimit-7d-sonnet-pct) claude_rl_7d_sonnet="$2"; shift 2 ;;
       --phase-attempt)       phase_attempt="$2"; shift 2 ;;
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
+      --ticket-type)         ticket_type="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -230,6 +238,9 @@ build_canonical_line() {
   [[ -n "$service"    ]] || { echo "build_canonical_line: --service required" >&2; return 1; }
   [[ -n "$event_name" ]] || { echo "build_canonical_line: --event-name required" >&2; return 1; }
   [[ -n "$service_version" ]] || service_version="$(plugin_version)"
+  # CTL-1023: the work-type dimension is ALWAYS present — fall back to "unknown"
+  # so consumers can group by it without coping with a sometimes-missing key.
+  [[ -n "$ticket_type" ]] || ticket_type="unknown"
 
   # CTL-636: promote orchestration context into the resource block. Existing
   # callers already pass --orch / --linear-ticket (which land in attributes);
@@ -289,6 +300,7 @@ build_canonical_line() {
     --arg claude_rl_7d_sonnet "$claude_rl_7d_sonnet" \
     --arg phase_attempt "$phase_attempt" \
     --arg phase_revive_count "$phase_revive_count" \
+    --arg ticket_type "$ticket_type" \
     '{
       ts: $ts,
       id: $id,
@@ -334,6 +346,7 @@ build_canonical_line() {
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
         + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
         + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (
         (if $message == "" then {} else { message: $message } end)

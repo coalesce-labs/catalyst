@@ -584,9 +584,9 @@ window. Three problems compounded:
 
 **Decision**: Dispatch workers as `claude --bg --resume
 /catalyst-dev:phase-<name> <TICKET> --orch-dir <ORCH_DIR>` — one short-lived
-`--bg` job per phase. The orchestrator walks the canonical 9-phase sequence
+`--bg` job per phase. The orchestrator walks the canonical 10-phase sequence
 (`triage` → `research` → `plan` → `implement` → `verify` → `review` → `pr` →
-`monitor-merge` → `monitor-deploy`) via `orchestrate-phase-advance`, waking on
+`monitor-merge` → `monitor-deploy` → `teardown`) via `orchestrate-phase-advance`, waking on
 `phase.<name>.complete.<TICKET>` events routed by a new deterministic broker
 interest type, `phase_lifecycle` (CTL-447). Selected by
 `.catalyst/config.json → catalyst.orchestration.dispatchMode` —
@@ -608,7 +608,7 @@ model) is the runtime fallback when the key is missing.
   (`broker/index.mjs:1299-1335`) against
   `^phase\.([^.]+)\.(complete|failed)\.([A-Za-z][A-Za-z0-9_]*-\d+)$` — no Groq
   classification, no semantic ambiguity, one interest per ticket carrying
-  `{ticket, phase_names[9]}`. All four orchestrator interests
+  `{ticket, phase_names[10]}`. All four orchestrator interests
   (`pr_lifecycle`, `ticket_lifecycle`, `comms_lifecycle`, `phase_lifecycle`)
   fire back as `filter.wake.<ORCH_NAME>`, so the orchestrator watches a single
   event stream.
@@ -962,3 +962,37 @@ contract (single-write of the per-phase signal) intact.
   (`resolve_phase_session_id`) distinct from the stream-JSONL-driven
   `resolve_session_id`; both coexist (the legacy resolver still serves
   ADR-019's top-level branch).
+
+---
+
+## ADR-021: Workspace-level type-label taxonomy (CTL-995)
+
+**Decision**: All six type labels (`bug`, `feature`, `refactor`, `docs`, `chore`, `test`) live
+at workspace scope (not per-team), nested under a single `type` label group, with canonical
+palette colors: bug `#e5484d` · feature `#8b5cf6` · refactor `#14b8a6` · docs `#3b82f6` ·
+chore `#8d8d8d` · test `#22c55e`.
+
+**Rationale**:
+
+- Pre-migration state had `refactor`, `docs`, `chore`, and `test` as per-team labels duplicated
+  across CTL/ADV/OTL/SLI/EVR, causing color drift and making the UI badge design system require
+  per-team ID lists instead of a single workspace ID per type.
+- `bug` and `feature` were already at workspace scope; unifying all six removes the asymmetry.
+- A `type` group label provides a logical container so the six labels are visually grouped in
+  the Linear label picker.
+
+**Alternatives considered**:
+
+- **Promote team labels in-place via `issueLabelUpdate(teamId: null)`**: API rejected this field
+  (not in `IssueLabelUpdateInput`); fell back to rename-create-relabel-delete.
+- **Leave per-team labels, add workspace labels as aliases**: would create two labels per type,
+  ambiguous for new tickets.
+
+**Consequences**:
+
+- Any tooling that filters by label ID must use the workspace IDs documented in
+  `thoughts/shared/research/2026-06-10-ctl-995-label-taxonomy-migration.md`.
+- Component labels (orchestrator/broker/phase-agent/monitor/cli/ci/website/estimation/worktree)
+  remain team-scoped (CTL-only) — only the type axis is workspace-level.
+- New tickets on any team should apply workspace type labels; team-scoped type labels should not
+  be created.

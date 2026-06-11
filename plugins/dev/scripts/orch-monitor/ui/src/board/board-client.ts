@@ -11,6 +11,10 @@
 import type { BoardPayload, BoardOutbound, BoardInbound, ConnectionStatus } from "./types";
 import { getCached, putCached } from "./board-store";
 import { INITIAL_BACKOFF_MS, nextBackoff, createSnapshotGate } from "./board-logic";
+// CTL-919 / HUD1: decode SSE frames through the ONE shared read-model contract
+// (the same envelope decode the terminal HUD uses), not a per-client JSON.parse —
+// so a truncated/garbage frame is skipped identically on every surface.
+import { decodeReadModelFrame } from "../../../lib/read-model-client";
 
 export interface BoardHandlers {
   onSnapshot: (payload: BoardPayload) => void;
@@ -141,11 +145,10 @@ function connectViaDirectSSE(
     es.addEventListener("board", (ev) => {
       backoff = INITIAL_BACKOFF_MS; // reset on a real frame
       onStatus("connected");
-      try {
-        apply(JSON.parse((ev as MessageEvent).data) as BoardPayload);
-      } catch {
-        /* ignore malformed frame */
-      }
+      // Shared contract decode: returns null (skipped) on a malformed/truncated
+      // frame instead of throwing — identical guard on web and HUD.
+      const payload = decodeReadModelFrame((ev as MessageEvent).data as string);
+      if (payload) apply(payload);
     });
     es.onerror = () => {
       try {

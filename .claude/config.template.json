@@ -14,14 +14,18 @@
     "linear": {
       "teamKey": "PROJ",
       "stateMap": {
-        "backlog": "Backlog",
-        "todo": "Todo",
-        "research": "In Progress",
-        "planning": "In Progress",
-        "inProgress": "In Progress",
-        "inReview": "In Review",
-        "done": "Done",
-        "canceled": "Canceled"
+        "backlog":     "Backlog",
+        "todo":        "Todo",
+        "triage":      "Triage",
+        "research":    "Research",
+        "planning":    "Plan",
+        "inProgress":  "Implement",
+        "verifying":   "Validate",
+        "reviewing":   "Review",
+        "remediating": "Remediate",
+        "inReview":    "PR",
+        "done":        "Done",
+        "canceled":    "Canceled"
       }
     },
     "thoughts": {

@@ -107,6 +107,21 @@ function StreamEventRow({ event }: { event: StreamEvent }) {
           </span>
         </div>
       );
+    // CTL-887 (BFF5): ◌ thinking… reasoning rows from the EC transcript tail.
+    case "reasoning":
+      return (
+        <div className="flex items-start gap-2 py-1">
+          <span className="mt-0.5 shrink-0 font-mono text-[11px] leading-none text-muted">
+            ◌
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[11px] italic text-muted">
+            {event.text?.slice(0, 100) || "thinking…"}
+          </span>
+          <span className="shrink-0 font-mono text-[10px] text-muted tabular-nums">
+            {fmtSince(age)}
+          </span>
+        </div>
+      );
     case "turn": {
       const hasTools = event.turnTools && event.turnTools.length > 0;
       const hasText = event.text && event.text.length > 0;
@@ -442,7 +457,7 @@ export function WorkerDetailDrawer({
     <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
       <SheetContent
         side="right"
-        className="flex w-full flex-col gap-0 border-l border-border bg-surface-1 p-0 sm:max-w-[540px]"
+        className="flex w-full flex-col gap-0 border-l border-border bg-surface-2 p-0 sm:max-w-[540px]"
       >
         {/* Header */}
         <SheetHeader className="flex flex-row items-center gap-2 space-y-0 border-b border-border px-4 py-3 pr-12">

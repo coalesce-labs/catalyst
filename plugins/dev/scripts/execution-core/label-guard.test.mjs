@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   labelOnce,
+  clearStalledLabel,
   inEscalationCooldown,
   recordEscalation,
   escalationCooldownPath,
@@ -59,6 +60,26 @@ describe("labelOnce", () => {
     expect(ws.applyLabel.calls.length).toBe(0);
   });
 
+  test("CTL-962: returns true on the first application, false on a marker-guarded no-op", () => {
+    const ws = { applyLabel: recorder({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    // First call performs the write → true (callers bound side-effects to this).
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(true);
+    // Second call short-circuits on the .applied marker → false.
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(false);
+    expect(ws.applyLabel.calls.length).toBe(1);
+  });
+
+  test("CTL-962: returns false on a no-op when a .skipped marker exists", () => {
+    const ws = { applyLabel: recorder({ applied: true }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    writeFileSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"), "");
+
+    expect(labelOnce(orchDir, "CTL-1", "needs-human", ws)).toBe(false);
+    expect(ws.applyLabel.calls.length).toBe(0);
+  });
+
   test("missing-label reason → writes .skipped marker (no retry within this run)", () => {
     const ws = { applyLabel: recorder({ applied: false, reason: "missing-label" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
@@ -67,6 +88,34 @@ describe("labelOnce", () => {
 
     expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
       true
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
+  test("CTL-834: exclusive-conflict reason → writes .skipped marker (no retry storm)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      true
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
+  test("transient reason → NO marker (retries next tick)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "transient" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      false
     );
     expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
       false
@@ -206,5 +255,203 @@ describe("inEscalationCooldown / recordEscalation", () => {
     expect(inEscalationCooldown(orchDir, "CTL-9", "monitor-merge", t0)).toBe(true);
     expect(inEscalationCooldown(orchDir, "CTL-11", "pr", t0)).toBe(false);
     expect(inEscalationCooldown(orchDir, "CTL-9", "triage", t0)).toBe(false);
+  });
+});
+
+// ─── clearStalledLabel (CTL-646) ───
+
+describe("clearStalledLabel", () => {
+  test("clears label + deletes .applied marker together", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const removed = [];
+    const ws = { removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; } };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(removed).toHaveLength(1);
+    expect(removed[0]).toEqual({ t: "CTL-1", l: "needs-human" });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("also deletes the .skipped marker", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.skipped"), "");
+    const ws = { removeLabel: () => ({ removed: true }) };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.skipped"))).toBe(false);
+  });
+
+  test("no-op when no marker present — still calls removeLabel, does not throw", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+    const removed = [];
+    const ws = { removeLabel: (t, l) => { removed.push({ t, l }); return { removed: true }; } };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    expect(removed).toHaveLength(1);
+  });
+
+  test("marker retained on failed removal (removed: false)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => ({ removed: false, reason: "transient" }) };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("never throws when removeLabel throws — marker kept", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => { throw new Error("network"); } };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  // CTL-639 verify: the async (Promise) branch is what the real Linearis
+  // removeLabel actually returns — exercise it directly, not just the sync stub.
+  test("async removeLabel resolving { removed: true } deletes the marker", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let resolveFn;
+    const pending = new Promise((res) => { resolveFn = res; });
+    const ws = { removeLabel: () => pending };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+    // Marker still present until the promise settles.
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    resolveFn({ removed: true });
+    await pending;
+    await Promise.resolve(); // flush the .then(finalize) microtask
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("async removeLabel rejecting does not throw and retains the marker", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let rejectFn;
+    // Deferred so clearStalledLabel's .catch attaches before the rejection
+    // fires — avoids a spurious unhandled-rejection flag.
+    const pending = new Promise((_res, rej) => { rejectFn = rej; });
+    const ws = { removeLabel: () => pending };
+
+    expect(() => clearStalledLabel(orchDir, "CTL-1", "needs-human", ws)).not.toThrow();
+    rejectFn(new Error("network"));
+    await pending.catch(() => {}); // settle the rejection
+    await Promise.resolve();
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+
+  test("removeLabel returning undefined is treated as success — marker deleted", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    const ws = { removeLabel: () => undefined };
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("apply → clear → re-apply cycle re-arms the labelOnce guard", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+
+    // Apply
+    labelOnce(orchDir, "CTL-1", "needs-human", { applyLabel: () => ({ applied: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+
+    // Clear
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: true }) });
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+
+    // Re-apply
+    let applied = 0;
+    labelOnce(orchDir, "CTL-1", "needs-human", { applyLabel: () => { applied++; return { applied: true }; } });
+    expect(applied).toBe(1);
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(true);
+  });
+});
+
+// ─── CTL-936: labelOnce — operator-visible event on unrecoverable failure ────
+
+describe("labelOnce CTL-936 operator-visible event", () => {
+  test("emits intent.ineffective event on exclusive-conflict when enforce=1", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-A"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+
+    labelOnce(orchDir, "CTL-936-A", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]["event.name"]).toBe("intent.ineffective");
+    expect(events[0].payload.kind).toBe("label");
+    expect(events[0].payload.subject).toBe("CTL-936-A");
+    expect(events[0].payload.postcondition.label).toBe("needs-human");
+    expect(events[0].payload.reason).toBe("exclusive-conflict");
+    // .skipped marker still written (retry storm still suppressed)
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-936-A", ".linear-label-needs-human.skipped"))
+    ).toBe(true);
+  });
+
+  test("does NOT emit event in shadow mode (enforce=0)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-B"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+
+    labelOnce(orchDir, "CTL-936-B", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "0" },
+    });
+
+    expect(events).toHaveLength(0);
+  });
+
+  test("does NOT emit event when appendEvent is absent (legacy callers)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-C"), { recursive: true });
+    const ws = { applyLabel: () => ({ applied: false, reason: "exclusive-conflict" }) };
+    // Should not throw even without appendEvent
+    expect(() => {
+      labelOnce(orchDir, "CTL-936-C", "needs-human", ws, {
+        env: { CATALYST_INTENTS_ENFORCE: "1" },
+      });
+    }).not.toThrow();
+  });
+
+  test("does NOT emit event for transient failures (only unrecoverable)", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-936-D"), { recursive: true });
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+    const ws = { applyLabel: () => ({ applied: false, reason: "rate-limited" }) };
+
+    labelOnce(orchDir, "CTL-936-D", "needs-human", ws, {
+      appendEvent,
+      env: { CATALYST_INTENTS_ENFORCE: "1" },
+    });
+
+    expect(events).toHaveLength(0);
+    // No .skipped marker for transient failures (retry next tick)
+    expect(
+      existsSync(join(orchDir, "workers", "CTL-936-D", ".linear-label-needs-human.skipped"))
+    ).toBe(false);
   });
 });

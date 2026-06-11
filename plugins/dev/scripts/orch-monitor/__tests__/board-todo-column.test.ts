@@ -9,7 +9,11 @@ import { dirname, join } from "node:path";
 import { PHASE_TO_LINEAR } from "../lib/board-data.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const boardSrc = readFileSync(join(HERE, "..", "ui", "src", "board", "Board.tsx"), "utf8");
+// BOARD2 / CTL-906: the canonical Linear column SET moved out of Board.tsx into
+// the pure board/board-display.ts (LINEAR_COLUMNS) so the DOM-free column tests
+// can read it. This guard follows it there — the Triage/Todo columns are still
+// locked into the UI, now in their single source.
+const boardSrc = readFileSync(join(HERE, "..", "ui", "src", "board", "board-display.ts"), "utf8");
 
 // ── Requirement A: triage phase maps to "Triage", not "Research" ─────────────
 test("PHASE_TO_LINEAR maps triage phase to 'Triage' column (not 'Research')", () => {
@@ -21,17 +25,17 @@ test("PHASE_TO_LINEAR has queued → 'Todo' for eligible queue synthesis", () =>
   expect(PHASE_TO_LINEAR.queued).toBe("Todo");
 });
 
-// ── Requirement C: Board.tsx LINEAR_COLS includes Triage and Todo columns ─────
-test("Board.tsx LINEAR_COLS includes 'Triage' column key", () => {
-  // Extract the LINEAR_COLS initializer and check it contains the Triage key
-  const re = /const\s+LINEAR_COLS\b[^=]*=\s*\[[\s\S]*?\];/;
+// ── Requirement C: LINEAR_COLUMNS includes Triage and Todo columns ────────────
+test("board-display LINEAR_COLUMNS includes 'Triage' column key", () => {
+  // Extract the LINEAR_COLUMNS initializer and check it contains the Triage key
+  const re = /LINEAR_COLUMNS\b[^=]*=\s*\[[\s\S]*?\];/;
   const m = re.exec(boardSrc);
   expect(m).not.toBeNull();
   expect(m![0]).toContain('"Triage"');
 });
 
-test("Board.tsx LINEAR_COLS includes 'Todo' column key", () => {
-  const re = /const\s+LINEAR_COLS\b[^=]*=\s*\[[\s\S]*?\];/;
+test("board-display LINEAR_COLUMNS includes 'Todo' column key", () => {
+  const re = /LINEAR_COLUMNS\b[^=]*=\s*\[[\s\S]*?\];/;
   const m = re.exec(boardSrc);
   expect(m).not.toBeNull();
   expect(m![0]).toContain('"Todo"');

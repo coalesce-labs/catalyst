@@ -16,6 +16,7 @@ import {
   countReviveEvents,
   countDistinctRevivingTickets,
   countRemediateCycles,
+  hasCompleteEvent,
   __resetEventScanIndexForTest,
   __phaseEventsLengthForTest,
   countTicketEventsInWindow,
@@ -476,5 +477,57 @@ describe("countTicketEventsInWindow (CTL-671)", () => {
     expect(
       countTicketEventsInWindow({ ticket: "CTL-9", windowMs: 60_000, now: () => now, path })
     ).toBe(1);
+  });
+});
+
+// CTL-778: hasCompleteEvent — has a phase.<phase>.complete.<ticket> event been observed?
+describe("hasCompleteEvent", () => {
+  beforeEach(() => __resetEventScanIndexForTest());
+
+  test("true after a phase.<phase>.complete.<ticket> envelope", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "plan", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(hasCompleteEvent({ ticket: "CTL-1", phase: "plan", path })).toBe(true);
+  });
+
+  test("false when only a different phase completed", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "research", action: "complete", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(hasCompleteEvent({ ticket: "CTL-1", phase: "plan", path })).toBe(false);
+  });
+
+  test("suffix is exact (CTL-9 never matches CTL-90)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "plan", action: "complete", ticket: "CTL-90", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(hasCompleteEvent({ ticket: "CTL-9", phase: "plan", path })).toBe(false);
+  });
+
+  test("missing log → false (cold start)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "evtscan-"));
+    expect(hasCompleteEvent({ ticket: "CTL-1", phase: "plan", path: join(dir, "events.jsonl") })).toBe(false);
+  });
+
+  test("false when only a revive event exists (not a complete)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "plan", action: "revive", ticket: "CTL-1", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(hasCompleteEvent({ ticket: "CTL-1", phase: "plan", path })).toBe(false);
+  });
+
+  test("true for any phase segment (implement, verify, etc.)", () => {
+    const { path } = tempLog([
+      makeEvent({ phase: "implement", action: "complete", ticket: "CTL-5", ts: "2026-06-08T00:00:00Z" }),
+    ]);
+    expect(hasCompleteEvent({ ticket: "CTL-5", phase: "implement", path })).toBe(true);
+  });
+
+  test("returns false when ticket or phase is missing", () => {
+    const { path } = tempLog([]);
+    expect(hasCompleteEvent({ ticket: "", phase: "plan", path })).toBe(false);
+    expect(hasCompleteEvent({ ticket: "CTL-1", phase: "", path })).toBe(false);
+    expect(hasCompleteEvent({ path })).toBe(false);
   });
 });

@@ -55,7 +55,7 @@ You usually don't edit this by hand. When you run `setup-catalyst.sh` with a Lin
 The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 
 - **`execution-core`** — the autonomous daemon. It watches your board, picks up ready tickets, and runs them with no command from you. This is the away-from-keyboard mode.
-- **`phase-agents`** — runs each ticket as nine short background jobs, one per step.
+- **`phase-agents`** — runs each ticket as ten short background jobs, one per step.
 - **`oneshot-legacy`** — one long-running job per ticket. The older default.
 
 ```json
@@ -79,7 +79,8 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.dispatchMode` | `oneshot-legacy` | Which run mode to use (above) |
 | `orchestration.maxParallel` | `3` | How many tickets run at once |
 | `orchestration.worktreeDir` | `~/catalyst/wt/<projectKey>` | Where worktrees are created |
-| `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy` |
+| `orchestration.pluginDirs` | unset | Path(s) to the plugin checkout(s) workers run from (`<checkout>/plugins/dev`). Set by `setup-plugin-source.sh`; resolved by `phase-agent-dispatch` and refreshed by `catalyst-stack hotpatch` / merge-to-main. String or `:`-joined array. May also live in the machine config (Layer 2); the `CATALYST_PLUGIN_DIRS` env var overrides both. |
+| `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
 | `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
 | `orchestration.stalePrRescue.enabled` | `true` | Periodically rescue orphaned PRs that drifted to DIRTY or BEHIND after their workers died. |
@@ -94,6 +95,10 @@ For `execution-core` mode, the number of workers comes from a separate committed
 ### Which tickets the daemon picks up
 
 In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets are ready — for example, `status: "Ready"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also needs six Linear states to exist — `Ready`, `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates.
+
+If the registry is missing (a fresh or headless host), enroll a project with
+`catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the
+file by hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
 
 ## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
 

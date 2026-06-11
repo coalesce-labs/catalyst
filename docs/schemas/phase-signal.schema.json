@@ -25,6 +25,7 @@
         "pr",
         "monitor-merge",
         "monitor-deploy",
+        "teardown",
         "remediate"
       ]
     },
@@ -59,7 +60,7 @@
     },
     "worktreePath": {
       "type": ["string", "null"],
-      "description": "Absolute filesystem path to the git worktree created for this ticket/phase. null for phases that do not create a worktree (e.g. monitor-merge, monitor-deploy on some configurations).",
+      "description": "Absolute filesystem path to the git worktree created for this ticket/phase. null for phases that do not create a worktree (e.g. monitor-merge, monitor-deploy, teardown on some configurations).",
       "examples": ["/Users/ryan/catalyst/workspaces/CTL-123"]
     },
     "startedAt": {

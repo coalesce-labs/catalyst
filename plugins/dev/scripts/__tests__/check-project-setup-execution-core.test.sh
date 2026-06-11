@@ -33,10 +33,10 @@ build_project() {
   # stateMap (the authored contract) only.
   local state_map
   if [[ $full == "1" ]]; then
-    state_map='{"backlog":"Backlog","todo":"Ready","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","verifying":"Validate","reviewing":"Validate","inReview":"PR","done":"Done","canceled":"Canceled"}'
+    state_map='{"backlog":"Backlog","todo":"Todo","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","verifying":"Validate","reviewing":"Validate","inReview":"PR","done":"Done","canceled":"Canceled"}'
   else
     # missing Validate and PR from stateMap values
-    state_map='{"backlog":"Backlog","todo":"Ready","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","done":"Done","canceled":"Canceled"}'
+    state_map='{"backlog":"Backlog","todo":"Todo","triage":"Triage","research":"Research","planning":"Plan","inProgress":"Implement","done":"Done","canceled":"Canceled"}'
   fi
 
   cat > "$dir/.catalyst/config.json" <<EOF
@@ -57,7 +57,7 @@ EOF
   mkdir -p "${catalyst_dir}/execution-core"
   if [[ $registry == "1" ]]; then
     cat > "${catalyst_dir}/execution-core/registry.json" <<EOF
-{ "projects": [ { "team": "CTL", "repoRoot": "${dir}", "eligibleQuery": { "status": "Ready" } } ] }
+{ "projects": [ { "team": "CTL", "repoRoot": "${dir}", "eligibleQuery": { "status": "Todo" } } ] }
 EOF
   else
     echo '{ "projects": [] }' > "${catalyst_dir}/execution-core/registry.json"
@@ -121,6 +121,19 @@ if ! grep -qiE "contract state|registry entry" <<<"$OUT4"; then
 else
   fail "fully-configured execution-core repo emits no execution-core warning"
   echo "$OUT4" | sed 's/^/    /'
+fi
+
+# ─── Test 4b: CTL-722 — no "Ready missing" false-positive on post-cutover map ─
+# After CTL-722 the contract list is (Todo …), so a correctly-configured repo
+# with todo→"Todo" in the stateMap must not trigger a contract-state warning.
+P4B="${SCRATCH}/p4b"
+CD4B="$(build_project "$P4B" "execution-core" 1 1)"
+OUT4B="$(run_check "$P4B" "$CD4B" || true)"
+if ! grep -qi "Ready.*missing\|missing.*Ready\|contract state.*Ready" <<<"$OUT4B"; then
+  pass "CTL-722: no spurious 'Ready missing' warning on post-cutover map (Todo)"
+else
+  fail "CTL-722: no spurious 'Ready missing' warning on post-cutover map (Todo)"
+  echo "$OUT4B" | sed 's/^/    /'
 fi
 
 # ─── Test 5: execution-core + missing registry entry → hard error (CTL-578) ──

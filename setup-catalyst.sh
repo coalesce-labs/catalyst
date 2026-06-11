@@ -407,11 +407,10 @@ update_config_with_linear_states() {
 }
 
 # Ensure the execution-core Linear-state contract (CTL-564). A thin wrapper:
-# only when the resolved config's orchestration.dispatchMode is "execution-core"
-# does it invoke the standalone setup-execution-core-states.sh, which ensures the
-# contract states exist, writes the 9->5 collapse stateMap, refreshes stateIds,
-# and upserts the central registry entry. For phase-agents / oneshot-legacy repos
-# this is a silent no-op. A non-zero exit from the standalone script (e.g. a
+# invokes setup-execution-core-states.sh for every --full repo so the contract
+# states, collapse stateMap, and registry entry are provisioned regardless of
+# dispatchMode (CTL-722: the stateMap write is idempotent — the states script
+# preserves a template-default or user-customised map). A non-zero exit (e.g. a
 # Linear-permission failure) is tolerated (|| true) so it never aborts setup.
 setup_execution_core_states() {
 	# Resolve config the same way update_config_with_linear_states does:
@@ -422,10 +421,10 @@ setup_execution_core_states() {
 	fi
 	[[ -f $config_file ]] || return 0
 
-	local dispatch_mode
-	dispatch_mode=$(jq -r '.catalyst.orchestration.dispatchMode // empty' "$config_file" 2>/dev/null)
-	# Gate: only execution-core repos get the state-contract step.
-	[[ $dispatch_mode == "execution-core" ]] || return 0
+	# CTL-722: run the state-contract step for every --full repo, not only
+	# execution-core ones, so a fresh phase-agents repo provisions the contract
+	# states + registry entry. The stateMap write is idempotent (the states
+	# script preserves a template-default or user-customised map).
 
 	# Locate the standalone script — installed plugin root or the repo checkout.
 	local states_script=""

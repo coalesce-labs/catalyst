@@ -3,7 +3,21 @@
 // Vite config import assembleBoard() without a TS7016 implicit-any error.
 // Keep in sync with the object assembled in board-data.mjs.
 
-export type BoardActiveState = "active" | "needs-human" | "stuck" | null;
+// CTL-928: "dead" joins the liveness states — a worker whose DURABLE bg-job state
+// (~/.claude/jobs/<id>/state.json) is terminal (stopped/failed/done/blocked) or
+// whose job dir is gone, regardless of a phase signal still saying `running`. A
+// dead worker is excluded from in-flight + consumed capacity.
+export type BoardActiveState = "active" | "stuck" | "dead" | null;
+
+/** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
+ *  the node-aware surfaces can attribute/group by host. `name` is the
+ *  configurable host name (CATALYST_HOST_NAME / os.hostname() minus ".local");
+ *  `id` is sha256(name)[:16] — identical across the bash/mjs/ts host-identity
+ *  primitives. Same shape as the read-model contract's HostRef. */
+export interface BoardHostRef {
+  name: string;
+  id: string;
+}
 
 export interface BoardWorker {
   name: string;
@@ -18,7 +32,31 @@ export interface BoardWorker {
   team: string;
   runtimeMs: number | null;
   costUSD: number | null;
+  /** CC-UUID from `claude agents --json .sessionId` (Prometheus/Loki claude-code key). */
   sessionId: string;
+  /** CTL-888 (BFF6) P6: exact wall-clock start (epoch ms) for precise elapsed. */
+  startedAt: number | null;
+  /** CTL-888 (BFF6) P7: OS pid of the bg worker. */
+  pid: number | null;
+  /** CTL-888 (BFF6) P7: catalyst `sess_…` id (catalyst.session heartbeat key); null when unknown. */
+  catalystSessionId: string | null;
+  /** CTL-928: the durable `claude --bg` job id this worker's liveness was derived
+   *  from (read off the phase signal). null when no signal carried one. Optional so
+   *  existing BoardWorker fixtures stay valid; the runtime always populates it. */
+  bgJobId?: string | null;
+  /** CTL-922 (BFF10): the node owning this worker, from the phase signal
+   *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
+   *  null when no host is named (single-host resolves to the one node). */
+  host: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation, from the durable fence projection
+   *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
+   *  isFenceCurrent without a live attachment fetch. null when no fence. */
+  generation: number | null;
+  /** CTL-947: true when the worker is parked waiting for a human prompt —
+   *  derived from the durable bg-job state "blocked" (the Claude Code signal
+   *  that the job needs user input / a permission grant). false otherwise.
+   *  Optional so existing BoardWorker fixtures stay valid without back-fill. */
+  waitingOnUser?: boolean;
 }
 
 export interface BoardPhaseCost {
@@ -33,6 +71,8 @@ export interface BoardPhaseTiming {
   durationMs: number | null;
   startedAt: string | null;
   completedAt: string | null;
+  /** CTL-888 (BFF6) P5: per-phase model for the spine + gantt; null when absent. */
+  model: string | null;
 }
 
 export interface BoardCurrentPhase {
@@ -59,6 +99,10 @@ export interface BoardTicket {
   lastActiveMs: number | null;
   priority: number;
   estimate: number | null;
+  /** CTL-954: estimation method from triage.json (fibonacci/tShirt/exponential/linear); null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-954: human-readable estimate (e.g. "M" for tShirt 2, "5" for fibonacci 5); null when estimate is null. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
   costUSD: number | null;
@@ -72,6 +116,25 @@ export interface BoardTicket {
   held: "blocked" | "waiting" | null;
   /** Dependency ids a `blocked` hold is waiting on (from triage.json). */
   blockers: string[];
+  /** CTL-901 (HOME3): ISO applied-at of the held (blocked/waiting) labels, from
+   *  the durable ticket_state.held_since the broker projects (BFF11 / CTL-923).
+   *  The honest "how long has it been waiting on you" anchor; null when the
+   *  durable cache has no stamp (rendered unavailable, never fabricated). Only
+   *  meaningful while `held` is set. */
+  heldSince: string | null;
+  /** CTL-901 (HOME3): ISO wall-clock start of the ticket's CURRENT phase
+   *  (deriveCurrentPhase's startedAt) — the "how long has it been running / in
+   *  its current state" anchor for the running set. null when the surfaced phase
+   *  carried no startedAt. */
+  currentPhaseSince: string | null;
+  /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
+   *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
+   *  null when no host is named (single-host resolves to the one node). */
+  host: BoardHostRef | null;
+  /** CTL-922 (BFF10): the fence generation, from the durable fence projection
+   *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
+   *  isFenceCurrent without a live attachment fetch. null when no fence. */
+  generation: number | null;
 }
 
 export interface BoardQueueItem {
@@ -84,17 +147,33 @@ export interface BoardQueueItem {
   team: string;
   rank: number;
   estimate: number | null;
+  /** CTL-954: estimation method from triage.json; null when absent. */
+  estimateMethod?: string | null;
+  /** CTL-954: human-readable estimate display; null when estimate is null. */
+  estimateDisplay?: string | null;
   scope: string | null;
   project: string | null;
+  /** CTL-922 (BFF10): the node owning this queued ticket, from the durable fence
+   *  projection owner_host (BFF11); null when no fence attachment observed. */
+  host: BoardHostRef | null;
 }
 
 export interface BoardConfig {
   maxParallel: number;
+  /** CTL-928: LIVE in-flight workers (dead bg-jobs excluded). */
   inFlight: number;
+  /** CTL-928: maxParallel − live inFlight — true free capacity (dead workers no
+   *  longer suppress it). */
   freeSlots: number;
   active: number;
   working: number;
   stuck: number;
+  /** CTL-928: workers whose durable bg-job is dead (terminal state.json or gone
+   *  job dir) yet still listed by `claude agents`. Surfaced so the operator sees
+   *  the corpses; they do NOT consume capacity (excluded from inFlight/freeSlots).
+   *  Optional so existing BoardConfig fixtures stay valid; the runtime always
+   *  populates it via deriveCapacity. */
+  dead?: number;
 }
 
 export interface BoardPayload {
@@ -107,12 +186,123 @@ export interface BoardPayload {
 }
 
 export const PHASE_ORDER: string[];
+/** CTL-972: the ancillary remediate phase — not in PHASE_ORDER (cycles with
+ *  verify), but a real phase-agent type. Used by derivePhaseWithRemediate to
+ *  unify ticket.phase with the worker/queue's phase-agent-type value. */
+export const REMEDIATE_PHASE: string;
 export const PHASE_TO_LINEAR: Record<string, string>;
 export const TERMINAL: Set<string>;
+/** CTL-928: the `claude --bg` job-lifecycle terminal `state` values (distinct from
+ *  the worker-signal TERMINAL set). In lock-step with recovery.mjs. */
+export const TERMINAL_JOB_STATES: Set<string>;
+/** CTL-928: the synthetic current-phase that marks a genuinely pipeline-done
+ *  ticket (deriveCurrentPhase collapses terminal monitor-deploy/teardown to it). */
+export const PIPELINE_DONE_PHASE: string;
 export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+
+/** CTL-928: a single ticket's lane on the queue board (live | between-phases |
+ *  recent-done). Honors the terminal-intermediate vs pipeline-done distinction. */
+export type BoardLane = "live" | "between-phases" | "recent-done";
+
+/** CTL-928: the already-read `claude --bg` job state (state.json) shape consumed
+ *  by bgJobLifecycle — { state, firstTerminalAt }, or null when the job dir is gone. */
+export interface BgJobState {
+  state: string | null;
+  firstTerminalAt: string | null;
+}
+
+/** CTL-928: read a `claude --bg` job's durable state from
+ *  ~/.claude/jobs/<bgJobId>/state.json (honours CATALYST_REVIVE_JOBS_DIR). Returns
+ *  { state, firstTerminalAt }, or null when the job dir is gone. A present-but-
+ *  unreadable state.json yields { state:null, firstTerminalAt:null } (alive). Never
+ *  throws. */
+export function readBgJobState(bgJobId: string | null | undefined): Promise<BgJobState | null>;
+
+/** CTL-928: PURE read-model mirror of recovery.mjs::jobLifecycle. null jobState →
+ *  "dead-gone"; firstTerminalAt set or terminal `state` → "dead-terminal"; else
+ *  "alive". mtime is intentionally NOT consulted (CTL-662 fan-out trap). */
+export function bgJobLifecycle(jobState: BgJobState | null): "dead-gone" | "dead-terminal" | "alive";
+
+/** CTL-928: true iff bgJobLifecycle(jobState) is not "alive" (dead-gone or
+ *  dead-terminal). null jobState → dead. */
+export function isBgJobDead(jobState: BgJobState | null): boolean;
+
+/** CTL-928: true iff a board worker's derived activeState is "dead". A dead worker
+ *  is excluded from ticketIds, inFlight, freeSlots, and the "active" count. */
+export function isWorkerDead(worker: { activeState?: BoardActiveState } | null | undefined): boolean;
+
+/** CTL-928: PURE capacity summary — dead bg-workers excluded from inFlight +
+ *  freeSlots, surfaced as `dead`. Drives the board config block. */
+export function deriveCapacity(
+  workers: ReadonlyArray<{ activeState?: BoardActiveState; working?: boolean }>,
+  maxParallel: number,
+): BoardConfig;
+
+/** CTL-928: classify a worker's top-level liveness — durable bg-job state FIRST
+ *  (a `running` signal is not proof of life), transcript age second. Returns
+ *  "dead" | "stuck" | "active". `jobState` is the worker's read bg-job state (or
+ *  null); `bgKnown` distinguishes a positively-read bg state (a dead verdict is
+ *  trustworthy) from an unresolvable bg_job_id (fall back to transcript age). */
+export function deriveActiveState(
+  ticket: string,
+  phase: string,
+  ageMs: number | null,
+  jobState: BgJobState | null,
+  bgKnown: boolean,
+): Promise<"dead" | "stuck" | "active">;
+
+/** CTL-928: PURE single-source lane classifier for a non-queued ticket — "live"
+ *  (a live, non-dead worker attached), "recent-done" (phase === PIPELINE_DONE_PHASE),
+ *  else "between-phases" (terminal-intermediate / dead-but-running, no live worker). */
+export function laneFor(ticket: {
+  workerStatus: string | null;
+  activeState: BoardActiveState;
+  phase: string;
+}): BoardLane;
 export function buildPhaseSummary(phaseSigs: unknown[], now: number): BoardPhaseTiming[];
 export function deriveCurrentPhase(phaseSigs: unknown[]): BoardCurrentPhase;
-export function deriveActiveState(ticket: string, phase: string, ageMs: number | null, dir?: string): Promise<BoardActiveState>;
+/** CTL-972: derive a ticket's current phase, overlaying the remediate signal on
+ *  top of the PHASE_ORDER-based result. Returns phase='remediate' when the
+ *  remediate agent is active (non-terminal) OR when remediate was the most-recently-
+ *  active phase (terminal but more recent than the base phase). Returns the
+ *  deriveCurrentPhase result unchanged when remediateSig is null/absent. PURE. */
+export function derivePhaseWithRemediate(
+  phaseSigs: unknown[],
+  remediateSig: unknown | null | undefined,
+): BoardCurrentPhase;
+/** Build a thin Todo-column BoardTicket from an eligible queue entry (CTL-767). */
+export function synthesizeQueuedTicket(
+  eligible: unknown,
+  linfo: Record<string, unknown>,
+): BoardTicket;
 export function assembleBoard(): Promise<BoardPayload>;
+/** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
+ *  sha256(name)[:16]); null for a null/empty name. */
+export function hostRefFromName(name: unknown): BoardHostRef | null;
+/** CTL-922 (BFF10): resolve an entity's owning host — phase-signal host:{name,id}
+ *  first (CTL-852), else the durable fence projection owner_host (BFF11). */
+export function deriveHost(
+  phaseSigs: unknown[],
+  fence?: { ownerHost?: string | null },
+): BoardHostRef | null;
+/** CTL-922 (BFF10): resolve an entity's fence generation — durable fence
+ *  projection (BFF11) first, else the phase signal generation; null when neither. */
+export function deriveGeneration(
+  phaseSigs: unknown[],
+  fence?: { generation?: number | null },
+): number | null;
+
+/**
+ * CTL-887 (BFF5): cache-only peek of the resident transcript-path cache. Returns
+ * the absolute `~/.claude/projects/<dir>/<sessionId>.jsonl` path if board
+ * assembly has already resolved it, or null on a miss (no directory scan).
+ */
+export function peekTranscriptCache(sessionId: string): string | null;
+
+/**
+ * CTL-733: resolve a sessionId to its transcript `.jsonl` path, caching the hit.
+ * Falls back to a single project-dir scan only on a cache miss.
+ */
+export function resolveTranscript(sessionId: string): Promise<string | null>;

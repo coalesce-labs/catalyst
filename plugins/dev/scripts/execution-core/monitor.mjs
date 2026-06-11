@@ -33,7 +33,11 @@ import {
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
   log,
+  getHostName,      // CTL-862
+  getClusterHosts,  // CTL-862
 } from "./config.mjs";
+import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
+import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
@@ -44,6 +48,11 @@ import { applyTriageStatus as defaultApplyTriageStatus, applyAssignee as default
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
+import {
+  recordReconcileSuccess,
+  recordReconcileFailure,
+  __resetReconcileHealthForTests,
+} from "./reconcile-health.mjs";
 
 // DRAG_OUT_STATES — the Linear workflow states that signal "stop work on this
 // ticket". The monitor classifies these as a kill: remove the ticket from the
@@ -100,6 +109,8 @@ export function parseIssueUpdatedEvent(event) {
     toLabels: payload.toLabels ?? null,
     toProject: payload.toProject ?? null,
     toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
+    // CTL-957: estimate from the event payload (may be undefined when absent).
+    toEstimate: typeof payload.toEstimate === "number" ? payload.toEstimate : ("toEstimate" in payload ? null : undefined),
     description: typeof payload.description === "string" ? payload.description : null, // CTL-749
     descriptionChanged: payload.descriptionChanged === true, // CTL-749
     actorId: payload.actorId ?? null,   // CTL-749
@@ -162,12 +173,16 @@ export function handleIssueUpdatedEvent(
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
     if (ticketMatchesQuery(query, parsed)) {
-      upsertTicket(query.team, {
+      const upd = {
         identifier: parsed.identifier,
         state: parsed.toState,
         priority: parsed.toPriority,
         project: parsed.toProject ?? null,
-      });
+      };
+      // CTL-957: forward estimate into the eligible projection when present
+      // (undefined = absent from payload = keep stored value).
+      if (parsed.toEstimate !== undefined) upd.estimate = parsed.toEstimate;
+      upsertTicket(query.team, upd);
     } else {
       removeTicket(query.team, parsed.identifier);
     }
@@ -209,7 +224,16 @@ const knownProjects = new Set();
 // edit is picked up without a daemon restart. A failed poll THROWS inside
 // runEligibleQuery; we log and return, preserving the prior eligible set
 // rather than flattening it to empty.
-export function reconcileProject(team, { exec } = {}) {
+//
+// CTL-867: a PERSISTENT per-team poll failure (e.g. the team's status references
+// a removed Linear state, so `linearis issues list --team X --status Ready`
+// exits 1 every tick) is no longer ONLY a buried log.error. Each call records
+// the per-team reconcile outcome (recordReconcileSuccess / recordReconcileFailure);
+// after N consecutive failures the health tracker escalates a canonical
+// `monitor.reconcile.failing.<TEAM>` event onto the unified event log so the
+// orch-monitor dashboard surfaces the silently-starving team, and a recovering
+// poll clears the alert. `appendHealthEvent` is an injectable test seam.
+export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
   const entry = getProjectConfig(team);
   if (!entry) {
     log.warn({ team }, "reconcile: no registry entry for team — skipping");
@@ -221,8 +245,15 @@ export function reconcileProject(team, { exec } = {}) {
     tickets = runEligibleQuery(query, { exec });
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
+    // CTL-867: escalate persistent failures beyond the buried log line.
+    recordReconcileFailure(team, err.message, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
     return;
   }
+  // CTL-867: the poll succeeded — reset the failure streak, refresh the
+  // last-successful-refresh marker, and clear any standing alert. Recorded
+  // BEFORE the projection write so a successful poll counts as a recovery even
+  // if the (rare) projection write below fails.
+  recordReconcileSuccess(team, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
   try {
     setProjectEligible(team, tickets, { source: "reconcile", query });
   } catch (err) {
@@ -242,10 +273,10 @@ export function reconcileProject(team, { exec } = {}) {
 // reconcileAll — full reconcile of every registered team (the missed-webhook
 // backstop). Re-reads registry.json each call so a team added to the registry
 // is picked up and one removed is dropped within one tick.
-export function reconcileAll({ exec } = {}) {
+export function reconcileAll({ exec, appendHealthEvent } = {}) {
   const projects = listProjects();
   const seen = new Set(projects.map((p) => p.team));
-  for (const p of projects) reconcileProject(p.team, { exec });
+  for (const p of projects) reconcileProject(p.team, { exec, appendHealthEvent });
   for (const stale of knownProjects) {
     if (!seen.has(stale)) {
       dropProject(stale);
@@ -312,6 +343,10 @@ export function handleStateChangedEvent(
     gateway,
     fetchAssignee = fetchTicketAssignee,
     applyAssignee = defaultApplyAssignee,
+    // CTL-862: cross-host coordination seams.
+    hosts = undefined,
+    hostName = undefined,
+    claimDispatch = claimDispatchSync,
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -350,6 +385,7 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
+          hosts, hostName, claimDispatch, // CTL-862
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -401,6 +437,7 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
+          hosts, hostName, claimDispatch, // CTL-862
         });
       } else {
         log.debug(
@@ -477,9 +514,25 @@ function dispatchTriage(identifier, {
   gateway,
   fetchAssignee = fetchTicketAssignee,
   applyAssignee = defaultApplyAssignee,
+  // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
+  hosts = undefined,
+  hostName = undefined,
+  claimDispatch = claimDispatchSync,
 }) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
+    return false;
+  }
+  // CTL-862: HRW ownership filter. Resolve roster/self lazily per call so hot
+  // roster reloads need no restart. Single-host roster → ownedBy is identity.
+  const roster = hosts ?? getClusterHosts();
+  const self = hostName ?? getHostName();
+  const multiHost = roster.length > 1;
+  if (!ownedBy(identifier, roster, self)) {
+    log.debug(
+      { identifier, self, roster },
+      "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
+    );
     return false;
   }
   if (budget && budget.remaining <= 0) {
@@ -499,6 +552,29 @@ function dispatchTriage(identifier, {
       log.info(
         { identifier, known: a.known, assignee: a.known ? (a.assignee ?? null) : undefined },
         "monitor: triage dispatch skipped — respect-assignment (CTL-781)"
+      );
+      return false;
+    }
+  }
+  // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
+  // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
+  // The claim returns a won {generation} here too — CTL-862 supplies a
+  // claim+generation on this triage path.
+  //
+  // CTL-864 reduced scope: even with a won generation in hand, triage is
+  // dispatched WITHOUT forwarding a cross-host fence token. phase-triage's only
+  // side-effects (its Linear mirror comment + Todo→Triage transition) are
+  // idempotent and cheap, so an unfenced double-triage from a partitioned host is
+  // benign relative to the push / PR / merge side-effects the scheduler-dispatched
+  // phases (now fenced) guard against. We therefore intentionally do NOT fence
+  // triage nor persist its generation — a fast-follow ticket will plumb the
+  // generation through if triage ever needs fencing.
+  if (multiHost) {
+    const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
+    if (!claim.won) {
+      log.debug(
+        { identifier, self },
+        "ctl-862: lost cross-host claim — another host owns this triage dispatch, deferring"
       );
       return false;
     }
@@ -573,6 +649,10 @@ export function sweepMissingTriage({
   gateway,
   fetchAssignee = fetchTicketAssignee,
   applyAssignee = defaultApplyAssignee,
+  // CTL-862: cross-host coordination seams.
+  hosts = undefined,
+  hostName = undefined,
+  claimDispatch = claimDispatchSync,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -596,6 +676,7 @@ export function sweepMissingTriage({
         gateway,
         fetchAssignee,
         applyAssignee,
+        hosts, hostName, claimDispatch, // CTL-862
       });
     }
   }
@@ -852,4 +933,5 @@ export function __resetForTests() {
   leftoverBuf = "";
   tailerOpts = {};
   resetLivenessCache();
+  __resetReconcileHealthForTests(); // CTL-867: clear per-team reconcile-health map
 }

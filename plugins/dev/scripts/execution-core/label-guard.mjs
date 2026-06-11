@@ -16,7 +16,7 @@
 //     dispatch cool-down rationale in scheduler.mjs::dispatchCooldownPath and
 //     memory project_scheduler_marker_under_workers_excludes_ticket).
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { log } from "./config.mjs";
 
@@ -28,36 +28,120 @@ import { log } from "./config.mjs";
 // record terminal outcomes:
 //
 //   .applied — applyLabel returned applied:true. Happy path.
-//   .skipped — applyLabel returned reason:"missing-label". The workspace lacks
-//              the label; retrying inside this daemon's lifetime would just
-//              storm the Linear API (CTL-585). An operator creates the label
-//              in the Linear UI and deletes this marker to re-arm the apply.
+//   .skipped — applyLabel returned an UNRECOVERABLE reason ("missing-label": the
+//              workspace lacks the label; "exclusive-conflict" (CTL-834): the
+//              label's exclusive-group sibling is already on the ticket). Either
+//              way the add can never land this run, so retrying every tick would
+//              just storm the Linear API (CTL-585). An operator fixes the cause
+//              (create the label / clear the sibling) and deletes this marker to
+//              re-arm the apply.
 //
 // Transient failures (reason:"rate-limited", "transient", undefined) write no
 // marker so the next tick retries — CTL-558's recovery contract. CTL-638 pairs
 // this with the escalation cool-down below to break the per-tick storm even
 // when the transient-failure path keeps re-attempting the write.
-export function labelOnce(orchDir, ticket, label, writeStatus) {
-  const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
-  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return;
+// labelMarkerBase — shared path prefix for the once-marker files used by
+// labelOnce and clearStalledLabel (single source of truth for the marker path).
+function labelMarkerBase(orchDir, ticket, label) {
+  return join(orchDir, "workers", ticket, `.linear-label-${label}`);
+}
+
+// UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
+// daemon lifetime (CTL-834); labelOnce writes its .skipped marker for these to
+// stop the per-tick retry storm. "missing-label": the workspace lacks the label;
+// "exclusive-conflict": the label's exclusive-group sibling is already present.
+const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
+
+// CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
+// AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
+// operator-visible "intent.ineffective" event instead of silently writing
+// .skipped and logging a warn. The .skipped marker is still written so the
+// per-tick retry storm stays suppressed — the difference is operator visibility.
+// Default null → legacy behavior (all existing callers unaffected).
+//
+// CTL-962: returns a boolean so callers can bound side-effects (an operator
+// event, a counter) to the FIRST application only. Returns `false` when a
+// terminal marker (.applied/.skipped) already exists → this call is a no-op;
+// `true` when this call performed the write attempt (the once-application).
+// Existing callers ignore the return value, so this is backward-compatible.
+export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = null, env = process.env } = {}) {
+  const base = labelMarkerBase(orchDir, ticket, label);
+  if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) return false;
   try {
     const res = writeStatus.applyLabel({ ticket, label });
     // A fake that returns undefined (test stubs) is treated as success so
     // the once-semantics stay testable without a real result.
     if (res === undefined || res?.applied) {
       writeFileSync(`${base}.applied`, "");
-    } else if (res?.reason === "missing-label") {
+    } else if (UNRECOVERABLE_LABEL_REASONS.has(res?.reason)) {
       writeFileSync(`${base}.skipped`, "");
+      const reason = res.reason;
       log.warn(
-        { ticket, label },
-        "scheduler: label missing in workspace — skipping retries for this run"
+        { ticket, label, reason },
+        "scheduler: label unrecoverable (missing / exclusive-conflict) — skipping retries for this run"
       );
+      // CTL-936: emit operator-visible event when enforce mode is on.
+      if ((env.CATALYST_INTENTS_ENFORCE ?? "0") === "1" && typeof appendEvent === "function") {
+        try {
+          appendEvent({
+            "event.name": "intent.ineffective",
+            payload: {
+              kind: "label",
+              subject: ticket,
+              attempts: 1,
+              postcondition: { kind: "label", subject: ticket, label, present: true },
+              reason,
+            },
+          });
+        } catch (evtErr) {
+          log.warn(
+            { ticket, label, err: evtErr?.message },
+            "ctl-936: labelOnce appendEvent threw — continuing"
+          );
+        }
+      }
     }
   } catch (err) {
     log.warn(
       { ticket, label, err: err.message },
       "scheduler: label write-back threw — continuing tick"
     );
+  }
+  // CTL-962: reached only when no terminal marker existed at entry, i.e. this
+  // call performed the write attempt (the once-application for this lifetime).
+  return true;
+}
+
+// ─── CTL-646: clearStalledLabel — inverse of labelOnce ───
+//
+// Removes the Linear label AND deletes the once-marker(s) so the apply guard
+// re-arms. Both must happen together: deleting the marker without clearing the
+// label would let the daemon believe the label is gone while Linear still shows
+// it; clearing the label without deleting the marker would leave labelOnce
+// permanently disarmed. Best-effort and never throws (mirrors labelOnce).
+// The marker is deleted ONLY on a confirmed removal so a transient API failure
+// is retried next tick.
+export function clearStalledLabel(orchDir, ticket, label, writeStatus) {
+  const base = labelMarkerBase(orchDir, ticket, label);
+  try {
+    const res = writeStatus.removeLabel(ticket, label);
+    const finalize = (r) => {
+      // undefined (test stub) treated as success; otherwise require removed:true.
+      if (r === undefined || r?.removed) {
+        for (const suffix of [".applied", ".skipped"]) {
+          const p = `${base}${suffix}`;
+          if (existsSync(p)) { try { unlinkSync(p); } catch { /* best-effort */ } }
+        }
+      }
+    };
+    if (res && typeof res.then === "function") {
+      res.then(finalize).catch((err) =>
+        log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: removeLabel rejected — continuing"));
+    } else {
+      finalize(res);
+    }
+  } catch (err) {
+    log.warn({ ticket, label, err: err.message }, "clearStalledLabel: threw — continuing tick");
   }
 }
 

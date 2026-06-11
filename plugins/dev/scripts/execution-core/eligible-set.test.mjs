@@ -123,6 +123,115 @@ describe("setProjectEligible", () => {
     );
     expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
   });
+
+  test("CTL-878: a parent-only delta DOES rewrite the file (parent is in the content key)", async () => {
+    // A pre-fix projection lacks `parent`; the post-fix reconcile supplies it.
+    // Without parent in contentKey the rewrite is skipped and the read-layer
+    // parent-epic drop silently no-ops for steady-state eligible children.
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, parent: "A-9" }],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
+    const doc = JSON.parse(readFileSync(projFile("alpha"), "utf8"));
+    expect(doc.tickets[0].parent).toBe("A-9"); // parent persisted to disk
+  });
+
+  test("CTL-926: a blocked_by edge delta DOES rewrite the file (relations are in the content key)", async () => {
+    // A-1 starts blocked by A-2 (inverseRelations: A-2 blocks A-1). The blocker
+    // is then removed in Linear with NO state/priority/parent change. Pre-fix,
+    // contentKey ignored relations so the rewrite was skipped and the scheduler
+    // kept reading the stale blocked edge — the ticket stayed falsely blocked.
+    setProjectEligible(
+      "alpha",
+      [
+        {
+          identifier: "A-1",
+          state: "Todo",
+          priority: 1,
+          inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "A-2" } }] },
+        },
+      ],
+      { source: "reconcile", query: {} },
+    );
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    // Same identifier/state/priority/parent — only the blocker edge is gone.
+    setProjectEligible(
+      "alpha",
+      [{ identifier: "A-1", state: "Todo", priority: 1, inverseRelations: { nodes: [] } }],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBeGreaterThan(mtime1);
+    const doc = JSON.parse(readFileSync(projFile("alpha"), "utf8"));
+    expect(doc.tickets[0].inverseRelations.nodes).toEqual([]); // fresh edges persisted to disk
+  });
+
+  test("CTL-926: an edge-order-only permutation does NOT rewrite (signature is order-independent)", async () => {
+    // Two blockers in one order, then the same two in the reverse order. The set
+    // of edges is identical, so the signature must match and the write must skip.
+    setProjectEligible(
+      "alpha",
+      [
+        {
+          identifier: "A-1",
+          state: "Todo",
+          priority: 1,
+          inverseRelations: {
+            nodes: [
+              { type: "blocks", issue: { identifier: "A-2" } },
+              { type: "blocks", issue: { identifier: "A-3" } },
+            ],
+          },
+        },
+      ],
+      { source: "reconcile", query: {} },
+    );
+    const mtime1 = statSync(projFile("alpha")).mtimeMs;
+    await sleep(15);
+    setProjectEligible(
+      "alpha",
+      [
+        {
+          identifier: "A-1",
+          state: "Todo",
+          priority: 1,
+          inverseRelations: {
+            nodes: [
+              { type: "blocks", issue: { identifier: "A-3" } },
+              { type: "blocks", issue: { identifier: "A-2" } },
+            ],
+          },
+        },
+      ],
+      { source: "reconcile", query: {} },
+    );
+    expect(statSync(projFile("alpha")).mtimeMs).toBe(mtime1); // no spurious rewrite
+  });
+
+  test("CTL-926: a deleted projection file IS recreated on the next reconcile", () => {
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    expect(existsSync(projFile("alpha"))).toBe(true);
+    rmSync(projFile("alpha"), { force: true }); // simulate the incident's deleted file
+    expect(existsSync(projFile("alpha"))).toBe(false);
+    // Next reconcile delivers the same content; existsSync=false must bypass the
+    // skip-guard and rewrite the file.
+    setProjectEligible("alpha", [{ identifier: "A-1", state: "Todo", priority: 1 }], {
+      source: "reconcile",
+      query: {},
+    });
+    expect(existsSync(projFile("alpha"))).toBe(true);
+  });
 });
 
 describe("removeTicket", () => {

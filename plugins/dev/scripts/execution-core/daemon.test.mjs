@@ -5,7 +5,7 @@
 // functions so no real timers, Linear polls, or child processes run — the
 // composition logic is exercised deterministically.
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -34,8 +34,14 @@ import {
   readLinearBotWriteId,
   _isBotId,
 } from "./daemon.mjs";
-import { getEventLogPath } from "./config.mjs";
+import { getEventLogPath, log } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
+import {
+  recordHoldStop,
+  holdStopCooldownPath,
+  inHoldStopCooldown,
+  clearHoldStopCooldown,
+} from "./scheduler.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
@@ -381,6 +387,47 @@ describe("startDaemon", () => {
     expect(existsSync(pidFile)).toBe(false);
   });
 
+  // CTL-854: boot-warn when registry is empty — exactly once, names recovery verb
+  test("WARNs once when the registry is empty at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [],
+    });
+    const emptyWarns = warn.mock.calls.filter(
+      (c) => JSON.stringify(c).includes("registry") && JSON.stringify(c).includes("register"),
+    );
+    expect(emptyWarns.length).toBe(1);
+    warn.mockRestore();
+  });
+
+  test("does NOT warn when projects are registered at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [{ team: "CTL", repoRoot: catalystDir, eligibleQuery: null }],
+    });
+    const emptyWarns = warn.mock.calls.filter((c) => JSON.stringify(c).includes("register"));
+    expect(emptyWarns.length).toBe(0);
+    warn.mockRestore();
+  });
+
   test("reconciles when the registry changes (debounced)", async () => {
     let reconciled = 0;
     startDaemon({
@@ -393,7 +440,7 @@ describe("startDaemon", () => {
       watchRegistry: true,
       debounceMs: 20,
     });
-    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Ready" } });
+    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Todo" } });
     // Poll up to 2s rather than a fixed wait — fs.watch delivery latency plus
     // the debounce timer varies under concurrent full-suite load, so a fixed
     // 60ms wait is flaky. The reconcile only has to fire once.
@@ -633,7 +680,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
         orchestration: {
           executionCore: {
             maxParallel: 4,
-            eligibleQuery: { status: "Ready" },
+            eligibleQuery: { status: "Todo" },
           },
         },
       },
@@ -643,7 +690,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
     });
     expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
       maxParallel: 6,
-      eligibleQuery: { status: "Ready" },
+      eligibleQuery: { status: "Todo" },
     });
   });
 });
@@ -1141,6 +1188,90 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatched[0].ticket).toBe("CTL-1");
     expect(dispatched[0].phase).toBe("implement");
   });
+
+  test("CTL-768: stoppedForHold → dispatch with resumeSession from resolveSession", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push({ p, opts }),
+      removeLabel: async () => {},
+      resolveSession: (bg) => (bg === "held1234" ? "uuid-resume" : null),
+    });
+    expect(dispatched[0].opts.resumeSession).toBe("uuid-resume");
+    expect(dispatched[0].p).toBe("implement");
+  });
+
+  test("CTL-768: stoppedForHold → signal reset to stalled, marker cleared", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    recordHoldStop(orch, "CTL-1", "implement", 1_000);
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: () => {},
+      removeLabel: async () => {},
+      resolveSession: () => "uuid",
+    });
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.stoppedForHold).toBe(false);     // cleared
+    expect(inHoldStopCooldown(orch, "CTL-1", "implement", 2_000)).toBe(false); // cooldown cleared
+  });
+
+  test("CTL-768: stoppedForHold but resolveSession null → dispatch WITHOUT resume (cold fallback)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: () => null,
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+  });
+
+  test("CTL-768: no stoppedForHold → backward-compat (no resume, signal unchanged)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "x" }),
+    );
+    const dispatched = [];
+    const resolveSpy = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: (bg) => { resolveSpy.push(bg); return "x"; },
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+    expect(resolveSpy).toEqual([]);             // resolveSession never called
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("needs-input");     // not reset
+  });
 });
 
 // CTL-749: inbox writer factory functions
@@ -1496,5 +1627,94 @@ describe("readLinearBotWriteId (CTL-781)", () => {
     const bad = join(tmpDir, "bad.json");
     writeFileSync(bad, "not-json{{");
     expect(() => readLinearBotWriteId(bad, bad)).not.toThrow();
+  });
+});
+
+// ── CTL-862: daemon.mjs — CATALYST_CONFIG_FILE propagation + ownership boot-log ──
+//
+// Two independent daemon edits: propagate the resolved config path into process.env
+// so getClusterHosts() resolves the right repo regardless of cwd, and replace the
+// bare boot-log line with one reporting owned-vs-eligible ticket counts.
+describe("CTL-862 — daemon CATALYST_CONFIG_FILE propagation", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("propagates configPath into CATALYST_CONFIG_FILE when unset (CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_CONFIG_FILE;
+    const fakeConfigPath = join(catalystDir, "fake-config.json");
+    try {
+      startDaemon({ ...baseOpts(), configPath: fakeConfigPath });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(fakeConfigPath);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+
+  test("does NOT overwrite CATALYST_CONFIG_FILE already set (||= semantics, CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    const preExisting = "/pre-set/catalyst/config.json";
+    process.env.CATALYST_CONFIG_FILE = preExisting;
+    try {
+      startDaemon({ ...baseOpts(), configPath: "/new/config.json" });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(preExisting);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+});
+
+describe("CTL-862 — daemon boot-log ownership context", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("boot log carries host/owns/eligible/roster fields (CTL-862)", () => {
+    const infoSpy = spyOn(log, "info");
+    const ROSTER = ["mini", "mac-studio"];
+    const SELF = "mini";
+    const eligible = [{ identifier: "ENG-1" }, { identifier: "ENG-2" }];
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => eligible,
+        bootHosts: ROSTER,
+        bootHostName: SELF,
+      });
+      const bootCall = infoSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("daemon started")
+      );
+      expect(bootCall).toBeDefined();
+      const obj = bootCall[0];
+      expect(obj.host).toBe(SELF);
+      expect(Array.isArray(obj.roster)).toBe(true);
+      expect(obj.eligible).toBe(eligible.length);
+      expect(typeof obj.owns).toBe("number");
+      expect(obj.owns).toBeGreaterThanOrEqual(0);
+      expect(obj.owns).toBeLessThanOrEqual(eligible.length);
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });

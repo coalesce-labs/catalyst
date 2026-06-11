@@ -91,7 +91,7 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 - **execution-core/registry.json**: For `dispatchMode: execution-core` teams, the central
   `team → repoRoot → eligibleQuery` registry. The Linear-state contract that drives the
   execution-core daemon is **setup-tooling-owned** (design decision D8): `setup-catalyst.sh`
-  ensures the contract workflow states, writes the 9-phase → 5-state collapse `stateMap`, and
+  ensures the contract workflow states, writes the 10-phase → 5-state collapse `stateMap`, and
   upserts each team's registry entry. The execution-core daemon reads the registry directly
   (D4); the per-repo enrollment records CTL-554 wrote under `execution-core/projects/` and the
   `/orchestrate` enroll step they relied on were retired in CTL-582. All access flows through the
@@ -222,8 +222,8 @@ state — comms is observability and cross-worker coordination. See
 ## Phase-Agent Communication
 
 Orchestrators dispatched in `dispatchMode = "phase-agents"` spawn one short-lived `claude --bg`
-job per phase, walking the 9-phase pipeline (triage → research → plan → implement → verify →
-review → pr → monitor-merge → monitor-deploy — see `docs/orchestrator-overview.md`). Phase
+job per phase, walking the 10-phase pipeline (triage → research → plan → implement → verify →
+review → pr → monitor-merge → monitor-deploy → teardown — see `docs/orchestrator-overview.md`). Phase
 agents do **not** message each other directly. They communicate by **appending typed events to a
 single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator wakes on those
 events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
@@ -270,7 +270,7 @@ The rebase is otherwise unchanged from CTL-667:
 
 - **Fresh-only.** A resume dispatch (`--resume-session` set, CTL-658) skips it — the resumed
   session assumes the prior tree.
-- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`
+- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`/`teardown`
   phases are exempt. The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`.
 - **Local-only.** It never pushes and never touches the open PR; machine-local noise
   (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.

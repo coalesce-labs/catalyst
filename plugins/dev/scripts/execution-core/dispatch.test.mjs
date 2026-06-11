@@ -254,6 +254,51 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     expect(args).not.toContain("--resume-session");
     expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
   });
+
+  // CTL-990: an exec-looping phase-agent-dispatch (the recreate→rebase-refused
+  // recursion) blocked the daemon's synchronous spawn forever — no rc, no
+  // failure ladder. The spawn must carry a hard timeout + SIGKILL.
+  test("passes a hard timeout + SIGKILL so a wedged dispatch cannot block the daemon (CTL-990)", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    const { opts } = spawn.calls[0];
+    expect(opts.timeout).toBeGreaterThan(0);
+    expect(opts.killSignal).toBe("SIGKILL");
+  });
+
+  test("CATALYST_DISPATCH_TIMEOUT_MS overrides the spawn timeout (CTL-990)", () => {
+    const spawn = spy();
+    process.env.CATALYST_DISPATCH_TIMEOUT_MS = "12345";
+    try {
+      defaultRunPhaseAgent(
+        { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+        { spawn },
+      );
+    } finally {
+      delete process.env.CATALYST_DISPATCH_TIMEOUT_MS;
+    }
+    expect(spawn.calls[0].opts.timeout).toBe(12345);
+  });
+
+  // CTL-990: the recreate-once marker must be PER DISPATCH CHAIN (set only by
+  // phase-agent-dispatch's own exec). An ambient value in the daemon's env
+  // would pre-spend every fresh dispatch's recreate budget via ...process.env.
+  test("strips an ambient CATALYST_RECREATE_ATTEMPTED from the spawned env (CTL-990)", () => {
+    const spawn = spy();
+    process.env.CATALYST_RECREATE_ATTEMPTED = "1";
+    try {
+      defaultRunPhaseAgent(
+        { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+        { spawn },
+      );
+    } finally {
+      delete process.env.CATALYST_RECREATE_ATTEMPTED;
+    }
+    expect("CATALYST_RECREATE_ATTEMPTED" in spawn.calls[0].opts.env).toBe(false);
+  });
 });
 
 describe("dispatchTicket", () => {
@@ -446,5 +491,93 @@ describe("dispatchTicket — attempt thread-through (CTL-761)", () => {
     const dispatch = (a) => { calls.push(a); return { code: 0 }; };
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, attempt: 2 });
     expect(calls[0].attempt).toBe(2);
+  });
+});
+
+// CTL-864: clusterGeneration → CATALYST_CLUSTER_GENERATION env var in spawned process
+describe("defaultRunPhaseAgent — clusterGeneration env injection (CTL-864)", () => {
+  const spy = () => {
+    const calls = [];
+    const spawn = (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { status: 0, stdout: "ok", stderr: "" };
+    };
+    spawn.calls = calls;
+    return spawn;
+  };
+
+  test("sets CATALYST_CLUSTER_GENERATION when clusterGeneration provided", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1", clusterGeneration: 7 },
+      { spawn },
+    );
+    expect(spawn.calls[0].opts.env.CATALYST_CLUSTER_GENERATION).toBe("7");
+  });
+
+  test("does NOT set CATALYST_CLUSTER_GENERATION when clusterGeneration absent", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1" },
+      { spawn },
+    );
+    expect("CATALYST_CLUSTER_GENERATION" in spawn.calls[0].opts.env).toBe(false);
+  });
+
+  test("does NOT set CATALYST_CLUSTER_GENERATION when clusterGeneration is null", () => {
+    const spawn = spy();
+    defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", worktreePath: "/wt/CTL-1", clusterGeneration: null },
+      { spawn },
+    );
+    expect("CATALYST_CLUSTER_GENERATION" in spawn.calls[0].opts.env).toBe(false);
+  });
+});
+
+// CTL-864: dispatchTicket forwards clusterGeneration
+describe("dispatchTicket — clusterGeneration thread-through (CTL-864)", () => {
+  test("backward compat: no clusterGeneration → dispatch receives no clusterGeneration key", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "pr", { dispatch });
+    expect("clusterGeneration" in calls[0]).toBe(false);
+  });
+
+  test("forwards clusterGeneration to dispatch when provided", () => {
+    const calls = [];
+    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    dispatchTicket("/orch", "CTL-1", "pr", { dispatch, clusterGeneration: 7 });
+    expect(calls[0].clusterGeneration).toBe(7);
+  });
+});
+
+// CTL-864: defaultDispatch forwards clusterGeneration to runPhaseAgent
+describe("defaultDispatch — clusterGeneration passthrough (CTL-864)", () => {
+  const seams = () => {
+    const calls = [];
+    return {
+      resolveProject: () => ({ repoRoot: "/repo" }),
+      createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
+      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      calls,
+    };
+  };
+
+  test("forwards clusterGeneration to runPhaseAgent when set", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr", clusterGeneration: 7 },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].clusterGeneration).toBe(7);
+  });
+
+  test("clusterGeneration is undefined on a cold dispatch (no clusterGeneration)", () => {
+    const s = seams();
+    defaultDispatch(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "pr" },
+      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+    );
+    expect(s.calls[0].clusterGeneration).toBeUndefined();
   });
 });

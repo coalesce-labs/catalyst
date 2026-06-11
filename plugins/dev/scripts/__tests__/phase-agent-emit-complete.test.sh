@@ -568,6 +568,38 @@ SIGNAL_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
 assert_eq "turn cap hit (75)" "$PAYLOAD_REASON" "turn-cap path still carries failure_reason in event"
 assert_eq "turn cap hit (75)" "$SIGNAL_REASON" "turn-cap path still carries failureReason in signal"
 
+# CTL-1023: the work-type dimension (catalyst.ticket.type) rides on every phase
+# terminal event, resolved from workers/<ticket>/triage.json .classification.
+echo ""
+echo "Test 36 (CTL-1023): catalyst.ticket.type reads triage.json .classification"
+fresh_env t36
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"classification":"bug","estimated_scope":"small"}' >"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/triage.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+assert_eq "bug" "$TTYPE" "catalyst.ticket.type = classification from triage.json"
+
+echo ""
+echo "Test 37 (CTL-1023): catalyst.ticket.type defaults to 'unknown' with no triage.json"
+fresh_env t37
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+HAS_TTYPE=$(echo "$LINE" | jq -r '.attributes | has("catalyst.ticket.type")')
+assert_eq "true" "$HAS_TTYPE" "catalyst.ticket.type is present even with no classification"
+assert_eq "unknown" "$TTYPE" "catalyst.ticket.type defaults to 'unknown' (never inconsistently missing)"
+
+echo ""
+echo "Test 38 (CTL-1023): catalyst.ticket.type rides the .failed event too"
+fresh_env t38
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"classification":"feature"}' >"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/triage.json"
+"$EMIT_SCRIPT" --phase verify --ticket CTL-100 --status failed --reason "tests red" >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+assert_eq "feature" "$TTYPE" "catalyst.ticket.type present on failed event"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

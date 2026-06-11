@@ -31,6 +31,7 @@ import { homedir } from "node:os";
 import { parseEventTailChunk } from "./event-tail.mjs";
 import {
   getExecutionCoreDir,
+  getRegistryPath,
   getEventLogPath,
   log,
   EVENT_DEBOUNCE_MS,
@@ -38,10 +39,14 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readRatelimitPollerConfig,
+  getHostName,      // CTL-862
+  getClusterHosts,  // CTL-862
 } from "./config.mjs";
+import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
+import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
 import {
   recoverStartup,
@@ -52,7 +57,7 @@ import {
   reconcileAll,
   createTicketStateCache,
 } from "./index.mjs";
-import { Reaper, defaultReadActivePhaseSignal } from "./reaper.mjs";
+import { Reaper, defaultReadActivePhaseSignal, defaultReadSignalBgJobId } from "./reaper.mjs";
 import { startOrphanReaperTimer, readOrphanReaperConfig } from "./orphan-reaper-timer.mjs";
 import {
   startWorktreeRefreshTimer,
@@ -63,7 +68,7 @@ import {
   readStalePrRescueConfig,
 } from "./stale-pr-rescue-timer.mjs";
 import { DEFAULTS as RESCUE_DEFAULTS } from "./stale-pr-rescue.mjs";
-import { reconcileBootResume } from "./boot-resume.mjs";
+import { reconcileBootResume, processApprovedResumes } from "./boot-resume.mjs";
 // CTL-665: the committed executionCore concurrency reader — imported directly
 // (not via the index.mjs barrel, mirroring the orphan-reaper-timer import) so
 // main() can resolve the slot-ceiling config once and thread it into the
@@ -75,8 +80,10 @@ import {
   readExecutionCoreConcurrency,
   readExecutionCoreConcurrencyLayer2,
   mergeExecutionCoreConcurrency,
+  readAllEligibleTickets, // CTL-862: boot-log ownership count
+  clearHoldStopCooldown, // CTL-768
 } from "./scheduler.mjs";
-import { writeBootMarker, clearProgressMarks } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water
+import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
 import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
@@ -259,7 +266,7 @@ function ensureState(orchDir) {
 // and skipped, never fatal.
 export async function handleCommentWake(
   parsed,
-  { orchDir, dispatch, removeLabel, botUserId },
+  { orchDir, dispatch, removeLabel, botUserId, resolveSession = resolvePhaseSessionId },
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -292,13 +299,40 @@ export async function handleCommentWake(
     const parkedPhase = sig.parkedFrom ?? sig.phase;
     const handoffPath = sig.handoffPath ?? undefined;
 
+    // CTL-768: a held-stopped worker (process killed to free its slot) must be
+    // revived with --resume so it continues the paused conversation. Reset the
+    // signal to "stalled" first (so phase-agent-dispatch's idempotency guard
+    // accepts the re-dispatch — mirrors defaultReviveDispatch) and clear the
+    // marker so a future re-park starts clean. A still-alive worker
+    // (stoppedForHold falsy) keeps the exact legacy path — no resume, no reset.
+    let resumeSession;
+    if (sig.stoppedForHold === true) {
+      resumeSession = (sig.bg_job_id ? resolveSession(sig.bg_job_id) : null) ?? undefined;
+      const signalPath = join(workerDir, fname);
+      try {
+        const updated = {
+          ...sig, status: "stalled", stoppedForHold: false,
+          attentionReason: "ctl-768-hold-wake",
+          updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+        };
+        const tmp = `${signalPath}.tmp.${process.pid}`;
+        writeFileSync(tmp, JSON.stringify(updated, null, 2));
+        renameSync(tmp, signalPath);                            // atomic
+      } catch (err) {
+        log.warn({ ticket, phase: parkedPhase, err: err.message },
+          "handleCommentWake: hold-wake signal reset failed — skipping");
+        continue;
+      }
+      clearHoldStopCooldown(orchDir, ticket, parkedPhase);
+    }
+
     try {
       await removeLabel(ticket, "needs-human/question");
     } catch {
       /* fail-open */
     }
 
-    dispatch(orchDir, ticket, parkedPhase, { handoffPath });
+    dispatch(orchDir, ticket, parkedPhase, { handoffPath, resumeSession });
   }
 }
 
@@ -371,9 +405,21 @@ export function startDaemon({
   // tests inject spies). The stop handle is stored so stopDaemon can tear it
   // down symmetrically with the scheduler block.
   startAutoTuner: startAutoTunerFn = startAutoTuner,
+  // CTL-854: injectable for the boot empty-registry health check. Tests inject
+  // a deterministic fake; production uses the real registry reader.
+  listProjects: listProjectsFn = realListProjects,
+  // CTL-862: injectable seams for the ownership boot-log. Tests inject a fixed
+  // roster and eligible list; production resolves them from the real modules.
+  readAllEligible = readAllEligibleTickets,
+  bootHosts = undefined,
+  bootHostName = undefined,
 } = {}) {
   const orchDir = getExecutionCoreDir();
   ensureState(orchDir);
+  // CTL-862: write the resolved config path back into the env so downstream
+  // callers (getClusterHosts → getCatalystRepoDir) resolve the right repo
+  // regardless of the daemon's cwd. ||= preserves any launcher-provided value.
+  if (configPath) process.env.CATALYST_CONFIG_FILE ||= configPath;
   // CTL-655: record this daemon process's start time so the first scheduler
   // tick's reclaimDeadWorkIfPossible can window the per-ticket revive budget to
   // the current run (a clean restart resets a budget burned by a prior storm).
@@ -434,6 +480,9 @@ export function startDaemon({
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
     reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
+    // (operator may have dropped the sentinel while the daemon was down).
+    processApprovedResumes({ orchDir });
     // CTL-634: one shared TTL state cache. The monitor write-through populates
     // it on every state_changed event; the scheduler read path consults it
     // during out-of-set blocker hydration. A single instance threaded into
@@ -562,7 +611,31 @@ export function startDaemon({
     throw err;
   }
 
-  log.info({ orchDir }, "execution-core daemon started");
+  // CTL-854: a fresh/headless host whose registry was never written boots a
+  // perfectly healthy-looking daemon that dispatches NOTHING. Surface it once
+  // at startup (not per-reconcile) with the recovery verb so the operator has
+  // an actionable signal rather than a silent idle daemon.
+  try {
+    if (listProjectsFn().length === 0) {
+      log.warn(
+        { registry: getRegistryPath() },
+        "execution-core daemon: registry has 0 projects — nothing will be dispatched. " +
+          "Enroll a project: `catalyst-execution-core register --team <TEAM> --repo-root <path>`",
+      );
+    }
+  } catch (err) {
+    log.warn({ err }, "execution-core daemon: registry health check failed (continuing)");
+  }
+
+  // CTL-862: report HRW ownership at boot for multi-host observability.
+  const bootRoster = bootHosts ?? getClusterHosts();
+  const bootSelf = bootHostName ?? getHostName();
+  const bootEligible = readAllEligible();
+  const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+  log.info(
+    { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
+    "execution-core daemon started"
+  );
 }
 
 // startReaperAndTimer — wire the Reaper (CTL-649 Phase 4) and the periodic
@@ -598,6 +671,7 @@ function startReaperAndTimer({
   _reaper = makeReaper({
     minIdleMs: (orphanReaperConfig?.minIdleSeconds ?? 900) * 1000,
     readActivePhaseSignal: (ticket) => defaultReadActivePhaseSignal(orchDir, ticket),
+    readSignalBgJobId: (ticket, phase) => defaultReadSignalBgJobId(orchDir, ticket, phase),
   });
 
   // Boot replay: cover for any intents that landed while the daemon was down.

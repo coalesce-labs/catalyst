@@ -34,6 +34,7 @@ describe("phaseIndex", () => {
     expect(phaseIndex("triage")).toBeLessThan(phaseIndex("research"));
     expect(phaseIndex("implement")).toBeLessThan(phaseIndex("verify"));
     expect(phaseIndex("monitor-merge")).toBeLessThan(phaseIndex("monitor-deploy"));
+    expect(phaseIndex("monitor-deploy")).toBeLessThan(phaseIndex("teardown"));
   });
   test("throws PhaseFsmError on an unknown phase (fail loud, never silent -1)", () => {
     expect(() => phaseIndex("bogus")).toThrow(PhaseFsmError);
@@ -70,9 +71,17 @@ describe("transition — happy path (complete advances the pipeline)", () => {
     });
   }
 
-  test("monitor-deploy --complete--> done (terminal success)", () => {
+  test("monitor-deploy --complete--> teardown", () => {
     const next = transition(
       { phase: "monitor-deploy", reviveCount: 0, parkedFrom: null },
+      { type: "complete" }
+    );
+    expect(next).toEqual({ phase: "teardown", reviveCount: 0, parkedFrom: null });
+  });
+
+  test("teardown --complete--> done (terminal success)", () => {
+    const next = transition(
+      { phase: "teardown", reviveCount: 0, parkedFrom: null },
       { type: "complete" }
     );
     expect(next).toEqual({ phase: "done", reviveCount: 0, parkedFrom: null });
@@ -281,6 +290,7 @@ describe("PHASE_LINEAR_KEY — the 9→5 collapse (CTL-558)", () => {
       pr: "inReview",
       "monitor-merge": "inReview",
       "monitor-deploy": "inReview",
+      teardown: "inReview",
     });
   });
   test("triage has no status key — the human owns the Triage state", () => {
