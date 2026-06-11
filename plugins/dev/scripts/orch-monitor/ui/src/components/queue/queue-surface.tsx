@@ -75,7 +75,7 @@ export function QueueSurface() {
         </div>
 
         {/* The control-tower body, filling the inset below the header. */}
-        <div className="cat-scroll min-h-0 flex-1" style={{ overflowY: "auto" }}>
+        <div className="cat-overlay-scroll min-h-0 flex-1" style={{ overflowY: "auto" }}>
           {payload ? (
             <div style={{ maxWidth: 1120, margin: "0 auto", padding: "8px 24px 32px", display: "flex", flexDirection: "column", gap: 28 }}>
               <SlotDeck

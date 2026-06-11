@@ -320,6 +320,7 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
   return (
     <aside
       data-shell-rail
+      className="cat-overlay-scroll"
       style={{
         width: 280,
         flex: "0 0 280px",
@@ -625,7 +626,7 @@ export function Shell({
       <div style={{ display: "flex", flex: "1 1 auto", minHeight: 0 }}>
         <div
           data-shell-body
-          className="no-scrollbar"
+          className="cat-overlay-scroll"
           style={{ flex: "1 1 auto", minWidth: 0, overflowY: "auto", padding: "14px 16px" }}
         >
           {/* CTL-1003 §A1: in bare mode the floating mono-key + live dot above the

@@ -126,7 +126,7 @@ export function FleetOpsSurface() {
   }, [boardGeneratedAt, now]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
+    <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
       <header className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">Fleet Ops</h1>

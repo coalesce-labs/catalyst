@@ -43,6 +43,7 @@ import {
   shouldToggleSidebar,
 } from "@/lib/sidebar-collapse";
 import { shouldOpenPalette } from "@/lib/command-palette";
+import { installOverlayScroll } from "@/lib/overlay-scroll";
 import { useAtom } from "jotai";
 import { repoScopeAtom } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
@@ -151,6 +152,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     writeSidebarOpen(open);
   }, [open]);
+
+  // CTL-1036: install the SINGLE global overlay-scrollbar listener once for the
+  // whole app. It tags any `.cat-overlay-scroll` scroller with `cat-scrolling`
+  // while it scrolls and removes it ~1s after the gesture ends — the CSS reveals
+  // the slim overlay thumb only while that marker is present, so bars stay hidden
+  // at rest and never shift layout.
+  useEffect(() => installOverlayScroll(), []);
 
   // `[` toggles the rail; `g <key>` chords jump surfaces. Both ignore typing.
   useEffect(() => {

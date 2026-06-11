@@ -206,11 +206,11 @@ export const fmtMsAgo = (ms: number) => {
 // (cubic-bezier jolt) is the visual analog of the iOS rubber-band that the CSS
 // contain alone can't provide in Safari. Gated on prefers-reduced-motion: under
 // reduce, the translateX is 0 (no motion) and only the edge shadow remains.
+// CTL-1036: the board-local always-visible 9px .cat-scroll bar is retired — every
+// board/lane scroller now uses the shared .cat-overlay-scroll utility (app.css),
+// hidden at rest and revealed transiently while scrolling. PULSE_CSS keeps only
+// the rubber-band bump classes.
 const PULSE_CSS = `
-.cat-scroll::-webkit-scrollbar { width:9px; height:9px; }
-.cat-scroll::-webkit-scrollbar-thumb { background:${C.s4}; border-radius:6px; }
-.cat-scroll::-webkit-scrollbar-track { background:transparent; }
-
 @media (prefers-reduced-motion: no-preference) {
   .cat-board-bump-left  { transform: translateX(4px);  transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
   .cat-board-bump-right { transform: translateX(-4px); transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
