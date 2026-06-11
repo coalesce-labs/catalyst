@@ -113,8 +113,8 @@ export function createOtelHealthChecker(
     const needPromProbe = prometheusUrl !== null && trackedProm === null;
 
     const [promReachable, lokiReachable] = await Promise.all([
-      needPromProbe ? probe(prometheusUrl as string, PROM_PROBE_PATH) : Promise.resolve(false),
-      needLokiProbe ? probe(lokiUrl as string, LOKI_PROBE_PATH) : Promise.resolve(false),
+      needPromProbe ? probe(prometheusUrl, PROM_PROBE_PATH) : Promise.resolve(false),
+      needLokiProbe ? probe(lokiUrl, LOKI_PROBE_PATH) : Promise.resolve(false),
     ]);
 
     // The `severity` field is added ONLY when the registry tracker is wired — so
