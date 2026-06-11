@@ -80,6 +80,8 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
+// CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
+import { isIntentEffective, getMaxAttempts } from "./beliefs/intent.mjs";
 // CTL-966 + CTL-935: the advancement shadow comparator — compares the procedural
 // deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
 // logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
@@ -2120,6 +2122,24 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
 function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob) {
   return ({ subject, bgJobId }) => {
     if (!subject || !bgJobId) return false;
+    // CTL-1045 Bug 1: suppress the stop when the kill intent has plateaued
+    // ineffective — mirrors intentAwareKill's isIntentEffective guard (recovery.mjs).
+    // NOT additionally gated on CATALYST_INTENTS_ENFORCE: the J2 kill only fires
+    // under CATALYST_STALL_JANITOR=enforce, and that mode must be storm-safe on its
+    // own. Fail-open when intentDb is null.
+    if (intentDb) {
+      try {
+        if (!isIntentEffective(intentDb, "kill", subject, { maxAttempts: getMaxAttempts(intentDb) })) {
+          log.warn(
+            { subject, bgJobId },
+            "stall-janitor: kill intent ineffective — skipping claude stop (CTL-1045 storm prevention)",
+          );
+          return false;
+        }
+      } catch (err) {
+        log.warn({ subject, err: err?.message }, "stall-janitor: isIntentEffective threw — continuing kill (CTL-1045)");
+      }
+    }
     // Issue the real stop FIRST so a record-failure can never swallow the kill
     // (intentAwareKill records-then-kills, but its record path is best-effort and
     // never short-circuits the kill either — here the kill is the load-bearing act).
