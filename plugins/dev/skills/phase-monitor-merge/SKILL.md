@@ -157,6 +157,8 @@ Key elements that MUST be preserved:
 Once `mergeable_state == "clean"` (and the PR isn't already merged):
 
 ```bash
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")

@@ -62,6 +62,9 @@ import {
   stageRankForTicket,
   readWorkerPriority,
   writeWorkerPriority,
+  // CTL-864 remediation: persisted cross-host fence token round-trip
+  readClusterGeneration,
+  writeClusterGeneration,
   buildGlobalRanking,
   // CTL-700 (Item A)
   readDispatchFailureReason,
@@ -3917,7 +3920,7 @@ describe("schedulerTick — CTL-574 reclaim-dead-work sweep", () => {
         readEligible: () => [],
         dispatch: () => ({ code: 0 }),
         writeStatus: { applyPhaseStatus: () => {}, applyTerminalDone: () => {} },
-  
+
       })
     ).not.toThrow();
   });
@@ -5021,6 +5024,41 @@ describe("readWorkerPriority / writeWorkerPriority (CTL-705)", () => {
     writeFileSync(join(dir, "priority.json"), "not-json");
     expect(() => readWorkerPriority(orchDir, "CTL-44")).not.toThrow();
     expect(readWorkerPriority(orchDir, "CTL-44")).toEqual({ priority: 5, createdAt: null });
+  });
+});
+
+// ── CTL-864 remediation: persisted cross-host fence token (read/write) ──
+describe("readClusterGeneration / writeClusterGeneration (CTL-864)", () => {
+  test("missing cluster-generation.json → null", () => {
+    expect(readClusterGeneration(orchDir, "CTL-NONE")).toBe(null);
+  });
+
+  test("round-trips the won generation through write → read", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-864a"), { recursive: true });
+    writeClusterGeneration(orchDir, "CTL-864a", 7);
+    expect(readClusterGeneration(orchDir, "CTL-864a")).toBe(7);
+  });
+
+  test("write is idempotent — second write overwrites first", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-864b"), { recursive: true });
+    writeClusterGeneration(orchDir, "CTL-864b", 3);
+    writeClusterGeneration(orchDir, "CTL-864b", 5);
+    expect(readClusterGeneration(orchDir, "CTL-864b")).toBe(5);
+  });
+
+  test("non-finite generation (null single-host claim) is never persisted", () => {
+    mkdirSync(join(orchDir, "workers", "CTL-864c"), { recursive: true });
+    writeClusterGeneration(orchDir, "CTL-864c", null);
+    expect(existsSync(join(orchDir, "workers", "CTL-864c", "cluster-generation.json"))).toBe(false);
+    expect(readClusterGeneration(orchDir, "CTL-864c")).toBe(null);
+  });
+
+  test("malformed cluster-generation.json → null, never throws", () => {
+    const dir = join(orchDir, "workers", "CTL-864d");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "cluster-generation.json"), "not-json");
+    expect(() => readClusterGeneration(orchDir, "CTL-864d")).not.toThrow();
+    expect(readClusterGeneration(orchDir, "CTL-864d")).toBe(null);
   });
 });
 
@@ -7694,6 +7732,202 @@ describe("CTL-850 — HRW ownership + claim-on-dispatch (schedulerTick new-work)
     // A lost claim is NOT a dispatch failure, so NO cooldown marker is written
     // (the ticket is simply reconsidered next tick).
     expect(existsSync(dispatchCooldownPath(orchDir, TICKET, "research"))).toBe(false);
+  });
+
+  // CTL-864: the won claim.generation is forwarded as clusterGeneration to dispatchTicket.
+  test("CTL-864: multi-host dispatch forwards the won claim.generation as clusterGeneration", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect(dispatch.calls[0].clusterGeneration).toBe(7);
+  });
+
+  test("CTL-864: single-host dispatch passes no clusterGeneration (no-op)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: false, generation: null }); // never called
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+    expect("clusterGeneration" in dispatch.calls[0]).toBe(false);
+  });
+
+  // CTL-864 remediation: the won generation is PERSISTED so the later
+  // advancement/revive sweeps can re-inject it (the fence was inert without this).
+  // The dispatch stub writes the signal file so the worker dir exists when the
+  // post-dispatch persist runs (mirrors what phase-agent-dispatch does in prod;
+  // writeClusterGeneration is best-effort no-op on a missing dir, like
+  // writeWorkerPriority).
+  const dispatchCreatesDir = () => {
+    const calls = [];
+    const fn = (args) => {
+      calls.push(args);
+      const dir = join(orchDir, "workers", args.ticket);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, `phase-${args.phase}.json`),
+        JSON.stringify({ ticket: args.ticket, phase: args.phase, status: "dispatched", bg_job_id: "new-bg" })
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("CTL-864 remediation: a won multi-host claim persists cluster-generation.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir();
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(readClusterGeneration(orchDir, TICKET)).toBe(7);
+  });
+
+  test("CTL-864 remediation: single-host dispatch persists NO cluster-generation.json", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = dispatchCreatesDir(); // dir exists, so absence is from the null-guard
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne(),
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch: recordClaim({ won: false, generation: null }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(existsSync(join(orchDir, "workers", TICKET, "cluster-generation.json"))).toBe(false);
+  });
+});
+
+// ── CTL-864 remediation: advancement + revive sweeps re-inject the fence token ──
+//
+// The HIGH verify finding: the 5 guarded skills run as LATER phases dispatched by
+// the advancement sweep (implement/pr/monitor-merge/monitor-deploy) and the revive
+// sweep — neither re-forwarded the won token, so every fence guard no-op'd. These
+// assert the persisted token is re-injected on both paths (multi-host only).
+describe("CTL-864 remediation — advancement + revive re-inject clusterGeneration", () => {
+  const ROSTER = ["mini", "mac-studio"];
+
+  test("advancement sweep re-injects the persisted token (multi-host)", () => {
+    writeSignal("CTL-864X", "research", "done"); // in-flight; advancement → plan
+    writeClusterGeneration(orchDir, "CTL-864X", 9); // token won at the earlier new-work claim
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    const call = dispatch.calls.find((c) => c.ticket === "CTL-864X");
+    expect(call).toBeDefined();
+    expect(call.phase).toBe("plan");
+    expect(call.clusterGeneration).toBe(9);
+  });
+
+  test("advancement sweep forwards NO token on single-host (exact no-op)", () => {
+    writeSignal("CTL-864Y", "research", "done");
+    writeClusterGeneration(orchDir, "CTL-864Y", 9); // present, but single-host → not read
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      hosts: ["solo"],
+      hostName: "solo",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    const call = dispatch.calls.find((c) => c.ticket === "CTL-864Y");
+    expect(call).toBeDefined();
+    expect("clusterGeneration" in call).toBe(false);
+  });
+
+  test("advancement sweep forwards no token when none persisted (multi-host, unclaimed ticket)", () => {
+    writeSignal("CTL-864Z", "research", "done"); // no cluster-generation.json written
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    const call = dispatch.calls.find((c) => c.ticket === "CTL-864Z");
+    expect(call).toBeDefined();
+    expect("clusterGeneration" in call).toBe(false); // null → dispatchTicket drops the key
+  });
+
+  test("revive sweep re-injects the persisted token (multi-host)", () => {
+    const dir = join(orchDir, "workers", "CTL-864R");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "phase-monitor-merge.json"),
+      JSON.stringify({
+        ticket: "CTL-864R", phase: "monitor-merge", status: "preempted",
+        parkedFrom: "monitor-merge", bg_job_id: "bg-r", attentionReason: "preempted-by-priority",
+      })
+    );
+    writeWorkerPriority(orchDir, "CTL-864R", { priority: 2, createdAt: "2026-05-01T00:00:00Z" });
+    writeClusterGeneration(orchDir, "CTL-864R", 11);
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const calls = [];
+    const dispatch = (args) => {
+      calls.push(args);
+      const d = join(orchDir, "workers", args.ticket);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(
+        join(d, `phase-${args.phase}.json`),
+        JSON.stringify({ ticket: args.ticket, phase: args.phase, status: "dispatched", bg_job_id: "new-bg" })
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      liveBackgroundCount: () => 1, // 1 free slot
+      reclaimDeadWork: () => "noop",
+      resolveSession: () => "uuid-x",
+      verifyDispatched: verifyOk,
+    });
+    const call = calls.find((c) => c.ticket === "CTL-864R");
+    expect(call).toBeDefined();
+    expect(call.phase).toBe("monitor-merge");
+    expect(call.clusterGeneration).toBe(11);
   });
 });
 

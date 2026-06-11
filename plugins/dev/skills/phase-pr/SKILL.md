@@ -172,6 +172,8 @@ When an existing open PR is found, promote it (if draft) and finish — **withou
 `create-pr`. The promote-and-finish block is NOT side-effect-free.
 
 ```bash
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   echo "phase-pr: promoting existing PR #${EXISTING_PR_NUMBER} (draft=${EXISTING_PR_IS_DRAFT})" >&2
   if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then

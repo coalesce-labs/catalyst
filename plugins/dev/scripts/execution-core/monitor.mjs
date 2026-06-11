@@ -558,6 +558,17 @@ function dispatchTriage(identifier, {
   }
   // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
   // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
+  // The claim returns a won {generation} here too — CTL-862 supplies a
+  // claim+generation on this triage path.
+  //
+  // CTL-864 reduced scope: even with a won generation in hand, triage is
+  // dispatched WITHOUT forwarding a cross-host fence token. phase-triage's only
+  // side-effects (its Linear mirror comment + Todo→Triage transition) are
+  // idempotent and cheap, so an unfenced double-triage from a partitioned host is
+  // benign relative to the push / PR / merge side-effects the scheduler-dispatched
+  // phases (now fenced) guard against. We therefore intentionally do NOT fence
+  // triage nor persist its generation — a fast-follow ticket will plumb the
+  // generation through if triage ever needs fencing.
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
     if (!claim.won) {
