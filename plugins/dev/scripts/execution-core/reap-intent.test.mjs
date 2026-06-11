@@ -46,9 +46,9 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 16 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 18 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(16);
+    expect(REAP_INTENT_TYPES.length).toBe(18);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
@@ -58,6 +58,39 @@ describe("emitReapIntent", () => {
     expect(REAP_INTENT_TYPES).toContain("janitor.would.reap-request");
     expect(REAP_INTENT_TYPES).toContain("janitor.would.kill-intent");
     expect(REAP_INTENT_TYPES).toContain("janitor.would.defer");
+    // CTL-1005 J3 stall-clear vocabulary (the types CTL-1005 added to the
+    // emitter but forgot to register here — every J3 verdict threw at the
+    // emitter and was silently lost: CTL-1004/CTL-1056).
+    expect(REAP_INTENT_TYPES).toContain("janitor.stall.cleared");
+    expect(REAP_INTENT_TYPES).toContain("janitor.would.clear");
+  });
+
+  // CTL-1004/CTL-1056 regression guard: every event type the stall-janitor
+  // EMITS must be registered in the reap-intent vocabulary, else emitReapIntent
+  // throws "unknown reap-intent event type" and the verdict is silently dropped.
+  // Enumerated from the SINGLE-SOURCE-OF-TRUTH constant both modules import.
+  it("registers every JANITOR_EVENT_TYPES member in REAP_INTENT_TYPES (no drift)", async () => {
+    const { REAP_INTENT_TYPES } = await freshModule();
+    const { JANITOR_EVENT_TYPES } = await import(
+      `./janitor-event-types.mjs?cb=${Date.now()}-${Math.random()}`
+    );
+    const missing = JANITOR_EVENT_TYPES.filter((t) => !REAP_INTENT_TYPES.includes(t));
+    expect(missing).toEqual([]);
+  });
+
+  it("accepts the J3 janitor.stall.cleared + janitor.would.clear types end-to-end (CTL-1005)", async () => {
+    const { emitReapIntent } = await freshModule();
+    for (const type of ["janitor.stall.cleared", "janitor.would.clear"]) {
+      const ok = await emitReapIntent(type, {
+        ticket: "CTL-1005",
+        phase: "implement",
+        reason: "prior-artifact-now-complete",
+      });
+      expect(ok).toBe(true);
+      const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+      expect(last.event).toBe(type);
+      expect(last.ticket).toBe("CTL-1005");
+    }
   });
 
   it("accepts phase.terminal.reap-requested (CTL-695)", async () => {

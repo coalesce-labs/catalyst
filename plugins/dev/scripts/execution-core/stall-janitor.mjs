@@ -46,6 +46,25 @@ import { cleanPorcelain } from "./worktree-safety.mjs";
 // on. Single source of truth — no duplicated phase order / glob patterns.
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { NEXT_PHASE } from "../lib/workflow-descriptor.mjs";
+// CTL-1004 / CTL-1005 / CTL-1056: the janitor's emit vocabulary lives in a
+// dependency-free leaf that reap-intent.mjs ALSO imports to seed its closed
+// REAP_INTENT_TYPES. Referencing JANITOR_EVENT (instead of bare string literals)
+// at every shadow/enforce emit site binds the producer to the same source of
+// truth — a new emit type is unusable until it is added to the shared list,
+// which the vocabulary then registers automatically.
+import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
+
+// Named accessors over the frozen list — one per janitor emit type. Indexing the
+// frozen array keeps the strings in ONE place; a typo here is a load error, not a
+// silent live drop.
+const JANITOR_EVENT = Object.freeze({
+  worktreeDeferred: JANITOR_EVENT_TYPES[0], // "janitor.worktree.deferred"
+  wouldDefer: JANITOR_EVENT_TYPES[1], // "janitor.would.defer"
+  wouldReapRequest: JANITOR_EVENT_TYPES[2], // "janitor.would.reap-request"
+  wouldKillIntent: JANITOR_EVENT_TYPES[3], // "janitor.would.kill-intent"
+  stallCleared: JANITOR_EVENT_TYPES[4], // "janitor.stall.cleared"
+  wouldClear: JANITOR_EVENT_TYPES[5], // "janitor.would.clear"
+});
 
 // classifyOrphanWorktree (J1) — PURE. Given the fully-resolved evidence for one
 // terminal-Done ticket's worktree, decide the disposition:
@@ -251,7 +270,7 @@ export function runStallJanitorPass({
 
       if (decision.action === "defer") {
         fire(
-          enforce ? "janitor.worktree.deferred" : "janitor.would.defer",
+          enforce ? JANITOR_EVENT.worktreeDeferred : JANITOR_EVENT.wouldDefer,
           { ticket: c.ticket, worktreePath: c.worktreePath, reason: decision.reason },
           c.ticket,
         );
@@ -273,7 +292,7 @@ export function runStallJanitorPass({
         fire("orphans.reap-requested", reapFields, c.ticket);
         report.reaped.push({ ticket: c.ticket, worktreePath: c.worktreePath });
       } else {
-        fire("janitor.would.reap-request", reapFields, c.ticket);
+        fire(JANITOR_EVENT.wouldReapRequest, reapFields, c.ticket);
         report.wouldReap.push({ ticket: c.ticket, worktreePath: c.worktreePath });
       }
     } catch (err) {
@@ -308,7 +327,7 @@ export function runStallJanitorPass({
         report.killIntents.push({ ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId });
       } else {
         fire(
-          "janitor.would.kill-intent",
+          JANITOR_EVENT.wouldKillIntent,
           { ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId, reason: "post-teardown-idle-ghost" },
           c.ticket,
         );
@@ -345,14 +364,14 @@ export function runStallJanitorPass({
         // .applied (one clear per worker-dir lifetime), and let the scheduler re-dispatch.
         clearStall({ ticket: c.ticket, phase: c.phase });
         fire(
-          "janitor.stall.cleared",
+          JANITOR_EVENT.stallCleared,
           { ticket: c.ticket, phase: c.phase, artifact_verified: true, reason: decision.reason },
           c.ticket,
         );
         report.stallsCleared.push({ ticket: c.ticket, phase: c.phase });
       } else {
         fire(
-          "janitor.would.clear",
+          JANITOR_EVENT.wouldClear,
           { ticket: c.ticket, phase: c.phase, artifact_verified: true, reason: decision.reason },
           c.ticket,
         );

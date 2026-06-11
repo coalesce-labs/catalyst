@@ -316,6 +316,59 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
   });
 });
 
+// CTL-1004 / CTL-1056 Bug 2: a failing dispatch must surface the captured
+// stderr + the spawn error code / kill signal so the scheduler's "dispatch
+// failed" log is diagnosable (today it logged a bare {ticket, code} with no
+// stderr). defaultRunPhaseAgent must thread res.error?.code (e.g. ETIMEDOUT) and
+// res.signal (e.g. SIGKILL from the CTL-990 timeout) into its result.
+describe("defaultRunPhaseAgent — failure diagnostics (CTL-1004/CTL-1056 Bug 2)", () => {
+  test("a spawn that exits non-zero returns its stderr verbatim", () => {
+    const spawn = () => ({ status: 2, stdout: "", stderr: "phase-agent-dispatch: prior artifact missing\n" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/prior artifact missing/);
+  });
+
+  test("a timeout (res.error ETIMEDOUT + res.signal SIGKILL) surfaces spawnError + signal", () => {
+    const err = new Error("spawnSync phase-agent-dispatch ETIMEDOUT");
+    err.code = "ETIMEDOUT";
+    const spawn = () => ({ error: err, signal: "SIGKILL", stdout: "", stderr: "partial output before kill" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(127);
+    expect(r.spawnError).toBe("ETIMEDOUT");
+    expect(r.signal).toBe("SIGKILL");
+    // stderr captured up to the kill must still be carried (not dropped for the error message).
+    expect(r.stderr).toMatch(/ETIMEDOUT|partial output before kill/);
+  });
+
+  test("a clean exit carries res.signal=null and no spawnError (keys absent)", () => {
+    const spawn = () => ({ status: 0, stdout: "ok", stderr: "", signal: null });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(0);
+    expect("spawnError" in r).toBe(false);
+    expect(r.signal == null).toBe(true);
+  });
+
+  test("a SIGKILL'd spawn without res.error still surfaces the signal", () => {
+    const spawn = () => ({ status: null, signal: "SIGKILL", stdout: "", stderr: "killed mid-run" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "verify", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.signal).toBe("SIGKILL");
+    expect(r.stderr).toMatch(/killed mid-run/);
+  });
+});
+
 describe("dispatchTicket", () => {
   test("delegates to the injected dispatch function with orchDir/ticket/phase", () => {
     const calls = [];
