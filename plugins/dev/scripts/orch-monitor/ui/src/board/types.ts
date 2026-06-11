@@ -17,6 +17,13 @@ import type { ReadModelPayload } from "../../../lib/read-model-client";
 // the board renders it as a distinct dead/zombie state, not "active".
 export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
+// CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
+// the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
+// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
+// watchdog/phase escalation via a needs-human/needs-input label or the host-local
+// marker) | null. needs-human wins. DISTINCT from `held` (admission-gate pair).
+export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
  *  queue node column) can attribute/group by host. Mirrors the server's
@@ -127,6 +134,16 @@ export interface BoardTicket {
    *  has it been running / in its current state" anchor for the running set.
    *  null when the surfaced phase carried no startedAt. */
   currentPhaseSince?: string | null;
+  /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
+   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
+   *  escalation via a needs-human/needs-input label or the host-local marker) |
+   *  null. needs-human wins. Drives the ONE yellow board accent + the Inbox
+   *  "Needs you" section. DISTINCT from `held` (the admission-gate pair). */
+  attention?: BoardAttention;
+  /** CTL-729: ISO timestamp the attention started — the worker's current-phase
+   *  start for waiting-on-you; null for needs-human. The Inbox row anchors its
+   *  duration to attentionSince ?? heldSince; null is rendered unavailable. */
+  attentionSince?: string | null;
   /** CTL-922 (BFF10): the node owning this ticket (BOARD3 host swimlanes), from
    *  the phase signals host:{name,id} (CTL-852) or the durable fence projection
    *  owner_host (BFF11). null when no host is named. */

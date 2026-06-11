@@ -9,6 +9,14 @@
 // dead worker is excluded from in-flight + consumed capacity.
 export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
+// CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
+// the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
+// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
+// watchdog/phase escalation via a needs-human/needs-input label or the host-local
+// marker) | null. needs-human wins over waiting-on-you. DISTINCT from `held` (the
+// admission-gate blocked/waiting pair).
+export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
  *  the node-aware surfaces can attribute/group by host. `name` is the
  *  configurable host name (CATALYST_HOST_NAME / os.hostname() minus ".local");
@@ -127,6 +135,17 @@ export interface BoardTicket {
    *  its current state" anchor for the running set. null when the surfaced phase
    *  carried no startedAt. */
   currentPhaseSince: string | null;
+  /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
+   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
+   *  escalation via a needs-human/needs-input label or the host-local marker) |
+   *  null. needs-human wins. Drives the ONE yellow board accent + Inbox "Needs
+   *  you" section. DISTINCT from `held` (the admission-gate pair). */
+  attention: BoardAttention;
+  /** CTL-729: ISO timestamp the attention started — the worker's current-phase
+   *  start for waiting-on-you; null for needs-human (no durable label-applied
+   *  stamp is projected). The Inbox row anchors its duration to attentionSince ??
+   *  heldSince; null is rendered unavailable, never fabricated. */
+  attentionSince: string | null;
   /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
    *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
    *  null when no host is named (single-host resolves to the one node). */
@@ -201,6 +220,21 @@ export const PIPELINE_DONE_PHASE: string;
 export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+
+/** CTL-729: the escalation labels that trigger attention 'needs-human'. */
+export const ATTENTION_LABEL_NEEDS_HUMAN: string;
+export const ATTENTION_LABEL_NEEDS_INPUT: string;
+/** CTL-729: PURE classifier for the single needs-attention bucket. needs-human
+ *  (a needs-human/needs-input label OR the host-local marker) WINS over
+ *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning
+ *  reason; null when that reason carries no durable stamp (never fabricated). */
+export function deriveAttention(opts?: {
+  waitingOnUser?: boolean;
+  labels?: unknown;
+  needsHumanMarker?: boolean;
+  waitingSince?: string | null;
+  needsHumanSince?: string | null;
+}): { attention: BoardAttention; attentionSince: string | null };
 
 /** CTL-928: a single ticket's lane on the queue board (live | between-phases |
  *  recent-done). Honors the terminal-intermediate vs pipeline-done distinction. */
