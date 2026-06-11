@@ -125,10 +125,13 @@ describe("ticket-rail.tsx — floating cards + readable relations (CTL-1003)", (
     expect(railSrc).toContain("writeRailCollapsed");
   });
 
-  it("the rail aside is transparent + overlay-scroll (floating cards, no rail panel)", () => {
-    // CTL-1036: the rail now uses the shared overlay-scrollbar utility (hidden at
-    // rest, slim thumb while scrolling) instead of the permanent-hide .no-scrollbar.
-    expect(railSrc).toContain('className="cat-overlay-scroll"');
+  it("the rail aside is transparent with no scroller of its own (floating cards, no rail panel)", () => {
+    // CTL-1048: the rail is a plain flex column inside the Shell's single
+    // scrolling body row — it must NOT own a nested scroller (the old
+    // cat-overlay-scroll / overflowY rail re-splits the scroll context).
+    expect(railSrc).not.toContain("cat-overlay-scroll");
+    // no overflowY STYLE property (the prose comment may still mention it).
+    expect(railSrc).not.toMatch(/overflowY\s*:\s*["']/);
     expect(railSrc).toMatch(/background: "transparent"/);
     expect(railSrc).not.toMatch(/borderLeft/);
   });

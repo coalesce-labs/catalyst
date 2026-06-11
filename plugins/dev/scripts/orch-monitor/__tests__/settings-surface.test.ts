@@ -17,7 +17,7 @@ import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { SETTINGS_BREADCRUMB } from "../ui/src/lib/surface";
+import { SETTINGS_BREADCRUMB, SURFACES, SURFACE_CHORD } from "../ui/src/lib/surface";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -64,13 +64,16 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
 
   it("Settings is a FOOTER destination, not an OPERATE landing surface", () => {
     // It must NOT be added to the Surface union / SURFACES / SURFACE_CHORD
-    // (those are the four landing surfaces). It has its own breadcrumb instead.
+    // (the nav/palette landing surfaces). It has its own breadcrumb instead.
+    // OBS-5 widened the union to the OBSERVE surfaces, so assert settings'
+    // EXCLUSION rather than pinning the exact member list.
     expect(SETTINGS_BREADCRUMB).toEqual(["Settings"]);
     expect(surfaceSrc).toContain("SETTINGS_BREADCRUMB");
-    // The Surface type stays exactly the four OPERATE surfaces.
-    expect(surfaceSrc).toMatch(
-      /export type Surface =\s*"home"\s*\|\s*"board"\s*\|\s*"workers"\s*\|\s*"queue";/,
-    );
+    expect(SURFACES.map(String)).not.toContain("settings");
+    expect(Object.values(SURFACE_CHORD).map(String)).not.toContain("settings");
+    const unionSrc = surfaceSrc.match(/export type Surface =([^;]*);/)?.[1] ?? "";
+    expect(unionSrc).toContain('"home"');
+    expect(unionSrc).not.toContain('"settings"');
     // The shell shows the Settings breadcrumb when settingsOpen.
     expect(shellSrc).toMatch(/settingsOpen\s*\?\s*SETTINGS_BREADCRUMB/);
   });

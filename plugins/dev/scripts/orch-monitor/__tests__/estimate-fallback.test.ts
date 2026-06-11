@@ -8,7 +8,7 @@
 //  4. Mocked Linear responses keyed by number + team.key map back to the correct identifier.
 //  5. estimateDisplay is correct per method (fibonacci → number, tShirt → label).
 
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from "bun:test";
 import {
   fillEstimateFallback,
   getEstimationMethodAsync,
@@ -16,6 +16,23 @@ import {
   _clearMethodCache,
   _getEstimateCacheSize,
 } from "../lib/linear-estimate-fallback.mjs";
+
+// fillEstimateFallback fail-opens (no fetch at all) without a Linear token, and
+// CI has no real credentials — so pin a fake token for the whole file (every
+// fetch below is mocked). Without this the file only passes when an earlier
+// test file happens to leak a token into process.env.
+const PREV_TOKEN = process.env.LINEAR_API_TOKEN;
+const PREV_KEY = process.env.LINEAR_API_KEY;
+beforeAll(() => {
+  process.env.LINEAR_API_TOKEN = "lin_api_test_token";
+  delete process.env.LINEAR_API_KEY;
+});
+afterAll(() => {
+  if (PREV_TOKEN !== undefined) process.env.LINEAR_API_TOKEN = PREV_TOKEN;
+  else delete process.env.LINEAR_API_TOKEN;
+  if (PREV_KEY !== undefined) process.env.LINEAR_API_KEY = PREV_KEY;
+  else delete process.env.LINEAR_API_KEY;
+});
 
 // ── Helpers: mock the global fetch for testing ────────────────────────────────
 // We replace globalThis.fetch with a spy that records calls + returns a preset response.
