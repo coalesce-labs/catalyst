@@ -70,6 +70,8 @@ import {
   type Lane,
   type GroupableEntity,
 } from "./board-grouping";
+import { useRepoIconMap } from "./repo-icon-context";
+import { groupIconSrc } from "./entity-icon";
 
 // ── shared geometry ──────────────────────────────────────────────────────────
 // One column track is 300px (the legacy Column width), with a 16px gutter — so
@@ -211,11 +213,13 @@ function GroupLabelRow({
   count,
   live,
   hint,
+  iconSrc,
 }: {
   label: string;
   count: number;
   live: Lane<unknown>["live"];
   hint: string | null;
+  iconSrc?: string | null;
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
@@ -248,10 +252,15 @@ function GroupLabelRow({
           background: C.s0,
         }}
       >
-        <span
-          className={isLive ? "catalyst-live-dot" : undefined}
-          style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, display: "inline-block", flex: "0 0 auto" }}
-        />
+        {iconSrc ? (
+          <img src={iconSrc} alt="" aria-hidden
+            style={{ width: 14, height: 14, borderRadius: 4, objectFit: "contain", flex: "0 0 auto" }} />
+        ) : (
+          <span
+            className={isLive ? "catalyst-live-dot" : undefined}
+            style={{ width: 9, height: 9, borderRadius: "50%", background: dotColor, display: "inline-block", flex: "0 0 auto" }}
+          />
+        )}
         <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 700, color: C.fg }}>{label}</span>
         <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{count}</span>
         {hint && (
@@ -438,6 +447,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   // (axis !== "none" AND laneCount > 1). A single group or no-axis board
   // scrolls normally — one lane should not get a tiny scroll box.
   const constrainCells = groupBy !== "none" && lanes.length > 1;
+  const icons = useRepoIconMap();
 
   // CTL-973: refs for the swipe guard + bump affordance.
   // `scrollRef` points at the overflow container (the wheel listener target).
@@ -539,6 +549,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   count={lane.items.length}
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
+                  iconSrc={groupIconSrc(groupBy, lane.key, icons)}
                 />
                 <LaneCardsRow cells={cells} constrainCells={constrainCells} />
               </Fragment>

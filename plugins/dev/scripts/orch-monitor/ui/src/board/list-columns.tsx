@@ -24,6 +24,7 @@ import {
   fmtAgo,
   fmtRuntime,
 } from "./Board";
+import { EntityMarker } from "./entity-marker";
 import { ticketSortValue, workerSortValue, type Density } from "./list-data";
 
 export type { Density };
@@ -80,8 +81,8 @@ export const TICKET_COLUMNS: readonly ListColumn<BoardTicket>[] = [
     width: 28,
     sortable: false,
     sortValue: (t) => ticketSortValue(t, "live"),
-    // the LIVE cyan lives ONLY here, via the shared ActivityDot — never on chrome.
-    cell: (t) => <ActivityDot state={t.activeState} fallback={accentFor(t, "phase")} />,
+    // the LIVE cyan lives ONLY here, via EntityMarker (icon+badge) or ActivityDot fallback — never on chrome.
+    cell: (t) => <EntityMarker repo={t.repo} state={t.activeState} fallback={accentFor(t, "phase")} />,
   },
   {
     id: "pri",
