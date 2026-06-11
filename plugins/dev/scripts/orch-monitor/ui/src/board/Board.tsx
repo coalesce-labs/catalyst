@@ -92,6 +92,7 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 // axis="none" collapses to the single shared-header column board (one synthetic
 // lane, no group label). The shared `C` / `LIVE` tokens are in board-tokens.ts.
 import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS } from "./board-tokens";
+import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
@@ -384,11 +385,39 @@ export function DepChips({ blockers, blockedBy }: { blockers?: string[]; blocked
 export function Cost({ v }: { v: number | null }) {
   return <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 10.5, color: v == null ? C.fgDim : C.fgMuted }}>{v == null ? "—" : `$${v.toFixed(2)}`}</span>;
 }
+// CTL-1022: the title is a plain clamped block — NO hover tooltip. The old
+// Tooltip dumped the full title (the "description dump" Ryan flagged) on hover,
+// which was jarring and not built for reading. A future intentional rich
+// hover-card can replace it; for now hovering a card title shows nothing.
 export function TitleText({ text, clamp = 2 }: { text: string; clamp?: number }) {
   return (
+    <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px", display: "-webkit-box", WebkitLineClamp: clamp, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
+  );
+}
+
+// CTL-1022: the board card's corner type pill — a compact, Linear-calm symbol.
+// It shows ONLY the type's icon in its type color over a quiet muted background
+// (never a saturated badge, never the type word). The icon + color + label all
+// come from the shared `typeSymbol` map. Hovering names the type ("Feature").
+// Unknown/absent types render a neutral dot (typeSymbol returns icon: null) so a
+// stray triage value can never produce a broken card.
+export function TypePill({ type }: { type: string }) {
+  const { icon: Icon, color, label } = typeSymbol(type);
+  return (
     <Tooltip><TooltipTrigger asChild>
-      <div style={{ color: C.fg, fontSize: 13, lineHeight: 1.35, margin: clamp === 1 ? "5px 0 6px" : "7px 0 9px", display: "-webkit-box", WebkitLineClamp: clamp, WebkitBoxOrient: "vertical", overflow: "hidden", cursor: "default" }}>{text}</div>
-    </TooltipTrigger><TooltipContent style={{ maxWidth: 360 }}>{text}</TooltipContent></Tooltip>
+      <span
+        aria-label={label}
+        style={{
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          width: 18, height: 18, borderRadius: 5, background: C.s1,
+          border: `1px solid ${C.borderSubtle}`, cursor: "default",
+        }}
+      >
+        {Icon
+          ? <Icon size={11} color={color} strokeWidth={2.25} />
+          : <span style={{ width: 5, height: 5, borderRadius: "50%", background: color }} />}
+      </span>
+    </TooltipTrigger><TooltipContent>{label}</TooltipContent></Tooltip>
   );
 }
 
@@ -474,7 +503,7 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
         <span style={{ flex: 1 }} />
         {live && <span style={{ fontFamily: C.mono, fontSize: 10, color: LIVE }}>{t.working ? "working" : "active"}</span>}
         {stuck && <span style={{ fontFamily: C.mono, fontSize: 10, color: C.red }}>stuck</span>}
-        {!compact && <Badge variant="secondary" style={{ fontFamily: C.mono, fontSize: 10 }}>{t.type}</Badge>}
+        {!compact && <TypePill type={t.type} />}
       </div>
       <TitleText text={t.title} clamp={compact ? 1 : 2} />
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
