@@ -60,6 +60,12 @@ import {
   type PaneAccent,
 } from "@/board/reading-pane-model";
 import { verbActionFor } from "@/board/respond-client";
+import {
+  artifactHref,
+  fetchArtifacts,
+  fetchInboxSummary,
+  type TicketArtifact,
+} from "@/board/inbox-read-client";
 import type { RespondRowStatus } from "@/hooks/use-respond";
 import type { BoardWorker } from "@/board/types";
 import { Badge } from "@/components/ui/badge";
@@ -70,7 +76,6 @@ import { cn } from "@/lib/utils";
 import { StatusIcon } from "./status-icon";
 import { PhaseStrip } from "./phase-strip";
 import {
-  inboxSummaryUrl,
   mergeSummaryIntoTicket,
   type InboxSummaryResponse,
 } from "./inbox-summary-data";
@@ -95,16 +100,13 @@ function useInboxSummary(
     }
     let alive = true;
     setState({ kind: "loading" });
+    // The literal fetch is isolated in inbox-read-client.ts (the read-path
+    // mirror of respond-client.ts); the home tree's no-fetch invariant keeps
+    // this component fetch-free, reaching the network only through that client.
     void (async () => {
-      try {
-        const res = await fetch(inboxSummaryUrl(ticket, phase));
-        if (!alive) return;
-        if (!res.ok) { setState({ kind: "error" }); return; }
-        const body = (await res.json()) as InboxSummaryResponse;
-        if (alive) setState({ kind: "loaded", response: body });
-      } catch {
-        if (alive) setState({ kind: "error" });
-      }
+      const result = await fetchInboxSummary(ticket, phase);
+      if (!alive) return;
+      setState(result.ok ? { kind: "loaded", response: result.response } : { kind: "error" });
     })();
     return () => { alive = false; };
   }, [ticket, phase, enabled]);
@@ -112,8 +114,6 @@ function useInboxSummary(
 }
 
 // ── artifact deep-dive links (CTL-1042 Scenario 4) ───────────────────────────
-interface TicketArtifact { kind: "research" | "plan"; path: string; peek: string | null }
-interface ArtifactsResponse { ticket: string; artifacts: TicketArtifact[]; crossNodeCaveat: string }
 type ArtifactsState =
   | { kind: "idle" }
   | { kind: "loading" }
@@ -127,15 +127,9 @@ function useArtifacts(ticket: string | undefined, enabled: boolean): ArtifactsSt
     let alive = true;
     setState({ kind: "loading" });
     void (async () => {
-      try {
-        const res = await fetch(`/api/ticket-artifacts/${encodeURIComponent(ticket)}`);
-        if (!alive) return;
-        if (!res.ok) { setState({ kind: "error" }); return; }
-        const body = (await res.json()) as ArtifactsResponse;
-        if (alive) setState({ kind: "loaded", artifacts: body.artifacts ?? [] });
-      } catch {
-        if (alive) setState({ kind: "error" });
-      }
+      const result = await fetchArtifacts(ticket);
+      if (!alive) return;
+      setState(result.ok ? { kind: "loaded", artifacts: result.artifacts } : { kind: "error" });
     })();
     return () => { alive = false; };
   }, [ticket, enabled]);
@@ -413,7 +407,7 @@ export function ReadingPane({
             {docArtifacts.map((a) => (
               <Button key={a.kind} asChild variant="outline" size="sm">
                 <a
-                  href={`/api/ticket-artifacts/${encodeURIComponent(row.id)}/${a.kind}`}
+                  href={artifactHref(row.id, a.kind)}
                   target="_blank"
                   rel="noopener noreferrer"
                   title={`Open ${a.kind} doc`}

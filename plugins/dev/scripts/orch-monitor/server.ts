@@ -260,7 +260,7 @@ import {
 // the local thoughts tree) and NEVER do a synchronous live Linear call per
 // request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
 import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
-import { readTicketArtifacts } from "./lib/ticket-artifacts-reader.mjs";
+import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
 // CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
 // ticket-detail page. Board title is stale-sourced and the durable cache has no
 // description column, so both must be live-fetched (cached, TTL'd, fail-open).
@@ -1948,6 +1948,44 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const artifacts = await readTicketArtifacts(ticket);
           return Response.json(artifacts);
+        }
+
+        // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
+        // the reading-pane deep-dive pills. The list route above is anchored at
+        // the ticket segment ($), so it never matches this two-segment path;
+        // this opens the actual markdown the pill links to (without it the pill
+        // hit the SPA/404 fallback). The served file path is resolved by our own
+        // glob over the local thoughts tree — not attacker-supplied — but we
+        // still validate both URL segments defensively.
+        const ticketArtifactByKindMatch = url.pathname.match(
+          /^\/api\/ticket-artifacts\/([^/]+)\/([^/]+)$/,
+        );
+        if (ticketArtifactByKindMatch) {
+          let ticket: string;
+          let kind: string;
+          try {
+            ticket = decodeURIComponent(ticketArtifactByKindMatch[1]);
+            kind = decodeURIComponent(ticketArtifactByKindMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (kind !== "research" && kind !== "plan") {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const doc = await readTicketArtifactContent(ticket, kind);
+          if (!doc) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return new Response(doc.content, {
+            headers: { "Content-Type": "text/markdown; charset=utf-8" },
+          });
         }
 
         // CTL-889 (P12): cache-backed fuzzy ticket search for the ⌘K palette's
@@ -3807,12 +3845,15 @@ if (import.meta.main) {
   );
   const inboxSummaryProvider: InboxSummaryProvider | null = aiCfg.enabled
     ? createInboxSummaryProvider(aiCfg, {
-        collectState: (ticket, phase) =>
+        // The provider still accepts a `phase` on generate(), but collection is
+        // intentionally NOT phase-scoped: the cache key derives the phase from
+        // the held signal independently, so threading it here would be
+        // redundant. The closure drops the unused arg rather than imply it acts.
+        collectState: (ticket) =>
           collectInboxItemState(ticket, {
             workersDir: `${CATALYST_DIR}/execution-core/workers`,
             projectsDir: `${process.env.HOME ?? ""}/.claude/projects`,
             title: null,
-            ...(phase ? {} : {}),
           }),
       })
     : null;
