@@ -80,6 +80,8 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-933: shadow belief-store fact collector (opt-in CATALYST_BELIEFS_SHADOW=1).
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
+// CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
+import { isIntentEffective, getMaxAttempts } from "./beliefs/intent.mjs";
 // CTL-966 + CTL-935: the advancement shadow comparator — compares the procedural
 // deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
 // logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
@@ -1643,7 +1645,7 @@ export function escalateDispatchExhausted(
   orchDir,
   ticket,
   phase,
-  { writeFile = writeFileSync, readFile = readFileSync } = {}
+  { writeFile = writeFileSync, readFile = readFileSync, code = null, cause = null } = {}
 ) {
   const dir = join(orchDir, "workers", ticket);
   const p = join(dir, `phase-${phase}.json`);
@@ -1664,6 +1666,8 @@ export function escalateDispatchExhausted(
         phase,
         status: "stalled",
         stalledReason: "prior-artifact-retry-exhausted",
+        dispatchFailureCode: code,   // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
+        dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
         updatedAt: new Date().toISOString(),
       })
     );
@@ -2120,6 +2124,24 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
 function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob) {
   return ({ subject, bgJobId }) => {
     if (!subject || !bgJobId) return false;
+    // CTL-1045 Bug 1: suppress the stop when the kill intent has plateaued
+    // ineffective — mirrors intentAwareKill's isIntentEffective guard (recovery.mjs).
+    // NOT additionally gated on CATALYST_INTENTS_ENFORCE: the J2 kill only fires
+    // under CATALYST_STALL_JANITOR=enforce, and that mode must be storm-safe on its
+    // own. Fail-open when intentDb is null.
+    if (intentDb) {
+      try {
+        if (!isIntentEffective(intentDb, "kill", subject, { maxAttempts: getMaxAttempts(intentDb) })) {
+          log.warn(
+            { subject, bgJobId },
+            "stall-janitor: kill intent ineffective — skipping claude stop (CTL-1045 storm prevention)",
+          );
+          return false;
+        }
+      } catch (err) {
+        log.warn({ subject, err: err?.message }, "stall-janitor: isIntentEffective threw — continuing kill (CTL-1045)");
+      }
+    }
     // Issue the real stop FIRST so a record-failure can never swallow the kill
     // (intentAwareKill records-then-kills, but its record path is best-effort and
     // never short-circuits the kill either — here the kill is the load-bearing act).
@@ -2174,10 +2196,12 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 //      marker (clearStalledLabel) so a future genuine escalation can re-apply;
 //   3. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
 //      orphan-detected event instead of being silently suppressed;
-//   4. write the .janitor-cleared-<phase>.applied once-marker so a re-stall on the
-//      same phase this daemon lifetime is NOT re-cleared (operator review).
-// The once-marker is written LAST and unconditionally so even a partial clear is
-// not retried into a clear-storm — the gate is "did we ever clear this phase".
+//   4. write the .janitor-cleared-<phase>.applied once-marker ON CONFIRMED label
+//      removal only (CTL-1045 Bug 4). Scope is the worker-dir lifetime: file-backed,
+//      survives daemon restarts, deleted only when the reaper removes the worker dir
+//      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
+//      preserved — the marker is still written at most once; a failed clear is
+//      intentionally left re-armable (a future genuine escalation must get through).
 function defaultClearStall(orchDir, writeStatus) {
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
@@ -2188,9 +2212,20 @@ function defaultClearStall(orchDir, writeStatus) {
     } catch (err) {
       log.warn({ ticket, phase, err: err?.message }, "stall-janitor: stalled-signal delete failed (CTL-1005)");
     }
-    // 2. clear the needs-human label + its once-marker (re-arms a future escalation).
+    // 2. clear the needs-human label; write the once-marker ONLY on confirmed removal
+    //    (CTL-1045 Bug 4 — a failed clear must NOT disarm future escalations).
     try {
-      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus, {
+        onRemoved: () => {
+          try {
+            mkdirSync(workerDir, { recursive: true });
+            // One clear per ticket per phase per worker-dir lifetime (CTL-1045 Bug 5).
+            writeFileSync(join(workerDir, `.janitor-cleared-${phase}.applied`), "");
+          } catch (err) {
+            log.warn({ ticket, phase, err: err?.message }, "stall-janitor: cleared-marker write failed (CTL-1005)");
+          }
+        },
+      });
     } catch (err) {
       log.warn({ ticket, phase, err: err?.message }, "stall-janitor: needs-human clear failed (CTL-1005)");
     }
@@ -2198,14 +2233,6 @@ function defaultClearStall(orchDir, writeStatus) {
     try {
       rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
     } catch { /* best-effort */ }
-    // 4. write the .janitor-cleared-<phase>.applied once-marker LAST (one clear per
-    //    ticket per phase per daemon lifetime — a re-stall is left for operators).
-    try {
-      mkdirSync(workerDir, { recursive: true });
-      writeFileSync(join(workerDir, `.janitor-cleared-${phase}.applied`), "");
-    } catch (err) {
-      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: cleared-marker write failed (CTL-1005)");
-    }
     return true;
   };
 }
@@ -2524,7 +2551,7 @@ export function schedulerTick(
       const cd = recordDispatchFailure(orchDir, ticket, phase, 0, now());
       if (fullFailureLadder) {
         if (cd.consecutiveFailures >= getMaxDispatchRetries())
-          escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+          escalateDispatchExhausted(orchDir, ticket, phase, { code: 0, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
         maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
         appendDispatchFailedEvent({
           orchId: ticket,
@@ -2560,7 +2587,7 @@ export function schedulerTick(
     const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
     if (fullFailureLadder) {
       if (cd.consecutiveFailures >= getMaxDispatchRetries())
-        escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+        escalateDispatchExhausted(orchDir, ticket, phase, { code: r.code, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
       maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
       // CTL-611 Gap 2: surface the silent drop as an event.
       appendDispatchFailedEvent({

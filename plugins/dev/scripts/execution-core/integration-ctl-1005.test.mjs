@@ -34,7 +34,7 @@ function seedStall() {
   mkdirSync(d, { recursive: true });
   writeFileSync(
     join(d, `phase-${PHASE}.json`),
-    JSON.stringify({ ticket: TICKET, phase: PHASE, status: "stalled", stalledReason: "prior-artifact-retry-exhausted" }),
+    JSON.stringify({ ticket: TICKET, phase: PHASE, status: "stalled", stalledReason: "prior-artifact-retry-exhausted", dispatchFailureCode: 2 }),
   );
   // The completed prior-phase (research) signal that should survive the clear so
   // the scheduler can re-derive `plan` next tick.
@@ -77,6 +77,8 @@ function makeTickOpts({ mode, events = [], stallCtx } = {}) {
           artifactPresent: true,
           artifactComplete: true,
           alreadyCleared: false,
+          dispatchFailureCode: 2,       // CTL-1045 Bug 2
+          priorDoneSignalPresent: true, // CTL-1045 Bug 3
         },
       ],
       emit: (type, fields) => {
@@ -102,7 +104,7 @@ describe("CTL-1005 J3 integration — enforce performs the real clear", () => {
     expect(existsSync(join(workerDir(), ".linear-label-needs-human.applied"))).toBe(false);
     // .orphan-detected.applied cleared (a future stall re-emits, not silently suppressed).
     expect(existsSync(join(workerDir(), ".orphan-detected.applied"))).toBe(false);
-    // .janitor-cleared-<phase>.applied once-marker written (one clear per lifetime).
+    // .janitor-cleared-<phase>.applied once-marker written (one clear per worker-dir lifetime).
     expect(existsSync(join(workerDir(), `.janitor-cleared-${PHASE}.applied`))).toBe(true);
     // The event + the tick report.
     const ev = events.find((e) => e.type === "janitor.stall.cleared");
@@ -131,6 +133,8 @@ describe("CTL-1005 J3 integration — enforce performs the real clear", () => {
           artifactPresent: true,
           artifactComplete: true,
           alreadyCleared: true, // the marker the census would have read
+          dispatchFailureCode: 2,
+          priorDoneSignalPresent: true,
         },
       }),
     );
@@ -157,12 +161,96 @@ describe("CTL-1005 J3 integration — enforce performs the real clear", () => {
           artifactPresent: true,
           artifactComplete: false, // present but truncated
           alreadyCleared: false,
+          dispatchFailureCode: 2,
+          priorDoneSignalPresent: true,
         },
       }),
     );
     expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(true);
     expect(events.filter((e) => e.type === "janitor.stall.cleared")).toHaveLength(0);
     expect(result.janitorStallsCleared).toEqual([]);
+  });
+});
+
+describe("CTL-1045 J3 integration — new gates", () => {
+  test("CTL-1045 Bug 2: stall with non-benign dispatchFailureCode stays frozen (verify_failed code=0)", () => {
+    seedStall();
+    const events = [];
+    const result = schedulerTick(
+      orchDir,
+      makeTickOpts({
+        mode: "enforce",
+        events,
+        stallCtx: {
+          ticket: TICKET,
+          phase: PHASE,
+          stalledReason: "prior-artifact-retry-exhausted",
+          linearTerminal: false,
+          liveSessionInWorktree: false,
+          artifactPresent: true,
+          artifactComplete: true,
+          alreadyCleared: false,
+          dispatchFailureCode: 0,       // verify_failed — NOT clearable
+          priorDoneSignalPresent: true,
+        },
+      }),
+    );
+    expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(true);
+    expect(events.filter((e) => e.type === "janitor.stall.cleared")).toHaveLength(0);
+    expect(result.janitorStallsCleared).toEqual([]);
+  });
+
+  test("CTL-1045 Bug 3: stall with code=2 but no prior-done signal stays frozen (empty-dir re-walk guard)", () => {
+    seedStall();
+    const events = [];
+    const result = schedulerTick(
+      orchDir,
+      makeTickOpts({
+        mode: "enforce",
+        events,
+        stallCtx: {
+          ticket: TICKET,
+          phase: PHASE,
+          stalledReason: "prior-artifact-retry-exhausted",
+          linearTerminal: false,
+          liveSessionInWorktree: false,
+          artifactPresent: true,
+          artifactComplete: true,
+          alreadyCleared: false,
+          dispatchFailureCode: 2,
+          priorDoneSignalPresent: false, // prior-done signal absent
+        },
+      }),
+    );
+    expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(true);
+    expect(events.filter((e) => e.type === "janitor.stall.cleared")).toHaveLength(0);
+    expect(result.janitorStallsCleared).toEqual([]);
+  });
+});
+
+describe("CTL-1045 Bug 4 — once-marker withheld on failed needs-human clear", () => {
+  test("a FAILED needs-human clear withholds the once-marker (stalled signal still deleted)", () => {
+    seedStall();
+    const events = [];
+    // Wire removeLabel to return {removed: false} — simulates a Linear API failure.
+    const result = schedulerTick(
+      orchDir,
+      {
+        ...makeTickOpts({ mode: "enforce", events }),
+        writeStatus: {
+          applyLabel: () => ({ applied: true }),
+          removeLabel: () => ({ removed: false }), // label removal fails
+          runTransition: () => ({ applied: false }),
+        },
+      },
+    );
+    // The stalled signal IS deleted (the unstick happens regardless of label-clear).
+    expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(false);
+    // The once-marker is withheld — a future genuine escalation must be re-armable.
+    expect(existsSync(join(workerDir(), `.janitor-cleared-${PHASE}.applied`))).toBe(false);
+    // The needs-human marker is RETAINED (removeLabel failed → retry on next tick).
+    expect(existsSync(join(workerDir(), ".linear-label-needs-human.applied"))).toBe(true);
+    expect(result.janitorStallsCleared).toEqual([{ ticket: TICKET, phase: PHASE }]);
   });
 });
 

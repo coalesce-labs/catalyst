@@ -214,6 +214,42 @@ describe("CTL-1004 integration — isolation", () => {
 // recordKillIntent seam — so defaultJanitorKillIntentRecorder(intentDb,
 // killBgJob) is what runs. The assertion is that a REAL stop seam fires (not
 // merely that an intent row was written).
+// Tick opts with the PRODUCTION recorder path (recordKillIntent NOT injected),
+// a real intentDb, and a spy killBgJob so we can observe the stop seam.
+// Module-scoped so CTL-1045 suppression tests can reuse it.
+function prodTickOpts({ mode, killed, intentDb }) {
+  return {
+    readEligible: () => [],
+    dispatch: () => ({ status: "dispatched" }),
+    exec: () => ({ code: null }),
+    reclaimDeadWork: () => ({ class: "alive-suppressed" }),
+    writeStatus: {
+      applyLabel: () => ({ applied: true }),
+      removeLabel: () => ({ removed: true }),
+      runTransition: () => ({ applied: false }),
+    },
+    now: () => NOW,
+    watchdog: { mode: "off" },
+    intentDb,
+    // Spy stop seam — records every bgJobId killBgJob is asked to stop.
+    killBgJob: ({ bgJobId }) => killed.push(bgJobId),
+    stallJanitor: {
+      mode,
+      collectGhostCandidates: () => [
+        {
+          ticket: "CTL-1004G",
+          phase: "monitor-deploy",
+          bgJobId: "ghostjob",
+          terminalForMs: 700_000,
+          sessionKind: "background",
+          sessionStatus: "idle",
+        },
+      ],
+      // recordKillIntent intentionally NOT injected → production recorder.
+    },
+  };
+}
+
 describe("CTL-1004 J2 enforce — a real stop seam fires (killBgJob), not just an intent row", () => {
   // A real beliefs.db with a single tick row (defaultJanitorKillIntentRecorder
   // needs the latest tick_id to anchor the intent insert).
@@ -221,41 +257,6 @@ describe("CTL-1004 J2 enforce — a real stop seam fires (killBgJob), not just a
     const db = openBeliefsDb({ path: join(orchDir, "beliefs.db") });
     db.run("INSERT INTO tick (now_ms, host) VALUES (?, 'testhost')", [NOW]);
     return db;
-  }
-
-  // Tick opts with the PRODUCTION recorder path (recordKillIntent NOT injected),
-  // a real intentDb, and a spy killBgJob so we can observe the stop seam.
-  function prodTickOpts({ mode, killed, intentDb }) {
-    return {
-      readEligible: () => [],
-      dispatch: () => ({ status: "dispatched" }),
-      exec: () => ({ code: null }),
-      reclaimDeadWork: () => ({ class: "alive-suppressed" }),
-      writeStatus: {
-        applyLabel: () => ({ applied: true }),
-        removeLabel: () => ({ removed: true }),
-        runTransition: () => ({ applied: false }),
-      },
-      now: () => NOW,
-      watchdog: { mode: "off" },
-      intentDb,
-      // Spy stop seam — records every bgJobId killBgJob is asked to stop.
-      killBgJob: ({ bgJobId }) => killed.push(bgJobId),
-      stallJanitor: {
-        mode,
-        collectGhostCandidates: () => [
-          {
-            ticket: "CTL-1004G",
-            phase: "monitor-deploy",
-            bgJobId: "ghostjob",
-            terminalForMs: 700_000,
-            sessionKind: "background",
-            sessionStatus: "idle",
-          },
-        ],
-        // recordKillIntent intentionally NOT injected → production recorder.
-      },
-    };
   }
 
   test("enforce: killBgJob IS called with the ghost's bgJobId AND an intent row is recorded", () => {
@@ -286,5 +287,51 @@ describe("CTL-1004 J2 enforce — a real stop seam fires (killBgJob), not just a
       .query("SELECT subject FROM intent WHERE kind = 'kill' AND subject = ?")
       .get("CTL-1004G/monitor-deploy");
     expect(row == null).toBe(true); // no intent row recorded in shadow
+  });
+});
+
+// ── CTL-1045 Bug 1 — isIntentEffective suppression in the J2 kill recorder ─
+describe("CTL-1045 Bug 1 — J2 kill-storm: ineffective-intent suppression in defaultJanitorKillIntentRecorder", () => {
+  function makeIntentDbWithSeededIntent(attempts) {
+    const db = openBeliefsDb({ path: join(orchDir, "beliefs.db") });
+    db.run("INSERT INTO tick (now_ms, host) VALUES (?, 'testhost')", [NOW]);
+    const tickRow = db.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+    db.run(
+      "INSERT INTO intent (tick_id, kind, subject, postcondition, attempts, outcome) VALUES (?, 'kill', ?, ?, ?, NULL)",
+      [
+        tickRow.tick_id,
+        "CTL-1004G/monitor-deploy",
+        JSON.stringify({ kind: "kill", subject: "CTL-1004G/monitor-deploy", bgJobId: "ghostjob", sessionNotRegistered: true }),
+        attempts,
+      ],
+    );
+    return db;
+  }
+
+  test("enforce: a plateaued ineffective kill intent (attempts >= max) suppresses killBgJob", () => {
+    const killed = [];
+    // Seed an intent already at cap (attempts=2, outcome IS NULL — the plateaued state).
+    const intentDb = makeIntentDbWithSeededIntent(2);
+    schedulerTick(orchDir, prodTickOpts({ mode: "enforce", killed, intentDb }));
+
+    expect(killed).toEqual([]); // guard suppressed the stop
+  });
+
+  test("enforce: a still-effective kill intent (attempts < max) DOES call killBgJob", () => {
+    const killed = [];
+    // Seed an intent at attempts=1 (below default maxAttempts=2 → still effective).
+    const intentDb = makeIntentDbWithSeededIntent(1);
+    schedulerTick(orchDir, prodTickOpts({ mode: "enforce", killed, intentDb }));
+
+    expect(killed).toEqual(["ghostjob"]); // guard must not over-suppress
+  });
+
+  test("enforce: intentDb=null bypasses the guard entirely — kill still fires", () => {
+    const killed = [];
+    // intentDb omitted → null default → isIntentEffective check is skipped
+    // entirely; killBgJob must still be called (fail-open when beliefs db absent).
+    schedulerTick(orchDir, prodTickOpts({ mode: "enforce", killed, intentDb: null }));
+
+    expect(killed).toEqual(["ghostjob"]);
   });
 });

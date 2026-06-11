@@ -121,7 +121,7 @@ export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = n
 // permanently disarmed. Best-effort and never throws (mirrors labelOnce).
 // The marker is deleted ONLY on a confirmed removal so a transient API failure
 // is retried next tick.
-export function clearStalledLabel(orchDir, ticket, label, writeStatus) {
+export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemoved = null } = {}) {
   const base = labelMarkerBase(orchDir, ticket, label);
   try {
     const res = writeStatus.removeLabel(ticket, label);
@@ -131,6 +131,14 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus) {
         for (const suffix of [".applied", ".skipped"]) {
           const p = `${base}${suffix}`;
           if (existsSync(p)) { try { unlinkSync(p); } catch { /* best-effort */ } }
+        }
+        // CTL-1045 Bug 4: run the caller's confirmed-removal hook ONLY when
+        // removal is confirmed — e.g. the J3 once-marker write. A failed removal
+        // must NOT disarm future genuine escalations via the once-marker.
+        if (typeof onRemoved === "function") {
+          try { onRemoved(); } catch (err) {
+            log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: onRemoved threw — continuing");
+          }
         }
       }
     };

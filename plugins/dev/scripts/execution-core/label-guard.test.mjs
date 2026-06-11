@@ -386,6 +386,62 @@ describe("clearStalledLabel", () => {
   });
 });
 
+// ─── CTL-1045 Bug 4: clearStalledLabel onRemoved callback ───────────────────
+
+describe("CTL-1045 Bug 4 — clearStalledLabel onRemoved callback", () => {
+  test("onRemoved is invoked only when removal is confirmed (removed: true)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: true }) }, { onRemoved: () => { called++; } });
+    expect(called).toBe(1);
+  });
+
+  test("onRemoved is withheld when removal is NOT confirmed (removed: false)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: false }) }, { onRemoved: () => { called++; } });
+    expect(called).toBe(0);
+  });
+
+  test("onRemoved fires after an async removeLabel resolving removed:true", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(
+      orchDir, "CTL-1", "needs-human",
+      { removeLabel: () => Promise.resolve({ removed: true }) },
+      { onRemoved: () => { called++; } },
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(called).toBe(1);
+  });
+
+  test("a throwing onRemoved does not propagate — clearStalledLabel stays best-effort", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+
+    // onRemoved throws — clearStalledLabel must not re-throw.
+    expect(() =>
+      clearStalledLabel(
+        orchDir, "CTL-1", "needs-human",
+        { removeLabel: () => ({ removed: true }) },
+        { onRemoved: () => { throw new Error("disk full"); } },
+      )
+    ).not.toThrow();
+    // The marker deletion still completed before onRemoved was called.
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+});
+
 // ─── CTL-936: labelOnce — operator-visible event on unrecoverable failure ────
 
 describe("labelOnce CTL-936 operator-visible event", () => {
