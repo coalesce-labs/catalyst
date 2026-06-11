@@ -16,6 +16,8 @@
 // Dependencies card is omitted when there is no resident ticket / payload).
 
 import { useState, type ReactNode } from "react";
+import { useDetailEntryState } from "@/hooks/use-detail-entry-state";
+import { railSectionExpanded, setRailSection } from "./detail-entry-state";
 import { C } from "./board-tokens";
 import { Link } from "@tanstack/react-router";
 import { Box, ChevronDown, ChevronsUpDown } from "lucide-react";
@@ -35,8 +37,6 @@ import { PriorityIcon } from "./Board";
 import { useRepoIconMap } from "./repo-icon-context";
 import { resolveEntityIcon } from "./entity-icon";
 import {
-  readRailCollapsed,
-  writeRailCollapsed,
   relationHiddenCount,
   RELATION_GROUP_LIMIT,
 } from "./ticket-rail-model";
@@ -61,15 +61,23 @@ function RailCard({
   title: string;
   children: ReactNode;
 }) {
-  // CONTROLLED open-state, seeded from + written through to localStorage so the
-  // collapse persists across reloads (the §B1 Gherkin "collapse state persists").
-  const [open, setOpen] = useState<boolean>(() => !readRailCollapsed(id));
+  // CTL-1049: CONTROLLED open-state sourced from the back-stack ENTRY STATE (the
+  // jotai family keyed by the TanStack per-history-entry __TSR_key), NOT the old
+  // global `catalyst.ticket-rail.<id>.collapsed` localStorage key. That key was
+  // SHARED across every ticket, so a section you collapsed on ticket A stayed
+  // collapsed on ticket B — the sticky-collapse leak CTL-1049 kills. Now a fresh
+  // PUSH lands on a new entry whose railExpanded map is empty → every section
+  // resolves to EXPANDED (the all-open default); a back/forward traverse restores
+  // the exact per-section collapse the operator left on THIS entry. (Sidebar /
+  // Settings-like collapse prefs stay preference-based — this convention is only
+  // for transient detail-view state.)
+  const { state: entryState, setState: setEntryState } = useDetailEntryState();
+  const open = railSectionExpanded(entryState, id);
   return (
     <Collapsible
       open={open}
       onOpenChange={(next) => {
-        setOpen(next);
-        writeRailCollapsed(id, !next);
+        setEntryState((prev) => setRailSection(prev, id, next));
       }}
       data-rail-card={id}
       className="rounded-lg border border-border bg-surface-1 px-3.5 py-3"
