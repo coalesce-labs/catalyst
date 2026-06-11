@@ -337,6 +337,14 @@ compose_otel_resource_attrs() {
 	# launch mode (phase-bg here vs catalyst.exec_context=interactive that
 	# catalyst-claude.sh stamps on the interactive orchestrator/dev sessions).
 	attrs="${attrs},catalyst.exec_context=phase-bg"
+	# CTL-1008 Phase 3: resolve dispatch_mode from env then config; omit when empty
+	# so no empty key pollutes the attribute string.
+	local dispatch_mode
+	dispatch_mode="${CATALYST_DISPATCH_MODE:-}"
+	if [[ -z "$dispatch_mode" ]] && command -v jq >/dev/null 2>&1; then
+		dispatch_mode="$(config_value '.catalyst.orchestration.dispatchMode' '' 2>/dev/null || true)"
+	fi
+	[[ -n "$dispatch_mode" ]] && attrs="${attrs},catalyst.dispatch_mode=${dispatch_mode}"
 	printf '%s\n' "$attrs"
 }
 

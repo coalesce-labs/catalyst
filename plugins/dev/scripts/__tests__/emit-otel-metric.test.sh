@@ -204,13 +204,21 @@ assert_eq "null" \
   "$(echo "$BODY_5" | jq -r '.resourceMetrics[0].resource.attributes[] | select(.key=="revive_count") | .value.stringValue // "null"')" \
   "integer --resource-attr: stringValue is absent"
 
-# ─── Test 6: silent no-op when OTEL_EXPORTER_OTLP_ENDPOINT unset ────────────
+# ─── Test 6: silent no-op when endpoint unset and config has no endpoint ────
+# CTL-1008 Phase 3: uses an isolated HOME with an empty observability config
+# so the config-fallback path also finds nothing → script is still a no-op.
 echo ""
-echo "--- Test 6: silent no-op when endpoint unset ---"
+echo "--- Test 6: silent no-op when endpoint unset and config has no endpoint ---"
 STUB_DIR_6="$SCRATCH/stub6"
 setup_curl_stub "$STUB_DIR_6"
+CONFIG_DIR_6="$SCRATCH/config6"
+mkdir -p "$CONFIG_DIR_6/.config/catalyst"
+printf '{"catalyst":{"observability":{}}}\n' \
+  > "$CONFIG_DIR_6/.config/catalyst/config-catalyst-workspace.json"
 export PATH="$STUB_DIR_6:$PATH"
 unset OTEL_EXPORTER_OTLP_ENDPOINT
+REAL_HOME_6="$HOME"
+export HOME="$CONFIG_DIR_6"
 export CURL_STUB_ARGS="$SCRATCH/args6"
 export CURL_STUB_BODY="$SCRATCH/body6"
 rm -f "$SCRATCH/args6" "$SCRATCH/body6"
@@ -218,9 +226,10 @@ export CURL_STUB_EXIT=99
 
 "$EMIT_SCRIPT" iteration_count --kind plan --count 1 >/dev/null 2>&1
 EXIT_CODE_6=$?
-assert_eq "0" "$EXIT_CODE_6" "exit 0 when endpoint unset"
+export HOME="$REAL_HOME_6"
+assert_eq "0" "$EXIT_CODE_6" "exit 0 when endpoint unset and config empty"
 if [[ ! -f "$SCRATCH/args6" ]]; then
-  pass "curl not invoked when endpoint unset"
+  pass "curl not invoked when endpoint unset and config empty"
 else
   fail "curl was invoked — stub args captured: $(cat "$SCRATCH/args6")"
 fi
@@ -244,6 +253,87 @@ if [[ ! -f "$SCRATCH/args7" ]]; then
   pass "unknown flag: curl not invoked"
 else
   fail "unknown flag: curl was unexpectedly invoked"
+fi
+
+# ─── Test 8 (CTL-1008 Phase 3): config fallback when OTEL_EXPORTER_OTLP_ENDPOINT unset ─────
+echo ""
+echo "--- Test 8 (CTL-1008): config fallback — endpoint from workspace config ---"
+STUB_DIR_8="$SCRATCH/stub8"
+setup_curl_stub "$STUB_DIR_8"
+# Write a minimal workspace config with the OTLP endpoint
+CONFIG_DIR_8="$SCRATCH/config8"
+mkdir -p "$CONFIG_DIR_8"
+cat > "$CONFIG_DIR_8/config-catalyst-workspace.json" <<'CFGEOF'
+{
+  "catalyst": {
+    "observability": {
+      "forwarders": {
+        "otlp": {
+          "endpoint": "http://100.65.193.30:4317"
+        }
+      }
+    }
+  }
+}
+CFGEOF
+export PATH="$STUB_DIR_8:$PATH"
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+# Override HOME so the script reads our fixture config
+REAL_HOME="$HOME"
+export HOME="$CONFIG_DIR_8"
+mkdir -p "$HOME/.config/catalyst"
+cp "$CONFIG_DIR_8/config-catalyst-workspace.json" "$HOME/.config/catalyst/config-catalyst-workspace.json"
+export CURL_STUB_ARGS="$SCRATCH/args8"
+export CURL_STUB_BODY="$SCRATCH/body8"
+rm -f "$SCRATCH/args8" "$SCRATCH/body8"
+
+"$EMIT_SCRIPT" iteration_count --kind plan --count 1 >/dev/null 2>&1
+EXIT_CODE_8=$?
+export HOME="$REAL_HOME"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://collector.example:4317"
+assert_eq "0" "$EXIT_CODE_8" "config fallback: exit 0"
+if [[ -f "$SCRATCH/args8" ]]; then
+  CAPTURED_URL_8="$(grep -o 'http://[^ ]*' "$SCRATCH/args8" | head -1)"
+  assert_contains "$CAPTURED_URL_8" "100.65.193.30" "config fallback: POSTed to config endpoint"
+  assert_contains "$CAPTURED_URL_8" "4318" "config fallback: port 4317→4318 swap applied"
+else
+  fail "config fallback: curl not invoked — endpoint not resolved from config"
+fi
+
+# ─── Test 9 (CTL-1008 Phase 3): still silent no-op when neither env nor config has endpoint ─
+echo ""
+echo "--- Test 9 (CTL-1008): silent no-op when neither env nor config has endpoint ---"
+STUB_DIR_9="$SCRATCH/stub9"
+setup_curl_stub "$STUB_DIR_9"
+CONFIG_DIR_9="$SCRATCH/config9"
+mkdir -p "$CONFIG_DIR_9/.config/catalyst"
+# Write a config without any OTLP endpoint
+cat > "$CONFIG_DIR_9/.config/catalyst/config-catalyst-workspace.json" <<'CFGEOF'
+{
+  "catalyst": {
+    "observability": {}
+  }
+}
+CFGEOF
+export PATH="$STUB_DIR_9:$PATH"
+unset OTEL_EXPORTER_OTLP_ENDPOINT
+REAL_HOME_9="$HOME"
+export HOME="$CONFIG_DIR_9"
+export CURL_STUB_ARGS="$SCRATCH/args9"
+export CURL_STUB_BODY="$SCRATCH/body9"
+rm -f "$SCRATCH/args9" "$SCRATCH/body9"
+export CURL_STUB_EXIT=99
+
+"$EMIT_SCRIPT" iteration_count --kind plan --count 1 >/dev/null 2>&1
+EXIT_CODE_9=$?
+export HOME="$REAL_HOME_9"
+unset CURL_STUB_EXIT
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://collector.example:4317"
+assert_eq "0" "$EXIT_CODE_9" "no endpoint: exit 0 (silent no-op)"
+if [[ ! -f "$SCRATCH/args9" ]]; then
+  pass "no endpoint: curl not invoked"
+else
+  fail "no endpoint: curl was invoked unexpectedly"
 fi
 
 # ─── Summary ────────────────────────────────────────────────────────────────

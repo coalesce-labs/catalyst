@@ -1960,6 +1960,50 @@ assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "precheck park: s
 assert_eq "rebase_refused_dirty_tree" "$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)" \
 	"precheck park: signal failureReason = rebase_refused_dirty_tree (typed, not continue_failed cascade)"
 
+# ─── Test 63 (CTL-1008 Phase 3): catalyst.dispatch_mode in OTEL_RESOURCE_ATTRIBUTES ─
+echo ""
+echo "Test 63 (CTL-1008): CATALYST_DISPATCH_MODE → catalyst.dispatch_mode in OTEL attrs"
+fresh_env t63_dispatch_mode
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj",
+    "orchestration": {
+      "dispatchMode": "execution-core"
+    }
+  }
+}
+EOF
+DRY63=$(cd "${TEST_DIR}/proj" &&
+	CATALYST_DISPATCH_MODE=execution-core \
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL63="$(echo "$DRY63" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ "$OTEL63" == *"catalyst.dispatch_mode=execution-core"* ]]; then
+	pass "catalyst.dispatch_mode=execution-core present when CATALYST_DISPATCH_MODE set"
+else
+	fail "catalyst.dispatch_mode=execution-core MISSING from OTEL attrs: $OTEL63"
+fi
+
+# ─── Test 64 (CTL-1008 Phase 3): dispatch_mode OMITTED when not provided ────
+echo ""
+echo "Test 64 (CTL-1008): catalyst.dispatch_mode OMITTED when neither env nor config sets it"
+fresh_env t64_dispatch_mode_absent
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+DRY64=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL64="$(echo "$DRY64" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ "$OTEL64" == *"catalyst.dispatch_mode"* ]]; then
+	fail "catalyst.dispatch_mode should be ABSENT when not configured, but found: $OTEL64"
+else
+	pass "catalyst.dispatch_mode correctly absent when neither env nor config provides it"
+fi
+
 echo ""
 echo "Test 63 (CTL-864): CATALYST_CLUSTER_GENERATION is included in .settings.env when set"
 fresh_env t63

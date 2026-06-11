@@ -79,6 +79,14 @@ done
 # ─── Endpoint resolution ────────────────────────────────────────────────────
 
 ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
+if [[ -z "$ENDPOINT" ]]; then
+  # CTL-1008 Phase 3: fall back to workspace config endpoint so iteration_count
+  # metrics don't silently no-op in workers whose launching shell lacks the env var.
+  _CFG_FILE="${HOME}/.config/catalyst/config-catalyst-workspace.json"
+  if [[ -r "$_CFG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    ENDPOINT="$(jq -r '.catalyst.observability.forwarders.otlp.endpoint // empty' "$_CFG_FILE" 2>/dev/null || true)"
+  fi
+fi
 [[ -n "$ENDPOINT" ]] || die_silent
 
 # Strip trailing slashes.
