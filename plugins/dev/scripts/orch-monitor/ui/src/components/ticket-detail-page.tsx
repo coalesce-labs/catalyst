@@ -724,7 +724,6 @@ function TelemetryStrip({ ticket }: { ticket: BoardTicket }) {
 export function TicketDetailPage({
   ticket,
   workers = [],
-  tickets = [],
   realTitle = null,
   description = null,
   descLoaded = false,
@@ -732,8 +731,6 @@ export function TicketDetailPage({
 }: {
   ticket: BoardTicket | undefined;
   workers?: BoardWorker[];
-  /** CTL-948: all resident tickets, used to build the dep sub-graph. */
-  tickets?: BoardTicket[];
   /** CTL-974: the LIVE Linear title from /api/linear-ticket — wins over the
    *  stale board title in the Header; null falls back to the board title. */
   realTitle?: string | null;

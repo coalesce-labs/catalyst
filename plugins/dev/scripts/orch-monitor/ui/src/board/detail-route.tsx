@@ -191,7 +191,6 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         <TicketDetailPage
           ticket={ticket}
           workers={payload?.workers ?? []}
-          tickets={payload?.tickets ?? []}
           realTitle={linear.title}
           description={linear.description}
           descLoaded={linear.loaded}
