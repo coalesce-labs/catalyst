@@ -145,6 +145,7 @@ import {
   runStallJanitorPass,
   defaultCollectOrphanCandidates,
   defaultCollectGhostCandidates,
+  defaultCollectStallClearCandidates, // CTL-1005 J3
 } from "./stall-janitor.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
@@ -2159,6 +2160,56 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
   };
 }
 
+// defaultClearStall — CTL-1005 J3's unstick seam. Clears a
+// `prior-artifact-retry-exhausted` stall MINIMALLY and lets the scheduler's normal
+// path re-dispatch: the stalled signal is the ONLY thing making isTicketInFlight
+// false + tripping the needs-human terminal sweep, so deleting it (with the
+// completed prior-phase signals still present) lets deriveAdvancement re-derive the
+// next phase on the next tick. Mirrors clearDispatchCooldown's best-effort,
+// never-throw discipline.
+//
+// The clear, per the CTL-1005 Gherkin:
+//   1. delete the synthetic phase-<phase>.json stalled signal (the unstick);
+//   2. clear the needs-human label + its .linear-label-needs-human.{applied,skipped}
+//      marker (clearStalledLabel) so a future genuine escalation can re-apply;
+//   3. delete .orphan-detected.applied (CTL-868) so a future stall re-emits the
+//      orphan-detected event instead of being silently suppressed;
+//   4. write the .janitor-cleared-<phase>.applied once-marker so a re-stall on the
+//      same phase this daemon lifetime is NOT re-cleared (operator review).
+// The once-marker is written LAST and unconditionally so even a partial clear is
+// not retried into a clear-storm — the gate is "did we ever clear this phase".
+function defaultClearStall(orchDir, writeStatus) {
+  return ({ ticket, phase }) => {
+    if (!ticket || !phase) return false;
+    const workerDir = join(orchDir, "workers", ticket);
+    // 1. delete the synthetic stalled signal (the actual unstick).
+    try {
+      rmSync(join(workerDir, `phase-${phase}.json`), { force: true });
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: stalled-signal delete failed (CTL-1005)");
+    }
+    // 2. clear the needs-human label + its once-marker (re-arms a future escalation).
+    try {
+      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: needs-human clear failed (CTL-1005)");
+    }
+    // 3. delete .orphan-detected.applied so a future stall re-emits (CTL-868).
+    try {
+      rmSync(join(workerDir, ".orphan-detected.applied"), { force: true });
+    } catch { /* best-effort */ }
+    // 4. write the .janitor-cleared-<phase>.applied once-marker LAST (one clear per
+    //    ticket per phase per daemon lifetime — a re-stall is left for operators).
+    try {
+      mkdirSync(workerDir, { recursive: true });
+      writeFileSync(join(workerDir, `.janitor-cleared-${phase}.applied`), "");
+    } catch (err) {
+      log.warn({ ticket, phase, err: err?.message }, "stall-janitor: cleared-marker write failed (CTL-1005)");
+    }
+    return true;
+  };
+}
+
 // schedulerTick — one pull cycle: (1) advancement sweep, (2) new-work pull,
 // (3) terminal-Done sweep (CTL-558). Idempotent and restart-safe — derives
 // every action from filesystem state. `exec` is the injectable seam for the
@@ -2324,6 +2375,12 @@ export function schedulerTick(
       terminalIdleMs: _janitorTerminalIdleMs = undefined,
       collectOrphanCandidates: _collectOrphanCandidates = undefined,
       collectGhostCandidates: _collectGhostCandidates = undefined,
+      // CTL-1005 J3: stall-clear census + unstick seams. Defaults undefined →
+      // the pass collects no J3 candidates (a bare unit tick stays inert);
+      // production wires defaultCollectStallClearCandidates + defaultClearStall
+      // below. Tests inject stubs to drive J3 in isolation.
+      collectStallClearCandidates: _collectStallClearCandidates = undefined,
+      clearStall: _clearStall = undefined,
       emit: _janitorEmit = emitReapIntent,
       recordKillIntent: _recordKillIntent = undefined,
     } = {},
@@ -2702,18 +2759,30 @@ export function schedulerTick(
   let janitorKillIntents = [];
   let janitorWouldKill = [];
   let janitorDeferred = [];
+  let janitorStallsCleared = [];
+  let janitorWouldClear = [];
   {
     const jcfg = readStallJanitorConfig();
     const jMode = _janitorMode ?? jcfg.mode;
     // Only run when an opt-in census producer is wired (production via
     // startScheduler, or a test injecting it). A bare tick has none → skip cleanly.
-    if (jMode !== "off" && (_collectOrphanCandidates || _collectGhostCandidates)) {
+    if (
+      jMode !== "off" &&
+      (_collectOrphanCandidates || _collectGhostCandidates || _collectStallClearCandidates)
+    ) {
       try {
         const jreport = runStallJanitorPass({
           mode: jMode,
           terminalIdleMs: _janitorTerminalIdleMs ?? jcfg.terminalIdleMs,
           collectOrphanCandidates: _collectOrphanCandidates ?? (() => []),
           collectGhostCandidates: _collectGhostCandidates ?? (() => []),
+          // CTL-1005 J3: stall-clear census + unstick seams.
+          collectStallClearCandidates: _collectStallClearCandidates ?? (() => []),
+          // Default clear seam: deletes the synthetic stalled signal, clears
+          // needs-human (+ marker) + .orphan-detected.applied, writes the
+          // .janitor-cleared-<phase>.applied once-marker, and lets the scheduler's
+          // normal path re-dispatch. writeStatus carries the removeLabel seam.
+          clearStall: _clearStall ?? defaultClearStall(orchDir, writeStatus),
           emit: _janitorEmit,
           // Default kill seam: BOTH issues killBgJob AND records the pinned
           // intent (mirrors recovery.mjs intentAwareKill). CTL-1004 J2-enforce
@@ -2728,7 +2797,12 @@ export function schedulerTick(
         janitorKillIntents = jreport.killIntents;
         janitorWouldKill = jreport.wouldKill;
         janitorDeferred = jreport.deferred;
-        if (janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length || janitorWouldKill.length) {
+        janitorStallsCleared = jreport.stallsCleared;
+        janitorWouldClear = jreport.wouldClear;
+        if (
+          janitorReaped.length || janitorKillIntents.length || janitorWouldReap.length ||
+          janitorWouldKill.length || janitorStallsCleared.length || janitorWouldClear.length
+        ) {
           log.info(
             {
               mode: jMode,
@@ -2737,8 +2811,10 @@ export function schedulerTick(
               killIntents: janitorKillIntents.length,
               wouldKill: janitorWouldKill.length,
               deferred: janitorDeferred.length,
+              stallsCleared: janitorStallsCleared.length,
+              wouldClear: janitorWouldClear.length,
             },
-            "scheduler: stall-janitor pass (CTL-1004)"
+            "scheduler: stall-janitor pass (CTL-1004/CTL-1005)"
           );
         }
       } catch (err) {
@@ -4110,6 +4186,8 @@ export function schedulerTick(
     janitorKillIntents,  // CTL-1004 — ghost-session kill-intents RECORDED this tick (enforce)
     janitorWouldKill,    // CTL-1004 — ghost sessions that WOULD get a kill-intent (shadow)
     janitorDeferred,     // CTL-1004 — dirty worktrees deferred (no removal, no queue)
+    janitorStallsCleared, // CTL-1005 — prior-artifact-retry-exhausted stalls CLEARED this tick (enforce)
+    janitorWouldClear,   // CTL-1005 — stalls that WOULD be cleared (shadow)
     advanced,
     dispatched,
     freeSlots,
@@ -4392,6 +4470,26 @@ function runTick() {
             orchDir: runningOpts.orchDir,
             agents: getAgentsCached().agents,
           }),
+        // CTL-1005 J3: wire the read-only stall-clear census + the production
+        // unstick seam. The census only resolves Linear state for tickets that
+        // ALREADY carry a prior-artifact-retry-exhausted stall (rare), so the
+        // bounded extra fetchTicketState reads never storm the API. The clear
+        // seam deletes the synthetic stalled signal + re-arms needs-human; the
+        // scheduler's normal path re-dispatches next tick.
+        collectStallClearCandidates: () =>
+          defaultCollectStallClearCandidates({
+            orchDir: runningOpts.orchDir,
+            projects: listProjects(),
+            agents: getAgentsCached().agents,
+            isLinearTerminal: (id) => {
+              // fetchTicketState with no gateway behaves as the plain cache-first
+              // read (the daemon's runTick does not thread a gateway, matching the
+              // CTL-642 terminal short-circuit at the reconcile backstop).
+              const state = fetchTicketState(id);
+              return state != null && isLinearTerminal(state);
+            },
+          }),
+        clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
       },
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.

@@ -18,9 +18,11 @@ import { join } from "node:path";
 import {
   classifyOrphanWorktree,
   classifyGhostSession,
+  classifyStallClear,
   runStallJanitorPass,
   defaultCollectOrphanCandidates,
   defaultCollectGhostCandidates,
+  defaultCollectStallClearCandidates,
   defaultTicketFromCwd,
 } from "./stall-janitor.mjs";
 
@@ -337,6 +339,198 @@ describe("runStallJanitorPass — off mode (CTL-1004)", () => {
   });
 });
 
+// ===========================================================================
+// CTL-1005 J3 — auto-clear a prior-artifact-retry-exhausted stall ONCE when the
+// prior-phase artifact is present AND complete (non-truncated).
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// J3 classifier — classifyStallClear (PURE, all evidence injected)
+// ---------------------------------------------------------------------------
+describe("classifyStallClear (CTL-1005 J3)", () => {
+  const base = {
+    ticket: "CTL-854",
+    phase: "plan",
+    stalledReason: "prior-artifact-retry-exhausted",
+    linearTerminal: false, // Linear state is non-terminal
+    liveSessionInWorktree: false,
+    artifactPresent: true,
+    artifactComplete: true, // existence + non-truncation
+    alreadyCleared: false, // no .janitor-cleared-<phase>.applied marker yet
+  };
+
+  test("retry-exhausted stall + complete artifact + non-terminal + no live session → clear", () => {
+    expect(classifyStallClear(base).action).toBe("clear");
+  });
+
+  test("wrong stalledReason (e.g. dispatch-circuit-breaker) → skip (never clears a non-retry-exhausted stall)", () => {
+    const d = classifyStallClear({ ...base, stalledReason: "dispatch-circuit-breaker" });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/reason/);
+  });
+
+  test("artifact ABSENT → skip (stays frozen)", () => {
+    const d = classifyStallClear({ ...base, artifactPresent: false });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/artifact/);
+  });
+
+  test("artifact present but TRUNCATED (incomplete) → skip (existence alone is not enough)", () => {
+    const d = classifyStallClear({ ...base, artifactComplete: false });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/artifact/);
+  });
+
+  test("Linear state terminal/merged → skip (never unstick a terminal ticket)", () => {
+    const d = classifyStallClear({ ...base, linearTerminal: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/terminal/);
+  });
+
+  test("a live session owns the worktree → skip (never touch live)", () => {
+    const d = classifyStallClear({ ...base, liveSessionInWorktree: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/live/);
+  });
+
+  test("already cleared once (.janitor-cleared marker present) → skip (one clear per lifetime)", () => {
+    const d = classifyStallClear({ ...base, alreadyCleared: true });
+    expect(d.action).toBe("skip");
+    expect(d.reason).toMatch(/already-cleared/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runStallJanitorPass — J3 driver (clear seam injected)
+// ---------------------------------------------------------------------------
+function makeStallWorld(overrides = {}) {
+  return {
+    orphanCandidates: [],
+    ghostCandidates: [],
+    stallCandidates: [
+      {
+        ticket: "CTL-854",
+        phase: "plan",
+        stalledReason: "prior-artifact-retry-exhausted",
+        linearTerminal: false,
+        liveSessionInWorktree: false,
+        artifactPresent: true,
+        artifactComplete: true,
+        alreadyCleared: false,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function makeStallOpts(world, { mode, events = [], cleared = [] } = {}) {
+  return {
+    mode,
+    collectOrphanCandidates: () => world.orphanCandidates,
+    collectGhostCandidates: () => world.ghostCandidates,
+    collectStallClearCandidates: () => world.stallCandidates,
+    emit: (type, fields) => {
+      events.push({ type, ...fields });
+      return Promise.resolve(true);
+    },
+    // The clear seam: records the (ticket, phase) it was asked to clear.
+    clearStall: ({ ticket, phase }) => {
+      cleared.push({ ticket, phase });
+      return true;
+    },
+  };
+}
+
+describe("runStallJanitorPass — J3 enforce (CTL-1005)", () => {
+  test("clears a complete-artifact retry-exhausted stall: calls clearStall + emits janitor.stall.cleared{artifact_verified:true}", async () => {
+    const events = [];
+    const cleared = [];
+    const world = makeStallWorld();
+    const res = await runStallJanitorPass(makeStallOpts(world, { mode: "enforce", events, cleared }));
+    expect(cleared).toEqual([{ ticket: "CTL-854", phase: "plan" }]);
+    const ev = events.find((e) => e.type === "janitor.stall.cleared");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-854");
+    expect(ev.phase).toBe("plan");
+    expect(ev.artifact_verified ?? ev.artifactVerified).toBe(true);
+    expect(res.stallsCleared).toEqual([{ ticket: "CTL-854", phase: "plan" }]);
+  });
+
+  test("absent/truncated artifact stays frozen — no clear, no event", async () => {
+    const events = [];
+    const cleared = [];
+    const world = makeStallWorld({
+      stallCandidates: [{ ...makeStallWorld().stallCandidates[0], artifactComplete: false }],
+    });
+    const res = await runStallJanitorPass(makeStallOpts(world, { mode: "enforce", events, cleared }));
+    expect(cleared).toEqual([]);
+    expect(events.filter((e) => e.type === "janitor.stall.cleared")).toHaveLength(0);
+    expect(res.stallsCleared).toEqual([]);
+  });
+
+  test("terminal Linear ticket is never unstuck", async () => {
+    const cleared = [];
+    const world = makeStallWorld({
+      stallCandidates: [{ ...makeStallWorld().stallCandidates[0], linearTerminal: true }],
+    });
+    await runStallJanitorPass(makeStallOpts(world, { mode: "enforce", cleared }));
+    expect(cleared).toEqual([]);
+  });
+
+  test("already-cleared (re-stall after one clear) is not re-cleared", async () => {
+    const cleared = [];
+    const world = makeStallWorld({
+      stallCandidates: [{ ...makeStallWorld().stallCandidates[0], alreadyCleared: true }],
+    });
+    await runStallJanitorPass(makeStallOpts(world, { mode: "enforce", cleared }));
+    expect(cleared).toEqual([]);
+  });
+
+  test("never clears a non-retry-exhausted stall (different stalledReason)", async () => {
+    const cleared = [];
+    const world = makeStallWorld({
+      stallCandidates: [{ ...makeStallWorld().stallCandidates[0], stalledReason: "dispatch-circuit-breaker" }],
+    });
+    await runStallJanitorPass(makeStallOpts(world, { mode: "enforce", cleared }));
+    expect(cleared).toEqual([]);
+  });
+});
+
+describe("runStallJanitorPass — J3 shadow (CTL-1005)", () => {
+  test("shadow emits janitor.would.clear{artifact_verified:true}; never calls clearStall", async () => {
+    const events = [];
+    const cleared = [];
+    const world = makeStallWorld();
+    const res = await runStallJanitorPass(makeStallOpts(world, { mode: "shadow", events, cleared }));
+    expect(cleared).toEqual([]);
+    expect(events.filter((e) => e.type === "janitor.stall.cleared")).toHaveLength(0);
+    const would = events.find((e) => e.type === "janitor.would.clear");
+    expect(would).toBeDefined();
+    expect(would.ticket).toBe("CTL-854");
+    expect(would.artifact_verified ?? would.artifactVerified).toBe(true);
+    expect(res.wouldClear).toEqual([{ ticket: "CTL-854", phase: "plan" }]);
+    expect(res.stallsCleared).toEqual([]);
+  });
+});
+
+describe("runStallJanitorPass — J3 off (CTL-1005)", () => {
+  test("mode:off → J3 census never collected, no clears", async () => {
+    let collected = false;
+    const cleared = [];
+    const world = makeStallWorld();
+    const opts = makeStallOpts(world, { mode: "off", cleared });
+    opts.collectStallClearCandidates = () => {
+      collected = true;
+      return world.stallCandidates;
+    };
+    const res = await runStallJanitorPass(opts);
+    expect(collected).toBe(false);
+    expect(cleared).toEqual([]);
+    expect(res.stallsCleared).toEqual([]);
+    expect(res.wouldClear).toEqual([]);
+  });
+});
+
 describe("runStallJanitorPass — isolation (CTL-1004)", () => {
   test("a throwing classifier/seam on one candidate does not abort the whole pass", async () => {
     const events = [];
@@ -510,5 +704,116 @@ describe("defaultCollectGhostCandidates (CTL-1004)", () => {
       agents: [{ sessionId: "g", cwd: "/wt/CTL/CTL-200", status: "idle", kind: "background" }],
     });
     expect(out).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J3 census builder — defaultCollectStallClearCandidates (CTL-1005)
+// ---------------------------------------------------------------------------
+describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
+  let orchDir;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "ctl1005-cen-"));
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  // Write a stalled phase signal with the J3-relevant reason.
+  function mkStalled(ticket, phase, { reason = "prior-artifact-retry-exhausted", cleared = false } = {}) {
+    const d = join(orchDir, "workers", ticket);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(
+      join(d, `phase-${phase}.json`),
+      JSON.stringify({ ticket, phase, status: "stalled", stalledReason: reason }),
+    );
+    if (cleared) writeFileSync(join(d, `.janitor-cleared-${phase}.applied`), "");
+    return d;
+  }
+
+  // A `plan`-phase stall needs its prior research artifact under
+  // thoughts/shared/research/. The artifact-completeness probe is injected so the
+  // census doesn't shell out / read the real worktree.
+  test("plan stall + COMPLETE prior research artifact + non-terminal + no session → one candidate (artifactComplete:true)", () => {
+    mkStalled("CTL-854", "plan");
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-854",
+      agents: [],
+      artifactComplete: () => true, // injected completeness probe (present + non-truncated)
+      artifactPresent: () => true,
+    });
+    const c = out.find((x) => x.ticket === "CTL-854");
+    expect(c).toBeDefined();
+    expect(c.phase).toBe("plan");
+    expect(c.stalledReason).toBe("prior-artifact-retry-exhausted");
+    expect(c.artifactPresent).toBe(true);
+    expect(c.artifactComplete).toBe(true);
+    expect(c.linearTerminal).toBe(false);
+    expect(c.liveSessionInWorktree).toBe(false);
+    expect(c.alreadyCleared).toBe(false);
+  });
+
+  test("MISSING prior artifact → candidate carries artifactPresent:false (classifier then skips)", () => {
+    mkStalled("CTL-854", "plan");
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-854",
+      artifactPresent: () => false,
+      artifactComplete: () => false,
+    });
+    expect(out[0].artifactPresent).toBe(false);
+    expect(out[0].artifactComplete).toBe(false);
+  });
+
+  test("TRUNCATED prior artifact → candidate carries artifactComplete:false (present but incomplete)", () => {
+    mkStalled("CTL-854", "plan");
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-854",
+      artifactPresent: () => true,
+      artifactComplete: () => false, // present on disk but truncated
+    });
+    expect(out[0].artifactPresent).toBe(true);
+    expect(out[0].artifactComplete).toBe(false);
+  });
+
+  test("a non-retry-exhausted stall (dispatch-circuit-breaker) is NOT censused for J3", () => {
+    mkStalled("CTL-854", "plan", { reason: "dispatch-circuit-breaker" });
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-854",
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    expect(out.map((c) => c.ticket)).toEqual([]);
+  });
+
+  test("a non-stalled signal (running/done) is NOT censused", () => {
+    const d = join(orchDir, "workers", "CTL-900");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "phase-plan.json"), JSON.stringify({ status: "running" }));
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-900",
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    expect(out.map((c) => c.ticket)).toEqual([]);
+  });
+
+  test(".janitor-cleared-<phase>.applied marker present → alreadyCleared:true", () => {
+    mkStalled("CTL-854", "plan", { cleared: true });
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => "/wt/CTL-854",
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    expect(out[0].alreadyCleared).toBe(true);
   });
 });

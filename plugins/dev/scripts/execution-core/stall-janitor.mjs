@@ -40,6 +40,12 @@ import { spawnSync } from "node:child_process";
 import { log } from "./config.mjs";
 import { parseWorktreeForBranch } from "./worktree.mjs";
 import { cleanPorcelain } from "./worktree-safety.mjs";
+// CTL-1005 J3: prior-phase artifact completeness reuses the SAME work-done probes
+// (existence + non-truncation) the reclaim sweep already trusts, and the NEXT_PHASE
+// table (inverted → prior-phase) so the stalled phase maps to the artifact it waited
+// on. Single source of truth — no duplicated phase order / glob patterns.
+import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
+import { NEXT_PHASE } from "../lib/workflow-descriptor.mjs";
 
 // classifyOrphanWorktree (J1) — PURE. Given the fully-resolved evidence for one
 // terminal-Done ticket's worktree, decide the disposition:
@@ -100,6 +106,46 @@ export function classifyGhostSession(ctx = {}) {
   return { action: "kill-intent", reason: "post-teardown-idle-ghost" };
 }
 
+// classifyStallClear (J3, CTL-1005) — PURE. Given a `prior-artifact-retry-exhausted`
+// stall + its fully-resolved evidence, decide whether to auto-clear it ONCE so the
+// scheduler can re-dispatch. The defect being fixed: escalateDispatchExhausted
+// writes a synthetic `stalled` signal when the dispatch retry ceiling is hit
+// because the PRIOR-phase artifact was missing, then never re-checks whether the
+// artifact later arrived — the ticket freezes to needs-human permanently.
+//   "clear" — the prior artifact is now present AND complete (non-truncated), the
+//             Linear state is non-terminal, no live session owns the worktree, and
+//             we have not already cleared this phase once this daemon lifetime.
+//   "skip"  — anything else. Every gate fails CLOSED (stay frozen) — a borderline
+//             case is left for operator review, never force-unstuck.
+//
+// ctx fields:
+//   stalledReason          — must be exactly "prior-artifact-retry-exhausted".
+//   linearTerminal         — the ticket's Linear state is terminal/merged.
+//   liveSessionInWorktree  — a live session has its cwd inside the worktree.
+//   artifactPresent        — the named prior-phase artifact exists.
+//   artifactComplete       — …AND is non-truncated (existence alone is not enough;
+//                            re-walk artifact-validation precedent).
+//   alreadyCleared         — a .janitor-cleared-<phase>.applied marker is present.
+export function classifyStallClear(ctx = {}) {
+  // Only the transient prior-artifact-retry-exhausted stall is auto-clearable.
+  // A dispatch-circuit-breaker / phantom-ticket / any other stall is operator-owned.
+  if (ctx.stalledReason !== "prior-artifact-retry-exhausted")
+    return { action: "skip", reason: "not-retry-exhausted-reason" };
+  // NEVER unstick a terminal/merged Linear ticket (the pipeline is genuinely done).
+  if (ctx.linearTerminal) return { action: "skip", reason: "linear-terminal" };
+  // NEVER touch a live worker (the safety fence, mirrors J1).
+  if (ctx.liveSessionInWorktree) return { action: "skip", reason: "live-session-in-worktree" };
+  // One clear per ticket per phase per daemon lifetime — a re-stall after one
+  // clear is left frozen for operator review (the Gherkin's re-stall scenario).
+  if (ctx.alreadyCleared) return { action: "skip", reason: "already-cleared" };
+  // The artifact must be PRESENT and COMPLETE — existence alone is not enough
+  // (a truncated plan/research doc silently flowing downstream is a real failure
+  // class; re-walk artifact-validation precedent).
+  if (!ctx.artifactPresent) return { action: "skip", reason: "artifact-absent" };
+  if (!ctx.artifactComplete) return { action: "skip", reason: "artifact-truncated" };
+  return { action: "clear", reason: "prior-artifact-now-complete" };
+}
+
 // runStallJanitorPass — the action driver. Enumerates the terminal-Done orphan
 // candidates + ghost-session candidates (injected census seams), classifies each,
 // and either ACTS (enforce) or SHADOWS (would.*). Returns a per-tick report:
@@ -126,15 +172,26 @@ export function classifyGhostSession(ctx = {}) {
 //                                               for the bookkeeping half; the stop
 //                                               is the load-bearing act.
 //   terminalIdleMs            → number         J2 threshold (default 600s)
+//   collectStallClearCandidates() → [stallCtx] (J3 classify ctx + ticket/phase)
+//   clearStall({ticket,phase})    → bool       J3 unstick seam: deletes the
+//                                               synthetic stalled signal, clears
+//                                               needs-human + the orphan-detected
+//                                               marker, writes the once-marker, and
+//                                               lets the scheduler re-dispatch.
 export function runStallJanitorPass({
   mode = "shadow",
   terminalIdleMs = 600_000,
   collectOrphanCandidates = () => [],
   collectGhostCandidates = () => [],
+  collectStallClearCandidates = () => [],
   emit = async () => true,
   recordKillIntent = () => false,
+  clearStall = () => false,
 } = {}) {
-  const report = { reaped: [], wouldReap: [], killIntents: [], wouldKill: [], deferred: [] };
+  const report = {
+    reaped: [], wouldReap: [], killIntents: [], wouldKill: [], deferred: [],
+    stallsCleared: [], wouldClear: [],
+  };
 
   // off → skip the pass entirely: no census, no events, no intents.
   if (mode === "off") return report;
@@ -239,6 +296,50 @@ export function runStallJanitorPass({
       log.warn(
         { ticket: c?.ticket, err: err?.message },
         "stall-janitor: per-ghost step failed — continuing (CTL-1004)",
+      );
+    }
+  }
+
+  // ---- J3: prior-artifact-retry-exhausted stalls → auto-clear ONCE (CTL-1005) -
+  // A transient stall (escalateDispatchExhausted wrote a synthetic `stalled`
+  // signal because the prior-phase artifact was missing) that froze to needs-human
+  // even after the artifact later arrived. In enforce the clearStall seam deletes
+  // the synthetic signal + clears needs-human / .orphan-detected / writes the
+  // once-marker; the scheduler's normal path then re-dispatches next tick.
+  let stallCandidates = [];
+  try {
+    stallCandidates = collectStallClearCandidates() ?? [];
+  } catch (err) {
+    log.warn({ err: err?.message }, "stall-janitor: stall-clear census threw — skipping J3 (CTL-1005)");
+    stallCandidates = [];
+  }
+  for (const c of stallCandidates) {
+    try {
+      const decision = classifyStallClear(c);
+      if (decision.action !== "clear") continue;
+      if (enforce) {
+        // The clear is the executor: delete the synthetic stalled signal, clear
+        // needs-human + .orphan-detected.applied, write .janitor-cleared-<phase>
+        // .applied (one clear per lifetime), and let the scheduler re-dispatch.
+        clearStall({ ticket: c.ticket, phase: c.phase });
+        fire(
+          "janitor.stall.cleared",
+          { ticket: c.ticket, phase: c.phase, artifact_verified: true, reason: decision.reason },
+          c.ticket,
+        );
+        report.stallsCleared.push({ ticket: c.ticket, phase: c.phase });
+      } else {
+        fire(
+          "janitor.would.clear",
+          { ticket: c.ticket, phase: c.phase, artifact_verified: true, reason: decision.reason },
+          c.ticket,
+        );
+        report.wouldClear.push({ ticket: c.ticket, phase: c.phase });
+      }
+    } catch (err) {
+      log.warn(
+        { ticket: c?.ticket, err: err?.message },
+        "stall-janitor: per-stall-clear step failed — continuing (CTL-1005)",
       );
     }
   }
@@ -436,4 +537,151 @@ export function defaultSignalMtimeMs(path) {
   } catch {
     return null;
   }
+}
+
+// PRIOR_PHASE — phase → the phase whose artifact it waits on, derived by inverting
+// NEXT_PHASE (the workflow descriptor's forward successor table). Single source of
+// truth: when the pipeline order changes, this map follows automatically. The
+// `prior-artifact-retry-exhausted` stall is written for the phase that COULD NOT
+// launch because PRIOR_PHASE[phase]'s artifact was missing.
+const PRIOR_PHASE = Object.freeze(
+  Object.fromEntries(
+    Object.entries(NEXT_PHASE)
+      .filter(([, next]) => typeof next === "string")
+      .map(([phase, next]) => [next, phase]),
+  ),
+);
+
+// defaultPriorArtifactComplete — does the prior-phase artifact for a stalled phase
+// exist AND read as COMPLETE (non-truncated)? Reuses the reclaim sweep's per-phase
+// work-done probe (WORK_DONE_PROBES[priorPhase]) so completeness means exactly what
+// it means everywhere else: MIN_ARTIFACT_BYTES + the schema's closing markers for a
+// thoughts/ doc, a content-validated JSON for a worker-dir signal. Returns false on
+// any unknown phase / missing probe / throwing seam (the safe default — stay frozen).
+export function defaultPriorArtifactComplete({ ticket, phase, orchDir, repoRoot } = {}) {
+  const prior = PRIOR_PHASE[phase];
+  if (!prior) return false; // entry phase (no prior) or unknown — never auto-clear
+  const probe = WORK_DONE_PROBES[prior];
+  if (typeof probe !== "function") return false;
+  try {
+    return probe({ ticket, orchDir, repoRoot }) === true;
+  } catch (err) {
+    log.warn({ ticket, phase, prior, err: err?.message }, "stall-janitor: prior-artifact probe threw (CTL-1005)");
+    return false;
+  }
+}
+
+// defaultCollectStallClearCandidates — enumerate every ticket carrying a
+// `prior-artifact-retry-exhausted` stall and build the J3 classify ctx from
+// read-only probes. The artifact-completeness check (artifactPresent +
+// artifactComplete) defaults to defaultPriorArtifactComplete (the reclaim
+// work-done probe); Linear-terminal + worktree + live-session detection are
+// injected seams (the daemon wires its warm agents snapshot + Linear cache).
+// Any throw degrades to "skip this candidate" — the janitor never escalates on
+// missing data. Mirrors defaultCollectOrphanCandidates' read-only discipline.
+export function defaultCollectStallClearCandidates({
+  orchDir,
+  projects = [],
+  agents = [],
+  isLinearTerminal = () => false,
+  // resolveWorktreePath(ticket) → the worktree path (or null). Default resolves it
+  // from the registered projects' `git worktree list --porcelain` (read-only).
+  resolveWorktreePath = undefined,
+  // artifactPresent / artifactComplete(ctx) — injectable for tests. In production
+  // both fold into the single work-done probe (present ⊆ complete): a complete
+  // artifact is necessarily present, so the default derives presence from
+  // completeness when a dedicated presence probe is not supplied.
+  artifactComplete = undefined,
+  artifactPresent = undefined,
+  runGit = (args) => spawnSync("git", args, { encoding: "utf8" }),
+} = {}) {
+  const out = [];
+  let workerDirs;
+  try {
+    workerDirs = readdirSync(join(orchDir, "workers"), { withFileTypes: true });
+  } catch {
+    return out; // no workers dir → nothing to census
+  }
+
+  // Resolve a worktree path for a ticket across the registered projects (cached).
+  const worktreeListByRepo = new Map();
+  function defaultResolveWorktreePath(ticket) {
+    for (const p of projects) {
+      const repoRoot = p?.repoRoot;
+      if (!repoRoot) continue;
+      let porcelain = worktreeListByRepo.get(repoRoot);
+      if (porcelain == null) {
+        porcelain = "";
+        try {
+          const res = runGit(["-C", repoRoot, "worktree", "list", "--porcelain"]);
+          if (!res.error && (res.status ?? 1) === 0) porcelain = res.stdout ?? "";
+        } catch { /* unreadable → no worktrees */ }
+        worktreeListByRepo.set(repoRoot, porcelain);
+      }
+      const path = parseWorktreeForBranch(porcelain, ticket);
+      if (path) return path;
+    }
+    return null;
+  }
+  const resolvePath = resolveWorktreePath ?? defaultResolveWorktreePath;
+
+  // repoRoot lookup for the work-done probe (it resolves the worktree itself).
+  function repoRootFor(ticket) {
+    const team = (ticket.match(/^([A-Z]+)-/) ?? [])[1];
+    const p = projects.find((x) => x?.team === team);
+    return p?.repoRoot ?? null;
+  }
+
+  for (const d of workerDirs) {
+    if (!d.isDirectory()) continue;
+    const ticket = d.name;
+    try {
+      const workerDir = join(orchDir, "workers", ticket);
+      // Find a `stalled` phase signal carrying the J3-relevant reason.
+      let stalledPhase = null;
+      for (const f of readdirSync(workerDir)) {
+        const m = /^phase-(.+)\.json$/.exec(f);
+        if (!m) continue;
+        let raw;
+        try { raw = JSON.parse(readFileSync(join(workerDir, f), "utf8")); } catch { continue; }
+        if (raw?.status === "stalled" && raw?.stalledReason === "prior-artifact-retry-exhausted") {
+          stalledPhase = m[1];
+          break;
+        }
+      }
+      if (!stalledPhase) continue; // no J3-relevant stall on this ticket
+
+      const worktreePath = resolvePath(ticket);
+      const liveSessionInWorktree =
+        !!worktreePath &&
+        Array.isArray(agents) &&
+        agents.some((a) => cwdUnder(a?.cwd, worktreePath));
+      const alreadyCleared = existsSync(join(workerDir, `.janitor-cleared-${stalledPhase}.applied`));
+      const linearTerminal = (() => {
+        try { return isLinearTerminal(ticket) === true; } catch { return false; }
+      })();
+
+      // Artifact completeness: a complete artifact is necessarily present, so
+      // presence defaults to completeness unless a dedicated presence probe is given.
+      const probeCtx = { ticket, phase: stalledPhase, orchDir, repoRoot: repoRootFor(ticket) };
+      const complete =
+        (artifactComplete ?? defaultPriorArtifactComplete)(probeCtx) === true;
+      const present = artifactPresent ? artifactPresent(probeCtx) === true : complete;
+
+      out.push({
+        ticket,
+        phase: stalledPhase,
+        stalledReason: "prior-artifact-retry-exhausted",
+        linearTerminal,
+        liveSessionInWorktree,
+        artifactPresent: present,
+        artifactComplete: complete,
+        alreadyCleared,
+        worktreePath,
+      });
+    } catch (err) {
+      log.warn({ ticket, err: err?.message }, "stall-janitor: stall-clear candidate probe threw — skipping (CTL-1005)");
+    }
+  }
+  return out;
 }
