@@ -311,6 +311,17 @@ export function synthesizeQueuedTicket(
   eligible: unknown,
   linfo: Record<string, unknown>,
 ): BoardTicket;
+/** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
+ *  surface). Priority: explicit triage.title → the authoritative Linear title
+ *  (linfo, then the eligible projection) → triage.summary (last-ditch) → the
+ *  ticket key. NEVER lets the triage summary (a description) stand in for a real
+ *  Linear title. */
+export function ticketTitle(
+  ticket: string,
+  triage: { title?: string | null; summary?: string | null } | null | undefined,
+  eligibleIndex: Record<string, { title?: string | null } | undefined>,
+  linfo?: Record<string, { title?: string | null } | undefined>,
+): string;
 export function assembleBoard(): Promise<BoardPayload>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
