@@ -103,8 +103,11 @@ export function renderAuditMarkdown(entries: AttributeAuditEntry[]): string {
   // Remediation map
   lines.push("## Remediation Map (CTL-1008 Handoff)", "");
   lines.push(
-    "Each cluster below is a unit of work for CTL-1008. Emit-side files and",
-    "dual-emit windows are derived from the manifest.",
+    "Each cluster below is a unit of work for CTL-1008. Emit-side files are",
+    "derived from the manifest. Per the operator decision (Ryan, 2026-06-11),",
+    "every rename uses a **hard cutover** — no dual-emit period, no deprecated-name",
+    "emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,",
+    "validated against live Loki.",
     "",
   );
 
@@ -118,14 +121,19 @@ export function renderAuditMarkdown(entries: AttributeAuditEntry[]): string {
     const label = CLUSTER_LABELS[cluster];
     lines.push(`### Cluster ${cluster} — ${label}`, "");
 
-    // Collect emit-side files and dual-emit window
+    // Collect emit-side files and rename placement. Migration is always
+    // hard-cutover (operator decision, Ryan 2026-06-11) — no dual-emit window.
     const sources = [...new Set(clusterEntries.map((e) => e.source.split(":")[0]))];
-    const weeks = [...new Set(clusterEntries.map((e) => e.dualEmitWeeks).filter(Boolean))];
     const where = [...new Set(clusterEntries.map((e) => e.where).filter(Boolean))];
     lines.push(
       `- **Emit-side files**: ${sources.map((s) => `\`${s}\``).join(", ")}`,
       `- **Where**: ${where.join(", ") || "emit"}`,
-      `- **Dual-emit window**: ${weeks.join(", ")} week(s)`,
+      `- **Migration**: hard-cutover (no dual-emit)`,
+      `- **Consumer-update checklist** (all in ONE PR, validated against live Loki):`,
+      `  - [ ] emit-side rename in the file(s) above`,
+      `  - [ ] Grafana dashboard JSON updates`,
+      `  - [ ] orch-monitor otel-queries updates`,
+      `- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)`,
       "",
     );
 

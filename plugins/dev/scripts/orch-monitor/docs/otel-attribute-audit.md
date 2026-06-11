@@ -110,14 +110,22 @@ Do **not** edit this file directly.
 
 ## Remediation Map (CTL-1008 Handoff)
 
-Each cluster below is a unit of work for CTL-1008. Emit-side files and
-dual-emit windows are derived from the manifest.
+Each cluster below is a unit of work for CTL-1008. Emit-side files are
+derived from the manifest. Per the operator decision (Ryan, 2026-06-11),
+every rename uses a **hard cutover** — no dual-emit period, no deprecated-name
+emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,
+validated against live Loki.
 
 ### Cluster A — event.* non-name fields
 
 - **Emit-side files**: `canonical-event.ts`
 - **Where**: emit
-- **Dual-emit window**: 4 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -131,7 +139,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `ratelimit-event.mjs`
 - **Where**: both
-- **Dual-emit window**: 2 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -149,7 +162,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `host.mjs`
 - **Where**: both
-- **Dual-emit window**: 4 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -167,7 +185,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `processes.mjs`
 - **Where**: emit
-- **Dual-emit window**: 2 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -180,7 +203,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `canonical-event.ts`
 - **Where**: emit
-- **Dual-emit window**: 2 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -192,7 +220,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `canonical-event.sh`
 - **Where**: emit
-- **Dual-emit window**: 2 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -203,7 +236,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `emit-otel-event.sh`
 - **Where**: emit
-- **Dual-emit window**: 1 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |
@@ -216,7 +254,12 @@ dual-emit windows are derived from the manifest.
 
 - **Emit-side files**: `canonical-event.ts`
 - **Where**: both
-- **Dual-emit window**: 4 week(s)
+- **Migration**: hard-cutover (no dual-emit)
+- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
+  - [ ] emit-side rename in the file(s) above
+  - [ ] Grafana dashboard JSON updates
+  - [ ] orch-monitor otel-queries updates
+- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
 
 | Current key | Target name | Note |
 | --- | --- | --- |

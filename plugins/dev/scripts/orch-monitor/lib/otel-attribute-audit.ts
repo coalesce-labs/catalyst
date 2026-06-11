@@ -15,7 +15,6 @@ export interface AttributeAuditEntry {
   targetName?: string;
   remediationCluster?: RemediationCluster;
   where?: "emit" | "collector" | "both";
-  dualEmitWeeks?: number;
   note?: string;
 }
 
@@ -28,18 +27,18 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "host.name",         emitter: "ts", source: "canonical-event.ts:47", classification: "conforming" },
   { key: "host.id",           emitter: "ts", source: "canonical-event.ts:48", classification: "conforming" },
   // CTL-636 optional resource context
-  { key: "project",                 emitter: "ts", source: "canonical-event.ts:52", classification: "rename-to",            targetName: "catalyst.project",        remediationCluster: "H", where: "both",      dualEmitWeeks: 4 },
+  { key: "project",                 emitter: "ts", source: "canonical-event.ts:52", classification: "rename-to",            targetName: "catalyst.project",        remediationCluster: "H", where: "both" },
   { key: "linear.key",              emitter: "ts", source: "canonical-event.ts:53", classification: "legitimately-custom" },
   { key: "catalyst.orchestration",  emitter: "ts", source: "canonical-event.ts:54", classification: "legitimately-custom" },
 
   // ── TS emitter — Attributes interface (canonical-event.ts) ───────────────
   // §4b: Event classifier family
   { key: "event.name",    emitter: "ts", source: "canonical-event.ts:59", classification: "conforming" },
-  { key: "event.entity",  emitter: "ts", source: "canonical-event.ts:60", classification: "rename-to", targetName: "catalyst.event.entity",  remediationCluster: "A", where: "emit", dualEmitWeeks: 4 },
-  { key: "event.action",  emitter: "ts", source: "canonical-event.ts:61", classification: "rename-to", targetName: "catalyst.event.action",  remediationCluster: "A", where: "emit", dualEmitWeeks: 4 },
-  { key: "event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "rename-to", targetName: "catalyst.event.label",   remediationCluster: "A", where: "emit", dualEmitWeeks: 4 },
-  { key: "event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "rename-to", targetName: "catalyst.event.value",   remediationCluster: "A", where: "emit", dualEmitWeeks: 4 },
-  { key: "event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "rename-to", targetName: "catalyst.event.channel", remediationCluster: "A", where: "emit", dualEmitWeeks: 4 },
+  { key: "event.entity",  emitter: "ts", source: "canonical-event.ts:60", classification: "rename-to", targetName: "catalyst.event.entity",  remediationCluster: "A", where: "emit" },
+  { key: "event.action",  emitter: "ts", source: "canonical-event.ts:61", classification: "rename-to", targetName: "catalyst.event.action",  remediationCluster: "A", where: "emit" },
+  { key: "event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "rename-to", targetName: "catalyst.event.label",   remediationCluster: "A", where: "emit" },
+  { key: "event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "rename-to", targetName: "catalyst.event.value",   remediationCluster: "A", where: "emit" },
+  { key: "event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "rename-to", targetName: "catalyst.event.channel", remediationCluster: "A", where: "emit" },
 
   // §4c: Catalyst internal — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.orchestrator.id", emitter: "ts", source: "canonical-event.ts:67", classification: "legitimately-custom" },
@@ -51,12 +50,12 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "vcs.repository.name", emitter: "ts", source: "canonical-event.ts:73", classification: "conforming" },
   { key: "vcs.pr.number",       emitter: "ts", source: "canonical-event.ts:74", classification: "conforming" },
   { key: "vcs.ref.name",        emitter: "ts", source: "canonical-event.ts:75", classification: "conforming" },
-  { key: "vcs.revision",        emitter: "ts", source: "canonical-event.ts:76", classification: "rename-to", targetName: "vcs.ref.revision", remediationCluster: "E", where: "emit", dualEmitWeeks: 2 },
+  { key: "vcs.revision",        emitter: "ts", source: "canonical-event.ts:76", classification: "rename-to", targetName: "vcs.ref.revision", remediationCluster: "E", where: "emit" },
 
   // §4e: CI/CD semconv
   { key: "cicd.pipeline.run.id",         emitter: "ts", source: "canonical-event.ts:79", classification: "conforming" },
   { key: "cicd.pipeline.run.status",     emitter: "ts", source: "canonical-event.ts:80", classification: "conforming" },
-  { key: "cicd.pipeline.run.conclusion", emitter: "ts", source: "canonical-event.ts:81", classification: "rename-to", targetName: "cicd.pipeline.run.result", remediationCluster: "E", where: "emit", dualEmitWeeks: 2 },
+  { key: "cicd.pipeline.run.conclusion", emitter: "ts", source: "canonical-event.ts:81", classification: "rename-to", targetName: "cicd.pipeline.run.result", remediationCluster: "E", where: "emit" },
   { key: "cicd.pipeline.name",           emitter: "ts", source: "canonical-event.ts:82", classification: "conforming" },
 
   // Linear — legitimately-custom (no OTel semconv; linear.* vendor namespace)
@@ -66,7 +65,7 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "linear.actor.id",         emitter: "ts", source: "canonical-event.ts:88", classification: "legitimately-custom" },
 
   // §4f: Deployment semconv
-  { key: "deployment.environment", emitter: "ts", source: "canonical-event.ts:91", classification: "rename-to", targetName: "deployment.environment.name", remediationCluster: "E", where: "emit", dualEmitWeeks: 2 },
+  { key: "deployment.environment", emitter: "ts", source: "canonical-event.ts:91", classification: "rename-to", targetName: "deployment.environment.name", remediationCluster: "E", where: "emit" },
   { key: "deployment.id",          emitter: "ts", source: "canonical-event.ts:92", classification: "conforming", note: "type should be string per OTel semconv; currently number" },
 
   // §4g: Claude Code metadata (CTL-374) — legitimately-custom (claude.* vendor namespace)
@@ -84,48 +83,48 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "claude.ratelimit.seven_day_sonnet_pct", emitter: "sh", source: "canonical-event.sh:346", classification: "legitimately-custom", note: "CTL-763" },
 
   // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F
-  { key: "phase.attempt",      emitter: "sh", source: "canonical-event.sh:347", classification: "rename-to", targetName: "catalyst.phase.attempt",      remediationCluster: "F", where: "emit", dualEmitWeeks: 2, note: "CTL-761" },
-  { key: "phase.revive_count", emitter: "sh", source: "canonical-event.sh:348", classification: "rename-to", targetName: "catalyst.phase.revive_count", remediationCluster: "F", where: "emit", dualEmitWeeks: 2, note: "CTL-761" },
+  { key: "phase.attempt",      emitter: "sh", source: "canonical-event.sh:347", classification: "rename-to", targetName: "catalyst.phase.attempt",      remediationCluster: "F", where: "emit", note: "CTL-761" },
+  { key: "phase.revive_count", emitter: "sh", source: "canonical-event.sh:348", classification: "rename-to", targetName: "catalyst.phase.revive_count", remediationCluster: "F", where: "emit", note: "CTL-761" },
 
   // CTL-1023: work-type dimension — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.ticket.type", emitter: "sh", source: "canonical-event.sh:349", classification: "legitimately-custom", note: "CTL-1023" },
 
   // ── MJS emitter — execution-core/ratelimit-event.mjs ─────────────────────
   // §4i: Account rate-limit cluster B — rename-to
-  { key: "account.email",               emitter: "mjs", source: "ratelimit-event.mjs:62", classification: "rename-to", targetName: "catalyst.account.email",               remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.five_hour_pct",     emitter: "mjs", source: "ratelimit-event.mjs:64", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_pct",     remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.seven_day_pct",     emitter: "mjs", source: "ratelimit-event.mjs:65", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_pct",     remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.five_hour_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:66", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_resets_at", remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.seven_day_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:67", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_resets_at", remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.seven_day_opus_pct",   emitter: "mjs", source: "ratelimit-event.mjs:68", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_opus_pct",   remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "ratelimit.seven_day_sonnet_pct", emitter: "mjs", source: "ratelimit-event.mjs:69", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_sonnet_pct", remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "subscription.type", emitter: "mjs", source: "ratelimit-event.mjs:70", classification: "rename-to", targetName: "catalyst.subscription.type", remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
-  { key: "rate_limit.tier",   emitter: "mjs", source: "ratelimit-event.mjs:71", classification: "rename-to", targetName: "catalyst.ratelimit.tier",    remediationCluster: "B", where: "both", dualEmitWeeks: 2 },
+  { key: "account.email",               emitter: "mjs", source: "ratelimit-event.mjs:62", classification: "rename-to", targetName: "catalyst.account.email",               remediationCluster: "B", where: "both" },
+  { key: "ratelimit.five_hour_pct",     emitter: "mjs", source: "ratelimit-event.mjs:64", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_pct",     remediationCluster: "B", where: "both" },
+  { key: "ratelimit.seven_day_pct",     emitter: "mjs", source: "ratelimit-event.mjs:65", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_pct",     remediationCluster: "B", where: "both" },
+  { key: "ratelimit.five_hour_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:66", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_resets_at", remediationCluster: "B", where: "both" },
+  { key: "ratelimit.seven_day_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:67", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_resets_at", remediationCluster: "B", where: "both" },
+  { key: "ratelimit.seven_day_opus_pct",   emitter: "mjs", source: "ratelimit-event.mjs:68", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_opus_pct",   remediationCluster: "B", where: "both" },
+  { key: "ratelimit.seven_day_sonnet_pct", emitter: "mjs", source: "ratelimit-event.mjs:69", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_sonnet_pct", remediationCluster: "B", where: "both" },
+  { key: "subscription.type", emitter: "mjs", source: "ratelimit-event.mjs:70", classification: "rename-to", targetName: "catalyst.subscription.type", remediationCluster: "B", where: "both" },
+  { key: "rate_limit.tier",   emitter: "mjs", source: "ratelimit-event.mjs:71", classification: "rename-to", targetName: "catalyst.ratelimit.tier",    remediationCluster: "B", where: "both" },
 
   // ── MJS emitter — catalyst-agent/host.mjs ────────────────────────────────
   // §4j: Host system metrics cluster C — rename-to (host.* → system.*)
-  { key: "host.cpu_pct",      emitter: "mjs", source: "host.mjs:273", classification: "rename-to", targetName: "system.cpu.utilization",       remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ÷100 → 0.0–1.0" },
-  { key: "host.cpu_count",    emitter: "mjs", source: "host.mjs:274", classification: "rename-to", targetName: "system.cpu.logical_count",     remediationCluster: "C", where: "both", dualEmitWeeks: 4 },
-  { key: "host.load1",        emitter: "mjs", source: "host.mjs:275", classification: "rename-to", targetName: "system.linux.cpu.load_1m",     remediationCluster: "C", where: "both", dualEmitWeeks: 4 },
-  { key: "host.mem_used_mb",  emitter: "mjs", source: "host.mjs:276", classification: "rename-to", targetName: "system.memory.usage",          remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ×1048576 → bytes, state=used" },
-  { key: "host.mem_total_mb", emitter: "mjs", source: "host.mjs:277", classification: "rename-to", targetName: "system.memory.limit",          remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ×1048576 → bytes" },
-  { key: "host.mem_used_pct", emitter: "mjs", source: "host.mjs:278", classification: "rename-to", targetName: "system.memory.utilization",    remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ÷100 → 0.0–1.0" },
-  { key: "host.disk_used_gb", emitter: "mjs", source: "host.mjs:279", classification: "rename-to", targetName: "system.filesystem.usage",      remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ×1073741824 → bytes, state=used" },
-  { key: "host.disk_total_gb",emitter: "mjs", source: "host.mjs:280", classification: "rename-to", targetName: "system.filesystem.capacity",   remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ×1073741824 → bytes" },
-  { key: "host.disk_used_pct",emitter: "mjs", source: "host.mjs:281", classification: "rename-to", targetName: "system.filesystem.utilization",remediationCluster: "C", where: "both", dualEmitWeeks: 4, note: "unit: ÷100 → 0.0–1.0" },
+  { key: "host.cpu_pct",      emitter: "mjs", source: "host.mjs:273", classification: "rename-to", targetName: "system.cpu.utilization",       remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
+  { key: "host.cpu_count",    emitter: "mjs", source: "host.mjs:274", classification: "rename-to", targetName: "system.cpu.logical_count",     remediationCluster: "C", where: "both" },
+  { key: "host.load1",        emitter: "mjs", source: "host.mjs:275", classification: "rename-to", targetName: "system.linux.cpu.load_1m",     remediationCluster: "C", where: "both" },
+  { key: "host.mem_used_mb",  emitter: "mjs", source: "host.mjs:276", classification: "rename-to", targetName: "system.memory.usage",          remediationCluster: "C", where: "both", note: "unit: ×1048576 → bytes, state=used" },
+  { key: "host.mem_total_mb", emitter: "mjs", source: "host.mjs:277", classification: "rename-to", targetName: "system.memory.limit",          remediationCluster: "C", where: "both", note: "unit: ×1048576 → bytes" },
+  { key: "host.mem_used_pct", emitter: "mjs", source: "host.mjs:278", classification: "rename-to", targetName: "system.memory.utilization",    remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
+  { key: "host.disk_used_gb", emitter: "mjs", source: "host.mjs:279", classification: "rename-to", targetName: "system.filesystem.usage",      remediationCluster: "C", where: "both", note: "unit: ×1073741824 → bytes, state=used" },
+  { key: "host.disk_total_gb",emitter: "mjs", source: "host.mjs:280", classification: "rename-to", targetName: "system.filesystem.capacity",   remediationCluster: "C", where: "both", note: "unit: ×1073741824 → bytes" },
+  { key: "host.disk_used_pct",emitter: "mjs", source: "host.mjs:281", classification: "rename-to", targetName: "system.filesystem.utilization",remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
 
   // ── MJS emitter — catalyst-agent/processes.mjs ───────────────────────────
   // §4k: Process metrics — partially conforming, cluster D
   { key: "process.command",  emitter: "mjs", source: "processes.mjs:283", classification: "conforming" },
-  { key: "process.cpu_pct",  emitter: "mjs", source: "processes.mjs:284", classification: "rename-to", targetName: "process.cpu.utilization", remediationCluster: "D", where: "emit", dualEmitWeeks: 2, note: "unit: ÷100 → 0.0–1.0" },
-  { key: "process.rss_mb",   emitter: "mjs", source: "processes.mjs:285", classification: "rename-to", targetName: "process.memory.usage",    remediationCluster: "D", where: "emit", dualEmitWeeks: 2, note: "unit: ×1048576 → bytes" },
-  { key: "process.ticket",   emitter: "mjs", source: "processes.mjs:286", classification: "rename-to", targetName: "catalyst.process.ticket", remediationCluster: "D", where: "emit", dualEmitWeeks: 2 },
-  { key: "process.phase",    emitter: "mjs", source: "processes.mjs:287", classification: "rename-to", targetName: "catalyst.process.phase",  remediationCluster: "D", where: "emit", dualEmitWeeks: 2 },
+  { key: "process.cpu_pct",  emitter: "mjs", source: "processes.mjs:284", classification: "rename-to", targetName: "process.cpu.utilization", remediationCluster: "D", where: "emit", note: "unit: ÷100 → 0.0–1.0" },
+  { key: "process.rss_mb",   emitter: "mjs", source: "processes.mjs:285", classification: "rename-to", targetName: "process.memory.usage",    remediationCluster: "D", where: "emit", note: "unit: ×1048576 → bytes" },
+  { key: "process.ticket",   emitter: "mjs", source: "processes.mjs:286", classification: "rename-to", targetName: "catalyst.process.ticket", remediationCluster: "D", where: "emit" },
+  { key: "process.phase",    emitter: "mjs", source: "processes.mjs:287", classification: "rename-to", targetName: "catalyst.process.phase",  remediationCluster: "D", where: "emit" },
 
   // ── Legacy SH emitter — emit-otel-event.sh (OTLP direct) ─────────────────
   // §4l: Legacy bare attributes cluster G — rename-to
-  { key: "outcome",    emitter: "legacy-sh", source: "emit-otel-event.sh:130", classification: "rename-to", targetName: "catalyst.outcome",   remediationCluster: "G", where: "emit", dualEmitWeeks: 1 },
-  { key: "session_id", emitter: "legacy-sh", source: "emit-otel-event.sh:131", classification: "rename-to", targetName: "claude.session.id",  remediationCluster: "G", where: "emit", dualEmitWeeks: 1 },
-  { key: "reason",     emitter: "legacy-sh", source: "emit-otel-event.sh:135", classification: "rename-to", targetName: "catalyst.reason",    remediationCluster: "G", where: "emit", dualEmitWeeks: 1 },
-  { key: "phase",      emitter: "legacy-sh", source: "emit-otel-event.sh:141", classification: "rename-to", targetName: "catalyst.phase",     remediationCluster: "G", where: "emit", dualEmitWeeks: 1 },
+  { key: "outcome",    emitter: "legacy-sh", source: "emit-otel-event.sh:130", classification: "rename-to", targetName: "catalyst.outcome",   remediationCluster: "G", where: "emit" },
+  { key: "session_id", emitter: "legacy-sh", source: "emit-otel-event.sh:131", classification: "rename-to", targetName: "claude.session.id",  remediationCluster: "G", where: "emit" },
+  { key: "reason",     emitter: "legacy-sh", source: "emit-otel-event.sh:135", classification: "rename-to", targetName: "catalyst.reason",    remediationCluster: "G", where: "emit" },
+  { key: "phase",      emitter: "legacy-sh", source: "emit-otel-event.sh:141", classification: "rename-to", targetName: "catalyst.phase",     remediationCluster: "G", where: "emit" },
 ];

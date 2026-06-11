@@ -168,6 +168,17 @@ describe("otel-attribute-audit — Phase 3: generated doc", () => {
     }
   });
 
+  it("hard-cutover migration: rendered doc records hard-cutover and no dual-emit window (operator decision Ryan 2026-06-11)", () => {
+    const rendered = renderAuditMarkdown(AUDIT_MANIFEST);
+    // Every rename cluster must encode the hard-cutover migration strategy.
+    expect(rendered).toContain("hard-cutover");
+    // The repudiated dual-emit-window encoding must not reappear.
+    expect(rendered).not.toContain("Dual-emit window");
+    expect(rendered.toLowerCase()).not.toContain("dual-emit window");
+    // The manifest itself must carry no dual-emit-window field.
+    expect(JSON.stringify(AUDIT_MANIFEST)).not.toContain("dualEmitWeeks");
+  });
+
   it("PII gate: manifest and rendered doc contain no user_email or user_account_ entries", () => {
     const rendered = renderAuditMarkdown(AUDIT_MANIFEST);
     expect(rendered).not.toContain("user_email");
