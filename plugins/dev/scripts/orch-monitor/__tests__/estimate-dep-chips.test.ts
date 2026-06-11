@@ -103,15 +103,17 @@ describe("CTL-957: estimate read-model projection", () => {
 // We test the public output via the module-level constants instead.
 describe("CTL-957: estimateDisplay method-aware rendering", () => {
   it("tShirt estimate 2 displays as 'M'", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return; // not exported — rely on ScopeChip text check
     expect(deriveEstimateDisplay(2, "tShirt")).toBe("M");
   });
 
   it("fibonacci estimate 5 displays as '5'", async () => {
-    const m = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
-    if (!m?.deriveEstimateDisplay) return;
-    expect(m.deriveEstimateDisplay(5, "fibonacci")).toBe("5");
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
+    if (!deriveEstimateDisplay) return;
+    expect(deriveEstimateDisplay(5, "fibonacci")).toBe("5");
   });
 });
 

@@ -294,19 +294,22 @@ describe("CTL-974: getEstimationMethodAsync — team method resolution", () => {
 
 describe("CTL-974: estimateDisplay correct per estimation method", () => {
   it("fibonacci estimate 8 renders as '8'", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return; // not exported — rely on board-data's own tests
     expect(deriveEstimateDisplay(8, "fibonacci")).toBe("8");
   });
 
   it("tShirt estimate 2 renders as 'M'", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return;
     expect(deriveEstimateDisplay(2, "tShirt")).toBe("M");
   });
 
   it("null estimate renders as null regardless of method", async () => {
-    const { deriveEstimateDisplay } = await import("../lib/board-data.mjs" as any).catch(() => null) as any;
+    const mod = await import("../lib/board-data.mjs").catch(() => null);
+    const deriveEstimateDisplay = mod?.deriveEstimateDisplay;
     if (!deriveEstimateDisplay) return;
     expect(deriveEstimateDisplay(null, "fibonacci")).toBeNull();
     expect(deriveEstimateDisplay(null, "tShirt")).toBeNull();
