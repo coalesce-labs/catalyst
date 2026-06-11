@@ -5,6 +5,7 @@ import { describe, it, expect } from "bun:test";
 import type { BoardWorker, BoardTicket } from "../../board/types";
 import {
   ordinal,
+  fmtAge,
   assignSlots,
   groupHoldingBuckets,
   holdingTicketIds,
@@ -81,6 +82,19 @@ describe("ordinal", () => {
     expect(ordinal(23)).toBe("23rd");
     expect(ordinal(111)).toBe("111th");
     expect(ordinal(101)).toBe("101st");
+  });
+});
+
+describe("fmtAge", () => {
+  it("formats minutes / hours / days with no 'ago' suffix", () => {
+    expect(fmtAge(30 * 1000)).toBe("<1m");
+    expect(fmtAge(5 * 60000)).toBe("5m");
+    expect(fmtAge(3 * 3600000)).toBe("3h");
+    expect(fmtAge(2 * 86400000)).toBe("2d");
+  });
+  it("negative / non-finite → empty string", () => {
+    expect(fmtAge(-100)).toBe("");
+    expect(fmtAge(NaN)).toBe("");
   });
 });
 

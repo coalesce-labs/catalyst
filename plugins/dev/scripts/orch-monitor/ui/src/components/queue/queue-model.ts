@@ -14,6 +14,23 @@ export function isLiveWorker(w: BoardWorker): boolean {
   return w.activeState !== "dead";
 }
 
+// ── waited-time ────────────────────────────────────────────────────────────────
+
+/**
+ * Compact "how long it has waited" label from an elapsed millisecond span, with
+ * NO "ago" suffix (it's a duration column, not a timestamp): "2d", "3h", "5m",
+ * "<1m". Negative / non-finite → "" (render nothing rather than a bogus age).
+ */
+export function fmtAge(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "<1m";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 // ── ordinal ──────────────────────────────────────────────────────────────────
 
 /**
