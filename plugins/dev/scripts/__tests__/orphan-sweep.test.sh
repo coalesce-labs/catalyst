@@ -365,6 +365,10 @@ EOF
 chmod +x "$MOCKBIN/lsof"
 
 # --- Phase 5: vector 2 — multi-root classification-driven removal (T19-T29) ---
+# SWEEP_FORCE_POWER=1 bypasses the battery gate added by the linter in sweep_worktrees().
+# discover_worktree_roots() (linter version) uses SWEEP_WT_ROOT directly as a root dir;
+# enumerate_worktree_dirs looks for .git-bearing dirs one level inside each root.
+# Fixture structure: SWEEP_WT_ROOT/<worktree-name>/.git  (not SWEEP_WT_ROOT/ns/<wt>/.git)
 
 # ---- mock-git for Phase 5 ----
 export GIT_LOG="${SCRATCH}/git.log"
@@ -391,15 +395,11 @@ done
 
 case "$subcmd" in
   status)
-    # SALVAGE_DIRTY fixtures contain "DIRTY" or "SALVAGE_DIRTY" in path
     if [[ "${cwd_path:-}" == *"SALVAGE_DIRTY"* ]]; then
       echo "M some/file.txt"
     fi
-    # otherwise empty (clean)
     ;;
   worktree)
-    # "worktree list --porcelain" -> return a fake primary entry so _is_primary_checkout works
-    # "worktree remove" -> exit 0 (success), already logged above
     i=$((i+1))
     subcmd2="${!i}"
     if [[ "$subcmd2" == "list" ]]; then
@@ -411,7 +411,6 @@ case "$subcmd" in
     fi
     ;;
   merge-base)
-    # --is-ancestor: exit 0 (merged) for all non-SALVAGE_UNPUSHED paths
     if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
       exit 1
     fi
@@ -421,7 +420,6 @@ case "$subcmd" in
     echo "refs/remotes/origin/main"
     ;;
   rev-list)
-    # --count HEAD --not <refs>: return 0 (nothing unpushed) unless SALVAGE_UNPUSHED
     if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
       echo "3"
     else
@@ -429,7 +427,6 @@ case "$subcmd" in
     fi
     ;;
   branch)
-    # branch -r --contains HEAD: return origin/main for non-SALVAGE_UNPUSHED
     if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
       echo ""
     else
@@ -437,7 +434,6 @@ case "$subcmd" in
     fi
     ;;
   symbolic-ref)
-    # symbolic-ref --quiet --short refs/remotes/origin/HEAD
     if [[ "${cwd_path:-}" == *"MASTER"* ]]; then
       echo "origin/master"
     else
@@ -445,7 +441,6 @@ case "$subcmd" in
     fi
     ;;
   rev-parse)
-    # rev-parse --abbrev-ref HEAD -> branch name (basename of cwd_path)
     echo "$(basename "${cwd_path:-unknown}")"
     ;;
 esac
@@ -480,19 +475,21 @@ EOF
 chmod +x "$MOCKBIN/worktree-presweep.sh"
 
 # ---- fixture setup ----
+# Fixtures go directly in SWEEP_WT_ROOT (linter's discover_worktree_roots uses it as direct root)
 export SWEEP_WT_ROOT="${SCRATCH}/wt3"
-mkdir -p "${SWEEP_WT_ROOT}/catalyst-workspace" "${SWEEP_WT_ROOT}/adva"
-mkdir -p "${SWEEP_WT_ROOT}/catalyst-workspace/CTL-10/.git"
-mkdir -p "${SWEEP_WT_ROOT}/adva/ADV-20/.git"
+mkdir -p "${SWEEP_WT_ROOT}/CTL-10/.git"
+touch -t 202501010000 "${SWEEP_WT_ROOT}/CTL-10" 2>/dev/null || true
 
-# backdate the fixture dirs so idle check passes (SWEEP_IDLE_HOURS=9999 override used per-test)
-touch -t 202501010000 "${SWEEP_WT_ROOT}/catalyst-workspace/CTL-10" 2>/dev/null || true
-touch -t 202501010000 "${SWEEP_WT_ROOT}/adva/ADV-20" 2>/dev/null || true
+# ADV-20 goes in a separate root via SWEEP_PROJECT_CLAUDE_WT (demonstrates multi-root)
+ADV_ROOT="${SCRATCH}/adva-root"
+mkdir -p "${ADV_ROOT}/ADV-20/.git"
+touch -t 202501010000 "${ADV_ROOT}/ADV-20" 2>/dev/null || true
 
-# T19: SAFE worktrees in 2 roots (CTL-10 + ADV-20) -> both removed
+# T19: SAFE worktrees in 2 roots (CTL-10 in SWEEP_WT_ROOT + ADV-20 in SWEEP_PROJECT_CLAUDE_WT)
+# -> both removed (git worktree remove both)
 rm -f "$GIT_LOG" "$SCRATCH_OTEL_LOG"
 run "T19: multi-root sweep exits 0" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT='${ADV_ROOT}' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}'"
 
 run "T19b: CTL-10 git worktree remove called" \
   bash -c "grep -q 'worktree remove' '${GIT_LOG}' && grep -q 'CTL-10' '${GIT_LOG}'"
@@ -506,7 +503,7 @@ mkdir -p "${PROJ_WT}/PROJ-SAFE/.git"
 touch -t 202501010000 "${PROJ_WT}/PROJ-SAFE" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T20: SWEEP_PROJECT_CLAUDE_WT SAFE tree removed" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT='${PROJ_WT}' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'PROJ-SAFE' '${GIT_LOG}'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT='${PROJ_WT}' SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'PROJ-SAFE' '${GIT_LOG}'"
 
 # T21a: SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=1, HOME has .claude/worktrees SAFE tree -> removed
 HOME3="${SCRATCH}/home3"
@@ -514,34 +511,33 @@ mkdir -p "${HOME3}/.claude/worktrees/GLOBAL-SAFE/.git"
 touch -t 202501010000 "${HOME3}/.claude/worktrees/GLOBAL-SAFE" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T21a: SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=1 removes global wt" \
-  bash -c "HOME='${HOME3}' SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=1 bash '${SWEEP}' && grep -q 'GLOBAL-SAFE' '${GIT_LOG}'"
+  bash -c "HOME='${HOME3}' SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=1 bash '${SWEEP}' && grep -q 'GLOBAL-SAFE' '${GIT_LOG}'"
 
 # T21b: SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 -> NOT removed
 rm -f "$GIT_LOG"
 run "T21b: SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 skips global wt" \
-  bash -c "HOME='${HOME3}' SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && ! grep -q 'GLOBAL-SAFE' '${GIT_LOG}' 2>/dev/null; true"
+  bash -c "HOME='${HOME3}' SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && ! grep -q 'GLOBAL-SAFE' '${GIT_LOG}' 2>/dev/null; true"
 
 # T22: CTL-99 classified SAFE (linearis returns [] proving Done gate gone) -> removed
-mkdir -p "${SWEEP_WT_ROOT}/catalyst-workspace/CTL-99/.git"
-touch -t 202501010000 "${SWEEP_WT_ROOT}/catalyst-workspace/CTL-99" 2>/dev/null || true
+mkdir -p "${SWEEP_WT_ROOT}/CTL-99/.git"
+touch -t 202501010000 "${SWEEP_WT_ROOT}/CTL-99" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T22: CTL-99 removed without linearis Done check ([] proves Done gate gone)" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'CTL-99' '${GIT_LOG}'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'CTL-99' '${GIT_LOG}'"
 
-# T23: fixture path *MASTER* -> symbolic-ref returns origin/master; verify merge-base uses it
-MASTER_WT="${SWEEP_WT_ROOT}/catalyst-workspace/MASTER-001"
+# T23: fixture path *MASTER* -> symbolic-ref returns origin/master; verify it's used
+MASTER_WT="${SWEEP_WT_ROOT}/MASTER-001"
 mkdir -p "${MASTER_WT}/.git"
 touch -t 202501010000 "${MASTER_WT}" 2>/dev/null || true
 rm -f "$GIT_LOG"
-run "T23: MASTER fixture uses origin/master trunk" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'MASTER\|master' || grep -q 'origin/master' '${GIT_LOG}' 2>/dev/null || grep -q 'MASTER' '${GIT_LOG}' 2>/dev/null"
+run "T23: MASTER fixture uses origin/master trunk (logged or in GIT_LOG)" \
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'MASTER\|master' || grep -q 'origin/master' '${GIT_LOG}' 2>/dev/null || grep -q 'MASTER' '${GIT_LOG}' 2>/dev/null"
 
 # T24: fixture where symbolic-ref returns empty -> resolve_trunk_ref falls back to origin/main
-# We override the git mock to return empty for symbolic-ref on this specific path
-EMPTY_SYMREF_WT="${SWEEP_WT_ROOT}/catalyst-workspace/EMPTY-SYMREF"
+# Patch mock-git to return empty for EMPTY-SYMREF symbolic-ref
+EMPTY_SYMREF_WT="${SWEEP_WT_ROOT}/EMPTY-SYMREF"
 mkdir -p "${EMPTY_SYMREF_WT}/.git"
 touch -t 202501010000 "${EMPTY_SYMREF_WT}" 2>/dev/null || true
-# Patch mock-git to return empty for EMPTY-SYMREF symbolic-ref
 cat > "$MOCKBIN/git" <<'GITEOF'
 #!/usr/bin/env bash
 echo "$@" >> "${GIT_LOG}"
@@ -589,7 +585,6 @@ case "$subcmd" in
     if [[ "${cwd_path:-}" == *"MASTER"* ]]; then
       echo "origin/master"
     elif [[ "${cwd_path:-}" == *"EMPTY-SYMREF"* ]]; then
-      # return empty to trigger fallback
       exit 1
     else
       echo "origin/main"
@@ -605,38 +600,38 @@ chmod +x "$MOCKBIN/git"
 
 rm -f "$GIT_LOG"
 run "T24: empty symbolic-ref falls back to origin/main (EMPTY-SYMREF removed as SAFE)" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'EMPTY-SYMREF' '${GIT_LOG}'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' && grep -q 'EMPTY-SYMREF' '${GIT_LOG}'"
 
 # T25: orphan gitfile dir (backdated) -> rm -rf called, NOT git worktree remove
-ORPHAN_WT="${SWEEP_WT_ROOT}/catalyst-workspace/ORPHAN-GF"
+ORPHAN_WT="${SWEEP_WT_ROOT}/ORPHAN-GF"
 mkdir -p "${ORPHAN_WT}"
 echo "gitdir: /nonexistent/path/that/does/not/exist" > "${ORPHAN_WT}/.git"
 touch -t 202501010000 "${ORPHAN_WT}" "${ORPHAN_WT}/.git" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T25: orphan gitfile dir rm-rf called (not git worktree remove)" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'orphan\|removed orphan'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'orphan\|removed orphan'"
 
 run "T25b: ORPHAN-GF not in git worktree remove log" \
   bash -c "! grep -E 'worktree remove.*ORPHAN-GF|ORPHAN-GF.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
 # T26a: SALVAGE_DIRTY fixture -> NOT removed, log says "salvage"
-DIRTY_WT="${SWEEP_WT_ROOT}/catalyst-workspace/SALVAGE_DIRTY-WT"
+DIRTY_WT="${SWEEP_WT_ROOT}/SALVAGE_DIRTY-WT"
 mkdir -p "${DIRTY_WT}/.git"
 touch -t 202501010000 "${DIRTY_WT}" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T26a: SALVAGE_DIRTY fixture not removed, salvage logged" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'salvage'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'salvage\|SALVAGE'"
 
 run "T26a-b: SALVAGE_DIRTY-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_DIRTY|SALVAGE_DIRTY.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
 # T26b: SALVAGE_UNPUSHED fixture -> NOT removed, log says "salvage"
-UNPUSHED_WT="${SWEEP_WT_ROOT}/catalyst-workspace/SALVAGE_UNPUSHED-WT"
+UNPUSHED_WT="${SWEEP_WT_ROOT}/SALVAGE_UNPUSHED-WT"
 mkdir -p "${UNPUSHED_WT}/.git"
 touch -t 202501010000 "${UNPUSHED_WT}" 2>/dev/null || true
 rm -f "$GIT_LOG"
 run "T26b: SALVAGE_UNPUSHED fixture not removed, salvage logged" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'salvage'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'salvage\|SALVAGE\|skip.*SALVAGE\|SALVAGE.*skip'"
 
 run "T26b-b: SALVAGE_UNPUSHED-WT not in git worktree remove" \
   bash -c "! grep -E 'worktree remove.*SALVAGE_UNPUSHED|SALVAGE_UNPUSHED.*worktree remove' '${GIT_LOG}' 2>/dev/null; true"
@@ -644,24 +639,21 @@ run "T26b-b: SALVAGE_UNPUSHED-WT not in git worktree remove" \
 # T27: --dry-run -> logs "would remove" for SAFE dirs, GIT_LOG has no worktree remove
 rm -f "$GIT_LOG"
 run "T27: dry-run logs would-remove for SAFE dirs" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run 2>&1 | grep -qi 'would remove'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run 2>&1 | grep -qi 'would remove'"
 
 run "T27b: dry-run GIT_LOG has no worktree remove" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' --dry-run && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
 
 # T28: SWEEP_WT_ROOT=/nonexistent -> exit 0, no error
 run "T28: nonexistent SWEEP_WT_ROOT exits 0" \
-  bash -c "SWEEP_WT_ROOT=/nonexistent SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_WT_ROOT=/nonexistent SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}'"
 
 # T29: primary checkout dir -> "skip primary checkout" in log, not classified
-# Structure: SWEEP_WT_ROOT/group/my-primary (worktree)
-# mock-git reports my-primary as the primary checkout
-# discover_worktree_roots finds: SWEEP_WT_ROOT/group
-# enumerate_worktree_dirs finds: SWEEP_WT_ROOT/group/my-primary
-# _is_primary_checkout: worktree list returns my-primary path -> matches -> skip
+# discover_worktree_roots (linter version) uses SWEEP_WT_ROOT directly as root.
+# enumerate_worktree_dirs finds my-primary directly inside SWEEP_WT_ROOT.
+# _is_primary_checkout: worktree list returns my-primary's real path -> matches -> skip logged.
 T29_WT_ROOT="${SCRATCH}/wt-t29"
-T29_GROUP="${T29_WT_ROOT}/group"
-T29_PRIMARY="${T29_GROUP}/my-primary"
+T29_PRIMARY="${T29_WT_ROOT}/my-primary"
 mkdir -p "${T29_PRIMARY}/.git"
 touch -t 202501010000 "${T29_PRIMARY}" 2>/dev/null || true
 
@@ -729,7 +721,7 @@ chmod +x "$MOCKBIN/git"
 
 rm -f "$GIT_LOG"
 run "T29: primary checkout dir -> skip primary checkout logged" \
-  bash -c "SWEEP_IDLE_HOURS=9999 SWEEP_WT_ROOT='${T29_WT_ROOT}' SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'skip primary'"
+  bash -c "SWEEP_FORCE_POWER=1 SWEEP_IDLE_HOURS=9999 SWEEP_WT_ROOT='${T29_WT_ROOT}' SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 bash '${SWEEP}' 2>&1 | grep -qi 'skip primary'"
 
 # Restore standard mock-git for subsequent phases (git mock removed; Phase 7 uses real git)
 rm -f "$MOCKBIN/git"
