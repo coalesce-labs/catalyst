@@ -30,6 +30,10 @@ import {
   LAYOUT_OPTIONS,
 } from "@/board/display-options-popover";
 import { SWIMLANE_OPTIONS } from "@/board/Swimlane";
+import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+import { useRepoIcons } from "@/hooks/use-repo-icons";
+import { repoIconPicksAtom } from "@/lib/repo-icon-picks-store";
+import { buildIconPickerRows } from "@/components/icon-picker-model";
 
 // settings-surface.tsx — the Settings preferences surface (CTL-911 / SURF3).
 // Replaces the footer Settings placeholder (handoff next-step #4). Renders the
@@ -130,6 +134,13 @@ export function SettingsSurface() {
   // Landing surface — read once for the control's initial value, then write
   // through on change (it only takes effect on the next load).
   const [landing, setLanding] = useState<Surface>(readLandingSurface);
+
+  // Project icons — per-repo candidate picker (CTL-997).
+  const { payload } = useBoardSnapshot();
+  const repos = payload?.repos ?? [];
+  const iconMap = useRepoIcons(repos);
+  const [iconPicks, setIconPicks] = useAtom(repoIconPicksAtom);
+  const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
 
   return (
     <div className="h-full min-h-0 overflow-y-auto bg-surface-0">
@@ -242,6 +253,76 @@ export function SettingsSurface() {
               label: SURFACE_LABEL[s],
             }))}
           />
+        </Section>
+
+        {/* ── Project icons ──────────────────────────────────────────────────── */}
+        <Section
+          title="Project icons"
+          description="Pick the crispest detected icon per project, or let Catalyst choose the best (SVG preferred). Saved in this browser."
+        >
+          {iconPickerRows.length === 0 ? (
+            <p className="py-3 text-xs text-muted">
+              No detectable project icons yet.
+            </p>
+          ) : (
+            iconPickerRows.map(({ repo, options }) => {
+              const activeValue =
+                iconPicks[repo] != null ? iconPicks[repo] : "auto";
+              return (
+                <div
+                  key={repo}
+                  className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-fg">{repo}</div>
+                  </div>
+                  <ToggleGroup
+                    type="single"
+                    value={activeValue}
+                    onValueChange={(v) => {
+                      if (!v) return;
+                      setIconPicks((p) => {
+                        const next = { ...p };
+                        if (v === "auto") {
+                          delete next[repo];
+                        } else {
+                          next[repo] = v;
+                        }
+                        return next;
+                      });
+                    }}
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                  >
+                    {options.map((opt) => {
+                      const value = opt.path ?? "auto";
+                      return (
+                        <ToggleGroupItem
+                          key={value}
+                          value={value}
+                          className={cn(
+                            "gap-1 text-xs",
+                            activeValue === value ? "text-fg" : "text-muted",
+                          )}
+                          title={opt.path ?? "Auto (best)"}
+                        >
+                          {opt.dataUrl ? (
+                            <img
+                              src={opt.dataUrl}
+                              alt={opt.label}
+                              className="size-4 object-contain"
+                            />
+                          ) : null}
+                          {opt.label}
+                        </ToggleGroupItem>
+                      );
+                    })}
+                  </ToggleGroup>
+                </div>
+              );
+            })
+          )}
         </Section>
       </div>
     </div>
