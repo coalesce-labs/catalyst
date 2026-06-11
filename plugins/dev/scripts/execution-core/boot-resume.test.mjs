@@ -19,6 +19,9 @@ import {
   isCheapPhase,
   bootResumePendingPath,
   bootResumeApprovedPath,
+  // CTL-1006
+  isBootResumeEligible,
+  supersededByTerminalPhase,
 } from "./boot-resume.mjs";
 
 let orchDir;
@@ -255,7 +258,9 @@ describe("reconcileBootResume", () => {
     });
     expect(res.dispatched).toBe(0);
     expect(calls).toHaveLength(0);
-    expect(res.skipped).toBe("not-cold-start");
+    // CTL-1006: the eligibility gate's skip reason is now "not-eligible"
+    // (it admits a daemon bounce, not only a cold start).
+    expect(res.skipped).toBe("not-eligible");
   });
 
   test("missing/undefined report ⇒ no-op (defensive)", () => {
@@ -803,5 +808,373 @@ describe("reconcileBootResume — cheap/expensive classification (CTL-644)", () 
     // Second call — marker already exists, no re-emit
     reconcileBootResume({ ...opts, reviveDispatch: makeDispatch(0), appendGatedEvent });
     expect(appendGatedEvent.calls.length).toBe(1); // still 1, not 2
+  });
+});
+
+// ─── CTL-1006 Scenario 1: eligibility predicate (real object shape + bounce) ──
+//
+// In production recoverStartup (recovery.mjs:2576/2583) sets report.coldStart to
+// the detectColdStart OBJECT — { coldStart, epoch, epochSource, ... } — never a
+// bare boolean. The legacy `coldStart !== true` gate is therefore a permanent
+// no-op in production: an object is never === true. isBootResumeEligible
+// normalizes both shapes AND admits a daemon bounce (exec-core boot epoch wins
+// the verdict, CTL-701) so a daemon restart resumes in-flight tickets instead of
+// letting the budget-gated per-tick reclaim false-escalate them to needs-human.
+describe("isBootResumeEligible (CTL-1006)", () => {
+  test("undefined/null report ⇒ false (defensive)", () => {
+    expect(isBootResumeEligible(undefined)).toBe(false);
+    expect(isBootResumeEligible(null)).toBe(false);
+  });
+
+  test("legacy synthetic boolean { coldStart: true } ⇒ true (back-compat)", () => {
+    expect(isBootResumeEligible({ coldStart: true })).toBe(true);
+  });
+
+  test("legacy synthetic boolean { coldStart: false } ⇒ false (back-compat no-op)", () => {
+    expect(isBootResumeEligible({ coldStart: false })).toBe(false);
+  });
+
+  test("REAL object cold start { coldStart: { coldStart: true, epochSource: 'os-boot' } } ⇒ true", () => {
+    // This is the production shape (detectColdStart return). The dead gate
+    // treated it as false (object !== true). This is the literal Scenario-1 bug.
+    expect(
+      isBootResumeEligible({ coldStart: { coldStart: true, epochSource: "os-boot" } })
+    ).toBe(true);
+  });
+
+  test("real object warm, OS epoch wins { coldStart: { coldStart: false, epochSource: 'os-boot' } } ⇒ false", () => {
+    // Scenario-1 "solely because the daemon restarted": an OS-warm, NON-bounce
+    // start stays a no-op — only genuine cold starts / bounces are eligible.
+    expect(
+      isBootResumeEligible({ coldStart: { coldStart: false, epochSource: "os-boot" } })
+    ).toBe(false);
+  });
+
+  test("DAEMON BOUNCE { coldStart: { coldStart: false, epochSource: 'exec-core' } } ⇒ true", () => {
+    // exec-core boot epoch is the winning cold-start source (CTL-701): a daemon
+    // restart without OS/socket reboot. The Scenario-1 fix admits it so in-flight
+    // tickets resume rather than being false-escalated by the reclaim sweep.
+    expect(
+      isBootResumeEligible({ coldStart: { coldStart: false, epochSource: "exec-core" } })
+    ).toBe(true);
+  });
+
+  test("explicit { daemonBounce: true } override seam ⇒ true", () => {
+    expect(isBootResumeEligible({ daemonBounce: true })).toBe(true);
+  });
+});
+
+// ─── CTL-1006 Scenario 1 end-to-end: reconcile runs on the production shape ───
+describe("reconcileBootResume — runs on real object shape + bounce (CTL-1006)", () => {
+  test("real object cold start dispatches a cheap phase (was a dead no-op pre-CTL-1006)", () => {
+    writeSignal(orchDir, "CTL-1", "plan", { worktreePath: "/wt/CTL-1", status: "running" });
+    const dispatched = [];
+    const events = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: { coldStart: true, epochSource: "os-boot" } },
+      agents: [],
+      dispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      appendEvent: (a) => events.push(a),
+    });
+    expect(res.dispatched).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-1", "phase-plan.json"), "utf8")
+    );
+    expect(sig.status).toBe("stalled"); // went through defaultReviveDispatch
+    expect(events).toHaveLength(1);
+  });
+
+  test("daemon bounce (epochSource exec-core) dispatches a cheap phase — the Scenario-1 fix", () => {
+    writeSignal(orchDir, "CTL-2", "research", { worktreePath: "/wt/CTL-2", status: "running" });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: { coldStart: false, epochSource: "exec-core" } },
+      agents: [],
+      dispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ ticket: "CTL-2", phase: "research" });
+  });
+
+  test("OS-warm non-bounce object ⇒ no-op (in-flight ticket NOT escalated solely because of restart)", () => {
+    writeSignal(orchDir, "CTL-3", "research", { worktreePath: "/wt/CTL-3", status: "running" });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: { coldStart: false, epochSource: "os-boot" } },
+      agents: [],
+      dispatch: (a) => {
+        dispatched.push(a);
+        return { code: 0 };
+      },
+      appendEvent: () => {},
+    });
+    expect(res.dispatched).toBe(0);
+    expect(dispatched).toHaveLength(0);
+    expect(res.skipped).toBe("not-eligible");
+  });
+});
+
+// ─── CTL-1006 Scenario 2: supersededByTerminalPhase pure unit ────────────────
+//
+// True iff some signal is TERMINAL at a phase strictly LATER than the resume
+// candidate's phase. Mirrors recovery's CTL-606 supersede guard but keyed on the
+// resume candidate: a later terminal phase (research=stalled) means re-dispatching
+// an earlier phase (triage) is a phase regression, not a resume.
+describe("supersededByTerminalPhase (CTL-1006)", () => {
+  test("a later TERMINAL phase supersedes the candidate — returns its name", () => {
+    const signals = [
+      { phase: "triage", status: "running" },
+      { phase: "research", status: "stalled" },
+    ];
+    expect(supersededByTerminalPhase(signals, "triage")).toBe("research");
+  });
+
+  test("only EARLIER terminal phases present ⇒ null (forward resume is fine)", () => {
+    const signals = [
+      { phase: "triage", status: "done" },
+      { phase: "research", status: "done" },
+      { phase: "plan", status: "done" },
+      { phase: "implement", status: "running" },
+    ];
+    expect(supersededByTerminalPhase(signals, "implement")).toBeNull();
+  });
+
+  test("equal-index terminal (remediate vs verify) is NOT a supersede (strictly-greater only)", () => {
+    // remediate ranks at verify's index — a remediate terminal must not shadow a
+    // verify resume candidate.
+    const signals = [{ phase: "remediate", status: "stalled" }];
+    expect(supersededByTerminalPhase(signals, "verify")).toBeNull();
+  });
+
+  test("a NON-terminal later phase does NOT supersede (keys on terminal only)", () => {
+    const signals = [{ phase: "research", status: "running" }];
+    expect(supersededByTerminalPhase(signals, "triage")).toBeNull();
+  });
+
+  test("unknown candidate phase ⇒ null, no throw (CTL-702 posture)", () => {
+    const signals = [{ phase: "research", status: "stalled" }];
+    expect(supersededByTerminalPhase(signals, "bogus-phase")).toBeNull();
+  });
+
+  test("unknown signal phase in the list is skipped, no throw", () => {
+    const signals = [
+      { phase: "tombstone-xyz", status: "stalled" },
+      { phase: "research", status: "stalled" },
+    ];
+    expect(supersededByTerminalPhase(signals, "triage")).toBe("research");
+  });
+
+  test("undefined / empty signal list ⇒ null", () => {
+    expect(supersededByTerminalPhase(undefined, "triage")).toBeNull();
+    expect(supersededByTerminalPhase([], "triage")).toBeNull();
+  });
+});
+
+// ─── CTL-1006 Scenario 2: phase-regression guard in candidate selection ──────
+//
+// The CTL-997/998 regression: a LATER phase is already terminal while an OLDER
+// earlier-phase signal is non-terminal (e.g. research=done but a stale triage
+// signal got re-touched to running). activePhaseForTicket is recency-ranked, so
+// it would resolve the earlier phase as the resume candidate. The guard reads the
+// FULL per-file signal set (readAllPhaseSignals — the collapsed readWorkerSignals
+// hides sibling terminal phases) and must NOT re-dispatch the earlier phase behind
+// a later terminal one; it surfaces a phase_regression observation instead.
+//
+// NOTE: the dominant phase here is terminal-`done` (not `stalled`). A `stalled`
+// sibling would make the ticket not-in-flight (scheduler.isTicketInFlight), so
+// the in-flight gate is the FIRST line of defense; this guard is defense-in-depth
+// for the in-flight, already-advanced-then-shadowed case.
+describe("selectBootResumeCandidates — phase-regression guard (CTL-1006)", () => {
+  test("research=done + older triage=running ⇒ candidate dropped (no triage re-dispatch)", () => {
+    writeSignal(orchDir, "CTL-997", "research", {
+      status: "done",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T03:00:00Z",
+    });
+    writeSignal(orchDir, "CTL-997", "triage", {
+      status: "running",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T01:00:00Z",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => c.ticket)).not.toContain("CTL-997");
+    expect(out).toEqual([]);
+  });
+
+  test("onPhaseRegression fires once with the candidate + dominant phase", () => {
+    writeSignal(orchDir, "CTL-997", "research", {
+      status: "done",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T03:00:00Z",
+    });
+    writeSignal(orchDir, "CTL-997", "triage", {
+      status: "running",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T01:00:00Z",
+    });
+    const observed = [];
+    selectBootResumeCandidates({
+      orchDir,
+      agents: [],
+      maxParallel: 3,
+      onPhaseRegression: (o) => observed.push(o),
+    });
+    expect(observed).toEqual([
+      { ticket: "CTL-997", phase: "triage", dominantPhase: "research" },
+    ]);
+  });
+
+  test("negative control: research=running (non-terminal) ⇒ NOT a regression, candidate selected", () => {
+    writeSignal(orchDir, "CTL-998", "research", {
+      status: "running",
+      worktreePath: "/wt/CTL-998",
+      updatedAt: "2026-05-27T03:00:00Z",
+    });
+    writeSignal(orchDir, "CTL-998", "triage", {
+      status: "running",
+      worktreePath: "/wt/CTL-998",
+      updatedAt: "2026-05-27T01:00:00Z",
+    });
+    const observed = [];
+    const out = selectBootResumeCandidates({
+      orchDir,
+      agents: [],
+      maxParallel: 3,
+      onPhaseRegression: (o) => observed.push(o),
+    });
+    // active phase is research (freshest non-terminal); no later terminal phase.
+    expect(out.map((c) => c.ticket)).toContain("CTL-998");
+    expect(observed).toEqual([]);
+  });
+
+  // CTL-1006 Scenario 4 (review HIGH finding): with boot-resume now actually
+  // running in production, an already-escalated needs-human ticket must not be
+  // silently auto-resumed on a bounce — the chronic-failure invariant is
+  // carried by this marker skip, not by eligibility.
+  test("escalated needs-human ticket is NOT auto-resumed (marker skip)", () => {
+    writeSignal(orchDir, "CTL-996", "implement", {
+      status: "running",
+      worktreePath: "/wt/CTL-996",
+      updatedAt: "2026-05-27T04:00:00Z",
+    });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-996", ".linear-label-needs-human.applied"),
+      "applied\n"
+    );
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => c.ticket)).not.toContain("CTL-996");
+  });
+
+  test("clearing the needs-human marker re-arms the ticket for resume", () => {
+    writeSignal(orchDir, "CTL-996", "implement", {
+      status: "running",
+      worktreePath: "/wt/CTL-996",
+      updatedAt: "2026-05-27T04:00:00Z",
+    });
+    const out = selectBootResumeCandidates({ orchDir, agents: [], maxParallel: 3 });
+    expect(out.map((c) => c.ticket)).toContain("CTL-996");
+  });
+
+  test("negative control: forward resume — implement=running with earlier phases done ⇒ selected", () => {
+    writeSignal(orchDir, "CTL-999", "triage", { status: "done", worktreePath: "/wt/CTL-999" });
+    writeSignal(orchDir, "CTL-999", "research", { status: "done", worktreePath: "/wt/CTL-999" });
+    writeSignal(orchDir, "CTL-999", "plan", { status: "done", worktreePath: "/wt/CTL-999" });
+    writeSignal(orchDir, "CTL-999", "implement", {
+      status: "running",
+      worktreePath: "/wt/CTL-999",
+      updatedAt: "2026-05-27T04:00:00Z",
+    });
+    const observed = [];
+    const out = selectBootResumeCandidates({
+      orchDir,
+      agents: [],
+      maxParallel: 3,
+      onPhaseRegression: (o) => observed.push(o),
+    });
+    expect(out.map((c) => c.ticket)).toContain("CTL-999");
+    expect(out.find((c) => c.ticket === "CTL-999").phase).toBe("implement");
+    expect(observed).toEqual([]);
+  });
+});
+
+// ─── CTL-1006 Scenario 2 wiring: regression observation through reconcile ─────
+describe("reconcileBootResume — phase-regression observation routing (CTL-1006)", () => {
+  test("emits the regression event and never revives the earlier phase", () => {
+    writeSignal(orchDir, "CTL-997", "research", {
+      status: "done",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T03:00:00Z",
+    });
+    writeSignal(orchDir, "CTL-997", "triage", {
+      status: "running",
+      worktreePath: "/wt/CTL-997",
+      updatedAt: "2026-05-27T01:00:00Z",
+    });
+    writeMaxParallel(orchDir, 3);
+
+    const revived = [];
+    const regressions = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      reviveDispatch: (a) => {
+        revived.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      appendRegressionEvent: (o) => regressions.push(o),
+    });
+
+    // No fresh triage worker spawned.
+    expect(revived.find((r) => r.ticket === "CTL-997")).toBeUndefined();
+    expect(res.dispatched).toBe(0);
+    // The regression observation was routed through the appender seam.
+    expect(regressions).toEqual([
+      { phase: "triage", ticket: "CTL-997", dominantPhase: "research", orchId: undefined },
+    ]);
+  });
+});
+
+// ─── CTL-1006 Scenario 3: expensive-phase gate still holds under bounce ──────
+describe("reconcileBootResume — expensive gate holds under bounce shape (CTL-1006)", () => {
+  test("implement gated behind .boot-resume-pending-approval even via the bounce path", () => {
+    writeSignal(orchDir, "CTL-50", "implement", { worktreePath: "/wt/CTL-50" });
+    writeMaxParallel(orchDir, 10);
+
+    const revived = [];
+    const gatedEvents = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: { coldStart: false, epochSource: "exec-core" } }, // bounce
+      agents: [],
+      reviveDispatch: (a) => {
+        revived.push(a);
+        return { code: 0 };
+      },
+      dispatch: () => {},
+      appendEvent: () => {},
+      appendGatedEvent: (o) => gatedEvents.push(o),
+    });
+
+    expect(res.gated).toBe(1);
+    expect(res.dispatched).toBe(0);
+    expect(revived).toHaveLength(0); // expensive phase NOT auto-revived
+    expect(existsSync(bootResumePendingPath(orchDir, "CTL-50"))).toBe(true);
+    expect(gatedEvents).toHaveLength(1);
+    expect(gatedEvents[0]).toMatchObject({ ticket: "CTL-50", phase: "implement" });
   });
 });

@@ -39,6 +39,8 @@ import {
   readBootSince,
   readExecCoreBootEpoch,
   clearProgressMarks,
+  // CTL-1006
+  defaultAppendBootResumePhaseRegressionEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -2945,6 +2947,69 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.load_per_core).toBe(0.3);
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+});
+
+// CTL-1006 Scenario 2: boot-resume phase-regression audit envelope. Emitted when
+// boot-resume would have re-dispatched an EARLIER phase whose ticket already has
+// a LATER terminal phase signal — surfaces the regression for forensics INSTEAD
+// of spawning a fresh earlier-phase worker. Audit-only: distinct action
+// (broker-ignored) + NOT counted by countReviveEvents (the Scenario-4 invariant —
+// a regression must never consume the chronic-failure revive budget).
+describe("boot-resume phase-regression event envelope (CTL-1006)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1006-pr-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes phase.<phase>.boot-resume-phase-regression.<ticket> with dominantPhase payload", () => {
+    const ok = defaultAppendBootResumePhaseRegressionEvent({
+      phase: "triage",
+      ticket: "CTL-997",
+      dominantPhase: "research",
+      orchId: "orch-1006",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe(
+      "phase.triage.boot-resume-phase-regression.CTL-997"
+    );
+    expect(env.attributes["event.action"]).toBe("boot-resume-phase-regression");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("boot-resume-phase-regression");
+    expect(env.body.payload.dominantPhase).toBe("research");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-1006");
+  });
+
+  test("Scenario-4 invariant: NOT counted by countReviveEvents (revive budget preserved)", async () => {
+    const { countReviveEvents } = await import("./event-scan.mjs");
+    // Use the implement phase so the event.name collides with the implement-only
+    // revive shape if the action were mis-named — countReviveEvents must still 0.
+    defaultAppendBootResumePhaseRegressionEvent({
+      phase: "implement",
+      ticket: "CTL-RG-1006",
+      dominantPhase: "verify",
+      orchId: "orch-1006",
+    });
+    expect(countReviveEvents({ ticket: "CTL-RG-1006" })).toBe(0);
   });
 });
 
