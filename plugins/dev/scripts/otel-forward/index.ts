@@ -9,6 +9,7 @@ import { log } from "./lib/logger.ts";
 import { OtlpSender } from "./lib/destinations/otlp.ts";
 import { PosthogSender } from "./lib/destinations/posthog.ts";
 import { CloudflareAESender } from "./lib/destinations/cloudflare-ae.ts";
+import { isFlatEvent, normalizeFlatEvent } from "./lib/normalize.ts";
 
 const CATALYST_DIR = process.env.CATALYST_DIR ?? join(homedir(), "catalyst");
 const EVENTS_DIR = process.env.CATALYST_EVENTS_DIR ?? join(CATALYST_DIR, "events");
@@ -33,7 +34,8 @@ const senders = {
 
 export function processLine(line: string): void {
   try {
-    const ev = JSON.parse(line) as CanonicalEvent;
+    let ev = JSON.parse(line) as CanonicalEvent;
+    if (isFlatEvent(ev)) ev = normalizeFlatEvent(ev as unknown as Record<string, unknown>);
     if (!ev.attributes) { stats.skipped++; return; }
     stats.processed++;
     if (senders.otlp) buffers.otlp.push(ev);

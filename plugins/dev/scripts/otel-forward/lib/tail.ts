@@ -30,10 +30,14 @@ export function createTailer(opts: TailerOpts): Tailer {
   let currentPath = opts.filePath ?? monthFn();
   let offset = opts.offset;
 
-  function isCanonical(line: string): boolean {
+  // Accept canonical OTel envelopes (have `attributes`) AND flat reap-intent
+  // records (have `event` but no `attributes`). processLine normalizes flat
+  // records into canonical form before forwarding.
+  function shouldForward(line: string): boolean {
     try {
       const obj = JSON.parse(line);
-      return typeof obj === "object" && obj !== null && "attributes" in obj;
+      if (typeof obj !== "object" || obj === null) return false;
+      return "attributes" in obj || (typeof (obj as Record<string, unknown>).event === "string");
     } catch { return false; }
   }
 
@@ -49,7 +53,7 @@ export function createTailer(opts: TailerOpts): Tailer {
     offset = size;
     const text = buf.toString("utf8");
     for (const line of text.split("\n")) {
-      if (line.length > 0 && isCanonical(line)) opts.onLine(line);
+      if (line.length > 0 && shouldForward(line)) opts.onLine(line);
     }
   }
 

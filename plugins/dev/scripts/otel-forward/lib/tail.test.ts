@@ -5,11 +5,17 @@ import { join } from "node:path";
 import { createTailer } from "./tail.ts";
 
 describe("createTailer", () => {
-  test("emits only canonical lines (has attributes)", async () => {
+  test("emits canonical lines AND flat reap-intent lines, skips unparseable", async () => {
     const dir = mkdtempSync(join(tmpdir(), "tail-"));
     const file = join(dir, "2026-05.jsonl");
-    writeFileSync(file, JSON.stringify({ ts: "2026-05-08T00:00:00Z", event: "old" }) + "\n");
+    // flat event (has `event`, no `attributes`) — now forwarded for normalization
+    writeFileSync(file, JSON.stringify({ ts: "2026-05-08T00:00:00Z", event: "phase.terminal.reap-requested" }) + "\n");
+    // canonical event — forwarded as before
     appendFileSync(file, JSON.stringify({ ts: "2026-05-08T00:00:01Z", attributes: { "event.name": "test" } }) + "\n");
+    // malformed line — not forwarded
+    appendFileSync(file, "not-json\n");
+    // object with neither event nor attributes — not forwarded
+    appendFileSync(file, JSON.stringify({ ts: "2026-05-08T00:00:02Z", otherField: "x" }) + "\n");
 
     const emitted: string[] = [];
     const ac = new AbortController();
@@ -17,9 +23,11 @@ describe("createTailer", () => {
     await tailer.drain();
     ac.abort();
 
-    expect(emitted.length).toBe(1);
-    const parsed = JSON.parse(emitted[0]);
-    expect(parsed.attributes["event.name"]).toBe("test");
+    expect(emitted.length).toBe(2);
+    const flat = JSON.parse(emitted[0]);
+    expect(flat.event).toBe("phase.terminal.reap-requested");
+    const canonical = JSON.parse(emitted[1]);
+    expect(canonical.attributes["event.name"]).toBe("test");
     rmSync(dir, { recursive: true });
   });
 
