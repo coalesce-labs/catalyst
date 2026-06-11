@@ -40,9 +40,45 @@ function byIdentifier(a, b) {
 // key, a pre-fix projection (no parent field) written by an older daemon would
 // survive across a deploy whenever the project's identifier/state/priority set
 // is steady — leaving the parent-epic edge un-dropped and the child deadlocked.
+//
+// CTL-926: relation edges (`blocks` / `blocked_by`) are also part of the
+// signature. The scheduler bakes each ticket's relations into the on-disk
+// projection and derives the blocked/ready graph from them (dependency-graph.mjs).
+// A pure edge delta — a blocker added or removed in Linear with no state/
+// priority/parent change — left all four tuple fields identical, so the write
+// was skipped and the scheduler kept reading stale edges, deadlocking a ticket
+// whose blockers were already cleared. Only `blocks`/`blocked_by` types matter:
+// they are the only types buildDependencyEdges consumes; `related`/`duplicate`
+// are ignored and excluded to avoid spurious rewrites.
+//
+// The signature is order-independent (sorted) and array-source-independent: an
+// edge appears in `relations` on one endpoint and `inverseRelations` on the
+// other, but both encode the same dependency, so we normalize both into one
+// sorted "type:peer" list per ticket.
+function relationsSignature(t) {
+  const edges = [];
+  for (const n of t.relations?.nodes ?? []) {
+    if (n?.type === "blocks" || n?.type === "blocked_by") {
+      edges.push(`${n.type}:${n.relatedIssue?.identifier ?? ""}`);
+    }
+  }
+  for (const n of t.inverseRelations?.nodes ?? []) {
+    if (n?.type === "blocks" || n?.type === "blocked_by") {
+      edges.push(`${n.type}:${n.issue?.identifier ?? ""}`);
+    }
+  }
+  return edges.sort().join("|");
+}
+
 function contentKey(tickets) {
   return JSON.stringify(
-    tickets.map((t) => [t.identifier, t.state, t.priority, t.parent ?? null]),
+    tickets.map((t) => [
+      t.identifier,
+      t.state,
+      t.priority,
+      t.parent ?? null,
+      relationsSignature(t),
+    ]),
   );
 }
 
