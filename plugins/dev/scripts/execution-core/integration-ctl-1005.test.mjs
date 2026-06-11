@@ -104,7 +104,7 @@ describe("CTL-1005 J3 integration — enforce performs the real clear", () => {
     expect(existsSync(join(workerDir(), ".linear-label-needs-human.applied"))).toBe(false);
     // .orphan-detected.applied cleared (a future stall re-emits, not silently suppressed).
     expect(existsSync(join(workerDir(), ".orphan-detected.applied"))).toBe(false);
-    // .janitor-cleared-<phase>.applied once-marker written (one clear per lifetime).
+    // .janitor-cleared-<phase>.applied once-marker written (one clear per worker-dir lifetime).
     expect(existsSync(join(workerDir(), `.janitor-cleared-${PHASE}.applied`))).toBe(true);
     // The event + the tick report.
     const ev = events.find((e) => e.type === "janitor.stall.cleared");

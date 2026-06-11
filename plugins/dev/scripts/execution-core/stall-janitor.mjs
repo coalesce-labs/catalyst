@@ -342,7 +342,7 @@ export function runStallJanitorPass({
       if (enforce) {
         // The clear is the executor: delete the synthetic stalled signal, clear
         // needs-human + .orphan-detected.applied, write .janitor-cleared-<phase>
-        // .applied (one clear per lifetime), and let the scheduler re-dispatch.
+        // .applied (one clear per worker-dir lifetime), and let the scheduler re-dispatch.
         clearStall({ ticket: c.ticket, phase: c.phase });
         fire(
           "janitor.stall.cleared",

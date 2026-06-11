@@ -835,4 +835,21 @@ describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
     });
     expect(out[0].alreadyCleared).toBe(true);
   });
+
+  // CTL-1045 Bug 5: doctrine guard — once-marker is file-backed and survives
+  // across daemon restarts (per worker-dir lifetime, NOT per daemon lifetime).
+  test("CTL-1045 Bug 5: once-marker survives across a simulated daemon restart (per worker-dir lifetime)", () => {
+    const d = mkStalled("CTL-854", "plan", { cleared: true });
+    // Simulate a daemon restart by constructing a fresh census call (new call stack,
+    // no module-level state persisted across the call).
+    const out = defaultCollectStallClearCandidates({
+      orchDir,
+      isLinearTerminal: () => false,
+      resolveWorktreePath: () => d,
+      artifactPresent: () => true,
+      artifactComplete: () => true,
+    });
+    // The marker file survives the restart — alreadyCleared reads true from disk.
+    expect(out[0].alreadyCleared).toBe(true);
+  });
 });
