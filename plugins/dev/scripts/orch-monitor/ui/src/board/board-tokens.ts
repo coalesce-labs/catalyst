@@ -7,17 +7,23 @@
 // and the "N active" header). Decorative chrome must never reach for it.
 
 export const C = {
-  // CTL-1013 elevation ladder (dark): surfaces stack UPWARD, darkest → lightest.
-  // s0 = chrome (darkest: sidebar/nav/footer). s1 = content canvas. s2 = cards.
-  // s3 = raised (popovers/pills/code). s4 = hover/tracks (top). Role reassignment,
-  // not a re-ramp — hexes unchanged; chrome-level elements keep s0, content uses s1.
-  s0: "#0e1116", // chrome (darkest)
-  s1: "#151a21", // content canvas
-  s2: "#1b212a", // cards
-  s3: "#242c37", // raised / popover / pills / code
-  s4: "#2e3845", // hover / tracks
-  borderSubtle: "#273039",
-  border: "#333e4d",
+  // CTL-1033 elevation ladder (dark): surfaces stack UPWARD, darkest → lightest,
+  // with PERCEPTIBLE +0.04–0.06 L steps so cards float (not emboss). These hexes
+  // are kept byte-identical to the .dark semantic vars in app.css (the contract
+  // test surface-contract.test.ts asserts the two stay in sync — kills drift).
+  // s0 = chrome (anchor, sidebar GOOD — UNCHANGED). s1 = content canvas. subtle =
+  // lane bands/zebra/column-header chips. s2 = cards. s3 = elevated (popovers/
+  // palette). s4 = hover/tracks (interaction, top — NOT an elevation level).
+  s0: "#0e1116", // chrome (anchor, unchanged)
+  s1: "#181d24", // content canvas (was #151a21)
+  subtle: "#20262f", // lane bands / zebra / column-header chips / inset wells (NEW)
+  s2: "#2b333d", // cards (was #1b212a)
+  s3: "#39424f", // elevated: popover / palette / dropdowns (was #242c37)
+  s4: "#434d5b", // hover / tracks (was #2e3845)
+  // CTL-1033: alpha-white borders, scaled inversely with surface lightness (the
+  // embossing cure's garnish). Drop straight into `1px solid ${C.border}` templates.
+  borderSubtle: "rgba(255,255,255,0.07)", // card edges, in-card hairlines
+  border: "rgba(255,255,255,0.11)", // inputs, interactive outlines, strong separators
   fg: "#edf1f7",
   fgMuted: "#9ba6b5",
   fgDim: "#6e7a8a",
@@ -38,6 +44,17 @@ export const C = {
 /** The reserved "in-loop" live signal (~25% chroma cut from original #5be0ff).
  *  Still unmistakably cyan; LIVE ONLY — never use for decorative chrome. */
 export const LIVE = "#53cde2";
+
+/** CTL-1033 card-lift box-shadows for dark inline-styled board code (mirror the
+ *  --shadow-card / --shadow-elevated CSS vars in app.css's .dark block). The inset
+ *  top-edge highlight + soft ambient shadow is the embossing cure: cards FLOAT off
+ *  the canvas instead of being pressed into it. Canonical card recipe (dark):
+ *    background: C.s2; border: 1px solid C.borderSubtle; box-shadow: CARD_LIFT;
+ *  Use ELEVATED_LIFT (with C.s3 bg) for the command palette / popovers. */
+export const CARD_LIFT =
+  "inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 4px rgba(0,0,0,0.35)";
+export const ELEVATED_LIFT =
+  "inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.45)";
 
 
 /** Canonical PHASE color map — the SINGLE definition; board-display.ts, formatters.ts,
