@@ -216,6 +216,7 @@ import {
   modelLatency,
   toolLatency,
   apiErrors,
+  apiErrorCounts,
   recentTail,
   eventsHeatmap,
   costValidation,
@@ -2197,8 +2198,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const range = url.searchParams.get("range") ?? "1h";
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
-          const result = await apiErrors(loki, range, limit);
-          return Response.json({ data: result });
+          // CTL-1039: alongside the panel's error rows, carry the proportional
+          // counts WITH EXPLICIT WINDOWS (15m + today) the hero reads to pick
+          // NOTED vs ERRORING. Backward-compatible: `data` stays the row array.
+          const [result, counts] = await Promise.all([
+            apiErrors(loki, range, limit),
+            apiErrorCounts(loki),
+          ]);
+          return Response.json({ data: result, counts });
         }
 
         // OBS-16 (UTILIZATION P_active): fleet-wide active-time ratio. A single
