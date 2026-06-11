@@ -359,6 +359,87 @@ else
     info "Create a 'Catalyst Orchestrator' OAuth app in Linear, then set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
 fi
 
+# ─── Worker-status Labels (CTL-764) ─────────────────────────────────────────
+
+header "Worker-status Labels"
+
+# Reuses the section-6 Linear token. No token or team key → info soft-skip.
+# Shared cache: $CATALYST_CONFIG/linear-git-automation-cache.json under
+# .[TEAM_KEY].workerStatusLabels (preserves gitAutomation siblings).
+if [[ -z "${token:-}" || -z "${TEAM_KEY:-}" ]]; then
+    info "Skipping worker-status label check — no Linear token or team key"
+else
+    WS_CS_CACHE="${CATALYST_CONFIG}/linear-git-automation-cache.json"
+    WS_CS_TTL=$((6 * 60 * 60))
+    ws_cs_members=""
+    ws_cs_status=""  # "" | "no_group" | "found"
+    if [[ -f "$WS_CS_CACHE" ]]; then
+        ws_cs_cache_ts=$(jq -r --arg k "$TEAM_KEY" \
+            '.[$k].workerStatusLabels.fetchedAt // empty' \
+            "$WS_CS_CACHE" 2>/dev/null)
+        if [[ -n "$ws_cs_cache_ts" ]]; then
+            now_ts=$(date +%s)
+            age=$((now_ts - ws_cs_cache_ts))
+            if [[ $age -ge 0 && $age -lt $WS_CS_TTL ]]; then
+                ws_cs_status="found"
+                ws_cs_members=$(jq -c --arg k "$TEAM_KEY" \
+                    '.[$k].workerStatusLabels.members // []' \
+                    "$WS_CS_CACHE" 2>/dev/null)
+            fi
+        fi
+    fi
+
+    if [[ -z "$ws_cs_status" ]] && command -v curl &>/dev/null; then
+        ws_cs_query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+        ws_cs_payload=$(jq -nc --arg q "$ws_cs_query" '{query: $q}')
+        ws_cs_resp=$(curl -s --max-time 5 -X POST https://api.linear.app/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: ${token}" \
+            -d "$ws_cs_payload" 2>/dev/null || true)
+        if [[ -n "$ws_cs_resp" ]] && ! echo "$ws_cs_resp" | jq -e '.errors' >/dev/null 2>&1; then
+            ws_cs_all=$(echo "$ws_cs_resp" | jq -c '.data.issueLabels.nodes // []' 2>/dev/null)
+            ws_cs_gid=$(echo "$ws_cs_all" | jq -r \
+                '.[] | select(.name == "worker-status" and .isGroup == true) | .id // empty' \
+                2>/dev/null | head -1)
+            if [[ -n "$ws_cs_gid" ]]; then
+                ws_cs_status="found"
+                ws_cs_members=$(echo "$ws_cs_all" | jq -c --arg pid "$ws_cs_gid" \
+                    '[.[] | select(.parent.id == $pid) | .name]' 2>/dev/null)
+                mkdir -p "$CATALYST_CONFIG"
+                tmp_ws_cs="$(mktemp)"
+                existing_ws_cs='{}'
+                [[ -f "$WS_CS_CACHE" ]] && existing_ws_cs="$(cat "$WS_CS_CACHE" 2>/dev/null || echo '{}')"
+                echo "$existing_ws_cs" | jq \
+                    --arg k "$TEAM_KEY" \
+                    --argjson members "$ws_cs_members" \
+                    --argjson ts "$(date +%s)" \
+                    '.[$k].workerStatusLabels = { fetchedAt: $ts, members: $members }' \
+                    > "$tmp_ws_cs" 2>/dev/null \
+                    && mv "$tmp_ws_cs" "$WS_CS_CACHE" \
+                    || rm -f "$tmp_ws_cs"
+            else
+                ws_cs_status="no_group"
+            fi
+        fi
+    fi
+
+    case "$ws_cs_status" in
+        found)
+            for _ws_cs_exp in queued blocked needs-input needs-human; do
+                if echo "$ws_cs_members" | jq -e --arg n "$_ws_cs_exp" \
+                    'map(. == $n) | any' >/dev/null 2>&1; then
+                    pass "worker-status label: ${_ws_cs_exp}"
+                else
+                    warn "worker-status label '${_ws_cs_exp}' missing — run plugins/dev/scripts/setup-execution-core-states.sh"
+                fi
+            done ;;
+        no_group)
+            warn "worker-status label group missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh" ;;
+        "")
+            info "worker-status label check skipped (no data available)" ;;
+    esac
+fi
+
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
 
 header "Observability Stack (optional)"

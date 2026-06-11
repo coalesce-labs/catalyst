@@ -291,6 +291,78 @@ if [[ -n $CONFIG_PATH ]]; then
 				fi
 			fi
 		fi
+
+		# CTL-764: worker-status label group check (hot-path, TTL-cached). Reuses the
+		# GIT_AUTO_TOKEN acquired above. Shared cache key: .[TEAM_KEY].workerStatusLabels
+		# preserves the gitAutomation sibling written above. Warnings only — never alters
+		# exit code. No per-project token → silently skipped (same gate as git-automation).
+		if [[ -n $GIT_AUTO_TOKEN && -n $TEAM_KEY ]]; then
+			WS_CACHE="${CATALYST_CONFIG}/linear-git-automation-cache.json"
+			WS_TTL=$((6 * 60 * 60))
+			ws_members=""
+			ws_status=""  # "" | "no_group" | "found"
+			if [[ -f $WS_CACHE ]]; then
+				ws_cache_ts=$(jq -r --arg k "$TEAM_KEY" \
+					'.[$k].workerStatusLabels.fetchedAt // empty' \
+					"$WS_CACHE" 2>/dev/null)
+				if [[ -n $ws_cache_ts ]]; then
+					now_ts=$(date +%s)
+					age=$((now_ts - ws_cache_ts))
+					if [[ $age -ge 0 && $age -lt $WS_TTL ]]; then
+						ws_status="found"
+						ws_members=$(jq -c --arg k "$TEAM_KEY" \
+							'.[$k].workerStatusLabels.members // []' \
+							"$WS_CACHE" 2>/dev/null)
+					fi
+				fi
+			fi
+
+			if [[ -z $ws_status ]] && command -v curl &>/dev/null; then
+				ws_query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+				ws_payload=$(jq -nc --arg q "$ws_query" '{query: $q}')
+				ws_resp=$(curl -s --max-time 5 -X POST https://api.linear.app/graphql \
+					-H "Content-Type: application/json" \
+					-H "Authorization: ${GIT_AUTO_TOKEN}" \
+					-d "$ws_payload" 2>/dev/null || true)
+				if [[ -n $ws_resp ]] && ! echo "$ws_resp" | jq -e '.errors' >/dev/null 2>&1; then
+					all_labels=$(echo "$ws_resp" | jq -c '.data.issueLabels.nodes // []' 2>/dev/null)
+					ws_group_id=$(echo "$all_labels" | jq -r \
+						'.[] | select(.name == "worker-status" and .isGroup == true) | .id // empty' \
+						2>/dev/null | head -1)
+					if [[ -n $ws_group_id ]]; then
+						ws_status="found"
+						ws_members=$(echo "$all_labels" | jq -c --arg pid "$ws_group_id" \
+							'[.[] | select(.parent.id == $pid) | .name]' 2>/dev/null)
+						mkdir -p "$CATALYST_CONFIG"
+						tmp_ws="$(mktemp)"
+						existing_ws_cache='{}'
+						[[ -f $WS_CACHE ]] && existing_ws_cache="$(cat "$WS_CACHE" 2>/dev/null || echo '{}')"
+						echo "$existing_ws_cache" | jq \
+							--arg k "$TEAM_KEY" \
+							--argjson members "$ws_members" \
+							--argjson ts "$(date +%s)" \
+							'.[$k].workerStatusLabels = { fetchedAt: $ts, members: $members }' \
+							> "$tmp_ws" 2>/dev/null \
+							&& mv "$tmp_ws" "$WS_CACHE" \
+							|| rm -f "$tmp_ws"
+					else
+						ws_status="no_group"
+					fi
+				fi
+			fi
+
+			case "$ws_status" in
+				found)
+					for _ws_exp in queued blocked needs-input needs-human; do
+						if ! echo "$ws_members" | jq -e --arg n "$_ws_exp" \
+							'map(. == $n) | any' >/dev/null 2>&1; then
+							warnings+=("worker-status label '${_ws_exp}' missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh")
+						fi
+					done ;;
+				no_group)
+					warnings+=("worker-status label group missing from Linear workspace — run plugins/dev/scripts/setup-execution-core-states.sh") ;;
+			esac
+		fi
 	fi
 
 	# Check Linear webhook registration (CTL-253) — gates whether Linear events reach the event log.

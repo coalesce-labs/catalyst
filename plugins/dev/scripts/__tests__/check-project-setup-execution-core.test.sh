@@ -277,13 +277,14 @@ CD11="$(build_project "$P11" "execution-core" 1 1)"
 XDG11="${SCRATCH}/p11-xdg"; BIN11="${SCRATCH}/p11-bin"; LOG11="${SCRATCH}/p11-curl.log"
 build_ga_secrets "$XDG11"
 install_ga_curl "$BIN11" "$LOG11" '[]'
-# Seed a fresh cache (fetchedAt = now) for team CTL with clean (no-drift) nodes.
+# Seed fresh caches for both git-automation and worker-status so NO live queries
+# are issued (neither block hits the network).
 NOW_TS="$(date +%s)"
 cat > "${XDG11}/catalyst/linear-git-automation-cache.json" <<EOF
 { "CTL": { "fetchedAt": ${NOW_TS}, "nodes": [
   {"id":"ga-s","event":"start","state":{"id":"x","name":"PR"}},
   {"id":"ga-m","event":"merge","state":{"id":"y","name":"Done"}}
-] } }
+], "workerStatusLabels": { "fetchedAt": ${NOW_TS}, "members": ["queued","blocked","needs-input","needs-human"] } } }
 EOF
 OUT11="$(run_check_ga "$P11" "$CD11" "$XDG11" "$BIN11" || true)"
 if [[ ! -f "$LOG11" ]] && ! grep -qiE "git automation" <<<"$OUT11"; then
@@ -292,6 +293,166 @@ else
   fail "fresh cache → live query not re-issued, no drift warning"
   [[ -f "$LOG11" ]] && echo "    (live query was issued — cache not honored)"
   echo "$OUT11" | sed 's/^/    /'
+fi
+
+
+# ─── CTL-764 Phase 2: worker-status label group prereq check ─────────────────
+#
+# install_ws_curl <bin> <log> <labels-state>
+# Returns clean git-automation nodes (no drift) + the canned issueLabels response.
+# labels-state: full | missing-needs-input | no-group
+install_ws_curl() {
+  local bin="$1" log="$2" state="$3"
+  mkdir -p "$bin"
+  local labels_nodes
+  case "$state" in
+    full)
+      labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null},{"id":"lbl-q","name":"queued","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-b","name":"blocked","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-ni","name":"needs-input","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-nh","name":"needs-human","isGroup":false,"parent":{"id":"grp-ws"}}]' ;;
+    missing-needs-input)
+      labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null},{"id":"lbl-q","name":"queued","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-b","name":"blocked","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-nh","name":"needs-human","isGroup":false,"parent":{"id":"grp-ws"}}]' ;;
+    no-group)
+      labels_nodes='[]' ;;
+  esac
+  cat > "${bin}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${log}"
+case "\$body" in
+  *gitAutomation*)
+    echo '{"data":{"teams":{"nodes":[{"gitAutomationStates":{"nodes":[{"id":"ga-s","event":"start","state":{"id":"x","name":"PR"}},{"id":"ga-m","event":"merge","state":{"id":"y","name":"Done"}}]}}]}}}'
+    ;;
+  *issueLabels*)
+    echo '{"data":{"issueLabels":{"nodes":${labels_nodes}}}}'
+    ;;
+  *)
+    echo '{"data":{}}'
+    ;;
+esac
+exit 0
+SCRIPT
+  chmod +x "${bin}/curl"
+}
+
+# ─── Test 12: fresh WS cache (all 4 members) → no warning, no live issueLabels ─
+P12="${SCRATCH}/p12"
+CD12="$(build_project "$P12" "execution-core" 1 1)"
+XDG12="${SCRATCH}/p12-xdg"; BIN12="${SCRATCH}/p12-bin"; LOG12="${SCRATCH}/p12-curl.log"
+mkdir -p "${XDG12}/catalyst"; : > "$LOG12"
+build_ga_secrets "$XDG12"
+install_ws_curl "$BIN12" "$LOG12" "full"
+NOW_TS12="$(date +%s)"
+cat > "${XDG12}/catalyst/linear-git-automation-cache.json" <<EOF
+{ "CTL": { "fetchedAt": ${NOW_TS12}, "nodes": [
+  {"id":"ga-s","event":"start","state":{"id":"x","name":"PR"}},
+  {"id":"ga-m","event":"merge","state":{"id":"y","name":"Done"}}
+], "workerStatusLabels": { "fetchedAt": ${NOW_TS12}, "members": ["queued","blocked","needs-input","needs-human"] } } }
+EOF
+OUT12="$(run_check_ga "$P12" "$CD12" "$XDG12" "$BIN12" || true)"
+if ! grep -qiE "worker.status.*missing|worker.status.*label" <<<"$OUT12"; then
+  pass "fresh WS cache: no worker-status warning"
+else
+  fail "fresh WS cache: no worker-status warning"
+  echo "$OUT12" | sed 's/^/    /'
+fi
+if ! grep -q "issueLabels" "$LOG12" 2>/dev/null; then
+  pass "fresh WS cache: no live issueLabels query issued"
+else
+  fail "fresh WS cache: no live issueLabels query issued"
+fi
+
+# ─── Test 13: WS cache miss + full group → no warning; cache written ───────────
+P13="${SCRATCH}/p13"
+CD13="$(build_project "$P13" "execution-core" 1 1)"
+XDG13="${SCRATCH}/p13-xdg"; BIN13="${SCRATCH}/p13-bin"; LOG13="${SCRATCH}/p13-curl.log"
+mkdir -p "${XDG13}/catalyst"; : > "$LOG13"
+build_ga_secrets "$XDG13"
+install_ws_curl "$BIN13" "$LOG13" "full"
+OUT13="$(run_check_ga "$P13" "$CD13" "$XDG13" "$BIN13" || true)"
+if ! grep -qiE "needs-input.*missing|needs-human.*missing|worker-status.*label" <<<"$OUT13"; then
+  pass "WS cache miss + full group: no worker-status warning"
+else
+  fail "WS cache miss + full group: no worker-status warning"
+  echo "$OUT13" | sed 's/^/    /'
+fi
+_ws_ts13=$(jq -r '.CTL.workerStatusLabels.fetchedAt // empty' \
+  "${XDG13}/catalyst/linear-git-automation-cache.json" 2>/dev/null || echo "")
+if [[ -n "$_ws_ts13" ]]; then
+  pass "WS cache miss: cache written under .CTL.workerStatusLabels"
+else
+  fail "WS cache miss: cache written under .CTL.workerStatusLabels"
+fi
+
+# ─── Test 14: cache miss + missing needs-input → warns member + setup hint ─────
+P14="${SCRATCH}/p14"
+CD14="$(build_project "$P14" "execution-core" 1 1)"
+XDG14="${SCRATCH}/p14-xdg"; BIN14="${SCRATCH}/p14-bin"; LOG14="${SCRATCH}/p14-curl.log"
+mkdir -p "${XDG14}/catalyst"; : > "$LOG14"
+build_ga_secrets "$XDG14"
+install_ws_curl "$BIN14" "$LOG14" "missing-needs-input"
+OUT14="$(run_check_ga "$P14" "$CD14" "$XDG14" "$BIN14" || true)"
+if grep -qiE "needs-input" <<<"$OUT14" && grep -q "setup-execution-core-states.sh" <<<"$OUT14"; then
+  pass "missing needs-input: warns naming the member + setup hint"
+else
+  fail "missing needs-input: warns naming the member + setup hint"
+  echo "$OUT14" | sed 's/^/    /'
+fi
+
+# ─── Test 15: group missing entirely → warns, exit 0 (warn-only) ───────────────
+P15="${SCRATCH}/p15"
+CD15="$(build_project "$P15" "execution-core" 1 1)"
+XDG15="${SCRATCH}/p15-xdg"; BIN15="${SCRATCH}/p15-bin"; LOG15="${SCRATCH}/p15-curl.log"
+mkdir -p "${XDG15}/catalyst"; : > "$LOG15"
+build_ga_secrets "$XDG15"
+install_ws_curl "$BIN15" "$LOG15" "no-group"
+OUT15="$(run_check_ga "$P15" "$CD15" "$XDG15" "$BIN15" || true)"
+RC15=$?
+if grep -qiE "worker-status" <<<"$OUT15"; then
+  pass "group missing: warns about worker-status"
+else
+  fail "group missing: warns about worker-status"
+  echo "$OUT15" | sed 's/^/    /'
+fi
+if [[ $RC15 -eq 0 ]]; then
+  pass "group missing: exit 0 (warn-only, exit code unchanged)"
+else
+  fail "group missing: exit 0 (got rc=$RC15)"
+fi
+
+# ─── Test 16: no per-project token → soft skip (no warning, no query) ──────────
+P16="${SCRATCH}/p16"
+CD16="$(build_project "$P16" "execution-core" 1 1)"
+XDG16="${SCRATCH}/p16-xdg"; BIN16="${SCRATCH}/p16-bin"; LOG16="${SCRATCH}/p16-curl.log"
+mkdir -p "${XDG16}/catalyst"; : > "$LOG16"
+# Deliberately no secrets file → GIT_AUTO_TOKEN empty → worker-status block skipped
+install_ws_curl "$BIN16" "$LOG16" "full"
+OUT16="$(run_check_ga "$P16" "$CD16" "$XDG16" "$BIN16" || true)"
+if ! grep -qiE "worker.status.*missing|worker.status.*label" <<<"$OUT16"; then
+  pass "no token: soft skip (no worker-status warning)"
+else
+  fail "no token: soft skip (no worker-status warning)"
+  echo "$OUT16" | sed 's/^/    /'
+fi
+if ! grep -q "issueLabels" "$LOG16" 2>/dev/null; then
+  pass "no token: no live issueLabels query"
+else
+  fail "no token: no live issueLabels query"
+fi
+
+# ─── Test 17: phase-agents mode → no worker-status check ───────────────────────
+P17="${SCRATCH}/p17"
+CD17="$(build_project "$P17" "phase-agents" 1 1)"
+XDG17="${SCRATCH}/p17-xdg"; BIN17="${SCRATCH}/p17-bin"; LOG17="${SCRATCH}/p17-curl.log"
+mkdir -p "${XDG17}/catalyst"; : > "$LOG17"
+build_ga_secrets "$XDG17"
+install_ws_curl "$BIN17" "$LOG17" "full"
+OUT17="$(run_check_ga "$P17" "$CD17" "$XDG17" "$BIN17" || true)"
+if ! grep -qiE "worker.status.*missing|worker.status.*label" <<<"$OUT17"; then
+  pass "phase-agents mode: no worker-status check"
+else
+  fail "phase-agents mode: no worker-status check"
+  echo "$OUT17" | sed 's/^/    /'
 fi
 
 echo ""
