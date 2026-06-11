@@ -141,7 +141,9 @@ export interface BoardListProps {
   embedded?: boolean;
 }
 
-const HEADER_BG = C.s1;
+// CTL-1033: list table header + group-band rows sit on `subtle` — a visible step
+// above the canvas, clearly above the chrome (rows are floor, cards are objects).
+const HEADER_BG = C.subtle;
 
 export function BoardList({
   kind,
@@ -661,7 +663,7 @@ function GroupHeaderRow({
     live === "live" ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : (color ?? C.blue);
   return (
     <TableRow
-      style={{ background: C.s2, cursor: "pointer" }}
+      style={{ background: C.subtle, cursor: "pointer" }}
       onClick={onToggle}
       aria-expanded={!collapsed}
       role="button"

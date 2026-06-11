@@ -1,5 +1,18 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * CTL-1033 — CANONICAL TOKEN SYSTEM.
+ * This file (ui/src/app.css, both themes) + ui/src/board/board-tokens.ts (the `C`
+ * object, dark inline-style consumers) ARE the orch-monitor design-token source of
+ * truth. `packages/tokens` (@catalyst/tokens) has ZERO app consumers and a divergent
+ * brand direction; it is informational only (see CTL-1033 §8 — retire-and-refill
+ * later, do not wire). The semantic surface ladder below (--surface-chrome/canvas/
+ * subtle/card/elevated/hover) is the ONE scaffolded set every route shell consumes;
+ * the --surface-0..4 / --background / --card / --popover / --sidebar vars are aliases
+ * onto it. Card lift (the embossing cure) rides on --shadow-card / --shadow-elevated.
+ * Contract tests: ui/src/elevation-ladder.test.ts + ui/src/surface-contract.test.ts.
+ * ───────────────────────────────────────────────────────────────────────────── */
 /* CTL-1003 §A2: Tailwind typography for the Linear-style prose reading column
    (.ticket-desc carries `prose prose-invert`; .ticket-desc unlayered rules below
    map the plugin's --tw-prose-invert-* vars to the app tokens + keep the existing
@@ -17,6 +30,15 @@
   --color-surface-2: var(--surface-2);
   --color-surface-3: var(--surface-3);
   --color-surface-4: var(--surface-4);
+  /* CTL-1033: semantic-named aliases of the per-theme ladder so route shells use
+     `bg-surface-canvas` / `bg-surface-subtle` / `bg-surface-card` etc. by ROLE.
+     These mirror the --color-surface-0..4 numeric aliases (same per-theme vars). */
+  --color-surface-chrome: var(--surface-chrome);
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-surface-card: var(--surface-card);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-hover: var(--surface-hover);
   --color-border: var(--border-strong);
   --color-border-subtle: var(--border-subtle);
   --color-fg: var(--fg);
@@ -106,18 +128,34 @@
   --color-light-muted: #76705f;
   --color-light-accent: #1f6feb;
 
-  /* CTL-1013: warm-light elevation ladder (same upward direction as dark):
-     chrome darkest-tinted → canvas lighter → cards lightest (raised paper).
-     These per-theme vars feed the theme-aware @theme inline aliases above. */
-  --surface-0: #ece7dd; /* chrome (sidebar/nav/footer), visibly tinted */
-  --surface-1: #faf7f2; /* content canvas */
-  --surface-2: #fffdf9; /* cards / panels / popovers — raised warm paper */
-  --surface-3: #ece7dd; /* raised-inset (code blocks, pills) — tinted chips */
-  --surface-4: #d8d1c2; /* hover / tracks */
+  /* CTL-1033: warm-light SEMANTIC ladder (same upward direction as dark):
+     chrome darkest-tinted → canvas → subtle → card → elevated (lightest paper).
+     Light elevation continues to ride on SHADOWS, not lightness — the steps are
+     tiny by design. --surface-hover is a darker interaction tint (EXEMPT from the
+     monotonic ladder order). --surface-3 stays the literal #ece7dd inset tint
+     (raised-inset pills/code) — an inset, exempt from the ladder. */
+  --surface-chrome: #ece7dd; /* chrome (sidebar/nav/footer), visibly tinted */
+  --surface-canvas: #faf7f2; /* content canvas */
+  --surface-subtle: #fcfaf5; /* lane bands / zebra / inset wells (NEW) */
+  --surface-card: #fffdf9; /* cards / panels — raised warm paper */
+  --surface-elevated: #ffffff; /* popovers / palette / dropdowns / modals (NEW) */
+  --surface-hover: #d8d1c2; /* hover / tracks — darker interaction tint (EXEMPT) */
+  /* Numeric aliases onto the semantic ladder (back-compat for --surface-N call
+     sites). --surface-3 is an inset tint (#ece7dd), NOT --surface-elevated. */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: #ece7dd; /* raised-inset (code blocks, pills) — tinted chips, EXEMPT */
+  --surface-4: #d8d1c2; /* hover / tracks (literal, EXEMPT) */
   --border-strong: #ddd5c7;
   --border-subtle: #e7e1d4; /* hairline card edge on paper */
   --fg: #2b2722;
   --fg-muted: #76705f;
+
+  /* CTL-1033: light card lift — soft warm shadows (no inset highlight; light
+     elevation reads via shadow + the bright card paper, not a top edge). */
+  --shadow-card: 0 1px 3px rgba(43, 39, 34, 0.08);
+  --shadow-elevated: 0 8px 24px rgba(43, 39, 34, 0.16);
 
   --background: var(--surface-1);
   --foreground: var(--color-light-fg);
@@ -160,19 +198,37 @@
    exact dark mappings that previously lived on `:root` (CTL-891 / SHELL1),
    now scoped to `.dark` so the toggle can flip between the two themes. */
 .dark {
-  /* CTL-1013: per-theme dark elevation ladder (feeds the theme-aware @theme inline
-     aliases). Surfaces stack UPWARD: s0 chrome (darkest) → s1 canvas → s2 cards →
-     s3 raised/popover → s4 hover/tracks. Same hexes as before — role reassignment
-     fixes the previous inversion (chrome was lighter than content). */
-  --surface-0: #0e1116; /* chrome (darkest) */
-  --surface-1: #151a21; /* content canvas */
-  --surface-2: #1b212a; /* cards */
-  --surface-3: #242c37; /* raised / popover / pills / code */
-  --surface-4: #2e3845; /* hover / tracks */
-  --border-strong: #333e4d;
-  --border-subtle: #273039;
+  /* CTL-1033: per-theme dark SEMANTIC elevation ladder (OKLCH-derived, blue-tinted
+     hue H≈257 preserved; +0.04–0.06 L between neighbors so cards FLOAT, not emboss).
+     chrome (anchor, sidebar GOOD — unchanged) → canvas → subtle (lane bands/zebra) →
+     card → elevated (popovers). --surface-hover is the interaction tint (top, NOT an
+     elevation level). The previous ramp's card step was a +0.03 imperceptible nudge;
+     the new card sits +0.089 L above canvas → a clearly visible step. */
+  --surface-chrome: #0e1116; /* chrome (sidebar/nav/footer) — anchor, UNCHANGED */
+  --surface-canvas: #181d24; /* every route's content shell */
+  --surface-subtle: #20262f; /* lane bands, zebra, column-header chips, inset wells */
+  --surface-card: #2b333d; /* cards / panels */
+  --surface-elevated: #39424f; /* popovers, command palette, dropdowns, modals */
+  --surface-hover: #434d5b; /* hover fills, scrollbar thumbs/tracks (interaction) */
+  /* Numeric aliases onto the semantic ladder (back-compat for --surface-N + the
+     shadcn bridge below). --surface-3 → elevated, --surface-4 → hover. */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: var(--surface-elevated);
+  --surface-4: var(--surface-hover);
+  /* CTL-1033: alpha-WHITE borders, scaled inversely with surface lightness (the
+     embossing cure's garnish — lightness is load-bearing, borders are the edge). */
+  --border-strong: rgba(255, 255, 255, 0.11); /* inputs, interactive outlines */
+  --border-subtle: rgba(255, 255, 255, 0.07); /* card edges, in-card hairlines */
   --fg: #edf1f7;
   --fg-muted: #9ba6b5;
+
+  /* CTL-1033: dark card lift — soft ambient outer shadow + inset top-edge highlight
+     (the standard Stripe/Linear/Vercel combo, the single best embossing cure). Card
+     bg is the PRIMARY lift (lightness); the shadow is the secondary signal. */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
+  --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
 
   --background: var(--surface-1); /* CTL-1013: canvas lightens one step (was s0) */
   --foreground: var(--color-fg);
@@ -214,6 +270,17 @@
 
 * {
   box-sizing: border-box;
+}
+
+/* CTL-1033: card-lift utility classes (the embossing cure). `.shadow-card` is the
+   canonical card lift; `.shadow-elevated` is the popover/palette tier. They read the
+   per-theme --shadow-card / --shadow-elevated vars (:root / .dark) so the lift flips
+   with the theme (inset top-highlight + ambient in dark; soft warm shadow in light). */
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+.shadow-elevated {
+  box-shadow: var(--shadow-elevated);
 }
 
 body {
@@ -642,5 +709,5 @@ body {
    The dispatches-next / bucket rows keep their inline background; this only sets
    the hover state, so a highlighted row's tint and the hover blend gracefully. */
 .cat-queue-row:hover {
-  background: #151a21;
+  background: var(--surface-subtle);
 }

@@ -99,7 +99,7 @@ export function RelationStateIcon({
           <path
             d="M4.2 7.2 L6.2 9.2 L9.9 4.8"
             fill="none"
-            stroke="#0b0d10"
+            stroke="var(--surface-canvas)"
             strokeWidth="1.6"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -113,7 +113,7 @@ export function RelationStateIcon({
           <path
             d="M4.6 4.6 L9.4 9.4 M9.4 4.6 L4.6 9.4"
             fill="none"
-            stroke="#0b0d10"
+            stroke="var(--surface-canvas)"
             strokeWidth="1.6"
             strokeLinecap="round"
           />

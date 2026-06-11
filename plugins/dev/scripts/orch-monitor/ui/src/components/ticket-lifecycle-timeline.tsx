@@ -16,6 +16,7 @@
 // cost/run absent → the dimmed <Needs> marker; artifact link only when present.
 
 import { useMemo } from "react";
+import { C, LIVE } from "../board/board-tokens";
 import {
   resolveTimelineRows,
   type TimelineRow,
@@ -24,18 +25,6 @@ import type { BoardTicket } from "@/board/types";
 import { phaseColor, fmtDuration, fmtClock, phaseModelLabel, fmtCost, fmtTokens } from "@/lib/formatters";
 import { EmptyState } from "./ui/empty-state";
 import { ListTree } from "lucide-react";
-
-// ── tokens (mirror ticket-detail-page.tsx's inline-`C` palette; cyan reserved) ──
-const C = {
-  s1: "#111318",
-  s2: "#171a21",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  cyan: "#5be0ff", // the reserved live signal — current phase / active node only
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 /** One artifact returned by /api/ticket-artifacts/<id> (mirrors the page's shape). */
 export interface TimelineArtifact {
@@ -172,8 +161,8 @@ function TimelineRowView({
           gap: 12,
           padding: "6px 8px",
           borderRadius: 5,
-          background: row.isActive ? C.cyan + "12" : C.s1,
-          border: `1px solid ${row.isActive ? C.cyan + "55" : C.border}`,
+          background: row.isActive ? LIVE + "12" : C.s1,
+          border: `1px solid ${row.isActive ? LIVE + "55" : C.border}`,
           font: `11px ${C.mono}`,
         }}
       >
@@ -184,7 +173,7 @@ function TimelineRowView({
               width: 8,
               height: 8,
               borderRadius: "50%",
-              background: row.isActive ? C.cyan : color,
+              background: row.isActive ? LIVE : color,
               flex: "0 0 auto",
             }}
           />

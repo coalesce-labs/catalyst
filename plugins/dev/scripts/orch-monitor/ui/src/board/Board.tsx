@@ -91,7 +91,7 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 // cards laid into the SAME shared column grid under ONE horizontal scroll axis.
 // axis="none" collapses to the single shared-header column board (one synthetic
 // lane, no group label). The shared `C` / `LIVE` tokens are in board-tokens.ts.
-import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS } from "./board-tokens";
+import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
 import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
@@ -502,7 +502,14 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
         // CTL-729: a quiet yellow left rule when the ticket needs the operator —
         // the same single accent the Inbox "Needs you" row carries. Stuck (red)
         // takes precedence so a dead/zombie signal is never masked by attention.
-        boxShadow: !stuck && attention ? `inset 2px 0 0 0 ${C.yellow}` : undefined,
+        // CTL-1033: compose that attention rule WITH the card lift (inset top-
+        // highlight + soft ambient shadow) so cards FLOAT off the canvas. Live cards
+        // keep the animated `.catalyst-live` ring (no static shadow).
+        boxShadow: live
+          ? undefined
+          : !stuck && attention
+            ? `inset 2px 0 0 0 ${C.yellow}, ${CARD_LIFT}`
+            : CARD_LIFT,
         transition: "background .25s",
         cursor: onOpen ? "pointer" : undefined,
       }}
@@ -655,7 +662,16 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
         border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : C.border}`,
         // CTL-729: the ONE yellow rule when this worker needs the operator —
         // identical accent to the ticket card. Stuck (red) takes precedence.
-        boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : attention ? `inset 2px 0 0 0 ${C.yellow}` : undefined,
+        // CTL-1033: compose the stuck/attention inset rule WITH the card lift so
+        // worker cards float; live keeps the `.catalyst-live` animated ring (no
+        // static shadow).
+        boxShadow: stuck
+          ? `inset 2px 0 0 0 ${C.red}, ${CARD_LIFT}`
+          : attention
+            ? `inset 2px 0 0 0 ${C.yellow}, ${CARD_LIFT}`
+            : live
+              ? undefined
+              : CARD_LIFT,
         cursor: onOpen ? "pointer" : undefined,
       }}
     >

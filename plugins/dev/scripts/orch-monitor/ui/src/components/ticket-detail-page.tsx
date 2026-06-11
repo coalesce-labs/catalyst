@@ -15,6 +15,7 @@
 // tested without a DOM; this file is the thin React skin over them.
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { C, LIVE } from "../board/board-tokens";
 import { useNavigate } from "@tanstack/react-router";
 import {
   resolveHeldBanner,
@@ -82,21 +83,6 @@ function DescriptionSkeleton() {
     </div>
   );
 }
-
-// ── tokens (mirror Shell.tsx / Board.tsx inline-`C` palette; cyan reserved) ──
-const C = {
-  s1: "#111318",
-  s2: "#171a21",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  cyan: "#5be0ff", // the reserved live signal — current phase / active node only
-  green: "#39d07a", // shipped/merged success tone (NOT cyan — cyan stays "live now")
-  red: "#ef5d5d",
-  yellow: "#eab308",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 /** A NEEDS-PLUMBING cell marker — dimmed "↯" + label. Never an invented value. */
 function Needs({ label }: { label: string }) {
@@ -433,14 +419,14 @@ function ActiveNodeTailView({ tail }: { tail: ActiveNodeTail }) {
         marginTop: 4,
         marginLeft: 22,
         paddingLeft: 10,
-        borderLeft: `1px solid ${C.cyan}55`,
+        borderLeft: `1px solid ${LIVE}55`,
         display: "flex",
         flexDirection: "column",
         gap: 2,
       }}
     >
       {/* now: <current tool> · turn N · ctx% — the live "here right now" line. */}
-      <div data-active-node-now style={{ font: `11px ${C.mono}`, color: C.cyan }}>
+      <div data-active-node-now style={{ font: `11px ${C.mono}`, color: LIVE }}>
         now: <span style={{ color: C.fg }}>{tail.currentTool ?? "…"}</span>
         <span style={{ color: C.fgDim }}> · turn {tail.turn ?? "—"} · ctx </span>
         <span data-active-node-ctx style={{ color: tail.contextPct != null ? C.fg : C.fgDim }}>{ctx}</span>
@@ -540,7 +526,7 @@ function ActivitySection({ ticketId }: { ticketId: string }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <SectionLabel>Activity</SectionLabel>
         <span style={{ flex: 1 }} />
-        <span style={{ font: `10px ${C.mono}`, color: live ? C.cyan : C.fgDim }}>
+        <span style={{ font: `10px ${C.mono}`, color: live ? LIVE : C.fgDim }}>
           {events.length} event{events.length === 1 ? "" : "s"}
           {live ? " · live" : ""}
         </span>
@@ -641,7 +627,7 @@ function TelemetryTileCell({ tile }: { tile: TelemetryTile }) {
           {fmtTelemetryValue(tile)}
         </span>
         {live && tile.points.length > 0 ? (
-          <Sparkline points={tile.points} color={C.cyan} ariaLabel={`${tile.label} sparkline`} />
+          <Sparkline points={tile.points} color={LIVE} ariaLabel={`${tile.label} sparkline`} />
         ) : tile.source === "needs-plumbing" ? (
           <span title="git-sourced, not telemetry" style={{ font: `9px ${C.mono}`, color: C.fgDim }}>
             ↯ git

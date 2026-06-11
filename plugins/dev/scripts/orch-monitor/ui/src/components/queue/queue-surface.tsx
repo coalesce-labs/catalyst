@@ -21,10 +21,6 @@ import { DispatchQueue } from "./dispatch-queue";
 import { HoldingBuckets } from "./holding-buckets";
 import { DeadStrip } from "./dead-strip";
 
-// The dark Catalyst board surface base color (orch-monitor DESIGN.md `s0`), kept
-// in step with the Board root so the embedded sections sit on the same backdrop.
-const SURFACE_BG = "#0b0d10";
-
 export function QueueSurface() {
   const { payload, status } = useScopedBoardSnapshot();
   const navigate = useNavigate();
@@ -43,19 +39,17 @@ export function QueueSurface() {
   return (
     <TooltipProvider delayDuration={200}>
       <div
-        className="flex h-full min-h-0 flex-col"
+        className="flex h-full min-h-0 flex-col bg-surface-canvas text-fg"
         style={{
-          background: SURFACE_BG,
-          color: "#e6e9ef",
           fontSize: 13,
           fontFamily:
             '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         }}
       >
-        {/* Calm one-line surface header (matches the dashboard meta row tone). */}
+        {/* Calm one-line surface header (matches the dashboard meta row tone).
+            CTL-1033: content shell = canvas (not chrome); hairline via border-subtle. */}
         <div
-          className="flex shrink-0 items-center gap-3 px-4 py-3"
-          style={{ borderBottom: "1px solid #262d36", background: "#111318" }}
+          className="flex shrink-0 items-center gap-3 border-b border-subtle bg-surface-canvas px-4 py-3"
         >
           <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
             Capacity &amp; queue

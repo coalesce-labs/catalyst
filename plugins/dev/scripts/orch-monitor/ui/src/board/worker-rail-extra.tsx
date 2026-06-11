@@ -17,6 +17,7 @@
 // (no second SSE connection).
 
 import { useEffect, useMemo, useState } from "react";
+import { C } from "./board-tokens";
 import type { BoardWorker } from "./types";
 import type { TailDiagnostics } from "./live-tail-data";
 import {
@@ -27,17 +28,6 @@ import {
 } from "./worker-detail-data";
 import { LIVE_CYAN } from "./detail-chrome";
 
-const C = {
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  yellow: "#e0b341",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 const LIVENESS_COLOR: Record<LivenessLevel, string> = {
   green: C.green,

@@ -97,7 +97,7 @@ export function ErrorClustersPanel({ entries }: ErrorClustersPanelProps) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-0">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-2">
         {clusters.map((c) => (
           <ClusterRow
             key={`${c.error} ${c.model}`}

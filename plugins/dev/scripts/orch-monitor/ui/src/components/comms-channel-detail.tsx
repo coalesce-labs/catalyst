@@ -220,7 +220,7 @@ export function CommsChannelDetail({
           </SheetHeader>
           {openMessage && (
             <div className="flex-1 overflow-auto px-4 pb-4">
-              <pre className="whitespace-pre-wrap break-all rounded bg-surface-0 p-3 font-mono text-[11px] text-fg">
+              <pre className="whitespace-pre-wrap break-all rounded bg-surface-subtle p-3 font-mono text-[11px] text-fg">
                 {JSON.stringify(openMessage, null, 2)}
               </pre>
             </div>
