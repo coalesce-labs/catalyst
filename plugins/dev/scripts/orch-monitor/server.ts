@@ -127,6 +127,10 @@ import {
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import type { InboxSummaryProvider } from "./lib/inbox-summary";
+import { createInboxSummaryProvider } from "./lib/inbox-summary";
+import { collectInboxItemState } from "./lib/inbox-state";
+import { loadAiConfig } from "./lib/ai-config";
 import type { SummarizeHandler } from "./lib/summarize";
 import { createSummarizeHandler } from "./lib/summarize";
 import { loadSummarizeConfig, type SummarizeConfig, type ProviderName } from "./lib/summarize/config";
@@ -328,6 +332,8 @@ export interface CreateServerOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
+  /** CTL-1042: per-inbox-item AI summary provider (GET /api/inbox/:ticket/summary). */
+  inboxSummaryProvider?: InboxSummaryProvider | null;
   summarizeHandler?: SummarizeHandler | null;
   summarizeConfig?: SummarizeConfig;
   prometheusUrl?: string | null;
@@ -738,6 +744,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     dbPath = null,
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
+    inboxSummaryProvider: inboxSummaryProviderOpt,
     summarizeHandler: summarizeHandlerOpt,
     summarizeConfig: summarizeConfigOpt,
     prometheusUrl,
@@ -807,6 +814,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   const briefingProvider: BriefingProvider | null =
     briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
+
+  const inboxSummaryProvider: InboxSummaryProvider | null =
+    inboxSummaryProviderOpt === null ? null : (inboxSummaryProviderOpt ?? null);
 
   const summarizeHandler: SummarizeHandler | null =
     summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
@@ -1987,6 +1997,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
             suggestedLabels: result.suggestedLabels,
             generatedAt: result.generatedAt,
           });
+        }
+
+        // CTL-1042: per-inbox-item AI summary — lazy, on operator select.
+        const inboxSummaryMatch =
+          req.method === "GET" && url.pathname.match(/^\/api\/inbox\/([^/]+)\/summary$/);
+        if (inboxSummaryMatch) {
+          let ticket: string;
+          try { ticket = decodeURIComponent(inboxSummaryMatch[1]); }
+          catch { return new Response("Bad Request", { status: 400 }); }
+          if (ticket.includes("..") || ticket.includes("/") || ticket.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!inboxSummaryProvider) return Response.json({ enabled: false });
+          const phase = url.searchParams.get("phase") ?? undefined;
+          const result = await inboxSummaryProvider.generate(ticket, phase);
+          if (!result) return Response.json({ enabled: true, ask: null, summary: null, options: null, blocker: null });
+          return Response.json({ enabled: true, ...result });
         }
 
         if (url.pathname === "/api/briefing/activity") {
@@ -3644,6 +3671,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
+    inboxSummaryProvider?.stop();
     void webhookTunnel?.stop();
     void linearWebhookTunnel?.stop();
     closeDb();
@@ -3771,6 +3799,24 @@ if (import.meta.main) {
     });
   }
 
+  // CTL-1042: per-inbox-item AI summary provider, built from the same two-layer
+  // config as the briefing provider (project .catalyst/config.json + secrets).
+  const aiCfg = loadAiConfig(
+    `${process.cwd()}/.catalyst/config.json`,
+    `${process.env.HOME ?? ""}/.config/catalyst/config-${detectProjectKey(process.cwd())}.json`,
+  );
+  const inboxSummaryProvider: InboxSummaryProvider | null = aiCfg.enabled
+    ? createInboxSummaryProvider(aiCfg, {
+        collectState: (ticket, phase) =>
+          collectInboxItemState(ticket, {
+            workersDir: `${CATALYST_DIR}/execution-core/workers`,
+            projectsDir: `${process.env.HOME ?? ""}/.claude/projects`,
+            title: null,
+            ...(phase ? {} : {}),
+          }),
+      })
+    : null;
+
   if (terminalOnly) {
     const handle = startTerminalOnly(WT_DIR, renderOpts, RUNS_DIR);
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -3795,6 +3841,7 @@ if (import.meta.main) {
       renderOptions: renderOpts,
       summarizeHandler,
       summarizeConfig: summarizeCfg,
+      inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
     });

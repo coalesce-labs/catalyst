@@ -2,7 +2,7 @@
 // per-inbox-item AI summary (CTL-1042). All network calls are injected via a
 // mock AiFetcher so tests run with no network and no real model.
 
-import { test, expect, describe, mock, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, mock } from "bun:test";
 import type { AiConfig } from "./ai-config";
 import type { InboxItemState } from "./inbox-state";
 import {
@@ -69,11 +69,13 @@ const OPENAI_OK_RESPONSE = JSON.stringify({
 });
 
 function okFetcher(body: string) {
-  return mock(async () => ({
-    ok: true,
-    status: 200,
-    text: async () => body,
-  }));
+  return mock(() =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => Promise.resolve(body),
+    }),
+  );
 }
 
 // ── buildInboxSummaryPrompt ───────────────────────────────────────────────────
@@ -156,7 +158,7 @@ describe("createInboxSummaryProvider", () => {
     const fetcher = okFetcher(ANTHROPIC_OK_RESPONSE);
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher,
-      collectState: async () => STATE_FIXTURE,
+      collectState: () => Promise.resolve(STATE_FIXTURE),
     });
     await provider.generate("CTL-1042", "implement");
     await provider.generate("CTL-1042", "implement");
@@ -165,11 +167,11 @@ describe("createInboxSummaryProvider", () => {
 
   test("re-fetches when the question changes (different questionHash)", async () => {
     let call = 0;
-    const fetcher = mock(async () => {
+    const fetcher = mock(() => {
       call++;
       const body =
         call === 1 ? ANTHROPIC_OK_RESPONSE : ANTHROPIC_OK_RESPONSE;
-      return { ok: true, status: 200, text: async () => body };
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(body) });
     });
     const states: InboxItemState[] = [
       { ...STATE_FIXTURE, raisedQuestion: "question A?" },
@@ -178,7 +180,7 @@ describe("createInboxSummaryProvider", () => {
     let stateIdx = 0;
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher,
-      collectState: async () => states[stateIdx++] ?? null,
+      collectState: () => Promise.resolve(states[stateIdx++] ?? null),
     });
     await provider.generate("CTL-1042", "implement");
     await provider.generate("CTL-1042", "implement");
@@ -186,19 +188,19 @@ describe("createInboxSummaryProvider", () => {
   });
 
   test("returns null when fetcher returns !ok (Scenario 3 — degrade)", async () => {
-    const bad = mock(async () => ({ ok: false, status: 503, text: async () => "" }));
+    const bad = mock(() => Promise.resolve({ ok: false, status: 503, text: () => Promise.resolve("") }));
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher: bad,
-      collectState: async () => STATE_FIXTURE,
+      collectState: () => Promise.resolve(STATE_FIXTURE),
     });
     expect(await provider.generate("CTL-1042", "implement")).toBeNull();
   });
 
   test("returns null when fetcher throws (Scenario 3 — degrade)", async () => {
-    const throws = mock(async (): Promise<never> => { throw new Error("network error"); });
+    const throws = mock((): Promise<never> => Promise.reject(new Error("network error")));
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher: throws,
-      collectState: async () => STATE_FIXTURE,
+      collectState: () => Promise.resolve(STATE_FIXTURE),
     });
     expect(await provider.generate("CTL-1042", "implement")).toBeNull();
   });
@@ -207,7 +209,7 @@ describe("createInboxSummaryProvider", () => {
     const fetcher = okFetcher(ANTHROPIC_OK_RESPONSE);
     const provider = createInboxSummaryProvider(
       { ...CONFIG, enabled: false },
-      { fetcher, collectState: async () => STATE_FIXTURE },
+      { fetcher, collectState: () => Promise.resolve(STATE_FIXTURE) },
     );
     expect(await provider.generate("CTL-1042", "implement")).toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
@@ -217,7 +219,7 @@ describe("createInboxSummaryProvider", () => {
     const fetcher = okFetcher(ANTHROPIC_OK_RESPONSE);
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher,
-      collectState: async () => null,
+      collectState: () => Promise.resolve(null),
     });
     expect(await provider.generate("CTL-1042", "implement")).toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
@@ -227,7 +229,7 @@ describe("createInboxSummaryProvider", () => {
     const fetcher = okFetcher(ANTHROPIC_OK_RESPONSE);
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher,
-      collectState: async () => STATE_FIXTURE,
+      collectState: () => Promise.resolve(STATE_FIXTURE),
     });
     await provider.generate("CTL-1042", "implement");
     provider.stop();
@@ -238,7 +240,7 @@ describe("createInboxSummaryProvider", () => {
   test("returns a non-null result with all fields on success", async () => {
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher: okFetcher(ANTHROPIC_OK_RESPONSE),
-      collectState: async () => STATE_FIXTURE,
+      collectState: () => Promise.resolve(STATE_FIXTURE),
     });
     const r = await provider.generate("CTL-1042", "implement");
     expect(r).not.toBeNull();
@@ -251,9 +253,9 @@ describe("createInboxSummaryProvider", () => {
     let capturedPhase: string | undefined;
     const provider = createInboxSummaryProvider(CONFIG, {
       fetcher: okFetcher(ANTHROPIC_OK_RESPONSE),
-      collectState: async (_ticket, phase) => {
+      collectState: (_ticket, phase) => {
         capturedPhase = phase;
-        return STATE_FIXTURE;
+        return Promise.resolve(STATE_FIXTURE);
       },
     });
     await provider.generate("CTL-1042", "plan");
