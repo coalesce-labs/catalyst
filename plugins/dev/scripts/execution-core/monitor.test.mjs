@@ -7,7 +7,8 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { readClusterGeneration } from "./scheduler.mjs"; // CTL-1028: persistence assertion
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1937,5 +1938,87 @@ describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(claimDispatch.calls).toHaveLength(1);
     expect(claimDispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "triage" });
+  });
+});
+
+// ── CTL-1028: triage forwards + persists cluster generation (monitor dispatchTriage) ──
+//
+// Mirrors the CTL-864 scheduler tests but drives dispatchTriage through the
+// exported handleStateChangedEvent (→Triage branch), since dispatchTriage is not
+// exported. The CTL-862 single-host exact-args assertion doubles as a regression
+// guard that single-host remains a true no-op after this change.
+describe("CTL-1028 — triage forwards + persists cluster generation (monitor dispatchTriage)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "ENG-1";
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("multi-host won claim forwards claim.generation as clusterGeneration", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: "/fake-orch-1028",
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch.mock.calls[0][0].clusterGeneration).toBe(7);
+  });
+
+  test("single-host passes NO clusterGeneration key (exact no-op)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: "/fake-orch-1028",
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect("clusterGeneration" in dispatch.mock.calls[0][0]).toBe(false);
+  });
+
+  test("won multi-host claim persists cluster-generation.json", () => {
+    enroll("ENG", { status: "Ready" });
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl-1028-persist-"));
+    try {
+      // dispatch stub creates the worker dir (mirrors dispatchCreatesDir in scheduler.test.mjs)
+      // so writeClusterGeneration's tmp+rename succeeds.
+      const dispatch = mock((args) => {
+        mkdirSync(join(orchDir, "workers", args.ticket), { recursive: true });
+        return { code: 0 };
+      });
+      const claimDispatch = recordClaim({ won: true, generation: 7 });
+      handleStateChangedEvent(triageEvent(), {
+        dispatch,
+        orchDir,
+        hosts: ROSTER,
+        hostName: OWNER,
+        claimDispatch,
+        applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+        appendEvent: () => {},
+      });
+      expect(readClusterGeneration(orchDir, TICKET)).toBe(7);
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
   });
 });

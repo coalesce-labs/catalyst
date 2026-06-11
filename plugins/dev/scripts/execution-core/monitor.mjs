@@ -56,7 +56,7 @@ import {
 } from "./linear-write.mjs";
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
-import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
+import { readMaxParallel, computeFreeSlots, writeClusterGeneration } from "./scheduler.mjs";
 import {
   recordReconcileSuccess,
   recordReconcileFailure,
@@ -587,17 +587,11 @@ function dispatchTriage(
   }
   // CTL-862: cross-host claim soft-CAS immediately before the spawn. Skipped on
   // single-host (no Linear write). A lost claim is NOT a failure — defer cleanly.
-  // The claim returns a won {generation} here too — CTL-862 supplies a
-  // claim+generation on this triage path.
-  //
-  // CTL-864 reduced scope: even with a won generation in hand, triage is
-  // dispatched WITHOUT forwarding a cross-host fence token. phase-triage's only
-  // side-effects (its Linear mirror comment + Todo→Triage transition) are
-  // idempotent and cheap, so an unfenced double-triage from a partitioned host is
-  // benign relative to the push / PR / merge side-effects the scheduler-dispatched
-  // phases (now fenced) guard against. We therefore intentionally do NOT fence
-  // triage nor persist its generation — a fast-follow ticket will plumb the
-  // generation through if triage ever needs fencing.
+  // CTL-1028: lift claim.generation out of the block so it can be forwarded to
+  // the triage worker as CATALYST_CLUSTER_GENERATION (mirrors CTL-864 scheduler
+  // path). null on single-host → writeClusterGeneration and dispatchTicket both
+  // treat null as a no-op (fence token is omitted from the env).
+  let clusterGeneration = null;
   if (multiHost) {
     const claim = claimDispatch({ ticket: identifier, hostName: self, phase: "triage" });
     if (!claim.won) {
@@ -607,12 +601,16 @@ function dispatchTriage(
       );
       return false;
     }
+    clusterGeneration = claim.generation; // CTL-1028: forward to worker (mirrors CTL-864)
   }
-  const r = dispatchTicket(orchDir, identifier, "triage", { dispatch });
+  const r = dispatchTicket(orchDir, identifier, "triage", { dispatch, clusterGeneration });
   if (r.code !== 0) {
     log.warn({ identifier, code: r.code }, "monitor: triage dispatch failed");
     return false;
   }
+  // CTL-1028: persist the won generation so a later flapping-host triage worker
+  // is fenced. null (single-host) is a no-op inside writeClusterGeneration.
+  writeClusterGeneration(orchDir, identifier, clusterGeneration);
   if (budget) budget.remaining -= 1;
   // CTL-704: write Linear Todo→Triage (verified) + emit observability event.
   let res = { applied: false, verified: false, from_state: null, to_state: null, reason: null };
