@@ -4461,6 +4461,48 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
   });
 });
 
+// ─── CTL-866: thoughtsPull seam in reclaimDeadHostWork ───────────────────────
+
+describe("reclaimDeadHostWork — thoughtsPull seam (CTL-866)", () => {
+  test("CTL-866: thoughtsPull runs after rebuildWorktree and before inferResume", async () => {
+    const order = [];
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => { order.push("rebuild"); return { ok: true, cwd: "/wt/CTL-900" }; },
+      thoughtsPull: (cwd) => { order.push(`pull:${cwd}`); return { ok: true }; },
+      inferResume: async () => { order.push("infer"); return "implement"; },
+    }));
+    expect(order).toEqual(["rebuild", "pull:/wt/CTL-900", "infer"]);
+  });
+
+  test("CTL-866: thoughtsPull failure is fail-open — reclaim still dispatches", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      thoughtsPull: () => { throw new Error("pull boom"); },
+      dispatch: () => { dispatched = true; return { code: 0 }; },
+    }));
+    expect(dispatched).toBe(true);
+    expect(r.taken).toHaveLength(1);
+  });
+
+  test("CTL-866: single-host roster → no thoughtsPull (whole fn short-circuits)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      roster: ["mini"],
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+
+  test("CTL-866: rebuildWorktree failure → thoughtsPull NOT called (skipped with the ticket)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => ({ ok: false, cwd: null }),
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+});
+
 // CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
 // phase.<phase>.complete AND whose probe passes is reconciled without waiting
 // for it to die. The completeEventSeen seam is the precise disambiguator
