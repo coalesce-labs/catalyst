@@ -26,12 +26,17 @@
 //      Column headers are sticky-top only (they scroll horizontally with columns).
 //   2. CONSTRAINED PER-CELL HEIGHT + OVERSCROLL CHAINING: when multiple groups are
 //      visible (axis !== none AND laneCount > 1), each (group × column) cell becomes
-//      a vertical scroll container — overflow-y:auto + max-height:var(--lane-cell-max)
-//      (≈ 2.6 cards). Critically, overscroll-behavior is NOT set to "contain" — the
+//      a vertical scroll container — overflow-y:auto with a per-lane max-height.
+//      CTL-1010: that cap is now MEASURED + WATER-FILLED per lane (useLaneCellHeights
+//      → computeLaneHeights) so the lanes fill the FULL board height instead of a
+//      flat 300px cap — the 300px is now only the pre-measurement first-frame
+//      fallback. Critically, overscroll-behavior is NOT set to "contain" — the
 //      default "auto" lets wheel events chain to the board's vertical scroll once the
-//      cell reaches its boundary (revealing the next group). A short/empty cell
-//      passes the wheel straight to the board. The board remains the single both-
-//      axes scroll container; groups stack vertically inside it.
+//      cell reaches its boundary (revealing the next group / page-scrolling in the
+//      degraded many-lane case). A short/empty cell passes the wheel straight to the
+//      board. The board remains the single both-axes scroll container; groups stack
+//      vertically inside it in normal document flow (no flex wrappers — the
+//      ChartCard flex-collapse trap is structurally avoided).
 //   3. axis="none" (single flat board): no group cells, no height constraint, the
 //      board scrolls normally. A single group (laneCount === 1) on a real axis
 //      also skips the height constraint so one lane doesn't get a tiny scroll box.
@@ -57,7 +62,7 @@
 // (buildLanes / showLaneChrome); this file is the presentational shell that lays
 // the lanes into one CSS grid. Hand-rolled inline styles per DESIGN.md, reusing
 // the shared `C` token object + the `.catalyst-live-dot` pulse.
-import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { C, LIVE } from "./board-tokens";
@@ -72,6 +77,8 @@ import {
 } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
 import { groupIconSrc } from "./entity-icon";
+import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
+import type { Density } from "./prefs-store";
 
 // ── shared geometry ──────────────────────────────────────────────────────────
 // One column track is 300px (the legacy Column width), with a 16px gutter — so
@@ -135,9 +142,16 @@ const PAD_X = 16;
 // Sticky offset for the group-label row — it pins just below the column header
 // (header content + its vertical padding + the 1px rule ≈ 44px).
 const HEADER_H = 44;
-// CTL-958: CSS variable name for the per-cell max-height knob. The default
-// (≈ 2.6 comfortable cards × ~120px/card + gaps) is tuned so at least 2 groups
-// are visible at once on a typical 900–1080px viewport.
+// CTL-1010: vertical chrome a LaneCardsRow adds around its cells — the row's
+// `padding: 2px top + 16px bottom`. Subtracted per lane when computing the
+// available cell-area height so the water-fill budget is exact (no magic fudge).
+export const ROW_PAD_V = 18;
+// CTL-958: CSS variable name for the per-cell max-height knob.
+// CTL-1010: this var/default is now ONLY the PRE-MEASUREMENT fallback applied on
+// the very first frame before useLaneCellHeights has measured the lanes; the real
+// caps are measured + water-filled per lane (computeLaneHeights). The "~2.6 cards"
+// rationale is dead — 300px is just a safe one-frame placeholder (and the value the
+// swimlane-scroll contract test still pins).
 // Exported for tests.
 export const LANE_CELL_MAX_VAR = "--lane-cell-max";
 export const LANE_CELL_MAX_DEFAULT = "300px";
@@ -166,6 +180,9 @@ export interface LaneCell {
 function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
   return (
     <div
+      // CTL-1010: tagged so useLaneCellHeights can measure the real header height
+      // (offsetHeight) instead of relying on the HEADER_H magic constant.
+      data-board-colheader="true"
       style={{
         display: "grid",
         gridTemplateColumns: `repeat(${columns.length}, ${COL_W}px)`,
@@ -226,7 +243,10 @@ function GroupLabelRow({
   return (
     // Outer band: sticky-TOP only — holds its row position during vertical scroll;
     // scrolls horizontally with the column grid so the background fills the full width.
+    // CTL-1010: tagged so useLaneCellHeights subtracts each lane's REAL label-band
+    // height (offsetHeight) from the available cell-area budget (no magic constant).
     <div
+      data-lane-label-band="true"
       style={{
         position: "sticky",
         top: HEADER_H,
@@ -286,17 +306,36 @@ function GroupLabelRow({
 // stay visibly aligned across lanes.
 //
 // CTL-958: when `constrainCells` is true each cell becomes a vertical scroll
-// container — overflow-y:auto + max-height:var(--lane-cell-max, 300px). This
-// shows ~2.6 cards per cell so multiple groups are visible at once. The cell's
+// container — overflow-y:auto with a per-lane max-height. The cell's
 // overscroll-behavior is left at the browser default ("auto") intentionally:
 // this is the standard chaining behavior where wheel events that reach the
 // cell's scroll boundary are passed up to the board's vertical scroll (revealing
-// the next group). "contain" would block that hand-off — do NOT set it.
-// Short/empty cells (not independently scrollable) pass the wheel straight
-// to the board with no extra config needed.
-function LaneCardsRow({ cells, constrainCells = false }: { cells: LaneCell[]; constrainCells?: boolean }) {
+// the next group / page-scrolling in the degraded case). "contain" would block
+// that hand-off — do NOT set it. Short/empty cells (not independently scrollable)
+// pass the wheel straight to the board with no extra config needed.
+//
+// CTL-1010: the cap is per-lane, MEASURED + WATER-FILLED (cellMax from
+// useLaneCellHeights → computeLaneHeights):
+//   • `undefined` (unmeasured first frame) → var(--lane-cell-max, 300px) fallback;
+//   • `null` (alloc ≥ demand) → no maxHeight (uncapped — shows everything);
+//   • number → that px cap (the lane's water-fill share).
+// The lane row carries `data-lane-key` (matched by the hook) and constrained cells
+// add className="cat-scroll" so internal scrollbars use the existing thin 9px
+// themed idiom (Board.tsx PULSE_CSS). No new affordances (no fades, no "+N more").
+function LaneCardsRow({
+  cells,
+  laneKey,
+  constrainCells = false,
+  cellMax,
+}: {
+  cells: LaneCell[];
+  laneKey?: string;
+  constrainCells?: boolean;
+  cellMax?: number | null;
+}) {
   return (
     <div
+      data-lane-key={laneKey}
       style={{
         display: "grid",
         gridTemplateColumns: `repeat(${cells.length}, ${COL_W}px)`,
@@ -310,17 +349,25 @@ function LaneCardsRow({ cells, constrainCells = false }: { cells: LaneCell[]; co
         <div
           key={i}
           data-lane-cell="true"
+          className={constrainCells ? "cat-scroll" : undefined}
           style={{
             display: "flex",
             flexDirection: "column",
             gap: 8,
             minWidth: 0,
-            // CTL-958: per-cell constrained height with overscroll chaining.
-            // Only applied when multiple groups are present (constrainCells=true).
+            // CTL-958 / CTL-1010: per-cell constrained height with overscroll
+            // chaining. Only applied when multiple groups are present
+            // (constrainCells=true). The cap is the lane's measured water-fill share.
             ...(constrainCells
               ? {
                   overflowY: "auto",
-                  maxHeight: `var(${LANE_CELL_MAX_VAR}, ${LANE_CELL_MAX_DEFAULT})`,
+                  // cellMax === undefined → pre-measurement fallback var;
+                  // cellMax === null → uncapped; number → that px cap.
+                  ...(cellMax === undefined
+                    ? { maxHeight: `var(${LANE_CELL_MAX_VAR}, ${LANE_CELL_MAX_DEFAULT})` }
+                    : cellMax === null
+                      ? {}
+                      : { maxHeight: cellMax }),
                   // overscroll-behavior: "auto" is the default — chains to the
                   // parent board scroll at the cell boundary. Explicit for clarity.
                   overscrollBehavior: "auto",
@@ -393,6 +440,128 @@ function useBoardSwipeGuard(
   }, [scrollRef, bumpRef]);
 }
 
+// ── CTL-1010: measure each lane's content + water-fill its cell-area height ────
+// Returns a Map<laneKey, number|null> of the per-lane cell max-height cap (null =
+// uncapped), or `null` while unmeasured (first frame). SwimlaneBoard threads each
+// lane's value down to its LaneCardsRow as `cellMax`.
+//
+// HOW IT MEASURES (no feedback loop): for each `[data-lane-key]` row, the lane's
+// DEMAND is the ceil of the max `scrollHeight` over its `[data-lane-cell]` children.
+// `scrollHeight` reports the cell's FULL content height INDEPENDENT of the applied
+// max-height cap — so applying a cap never changes the measurement, and re-measuring
+// is stable (no oscillation). AVAIL is the scroller's clientHeight minus the real
+// (measured) column-header height, minus the sum of the real lane label-band
+// heights, minus laneCount × ROW_PAD_V (each LaneCardsRow's 2px+16px vertical pad).
+//
+// Runs in useLayoutEffect (pre-paint → no flicker) on EVERY render, plus a
+// ResizeObserver on the scroller (viewport / footer resize bumps a counter). setState
+// is skipped when every value is within EPSILON px of the current map (absorbs
+// popLayout / motion jitter so we don't thrash).
+const MEASURE_EPSILON = 2;
+
+function useLaneCellHeights(
+  scrollRef: React.RefObject<HTMLDivElement | null>,
+  laneKeys: string[],
+  constrainCells: boolean,
+  density: Density,
+): Map<string, number | null> | null {
+  const [allocs, setAllocs] = useState<Map<string, number | null> | null>(null);
+  // ResizeObserver bumps this so the layout effect re-measures on viewport resize.
+  const [resizeTick, setResizeTick] = useState(0);
+  const lanesKey = laneKeys.join(" ");
+
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !constrainCells) {
+      // Clear any stale caps when the constraint is off (single lane / axis=none).
+      setAllocs((prev) => (prev === null ? prev : null));
+      return;
+    }
+
+    const laneEls = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-lane-key]"),
+    );
+    if (laneEls.length === 0) {
+      setAllocs((prev) => (prev === null ? prev : null));
+      return;
+    }
+
+    // DEMAND per lane: ceil(max scrollHeight over its cells). scrollHeight reads
+    // full content regardless of the applied cap → no feedback loop.
+    const keys: string[] = [];
+    const demands: number[] = [];
+    for (const laneEl of laneEls) {
+      const key = laneEl.getAttribute("data-lane-key") ?? "";
+      const cells = Array.from(
+        laneEl.querySelectorAll<HTMLElement>("[data-lane-cell]"),
+      );
+      let demand = 0;
+      for (const cell of cells) demand = Math.max(demand, cell.scrollHeight);
+      keys.push(key);
+      demands.push(Math.ceil(demand));
+    }
+
+    // AVAIL: scroller cell-area height. Measure the REAL chrome (no magic numbers):
+    // clientHeight − colHeader.offsetHeight − Σ(labelBand.offsetHeight) − laneCount×ROW_PAD_V.
+    const colHeaderEl = scroller.querySelector<HTMLElement>("[data-board-colheader]");
+    const labelBandEls = Array.from(
+      scroller.querySelectorAll<HTMLElement>("[data-lane-label-band]"),
+    );
+    const colHeaderH = colHeaderEl?.offsetHeight ?? 0;
+    const labelBandH = labelBandEls.reduce((sum, el) => sum + el.offsetHeight, 0);
+    const avail =
+      scroller.clientHeight - colHeaderH - labelBandH - laneEls.length * ROW_PAD_V;
+
+    const minH = LANE_MIN_CELL_H(density);
+    const caps = computeLaneHeights(demands, Math.max(0, avail), minH);
+
+    const next = new Map<string, number | null>();
+    keys.forEach((k, i) => next.set(k, caps[i]));
+
+    // Skip setState when nothing meaningfully changed (epsilon absorbs jitter).
+    setAllocs((prev) => {
+      if (prev && prev.size === next.size) {
+        let same = true;
+        for (const [k, v] of next) {
+          if (!prev.has(k)) {
+            same = false;
+            break;
+          }
+          const p = prev.get(k) ?? null;
+          if (v === null || p === null) {
+            if (v !== p) {
+              same = false;
+              break;
+            }
+          } else if (Math.abs(v - p) > MEASURE_EPSILON) {
+            same = false;
+            break;
+          }
+        }
+        if (same) return prev;
+      }
+      return next;
+    });
+    // Re-run every render (deps below include the lane set + resize tick); the
+    // measurement is idempotent so a no-op render is cheap (setState is skipped).
+  });
+
+  // ResizeObserver on the scroller → bump the resize tick to force a re-measure.
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller || !constrainCells) return;
+    const ro = new ResizeObserver(() => setResizeTick((t) => t + 1));
+    ro.observe(scroller);
+    return () => ro.disconnect();
+  }, [scrollRef, constrainCells, lanesKey]);
+
+  // Touch resizeTick so the layout effect re-runs when the observer fires (the
+  // effect has no dep array, so this is belt-and-suspenders / lint clarity).
+  void resizeTick;
+
+  return allocs;
+}
+
 /**
  * SwimlaneBoard — the shared-header, single-scroll swimlane board (CTL-950),
  * refined to Linear's nuanced scroll UX (CTL-958).
@@ -426,6 +595,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   columns,
   deriveLane,
   entityNoun = "ticket",
+  density = "comfortable",
 }: {
   items: T[];
   groupBy: GroupBy;
@@ -440,6 +610,10 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   /** distribute ONE lane's items across `columns` into aligned LaneCells. */
   deriveLane: (laneItems: T[]) => LaneCell[];
   entityNoun?: "ticket" | "worker";
+  /** CTL-1010: density drives ONLY the per-lane MINIMUM (LANE_MIN_CELL_H) used by
+   *  the water-fill; the real lane heights are measured from the DOM. Worker boards
+   *  default to "comfortable". */
+  density?: Density;
 }) {
   const lanes = buildLanes(items, groupBy, liveness);
   const chrome = showLaneChrome(groupBy, lanes.length);
@@ -457,6 +631,13 @@ export function SwimlaneBoard<T extends GroupableEntity>({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const bumpRef = useRef<HTMLDivElement | null>(null);
   useBoardSwipeGuard(scrollRef, bumpRef);
+
+  // CTL-1010: measure each lane's content + water-fill the available cell-area
+  // height so the lanes fill the full board height (no dead band) instead of the
+  // flat 300px cap. `allocs.get(laneKey)` is the per-lane cell max (null=uncapped);
+  // the whole map is null on the unmeasured first frame (cells fall back to var()).
+  const laneKeys = chrome ? lanes.map((l) => l.key) : [];
+  const allocs = useLaneCellHeights(scrollRef, laneKeys, constrainCells, density);
 
   // Shadow visibility state: tracks whether the board has scrollable overflow
   // on either side, so we can show left/right edge shadows without scroll-
@@ -551,7 +732,14 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                   iconSrc={groupIconSrc(groupBy, lane.key, icons)}
                 />
-                <LaneCardsRow cells={cells} constrainCells={constrainCells} />
+                {/* CTL-1010: cellMax = this lane's measured water-fill share
+                    (allocs is null on the first frame → undefined → var() fallback). */}
+                <LaneCardsRow
+                  cells={cells}
+                  laneKey={lane.key}
+                  constrainCells={constrainCells}
+                  cellMax={allocs?.get(lane.key)}
+                />
               </Fragment>
             );
           })
