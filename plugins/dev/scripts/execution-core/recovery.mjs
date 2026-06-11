@@ -660,6 +660,31 @@ export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
   );
 }
 
+// defaultAppendBootResumePhaseRegressionEvent —
+// phase.<phase>.boot-resume-phase-regression.<ticket>. CTL-1006 Scenario 2:
+// emitted when boot-resume would have re-dispatched an EARLIER phase whose ticket
+// already has a LATER terminal phase signal (e.g. research=stalled while an older
+// triage signal is still `running`). Audit-only — distinct action (broker-ignored,
+// not in PHASE_EVENT_PATTERN) and NOT counted by countReviveEvents (event-scan
+// matches only `phase.implement.revive.<ticket>`), so a regression never consumes
+// the chronic-failure revive budget (the Scenario-4 invariant). Surfaces the
+// regression for operator forensics INSTEAD of spawning a fresh earlier-phase
+// worker. Exported so boot-resume.mjs imports it as the default appender seam and
+// the round-trip test can confirm the envelope shape.
+export function defaultAppendBootResumePhaseRegressionEvent({ phase, ticket, dominantPhase, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume-phase-regression",
+      reason: "later-terminal-phase-supersedes-resume-candidate",
+      payloadExtras: { dominantPhase },
+    }),
+    "boot-resume-phase-regression",
+  );
+}
+
 // CTL-587: three new audit-only event helpers. The broker's PHASE_EVENT_PATTERN
 // in router.mjs only matches complete|failed|turn-cap-exhausted|skipped, so
 // revive/escalated/revive-suppressed events are deliberately ignored by the
