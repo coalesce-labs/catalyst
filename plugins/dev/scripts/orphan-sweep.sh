@@ -35,12 +35,17 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
 _PRINT_CONFIG=0
 _COUNT_DIRTY=0
+_CLASSIFY=0
+_CLASSIFY_PATH=""
+_CLASSIFY_TRUNK=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --print-config) _PRINT_CONFIG=1; shift ;;
     --count-dirty) _COUNT_DIRTY=1; shift ;;
+    --classify) _CLASSIFY=1; _CLASSIFY_PATH="${2:-}"; [[ -n "$_CLASSIFY_PATH" ]] && shift; shift ;;
+    --trunk)    _CLASSIFY_TRUNK="${2:-}"; shift 2 ;;
     --help|-h)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -213,6 +218,88 @@ _age_secs() {
   echo $(( epoch_now - epoch_then ))
 }
 
+# --- vector 2 classifier (CTL-1030) ---
+
+_LIVE_AGENTS_JSON=""
+_LIVE_AGENTS_LOADED=0
+_live_agents_json() {
+  if [[ "$_LIVE_AGENTS_LOADED" -eq 0 ]]; then
+    _LIVE_AGENTS_JSON="$(claude agents --json 2>/dev/null || echo '[]')"
+    _LIVE_AGENTS_LOADED=1
+  fi
+  printf '%s' "$_LIVE_AGENTS_JSON"
+}
+
+_wt_active_session() {
+  local wt="${1%/}" json
+  json="$(_live_agents_json)"
+  printf '%s' "$json" | jq -e --arg wt "$wt" \
+    '[.[]? | select(.cwd != null and (.cwd == $wt or (.cwd | startswith($wt + "/"))))] | length > 0' \
+    >/dev/null 2>&1
+}
+
+_is_orphan_gitfile_dir() {
+  local gitfile="${1}/.git" gitdir
+  [[ -f "$gitfile" ]] || return 1
+  gitdir="$(sed -n 's/^gitdir: //p' "$gitfile" 2>/dev/null)"
+  [[ -n "$gitdir" ]] || return 1
+  [[ "$gitdir" == /* ]] || gitdir="${1}/${gitdir}"
+  [[ ! -d "$gitdir" ]]
+}
+
+_wt_ancestry_ok() {
+  git -C "$1" merge-base --is-ancestor HEAD "$2" >/dev/null 2>&1 && return 0
+  [[ -n "$(git -C "$1" branch -r --contains HEAD 2>/dev/null)" ]] && return 0
+  return 1
+}
+
+_wt_unpushed_count() {
+  local ref
+  local refs=()
+  while IFS= read -r ref; do
+    [[ -n "$ref" ]] && refs+=( "$ref" )
+  done < <(git -C "$1" for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+  [[ ${#refs[@]} -eq 0 ]] && { printf '0'; return 0; }
+  git -C "$1" rev-list --count HEAD --not "${refs[@]}" 2>/dev/null || printf '0'
+}
+
+_wt_newest_mtime() {
+  find "$1" -type f \
+    -not -path '*/node_modules/*' -not -path '*/.cache/*' \
+    -not -path '*/.trunk/*' -not -path '*/dist/*' -not -path '*/build/*' \
+    2>/dev/null \
+  | while IFS= read -r f; do
+      stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0
+    done \
+  | sort -nr | head -1
+}
+
+_wt_is_idle() {
+  local newest now
+  newest="$(_wt_newest_mtime "$1")"
+  [[ -z "$newest" || "$newest" == "0" ]] && return 0
+  now="$(date -u +%s)"
+  [[ $(( now - newest )) -ge $(( SWEEP_IDLE_HOURS * 3600 )) ]]
+}
+
+classify_worktree() {
+  local wt="$1" trunk="${2:-origin/main}" dirty unpushed
+  [[ -d "$wt" ]] || { printf 'KEEP'; return 0; }
+  _wt_active_session "$wt" 2>/dev/null && { printf 'KEEP'; return 0; }
+  if _is_orphan_gitfile_dir "$wt" 2>/dev/null; then
+    _wt_is_idle "$wt" && { printf 'ORPHAN_GITFILE'; return 0; }
+    printf 'KEEP'; return 0
+  fi
+  dirty="$(_real_dirty_count "$wt" 2>/dev/null || echo 0)"
+  [[ "$dirty" -gt 0 ]] && { printf 'SALVAGE_DIRTY'; return 0; }
+  unpushed="$(_wt_unpushed_count "$wt" 2>/dev/null || echo 0)"
+  [[ "$unpushed" -gt 0 ]] && { printf 'SALVAGE_UNPUSHED'; return 0; }
+  if _wt_ancestry_ok "$wt" "$trunk" 2>/dev/null && _wt_is_idle "$wt"; then
+    printf 'SAFE'; return 0
+  fi
+  printf 'KEEP'
+}
+
 # Artifact files to exclude from signal sweeping (by basename)
 _is_artifact_file() {
   local basename="$1"
@@ -349,6 +436,12 @@ main() {
     exit 0
   fi
   [[ "$_COUNT_DIRTY" == "1" ]] && { _real_dirty_count_stdin; exit 0; }
+
+  if [[ "$_CLASSIFY" == "1" ]]; then
+    classify_worktree "$_CLASSIFY_PATH" "${_CLASSIFY_TRUNK:-origin/main}"
+    echo
+    exit 0
+  fi
 
   if is_dry; then
     log "=== DRY RUN — no changes will be made ==="

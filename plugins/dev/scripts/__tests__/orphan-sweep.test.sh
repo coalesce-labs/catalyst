@@ -570,6 +570,180 @@ run "T40: node_modules_local/ is real (segment-anchored)" bash -c "
     | bash '${SWEEP}' --count-dirty 2>/dev/null | grep -qx 1
 "
 
+# --- Phase 7: vector 2 classifier (T41-T49) ---
+
+# Remove git mock so real git is used for fixture repos
+rm -f "$MOCKBIN/git"
+
+# Claude mock (must come AFTER rm -f "$MOCKBIN/git")
+cat > "$MOCKBIN/claude" <<'CMEOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"agents --json"* ]]; then
+  echo "[{\"cwd\":\"${ACTIVE_CWD:-/nowhere}\"}]"
+fi
+exit 0
+CMEOF
+chmod +x "$MOCKBIN/claude"
+
+# Build fixture repo with origin
+mkdir -p "$SCRATCH/clf"
+git init --bare "$SCRATCH/clf/origin.git" >/dev/null 2>&1
+git clone "$SCRATCH/clf/origin.git" "$SCRATCH/clf/main" >/dev/null 2>&1
+echo "init" > "$SCRATCH/clf/main/README.md"
+git -C "$SCRATCH/clf/main" add README.md
+git -C "$SCRATCH/clf/main" -c user.email="test@test.com" -c user.name="Test" commit -m "init" >/dev/null 2>&1
+git -C "$SCRATCH/clf/main" push origin HEAD:main >/dev/null 2>&1
+git -C "$SCRATCH/clf/main" remote set-head origin main >/dev/null 2>&1 || true
+
+make_pushed_wt() {
+  name="$1"
+  git -C "$SCRATCH/clf/main" worktree add "$SCRATCH/clf/$name" -b "$name" >/dev/null 2>&1
+  echo "work" > "$SCRATCH/clf/$name/work.ts"
+  git -C "$SCRATCH/clf/$name" add work.ts
+  git -C "$SCRATCH/clf/$name" -c user.email="test@test.com" -c user.name="Test" commit -m "work" >/dev/null 2>&1
+  git -C "$SCRATCH/clf/$name" push origin "HEAD:refs/heads/$name" >/dev/null 2>&1
+  find "$SCRATCH/clf/$name" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+}
+
+# T41: pushed+clean+backdated, no active session -> SAFE
+make_pushed_wt wt41
+run "T41: pushed clean backdated wt -> SAFE" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt41' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# T42: local-only commit (no push), clean, backdated -> SALVAGE_UNPUSHED
+git -C "$SCRATCH/clf/main" worktree add "$SCRATCH/clf/wt42" -b "wt42" >/dev/null 2>&1
+echo "local only" > "$SCRATCH/clf/wt42/local.ts"
+git -C "$SCRATCH/clf/wt42" add local.ts
+git -C "$SCRATCH/clf/wt42" -c user.email="test@test.com" -c user.name="Test" commit -m "local only" >/dev/null 2>&1
+# intentionally NOT pushing
+find "$SCRATCH/clf/wt42" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+
+run "T42: local-only commit -> SALVAGE_UNPUSHED" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt42' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SALVAGE_UNPUSHED' ]]
+"
+
+# T43: pushed wt with untracked real file, backdated -> SALVAGE_DIRTY
+make_pushed_wt wt43
+echo "new feature" > "$SCRATCH/clf/wt43/feature.ts"
+find "$SCRATCH/clf/wt43" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+
+run "T43: pushed wt with untracked file -> SALVAGE_DIRTY" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt43' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SALVAGE_DIRTY' ]]
+"
+
+# T44: pushed, clean, file touched NOW -> KEEP (not idle)
+make_pushed_wt wt44
+# Touch files to NOW (not backdated)
+find "$SCRATCH/clf/wt44" -type f -print0 | xargs -0 touch 2>/dev/null || true
+
+run "T44: pushed clean but recent mtime -> KEEP (not idle)" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=1 bash '$SWEEP' --classify '$SCRATCH/clf/wt44' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# T45a: ACTIVE_CWD set to wt path exactly -> KEEP
+make_pushed_wt wt45
+find "$SCRATCH/clf/wt45" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+
+run "T45a: active session matches wt exactly -> KEEP" bash -c "
+  export ACTIVE_CWD='$SCRATCH/clf/wt45'
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt45' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# T45b: ACTIVE_CWD set to child dir -> KEEP; ACTIVE_CWD set to sibling prefix -> SAFE
+run "T45b-child: active session is subdirectory -> KEEP" bash -c "
+  export ACTIVE_CWD='$SCRATCH/clf/wt45/sub/dir'
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt45' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+run "T45b-sibling: sibling prefix does NOT match -> SAFE" bash -c "
+  export ACTIVE_CWD='$SCRATCH/clf/wt45-other'
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt45' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'SAFE' ]]
+"
+
+# T46: wt with no remote at all (git init without origin), clean, backdated -> KEEP
+mkdir -p "$SCRATCH/clf/wt46"
+git -C "$SCRATCH/clf/wt46" init >/dev/null 2>&1
+echo "noremote" > "$SCRATCH/clf/wt46/file.ts"
+git -C "$SCRATCH/clf/wt46" add file.ts
+git -C "$SCRATCH/clf/wt46" -c user.email="test@test.com" -c user.name="Test" commit -m "init" >/dev/null 2>&1
+find "$SCRATCH/clf/wt46" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+
+run "T46: wt with no remote -> KEEP" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt46' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# T47: non-existent path -> KEEP
+run "T47: non-existent path -> KEEP" bash -c "
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/does_not_exist_xyz' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# T48a: orphan gitfile wt, backdated -> ORPHAN_GITFILE
+mkdir -p "$SCRATCH/clf/wt48a"
+echo "gitdir: /absent/path/that/does/not/exist" > "$SCRATCH/clf/wt48a/.git"
+find "$SCRATCH/clf/wt48a" -type f -print0 | xargs -0 touch -t 202501010000 2>/dev/null || true
+
+run "T48a: orphan gitfile (absent gitdir), backdated -> ORPHAN_GITFILE" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt48a' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'ORPHAN_GITFILE' ]]
+"
+
+# T48b: orphan gitfile wt, NOT backdated (fresh mtime) -> KEEP
+mkdir -p "$SCRATCH/clf/wt48b"
+echo "gitdir: /absent/path/that/does/not/exist" > "$SCRATCH/clf/wt48b/.git"
+# Leave mtime as NOW (not backdated)
+
+run "T48b: orphan gitfile but fresh mtime -> KEEP" bash -c "
+  unset ACTIVE_CWD
+  verdict=\$(SWEEP_IDLE_HOURS=1 bash '$SWEEP' --classify '$SCRATCH/clf/wt48b' 2>/dev/null)
+  echo \"verdict=\$verdict\"
+  [[ \"\$verdict\" == 'KEEP' ]]
+"
+
+# T49: side-effect-free — git worktree list unchanged after all classify calls
+wt_list_before="\$(git -C '$SCRATCH/clf/main' worktree list 2>/dev/null)"
+wt_list_after="\$(git -C '$SCRATCH/clf/main' worktree list 2>/dev/null)"
+run "T49: classify calls are side-effect-free (worktree list unchanged)" bash -c "
+  before=\$(git -C '$SCRATCH/clf/main' worktree list 2>/dev/null)
+  # run classify on a few paths
+  SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt41' >/dev/null 2>&1
+  SWEEP_IDLE_HOURS=9999 bash '$SWEEP' --classify '$SCRATCH/clf/wt42' >/dev/null 2>&1
+  after=\$(git -C '$SCRATCH/clf/main' worktree list 2>/dev/null)
+  [[ \"\$before\" == \"\$after\" ]]
+"
+
+# Restore claude mock to no-op for any subsequent phases
+cat > "$MOCKBIN/claude" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "agents" ]]; then echo "[]"; fi
+EOF
+chmod +x "$MOCKBIN/claude"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
