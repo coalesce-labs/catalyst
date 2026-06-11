@@ -10,7 +10,7 @@ description: |
   `phase-agent-dispatch`, which invokes it via slash command — hence
   `user-invocable: true`.
 user-invocable: true
-disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
+disable-model-invocation: false # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
@@ -19,17 +19,17 @@ allowed-tools:
 
 # phase-pr
 
-Thin wrapper around `/catalyst-dev:create-pr`. The canonical skill already
-handles: commit, push, base-branch detection, PR creation, `describe-pr`
-auto-invocation, workflow-context tracking, Linear `inReview` transition,
-and the post-PR resolution loop. Phase-pr adds only the phase-agent envelope
-plus persisting `pr.number` + `pr.url` to the signal file for
-`phase-monitor-merge`.
+Thin wrapper around `/catalyst-dev:create-pr`. The canonical skill already handles: commit, push,
+base-branch detection, PR creation, `describe-pr` auto-invocation, workflow-context tracking, Linear
+`inReview` transition, and the post-PR resolution loop. Phase-pr adds only the phase-agent envelope
+plus persisting `pr.number` + `pr.url` to the signal file for `phase-monitor-merge`.
 
 ## Prerequisites
 
-- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=pr`, `CATALYST_TICKET` set by [[phase-agent-dispatch]].
-- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-review.json` exists with `status=done` — the dispatcher validates this; this skill assumes it.
+- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=pr`, `CATALYST_TICKET`
+  set by [[phase-agent-dispatch]].
+- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-review.json` exists with
+  `status=done` — the dispatcher validates this; this skill assumes it.
 - Current working directory is the ticket's worktree on the implementation branch (not main).
 
 ## Prelude
@@ -87,10 +87,10 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
 ## Already-merged detection (CTL-714)
 
 Before delegating to `create-pr`, detect whether this branch's `HEAD` is already contained in
-`origin/main` (manual rescue, or a sibling PR landed the same commits). If so, skip PR creation
-to avoid a duplicate / empty-diff PR. Two complementary checks: `git merge-base --is-ancestor`
-(works even if the branch was deleted from the remote) and `gh pr list --state merged` (recovers
-the merged PR number for the downstream probe).
+`origin/main` (manual rescue, or a sibling PR landed the same commits). If so, skip PR creation to
+avoid a duplicate / empty-diff PR. Two complementary checks: `git merge-base --is-ancestor` (works
+even if the branch was deleted from the remote) and `gh pr list --state merged` (recovers the merged
+PR number for the downstream probe).
 
 The detection fence is **side-effect-free** so the e2e test can source it in isolation.
 
@@ -119,8 +119,8 @@ if [[ -n "$BRANCH_NAME" ]]; then
 fi
 ```
 
-When `ALREADY_MERGED=1`, write the disposition into the signal file and complete without
-creating a PR:
+When `ALREADY_MERGED=1`, write the disposition into the signal file and complete without creating a
+PR:
 
 ```bash
 if [[ "$ALREADY_MERGED" -eq 1 ]]; then
@@ -145,11 +145,11 @@ fi
 
 ## Existing open PR detection (CTL-709)
 
-CTL-709's `phase-implement` may have already opened a draft PR for this branch. Detect it here so
-we can **promote** it (`gh pr ready`) rather than re-entering `create-pr`'s interactive
-"PR already exists" prompt (`create-pr/SKILL.md:96–104`) — that prompt would hang a `--bg`
-worker forever. Detection order: merged → existing-open → create-new. The detection fence is
-**side-effect-free** so the e2e test can source it in isolation.
+CTL-709's `phase-implement` may have already opened a draft PR for this branch. Detect it here so we
+can **promote** it (`gh pr ready`) rather than re-entering `create-pr`'s interactive "PR already
+exists" prompt (`create-pr/SKILL.md:96–104`) — that prompt would hang a `--bg` worker forever.
+Detection order: merged → existing-open → create-new. The detection fence is **side-effect-free** so
+the e2e test can source it in isolation.
 
 ```bash phase-pr-existing-pr-detect
 # CTL-709: phase-implement may have already opened a (draft) PR for this branch.
@@ -211,23 +211,23 @@ Plan §"Per-phase /goal conditions":
        transcript)."
 ```
 
-Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`).
-This is intentionally tight because the work is mostly tool calls — most of
-the reasoning happens upstream in `create-pr` itself.
+Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`). This is intentionally
+tight because the work is mostly tool calls — most of the reasoning happens upstream in `create-pr`
+itself.
 
 ## Phase-specific work
 
-1. When `EXISTING_PR_NUMBER` is set (the draft opened by `phase-implement` was detected and
-   promoted above): invoke `/catalyst-dev:describe-pr` via the Task tool on `$EXISTING_PR_NUMBER`.
-   Then proceed directly to the End block — **do not** invoke `/catalyst-dev:create-pr`.
+1. When `EXISTING_PR_NUMBER` is set (the draft opened by `phase-implement` was detected and promoted
+   above): invoke `/catalyst-dev:describe-pr` via the Task tool on `$EXISTING_PR_NUMBER`. Then
+   proceed directly to the End block — **do not** invoke `/catalyst-dev:create-pr`.
 
-2. When `EXISTING_PR_NUMBER` is empty (Phase 3 draft creation failed or was disabled):
-   invoke `/catalyst-dev:create-pr` via the Task tool. The canonical skill handles: branch push,
-   base-branch resolution, idempotent PR creation if one already exists, `describe-pr`
-   invocation, and Linear `inReview` transition.
+2. When `EXISTING_PR_NUMBER` is empty (Phase 3 draft creation failed or was disabled): invoke
+   `/catalyst-dev:create-pr` via the Task tool. The canonical skill handles: branch push,
+   base-branch resolution, idempotent PR creation if one already exists, `describe-pr` invocation,
+   and Linear `inReview` transition.
 
-3. After either path, capture the PR metadata via `gh` and write it into the phase signal file
-   so `phase-monitor-merge` can read it directly without re-querying GitHub:
+3. After either path, capture the PR metadata via `gh` and write it into the phase signal file so
+   `phase-monitor-merge` can read it directly without re-querying GitHub:
 
    ```bash
    PR_INFO=$(gh pr view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
@@ -245,23 +245,20 @@ the reasoning happens upstream in `create-pr` itself.
    fi
    ```
 
-4. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND
-   rebase) is **not** run here — that is `phase-monitor-merge`'s
-   responsibility. `create-pr`'s own brief monitoring window stays inside
-   `create-pr`; phase-pr exits as soon as the PR exists in `OPEN` state.
+4. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND rebase) is **not** run
+   here — that is `phase-monitor-merge`'s responsibility. `create-pr`'s own brief monitoring window
+   stays inside `create-pr`; phase-pr exits as soon as the PR exists in `OPEN` state.
 
 ## End block
 
-Mirror the phase output to Linear as a single comment (CTL-632). Describes the
-PR that was opened (number, URL, title, files changed, additions/deletions,
-commit count) plus the pre-merge verification surfaced from the verify phase's
-`verify.json` (test/typecheck/lint gate status + regression risk) so the trail
-records what was checked before the PR went up. PR metadata is re-read from the
-phase signal file (`.pr.number`/`.pr.url`, written in the phase-specific work
-above) and enriched via `gh pr view`; the verify summary is fail-soft if no
-`verify.json` exists. Body hard-truncated to 30,000 bytes. Fail-open and
-idempotent via the per-phase marker file. Uniquely-named fence so the e2e test
-can extract just this block.
+Mirror the phase output to Linear as a single comment (CTL-632). Describes the PR that was opened
+(number, URL, title, files changed, additions/deletions, commit count) plus the pre-merge
+verification surfaced from the verify phase's `verify.json` (test/typecheck/lint gate status +
+regression risk) so the trail records what was checked before the PR went up. PR metadata is re-read
+from the phase signal file (`.pr.number`/`.pr.url`, written in the phase-specific work above) and
+enriched via `gh pr view`; the verify summary is fail-soft if no `verify.json` exists. Body
+hard-truncated to 30,000 bytes. Fail-open and idempotent via the per-phase marker file.
+Uniquely-named fence so the e2e test can extract just this block.
 
 ```bash phase-pr-mirror
 LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
@@ -356,17 +353,16 @@ exit 1
 
 Common failure modes:
 
-- **Branch not pushable** (e.g., diverged, network failure): `create-pr` errors;
-  phase-pr emits `failed` with the underlying reason.
-- **PR already exists with no new commits**: not a failure — `create-pr` is
-  idempotent and returns the existing PR. The signal file gets the existing
-  PR number written, downstream phases proceed normally.
-- **`gh` not authenticated**: emit `failed` with the gh stderr; orchestrator's
-  retry path will not unstick this — escalate via `attention`.
+- **Branch not pushable** (e.g., diverged, network failure): `create-pr` errors; phase-pr emits
+  `failed` with the underlying reason.
+- **PR already exists with no new commits**: not a failure — `create-pr` is idempotent and returns
+  the existing PR. The signal file gets the existing PR number written, downstream phases proceed
+  normally.
+- **`gh` not authenticated**: emit `failed` with the gh stderr; orchestrator's retry path will not
+  unstick this — escalate via `attention`.
 
 ## Why this is a thin wrapper
 
-Plan architectural commitment #3. `/catalyst-dev:create-pr` is mature (504
-lines as of CTL-373) and owns workflow-context, Linear linking, describe-pr,
-and idempotency. phase-pr adds the phase-agent envelope (~80 lines) and
-nothing else — improvements to create-pr propagate for free.
+Plan architectural commitment #3. `/catalyst-dev:create-pr` is mature (504 lines as of CTL-373) and
+owns workflow-context, Linear linking, describe-pr, and idempotency. phase-pr adds the phase-agent
+envelope (~80 lines) and nothing else — improvements to create-pr propagate for free.

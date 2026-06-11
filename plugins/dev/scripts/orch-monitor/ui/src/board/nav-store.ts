@@ -62,6 +62,32 @@ export const navGroupsOpenAtom = atomWithStorage<Record<string, boolean>>(
   {},
 );
 
+// ── section open-state for the Overall + Observe groups (CTL-1034) ───────────
+/**
+ * CTL-1034: EVERY top-level sidebar section is collapsible — not just the
+ * per-project groups. The Overall group (always-on all-projects scope) and the
+ * Observe group each get their own persisted open/closed bit so the operator can
+ * fold any section, and the choice survives a reload (the same `atomWithStorage`
+ * discipline the per-project `navGroupsOpenAtom` and the board prefs use).
+ *
+ * Both default to OPEN (true) — the sidebar starts fully expanded; collapsing is
+ * an explicit operator gesture. A section containing the active surface force-
+ * renders open regardless of the stored bit (see the sidebar's force-open guard),
+ * so the selected item is never hidden inside a collapsed section.
+ *
+ * Previously the Overall group was a plain (non-collapsible) SidebarGroup and the
+ * Observe open-state lived in an ephemeral component `useState(false)` (lost on
+ * unmount, defaulted collapsed). Persisting both here unifies the collapse model.
+ */
+export const navOverallOpenAtom = atomWithStorage<boolean>(
+  "catalyst-nav-overall-v1",
+  true,
+);
+export const navObserveOpenAtom = atomWithStorage<boolean>(
+  "catalyst-nav-observe-v1",
+  true,
+);
+
 // ── list context (the resolved walk list) ───────────────────────────────────
 /**
  * The list the operator is walking, resolved once (via `resolveList`) from the

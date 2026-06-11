@@ -19,9 +19,7 @@ import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 
 // phase-agent-dispatch sits one directory up from execution-core/.
-const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
-  new URL("../phase-agent-dispatch", import.meta.url),
-);
+const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
 
 // teamOf — "CTL-123" → "CTL". Null for anything not <prefix>-<n>. The team
 // prefix is the registry key that resolves a ticket to its repo.
@@ -63,7 +61,7 @@ const getDispatchTimeoutMs = () =>
 
 export function defaultRunPhaseAgent(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-  { spawn = spawnSync } = {},
+  { spawn = spawnSync } = {}
 ) {
   const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
   if (resumeSession) args.push("--resume-session", resumeSession);
@@ -114,12 +112,21 @@ export function defaultRunPhaseAgent(
 // verbatim to runPhaseAgent so the spawned phase-agent-dispatch carries
 // `--resume-session`. Absent on every cold dispatch — only the revive path sets it.
 export function defaultDispatch(
-  { orchDir, ticket, phase, expectedWorktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
+  {
+    orchDir,
+    ticket,
+    phase,
+    expectedWorktreePath,
+    resumeSession,
+    handoffPath,
+    attempt,
+    clusterGeneration,
+  },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
     runPhaseAgent = defaultRunPhaseAgent,
-  } = {},
+  } = {}
 ) {
   const project = resolveProject(ticket);
   if (!project) {
@@ -148,7 +155,16 @@ export function defaultDispatch(
       worktreePath: wt.worktreePath,
     };
   }
-  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession, handoffPath, attempt, clusterGeneration }); // CTL-761, CTL-864
+  const res = runPhaseAgent({
+    orchDir,
+    ticket,
+    phase,
+    worktreePath: wt.worktreePath,
+    resumeSession,
+    handoffPath,
+    attempt,
+    clusterGeneration,
+  }); // CTL-761, CTL-864
   return { ...res, worktreePath: wt.worktreePath };
 }
 
@@ -157,8 +173,10 @@ export function defaultDispatch(
 // pass a resume UUID. Omitted when absent — the legacy toEqual assertions stay
 // green because the key is not added when the value is falsy.
 export function dispatchTicket(
-  orchDir, ticket, phase,
-  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {},
+  orchDir,
+  ticket,
+  phase,
+  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {}
 ) {
   const args = { orchDir, ticket, phase };
   if (resumeSession) args.resumeSession = resumeSession;

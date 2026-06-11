@@ -63,7 +63,13 @@ import { readVerifyVerdict } from "./work-done-probes.mjs";
 import { countRemediateCycles, countTicketEventsInWindow } from "./event-scan.mjs";
 import { rankTickets, compareTickets } from "./scheduler-rank.mjs";
 import { defaultDispatch, dispatchTicket, teamOf } from "./dispatch.mjs";
-import { fetchTicketState, fetchTicketsBatch, classifyTicketResolution, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
+import {
+  fetchTicketState,
+  fetchTicketsBatch,
+  classifyTicketResolution,
+  fetchTicketAssignee,
+  isAssigneeClaimable,
+} from "./linear-query.mjs";
 import { getProjectConfig, listProjects } from "./registry.mjs";
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
@@ -94,7 +100,7 @@ import {
   countBackgroundAgents,
   getAgentsCached,
   isBgJobAlive as defaultIsBgJobAlive,
-  livenessForBgJob as defaultLivenessForBgJob,   // CTL-768
+  livenessForBgJob as defaultLivenessForBgJob, // CTL-768
 } from "./claude-agents.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 // CTL-574: per-tick reclaim of dead-but-work-done phase workers. The default
@@ -161,7 +167,11 @@ import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
-import { getEstimationMethod, scaleForMethod, mapScopeToEstimate } from "./linear-estimation-method.mjs";
+import {
+  getEstimationMethod,
+  scaleForMethod,
+  mapScopeToEstimate,
+} from "./linear-estimation-method.mjs";
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -690,7 +700,7 @@ export function validatePerProjectBudgets(concurrency) {
     warnPerProjectOnce(
       `clamp:${sig}`,
       "execution-core: perProject reserves over-subscribed; clamping to fit maxParallel",
-      { totalReserve, globalMax, perProject: coerced },
+      { totalReserve, globalMax, perProject: coerced }
     );
     let remaining = globalMax;
     for (const k of keysWithReserve) {
@@ -707,7 +717,7 @@ export function validatePerProjectBudgets(concurrency) {
     warnPerProjectOnce(
       `under:${sig}`,
       "execution-core: sum(perProject.maxParallel) < globalMax — some slots may be unused",
-      { configuredCaps, globalMax },
+      { configuredCaps, globalMax }
     );
   }
 
@@ -799,7 +809,7 @@ export function computeFreeSlots(maxParallel, inFlightCount) {
 function readPhaseSignalRaw(orchDir, ticket, phase) {
   try {
     return JSON.parse(
-      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8"),
+      readFileSync(join(orchDir, "workers", ticket, `phase-${phase}.json`), "utf8")
     );
   } catch {
     return null;
@@ -836,9 +846,7 @@ export function predecessorPhaseOf(signals, next) {
 export function resolveReapPredecessor(signals, next) {
   const sig = signals ?? {};
   if (next === REMEDIATE_PHASE) {
-    return sig.verify === "done"
-      ? { phase: "verify", reason: "ctl-661-remediate-detour" }
-      : null;
+    return sig.verify === "done" ? { phase: "verify", reason: "ctl-661-remediate-detour" } : null;
   }
   if (next === "verify" && sig[REMEDIATE_PHASE] === "done") {
     return { phase: REMEDIATE_PHASE, reason: "ctl-661-remediate-detour" };
@@ -983,7 +991,7 @@ export function selectDispatchablePerProject(
   rankedReady,
   excludeTickets,
   freeSlots,
-  { perProject = {}, inFlight = new Set() } = {},
+  { perProject = {}, inFlight = new Set() } = {}
 ) {
   if (freeSlots <= 0) return [];
   const pp = perProject ?? {};
@@ -1137,8 +1145,7 @@ export function deriveAdvancement(signals, { verifyVerdict, remediateCycleCount 
   // (does NOT advance) so a producer bug can't silently leak past a phase.
   const latestStatus = sig[latest];
   const advanceEligible =
-    latestStatus === "done" ||
-    (latestStatus === "skipped" && latest === "monitor-deploy");
+    latestStatus === "done" || (latestStatus === "skipped" && latest === "monitor-deploy");
   if (latest === null || !advanceEligible) return null;
 
   // CTL-653: verdict routing at verify. A verdict-fail detours to remediate
@@ -1282,7 +1289,10 @@ function safeEmit(fn, arg, ctx) {
   try {
     fn(arg);
   } catch (err) {
-    log.warn({ ...ctx, err: err.message }, "scheduler: dispatch-lifecycle emit threw — continuing tick");
+    log.warn(
+      { ...ctx, err: err.message },
+      "scheduler: dispatch-lifecycle emit threw — continuing tick"
+    );
   }
 }
 
@@ -1352,7 +1362,13 @@ function unmetBlockersFor(candidateId, edges, poolById, blockerStates) {
 // number of write calls issued (0 == idempotent no-op OR cooled-down). `orchDir`/
 // `now` are optional so legacy callers / bare unit ticks keep the prior
 // best-effort-every-tick behavior (the cool-down simply never arms).
-export function convergeHeldLabel(ticket, current, desired, writeStatus, { orchDir, now = Date.now } = {}) {
+export function convergeHeldLabel(
+  ticket,
+  current,
+  desired,
+  writeStatus,
+  { orchDir, now = Date.now } = {}
+) {
   // CTL-834: back off if a recent apply of `desired` failed unrecoverably.
   if (orchDir && desired && inLabelCooldown(orchDir, ticket, desired, now())) {
     return 0;
@@ -1374,7 +1390,10 @@ export function convergeHeldLabel(ticket, current, desired, writeStatus, { orchD
     try {
       res = writeStatus.applyLabel({ ticket, label: desired });
     } catch (err) {
-      log.warn({ ticket, label: desired, err: err.message }, "convergeHeldLabel: applyLabel threw — continuing tick");
+      log.warn(
+        { ticket, label: desired, err: err.message },
+        "convergeHeldLabel: applyLabel threw — continuing tick"
+      );
     }
     writes++;
     if (orchDir && res && res.applied === false && UNRECOVERABLE_LABEL_REASONS.has(res.reason)) {
@@ -1494,8 +1513,7 @@ export function clearDispatchCooldown(orchDir, ticket, phase) {
 // (90s default) — comfortably longer than one revive→re-park cycle, short
 // enough to re-free the slot promptly. Env-overridable. File-backed (NOT an
 // in-memory Map) so the guard survives a daemon restart (watch-mode crashes).
-const HOLD_STOP_COOLDOWN_MS =
-  Number(process.env.SCHEDULER_HOLD_STOP_COOLDOWN_MS) || 90_000;
+const HOLD_STOP_COOLDOWN_MS = Number(process.env.SCHEDULER_HOLD_STOP_COOLDOWN_MS) || 90_000;
 
 // Marker lives under orchDir/.hold-stop-cooldowns/<ticket>-<phase>.json — outside
 // workers/<T>/ (same reasoning as .dispatch-cooldowns, CTL-624: never manufacture
@@ -1508,7 +1526,7 @@ export function inHoldStopCooldown(orchDir, ticket, phase, now) {
   let stoppedAt;
   try {
     stoppedAt = JSON.parse(
-      readFileSync(holdStopCooldownPath(orchDir, ticket, phase), "utf8"),
+      readFileSync(holdStopCooldownPath(orchDir, ticket, phase), "utf8")
     )?.stoppedAt;
   } catch {
     return false; // absent / malformed → not in cooldown
@@ -1522,18 +1540,22 @@ export function recordHoldStop(orchDir, ticket, phase, now) {
     mkdirSync(join(orchDir, ".hold-stop-cooldowns"), { recursive: true });
     writeFileSync(
       holdStopCooldownPath(orchDir, ticket, phase),
-      JSON.stringify({ ticket, phase, stoppedAt: now }),
+      JSON.stringify({ ticket, phase, stoppedAt: now })
     );
   } catch (err) {
-    log.warn({ ticket, phase, err: err.message },
-      "scheduler: hold-stop cooldown write failed — continuing");
+    log.warn(
+      { ticket, phase, err: err.message },
+      "scheduler: hold-stop cooldown write failed — continuing"
+    );
   }
 }
 
 export function clearHoldStopCooldown(orchDir, ticket, phase) {
   try {
     rmSync(holdStopCooldownPath(orchDir, ticket, phase), { force: true });
-  } catch { /* best-effort */ }
+  } catch {
+    /* best-effort */
+  }
 }
 
 // CTL-713: garbage-collect expired cooldown markers whose ticket has left the
@@ -1544,25 +1566,41 @@ export function clearHoldStopCooldown(orchDir, ticket, phase) {
 export function gcDispatchCooldowns(orchDir, eligibleIdentifiers, now) {
   const dir = join(orchDir, ".dispatch-cooldowns");
   let files;
-  try { files = readdirSync(dir); } catch { return []; }
+  try {
+    files = readdirSync(dir);
+  } catch {
+    return [];
+  }
   const reaped = [];
   for (const f of files) {
     if (!f.endsWith(".json")) continue;
     const p = join(dir, f);
     let marker;
-    try { marker = JSON.parse(readFileSync(p, "utf8")); } catch { continue; }
+    try {
+      marker = JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      continue;
+    }
     const phase = typeof marker?.phase === "string" ? marker.phase : null;
     let ticket = typeof marker?.ticket === "string" ? marker.ticket : null;
     if (!ticket && phase && f.endsWith(`-${phase}.json`)) {
       ticket = f.slice(0, f.length - `-${phase}.json`.length);
     }
     if (!ticket) continue;
-    const expiresAt = typeof marker?.expiresAt === "number"
-      ? marker.expiresAt
-      : (typeof marker?.failedAt === "number" ? marker.failedAt + DISPATCH_COOLDOWN_MS : null);
+    const expiresAt =
+      typeof marker?.expiresAt === "number"
+        ? marker.expiresAt
+        : typeof marker?.failedAt === "number"
+          ? marker.failedAt + DISPATCH_COOLDOWN_MS
+          : null;
     if (expiresAt === null || now < expiresAt) continue;
     if (eligibleIdentifiers.has(ticket)) continue;
-    try { rmSync(p, { force: true }); reaped.push({ ticket, phase }); } catch { /* best-effort */ }
+    try {
+      rmSync(p, { force: true });
+      reaped.push({ ticket, phase });
+    } catch {
+      /* best-effort */
+    }
   }
   return reaped;
 }
@@ -1574,8 +1612,10 @@ export function maybeEscalateDispatchFailures(orchDir, marker, { writeStatus, ap
   if (!marker || marker.consecutiveFailures < DISPATCH_FAILURE_ESCALATION_THRESHOLD) return;
   labelOnce(orchDir, marker.ticket, "needs-human", writeStatus);
   appendEvent({
-    ticket: marker.ticket, orchId: marker.ticket,
-    target_phase: marker.phase, code: marker.code,
+    ticket: marker.ticket,
+    orchId: marker.ticket,
+    target_phase: marker.phase,
+    code: marker.code,
     consecutiveFailures: marker.consecutiveFailures,
   });
 }
@@ -1725,7 +1765,10 @@ function recordRunawayAlert(orchDir, ticket, now) {
     mkdirSync(dir, { recursive: true });
     writeFileSync(runawayAlertPath(orchDir, ticket), JSON.stringify({ ticket, alertedAt: now }));
   } catch (err) {
-    log.warn({ ticket, err: err.message }, "scheduler: runaway-alert marker write failed — continuing");
+    log.warn(
+      { ticket, err: err.message },
+      "scheduler: runaway-alert marker write failed — continuing"
+    );
   }
 }
 
@@ -1853,10 +1896,7 @@ export function preflightWorkspaceLabels({
       }
     }
   } catch (err) {
-    logger.info(
-      { err: err.message },
-      "scheduler: workspace-label preflight threw — swallowed"
-    );
+    logger.info({ err: err.message }, "scheduler: workspace-label preflight threw — swallowed");
   }
 }
 
@@ -1884,11 +1924,20 @@ function defaultPreflightExec(cmd, args) {
 // CTL-757: the optional `emitStateWrite` callback (closed over schedulerTick's
 // injected emitter) audits the terminal-sweep Done write. Optional so the
 // once-semantics tests that call terminalDoneOnce directly need not supply it.
-function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiHost = false } = {}) {
+function terminalDoneOnce(
+  orchDir,
+  ticket,
+  writeStatus,
+  emitStateWrite,
+  { multiHost = false } = {}
+) {
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (existsSync(marker)) return;
   if (!fenceGuard({ ticket, orchDir, multiHost })) {
-    log.warn({ ticket }, "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)");
+    log.warn(
+      { ticket },
+      "ctl-863: stale fence — suppressing terminalDoneOnce write (zombie guard)"
+    );
     return;
   }
   try {
@@ -1897,7 +1946,13 @@ function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiH
     // when res is undefined (test stub) is skipped — emitStateWrite no-ops on a
     // falsy writerResult, so a stub-undefined result simply emits nothing.
     if (typeof emitStateWrite === "function") {
-      emitStateWrite({ writerResult: res, ticket, phase: TERMINAL_PHASE, source: "terminal-sweep", orchId: ticket });
+      emitStateWrite({
+        writerResult: res,
+        ticket,
+        phase: TERMINAL_PHASE,
+        source: "terminal-sweep",
+        orchId: ticket,
+      });
     }
     // Write the marker only on a confirmed apply — a failed write is retried
     // next tick. Note applyTerminalDone returns applied:true even for the
@@ -1933,7 +1988,14 @@ function terminalDoneOnce(orchDir, ticket, writeStatus, emitStateWrite, { multiH
 //   - GATE 3: the cached live Linear read must be NON-terminal (else there is
 //     nothing to fix — the common case is a no-op).
 // The applyTerminalDone write itself rides the shared linearBreaker (defaultExec).
-function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitStateWrite, { cache, prAdapter, fetchState = fetchTicketState, multiHost = false } = {}) {
+function reconcileTerminalBackstop(
+  orchDir,
+  ticket,
+  signal,
+  writeStatus,
+  emitStateWrite,
+  { cache, prAdapter, fetchState = fetchTicketState, multiHost = false } = {}
+) {
   // GATE 1 — pipeline reached terminal (marker present).
   const marker = join(orchDir, "workers", ticket, ".terminal-done.applied");
   if (!existsSync(marker)) return;
@@ -1958,23 +2020,32 @@ function reconcileTerminalBackstop(orchDir, ticket, signal, writeStatus, emitSta
   if (state == null || isLinearTerminal(state)) return; // already terminal or unreadable → no-op
   // CTL-863: zombie guard — a post-takeover paused host must not re-Do a ticket.
   if (!fenceGuard({ ticket, orchDir, multiHost })) {
-    log.warn({ ticket }, "ctl-863: stale fence — suppressing reconcileTerminalBackstop write (zombie guard)");
+    log.warn(
+      { ticket },
+      "ctl-863: stale fence — suppressing reconcileTerminalBackstop write (zombie guard)"
+    );
     return;
   }
   // Drift detected: force the forward Done write (the CTL-758 guard permits it).
   try {
     const res = writeStatus.applyTerminalDone({ ticket, cache });
     if (typeof emitStateWrite === "function") {
-      emitStateWrite({ writerResult: res, ticket, phase: TERMINAL_PHASE, source: "reconcile-backstop", orchId: ticket });
+      emitStateWrite({
+        writerResult: res,
+        ticket,
+        phase: TERMINAL_PHASE,
+        source: "reconcile-backstop",
+        orchId: ticket,
+      });
     }
     log.warn(
       { ticket, driftedState: state },
-      "ctl-758: reconcile backstop re-Done'd a merged ticket whose Linear state drifted back to non-terminal",
+      "ctl-758: reconcile backstop re-Done'd a merged ticket whose Linear state drifted back to non-terminal"
     );
   } catch (err) {
     log.warn(
       { ticket, err: err.message },
-      "scheduler: reconcile-backstop Done write threw — continuing tick",
+      "scheduler: reconcile-backstop Done write threw — continuing tick"
     );
   }
 }
@@ -2273,7 +2344,11 @@ export function schedulerTick(
 
     // CTL-864: forward the cross-host fence token. dispatchTicket drops the key
     // when clusterGeneration == null (single-host / no persisted claim → no-op).
-    const r = dispatchTicket(orchDir, ticket, phase, { dispatch, resumeSession, clusterGeneration });
+    const r = dispatchTicket(orchDir, ticket, phase, {
+      dispatch,
+      resumeSession,
+      clusterGeneration,
+    });
     if (r.code === 0) {
       // CTL-611: verify the dispatch actually produced a live worker before
       // declaring success. A --dry-run leak / mark_launch_failed half-write
@@ -2303,7 +2378,8 @@ export function schedulerTick(
       const reason = `verify_failed:${v.reason}`;
       const cd = recordDispatchFailure(orchDir, ticket, phase, 0, now());
       if (fullFailureLadder) {
-        if (cd.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+        if (cd.consecutiveFailures >= getMaxDispatchRetries())
+          escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
         maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
         appendDispatchFailedEvent({
           orchId: ticket,
@@ -2314,8 +2390,14 @@ export function schedulerTick(
           expiresAt: cd.expiresAt,
           consecutiveFailures: cd.consecutiveFailures,
         });
-        maybeEscalateDispatchFailures(orchDir, cd, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
-        log.warn({ ticket, phase, verifyReason: v.reason }, "scheduler: dispatched signal verification failed");
+        maybeEscalateDispatchFailures(orchDir, cd, {
+          writeStatus,
+          appendEvent: appendCooldownEscalatedEvent,
+        });
+        log.warn(
+          { ticket, phase, verifyReason: v.reason },
+          "scheduler: dispatched signal verification failed"
+        );
       } else {
         appendDispatchFailedEvent({
           orchId: ticket,
@@ -2332,7 +2414,8 @@ export function schedulerTick(
     const reason = readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
     const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
     if (fullFailureLadder) {
-      if (cd.consecutiveFailures >= getMaxDispatchRetries()) escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
+      if (cd.consecutiveFailures >= getMaxDispatchRetries())
+        escalateDispatchExhausted(orchDir, ticket, phase); // CTL-712 terminal stop
       maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
       // CTL-611 Gap 2: surface the silent drop as an event.
       appendDispatchFailedEvent({
@@ -2344,9 +2427,15 @@ export function schedulerTick(
         expiresAt: cd.expiresAt,
         consecutiveFailures: cd.consecutiveFailures,
       });
-      maybeEscalateDispatchFailures(orchDir, cd, { writeStatus, appendEvent: appendCooldownEscalatedEvent });
+      maybeEscalateDispatchFailures(orchDir, cd, {
+        writeStatus,
+        appendEvent: appendCooldownEscalatedEvent,
+      });
       if (failLogMsg) {
-        log.warn(failLogIncludePhase ? { ticket, phase, code: r.code } : { ticket, code: r.code }, failLogMsg);
+        log.warn(
+          failLogIncludePhase ? { ticket, phase, code: r.code } : { ticket, code: r.code },
+          failLogMsg
+        );
       }
     } else {
       appendDispatchFailedEvent({
@@ -2685,7 +2774,7 @@ export function schedulerTick(
       // tick. Log and continue to the next worker.
       log.warn(
         { ticket: sig.ticket, phase: sig.phase, step: "reclaim", err: err.message },
-        "scheduler: per-worker step failed — skipping signal, continuing tick (CTL-702)",
+        "scheduler: per-worker step failed — skipping signal, continuing tick (CTL-702)"
       );
     }
   }
@@ -2803,7 +2892,10 @@ export function schedulerTick(
             if (fenceGuard({ ticket: member, orchDir, multiHost })) {
               labelOnce(orchDir, member, "needs-human", writeStatus);
             } else {
-              log.warn({ ticket: member }, "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)");
+              log.warn(
+                { ticket: member },
+                "ctl-863: stale fence — suppressing labelOnce(needs-human/cycle) write (zombie guard)"
+              );
             }
           }
         }
@@ -2818,19 +2910,15 @@ export function schedulerTick(
       const freeSlotsForPromotion = livenessIsFresh()
         ? Math.max(0, computeFreeSlots(maxParallel, liveCount))
         : 0;
-      const readyCandidates = rankTickets(
-        admissionPool.filter((t) => readyIds.has(t.identifier)),
-      );
+      const readyCandidates = rankTickets(admissionPool.filter((t) => readyIds.has(t.identifier)));
       const admittedSlice = selectDispatchablePerProject(
         readyCandidates,
         new Set(),
         freeSlotsForPromotion,
-        { perProject: concurrency?.perProject, inFlight: inFlightTickets },
+        { perProject: concurrency?.perProject, inFlight: inFlightTickets }
       );
       admittedThisTick = new Set(
-        admittedSlice
-          .filter((t) => triagedWaiting.includes(t.identifier))
-          .map((t) => t.identifier),
+        admittedSlice.filter((t) => triagedWaiting.includes(t.identifier)).map((t) => t.identifier)
       );
 
       // A.7 — held-indicator convergence (CTL-755 ADDENDUM). For each candidate,
@@ -2840,14 +2928,17 @@ export function schedulerTick(
         externalIds: Object.keys(admissionBlockerStates),
       });
       const poolById = new Map(
-        admissionPool.filter((t) => t?.identifier).map((t) => [t.identifier, t]),
+        admissionPool.filter((t) => t?.identifier).map((t) => [t.identifier, t])
       );
       for (const ticket of triagedWaiting) {
         if (cycleMembers.has(ticket)) {
           // Cycle member → owned by needs-human (labelOnce above). Clear any
           // stale held label so it doesn't double-signal, and drop its held
           // emit-state so a future non-cycle hold re-emits.
-          convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, { orchDir, now });
+          convergeHeldLabel(ticket, labelsByTicket.get(ticket), null, writeStatus, {
+            orchDir,
+            now,
+          });
           lastHeldEmitState.delete(ticket);
           continue;
         }
@@ -2873,7 +2964,10 @@ export function schedulerTick(
         }
         // else: admitted → desired null → clear-on-pickup (both labels removed).
 
-        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, { orchDir, now });
+        convergeHeldLabel(ticket, labelsByTicket.get(ticket), desired, writeStatus, {
+          orchDir,
+          now,
+        });
 
         if (desired) {
           // Only-on-state-change emission: skip if the same held class already
@@ -2883,7 +2977,7 @@ export function schedulerTick(
             safeEmit(
               appendPhaseAdvanceHeldEvent,
               { orchId: ticket, ticket, reason, blockers },
-              { ticket, phase: "advance" },
+              { ticket, phase: "advance" }
             );
           }
         } else {
@@ -2904,9 +2998,7 @@ export function schedulerTick(
       // the durable edge via the same applyBlockedByRelation seam CTL-537 uses.
       // This is what makes the admission gate (STEP A) durable: the next tick's
       // analyzeDependencyGraph reads the persisted edge from Linear.
-      const descriptorByTicket = new Map(
-        waitingDescriptors.map((d) => [d.identifier, d]),
-      );
+      const descriptorByTicket = new Map(waitingDescriptors.map((d) => [d.identifier, d]));
       // CTL-925 Gap 2: full-graph edge set for the transitive cycle guard below.
       // waitingDescriptors carry relations/inverseRelations (inSet = the pool),
       // so buildDependencyEdges yields the canonical {from,to} edges the detector
@@ -2977,7 +3069,7 @@ export function schedulerTick(
             // as a dependency and would deadlock the child against a never-worked epic.
             log.warn(
               { candidate, dep },
-              "ctl-878 step-e: skipping dependency that is the candidate's parent epic",
+              "ctl-878 step-e: skipping dependency that is the candidate's parent epic"
             );
             continue;
           }
@@ -2988,7 +3080,7 @@ export function schedulerTick(
             // persist it (the read-layer buildDependencyEdges drop is the backstop).
             log.warn(
               { candidate, dep, candidateTeam: teamOf(candidate), depTeam: teamOf(dep) },
-              "ctl-838 step-e: skipping cross-team dependency (daemon cannot work it)",
+              "ctl-838 step-e: skipping cross-team dependency (daemon cannot work it)"
             );
             continue;
           }
@@ -3000,7 +3092,7 @@ export function schedulerTick(
             // backstop for direct out-of-pool back-edges.
             log.warn(
               { candidate, dep },
-              "ctl-925 step-e: skipping dependency that would close a cycle (transitive)",
+              "ctl-925 step-e: skipping dependency that would close a cycle (transitive)"
             );
             continue;
           }
@@ -3017,10 +3109,13 @@ export function schedulerTick(
           if (fenceGuard({ ticket: candidate, orchDir, multiHost })) {
             safeWrite(
               () => writeStatus.applyBlockedByRelation({ ticket: candidate, blockedBy: dep }),
-              { ticket: candidate, phase: "triage-deps" },
+              { ticket: candidate, phase: "triage-deps" }
             );
           } else {
-            log.warn({ ticket: candidate }, "ctl-863: stale fence — suppressing applyBlockedByRelation(triage-deps) write (zombie guard)");
+            log.warn(
+              { ticket: candidate },
+              "ctl-863: stale fence — suppressing applyBlockedByRelation(triage-deps) write (zombie guard)"
+            );
           }
           // CTL-784: we just wrote a NEW durable blocked_by edge for this
           // candidate. Its cached relations descriptor (read this tick by A.3)
@@ -3078,7 +3173,12 @@ export function schedulerTick(
 
         // Guard: implement quiet-window (mtime of the phase signal file)
         if (activePhase === "implement") {
-          const signalPath = join(orchDir, "workers", candidate.identifier, `phase-${activePhase}.json`);
+          const signalPath = join(
+            orchDir,
+            "workers",
+            candidate.identifier,
+            `phase-${activePhase}.json`
+          );
           try {
             const st = statSync(signalPath);
             if (nowMs - st.mtimeMs < PREEMPT_IMPLEMENT_QUIET_MS) continue;
@@ -3100,7 +3200,12 @@ export function schedulerTick(
         killBgJob({ bgJobId });
 
         // Atomically park the signal: status → "preempted", add parkedFrom + attentionReason.
-        const signalPath = join(orchDir, "workers", candidate.identifier, `phase-${activePhase}.json`);
+        const signalPath = join(
+          orchDir,
+          "workers",
+          candidate.identifier,
+          `phase-${activePhase}.json`
+        );
         try {
           const updated = {
             ...signalRaw,
@@ -3163,9 +3268,9 @@ export function schedulerTick(
       if (!inFlightTickets.has(sig.ticket)) continue;
       if (sig.status !== "needs-input") continue;
       const bgJobId = sig.raw?.bg_job_id ?? null;
-      if (!bgJobId) continue;                                   // no process to stop
+      if (!bgJobId) continue; // no process to stop
       if (inHoldStopCooldown(orchDir, sig.ticket, sig.phase, nowMs)) continue;
-      if (livenessForHeld(bgJobId) !== "idle") continue;        // mid-turn / absent guard
+      if (livenessForHeld(bgJobId) !== "idle") continue; // mid-turn / absent guard
 
       // CTL-768 (verify remediation): persist the durable stoppedForHold marker
       // BEFORE the irreversible kill so the sweep is crash-safe. If the marker
@@ -3179,28 +3284,34 @@ export function schedulerTick(
       const signalPath = join(orchDir, "workers", sig.ticket, `phase-${sig.phase}.json`);
       try {
         const updated = {
-          ...sig.raw,                                           // preserves bg_job_id
+          ...sig.raw, // preserves bg_job_id
           stoppedForHold: true,
           holdStoppedAt: new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, "Z"),
         };
         const tmp = `${signalPath}.tmp.${process.pid}`;
         writeFileSync(tmp, JSON.stringify(updated));
-        renameSync(tmp, signalPath);                            // atomic
+        renameSync(tmp, signalPath); // atomic
       } catch (err) {
-        log.warn({ ticket: sig.ticket, phase: sig.phase, err: err.message },
-          "scheduler: held-stop signal write failed — skipping (CTL-768)");
+        log.warn(
+          { ticket: sig.ticket, phase: sig.phase, err: err.message },
+          "scheduler: held-stop signal write failed — skipping (CTL-768)"
+        );
         continue;
       }
       recordHoldStop(orchDir, sig.ticket, sig.phase, nowMs);
 
       killBgJob({ bgJobId });
 
-      safeEmit(appendHeldStoppedEvent,
+      safeEmit(
+        appendHeldStoppedEvent,
         { orchId: sig.ticket, ticket: sig.ticket, phase: sig.phase, bgJobId },
-        { ticket: sig.ticket, phase: sig.phase });
+        { ticket: sig.ticket, phase: sig.phase }
+      );
       heldStopCount++;
-      log.info({ ticket: sig.ticket, phase: sig.phase, bgJobId },
-        "scheduler: held needs-input worker stopped to free slot (CTL-768)");
+      log.info(
+        { ticket: sig.ticket, phase: sig.phase, bgJobId },
+        "scheduler: held needs-input worker stopped to free slot (CTL-768)"
+      );
     }
   }
 
@@ -3247,7 +3358,8 @@ export function schedulerTick(
     // ticket stays at Linear "Triage" (no cooldown, auto-retries next tick). Keyed
     // on `next === NEW_WORK_ENTRY_PHASE` which deriveAdvancement returns UNIQUELY
     // for the triage→research edge; non-research edges skip the guard.
-    if (next === NEW_WORK_ENTRY_PHASE && signals.triage === "done" && !admittedThisTick.has(ticket)) continue;
+    if (next === NEW_WORK_ENTRY_PHASE && signals.triage === "done" && !admittedThisTick.has(ticket))
+      continue;
     if (inDispatchCooldown(orchDir, ticket, next, now())) continue; // CTL-624: throttle refused re-dispatch
     // CTL-671: circuit breaker — once consecutiveFailures has crossed the
     // threshold, quarantine to terminal `stalled` and stop re-dispatching.
@@ -3287,7 +3399,13 @@ export function schedulerTick(
           // before/after pair. The write itself stays best-effort inside
           // safeWrite; the emit is a separate best-effort step.
           const wr = writeStatus.applyPhaseStatus({ ticket, phase: next, cache });
-          emitStateWrite({ writerResult: wr, ticket, phase: next, source: "scheduler-advance", orchId: ticket });
+          emitStateWrite({
+            writerResult: wr,
+            ticket,
+            phase: next,
+            source: "scheduler-advance",
+            orchId: ticket,
+          });
         },
         { ticket, phase: next }
       );
@@ -3302,7 +3420,10 @@ export function schedulerTick(
               phase: next,
             });
           } else {
-            log.warn({ ticket }, "ctl-863: stale fence — suppressing applyEstimate write (zombie guard)");
+            log.warn(
+              { ticket },
+              "ctl-863: stale fence — suppressing applyEstimate write (zombie guard)"
+            );
           }
         }
       }
@@ -3374,15 +3495,21 @@ export function schedulerTick(
             const signalPath = join(orchDir, "workers", pd.identifier, `phase-${parkedPhase}.json`);
             try {
               const tmp = `${signalPath}.tmp.${process.pid}`;
-              writeFileSync(tmp, JSON.stringify({
-                ...(signalRaw ?? {}),
-                status: "stalled",
-                attentionReason: "resume-after-preemption",
-                updatedAt: new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z"),
-              }));
+              writeFileSync(
+                tmp,
+                JSON.stringify({
+                  ...(signalRaw ?? {}),
+                  status: "stalled",
+                  attentionReason: "resume-after-preemption",
+                  updatedAt: new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z"),
+                })
+              );
               renameSync(tmp, signalPath);
             } catch (err) {
-              log.warn({ ticket: pd.identifier, phase: parkedPhase, err: err.message }, "scheduler: resume signal reset failed");
+              log.warn(
+                { ticket: pd.identifier, phase: parkedPhase, err: err.message },
+                "scheduler: resume signal reset failed"
+              );
               return false;
             }
             return true;
@@ -3393,20 +3520,38 @@ export function schedulerTick(
           rankedAboveSince.delete(`${pd.identifier}:${pd.identifier}`); // clear any stale hysteresis
           safeEmit(
             appendResumedAfterPreemptionEvent,
-            { orchId: pd.identifier, ticket: pd.identifier, phase: parkedPhase, resumeSession: resumeSession ?? null },
+            {
+              orchId: pd.identifier,
+              ticket: pd.identifier,
+              phase: parkedPhase,
+              resumeSession: resumeSession ?? null,
+            },
             { ticket: pd.identifier, phase: parkedPhase }
           );
           if (fenceGuard({ ticket: pd.identifier, orchDir, multiHost })) {
             safeWrite(
               () => {
                 // CTL-757: audit the resume-after-preemption status write.
-                const wr = writeStatus.applyPhaseStatus({ ticket: pd.identifier, phase: parkedPhase, cache });
-                emitStateWrite({ writerResult: wr, ticket: pd.identifier, phase: parkedPhase, source: "preemption-resume", orchId: pd.identifier });
+                const wr = writeStatus.applyPhaseStatus({
+                  ticket: pd.identifier,
+                  phase: parkedPhase,
+                  cache,
+                });
+                emitStateWrite({
+                  writerResult: wr,
+                  ticket: pd.identifier,
+                  phase: parkedPhase,
+                  source: "preemption-resume",
+                  orchId: pd.identifier,
+                });
               },
               { ticket: pd.identifier, phase: parkedPhase }
             );
           } else {
-            log.warn({ ticket: pd.identifier }, "ctl-863: stale fence — suppressing preemption-resume applyPhaseStatus write (zombie guard)");
+            log.warn(
+              { ticket: pd.identifier },
+              "ctl-863: stale fence — suppressing preemption-resume applyPhaseStatus write (zombie guard)"
+            );
           }
           resumeSlots--;
           resumedCount++;
@@ -3445,7 +3590,7 @@ export function schedulerTick(
         if (eligibleIds.has(member)) {
           log.warn(
             { member, members: anomaly.members },
-            "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human",
+            "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human"
           );
           labelOnce(orchDir, member, "needs-human", writeStatus);
         }
@@ -3459,7 +3604,7 @@ export function schedulerTick(
   // sibling host's worker dirs). Identity filter for a single-host roster
   // (ownedBy is always true), so this is an exact no-op until a 2nd host joins.
   const ready = computeReadyTickets(eligible, { blockerStates }).filter((t) =>
-    ownedBy(t.identifier, roster, self),
+    ownedBy(t.identifier, roster, self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal
@@ -3493,13 +3638,12 @@ export function schedulerTick(
   // genuinely-free capacity at maxParallel>=2 (a transient single-tick throughput
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots = livenessFresh
-    ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount)
-        - resumedCount - promotedCount)
+    ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
     : 0;
   if (!livenessFresh) {
     log.warn(
       { maxParallel, inFlightCount, resumedCount, promotedCount, heldStopCount },
-      "scheduler: liveness snapshot stale/cold — holding new-work dispatch (CTL-731)",
+      "scheduler: liveness snapshot stale/cold — holding new-work dispatch (CTL-731)"
     );
   }
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
@@ -3514,7 +3658,7 @@ export function schedulerTick(
   if (concurrency?.perProject && Object.keys(concurrency.perProject).length > 0) {
     log.info(
       buildPerProjectGauge(inFlightTickets, concurrency.perProject, freeSlots),
-      "scheduler: per-project slots",
+      "scheduler: per-project slots"
     );
   }
 
@@ -3569,17 +3713,24 @@ export function schedulerTick(
           if (wouldCreateCycle(seqRaw, dep.blocked_by, dep.candidate)) {
             log.warn(
               { candidate: dep.candidate, blockedBy: dep.blocked_by },
-              "ctl-925 sequencing: skipping hard_dependency that would close a cycle",
+              "ctl-925 sequencing: skipping hard_dependency that would close a cycle"
             );
             continue;
           }
           if (fenceGuard({ ticket: dep.candidate, orchDir, multiHost })) {
             safeWrite(
-              () => writeStatus.applyBlockedByRelation({ ticket: dep.candidate, blockedBy: dep.blocked_by }),
+              () =>
+                writeStatus.applyBlockedByRelation({
+                  ticket: dep.candidate,
+                  blockedBy: dep.blocked_by,
+                }),
               { ticket: dep.candidate, phase: "sequencing" }
             );
           } else {
-            log.warn({ ticket: dep.candidate }, "ctl-863: stale fence — suppressing applyBlockedByRelation(sequencing) write (zombie guard)");
+            log.warn(
+              { ticket: dep.candidate },
+              "ctl-863: stale fence — suppressing applyBlockedByRelation(sequencing) write (zombie guard)"
+            );
           }
         }
         continue; // hold — D5 enforces the new edge next tick
@@ -3598,7 +3749,10 @@ export function schedulerTick(
     if (botUserIds instanceof Set && botUserIds.size > 0) {
       const a = fetchAssignee(t.identifier, { gateway, exec });
       if (!a.known) {
-        log.debug({ ticket: t.identifier }, "ctl-781: assignee unreadable — holding candidate this tick");
+        log.debug(
+          { ticket: t.identifier },
+          "ctl-781: assignee unreadable — holding candidate this tick"
+        );
         continue;
       }
       if (!isAssigneeClaimable(a.assignee, botUserIds)) {
@@ -3670,7 +3824,13 @@ export function schedulerTick(
             phase: NEW_WORK_ENTRY_PHASE,
             cache,
           });
-          emitStateWrite({ writerResult: wr, ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE, source: "scheduler-advance", orchId: t.identifier });
+          emitStateWrite({
+            writerResult: wr,
+            ticket: t.identifier,
+            phase: NEW_WORK_ENTRY_PHASE,
+            source: "scheduler-advance",
+            orchId: t.identifier,
+          });
         },
         { ticket: t.identifier, phase: NEW_WORK_ENTRY_PHASE }
       );
@@ -3678,10 +3838,10 @@ export function schedulerTick(
       // Linear. Best-effort (safeWrite) — an assignment failure never blocks
       // the pipeline; the read-back inside applyAssignee logs the gap.
       if (botWriteId) {
-        safeWrite(
-          () => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }),
-          { ticket: t.identifier, phase: "assignment" }
-        );
+        safeWrite(() => writeStatus.applyAssignee?.({ ticket: t.identifier, userId: botWriteId }), {
+          ticket: t.identifier,
+          phase: "assignment",
+        });
       }
     }
   }
@@ -3722,17 +3882,27 @@ export function schedulerTick(
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
     // marker + merged PR + non-terminal live state, so it is a no-op in the common
     // case and inert without a prAdapter.
-    reconcileTerminalBackstop(orchDir, ticket, signalByTicket.get(ticket), writeStatus, emitStateWrite, {
-      cache,
-      prAdapter,
-      fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
-      multiHost,
-    });
+    reconcileTerminalBackstop(
+      orchDir,
+      ticket,
+      signalByTicket.get(ticket),
+      writeStatus,
+      emitStateWrite,
+      {
+        cache,
+        prAdapter,
+        fetchState: (id, o = {}) => fetchTicketState(id, { ...o, gateway }),
+        multiHost,
+      }
+    );
     if (Object.values(signals).some((s) => s === "stalled")) {
       if (fenceGuard({ ticket, orchDir, multiHost })) {
         labelOnce(orchDir, ticket, "needs-human", writeStatus);
       } else {
-        log.warn({ ticket }, "ctl-863: stale fence — suppressing labelOnce(needs-human/stalled) write (zombie guard)");
+        log.warn(
+          { ticket },
+          "ctl-863: stale fence — suppressing labelOnce(needs-human/stalled) write (zombie guard)"
+        );
       }
       // CTL-868 route (B): also emit a canonical orphan-detected event (once) so a
       // stalled-no-recovery ticket is visible on the dashboard, not just label-flagged.
@@ -3838,8 +4008,7 @@ export const CIRCUIT_BREAKER_THRESHOLD =
 // CTL-9's storm was ~24,560 events over 3 days; 50-in-10min is a conservative
 // floor far above any healthy ticket's per-window rate.
 export const RUNAWAY_THRESHOLD = Number(process.env.SCHEDULER_RUNAWAY_THRESHOLD) || 50;
-export const RUNAWAY_WINDOW_MS =
-  Number(process.env.SCHEDULER_RUNAWAY_WINDOW_MS) || 10 * 60 * 1000;
+export const RUNAWAY_WINDOW_MS = Number(process.env.SCHEDULER_RUNAWAY_WINDOW_MS) || 10 * 60 * 1000;
 
 // --- daemon module state ---
 let tickTimer = null;
@@ -3887,7 +4056,7 @@ function runTick() {
       if (Number.isInteger(l1Max) && Number.isInteger(l2Max) && l2Max < l1Max) {
         log.warn(
           { layer1Max: l1Max, layer2Max: l2Max, effective: concurrency.maxParallel },
-          "scheduler: Layer-2 maxParallel overrides Layer-1 — autotune throttled below committed config (CTL-750)",
+          "scheduler: Layer-2 maxParallel overrides Layer-1 — autotune throttled below committed config (CTL-750)"
         );
       }
     } else {
@@ -3897,9 +4066,8 @@ function runTick() {
     // (write-only shadow; own try/catch inside — never throws, never gates).
     // CTL-936: thread the event-log append seam so reconcileIntents can emit
     // intent.ineffective operator events when CATALYST_INTENTS_ENFORCE=1.
-    const intentEventAppender = typeof runningOpts.appendIntentEvent === "function"
-      ? runningOpts.appendIntentEvent
-      : null;
+    const intentEventAppender =
+      typeof runningOpts.appendIntentEvent === "function" ? runningOpts.appendIntentEvent : null;
     const beliefsRes = collectBeliefsTick({
       orchDir: runningOpts.orchDir,
       linearCache: runningOpts.cache,
@@ -3922,7 +4090,10 @@ function runTick() {
         }
       } catch (diagErr) {
         try {
-          log.warn({ err: diagErr?.message }, "diagnostician: wake processing threw (tick unaffected)");
+          log.warn(
+            { err: diagErr?.message },
+            "diagnostician: wake processing threw (tick unaffected)"
+          );
         } catch {
           /* even logging must not break the tick */
         }
@@ -4008,7 +4179,9 @@ function runTick() {
       // local state.json, so the old snapshot-derived reclaim binding is gone.)
       livenessIsFresh:
         runningOpts.livenessIsFresh ??
-        (runningOpts.liveBackgroundCount !== undefined ? () => true : () => getAgentsCached().isFresh),
+        (runningOpts.liveBackgroundCount !== undefined
+          ? () => true
+          : () => getAgentsCached().isFresh),
       // CTL-537: production defaults to defaultCheckSequencing; tests inject via
       // startScheduler({ checkSequencing }) or directly into schedulerTick.
       checkSequencing: runningOpts.checkSequencing ?? defaultCheckSequencing,
