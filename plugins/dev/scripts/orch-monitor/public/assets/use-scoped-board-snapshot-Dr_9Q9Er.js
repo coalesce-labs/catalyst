@@ -1,0 +1,1 @@
+import{aM as t,aN as p,r,aO as c}from"./main-BWsxmdUW.js";function d(){const{payload:o,status:e}=t(),a=(o==null?void 0:o.repos)??[],{scope:s}=p(a);return{payload:r.useMemo(()=>o?c(o,s):null,[o,s]),status:e}}export{d as u};
