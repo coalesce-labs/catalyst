@@ -17,6 +17,7 @@ import {
   isTypingTarget,
   type Surface,
 } from "../ui/src/lib/surface";
+import { detailCrumbFor } from "../ui/src/lib/nav-model";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -184,6 +185,57 @@ describe("one edge-to-edge shell hosts every surface (CTL-891)", () => {
 
   it("App.tsx renders the active surface INSIDE the shell (edge-to-edge inset)", () => {
     expect(appSrc).toContain("AppShell");
+  });
+});
+
+// ── CTL-1003 §A1: one header — no search box, no collapse icon ───────────────
+describe("one header: no search box, no SidebarTrigger collapse icon (CTL-1003)", () => {
+  it("the header no longer renders the ⌘K search BUTTON (keyboard paths remain)", () => {
+    // The visible top-strip search trigger button is removed; the data-cmdk-trigger
+    // attribute (its only marker) must be gone from the shell source.
+    expect(shellSrc).not.toContain("data-cmdk-trigger");
+    expect(shellSrc).not.toContain("Search…");
+    // ⌘K / `/` keyboard open paths stay (the CommandDialog + shouldOpenPalette wiring).
+    expect(shellSrc).toContain("shouldOpenPalette");
+    expect(shellSrc).toContain("CommandDialog");
+  });
+
+  it("the SidebarTrigger collapse icon + its Separator are removed from the header", () => {
+    // `[` / Cmd-B still toggle via shouldToggleSidebar — only the visible icon goes.
+    expect(shellSrc).not.toContain("SidebarTrigger");
+    expect(shellSrc).not.toMatch(/from "@\/components\/ui\/separator"/);
+    expect(shellSrc).toContain("shouldToggleSidebar");
+  });
+
+  it("the header renders the single right-aligned HeaderActionsSlot", () => {
+    expect(shellSrc).toContain("HeaderActionsSlot");
+    expect(shellSrc).toContain("@/components/header-actions");
+  });
+});
+
+// ── CTL-1003 §A1: detailCrumbFor — the final ticket/worker breadcrumb crumb ───
+describe("detailCrumbFor — pure final-crumb resolver (CTL-1003)", () => {
+  it("returns the decoded id for a ticket/worker detail path", () => {
+    expect(detailCrumbFor("/ticket/CTL-729")).toBe("CTL-729");
+    expect(detailCrumbFor("/worker/CTL-845:2")).toBe("CTL-845:2");
+    // percent-encoded ids decode (a worker id with a colon arrives URL-encoded).
+    expect(detailCrumbFor("/worker/CTL-845%3A2")).toBe("CTL-845:2");
+  });
+
+  it("returns null for non-detail surfaces", () => {
+    expect(detailCrumbFor("/board")).toBeNull();
+    expect(detailCrumbFor("/workers")).toBeNull();
+    expect(detailCrumbFor("/")).toBeNull();
+    expect(detailCrumbFor("/settings")).toBeNull();
+  });
+
+  it("returns null for a malformed / over-segmented detail path and never throws", () => {
+    expect(detailCrumbFor("/ticket/")).toBeNull();
+    expect(detailCrumbFor("/ticket/CTL-1/extra")).toBeNull();
+    expect(detailCrumbFor("/ticketCTL-1")).toBeNull();
+    // a broken percent-encoding falls back to the raw id, not a throw.
+    expect(() => detailCrumbFor("/ticket/%E0%A4%A")).not.toThrow();
+    expect(detailCrumbFor("/ticket/%E0%A4%A")).toBe("%E0%A4%A");
   });
 });
 

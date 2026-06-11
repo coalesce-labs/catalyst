@@ -170,6 +170,10 @@ export function TicketDetailRoute({ id, search }: { id: string; search: DetailSe
         // CTL-996: the visible chrome title is null — the Shell renders only the
         // live dot + mono id, and the body <h1> owns the SINGLE visible title.
         title={null}
+        // CTL-1003 §A1: bare chrome — no second header bar, no floating mono key/
+        // dot; the app shell's single header owns the breadcrumb + the prev/next
+        // chevrons portal into its action slot.
+        chrome="bare"
         properties={ticketRows(ticket)}
         // CTL-996: the ticket rail-extra (Labels · Relations · Dependencies) —
         // the worker-page rail idiom, now on tickets too (worker rail untouched).

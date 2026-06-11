@@ -438,6 +438,19 @@ body {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * .no-scrollbar — hide the scrollbar while KEEPING scroll (CTL-1003 §A2). The
+ * reading column + the floating rail use this so the Linear-calm surface has no
+ * visible scrollbar chrome (scrolling still works via wheel/trackpad/keys).
+ * ────────────────────────────────────────────────────────────────────────── */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
  * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
  * client pass). Composes ON TOP of .md-content (reuses its table rules; the
  * description div carries BOTH classes) and overrides the rest to match Linear:

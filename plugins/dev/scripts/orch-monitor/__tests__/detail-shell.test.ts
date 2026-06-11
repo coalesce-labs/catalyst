@@ -166,6 +166,41 @@ describe("Shell.tsx — Properties rail dims unplumbed rows, never fabricates", 
   });
 });
 
+// ── CTL-1003 §A1: chrome="bare" suppresses the second header + LiveDotTitle ──
+describe("Shell.tsx — chrome='bare' drops the in-page header + live-dot title (CTL-1003)", () => {
+  it("gates the in-page <header data-shell-header> on chrome === 'full'", () => {
+    // The second header bar renders ONLY in full chrome; bare mode portals the
+    // chevrons into the app header instead.
+    expect(shellSrc).toMatch(/chrome === "full" \? \(/);
+    expect(shellSrc).toContain("data-shell-header");
+    expect(shellSrc).toContain("HeaderActions");
+    expect(shellSrc).toContain("PagerChevrons");
+  });
+
+  it("renders LiveDotTitle only in full chrome (bare drops the floating mono key + dot)", () => {
+    expect(shellSrc).toMatch(/chrome === "full" && <LiveDotTitle/);
+  });
+
+  it("the ticket route opts into bare chrome; the worker route stays full (default)", () => {
+    // The ticket route passes chrome="bare"; the worker route never sets chrome
+    // (defaults to "full"), so the worker page keeps its in-page header + LiveDotTitle.
+    const ticketBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function TicketDetailRoute"),
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    const workerBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    expect(ticketBlock).toMatch(/chrome="bare"/);
+    expect(workerBlock).not.toMatch(/chrome=/);
+  });
+
+  it("the PagerChevrons tooltips advertise the K (prev) / J (next) hotkeys (D1)", () => {
+    expect(shellSrc).toContain("Previous ticket — K");
+    expect(shellSrc).toContain("Next ticket — J");
+  });
+});
+
 // ── footer stream-health never claims "live" without a real frame ───────────
 describe("Shell.tsx — footer stream-health is honest", () => {
   it("only claims 'live' when a frame actually arrived (never fabricated)", () => {

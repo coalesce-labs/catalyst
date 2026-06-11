@@ -4,7 +4,6 @@ import {
   InboxIcon,
   LayoutGridIcon,
   ListOrderedIcon,
-  SearchIcon,
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
@@ -23,7 +22,12 @@ import {
   surfaceToPath,
   SETTINGS_PATH,
 } from "@/lib/route-surface";
-import { breadcrumbFor, buildNavGroups, paletteEntries } from "@/lib/nav-model";
+import {
+  breadcrumbFor,
+  buildNavGroups,
+  detailCrumbFor,
+  paletteEntries,
+} from "@/lib/nav-model";
 // CTL-898 / SHELL8 — the shell owns the NODE-SCOPE store (All-nodes by default).
 // Single-host is an identity no-op: the filter affordance is absent (the sidebar
 // gates it on the live cluster signal) so the scope stays All-nodes and nothing
@@ -57,14 +61,13 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
-import { Separator } from "@/components/ui/separator";
 import {
   SidebarInset,
   SidebarProvider,
-  SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/app-sidebar";
 import { AppFooter } from "@/components/app-footer";
+import { HeaderActionsSlot } from "@/components/header-actions";
 
 // CTL-891 / SHELL1 — the full-viewport (h-screen, NO outer max-w / mx-auto)
 // frame, ported from the prototype `mockups/home-proto/src/components/AppShell`.
@@ -211,9 +214,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // SINGLE search affordance for the shell (SHELL5 de-dups the prototype's two
   // search bars). The open contract lives in lib/command-palette.ts. ⌘K toggles; `/`
   // opens (a quick-open shouldn't re-close on a second slash).
-  // CTL-930: the click addEventListener for data-cmdk-trigger is REMOVED — the
-  // top-strip search button handles its own onClick via data-cmdk-trigger + the
-  // keydown listener. The WorkspaceSwitcher click path is gone with the switcher.
+  // CTL-1003 §A1: the visible top-strip search BUTTON is removed (the keyboard
+  // paths below are the sole palette affordance now); the old click-trigger
+  // listener was already retired in CTL-930.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (
@@ -271,7 +274,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
 
   // CTL-930/CTL-944: breadcrumbs are now scope-aware via breadcrumbFor.
-  const crumbs = settingsOpen ? SETTINGS_BREADCRUMB : breadcrumbFor(surface, repoScope);
+  // CTL-1003 §A1: on a detail route, append the decoded ticket/worker id as the
+  // final crumb (e.g. "Overall › Tickets › CTL-729"). The surface crumb then
+  // becomes a clickable back-to-list button (handled in the render below).
+  const detailId = settingsOpen ? null : detailCrumbFor(pathname);
+  const baseCrumbs = settingsOpen
+    ? SETTINGS_BREADCRUMB
+    : breadcrumbFor(surface, repoScope);
+  const crumbs = detailId != null ? [...baseCrumbs, detailId] : baseCrumbs;
 
   return (
     <NavSignalContext.Provider value={navSignal}>
@@ -287,14 +297,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       >
         <AppSidebar />
         <SidebarInset className="min-h-0 overflow-hidden">
-          {/* ── Thin top strip: hamburger + breadcrumb + ⌘K search ─────────── */}
+          {/* ── Thin top strip: the SINGLE header — breadcrumb + page actions ──
+              CTL-1003 §A1: the sidebar collapse icon and the search button are
+              gone (`[` / Cmd-B still toggle, ⌘K / `/` still open the palette —
+              only the visible buttons are removed). The breadcrumb is the sole
+              left affordance; a detail page portals its prev/next chevrons into
+              the right-aligned HeaderActionsSlot. */}
           <header className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
-            <SidebarTrigger className="text-muted-foreground" />
-            <Separator orientation="vertical" className="mr-1 h-4!" />
             <Breadcrumb>
               <BreadcrumbList>
                 {crumbs.map((crumb, i) => {
                   const isLast = i === crumbs.length - 1;
+                  // When a detail crumb is present, the SURFACE crumb (the one
+                  // just before it) is a clickable back-to-list button; all other
+                  // intermediate crumbs stay muted spans.
+                  const isSurfaceCrumb =
+                    detailId != null && i === crumbs.length - 2;
                   return (
                     // Separators are SIBLINGS of items (both <li>) — never nest a
                     // separator inside an item, or it's <li> within <li>.
@@ -302,6 +320,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                       <BreadcrumbItem>
                         {isLast ? (
                           <BreadcrumbPage>{crumb}</BreadcrumbPage>
+                        ) : isSurfaceCrumb ? (
+                          <button
+                            type="button"
+                            className="text-muted-foreground transition-colors hover:text-foreground"
+                            onClick={() =>
+                              void navigate({
+                                to: surfaceToPath(surface),
+                                search: (prev) => ({
+                                  scope: (prev as { scope?: string }).scope,
+                                }),
+                              })
+                            }
+                          >
+                            {crumb}
+                          </button>
                         ) : (
                           <span className="text-muted-foreground">{crumb}</span>
                         )}
@@ -313,25 +346,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </BreadcrumbList>
             </Breadcrumb>
 
-            {/* CTL-930: WorkspaceSwitcher removed from top strip. Scope is communicated
-                via the project-grouped left nav. The ⌘K search button is the only right-side
-                affordance. It handles its own click to open the palette. */}
-            <div className="ml-auto flex items-center">
-              {/* ⌘K search trigger. */}
-              <button
-                type="button"
-                data-cmdk-trigger
-                onClick={() => setPaletteOpen(true)}
-                className="flex h-7 items-center gap-2 rounded-md border border-border bg-secondary/30 px-2 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                aria-label="Search or jump to…"
-              >
-                <SearchIcon className="size-3.5" />
-                <span className="hidden sm:inline">Search…</span>
-                <kbd className="rounded border border-border bg-background/60 px-1 py-0.5 text-[10px]">
-                  ⌘K
-                </kbd>
-              </button>
-            </div>
+            {/* CTL-1003: the right-aligned page-action slot — a detail page
+                portals its prev/next chevrons here via <HeaderActions>. */}
+            <HeaderActionsSlot />
           </header>
 
           {/* CTL-989: the matched ROUTE renders into the layout's content slot

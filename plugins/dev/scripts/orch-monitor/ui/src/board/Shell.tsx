@@ -40,6 +40,9 @@ import {
 } from "./nav-store";
 import type { DetailSearch } from "./route-search";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
+import { ChevronUp, ChevronDown } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { HeaderActions } from "@/components/header-actions";
 
 // ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
 const C = {
@@ -103,8 +106,9 @@ export interface ShellProps {
    *  span — so the page body's <h1> owns the single visible title (ticket page);
    *  the worker page still passes its name string. */
   title: string | null;
-  /** The shared Properties-rail rows (page may append more below the divider). */
-  properties: PropertyRow[];
+  /** The shared Properties-rail rows (page may append more below the divider).
+   *  Optional in `chrome="bare"` mode where the page supplies its own `rail`. */
+  properties?: PropertyRow[];
   /** Footer stream-health (defaults to `unknown` → dim, no fabricated "live"). */
   streamHealth?: StreamHealth;
   /** Page-specific extra Property rows, rendered below the shared rail divider. */
@@ -114,6 +118,16 @@ export interface ShellProps {
   /** Open the ⌘K palette (saves/restores focus in the caller). Optional so the
    *  shell degrades to a no-op until the palette ticket (DETAIL/T8) wires it. */
   onPalette?: () => void;
+  /** CTL-1003 §A1: chrome density. `"full"` (default) keeps the in-page detail
+   *  header (breadcrumb + pager) AND the LiveDotTitle (worker page). `"bare"`
+   *  drops BOTH — no second header bar, no floating mono-key/dot above the title
+   *  — and instead portals the prev/next chevrons into the app header's action
+   *  slot (the ticket reading page; the app shell's single header owns the
+   *  breadcrumb). `properties` is optional in bare mode (the page passes `rail`). */
+  chrome?: "full" | "bare";
+  /** CTL-1003 §B1: when set, REPLACES the shared PropertiesRail in the body row —
+   *  the ticket page passes its floating rail-card column here. */
+  rail?: ReactNode;
 }
 
 // ── pager chevron ────────────────────────────────────────────────────────────
@@ -174,6 +188,59 @@ function Pager({
       <span style={{ font: `11px ${C.mono}`, color: C.fgMuted, padding: "0 4px" }}>{pager.text}</span>
       <Chevron dir="up" disabled={pager.atStart || pager.prevId === null} onClick={onPrev} />
       <Chevron dir="down" disabled={pager.atEnd || pager.nextId === null} onClick={onNext} />
+    </div>
+  );
+}
+
+// ── PagerChevrons (CTL-1003 §A1) ─────────────────────────────────────────────
+// The bare-chrome prev/next controls, portaled into the app header's action slot.
+// Two ghost lucide icon buttons under shadcn Tooltips whose copy advertises the
+// j/k hotkeys (D1: k = previous, j = next — Linear's idiom + the shipped
+// use-keyboard-nav binding). Disabled per the same end-of-list logic as Pager.
+function PagerChevrons({
+  pager,
+  onPrev,
+  onNext,
+}: {
+  pager: PagerState;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  const prevDisabled = pager.atStart || pager.prevId === null;
+  const nextDisabled = pager.atEnd || pager.nextId === null;
+  const suffix = pager.inList ? ` · ${pager.text}` : "";
+  const btn =
+    "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground";
+  return (
+    <div data-shell-pager-chevrons className="flex items-center gap-1">
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Previous ticket"
+            disabled={prevDisabled}
+            onClick={onPrev}
+            className={btn}
+          >
+            <ChevronUp className="size-4" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Previous ticket — K{suffix}</TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            aria-label="Next ticket"
+            disabled={nextDisabled}
+            onClick={onNext}
+            className={btn}
+          >
+            <ChevronDown className="size-4" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>Next ticket — J{suffix}</TooltipContent>
+      </Tooltip>
     </div>
   );
 }
@@ -350,11 +417,13 @@ export function Shell({
   listIds,
   live,
   title,
-  properties,
+  properties = [],
   streamHealth = { state: "unknown" },
   railExtra,
   children,
   onPalette,
+  chrome = "full",
+  rail,
 }: ShellProps) {
   const navigate = useNavigate();
   const router = useRouter();
@@ -505,35 +574,55 @@ export function Shell({
     >
       <style>{SHELL_PULSE_CSS}</style>
 
-      {/* ShellHeader — breadcrumb (left) + pager (right) */}
-      <header
-        data-shell-header
-        style={{
-          height: 44,
-          flex: "0 0 auto",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 16,
-          padding: "0 14px",
-          background: C.s1,
-          borderBottom: `1px solid ${C.border}`,
-        }}
-      >
-        <Breadcrumb ctx={breadcrumbCtx} onRoot={goRoot} />
-        {/* Pager hidden on a fully-degraded deep-link (no list, no cursor) — the
-            "— / —" state still renders so the operator sees why it's inert; only a
-            cold bare link with no context at all suppresses it. */}
-        {(pager.inList || pager.ghosted) && <Pager pager={pager} onPrev={goPrev} onNext={goNext} />}
-      </header>
+      {/* ShellHeader — breadcrumb (left) + pager (right). CTL-1003 §A1: in
+          `chrome="bare"` mode (the ticket reading page) this second header bar is
+          NOT rendered — the app shell's single header owns the breadcrumb, and the
+          prev/next chevrons are portaled into its action slot below. */}
+      {chrome === "full" ? (
+        <header
+          data-shell-header
+          style={{
+            height: 44,
+            flex: "0 0 auto",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+            padding: "0 14px",
+            background: C.s1,
+            borderBottom: `1px solid ${C.border}`,
+          }}
+        >
+          <Breadcrumb ctx={breadcrumbCtx} onRoot={goRoot} />
+          {/* Pager hidden on a fully-degraded deep-link (no list, no cursor) — the
+              "— / —" state still renders so the operator sees why it's inert; only a
+              cold bare link with no context at all suppresses it. */}
+          {(pager.inList || pager.ghosted) && <Pager pager={pager} onPrev={goPrev} onNext={goNext} />}
+        </header>
+      ) : (
+        // Bare chrome: portal the prev/next chevrons into the app header's slot.
+        (pager.inList || pager.ghosted) && (
+          <HeaderActions>
+            <PagerChevrons pager={pager} onPrev={goPrev} onNext={goNext} />
+          </HeaderActions>
+        )
+      )}
 
       {/* Body row: <DetailBody> slot + Properties rail */}
       <div style={{ display: "flex", flex: "1 1 auto", minHeight: 0 }}>
-        <div data-shell-body style={{ flex: "1 1 auto", minWidth: 0, overflowY: "auto", padding: "14px 16px" }}>
-          <LiveDotTitle id={id} title={title} live={live} />
-          <div style={{ marginTop: 12 }}>{children}</div>
+        <div
+          data-shell-body
+          className="no-scrollbar"
+          style={{ flex: "1 1 auto", minWidth: 0, overflowY: "auto", padding: "14px 16px" }}
+        >
+          {/* CTL-1003 §A1: in bare mode the floating mono-key + live dot above the
+              title is suppressed (the page <h1> + status row own the title). */}
+          {chrome === "full" && <LiveDotTitle id={id} title={title} live={live} />}
+          <div style={{ marginTop: chrome === "full" ? 12 : 0 }}>{children}</div>
         </div>
-        <PropertiesRail rows={properties} extra={railExtra} />
+        {/* CTL-1003 §B1: a page-supplied floating rail (`rail`) replaces the shared
+            flat PropertiesRail; the worker page keeps PropertiesRail + railExtra. */}
+        {rail != null ? rail : <PropertiesRail rows={properties} extra={railExtra} />}
       </div>
 
       <ShellFooter health={streamHealth} context={footerContext} />
