@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import type { Surface } from "./surface";
 import type { BoardPayload, BoardWorker } from "../board/types";
+import { filterPayloadByScope, REPO_SCOPE_ALL } from "./repo-scope";
+import { deriveInbox } from "../board/home-inbox";
 
 // ── Nav IA types ──────────────────────────────────────────────────────────────
 
@@ -302,3 +304,16 @@ export function overallQueueDepth(payload: BoardPayload): number {
   return payload.queue.length;
 }
 
+/**
+ * The "needs you" attention count for a scope (CTL-1037 inbox-badge addendum).
+ * This is the SAME number the inbox header reports ("N needs you") — the union of
+ * the attention + blocked + waiting buckets (deriveInbox(...).counts.needsYou) —
+ * NOT total inbox items. `scope === "all"` counts the whole fleet; a repo scope
+ * filters the payload to that repo first (filterPayloadByScope), so each project's
+ * Inbox badge reflects only its own waiting work.
+ */
+export function inboxAttentionCount(payload: BoardPayload, scope: string): number {
+  const scoped =
+    scope === REPO_SCOPE_ALL ? payload : filterPayloadByScope(payload, scope);
+  return deriveInbox(scoped).counts.needsYou;
+}

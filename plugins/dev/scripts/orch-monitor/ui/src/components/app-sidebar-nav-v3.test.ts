@@ -208,3 +208,22 @@ describe("CTL-1037 §B — honest nav counts + clarifying tooltips", () => {
   });
 });
 
+describe("CTL-1037 (C) — inbox attention badges", () => {
+  it("an amber AttentionBadge renders only when the needs-you count is > 0", () => {
+    expect(src).toContain("function AttentionBadge");
+    // Amber vocabulary (semantic yellow token), distinct from the neutral count badge.
+    expect(src).toContain("bg-yellow/15");
+    // Visibility gate: shown only when attentionN > 0.
+    expect(src).toMatch(/attentionN > 0 && \(\s*<AttentionBadge/);
+  });
+
+  it("the inbox count is the needs-you bucket, scoped per section", () => {
+    expect(src).toContain("inboxAttentionCount(payload, scopeVal)");
+  });
+
+  it("collapsed-section signal dots roll up inbox attention as amber", () => {
+    // sectionSignal returns 'anomaly' (amber) when a hidden child needs the operator.
+    expect(src).toContain('inboxAttentionCount(payload, "all") > 0');
+    expect(src).toMatch(/inboxAttentionCount\(payload, scopeVal\) > 0\) return "anomaly"/);
+  });
+});

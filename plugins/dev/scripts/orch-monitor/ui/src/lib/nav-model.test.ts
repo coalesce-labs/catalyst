@@ -10,6 +10,7 @@ import {
   projectQueueDepth,
   overallWorkerCount,
   overallQueueDepth,
+  inboxAttentionCount,
   isActiveWorker,
   displayCaseName,
   laneDisplayName,
@@ -313,6 +314,45 @@ describe("nav-model — projectQueueDepth", () => {
   });
 });
 
+describe("nav-model — inboxAttentionCount", () => {
+  it("counts the 'needs you' bucket (attention ∪ blocked ∪ waiting), not total inbox", () => {
+    // adva: 1 waiting-on-you (attention). catalyst: 0 needs-you (1 running only).
+    const p = payload({
+      tickets: [
+        t({ id: "ADV-1", repo: "adva", team: "ADV", attention: "waiting-on-you" }),
+        t({ id: "CTL-1", repo: "catalyst", activeState: "active", working: true, status: "running" }),
+      ],
+    });
+    // Gherkin: adva inbox shows 1, catalyst shows none, overall shows the total (1).
+    expect(inboxAttentionCount(p, "adva")).toBe(1);
+    expect(inboxAttentionCount(p, "catalyst")).toBe(0);
+    expect(inboxAttentionCount(p, "all")).toBe(1);
+  });
+
+  it("sums attention + blocked + waiting across the fleet for the overall row", () => {
+    const p = payload({
+      tickets: [
+        t({ id: "ADV-1", repo: "adva", team: "ADV", attention: "needs-human" }),
+        t({ id: "CTL-1", repo: "catalyst", held: "blocked" }),
+        t({ id: "CTL-2", repo: "catalyst", held: "waiting" }),
+        t({ id: "CTL-3", repo: "catalyst", activeState: "active", working: true, status: "running" }),
+      ],
+    });
+    expect(inboxAttentionCount(p, "all")).toBe(3);
+    expect(inboxAttentionCount(p, "catalyst")).toBe(2);
+    expect(inboxAttentionCount(p, "adva")).toBe(1);
+  });
+
+  it("is 0 when nothing needs the operator (badge hidden — clears live)", () => {
+    const p = payload({
+      tickets: [
+        t({ id: "CTL-1", repo: "catalyst", activeState: "active", working: true, status: "running" }),
+      ],
+    });
+    expect(inboxAttentionCount(p, "all")).toBe(0);
+    expect(inboxAttentionCount(p, "catalyst")).toBe(0);
+  });
+});
 
 // ── CTL-1012: display-name helpers (the ONE source of spelled-out entity names) ──
 

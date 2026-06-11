@@ -44,6 +44,7 @@ import {
   projectQueueDepth,
   overallWorkerCount,
   overallQueueDepth,
+  inboxAttentionCount,
 } from "@/lib/nav-model";
 import {
   repoScopeAtom,
@@ -143,6 +144,22 @@ function SectionSignalDot({ kind }: { kind: "live" | "anomaly" }) {
         kind === "live" ? "bg-green" : "bg-yellow",
       )}
     />
+  );
+}
+
+/**
+ * CTL-1037 (C) — the Inbox attention pill. A small muted-amber count badge shown
+ * ONLY when something is waiting on the operator (count > 0). Distinct vocabulary
+ * from the neutral SidebarMenuBadge used for the Workers/Queue numbers: amber =
+ * "needs you", consistent with the board's single yellow attention accent. Uses
+ * the bg-yellow / yellow semantic surface tokens (no new hex). Clears to nothing
+ * the moment the inbox empties — the caller renders nothing at zero.
+ */
+function AttentionBadge({ count }: { count: number }) {
+  return (
+    <SidebarMenuBadge className="bg-yellow/15 text-yellow tabular-nums">
+      {count}
+    </SidebarMenuBadge>
   );
 }
 
@@ -315,6 +332,13 @@ export function AppSidebar() {
     }
     return null;
   }
+  // CTL-1037 (C) — the Inbox attention count for a scope (overall or per-project):
+  // the "needs you" bucket the inbox header reports, derived from the snapshot so
+  // the per-project number is truthful without a new BFF projection. 0 → no badge.
+  function inboxCount(scopeVal: string): number {
+    if (!payload) return 0;
+    return inboxAttentionCount(payload, scopeVal);
+  }
   // CTL-1037 §A — the green PRESENCE dot extends to every Workers row (overall AND
   // per-project): it lights when that scope has at least one genuinely-active
   // worker, hidden otherwise. The Board row keeps its amber anomaly dot.
@@ -365,6 +389,7 @@ export function AppSidebar() {
     //             which is genuine signal for a capacity row). Other rows: no count.
     const workerN = item.surface === "workers" ? rowCount("workers", scopeVal) : null;
     const queueN = item.surface === "queue" ? rowCount("queue", scopeVal) : null;
+    const attentionN = item.surface === "home" ? inboxCount(scopeVal) : 0;
 
     // The neutral count badge (Workers/Queue) and its clarifying tooltip text.
     let countBadge: number | null = null;
@@ -404,6 +429,10 @@ export function AppSidebar() {
           </span>
           <span>{item.label}</span>
         </SidebarMenuButton>
+        {/* CTL-1037 (C): Inbox attention pill — amber, only when something needs you. */}
+        {item.surface === "home" && attentionN > 0 && (
+          <AttentionBadge count={attentionN} />
+        )}
         {countBadge != null && <SidebarMenuBadge>{countBadge}</SidebarMenuBadge>}
       </SidebarMenuItem>
     );
@@ -426,20 +455,27 @@ export function AppSidebar() {
   //   - repo scope → that repo's resident-payload worker/queue counts (the per-project
   //                  BFF projection isn't wired yet, so derive from the board snapshot).
   //   - "observe"  → OBSERVE surfaces carry no per-section count today → always null.
-  // CTL-1037 §B: the "all" branch now derives its honest active worker count from
-  // the resident snapshot (overallWorkerCount), falling back to the nav signal only
-  // before the snapshot loads, so the rolled-up dot agrees with the row badges.
+  // CTL-1037 (C): attention OUTRANKS live — a collapsed section hiding an Inbox
+  // "needs you" item (or a board anomaly) rolls up as an AMBER dot, even if it
+  // also has running workers; only a section that is live-but-calm shows green.
+  // This keeps the collapsed-header vocabulary consistent with the expanded rows:
+  // green = worker presence, amber = needs-your-attention.
   function sectionSignal(scopeVal: string): "live" | "anomaly" | null {
     if (scopeVal === "observe") return null;
     if (scopeVal === "all") {
       if (!nav && !payload) return null;
-      if (nav?.anomaly) return "anomaly";
+      // Attention first (amber): board anomaly OR an inbox item waiting on you.
+      if (nav?.anomaly || (payload && inboxAttentionCount(payload, "all") > 0)) {
+        return "anomaly";
+      }
       const workers = payload ? overallWorkerCount(payload) : (nav?.workerCount ?? 0);
       const queue = payload ? overallQueueDepth(payload) : (nav?.queueDepth ?? 0);
       if (workers > 0 || queue > 0) return "live";
       return null;
     }
     if (!payload) return null;
+    // Per-project: attention (amber) first, then live worker/queue presence (green).
+    if (inboxAttentionCount(payload, scopeVal) > 0) return "anomaly";
     if (
       projectWorkerCount(payload, scopeVal) > 0 ||
       projectQueueDepth(payload, scopeVal) > 0
