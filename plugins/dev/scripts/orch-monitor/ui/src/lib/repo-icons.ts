@@ -1,15 +1,22 @@
-// repo-icons.ts — pure logic for per-project icons (CTL-961).
+// repo-icons.ts — pure logic for per-project icons (CTL-961, CTL-997).
 //
-// Two-tier system:
-//   1. AUTO-DETECTED: the server probes GitHub for the repo's favicon and
-//      returns it as a data URL via /api/repo-icon/:repoKey.
-//   2. MANUAL OVERRIDE / FALLBACK: a per-project lucide icon name + color,
+// Three-tier system:
+//   1. AUTO-DETECTED (picked): the server probes GitHub for all icon candidates
+//      and returns them via /api/repo-icon/:repoKey; the operator can pick one.
+//   2. AUTO-DETECTED (default best): highest-ranked by format (SVG > PNG > ICO).
+//   3. MANUAL OVERRIDE / FALLBACK: a per-project lucide icon name + color,
 //      persisted in localStorage (prefix REPO_ICON_KEY_PREFIX).
 //
-// The UI renders the auto-detected icon when available; if not found,
-// it falls back to the manual override, then to no icon (just the color dot).
-//
 // This module is pure (no React, no side effects) so it can be unit-tested.
+
+export type IconFormat = "svg" | "png" | "ico";
+
+export interface IconCandidate {
+  path: string;
+  format: IconFormat;
+  downloadUrl: string;
+  dataUrl: string | null;
+}
 
 /** Names from the lucide-react set used as manual override icons. */
 export type LucideIconName =
@@ -42,6 +49,10 @@ export interface RepoIconOverride {
 /** Response shape from /api/repo-icon/:repo */
 export interface RepoIconApiResponse {
   found: boolean;
+  // CTL-997 multi-candidate fields
+  candidates?: IconCandidate[];
+  selectedPath?: string;
+  // legacy single-candidate fields (still emitted, mirror the best candidate)
   path?: string;
   downloadUrl?: string;
   dataUrl?: string | null;
@@ -49,13 +60,49 @@ export interface RepoIconApiResponse {
 
 /** Resolved icon data for a single repo. */
 export interface ResolvedRepoIcon {
-  /** data URL from the auto-detected favicon (when found). */
+  /** EFFECTIVE auto icon data URL (the picked candidate, else the default best). */
   autoDataUrl: string | null;
-  /** Manual override (from localStorage). */
+  /** All detected candidates, for the picker. */
+  candidates: IconCandidate[];
+  /** Which candidate path is currently active (pick or default), null if none. */
+  selectedPath: string | null;
+  /** Manual lucide override (from localStorage), unchanged. */
   override: RepoIconOverride | null;
 }
 
 export const REPO_ICON_KEY_PREFIX = "catalyst.repoIcon.";
+export const REPO_ICON_PICK_KEY_PREFIX = "catalyst.repoIconPick.";
+
+/**
+ * Extract all candidates from an API response.
+ * Synthesizes a single candidate from legacy fields when candidates[] is absent.
+ */
+export function parseIconCandidates(resp: RepoIconApiResponse): IconCandidate[] {
+  if (!resp.found) return [];
+  if (resp.candidates && resp.candidates.length > 0) return resp.candidates;
+  if (resp.path && resp.downloadUrl !== undefined) {
+    const lower = resp.path.toLowerCase();
+    const format: IconFormat = lower.endsWith(".svg") ? "svg"
+      : lower.endsWith(".ico") ? "ico" : "png";
+    return [{ path: resp.path, format, downloadUrl: resp.downloadUrl, dataUrl: resp.dataUrl ?? null }];
+  }
+  return [];
+}
+
+export function readIconPick(repoKey: string, storage?: Storage): string | null {
+  try { return (storage ?? localStorage).getItem(`${REPO_ICON_PICK_KEY_PREFIX}${repoKey}`); }
+  catch { return null; }
+}
+
+export function writeIconPick(repoKey: string, path: string, storage?: Storage): void {
+  try { (storage ?? localStorage).setItem(`${REPO_ICON_PICK_KEY_PREFIX}${repoKey}`, path); }
+  catch { /* quota / SSR */ }
+}
+
+export function clearIconPick(repoKey: string, storage?: Storage): void {
+  try { (storage ?? localStorage).removeItem(`${REPO_ICON_PICK_KEY_PREFIX}${repoKey}`); }
+  catch { /* ignore */ }
+}
 
 /**
  * Read manual icon override for a repo from localStorage.

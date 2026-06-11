@@ -3,14 +3,93 @@
 import { describe, it, expect } from "bun:test";
 import {
   parseIconResponse,
+  parseIconCandidates,
   readIconOverride,
   writeIconOverride,
   clearIconOverride,
+  readIconPick,
+  writeIconPick,
+  clearIconPick,
   REPO_ICON_KEY_PREFIX,
+  REPO_ICON_PICK_KEY_PREFIX,
   LUCIDE_ICON_OPTIONS,
   type RepoIconApiResponse,
   type RepoIconOverride,
 } from "./repo-icons";
+
+// ── parseIconCandidates ───────────────────────────────────────────────────────
+
+describe("parseIconCandidates", () => {
+  it("returns [] when found is false", () => {
+    expect(parseIconCandidates({ found: false })).toEqual([]);
+  });
+  it("returns the candidates array when present", () => {
+    const resp: RepoIconApiResponse = {
+      found: true, selectedPath: "logo.svg",
+      candidates: [
+        { path: "logo.svg", format: "svg", downloadUrl: "u1", dataUrl: "data:svg" },
+        { path: "favicon.ico", format: "ico", downloadUrl: "u2", dataUrl: "data:ico" },
+      ],
+    };
+    expect(parseIconCandidates(resp).map((c) => c.path)).toEqual(["logo.svg", "favicon.ico"]);
+  });
+  it("falls back to a single synthesized candidate from legacy fields (svg path)", () => {
+    const resp: RepoIconApiResponse = {
+      found: true, path: "logo.svg", downloadUrl: "u", dataUrl: "data:svg",
+    };
+    const cands = parseIconCandidates(resp);
+    expect(cands.map((c) => c.path)).toEqual(["logo.svg"]);
+    expect(cands[0].format).toBe("svg");
+  });
+  it("falls back to synthesized ico candidate from legacy fields", () => {
+    const resp: RepoIconApiResponse = {
+      found: true, path: "favicon.ico", downloadUrl: "u", dataUrl: "data:ico",
+    };
+    expect(parseIconCandidates(resp)[0].format).toBe("ico");
+  });
+  it("falls back to synthesized png candidate for unknown extension", () => {
+    const resp: RepoIconApiResponse = {
+      found: true, path: "apple-touch-icon.png", downloadUrl: "u", dataUrl: null,
+    };
+    expect(parseIconCandidates(resp)[0].format).toBe("png");
+  });
+});
+
+// ── readIconPick / writeIconPick / clearIconPick ──────────────────────────────
+
+// Reusable MemStorage (also declared below for the override tests)
+class MemStoragePick implements Storage {
+  private _data: Record<string, string> = {};
+  get length() { return Object.keys(this._data).length; }
+  key(index: number) { return Object.keys(this._data)[index] ?? null; }
+  getItem(k: string) { return this._data[k] ?? null; }
+  setItem(k: string, v: string) { this._data[k] = v; }
+  removeItem(k: string) { delete this._data[k]; }
+  clear() { this._data = {}; }
+}
+
+describe("readIconPick / writeIconPick / clearIconPick", () => {
+  it("round-trips a pick path", () => {
+    const s = new MemStoragePick();
+    writeIconPick("catalyst", "logo.svg", s);
+    expect(readIconPick("catalyst", s)).toBe("logo.svg");
+  });
+  it("returns null for an unset repo", () => {
+    expect(readIconPick("adva", new MemStoragePick())).toBeNull();
+  });
+  it("uses the pick key prefix (distinct from the override prefix)", () => {
+    const s = new MemStoragePick();
+    writeIconPick("r", "logo.svg", s);
+    expect(s.getItem(`${REPO_ICON_PICK_KEY_PREFIX}r`)).not.toBeNull();
+    expect(s.getItem(`${REPO_ICON_KEY_PREFIX}r`)).toBeNull();
+  });
+  it("clearIconPick removes the stored pick", () => {
+    const s = new MemStoragePick();
+    writeIconPick("r", "logo.svg", s);
+    clearIconPick("r", s);
+    expect(readIconPick("r", s)).toBeNull();
+  });
+});
 
 // ── LUCIDE_ICON_OPTIONS ───────────────────────────────────────────────────────
 
