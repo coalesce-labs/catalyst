@@ -214,6 +214,24 @@ import {
 // isTicketInFlight).
 const TERMINAL_SIGNAL_STATUSES = new Set(["failed", "stalled", "aborted"]);
 
+// CTL-1004/CTL-1056 Bug 2: dispatchFailureDiag — extract the diagnostic fields
+// from a dispatch result (r = { code, stderr, spawnError, signal }) for the
+// "dispatch failed" log + the phase.dispatch.failed event. The scheduler used to
+// log a BARE { ticket, code } and the event dropped stderr entirely, leaving
+// tonight's dispatch failures undiagnosable. Returns only the keys that carry
+// signal — an empty stderr / absent spawnError|signal produce NO key, so the
+// happy/empty case stays noise-free. The stderr tail is the last ~500 chars,
+// trimmed (the diagnostic is at the end: the failure ladder / exec error message).
+const DISPATCH_STDERR_TAIL_MAX = 500;
+export function dispatchFailureDiag(r = {}) {
+  const out = {};
+  const raw = typeof r.stderr === "string" ? r.stderr.trim() : "";
+  if (raw.length > 0) out.stderr_tail = raw.slice(-DISPATCH_STDERR_TAIL_MAX);
+  if (r.spawnError != null && r.spawnError !== "") out.spawn_error = r.spawnError;
+  if (r.signal != null && r.signal !== "") out.signal = r.signal;
+  return out;
+}
+
 // stageRankForTicket — given a {phase: status} map, return the highest STAGE_RANK
 // value over all non-terminal phases. Returns -1 when no active phase is found
 // (e.g. empty signals or all phases terminal) — this is the same sentinel used for
@@ -2584,12 +2602,16 @@ export function schedulerTick(
 
     // rc != 0 — real dispatch failure.
     const reason = readDispatchFailureReason(orchDir, ticket, phase) ?? "dispatch_nonzero_exit";
+    // CTL-1004/CTL-1056 Bug 2: pull the captured stderr tail + spawn error/signal
+    // off the dispatch result so the failure is diagnosable from BOTH the warn log
+    // and the phase.dispatch.failed event (the old log was a bare {ticket,code}).
+    const diag = dispatchFailureDiag(r);
     const cd = recordDispatchFailure(orchDir, ticket, phase, r.code, now()); // CTL-624: arm the cool-down window
     if (fullFailureLadder) {
       if (cd.consecutiveFailures >= getMaxDispatchRetries())
         escalateDispatchExhausted(orchDir, ticket, phase, { code: r.code, cause: reason }); // CTL-712 terminal stop; CTL-1045 Bug 2
       maybeTripCircuitBreaker(orchDir, ticket, phase); // CTL-671: trip same tick if at threshold
-      // CTL-611 Gap 2: surface the silent drop as an event.
+      // CTL-611 Gap 2: surface the silent drop as an event. CTL-1056: + diag.
       appendDispatchFailedEvent({
         orchId: ticket,
         ticket,
@@ -2598,6 +2620,7 @@ export function schedulerTick(
         reason,
         expiresAt: cd.expiresAt,
         consecutiveFailures: cd.consecutiveFailures,
+        ...diag,
       });
       maybeEscalateDispatchFailures(orchDir, cd, {
         writeStatus,
@@ -2605,7 +2628,10 @@ export function schedulerTick(
       });
       if (failLogMsg) {
         log.warn(
-          failLogIncludePhase ? { ticket, phase, code: r.code } : { ticket, code: r.code },
+          {
+            ...(failLogIncludePhase ? { ticket, phase, code: r.code } : { ticket, code: r.code }),
+            ...diag, // CTL-1056: stderr_tail / spawn_error / signal — diagnosable from the log
+          },
           failLogMsg
         );
       }
@@ -2616,9 +2642,10 @@ export function schedulerTick(
         target_phase: phase,
         code: r.code,
         reason,
+        ...diag,
       });
     }
-    return { ok: false, code: r.code, reason, signal: null };
+    return { ok: false, code: r.code, reason, signal: r.signal ?? null };
   }
 
   // CTL-671: compute the eligible set ONCE per tick. Consumed by the phantom

@@ -700,11 +700,17 @@ describe("selectDispatchable", () => {
 // ── Phase 4: dispatch and FSM-driven phase advancement ──
 
 // A dispatch stub: records every call, returns a configurable exit code.
-function fakeDispatch({ code = 0 } = {}) {
+function fakeDispatch({ code = 0, stderr = "", spawnError, signal } = {}) {
   const calls = [];
   const fn = (args) => {
     calls.push(args);
-    return { code, stdout: "", stderr: "" };
+    // CTL-1004/CTL-1056 Bug 2: surface optional spawnError / signal so the
+    // dispatch-failure diagnostic seam can be exercised. Keys stay absent unless
+    // supplied, preserving the byte-identical return shape existing tests assert.
+    const res = { code, stdout: "", stderr };
+    if (spawnError !== undefined) res.spawnError = spawnError;
+    if (signal !== undefined) res.signal = signal;
+    return res;
   };
   fn.calls = calls;
   return fn;
@@ -4904,6 +4910,48 @@ describe("phase.dispatch.failed event emission (CTL-611)", () => {
 
     expect(dispatch.calls).toHaveLength(1);
     expect(dispatchFailedEvents("CTL-204")).toHaveLength(1);
+  });
+
+  // CTL-1004/CTL-1056 Bug 2: a real rc!=0 dispatch failure must carry the
+  // captured stderr tail + spawn error / signal into the phase.dispatch.failed
+  // event payload, so the failure is diagnosable from the unified log (today it
+  // logged a bare {ticket, code} and the broker event dropped stderr entirely).
+  test("rc!=0 failure carries stderr_tail + spawn_error + signal in the event payload", () => {
+    writeSignal("CTL-206", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({
+      code: 127,
+      stderr: "phase-agent-dispatch: recreate→rebase refused\nworktree dirty, aborting\n",
+      spawnError: "ETIMEDOUT",
+      signal: "SIGKILL",
+    });
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-206");
+    expect(events).toHaveLength(1);
+    const payload = events[0].body.payload;
+    expect(payload.target_phase).toBe("plan");
+    expect(payload.code).toBe(127);
+    // The trimmed stderr tail is present and carries the diagnostic text.
+    expect(payload.stderr_tail).toMatch(/worktree dirty, aborting/);
+    expect(payload.spawn_error).toBe("ETIMEDOUT");
+    expect(payload.signal).toBe("SIGKILL");
+  });
+
+  test("a failure with empty stderr omits stderr_tail (no empty noise)", () => {
+    writeSignal("CTL-207", "research", "done");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 1, stderr: "" });
+
+    schedulerTick(orchDir, { readEligible: () => [], dispatch, now: () => 1_000 });
+
+    const events = dispatchFailedEvents("CTL-207");
+    expect(events).toHaveLength(1);
+    const payload = events[0].body.payload;
+    expect("stderr_tail" in payload).toBe(false);
+    expect("spawn_error" in payload).toBe(false);
+    expect("signal" in payload).toBe(false);
   });
 
   test("successful dispatch with verified signal does NOT emit phase.dispatch.failed", () => {

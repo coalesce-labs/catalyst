@@ -4,7 +4,7 @@
 // integration-ctl-729.test.mjs (the watchdog Pass 0w integration).
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick } from "./scheduler.mjs";
@@ -249,6 +249,113 @@ function prodTickOpts({ mode, killed, intentDb }) {
     },
   };
 }
+
+// ── CTL-1005 / CTL-1056 J3 — REAL emitter end-to-end (the live bug) ─────────
+//
+// THE LIVE BUG (daemon.log on mini, every tick): the J3 shadow path called the
+// PRODUCTION emit seam (emitReapIntent, the scheduler's default) with the type
+// "janitor.would.clear", but CTL-1005 never registered that type — nor the J3
+// enforce type "janitor.stall.cleared" — in reap-intent.mjs's closed
+// REAP_INTENT_TYPES. So emitReapIntent threw "unknown reap-intent event type:
+// janitor.would.clear", the fire() seam swallowed it as "stall-janitor: emit
+// failed (CTL-1004)", and EVERY J3 verdict was silently lost. These tests drive
+// schedulerTick with the REAL emitter (emit NOT injected) so a regression
+// resurfaces immediately: the verdict must land in the unified event log.
+describe("CTL-1005/CTL-1056 J3 integration — the real emitter accepts janitor.would.clear / janitor.stall.cleared", () => {
+  // J3 stall-clear candidate that classifies to "clear".
+  const clearableStall = (ticket = "CTL-1005J") => ({
+    ticket,
+    phase: "implement",
+    stalledReason: "prior-artifact-retry-exhausted",
+    linearTerminal: false,
+    liveSessionInWorktree: false,
+    artifactPresent: true,
+    artifactComplete: true,
+    alreadyCleared: false,
+    dispatchFailureCode: 2, // CTL-1045 Bug 2: prior-artifact-missing exit code (clearable)
+    priorDoneSignalPresent: true, // CTL-1045 Bug 3
+  });
+
+  // Production-shaped tick opts: emit NOT injected → the scheduler default
+  // (emitReapIntent) runs, writing to the CATALYST_DIR event log.
+  function realEmitterTickOpts({ mode, candidate, clearStall = () => true }) {
+    return {
+      readEligible: () => [],
+      dispatch: () => ({ status: "dispatched" }),
+      exec: () => ({ code: null }),
+      reclaimDeadWork: () => ({ class: "alive-suppressed" }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+        runTransition: () => ({ applied: false }),
+      },
+      now: () => NOW,
+      watchdog: { mode: "off" },
+      stallJanitor: {
+        mode,
+        collectStallClearCandidates: () => [candidate],
+        clearStall, // inject so the test never touches real signal files
+        // emit + recordKillIntent intentionally NOT injected → production seams.
+      },
+    };
+  }
+
+  // Read every event the unified log captured under the redirected CATALYST_DIR.
+  function readEvents() {
+    const ym = new Date(NOW).toISOString().slice(0, 7);
+    const logPath = join(orchDir, "events", `${ym}.jsonl`);
+    if (!existsSync(logPath)) return [];
+    return readFileSync(logPath, "utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l));
+  }
+
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = orchDir; // getEventLogPath → orchDir/events/<ym>.jsonl
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+  });
+
+  test("shadow: janitor.would.clear is emitted WITHOUT throwing 'unknown reap-intent event type'", () => {
+    const result = schedulerTick(
+      orchDir,
+      realEmitterTickOpts({ mode: "shadow", candidate: clearableStall() }),
+    );
+    // The verdict reached the report (the in-memory side) …
+    expect(result.janitorWouldClear).toEqual([{ ticket: "CTL-1005J", phase: "implement" }]);
+    // … AND landed in the unified event log (the seam that threw before the fix).
+    const ev = readEvents().find((e) => e.event === "janitor.would.clear");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-1005J");
+    expect(ev.phase).toBe("implement");
+  });
+
+  test("enforce: janitor.stall.cleared is emitted WITHOUT throwing", () => {
+    let cleared = null;
+    const result = schedulerTick(
+      orchDir,
+      realEmitterTickOpts({
+        mode: "enforce",
+        candidate: clearableStall("CTL-1005K"),
+        clearStall: (arg) => {
+          cleared = arg;
+          return true;
+        },
+      }),
+    );
+    expect(cleared).toEqual({ ticket: "CTL-1005K", phase: "implement" });
+    expect(result.janitorStallsCleared).toEqual([{ ticket: "CTL-1005K", phase: "implement" }]);
+    const ev = readEvents().find((e) => e.event === "janitor.stall.cleared");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe("CTL-1005K");
+    expect(ev.artifact_verified).toBe(true);
+  });
+});
 
 describe("CTL-1004 J2 enforce — a real stop seam fires (killBgJob), not just an intent row", () => {
   // A real beliefs.db with a single tick row (defaultJanitorKillIntentRecorder
