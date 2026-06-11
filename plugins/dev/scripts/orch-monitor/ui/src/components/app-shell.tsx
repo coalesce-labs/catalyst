@@ -169,6 +169,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // at rest and never shift layout.
   useEffect(() => installOverlayScroll(), []);
 
+  // CTL-1025: surface jump + create actions, built once per navigate change.
+  // Declared BEFORE the keydown effect below — that effect reads `surfaceActions`
+  // in its dependency array, so the const must already be initialized. A later
+  // declaration is a temporal-dead-zone ReferenceError that crashes AppShell on
+  // first render (target is ES2022, so the bundler keeps the TDZ check).
+  const surfaceActions = useMemo(
+    () =>
+      buildSurfaceActions({
+        jumpToSurface: (s) => void navigate({ to: surfaceToPath(s), search: (prev) => prev }),
+        create: () => setPaletteOpen(true),
+      }),
+    [navigate],
+  );
+
   // CTL-1025: `[` toggles the rail; `g <key>` chords + bare `c` go through the
   // action registry (matchAction). Both ignore typing targets.
   useEffect(() => {
@@ -285,16 +299,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     void navigate({ to: SETTINGS_PATH, search: (prev) => prev });
     setPaletteOpen(false);
   }, [navigate]);
-
-  // CTL-1025: surface jump + create actions, built once per navigate change.
-  const surfaceActions = useMemo(
-    () =>
-      buildSurfaceActions({
-        jumpToSurface: (s) => void navigate({ to: surfaceToPath(s), search: (prev) => prev }),
-        create: () => setPaletteOpen(true),
-      }),
-    [navigate],
-  );
 
   // CTL-1024: theme toggle, sidebar toggle, and board-display commands in the palette.
   const { toggle: toggleTheme } = useTheme();
