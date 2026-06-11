@@ -4,7 +4,10 @@
 // routes exercise the actual SQLite read path — proving the data comes from the
 // durable cache, never a live `linearis` call. Encodes the ticket's Gherkin
 // scenarios end-to-end through the HTTP surface.
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+//
+// CTL-996: also covers the /api/linear-ticket route which now returns
+// labels + relations in addition to title + description.
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
@@ -17,6 +20,7 @@ import {
 import type { TicketDetail } from "../lib/ticket-detail-reader.d.mts";
 import type { TicketArtifacts } from "../lib/ticket-artifacts-reader.d.mts";
 import type { TicketSearchResponse } from "../lib/ticket-search-reader.d.mts";
+import { _clearTitleDescCache } from "../lib/linear-title-description-fallback.mjs";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
@@ -156,6 +160,140 @@ describe("GET /api/ticket-artifacts/:id (P9)", () => {
 
   it("rejects a path-traversal id", async () => {
     const res = await fetch(`${baseUrl}/api/ticket-artifacts/..%2Fsecrets`);
+    expect(res.status).toBe(400);
+  });
+});
+
+// ── CTL-996: /api/linear-ticket route — extended response shape ───────────────
+// The route always returns 200 and now includes labels + relations in addition
+// to the existing title/description/source fields.
+// We mock global.fetch to intercept the Linear GraphQL call so no real network
+// traffic occurs (the fallback lib uses module-level fetch).
+
+type LinearTicketRouteResponse = {
+  id: string;
+  title: string | null;
+  description: string | null;
+  labels: Array<{ name: string; color: string }> | null;
+  relations: {
+    blockedBy: string[];
+    blocks: string[];
+    related: string[];
+    duplicateOf: string[];
+  } | null;
+  source: "linear-live" | "unavailable";
+};
+
+function mockLinearFetch(responseData: unknown) {
+  const original = globalThis.fetch;
+  let intercepted = false;
+  globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+    const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+    if (urlStr.includes("api.linear.app")) {
+      intercepted = true;
+      return { ok: true, json: async () => responseData } as Response;
+    }
+    // Pass through to the original fetch for server-to-server (localhost) calls.
+    return original(url as Parameters<typeof fetch>[0], init);
+  }) as typeof fetch;
+  return {
+    get intercepted() { return intercepted; },
+    restore() { globalThis.fetch = original; },
+  };
+}
+
+describe("GET /api/linear-ticket/:id (CTL-996 — labels + relations)", () => {
+  const prevToken = process.env.LINEAR_API_TOKEN;
+
+  beforeEach(() => {
+    _clearTitleDescCache();
+    process.env.LINEAR_API_TOKEN = "lin_api_test_token";
+  });
+
+  afterEach(() => {
+    if (prevToken !== undefined) process.env.LINEAR_API_TOKEN = prevToken;
+    else delete process.env.LINEAR_API_TOKEN;
+  });
+
+  it("returns labels and relations from Linear alongside title and description", async () => {
+    const mock = mockLinearFetch({
+      data: {
+        issues: {
+          nodes: [
+            {
+              number: 996,
+              title: "CTL-996 title",
+              description: "Spec body",
+              team: { key: "CTL" },
+              labels: { nodes: [{ name: "feature", color: "#8b5cf6" }] },
+              relations: {
+                nodes: [{ type: "blocks", relatedIssue: { identifier: "CTL-997" } }],
+              },
+              inverseRelations: {
+                nodes: [{ type: "blocks", issue: { identifier: "CTL-995" } }],
+              },
+            },
+          ],
+        },
+      },
+    });
+    try {
+      const res = await fetch(`${baseUrl}/api/linear-ticket/CTL-996`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as LinearTicketRouteResponse;
+      expect(body.id).toBe("CTL-996");
+      expect(body.title).toBe("CTL-996 title");
+      expect(body.description).toBe("Spec body");
+      expect(body.source).toBe("linear-live");
+      expect(body.labels).toEqual([{ name: "feature", color: "#8b5cf6" }]);
+      expect(body.relations?.blocks).toContain("CTL-997");
+      expect(body.relations?.blockedBy).toContain("CTL-995");
+      expect(body.relations?.related).toEqual([]);
+      expect(body.relations?.duplicateOf).toEqual([]);
+      expect(mock.intercepted).toBe(true);
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it("returns null labels and relations on unavailable ticket (always 200)", async () => {
+    const mock = mockLinearFetch({ data: { issues: { nodes: [] } } });
+    try {
+      const res = await fetch(`${baseUrl}/api/linear-ticket/CTL-99999`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as LinearTicketRouteResponse;
+      expect(body.id).toBe("CTL-99999");
+      expect(body.title).toBeNull();
+      expect(body.source).toBe("unavailable");
+      // null on unavailable (no data returned)
+      expect(body.labels).toBeNull();
+      expect(body.relations).toBeNull();
+    } finally {
+      mock.restore();
+    }
+  });
+
+  it("returns null labels and relations on network failure (always 200, fail-open)", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      if (urlStr.includes("api.linear.app")) throw new Error("network failure");
+      return original(url as Parameters<typeof fetch>[0], init);
+    }) as typeof fetch;
+    try {
+      const res = await fetch(`${baseUrl}/api/linear-ticket/CTL-996`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as LinearTicketRouteResponse;
+      expect(body.source).toBe("unavailable");
+      expect(body.labels).toBeNull();
+      expect(body.relations).toBeNull();
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("rejects path-traversal ids with 400", async () => {
+    const res = await fetch(`${baseUrl}/api/linear-ticket/..%2Fetc`);
     expect(res.status).toBe(400);
   });
 });

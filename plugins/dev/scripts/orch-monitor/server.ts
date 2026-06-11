@@ -1798,13 +1798,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Bad Request", { status: 400 });
           }
           const map = await fillTitleDescriptionFallback([ticket]);
-          const entry = map[ticket] ?? { title: null, description: null };
+          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null };
           const available =
             entry.title !== null || entry.description !== null;
           return Response.json({
             id: ticket,
             title: entry.title,
             description: entry.description,
+            labels: entry.labels ?? null,
+            relations: entry.relations ?? null,
             source: available ? "linear-live" : "unavailable",
           });
         }
