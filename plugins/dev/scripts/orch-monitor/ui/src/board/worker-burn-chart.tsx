@@ -13,6 +13,7 @@
 // unreachable / empty states so the chart never renders blank or fabricated.
 
 import { useMemo } from "react";
+import { C } from "./board-tokens";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid } from "recharts";
 import {
   ChartContainer,
@@ -32,14 +33,6 @@ const CHART_CONFIG = {
   tokens: { label: "Tokens", color: "var(--chart-2)" },
 } satisfies ChartConfig;
 
-const C = {
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 /** Compact $ for the left (cost) Y axis — sub-dollar reads in cents. */
 function fmtCostAxis(v: number): string {

@@ -192,7 +192,9 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
         position: "sticky",
         top: 0,
         zIndex: 3,
-        background: C.s0,
+        // CTL-1033: kanban column-header chips sit on `subtle` — a visible step
+        // ABOVE the canvas and clearly above the chrome (was C.s0 == sidebar dark).
+        background: C.subtle,
         borderBottom: `1px solid ${C.borderSubtle}`,
         width: "max-content",
       }}
@@ -252,7 +254,9 @@ function GroupLabelRow({
         position: "sticky",
         top: HEADER_H,
         zIndex: 2,
-        background: C.s0,
+        // CTL-1033: swimlane group bands sit on `subtle` — visibly lighter than
+        // the sidebar chrome (the ticket bug: rows sat at sidebar darkness).
+        background: C.subtle,
         width: "max-content",
         minWidth: "100%",
       }}
@@ -270,7 +274,8 @@ function GroupLabelRow({
           position: "sticky",
           left: 0,
           zIndex: 3,
-          background: C.s0,
+          // CTL-1033: the dual-sticky chip paints over the band — same `subtle`.
+          background: C.subtle,
         }}
       >
         {iconSrc ? (
@@ -711,7 +716,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "left",
-            background: `linear-gradient(to right, ${C.s0}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to right, ${C.s1}cc 0%, transparent 100%)`,
             marginRight: -32,
           }}
         />
@@ -765,7 +770,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "right",
-            background: `linear-gradient(to left, ${C.s0}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to left, ${C.s1}cc 0%, transparent 100%)`,
             marginLeft: -32,
           }}
         />

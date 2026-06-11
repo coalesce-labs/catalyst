@@ -85,7 +85,7 @@ export function ToolMixPanel({ counts, latency, onSelectTool }: ToolMixPanelProp
         <span>tool · calls · p95</span>
         <span>sorted by total time</span>
       </div>
-      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-0">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-2">
         {rows.map((row) => (
           <ToolRow
             key={row.tool}

@@ -32,6 +32,7 @@ import {
   type LiveSignal,
   type PagerState,
 } from "./detail-chrome";
+import { C } from "./board-tokens";
 import {
   cheatsheetOpenAtom,
   listContextAtom,
@@ -44,18 +45,9 @@ import { ChevronUp, ChevronDown } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HeaderActions } from "@/components/header-actions";
 
-// ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
-const C = {
-  s0: "#0b0d10",
-  s1: "#111318",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
+// ── tokens (CTL-1033: the ONE canonical palette from board-tokens.ts; the stale
+//    local ramp here was the cause of detail pages rendering darker than the
+//    sidebar — C.s1 is now the shared content canvas) ──────────────────────────
 
 // ── live-dot CSS (reuses the board's `catalyst-live-dot` breathing-ring keyframe,
 //    Board.tsx:118/121 — the SAME cyan signal, no new animation) ──────────────

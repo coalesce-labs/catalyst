@@ -99,11 +99,13 @@ describe("Shell.tsx — live-dot title reserves cyan for liveness only", () => {
     expect(shellSrc).toMatch(/rgba\(91,224,255/);
   });
 
-  it("no chrome element uses the cyan token except the live dot — accents are blue #4ea1ff", () => {
-    expect(chromeSrc).toMatch(/LIVE_CYAN = "#5be0ff"/);
-    expect(chromeSrc).toMatch(/CHROME_BLUE = "#4ea1ff"/);
-    // the cyan token literal must not appear as a static chrome colour in Shell —
-    // it only reaches the DOM through resolveLiveDot's returned `color`.
+  it("no chrome element uses the cyan token except the live dot — accents are blue", () => {
+    // CTL-1033: the detail-chrome colour consts now ALIAS the canonical board-tokens
+    // (LIVE_CYAN → LIVE, CHROME_BLUE → C.blue) instead of carrying their own hexes.
+    expect(chromeSrc).toMatch(/LIVE_CYAN = LIVE/);
+    expect(chromeSrc).toMatch(/CHROME_BLUE = C\.blue/);
+    // the stale cyan token literal must not appear as a static chrome colour in Shell —
+    // liveness only reaches the DOM through resolveLiveDot's returned `color`.
     expect(shellSrc).not.toMatch(/#5be0ff/);
     // reduced-motion collapses the breathing animation (ethos-compliant).
     expect(shellSrc).toMatch(/prefers-reduced-motion/);

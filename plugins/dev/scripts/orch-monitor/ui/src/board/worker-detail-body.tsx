@@ -21,6 +21,7 @@
 // connection). The raw SIGNAL panel stays last as the always-available escape hatch.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { C } from "./board-tokens";
 import { Link } from "@tanstack/react-router";
 import type { BoardWorker, BoardTicket } from "./types";
 import type { DetailSearch } from "./route-search";
@@ -37,21 +38,6 @@ import { ActivityTimeline } from "./activity-timeline";
 import { SubworkerTree } from "./subworker-tree";
 import { PhaseOutcome } from "./phase-outcome";
 import type { WorkerDetailModel } from "./use-worker-detail-model";
-
-// ── tokens (mirror Shell.tsx's inline-`C` palette) ──────────────────────────
-const C = {
-  s1: "#111318",
-  s2: "#161a21",
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  yellow: "#e0b341",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 // ── phase-type badge palette (NOT status colors — stage-family hues, §2) ─────
 // Color-coded by stage family using the chart-token hues so the badge answers

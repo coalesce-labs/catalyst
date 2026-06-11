@@ -104,7 +104,7 @@ export function CostBreakdownBars({
         <span>{labelHeader} · spend</span>
         <span>ranked ↓</span>
       </div>
-      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-0">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-2">
         {rows.map((row, i) => (
           <BreakdownRow
             key={row.label}

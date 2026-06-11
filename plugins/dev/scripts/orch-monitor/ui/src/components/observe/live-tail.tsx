@@ -236,7 +236,7 @@ export function LiveTail({ rows, workers, onOpenWorker, focusFilter }: LiveTailP
 
       {/* The tail itself — internally scrolled so the panel is height-capped and
           the hero stays the first paint (layout spec §5 #4). */}
-      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-0">
+      <ScrollArea className="min-h-0 flex-1 rounded-md border border-border bg-surface-2">
         {groups.length === 0 ? (
           <div className="px-3 py-6 text-center text-[11px] text-muted">
             no events match the current filter
