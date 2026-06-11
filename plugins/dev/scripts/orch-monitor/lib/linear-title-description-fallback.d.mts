@@ -1,6 +1,6 @@
 // Type declarations for linear-title-description-fallback.mjs — supplemental
-// {title, description, labels, relations} resolver for the ticket-detail page
-// (CTL-974 pattern, extended CTL-996).
+// {title, description, labels, relations, state, priority, project, estimate}
+// resolver for the ticket-detail page (CTL-974 pattern, extended CTL-996+CTL-1003).
 
 /** A single Linear label. */
 export interface LinearLabel {
@@ -8,16 +8,37 @@ export interface LinearLabel {
   color: string;
 }
 
-/** Relations grouped by direction and type. */
+/** Own-ticket state (name + workflow type). */
+export interface LinearStateRef {
+  name: string;
+  /** Linear workflow state type: "backlog"|"unstarted"|"started"|"completed"|"canceled" */
+  type: string;
+}
+
+/** A resolved relation-target issue (B3: enriched from bare string). */
+export interface RelationTarget {
+  /** Linear identifier, e.g. "CTL-997". */
+  identifier: string;
+  /** Issue title, or null when unavailable. */
+  title: string | null;
+  /** Issue state (name+type), or null when unavailable. */
+  state: LinearStateRef | null;
+  /** Issue priority (0–4, 0=none), or null when unavailable. */
+  priority: number | null;
+  /** Project name, or null when unavailable. */
+  project: string | null;
+}
+
+/** Relations grouped by direction and type. B3: arrays are RelationTarget[]. */
 export interface LinearRelations {
-  /** Identifiers of tickets this ticket is blocked by. */
-  blockedBy: string[];
-  /** Identifiers of tickets this ticket blocks. */
-  blocks: string[];
-  /** Identifiers of related tickets (deduped, both directions). */
-  related: string[];
-  /** Identifiers of tickets this ticket is a duplicate of. */
-  duplicateOf: string[];
+  /** Issues that block this ticket. */
+  blockedBy: RelationTarget[];
+  /** Issues this ticket blocks. */
+  blocks: RelationTarget[];
+  /** Related issues (deduped, both directions). */
+  related: RelationTarget[];
+  /** Issues this ticket is a duplicate of. */
+  duplicateOf: RelationTarget[];
 }
 
 /** Resolved supplemental fields for a single ticket. */
@@ -30,13 +51,21 @@ export interface TitleDescription {
   labels: LinearLabel[] | null;
   /** The ticket's relations (blockedBy/blocks/related/duplicateOf), or null on failure. */
   relations: LinearRelations | null;
+  /** Own-ticket state (name+type), or null when unavailable. */
+  state: LinearStateRef | null;
+  /** Own-ticket priority (0=none, 1=urgent, 2=high, 3=medium, 4=low), or null. */
+  priority: number | null;
+  /** Own-ticket project name, or null when unavailable. */
+  project: string | null;
+  /** Own-ticket estimate (story points), or null when unset. */
+  estimate: number | null;
 }
 
 /**
  * fillTitleDescriptionFallback — given an array of ticket IDs, return a map
- * { [id]: { title, description, labels, relations } } for those IDs.
+ * { [id]: TitleDescription } for those IDs.
  *
- * - Hits are served from the in-memory TTL cache (5 min).
+ * - Hits are served from the in-memory TTL cache (5 min default; 24h for completed/canceled).
  * - Remaining IDs are batched into one Linear GraphQL call per team-chunk.
  * - Always resolves; never rejects (fail-open → all null fields).
  */

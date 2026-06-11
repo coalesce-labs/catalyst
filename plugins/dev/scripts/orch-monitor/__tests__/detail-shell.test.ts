@@ -21,6 +21,8 @@ const routerSrc = read("app-router.tsx");
 const detailRouteSrc = read("board/detail-route.tsx");
 const keyboardHookSrc = read("hooks/use-keyboard-nav.ts");
 const chromeSrc = read("board/detail-chrome.ts");
+// CTL-1003 §B1: the ticket Property rows moved into the floating rail cards.
+const ticketRailSrc = read("board/ticket-rail.tsx");
 
 // ── Gherkin: the shell is the chrome both detail pages mount inside ─────────
 describe("Shell.tsx — the shared detail-page chrome, distinct from AppShell", () => {
@@ -140,29 +142,100 @@ describe("use-keyboard-nav.ts — extended in place, pre-existing bindings kept"
   });
 });
 
-// ── Gherkin: Properties rail never fabricates a value ───────────────────────
-describe("Shell.tsx — Properties rail dims unplumbed rows, never fabricates", () => {
-  // CTL-996: the T-shirt "Scope" row was REMOVED from the ticket rail (one
-  // complexity measure — the Fibonacci estimate — on this reading surface).
-  it("renders the shared cheap rows (Status/Phase/Priority/Estimate/Project/Repo/Team/Updated/PR)", () => {
-    for (const label of ["Status", "Phase", "Priority", "Estimate", "Project", "Repo", "Team", "Updated", "PR"]) {
+// ── Gherkin: Properties never fabricates a value ────────────────────────────
+describe("Properties — dims unplumbed rows, never fabricates", () => {
+  // CTL-1003 §B1: the ticket Properties moved into the floating rail card; the
+  // worker page keeps the flat Shell PropertiesRail. Priority/Estimate/Project
+  // rows are REMOVED from the ticket Properties card (priority+estimate live on
+  // the title row; Project gets its own card).
+  it("the ticket Properties card renders Status/Phase/Repo/Team/Updated/PR", () => {
+    for (const label of ["Status", "Phase", "Repo", "Team", "Updated", "PR"]) {
+      expect(ticketRailSrc).toContain(`label: "${label}"`);
+    }
+  });
+
+  it("the ticket Properties card no longer carries Priority/Estimate/Project/Scope rows", () => {
+    // priority + estimate live on the title row; project is its own card.
+    expect(ticketRailSrc).not.toContain(`label: "Priority"`);
+    expect(ticketRailSrc).not.toContain(`label: "Estimate"`);
+    expect(ticketRailSrc).not.toContain(`label: "Project"`);
+    expect(ticketRailSrc).not.toContain(`label: "Scope"`);
+  });
+
+  it("labels the model row honestly as the CURRENT phase's signal only", () => {
+    expect(ticketRailSrc).toMatch(/Model \(current phase\)/);
+  });
+
+  it("the WORKER rail still uses the flat Shell PropertiesRail rows", () => {
+    for (const label of ["Status", "Phase", "Repo", "Team", "Runtime", "Cost"]) {
       expect(detailRouteSrc).toContain(`label: "${label}"`);
     }
   });
 
-  it("no longer renders the T-shirt Scope row on the ticket rail (CTL-996)", () => {
-    expect(detailRouteSrc).not.toContain(`label: "Scope"`);
-  });
-
-  it("labels the model row honestly as the CURRENT phase's signal only", () => {
-    expect(detailRouteSrc).toMatch(/Model \(current phase\)/);
-  });
-
-  it("an unplumbed (undefined) row renders dimmed, never with an invented value", () => {
+  it("an unplumbed (undefined) Shell row renders dimmed, never with an invented value", () => {
     // undefined → dimmed; the rendered value falls to an em-dash, never fabricated.
     expect(shellSrc).toMatch(/const unplumbed = r\.value === undefined/);
     expect(shellSrc).toMatch(/data-unplumbed=\{unplumbed\}/);
     expect(shellSrc).toMatch(/r\.value == null \? "—"/);
+  });
+});
+
+// ── CTL-1003 §B1: the ticket route uses the floating rail-card column ─────────
+describe("ticket route renders the floating rail cards, worker keeps the flat rail (CTL-1003)", () => {
+  it("the ticket route passes a `rail` (TicketRailCards), not `properties`/`railExtra`", () => {
+    const ticketBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function TicketDetailRoute"),
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    expect(ticketBlock).toMatch(/rail=\{/);
+    expect(ticketBlock).toContain("TicketRailCards");
+  });
+
+  it("the worker route keeps `properties` + `railExtra` (flat rail untouched)", () => {
+    const workerBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    expect(workerBlock).toMatch(/properties=\{workerRows/);
+    expect(workerBlock).toMatch(/railExtra=\{/);
+  });
+
+  it("Shell renders the page-supplied `rail` in place of PropertiesRail when set", () => {
+    expect(shellSrc).toMatch(/rail != null \? rail : <PropertiesRail/);
+  });
+});
+
+// ── CTL-1003 §A1: chrome="bare" suppresses the second header + LiveDotTitle ──
+describe("Shell.tsx — chrome='bare' drops the in-page header + live-dot title (CTL-1003)", () => {
+  it("gates the in-page <header data-shell-header> on chrome === 'full'", () => {
+    // The second header bar renders ONLY in full chrome; bare mode portals the
+    // chevrons into the app header instead.
+    expect(shellSrc).toMatch(/chrome === "full" \? \(/);
+    expect(shellSrc).toContain("data-shell-header");
+    expect(shellSrc).toContain("HeaderActions");
+    expect(shellSrc).toContain("PagerChevrons");
+  });
+
+  it("renders LiveDotTitle only in full chrome (bare drops the floating mono key + dot)", () => {
+    expect(shellSrc).toMatch(/chrome === "full" && <LiveDotTitle/);
+  });
+
+  it("the ticket route opts into bare chrome; the worker route stays full (default)", () => {
+    // The ticket route passes chrome="bare"; the worker route never sets chrome
+    // (defaults to "full"), so the worker page keeps its in-page header + LiveDotTitle.
+    const ticketBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function TicketDetailRoute"),
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    const workerBlock = detailRouteSrc.slice(
+      detailRouteSrc.indexOf("export function WorkerDetailRoute"),
+    );
+    expect(ticketBlock).toMatch(/chrome="bare"/);
+    expect(workerBlock).not.toMatch(/chrome=/);
+  });
+
+  it("the PagerChevrons tooltips advertise the K (prev) / J (next) hotkeys (D1)", () => {
+    expect(shellSrc).toContain("Previous ticket — K");
+    expect(shellSrc).toContain("Next ticket — J");
   });
 });
 

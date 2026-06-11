@@ -34,11 +34,6 @@ export type DetailLens = (typeof LENS_VALUES)[number];
 export const TAB_VALUES = ["lifecycle", "cost", "activity"] as const;
 export type DetailTab = (typeof TAB_VALUES)[number];
 
-/** Which Q3 "where it stands" pipeline-indicator variant renders. Absent on the
- *  URL = the `strip` default (recommended). CTL-996. */
-export const PIPELINE_VALUES = ["strip", "chip", "dots"] as const;
-export type DetailPipeline = (typeof PIPELINE_VALUES)[number];
-
 /**
  * The typed search params shared by `/ticket/$id` and `/worker/$id`.
  * Every field is optional: a degraded deep-link (a pasted bare URL) carries
@@ -53,8 +48,6 @@ export interface DetailSearch {
   cursor?: number;
   /** CTL-996: the active ticket-detail tab. Absent = the `spec` default. */
   tab?: DetailTab;
-  /** CTL-996: the Q3 pipeline-indicator variant. Absent = the `strip` default. */
-  pipeline?: DetailPipeline;
 }
 
 function isDetailFrom(value: unknown): value is DetailFrom {
@@ -67,10 +60,6 @@ function isDetailLens(value: unknown): value is DetailLens {
 
 function isDetailTab(value: unknown): value is DetailTab {
   return typeof value === "string" && (TAB_VALUES as readonly string[]).includes(value);
-}
-
-function isDetailPipeline(value: unknown): value is DetailPipeline {
-  return typeof value === "string" && (PIPELINE_VALUES as readonly string[]).includes(value);
 }
 
 /**
@@ -113,9 +102,10 @@ export function validateDetailSearch(raw: unknown): DetailSearch {
   if (typeof record.col === "string" && record.col !== "") out.col = record.col;
   const cursor = coerceCursor(record.cursor);
   if (cursor !== undefined) out.cursor = cursor;
-  // CTL-996: invalid tab/pipeline values drop to undefined (→ the `spec`/`strip`
-  // defaults), keeping validation total + non-throwing.
+  // CTL-996: an invalid tab value drops to undefined (→ the `spec` default),
+  // keeping validation total + non-throwing. CTL-1003: the `pipeline` param +
+  // its strip/chip/dots variants are retired (the status-row phase chip is the
+  // sole "where it stands" affordance; the full stepper lives in the Lifecycle tab).
   if (isDetailTab(record.tab)) out.tab = record.tab;
-  if (isDetailPipeline(record.pipeline)) out.pipeline = record.pipeline;
   return out;
 }

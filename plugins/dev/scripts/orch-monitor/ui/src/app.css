@@ -1,5 +1,10 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* CTL-1003 §A2: Tailwind typography for the Linear-style prose reading column
+   (.ticket-desc carries `prose prose-invert`; .ticket-desc unlayered rules below
+   map the plugin's --tw-prose-invert-* vars to the app tokens + keep the existing
+   code-chip/pre/hljs/ticket-ref overrides winning). */
+@plugin "@tailwindcss/typography";
 
 @theme inline {
   /* CTL-930 Phase 4: raised dark ramp, muted-pop accents (board-tokens.ts is the source). */
@@ -438,6 +443,19 @@ body {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
+ * .no-scrollbar — hide the scrollbar while KEEPING scroll (CTL-1003 §A2). The
+ * reading column + the floating rail use this so the Linear-calm surface has no
+ * visible scrollbar chrome (scrolling still works via wheel/trackpad/keys).
+ * ────────────────────────────────────────────────────────────────────────── */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
  * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
  * client pass). Composes ON TOP of .md-content (reuses its table rules; the
  * description div carries BOTH classes) and overrides the rest to match Linear:
@@ -450,8 +468,26 @@ body {
 .ticket-desc {
   max-width: 680px;
   color: var(--color-fg);
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.6;
+  /* CTL-1003 §A2: map the @tailwindcss/typography prose-invert vars to the app
+     tokens so `prose prose-invert` inherits the Linear-calm palette. The
+     unlayered .ticket-desc rules below still beat the layered plugin utilities,
+     so the existing code-chip / pre / hljs / ticket-ref overrides keep winning. */
+  --tw-prose-invert-body: var(--color-fg);
+  --tw-prose-invert-headings: var(--color-fg);
+  --tw-prose-invert-bold: var(--color-fg);
+  --tw-prose-invert-code: var(--color-fg);
+  --tw-prose-invert-links: var(--color-accent);
+  --tw-prose-invert-quotes: var(--color-muted);
+  --tw-prose-invert-counters: var(--color-muted);
+  --tw-prose-invert-bullets: var(--color-muted);
+  --tw-prose-invert-quote-borders: var(--color-border);
+  --tw-prose-invert-hr: var(--color-border);
+  --tw-prose-invert-th-borders: var(--color-border);
+  --tw-prose-invert-td-borders: var(--color-border);
+  --tw-prose-invert-pre-bg: var(--color-surface-1);
+  --tw-prose-invert-pre-code: var(--color-fg);
 }
 .ticket-desc p {
   margin: 0.7em 0;
@@ -459,7 +495,7 @@ body {
 /* section headings: semibold, NO underline (Linear), generous top rhythm */
 .ticket-desc h1,
 .ticket-desc h2 {
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 600;
   color: var(--color-fg);
   margin: 1.4em 0 0.5em;

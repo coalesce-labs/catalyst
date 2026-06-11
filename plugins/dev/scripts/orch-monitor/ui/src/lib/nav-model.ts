@@ -150,6 +150,28 @@ export function breadcrumbFor(surface: Surface, scope: string): string[] {
   return [scopeLabel, surfaceLabel];
 }
 
+// ── detailCrumbFor ────────────────────────────────────────────────────────────
+
+/**
+ * The final detail crumb for a pathname: the decoded ticket/worker id when the
+ * pathname is a detail route (`/ticket/<id>` or `/worker/<id>`), else null.
+ * CTL-1003 §A1: the single header appends this to the surface trail so a ticket
+ * page reads "Overall › Tickets › CTL-729" with the key as the last crumb.
+ *
+ * Pure + total: never throws — a malformed/over-segmented path (e.g.
+ * `/ticket/CTL-1/extra`) or a non-detail path (`/board`) returns null, and a
+ * malformed percent-encoding falls back to the raw id rather than throwing.
+ */
+export function detailCrumbFor(pathname: string): string | null {
+  const m = /^\/(?:ticket|worker)\/([^/]+)$/.exec(pathname);
+  if (!m) return null;
+  try {
+    return decodeURIComponent(m[1]);
+  } catch {
+    return m[1];
+  }
+}
+
 // ── paletteEntries ────────────────────────────────────────────────────────────
 
 /** One group of entries for the ⌘K CommandDialog — the group heading + its items. */

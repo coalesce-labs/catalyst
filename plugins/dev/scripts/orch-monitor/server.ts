@@ -1798,7 +1798,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
             return new Response("Bad Request", { status: 400 });
           }
           const map = await fillTitleDescriptionFallback([ticket]);
-          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null };
+          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null, state: null, priority: null, project: null, estimate: null };
           const available =
             entry.title !== null || entry.description !== null;
           return Response.json({
@@ -1807,6 +1807,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
             description: entry.description,
             labels: entry.labels ?? null,
             relations: entry.relations ?? null,
+            state: entry.state ?? null,
+            priority: entry.priority ?? null,
+            project: entry.project ?? null,
+            estimate: entry.estimate ?? null,
             source: available ? "linear-live" : "unavailable",
           });
         }
