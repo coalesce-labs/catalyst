@@ -981,6 +981,230 @@ if [[ "${1:-}" == "agents" ]]; then echo "[]"; fi
 EOF
 chmod +x "$MOCKBIN/claude"
 
+# --- Phase 8: guardrails (T50-T59) ---
+
+# Install pmset mock
+cat > "$MOCKBIN/pmset" <<'EOF'
+#!/usr/bin/env bash
+printf 'Now drawing from '\''%s'\'' (Mains)\n' "${PMSET_POWER:-AC Power}"
+EOF
+chmod +x "$MOCKBIN/pmset"
+
+# Install/reset git mock for Phase 8 — handles SAFE dirs + push subcommand
+export GIT_LOG="${SCRATCH}/git.log"
+rm -f "$GIT_LOG"
+
+cat > "$MOCKBIN/git" <<'GITEOF8'
+#!/usr/bin/env bash
+echo "$@" >> "${GIT_LOG}"
+subcmd=""
+cwd_path=""
+i=1
+while [[ $i -le $# ]]; do
+  arg="${!i}"
+  if [[ "$arg" == "-C" ]]; then
+    i=$((i+1))
+    cwd_path="${!i}"
+  elif [[ "$arg" != -* || "$arg" == "--"* ]]; then
+    subcmd="$arg"
+    break
+  fi
+  i=$((i+1))
+done
+
+case "$subcmd" in
+  status)
+    # SALVAGE_DIRTY returns dirty files; others are clean
+    if [[ "${cwd_path:-}" == *"SALVAGE_DIRTY"* ]]; then
+      echo "M some/file.txt"
+    fi
+    ;;
+  worktree)
+    i=$((i+1))
+    subcmd2="${!i}"
+    if [[ "$subcmd2" == "list" ]]; then
+      echo "worktree ${SCRATCH}/PRIMARY"
+      echo "HEAD abc1234"
+      echo "branch refs/heads/main"
+      echo ""
+    fi
+    ;;
+  push)
+    # Log the push, exit with MOCK_PUSH_RC (default 0)
+    exit "${MOCK_PUSH_RC:-0}"
+    ;;
+  merge-base)
+    # SALVAGE_UNPUSHED dirs fail ancestry check
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
+      exit 1
+    fi
+    exit 0
+    ;;
+  for-each-ref)
+    echo "refs/remotes/origin/main"
+    ;;
+  rev-list)
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
+      echo "3"
+    else
+      echo "0"
+    fi
+    ;;
+  branch)
+    if [[ "${cwd_path:-}" == *"SALVAGE_UNPUSHED"* ]]; then
+      echo ""
+    else
+      echo "  origin/main"
+    fi
+    ;;
+  symbolic-ref)
+    echo "origin/main"
+    ;;
+  rev-parse)
+    echo "$(basename "${cwd_path:-unknown}")"
+    ;;
+esac
+exit 0
+GITEOF8
+chmod +x "$MOCKBIN/git"
+
+# Create a SAFE fixture root + helper function for Phase 8
+P8_WT_ROOT="${SCRATCH}/p8-wt"
+mkdir -p "$P8_WT_ROOT"
+
+make_safe_wt() {
+  local name="$1"
+  mkdir -p "${P8_WT_ROOT}/${name}/.git"
+  touch -t 202501010000 "${P8_WT_ROOT}/${name}" "${P8_WT_ROOT}/${name}/.git" 2>/dev/null || true
+}
+
+make_unpushed_wt() {
+  local name="$1"
+  mkdir -p "${P8_WT_ROOT}/${name}/.git"
+  touch -t 202501010000 "${P8_WT_ROOT}/${name}" "${P8_WT_ROOT}/${name}/.git" 2>/dev/null || true
+}
+
+# Common sweep invocation for Phase 8 (SAFE fixture root, idle hours high, no global wt)
+P8_SWEEP="SWEEP_WT_ROOT='${P8_WT_ROOT}' SWEEP_PROJECT_CLAUDE_WT=/nonexistent SWEEP_INCLUDE_GLOBAL_CLAUDE_WT=0 SWEEP_IDLE_HOURS=9999"
+
+# ----- T50: battery power + 1 SAFE tree -> no git worktree remove, log has "deferring" -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T50
+rm -f "$GIT_LOG"
+
+run "T50: battery -> deferring worktree sweep logged" \
+  bash -c "PMSET_POWER='Battery Power' eval \"${P8_SWEEP}\" bash '${SWEEP}' 2>&1 | grep -qi 'deferring worktree sweep'"
+
+run "T50b: battery -> no git worktree remove in GIT_LOG" \
+  bash -c "PMSET_POWER='Battery Power' eval \"${P8_SWEEP}\" bash '${SWEEP}' && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+
+# ----- T51: battery power -> trunk-cache GC still runs -----
+T51_CACHE="${SCRATCH}/p8-trunkcache"
+mkdir -p "${T51_CACHE}/old-cache"
+touch -t 202501010000 "${T51_CACHE}/old-cache" 2>/dev/null || true
+run "T51: battery -> trunk-cache GC still runs (old dir removed)" \
+  bash -c "PMSET_POWER='Battery Power' SWEEP_TRUNK_CACHE_DIR='${T51_CACHE}' eval \"${P8_SWEEP}\" bash '${SWEEP}' && ! test -d '${T51_CACHE}/old-cache'"
+
+# ----- T52: AC power + 1 SAFE tree -> git worktree remove called -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T52
+rm -f "$GIT_LOG"
+run "T52: AC power -> worktree remove called" \
+  bash -c "PMSET_POWER='AC Power' eval \"${P8_SWEEP}\" bash '${SWEEP}' && grep -q 'worktree remove' '${GIT_LOG}'"
+
+# ----- T53: no pmset + 1 SAFE tree -> treated as AC, remove called -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T53
+rm -f "$GIT_LOG"
+rm -f "$MOCKBIN/pmset"
+run "T53: no pmset -> treated as AC, remove called" \
+  bash -c "eval \"${P8_SWEEP}\" bash '${SWEEP}' && grep -q 'worktree remove' '${GIT_LOG}'"
+# Restore pmset mock
+cat > "$MOCKBIN/pmset" <<'EOF'
+#!/usr/bin/env bash
+printf 'Now drawing from '\''%s'\'' (Mains)\n' "${PMSET_POWER:-AC Power}"
+EOF
+chmod +x "$MOCKBIN/pmset"
+
+# ----- T54a: SWEEP_FORCE_POWER=ac + battery pmset -> remove called -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T54a
+rm -f "$GIT_LOG"
+run "T54a: SWEEP_FORCE_POWER=ac overrides battery pmset -> remove called" \
+  bash -c "PMSET_POWER='Battery Power' SWEEP_FORCE_POWER=ac eval \"${P8_SWEEP}\" bash '${SWEEP}' && grep -q 'worktree remove' '${GIT_LOG}'"
+
+# ----- T54b: SWEEP_FORCE_POWER=battery + AC pmset -> deferring -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T54b
+rm -f "$GIT_LOG"
+run "T54b: SWEEP_FORCE_POWER=battery overrides AC pmset -> deferring" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_FORCE_POWER=battery eval \"${P8_SWEEP}\" bash '${SWEEP}' 2>&1 | grep -qi 'deferring'"
+
+# ----- T55: SWEEP_MAX_REMOVALS=2 + 3 SAFE trees -> exactly 2 removes, log has "cap reached" -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T55a
+make_safe_wt SAFE-T55b
+make_safe_wt SAFE-T55c
+rm -f "$GIT_LOG"
+run "T55: cap=2 + 3 SAFE -> cap reached logged" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_MAX_REMOVALS=2 eval \"${P8_SWEEP}\" bash '${SWEEP}' 2>&1 | grep -qi 'cap reached'"
+
+rm -f "$GIT_LOG"
+run "T55b: cap=2 + 3 SAFE -> exactly 2 worktree removes in GIT_LOG" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_MAX_REMOVALS=2 eval \"${P8_SWEEP}\" bash '${SWEEP}' && count=\$(grep -c 'worktree remove' '${GIT_LOG}' 2>/dev/null || echo 0); [[ \"\$count\" -eq 2 ]]"
+
+# ----- T56: SWEEP_MAX_REMOVALS=2 + 1 SALVAGE_DIRTY + 2 SAFE -> both SAFE removed (skip doesn't count) -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SALVAGE_DIRTY-T56
+make_safe_wt SAFE-T56a
+make_safe_wt SAFE-T56b
+rm -f "$GIT_LOG"
+run "T56: cap=2 + 1 SALVAGE_DIRTY + 2 SAFE -> both SAFE removed (dirty skip doesn't count against cap)" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_MAX_REMOVALS=2 eval \"${P8_SWEEP}\" bash '${SWEEP}' && count=\$(grep -c 'worktree remove' '${GIT_LOG}' 2>/dev/null || echo 0); [[ \"\$count\" -eq 2 ]]"
+
+# ----- T57: SWEEP_MAX_REMOVALS unset + 3 SAFE -> all 3 removed, no "cap reached" -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_safe_wt SAFE-T57a
+make_safe_wt SAFE-T57b
+make_safe_wt SAFE-T57c
+rm -f "$GIT_LOG"
+run "T57: no explicit cap + 3 SAFE -> all 3 removed" \
+  bash -c "PMSET_POWER='AC Power' eval \"${P8_SWEEP}\" bash '${SWEEP}' && count=\$(grep -c 'worktree remove' '${GIT_LOG}' 2>/dev/null || echo 0); [[ \"\$count\" -eq 3 ]]"
+
+run "T57b: no explicit cap -> no 'cap reached' in log" \
+  bash -c "PMSET_POWER='AC Power' eval \"${P8_SWEEP}\" bash '${SWEEP}' 2>&1 | { ! grep -qi 'cap reached'; }"
+
+# ----- T58: SWEEP_SALVAGE_PUSH=1 + 1 SALVAGE_UNPUSHED -> push in GIT_LOG with salvage/ prefix, THEN worktree remove -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_unpushed_wt SALVAGE_UNPUSHED-T58
+rm -f "$GIT_LOG"
+run "T58: SWEEP_SALVAGE_PUSH=1 + SALVAGE_UNPUSHED -> push salvage/ branch then remove" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_SALVAGE_PUSH=1 eval \"${P8_SWEEP}\" bash '${SWEEP}' && grep -q 'push' '${GIT_LOG}' && grep -q 'worktree remove' '${GIT_LOG}'"
+
+run "T58b: push appears before worktree remove in GIT_LOG" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_SALVAGE_PUSH=1 eval \"${P8_SWEEP}\" bash '${SWEEP}' && push_line=\$(grep -n 'push' '${GIT_LOG}' | head -1 | cut -d: -f1); remove_line=\$(grep -n 'worktree remove' '${GIT_LOG}' | head -1 | cut -d: -f1); [[ -n \"\$push_line\" && -n \"\$remove_line\" && \"\$push_line\" -lt \"\$remove_line\" ]]"
+
+# ----- T59a: SWEEP_SALVAGE_PUSH=0 + 1 SALVAGE_UNPUSHED -> no push, no remove -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_unpushed_wt SALVAGE_UNPUSHED-T59a
+rm -f "$GIT_LOG"
+run "T59a: SWEEP_SALVAGE_PUSH=0 + SALVAGE_UNPUSHED -> no push, no remove" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_SALVAGE_PUSH=0 eval \"${P8_SWEEP}\" bash '${SWEEP}' && ! grep -q 'push' '${GIT_LOG}' 2>/dev/null && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+
+# ----- T59b: SWEEP_SALVAGE_PUSH=1 + push fails -> no remove, log "push failed" or "keeping" -----
+rm -rf "$P8_WT_ROOT" && mkdir -p "$P8_WT_ROOT"
+make_unpushed_wt SALVAGE_UNPUSHED-T59b
+rm -f "$GIT_LOG"
+run "T59b: push fails -> no worktree remove, log push failed/keeping" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_SALVAGE_PUSH=1 MOCK_PUSH_RC=1 eval \"${P8_SWEEP}\" bash '${SWEEP}' 2>&1 | grep -qiE 'push failed|keeping'"
+
+run "T59b-noremove: push fails -> no worktree remove in GIT_LOG" \
+  bash -c "PMSET_POWER='AC Power' SWEEP_SALVAGE_PUSH=1 MOCK_PUSH_RC=1 eval \"${P8_SWEEP}\" bash '${SWEEP}' && ! grep -q 'worktree remove' '${GIT_LOG}' 2>/dev/null; true"
+
+# Restore git mock removal for cleanliness
+rm -f "$MOCKBIN/git"
+rm -f "$MOCKBIN/pmset"
+
 # ─── results ────────────────────────────────────────────────────────────────
 
 echo ""
