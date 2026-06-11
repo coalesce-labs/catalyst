@@ -76,6 +76,12 @@
       "labels": [
         "auto-submitted"
       ]
+    },
+    "sweep": {
+      "idleHours": 48,
+      "intervalHours": 1,
+      "salvagePush": false,
+      "maxRemovalsPerRun": 10
     }
   }
 }
