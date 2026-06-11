@@ -331,7 +331,7 @@ export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
       minZoom={0.2}
       maxZoom={2}
       colorMode="dark"
-      style={{ background: C.s0 }}
+      style={{ background: C.s1 }}
       proOptions={{ hideAttribution: false }}
     >
       <Background color={C.borderSubtle} variant={BackgroundVariant.Dots} gap={20} size={1} />

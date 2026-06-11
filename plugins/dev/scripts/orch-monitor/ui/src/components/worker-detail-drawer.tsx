@@ -457,7 +457,7 @@ export function WorkerDetailDrawer({
     <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
       <SheetContent
         side="right"
-        className="flex w-full flex-col gap-0 border-l border-border bg-surface-1 p-0 sm:max-w-[540px]"
+        className="flex w-full flex-col gap-0 border-l border-border bg-surface-2 p-0 sm:max-w-[540px]"
       >
         {/* Header */}
         <SheetHeader className="flex flex-row items-center gap-2 space-y-0 border-b border-border px-4 py-3 pr-12">

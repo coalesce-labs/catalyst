@@ -23,6 +23,10 @@ import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
+// CTL-1015: the ONE canonical dispatch-order comparator (mirrors
+// execution-core/scheduler-rank.mjs compareTickets, parity-tested). The queue's
+// global rank is exactly the order the scheduler dispatches in.
+import { compareDispatchOrder } from "./dispatch-rank.mjs";
 
 const execFileP = promisify(execFile);
 
@@ -768,15 +772,13 @@ async function catalystSessionByCcUuid() {
   return map;
 }
 
-// ── ranked eligible queue (mirrors scheduler-rank.mjs compareTickets) ───────
-const PRIORITY_RANK = (p) => (p && p >= 1 && p <= 4 ? p : 5); // 1=urgent..4=low, 0/none→5
-function compareQueued(a, b) {
-  const dp = PRIORITY_RANK(a.priority) - PRIORITY_RANK(b.priority);
-  if (dp !== 0) return dp;                       // priority asc (urgent first)
-  const ca = a.createdAt || "", cb = b.createdAt || "";
-  if (ca !== cb) return ca < cb ? -1 : 1;        // FIFO
-  return String(a.id).localeCompare(String(b.id));
-}
+// ── ranked eligible queue ───────────────────────────────────────────────────
+// CTL-1015: the queue is sorted by the shared compareDispatchOrder (lib/dispatch-
+// rank.mjs), the ONE canonical dispatch-order comparator that mirrors
+// execution-core/scheduler-rank.mjs compareTickets. Queue items carry no `stage`,
+// so the stage axis ties at -1 for every pair — behavior-identical to the prior
+// local compareQueued (priority → createdAt → id), and comparator-identical to
+// the scheduler forever.
 
 async function loadEligible() {
   const out = [];
@@ -1085,7 +1087,7 @@ export async function assembleBoard() {
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
   const queue = await Promise.all(notInFlight
-    .sort(compareQueued)
+    .sort(compareDispatchOrder)
     .map(async (e, i) => {
       const { triage } = await readTicketArtifacts(e.id);
       return {

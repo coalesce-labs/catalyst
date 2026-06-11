@@ -41,7 +41,7 @@ export function DepGraphRoute() {
   return (
     <div
       style={{
-        background: C.s0,
+        background: C.s1, // CTL-1013: content canvas (s1), not chrome (s0)
         color: C.fg,
         height: "100vh",
         display: "flex",

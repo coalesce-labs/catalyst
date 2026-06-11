@@ -25,7 +25,7 @@ const root = createRoot(document.getElementById("root")!);
 if (isDevSandbox) {
   root.render(
     <StrictMode>
-      <div className="h-screen overflow-y-auto bg-surface-0 text-fg">
+      <div className="h-screen overflow-y-auto bg-background text-fg">
         <Suspense fallback={null}>
           <Sandbox />
         </Suspense>
