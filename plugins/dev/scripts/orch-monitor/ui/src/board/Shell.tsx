@@ -318,16 +318,20 @@ function LiveDotTitle({ id, title, live }: { id: string; title: string | null; l
 // ── Properties rail ─────────────────────────────────────────────────────────
 function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNode }) {
   return (
+    // CTL-1048: the rail no longer owns its own scroller — it is a plain flex
+    // column inside the Shell's single scrolling body row, so a wheel gesture over
+    // it scrolls the whole page (it "chains" by construction; a short rail rides
+    // along, a tall rail extends the shared scrollHeight). No `overflowY` / no
+    // `cat-overlay-scroll` here, or it would re-split the scroll context and
+    // re-create the dead zone CTL-1048 fixes.
     <aside
       data-shell-rail
-      className="cat-overlay-scroll"
       style={{
         width: 280,
         flex: "0 0 280px",
         background: C.s1,
         borderLeft: `1px solid ${C.border}`,
         padding: "12px 14px",
-        overflowY: "auto",
       }}
     >
       {rows.map((r) => {
@@ -568,19 +572,23 @@ export function Shell({
   const footerContext = breadcrumbText(breadcrumbCtx);
 
   return (
-    // CTL-949 / CTL-989: `minHeight: "100vh"` is the viewport-fill safety net for
-    // deep-links (where the parent height chain may not be 100%). `height: "100%"`
-    // fills the container when the chain IS wired — the detail Shell now renders
-    // inside AppShell's <Outlet/> (a flex-col content slot), so the height chain is
-    // the AppShell inset. The two rules together mean the shell always fills at
-    // least the full viewport without capping shorter-than-viewport content.
+    // CTL-989: the detail Shell renders inside AppShell's <Outlet/> (a flex-col
+    // content slot, `flex min-h-0 flex-1` → its height IS the inset content area).
+    // CTL-1048: this outer div fills that slot EXACTLY (`height:100%`, `minHeight:0`
+    // so the flex child can shrink) and the SCROLL lives one level down on the body
+    // row — NOT here. The old `minHeight:"100vh"` + `overflow:"hidden"` made the
+    // shell taller than its clipped slot, so its only inner scroller was the narrow
+    // prose column; wheel input anywhere ELSE (rail, gutters, header padding) hit
+    // this overflow-hidden box with no scrollable ancestor and went dead. Removing
+    // both, and moving overflow to the full-width body row below, makes the entire
+    // detail viewport (prose + rail) ONE scroll context with no dead zones.
     <div
       data-detail-shell={kind}
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        minHeight: "100vh",
+        minHeight: 0,
         background: C.s1,
         color: C.fg,
         overflow: "hidden",
@@ -622,12 +630,24 @@ export function Shell({
         )
       )}
 
-      {/* Body row: <DetailBody> slot + Properties rail */}
-      <div style={{ display: "flex", flex: "1 1 auto", minHeight: 0 }}>
+      {/* Body row: <DetailBody> slot + Properties rail.
+          CTL-1048: THIS row is the single scroll context for the whole detail page.
+          It spans the full width (prose column + rail), so a wheel/trackpad gesture
+          anywhere over the page — prose, rail, or the gutter between them — scrolls
+          the same element. The prose column and the rail are plain (non-scrolling)
+          flex children inside it; neither owns its own `overflow` anymore, so there
+          is no dead zone and no overscroll-behavior trap (a short rail simply rides
+          along with the body). `min-h-0` lets it shrink below content height so the
+          overflow actually engages; `cat-overlay-scroll` keeps the CTL-1036 overlay
+          scrollbar styling on the new scroller. */}
+      <div
+        data-shell-scroll
+        className="cat-overlay-scroll"
+        style={{ display: "flex", flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
+      >
         <div
           data-shell-body
-          className="cat-overlay-scroll"
-          style={{ flex: "1 1 auto", minWidth: 0, overflowY: "auto", padding: "14px 16px" }}
+          style={{ flex: "1 1 auto", minWidth: 0, padding: "14px 16px" }}
         >
           {/* CTL-1003 §A1: in bare mode the floating mono-key + live dot above the
               title is suppressed (the page <h1> + status row own the title). */}
