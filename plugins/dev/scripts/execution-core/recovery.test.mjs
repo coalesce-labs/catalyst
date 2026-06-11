@@ -31,6 +31,7 @@ import {
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
+  defaultAppendHeldStoppedEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -2856,6 +2857,40 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.reason).toBe("stalled-no-recovery");
     expect(env.body.payload.stalled_phases).toEqual(["implement", "verify"]);
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-od");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent writes a phase.<phase>.held-stopped.<ticket> envelope", () => {
+    // Exercises the REAL emitter (not the scheduler's stub seam): guards the
+    // buildEventEnvelope output — event.name convention, action, and the
+    // bg_job_id payload the revive --resume path + HUD/audit consumers read.
+    const ok = defaultAppendHeldStoppedEvent({
+      orchId: "orch-hs",
+      ticket: "CTL-HS-1",
+      phase: "implement",
+      bgJobId: "deadbeef",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.implement.held-stopped.CTL-HS-1");
+    expect(env.attributes["event.action"]).toBe("held-stopped");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("held-stopped");
+    expect(env.body.payload.bg_job_id).toBe("deadbeef");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-hs");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent is fail-open — returns falsy, never throws, on an unwriteable log dir", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-hs");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendHeldStoppedEvent({
+        orchId: "orch-hs",
+        ticket: "CTL-HS-FAIL",
+        phase: "implement",
+        bgJobId: "deadbeef",
+      }),
+    ).toBe(false);
   });
 
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {

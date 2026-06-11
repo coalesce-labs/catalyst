@@ -5499,7 +5499,38 @@ describe("held-worker stop sweep (CTL-768)", () => {
       dispatch: (d, t) => { dispatched.push(t); return { code: 0, stdout: "", stderr: "" }; },
       now: () => 1_000,
     });
-    expect(dispatched).not.toContain("CTL-2");  // freeSlots = max(0,1-1)-1 = 0 → no new dispatch
+    // freeSlots = computeFreeSlots(1, liveCount=1) = 0 → no new dispatch. The
+    // held worker is still in liveCount this tick (claude stop doesn't deregister
+    // same-tick), so computeFreeSlots alone already withholds the slot. (CTL-768
+    // remediation removed the redundant `- heldStopCount` term — see the
+    // maxParallel=2 regression below for why the term over-suppressed.)
+    expect(dispatched).not.toContain("CTL-2");
+  });
+
+  test("CTL-768 freeSlots regression: at maxParallel=2 a genuinely-free slot is dispatched the same tick a held-stop fires (no double-suppression)", async () => {
+    // One held idle needs-input worker (CTL-1, still in liveCount=1) + one
+    // genuinely-empty slot + one queued ticket (CTL-2). The corrected accounting
+    // is freeSlots = computeFreeSlots(2, liveCount=1) = 1: computeFreeSlots
+    // already withholds the held worker's slot (it's still in liveCount this
+    // tick), so CTL-2 MUST be dispatched into the second, genuinely-free slot.
+    // The pre-remediation `- heldStopCount` term gave max(0, (2-1) - 1) = 0 and
+    // wrongly suppressed this dispatch — this test fails on that old code.
+    writeNeedsInputSignal("CTL-1", "implement", { bg_job_id: "held1234" });
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeEligibleProjection("CTL", {
+      tickets: [{ identifier: "CTL-2", priority: 1, createdAt: "2026-05-01T00:00:00Z" }],
+    });
+    const dispatched = [];
+    schedulerTick(orchDir, {
+      liveBackgroundCount: () => 1, maxParallel: 2,        // liveCount=1 (held worker still counted)
+      livenessForHeld: () => "idle", killBgJob: () => {},
+      reclaimDeadWork: noopReclaim,
+      dispatch: (args) => { dispatched.push(args.ticket); return { code: 0, stdout: "", stderr: "" }; },
+      now: () => 1_000,
+    });
+    expect(dispatched).toContain("CTL-2");                // the free slot IS used
+    // No over-spawn: held worker still in liveCount (1) + 1 new dispatch = 2 = maxParallel.
+    expect(dispatched).toHaveLength(1);
   });
 
   test("needs-input + stoppedForHold signal is NOT revived (reclaimDeadWork returns noop)", () => {

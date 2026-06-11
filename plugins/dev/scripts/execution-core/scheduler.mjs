@@ -2984,8 +2984,15 @@ export function schedulerTick(
       if (inHoldStopCooldown(orchDir, sig.ticket, sig.phase, nowMs)) continue;
       if (livenessForHeld(bgJobId) !== "idle") continue;        // mid-turn / absent guard
 
-      killBgJob({ bgJobId });
-
+      // CTL-768 (verify remediation): persist the durable stoppedForHold marker
+      // BEFORE the irreversible kill so the sweep is crash-safe. If the marker
+      // write throws, we `continue` while the worker is STILL alive+idle (it is
+      // simply retried next tick) — rather than killing first and stranding a
+      // markerless needs-input worker that handleCommentWake would later revive
+      // COLD (no --resume), silently defeating the CTL-768 warm-revive contract
+      // and losing the paused turn context. A persisted marker GUARANTEES the
+      // --resume path. Marker-on-still-running is safe: status stays needs-input
+      // so no other sweep acts on it, and killBgJob is idempotent.
       const signalPath = join(orchDir, "workers", sig.ticket, `phase-${sig.phase}.json`);
       try {
         const updated = {
@@ -3001,8 +3008,10 @@ export function schedulerTick(
           "scheduler: held-stop signal write failed — skipping (CTL-768)");
         continue;
       }
-
       recordHoldStop(orchDir, sig.ticket, sig.phase, nowMs);
+
+      killBgJob({ bgJobId });
+
       safeEmit(appendHeldStoppedEvent,
         { orchId: sig.ticket, ticket: sig.ticket, phase: sig.phase, bgJobId },
         { ticket: sig.ticket, phase: sig.phase });
@@ -3271,9 +3280,17 @@ export function schedulerTick(
   // dispatched this tick took slots that liveCount (read before STEP B) does not
   // yet reflect, so without this term sweep 2 over-admits into them (the same
   // double-fill class CTL-705's resumedCount term fixed; one symmetric extra term).
+  // CTL-768 (verify remediation): do NOT subtract heldStopCount here. resumedCount
+  // and promotedCount correct for NEW same-tick spawns NOT yet in liveCount — a
+  // subtract is right. A held-stop is a KILL that is STILL in liveCount this tick
+  // (`claude stop` does not deregister within the same tick — scheduler.mjs:2525-2527),
+  // so computeFreeSlots(maxParallel, inFlightCount) already withholds its slot;
+  // subtracting heldStopCount removed that slot a SECOND time, over-suppressing
+  // genuinely-free capacity at maxParallel>=2 (a transient single-tick throughput
+  // loss; the slot frees naturally next tick via getAgentsCached deregistration).
   const freeSlots = livenessFresh
     ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount)
-        - resumedCount - promotedCount - heldStopCount)
+        - resumedCount - promotedCount)
     : 0;
   if (!livenessFresh) {
     log.warn(
