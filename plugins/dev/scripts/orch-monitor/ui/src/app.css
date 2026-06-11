@@ -605,3 +605,10 @@ body {
   margin: 0.8em 0;
   color: var(--color-muted);
 }
+
+/* CTL-1015: /queue control-tower row hover — soft s1 fill, calm (no border flash).
+   The dispatches-next / bucket rows keep their inline background; this only sets
+   the hover state, so a highlighted row's tint and the hover blend gracefully. */
+.cat-queue-row:hover {
+  background: #151a21;
+}

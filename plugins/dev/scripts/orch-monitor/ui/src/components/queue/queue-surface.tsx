@@ -1,35 +1,44 @@
-// queue-surface.tsx — the dedicated wide Queue surface (CTL-910 / SURF2).
+// queue-surface.tsx — the /queue CONTROL TOWER (CTL-1015 rebuild of CTL-910/SURF2).
 //
-// SURF2 promotes the board's internal Queue tab into the app shell as its OWN
-// edge-to-edge route. The shell (AppShell) already owns the Queue nav item, the
-// `g q` chord, and the top strip + breadcrumb; this component is the inset BODY
-// rendered when surface === "queue" (wired in App.tsx's SurfaceSwitch via
-// surfaceContentKind === "queue").
+// This is a rebuild of the body, not a restyle of the table. The page answers
+// "what consumes capacity next?" — a fleet-of-workers, departure-board surface in
+// the Linear-calm idiom. It keeps the SURF2 shell contract (the same cache-backed
+// read-model snapshot the board + Inbox consume, NEVER a synchronous Linear call)
+// and the existing surface header bar; only the subtitle copy changed.
 //
-// Data plane: the SAME cache-backed read-model snapshot the board + Inbox consume
-// (useBoardSnapshot → connectBoard → ONE shared EventSource), so the queue is fed
-// by the BFF read-model's queue entities (the eligible projection, globally
-// ranked + host-stamped in lib/board-data.mjs) and NEVER a synchronous per-request
-// Linear call (the SURF2 "fed by the read-model, not a Linear call" requirement).
-//
-// Rendering: it reuses the QueueView render verbatim (the width-hungry capacity
-// strip + SlotBar + Stats + the in-flight table + the ranked waiting table) with
-// `embedded` so it fills the inset's flex slot. QueueView itself adds the optional
-// per-node column + group-by-node affordance, both gated behind the single-host
-// identity no-op — so a single-node fleet reads exactly like today.
+// The body is composed from four presentational sections — SlotDeck (hero),
+// DispatchQueue, HoldingBuckets, DeadStrip — plus a rank footer. Each takes plain
+// data props (no snapshot hook, no router), so CTL-1016's Workers surface can
+// mount SlotDeck + DeadStrip directly with its own payload slice.
+import { useCallback } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
-// CTL-897 / SHELL7: the Queue consumes the workspace-SCOPED snapshot so the
-// switcher's repo selection actually filters the ranked depth (All = unfiltered).
 import { useScopedBoardSnapshot } from "@/hooks/use-scoped-board-snapshot";
-import { QueueView } from "@/board/Board";
+import { C } from "../../board/board-tokens";
+import { queueHostMode } from "../../board/queue-grouping";
+import { SlotDeck } from "./slot-deck";
+import { DispatchQueue } from "./dispatch-queue";
+import { HoldingBuckets } from "./holding-buckets";
+import { DeadStrip } from "./dead-strip";
 
 // The dark Catalyst board surface base color (orch-monitor DESIGN.md `s0`), kept
-// in step with the Board root so the embedded QueueView's hard-coded surfaces sit
-// on the same backdrop whether it is mounted standalone or in the shell.
+// in step with the Board root so the embedded sections sit on the same backdrop.
 const SURFACE_BG = "#0b0d10";
 
 export function QueueSurface() {
   const { payload, status } = useScopedBoardSnapshot();
+  const navigate = useNavigate();
+
+  // The surface owns routing (the sections stay router-free for composability):
+  // open a ticket detail page via the shared /ticket/$id route.
+  const onOpenTicket = useCallback(
+    (key: string) => {
+      void navigate({ to: "/ticket/$id", params: { id: key } });
+    },
+    [navigate],
+  );
+
+  const multiHost = payload ? queueHostMode(payload.queue) === "multi" : false;
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -52,7 +61,7 @@ export function QueueSurface() {
             Capacity &amp; queue
           </h1>
           <span style={{ color: "#8b93a1", fontSize: 12 }}>
-            What&apos;s on the plate, and what dispatches next
+            Who&apos;s working each slot, and what dispatches next
           </span>
           <span style={{ flex: 1 }} />
           <span
@@ -71,10 +80,37 @@ export function QueueSurface() {
           </span>
         </div>
 
-        {/* The edge-to-edge ranked depth table, filling the inset below the strip. */}
-        <div className="min-h-0 flex-1">
+        {/* The control-tower body, filling the inset below the header. */}
+        <div className="cat-scroll min-h-0 flex-1" style={{ overflowY: "auto" }}>
           {payload ? (
-            <QueueView data={payload} embedded />
+            <div style={{ maxWidth: 1120, margin: "0 auto", padding: "8px 24px 32px", display: "flex", flexDirection: "column", gap: 28 }}>
+              <SlotDeck
+                workers={payload.workers}
+                tickets={payload.tickets}
+                config={payload.config}
+                onOpenTicket={onOpenTicket}
+              />
+              <DispatchQueue
+                queue={payload.queue}
+                freeSlots={payload.config.freeSlots}
+                onOpenTicket={onOpenTicket}
+              />
+              <HoldingBuckets
+                tickets={payload.tickets}
+                workers={payload.workers}
+                maxParallel={payload.config.maxParallel}
+                onOpenTicket={onOpenTicket}
+              />
+              <DeadStrip
+                workers={payload.workers}
+                tickets={payload.tickets}
+                maxParallel={payload.config.maxParallel}
+              />
+              <div style={{ fontSize: 11, color: C.fgDim }}>
+                Dispatch order: priority → pipeline stage → created → id — the same rank the scheduler uses. Per-project caps apply at dispatch time. Blocked work never enters this line.
+                {multiHost ? " Node = the HRW owner host for each queued ticket." : ""}
+              </div>
+            </div>
           ) : (
             <div style={{ color: "#8b93a1", padding: 24 }}>
               Connecting to execution-core…
