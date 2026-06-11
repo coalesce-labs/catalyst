@@ -64,6 +64,47 @@ describe("ICON_PATH_PRIORITY", () => {
   });
 });
 
+// ── inferIconFormat ───────────────────────────────────────────────────────────
+
+import { inferIconFormat, pickBestCandidate, type IconCandidate } from "../lib/repo-icon-fetcher";
+
+describe("inferIconFormat", () => {
+  it("maps extensions to formats", () => {
+    expect(inferIconFormat("logo.svg")).toBe("svg");
+    expect(inferIconFormat("public/favicon.png")).toBe("png");
+    expect(inferIconFormat("favicon.ico")).toBe("ico");
+  });
+  it("treats apple-touch-icon.png as png", () => {
+    expect(inferIconFormat("apple-touch-icon.png")).toBe("png");
+  });
+  it("is case-insensitive", () => {
+    expect(inferIconFormat("Logo.SVG")).toBe("svg");
+    expect(inferIconFormat("Icon.ICO")).toBe("ico");
+  });
+});
+
+describe("pickBestCandidate", () => {
+  const mk = (path: string): IconCandidate => ({
+    path, format: inferIconFormat(path),
+    downloadUrl: `https://x/${path}`, dataUrl: null,
+  });
+
+  it("prefers svg over png over ico regardless of probe order", () => {
+    const cands = [mk("favicon.ico"), mk("logo.png"), mk("logo.svg")];
+    expect(pickBestCandidate(cands)?.path).toBe("logo.svg");
+  });
+  it("within the same format, earlier ICON_PATH_PRIORITY index wins", () => {
+    const cands = [mk("static/favicon.png"), mk("public/favicon.png")];
+    expect(pickBestCandidate(cands)?.path).toBe("public/favicon.png");
+  });
+  it("returns null for an empty candidate list", () => {
+    expect(pickBestCandidate([])).toBeNull();
+  });
+  it("handles a single candidate", () => {
+    expect(pickBestCandidate([mk("favicon.ico")])?.path).toBe("favicon.ico");
+  });
+});
+
 // ── buildRepoOwnerMap ─────────────────────────────────────────────────────────
 
 describe("buildRepoOwnerMap", () => {

@@ -24,10 +24,11 @@
 //  21. apps/website/public/favicon.svg
 //  22. apps/website/public/favicon.png
 //
-// The first path that returns a file object (non-null download_url) is cached.
+// All matching paths are collected; the best by format (SVG > PNG > ICO) is the default.
 // Cache: JSON files in cacheDir (default ~/catalyst/repo-icon-cache/), keyed by
-//   owner-repo slug, TTL 7 days. A negative result ("no icon found") is also
-//   cached (with a 1-day TTL) so we don't hammer the GitHub API on every boot.
+//   owner-repo slug, TTL 7 days (schema v2 — v1 entries re-probe once). A negative
+//   result ("no icon found") is also cached (with a 1-day TTL) so we don't hammer
+//   the GitHub API on every boot.
 //
 // Fail-open: any error (no gh binary, API rate-limit, no internet) returns null
 // so the UI falls through to the manual-override / lucide fallback.
@@ -36,6 +37,35 @@ import { execSync } from "child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
+
+export type IconFormat = "svg" | "png" | "ico";
+
+export interface IconCandidate {
+  path: string;
+  format: IconFormat;
+  downloadUrl: string;
+  dataUrl: string | null;
+}
+
+/** Crispness order: vector first, then raster, then legacy ico container. */
+const FORMAT_RANK: Record<IconFormat, number> = { svg: 0, png: 1, ico: 2 };
+
+export function inferIconFormat(path: string): IconFormat {
+  const lower = path.toLowerCase();
+  if (lower.endsWith(".svg")) return "svg";
+  if (lower.endsWith(".ico")) return "ico";
+  return "png";
+}
+
+/** Best = lowest FORMAT_RANK, tie-broken by ICON_PATH_PRIORITY index. */
+export function pickBestCandidate(cands: readonly IconCandidate[]): IconCandidate | null {
+  if (cands.length === 0) return null;
+  return [...cands].sort((a, b) => {
+    const fr = FORMAT_RANK[a.format] - FORMAT_RANK[b.format];
+    if (fr !== 0) return fr;
+    return ICON_PATH_PRIORITY.indexOf(a.path) - ICON_PATH_PRIORITY.indexOf(b.path);
+  })[0];
+}
 
 /** Ordered list of icon paths to probe in the repo root. */
 export const ICON_PATH_PRIORITY: readonly string[] = [
@@ -65,10 +95,21 @@ export const ICON_PATH_PRIORITY: readonly string[] = [
 ];
 
 export type IconResult =
-  | { found: true; path: string; downloadUrl: string; dataUrl: string | null }
+  | {
+      found: true;
+      candidates: IconCandidate[];
+      selectedPath: string;
+      // legacy single-candidate fields, mirror the best candidate (back-compat)
+      path: string;
+      downloadUrl: string;
+      dataUrl: string | null;
+    }
   | { found: false };
 
+const CACHE_SCHEMA_VERSION = 2; // v2 carries candidates[] (CTL-997)
+
 interface CacheEntry {
+  schemaVersion: number;
   cachedAt: number; // epoch ms
   result: IconResult;
 }
@@ -89,6 +130,7 @@ function readCache(cacheDir: string, ownerRepo: string): IconResult | null {
   try {
     const raw = readFileSync(file, "utf8");
     const entry: CacheEntry = JSON.parse(raw) as CacheEntry;
+    if (entry.schemaVersion !== CACHE_SCHEMA_VERSION) return null; // legacy v1 → re-probe
     const ttl = entry.result.found ? POSITIVE_TTL_MS : NEGATIVE_TTL_MS;
     if (Date.now() - entry.cachedAt < ttl) return entry.result;
   } catch {
@@ -100,7 +142,7 @@ function readCache(cacheDir: string, ownerRepo: string): IconResult | null {
 function writeCache(cacheDir: string, ownerRepo: string, result: IconResult): void {
   try {
     mkdirSync(cacheDir, { recursive: true });
-    const entry: CacheEntry = { cachedAt: Date.now(), result };
+    const entry: CacheEntry = { schemaVersion: CACHE_SCHEMA_VERSION, cachedAt: Date.now(), result };
     writeFileSync(cacheFile(cacheDir, ownerRepo), JSON.stringify(entry, null, 2));
   } catch {
     // write failures are silent — cache is best-effort
@@ -146,23 +188,33 @@ export async function fetchAsDataUrl(url: string): Promise<string | null> {
 }
 
 /**
- * Resolve the best icon for a GitHub repo, probing ICON_PATH_PRIORITY in order.
- * Uses `gh api` to check each path without downloading the full file.
- * Returns the first hit as a download_url string, or null when nothing found.
- *
- * This is the PURE resolver (no cache) — used in unit tests and by fetchRepoIcon.
+ * Probe every path in ICON_PATH_PRIORITY and collect all hits (no early exit).
+ * Returns all matching paths with their download URLs.
+ * This is the PURE resolver (no cache, no data-URL fetch) — used by fetchRepoIcon.
  */
-export function resolveRepoIconPath(ownerRepo: string): { path: string; downloadUrl: string } | null {
+export function resolveRepoIconCandidates(
+  ownerRepo: string,
+): { path: string; downloadUrl: string }[] {
+  const hits: { path: string; downloadUrl: string }[] = [];
   for (const iconPath of ICON_PATH_PRIORITY) {
     const dl = probeRepoPath(ownerRepo, iconPath);
-    if (dl) return { path: iconPath, downloadUrl: dl };
+    if (dl) hits.push({ path: iconPath, downloadUrl: dl });
   }
-  return null;
+  return hits;
+}
+
+/**
+ * Resolve the best icon for a GitHub repo (legacy single-hit API, back-compat).
+ * Re-implemented atop resolveRepoIconCandidates — returns the first hit.
+ */
+export function resolveRepoIconPath(ownerRepo: string): { path: string; downloadUrl: string } | null {
+  return resolveRepoIconCandidates(ownerRepo)[0] ?? null;
 }
 
 /**
  * Fetch the best icon for a GitHub repo, with disk cache.
- * Returns the cached or freshly-fetched IconResult.
+ * Returns all detected candidates plus the default-best (SVG > PNG > ICO).
+ * Legacy top-level path/downloadUrl/dataUrl fields mirror the best candidate.
  * Falls through gracefully (returns `{ found: false }`) on any error.
  */
 export async function fetchRepoIcon(
@@ -176,12 +228,27 @@ export async function fetchRepoIcon(
 
   let result: IconResult;
   try {
-    const hit = resolveRepoIconPath(ownerRepo);
-    if (!hit) {
+    const hits = resolveRepoIconCandidates(ownerRepo);
+    if (hits.length === 0) {
       result = { found: false };
     } else {
-      const dataUrl = await fetchAsDataUrl(hit.downloadUrl);
-      result = { found: true, path: hit.path, downloadUrl: hit.downloadUrl, dataUrl };
+      const candidates: IconCandidate[] = await Promise.all(
+        hits.map(async (h) => ({
+          path: h.path,
+          format: inferIconFormat(h.path),
+          downloadUrl: h.downloadUrl,
+          dataUrl: await fetchAsDataUrl(h.downloadUrl),
+        })),
+      );
+      const best = pickBestCandidate(candidates)!;
+      result = {
+        found: true,
+        candidates,
+        selectedPath: best.path,
+        path: best.path,
+        downloadUrl: best.downloadUrl,
+        dataUrl: best.dataUrl,
+      };
     }
   } catch {
     // Don't cache unexpected errors — let a retry happen next time
