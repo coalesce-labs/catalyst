@@ -56,6 +56,12 @@ export interface Lane<T> {
   label: string;
   /** null = no dot (non-host axis, the fallback lane, or no overlay supplied). */
   live: "live" | "degraded" | "offline" | null;
+  /** CTL-1012: the lane's REPRESENTATIVE repo short-name (the `first` member's
+   *  repo) — the team→repo bridge that lets a TEAM lane resolve its project icon
+   *  and display-cased brand name (each board entity carries BOTH team + repo).
+   *  null when the first member carries no repo. Present on every axis (it is just
+   *  the first member's repo); the lane-header rendering decides where to use it. */
+  repo: string | null;
   items: T[];
 }
 
@@ -174,7 +180,7 @@ export function buildLanes<T extends GroupableEntity>(
   liveness?: HostLiveness,
 ): Lane<T>[] {
   if (by === "none") {
-    return [{ key: UNASSIGNED, label: "", live: null, items }];
+    return [{ key: UNASSIGNED, label: "", live: null, repo: items[0]?.repo ?? null, items }];
   }
   // Each bucket carries its `first` member alongside its items, captured when the
   // bucket is created — so labeling never has to index `items[0]` (no out-of-range
@@ -193,6 +199,8 @@ export function buildLanes<T extends GroupableEntity>(
     // liveness only on the host axis, only when an overlay was supplied, and only
     // for a real (attributed) host lane. Otherwise no dot.
     live: isHost && liveness && key !== UNASSIGNED ? (liveness[key] ?? null) : null,
+    // CTL-1012: the representative repo short-name (the team→repo icon/name bridge).
+    repo: first.repo ?? null,
     items: laneItems,
   }));
   lanes.sort((a, b) => {

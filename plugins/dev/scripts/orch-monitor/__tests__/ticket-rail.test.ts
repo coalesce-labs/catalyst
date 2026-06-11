@@ -138,3 +138,29 @@ describe("ticket-rail.tsx — floating cards + readable relations (CTL-1003)", (
     expect(railSrc).not.toContain("ticket-ref-pill");
   });
 });
+
+// ── CTL-1012: the rail rows orient by the project icon ───────────────────────
+describe("ticket-rail.tsx — Repo/Team/Project rows carry the project icon (CTL-1012)", () => {
+  it("resolves the project mark from the resident ticket's repo via the shared icon context", () => {
+    expect(railSrc).toContain("useRepoIconMap");
+    expect(railSrc).toContain("resolveEntityIcon(ticket?.repo, icons)");
+  });
+
+  it("the Properties Repo + Team rows carry the resolved iconSrc", () => {
+    // both rows pass the iconSrc through to PropRow (the same brand the lanes show).
+    expect(railSrc).toMatch(/label: "Repo", value: ticket\.repo, iconSrc/);
+    expect(railSrc).toMatch(/label: "Team", value: ticket\.team, iconSrc/);
+  });
+
+  it("PropRow renders a 14px icon before the value when iconSrc + a real value are present", () => {
+    // guarded so the icon never shows beside a dimmed em-dash placeholder.
+    expect(railSrc).toContain("row.iconSrc != null && row.value != null");
+    expect(railSrc).toMatch(/width: 14, height: 14, borderRadius: 3, objectFit: "contain"/);
+  });
+
+  it("the Project card prefers the project icon, falling back to the Box glyph", () => {
+    // fail-open: an undiscovered icon (iconSrc null) keeps the generic Box.
+    expect(railSrc).toContain("iconSrc != null ? (");
+    expect(railSrc).toContain('<Box className="size-3.5 text-muted-foreground" />');
+  });
+});

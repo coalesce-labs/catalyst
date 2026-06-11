@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { resolveEntityIcon, liveBadgeKind, groupIconSrc } from "./entity-icon";
+import { resolveEntityIcon, liveBadgeKind, groupIconSrc, laneIconSrc } from "./entity-icon";
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 
 const ICONS: RepoIconMap = {
@@ -58,6 +58,26 @@ describe("EntityMarker decision (pure inputs)", () => {
   });
   it("no icon → resolveEntityIcon null ⇒ component falls back to ActivityDot", () => {
     expect(resolveEntityIcon("catalyst", {})).toBeNull();
+  });
+});
+
+describe("laneIconSrc (CTL-1012 — icon on team/repo/project, NOT host/none)", () => {
+  it("resolves the icon from the lane's repo on team/repo/project axes", () => {
+    // The team axis now gets an icon (via its representative repo) — the new behavior.
+    expect(laneIconSrc("team", "catalyst", ICONS)).toBe("data:image/png;base64,AAA");
+    expect(laneIconSrc("repo", "catalyst", ICONS)).toBe("data:image/png;base64,AAA");
+    expect(laneIconSrc("project", "catalyst", ICONS)).toBe("data:image/png;base64,AAA");
+  });
+  it("returns null on host/none axes (host keeps its liveness dot)", () => {
+    for (const axis of ["host", "none"] as const) {
+      expect(laneIconSrc(axis, "catalyst", ICONS)).toBeNull();
+    }
+  });
+  it("fail-open: missing repo or undiscovered icon → null (dot fallback)", () => {
+    expect(laneIconSrc("team", null, ICONS)).toBeNull();
+    expect(laneIconSrc("team", undefined, ICONS)).toBeNull();
+    expect(laneIconSrc("repo", "adva", ICONS)).toBeNull(); // adva has null autoDataUrl
+    expect(laneIconSrc("project", "ghost", ICONS)).toBeNull();
   });
 });
 

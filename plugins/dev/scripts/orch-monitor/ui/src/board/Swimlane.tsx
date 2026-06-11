@@ -76,7 +76,8 @@ import {
   type GroupableEntity,
 } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
-import { groupIconSrc } from "./entity-icon";
+import { laneIconSrc } from "./entity-icon";
+import { laneDisplayName } from "@/lib/nav-model";
 import { computeLaneHeights, LANE_MIN_CELL_H } from "./lane-heights";
 import type { Density } from "./prefs-store";
 
@@ -273,8 +274,10 @@ function GroupLabelRow({
         }}
       >
         {iconSrc ? (
+          // CTL-1012: the 16px project mark (up from the 14px CTL-998 favicon) so the
+          // brand reads at the lane-header scale; dot fallback when no icon discovered.
           <img src={iconSrc} alt="" aria-hidden
-            style={{ width: 14, height: 14, borderRadius: 4, objectFit: "contain", flex: "0 0 auto" }} />
+            style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain", flex: "0 0 auto" }} />
         ) : (
           <span
             className={isLive ? "catalyst-live-dot" : undefined}
@@ -726,11 +729,14 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             return (
               <Fragment key={lane.key}>
                 <GroupLabelRow
-                  label={lane.label}
+                  // CTL-1012: spelled-out brand name ("Adva (ADV)") + project icon,
+                  // resolved from the lane's representative repo (the team→repo bridge).
+                  // Host axis keeps its bare label + liveness dot (laneIconSrc → null).
+                  label={laneDisplayName(groupBy, lane.key, lane.label, lane.repo)}
                   count={lane.items.length}
                   live={lane.live}
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
-                  iconSrc={groupIconSrc(groupBy, lane.key, icons)}
+                  iconSrc={laneIconSrc(groupBy, lane.repo, icons)}
                 />
                 {/* CTL-1010: cellMax = this lane's measured water-fill share
                     (allocs is null on the first frame → undefined → var() fallback). */}

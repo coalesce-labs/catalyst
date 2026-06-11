@@ -94,7 +94,8 @@ import {
 } from "./list-group-data";
 import type { Lane } from "./board-grouping";
 import { useRepoIconMap } from "./repo-icon-context";
-import { groupIconSrc } from "./entity-icon";
+import { laneIconSrc } from "./entity-icon";
+import { laneDisplayName } from "@/lib/nav-model";
 
 // ── collapse state (CTL-955) ─────────────────────────────────────────────────
 // Jotai atom: a Map<navKind → Set<groupKey>> of collapsed group keys. Atom lives
@@ -224,6 +225,10 @@ interface GroupMeta {
   live: "live" | "degraded" | "offline" | null;
   /** 0-based render order for this group (stable, deterministic). */
   order: number;
+  /** CTL-1012: the swimlane lane's representative repo short-name (the team→repo
+   *  icon/name bridge). null for the default stage/activity groups (not entity
+   *  brands) and for swimlane lanes whose first member carries no repo. */
+  repo: string | null;
 }
 
 /** Build the group metadata map (groupKey → GroupMeta) and the `_group` assignment
@@ -256,6 +261,7 @@ function buildGroupAssignment<E extends {
         color: null,
         live: lane.live,
         order: laneIdx,
+        repo: lane.repo,
       });
     });
     return { rowGroupKey, groupMeta };
@@ -273,6 +279,7 @@ function buildGroupAssignment<E extends {
         color: hdr.color,
         live: hdr.live,
         order: g.order,
+        repo: null,
       });
       for (const row of g.items) rowGroupKey.set(row as unknown as ListRow<E>, g.key);
     });
@@ -287,6 +294,7 @@ function buildGroupAssignment<E extends {
         color: hdr.color,
         live: hdr.live,
         order: idx,
+        repo: null,
       });
       for (const row of g.items) rowGroupKey.set(row as unknown as ListRow<E>, g.key);
     });
@@ -495,7 +503,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
             {orderedGroups.map(({ meta, sorted, collapsed }) => {
               // swimlane lane — build a Lane-like object for singleLaneHint
               const singleLane = orderedGroups.length === 1
-                ? { key: meta.key, label: meta.label, items: sorted, live: meta.live }
+                ? { key: meta.key, label: meta.label, items: sorted, live: meta.live, repo: meta.repo }
                 : null;
               const hint =
                 swimlane !== "none" && singleLane
@@ -504,7 +512,11 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
               return (
                 <Fragment key={meta.key}>
                   <GroupHeaderRow
-                    label={meta.label}
+                    // CTL-1012: swimlane lanes carry the spelled-out brand name
+                    // ("Adva (ADV)") + project icon (team→repo bridge via meta.repo);
+                    // the default stage/activity groups (swimlane="none") keep their
+                    // verbatim label + accent dot (laneDisplayName/laneIconSrc no-op).
+                    label={laneDisplayName(swimlane, meta.key, meta.label, meta.repo)}
                     count={sorted.length}
                     live={meta.live}
                     color={meta.color}
@@ -512,7 +524,7 @@ function ListTable<E extends { id?: string; name?: string; team?: string | null;
                     collapsed={collapsed}
                     onToggle={() => toggleCollapse(meta.key)}
                     hint={hint}
-                    iconSrc={groupIconSrc(swimlane, meta.key, icons)}
+                    iconSrc={laneIconSrc(swimlane, meta.repo, icons)}
                   />
                   {/* CTL-952: AnimatePresence enables enter/exit for rows that
                       appear / disappear as priority or state changes. `initial=false`
@@ -675,8 +687,9 @@ function GroupHeaderRow({
             ▼
           </span>
           {iconSrc ? (
+            // CTL-1012: 16px project mark (up from CTL-998's 14px favicon).
             <img src={iconSrc} alt="" aria-hidden
-              style={{ width: 14, height: 14, borderRadius: 4, objectFit: "contain" }} />
+              style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain" }} />
           ) : live === "live" ? (
             <span className="catalyst-live-dot" style={{ width: 8, height: 8, borderRadius: "50%", background: dotColor, display: "inline-block" }} />
           ) : (
