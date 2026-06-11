@@ -26,8 +26,18 @@ let stats = { processed: 0, skipped: 0 };
 const buffers: { otlp: CanonicalEvent[]; posthog: CanonicalEvent[]; cae: CanonicalEvent[] } =
   { otlp: [], posthog: [], cae: [] };
 
+const CURRENT_MONTH = () => {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+};
+const EVENT_LOG_PATH = join(EVENTS_DIR, `${CURRENT_MONTH()}.jsonl`);
+
 const senders = {
-  otlp: cfg.otlp.enabled ? new OtlpSender({ endpoint: cfg.otlp.endpoint, dlqPath: join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl") }) : null,
+  otlp: cfg.otlp.enabled ? new OtlpSender({
+    endpoint: cfg.otlp.endpoint,
+    dlqPath: join(CATALYST_DIR, "otel-forward-dlq-otlp.jsonl"),
+    eventLogPath: EVENT_LOG_PATH,
+  }) : null,
   posthog: cfg.posthog.enabled ? new PosthogSender({ apiKey: cfg.posthog.apiKey, host: cfg.posthog.host, dlqPath: join(CATALYST_DIR, "otel-forward-dlq-posthog.jsonl") }) : null,
   cae: cfg.cloudflareAE.enabled ? new CloudflareAESender({ accountId: cfg.cloudflareAE.accountId, apiToken: cfg.cloudflareAE.apiToken, dataset: cfg.cloudflareAE.dataset, dlqPath: join(CATALYST_DIR, "otel-forward-dlq-cae.jsonl") }) : null,
 };

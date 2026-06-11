@@ -1,4 +1,7 @@
-import { describe, test, expect } from "bun:test";
+import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { buildOtlpPayload } from "./otlp.ts";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 
@@ -111,5 +114,78 @@ describe("buildOtlpPayload", () => {
     const payload = buildOtlpPayload([legacy as CanonicalEvent]) as any;
     const lr = payload.resourceLogs[0].scopeLogs[0].logRecords[0];
     expect("logRecordUid" in lr).toBe(false);
+  });
+});
+
+describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "otlp-fail-test-")); });
+
+  function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return { ...SAMPLE_EVENT, ...overrides };
+  }
+
+  test("appends a forward_failed canonical event after all retries exhausted", async () => {
+    global.fetch = mock(() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events.jsonl");
+    const dlqPath = join(dir, "dlq.jsonl");
+
+    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:1", dlqPath, eventLogPath, retryDelaysMs: [0, 0, 0] });
+    await sender.flush([makeEvent()]);
+
+    expect(existsSync(eventLogPath)).toBe(true);
+    const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
+    expect(lines.length).toBe(1);
+    const evt = JSON.parse(lines[0]) as CanonicalEvent;
+    expect(evt.attributes["event.name"]).toBe("catalyst.observability.forward_failed");
+    expect(evt.resource["service.name"]).toBe("catalyst.otel-forward");
+    expect((evt.body?.payload as Record<string, unknown>)?.batchSize).toBe(1);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("does NOT emit failure event for a batch of forward_failed events (loop guard)", async () => {
+    global.fetch = mock(() => Promise.reject(new Error("connection refused"))) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events2.jsonl");
+    const dlqPath = join(dir, "dlq2.jsonl");
+
+    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:1", dlqPath, eventLogPath, retryDelaysMs: [0, 0, 0] });
+
+    // Batch that already consists of forward_failed events
+    const failureBatch = [makeEvent({
+      resource: { "service.name": "catalyst.otel-forward", "service.namespace": "catalyst", "service.version": "1.0.0" },
+      attributes: { "event.name": "catalyst.observability.forward_failed" },
+    })];
+
+    await sender.flush(failureBatch);
+
+    // Loop guard: no forward_failed event appended
+    if (existsSync(eventLogPath)) {
+      const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
+      expect(lines.length).toBe(0);
+    }
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("successful flush appends no forward_failed event", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 200 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events3.jsonl");
+    const dlqPath = join(dir, "dlq3.jsonl");
+
+    const sender = new OtlpSender({ endpoint: "http://127.0.0.1:4318", dlqPath, eventLogPath });
+    await sender.flush([makeEvent()]);
+
+    expect(existsSync(eventLogPath)).toBe(false);
+
+    rmSync(dir, { recursive: true });
   });
 });
