@@ -962,3 +962,37 @@ contract (single-write of the per-phase signal) intact.
   (`resolve_phase_session_id`) distinct from the stream-JSONL-driven
   `resolve_session_id`; both coexist (the legacy resolver still serves
   ADR-019's top-level branch).
+
+---
+
+## ADR-021: Workspace-level type-label taxonomy (CTL-995)
+
+**Decision**: All six type labels (`bug`, `feature`, `refactor`, `docs`, `chore`, `test`) live
+at workspace scope (not per-team), nested under a single `type` label group, with canonical
+palette colors: bug `#e5484d` · feature `#8b5cf6` · refactor `#14b8a6` · docs `#3b82f6` ·
+chore `#8d8d8d` · test `#22c55e`.
+
+**Rationale**:
+
+- Pre-migration state had `refactor`, `docs`, `chore`, and `test` as per-team labels duplicated
+  across CTL/ADV/OTL/SLI/EVR, causing color drift and making the UI badge design system require
+  per-team ID lists instead of a single workspace ID per type.
+- `bug` and `feature` were already at workspace scope; unifying all six removes the asymmetry.
+- A `type` group label provides a logical container so the six labels are visually grouped in
+  the Linear label picker.
+
+**Alternatives considered**:
+
+- **Promote team labels in-place via `issueLabelUpdate(teamId: null)`**: API rejected this field
+  (not in `IssueLabelUpdateInput`); fell back to rename-create-relabel-delete.
+- **Leave per-team labels, add workspace labels as aliases**: would create two labels per type,
+  ambiguous for new tickets.
+
+**Consequences**:
+
+- Any tooling that filters by label ID must use the workspace IDs documented in
+  `thoughts/shared/research/2026-06-10-ctl-995-label-taxonomy-migration.md`.
+- Component labels (orchestrator/broker/phase-agent/monitor/cli/ci/website/estimation/worktree)
+  remain team-scoped (CTL-only) — only the type axis is workspace-level.
+- New tickets on any team should apply workspace type labels; team-scoped type labels should not
+  be created.
