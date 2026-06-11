@@ -248,6 +248,8 @@ describe("CTL-1045 Bug 4 — once-marker withheld on failed needs-human clear", 
     expect(existsSync(join(workerDir(), `phase-${PHASE}.json`))).toBe(false);
     // The once-marker is withheld — a future genuine escalation must be re-armable.
     expect(existsSync(join(workerDir(), `.janitor-cleared-${PHASE}.applied`))).toBe(false);
+    // The needs-human marker is RETAINED (removeLabel failed → retry on next tick).
+    expect(existsSync(join(workerDir(), ".linear-label-needs-human.applied"))).toBe(true);
     expect(result.janitorStallsCleared).toEqual([{ ticket: TICKET, phase: PHASE }]);
   });
 });

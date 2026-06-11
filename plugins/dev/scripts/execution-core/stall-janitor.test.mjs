@@ -742,7 +742,7 @@ describe("defaultCollectStallClearCandidates (CTL-1005 J3)", () => {
     mkdirSync(d, { recursive: true });
     writeFileSync(
       join(d, `phase-${phase}.json`),
-      JSON.stringify({ ticket, phase, status: "stalled", stalledReason: reason }),
+      JSON.stringify({ ticket, phase, status: "stalled", stalledReason: reason, dispatchFailureCode: 2 }),
     );
     if (cleared) writeFileSync(join(d, `.janitor-cleared-${phase}.applied`), "");
     return d;
