@@ -71,6 +71,12 @@ export interface ResolvedRepoIcon {
 }
 
 export const REPO_ICON_KEY_PREFIX = "catalyst.repoIcon.";
+/**
+ * Per-repo pick key prefix for low-level / non-React access.
+ * The reactive runtime uses repoIconPicksAtom (key: "catalyst.repoIconPicks") instead —
+ * these helpers write to separate per-repo keys. Use the atom for UI; these helpers
+ * for server-side or imperative contexts outside the React tree.
+ */
 export const REPO_ICON_PICK_KEY_PREFIX = "catalyst.repoIconPick.";
 
 /**

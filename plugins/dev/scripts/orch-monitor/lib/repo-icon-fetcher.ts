@@ -204,8 +204,9 @@ export function resolveRepoIconCandidates(
 }
 
 /**
- * Resolve the best icon for a GitHub repo (legacy single-hit API, back-compat).
- * Re-implemented atop resolveRepoIconCandidates — returns the first hit.
+ * Return the first-hit icon for a GitHub repo by ICON_PATH_PRIORITY order (legacy back-compat).
+ * Re-implemented atop resolveRepoIconCandidates. For the format-ranked best candidate,
+ * call pickBestCandidate(resolveRepoIconCandidates(...)) instead.
  */
 export function resolveRepoIconPath(ownerRepo: string): { path: string; downloadUrl: string } | null {
   return resolveRepoIconCandidates(ownerRepo)[0] ?? null;
@@ -240,7 +241,7 @@ export async function fetchRepoIcon(
           dataUrl: await fetchAsDataUrl(h.downloadUrl),
         })),
       );
-      const best = pickBestCandidate(candidates)!;
+      const best = pickBestCandidate(candidates) ?? candidates[0];
       result = {
         found: true,
         candidates,

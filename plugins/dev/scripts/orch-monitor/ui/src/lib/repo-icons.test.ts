@@ -53,6 +53,10 @@ describe("parseIconCandidates", () => {
     };
     expect(parseIconCandidates(resp)[0].format).toBe("png");
   });
+  it("returns [] when found=true but candidates is empty and no legacy fields", () => {
+    const resp: RepoIconApiResponse = { found: true, candidates: [] };
+    expect(parseIconCandidates(resp)).toEqual([]);
+  });
 });
 
 // ── readIconPick / writeIconPick / clearIconPick ──────────────────────────────

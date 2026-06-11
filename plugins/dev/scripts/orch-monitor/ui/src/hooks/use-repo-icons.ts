@@ -58,6 +58,9 @@ export function useRepoIcons(repos: readonly string[]): RepoIconMap {
   }, [repos.join(",")]);
 
   // Derive the resolved map reactively on every render from fetched + picks.
+  // Use repos.join(",") — same stabilization as the effect — so an inline []
+  // fallback (new reference each render) doesn't bust the memo every tick.
+  const reposKey = repos.join(",");
   return useMemo(() => {
     const out: RepoIconMap = {};
     for (const repo of repos) {
@@ -76,5 +79,5 @@ export function useRepoIcons(repos: readonly string[]): RepoIconMap {
     }
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repos, fetched, picks]);
+  }, [reposKey, fetched, picks]);
 }

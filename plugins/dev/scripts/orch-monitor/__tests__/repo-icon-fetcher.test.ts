@@ -103,6 +103,13 @@ describe("pickBestCandidate", () => {
   it("handles a single candidate", () => {
     expect(pickBestCandidate([mk("favicon.ico")])?.path).toBe("favicon.ico");
   });
+  it("returns one candidate when both same-format paths are absent from ICON_PATH_PRIORITY (both indexOf = -1)", () => {
+    // Both return -1 from indexOf; sort is stable — first in array wins.
+    const cands = [mk("unknown-a.svg"), mk("unknown-b.svg")];
+    const result = pickBestCandidate(cands);
+    expect(result).not.toBeNull();
+    expect(["unknown-a.svg", "unknown-b.svg"]).toContain(result?.path);
+  });
 });
 
 // ── buildRepoOwnerMap ─────────────────────────────────────────────────────────

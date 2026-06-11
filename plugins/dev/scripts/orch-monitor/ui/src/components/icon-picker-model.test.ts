@@ -66,4 +66,21 @@ describe("buildIconPickerRows", () => {
     expect(autoOpt.label).toBeDefined();
     expect(autoOpt.dataUrl).toBe("data:svg"); // Auto shows the resolved best
   });
+
+  it("uses format.toUpperCase() as the label for candidate options", () => {
+    const map: RepoIconMap = {
+      r: {
+        autoDataUrl: "data:svg", selectedPath: "logo.svg", override: null,
+        candidates: [
+          { path: "logo.svg", format: "svg", downloadUrl: "u1", dataUrl: "data:svg" },
+          { path: "favicon.ico", format: "ico", downloadUrl: "u2", dataUrl: null },
+          { path: "logo.png", format: "png", downloadUrl: "u3", dataUrl: "data:png" },
+        ],
+      },
+    };
+    const opts = buildIconPickerRows(["r"], map, {})[0].options;
+    expect(opts.find((o) => o.path === "logo.svg")?.label).toBe("SVG");
+    expect(opts.find((o) => o.path === "favicon.ico")?.label).toBe("ICO");
+    expect(opts.find((o) => o.path === "logo.png")?.label).toBe("PNG");
+  });
 });
