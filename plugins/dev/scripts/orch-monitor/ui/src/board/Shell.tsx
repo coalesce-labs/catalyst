@@ -20,9 +20,10 @@
 // The page surface drops its body into <DetailBody> and appends page-specific
 // Property rows below the shared rail divider; the shell never renders body panels.
 
-import { useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useAtom, useSetAtom } from "jotai";
 import { useCanGoBack, useNavigate, useRouter } from "@tanstack/react-router";
+import { useDetailEntryState } from "../hooks/use-detail-entry-state";
 import {
   breadcrumbText,
   resolveBreadcrumb,
@@ -446,6 +447,57 @@ export function Shell({
   const navigate = useNavigate();
   const router = useRouter();
   const canGoBack = useCanGoBack();
+
+  // ── CTL-1049 back-stack entry state ─────────────────────────────────────────
+  // The shared scaffolding owns the SCROLL half of the convention: it saves the
+  // single detail scroller's (the scroll-body row) offset into the current history
+  // entry's state on scroll-idle, and restores it on mount when the entry already
+  // carries a non-default offset (a back/forward traverse). A fresh PUSH lands on
+  // a new entry key whose `scrollY` is 0, so the page opens at the top. Both detail
+  // pages inherit this because both render through this Shell — no per-page wiring.
+  const { key: entryKey, state: entryState, setState: setEntryState } = useDetailEntryState();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Snapshot the restore target ONCE per entry key (a back/forward traverse), so
+  // the restore effect doesn't fight the live scroll writes that follow.
+  const restoreYRef = useRef<{ key: string; y: number } | null>(null);
+  if (restoreYRef.current?.key !== entryKey) {
+    restoreYRef.current = { key: entryKey, y: entryState.scrollY };
+  }
+
+  // Restore the saved offset when this entry mounts / changes (back/forward).
+  // Fresh push → scrollY 0 → a no-op (already at top). We restore AFTER paint so
+  // the body has its real scrollHeight; rAF avoids a layout-thrash on first frame.
+  useEffect(() => {
+    const el = scrollRef.current;
+    const target = restoreYRef.current;
+    if (!el || !target || target.y <= 0) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = target.y;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [entryKey]);
+
+  // Save the offset on scroll-idle (debounced) into THIS entry's state so a later
+  // back/forward traverse restores it. Debounced so a fling doesn't write on every
+  // frame; the trailing write captures the resting offset.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => {
+        const y = el.scrollTop;
+        setEntryState((prev) => (prev.scrollY === y ? prev : { ...prev, scrollY: y }));
+      }, 120);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (idle) clearTimeout(idle);
+    };
+  }, [entryKey, setEntryState]);
+
   const [listContext, setListContext] = useAtom(listContextAtom);
   const recordRecent = useSetAtom(recordRecentAtom);
   // ── overlay open-state (CTL-916 / DETAIL5): the ⌘K palette + the `?` cheatsheet
@@ -641,6 +693,7 @@ export function Shell({
           overflow actually engages; `cat-overlay-scroll` keeps the CTL-1036 overlay
           scrollbar styling on the new scroller. */}
       <div
+        ref={scrollRef}
         data-shell-scroll
         className="cat-overlay-scroll"
         style={{ display: "flex", flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}

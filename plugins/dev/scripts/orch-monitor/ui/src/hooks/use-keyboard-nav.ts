@@ -59,9 +59,13 @@ export function useKeyboardNav(options: KeyboardNavOptions): void {
     };
 
     function handleKeyDown(e: KeyboardEvent) {
-      const focusedTag = document.activeElement?.tagName;
+      const active = document.activeElement as HTMLElement | null;
+      const focusedTag = active?.tagName;
+      // CTL-1049: also guard a focused contentEditable host so Escape-means-back
+      // (and the other shortcuts) never fire while the operator edits rich text.
+      const focusedEditable = active?.isContentEditable === true;
       const wasChordPending = chordPending;
-      const action = classifyKey(e, focusedTag, wasChordPending);
+      const action = classifyKey(e, focusedTag, wasChordPending, focusedEditable);
 
       // Any resolved keystroke (the second key of a chord, or a non-`g` key)
       // clears a pending chord before we dispatch. `chord-start` re-arms below.
