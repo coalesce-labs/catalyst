@@ -139,6 +139,30 @@ t7() {
 }
 check "parity reports whether pluginDirs is set in machine config" t7
 
+# ── 8. off-main checkout → drift naming "main" (CTL-992) ────────────────────
+make_fixture offmain
+$GITC -C "${FIX_CHECKOUT}" checkout -q -b feature
+t8() {
+  local out rc
+  out="$(parity "${FIX_CHECKOUT}/plugins/dev" "" 2>&1)"; rc=$?
+  [[ $rc -ne 0 ]] && grep -qi "main" <<<"$out" && grep -q "feature" <<<"$out"
+}
+check "off-main checkout exits nonzero and names main + branch" t8
+
+# ── 9. linked-worktree pluginDirs → drift naming "worktree" (CTL-992) ───────
+make_fixture linked
+# park primary off main so the linked worktree can itself sit on main,
+# isolating the worktree signal from the off-main signal.
+$GITC -C "${FIX_CHECKOUT}" checkout -q -b parking
+LINKED_WT="${SCRATCH}/fix_linked/linkedwt"
+$GITC -C "${FIX_CHECKOUT}" worktree add -q "$LINKED_WT" main
+t9() {
+  local out rc
+  out="$(parity "${LINKED_WT}/plugins/dev" "" 2>&1)"; rc=$?
+  [[ $rc -ne 0 ]] && grep -qi "worktree" <<<"$out"
+}
+check "linked-worktree pluginDirs exits nonzero and names worktree" t9
+
 echo ""
 TOTAL=$((PASSES + FAILURES))
 echo "catalyst-stack-parity: $PASSES/$TOTAL passed, $FAILURES failed"
