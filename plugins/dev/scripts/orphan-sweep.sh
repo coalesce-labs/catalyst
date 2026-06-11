@@ -143,6 +143,8 @@ _init_roots() {
   SWEEP_LINEAR_TEAMS="${SWEEP_LINEAR_TEAMS:-CTL ADV}"
   SWEEP_RUN_ID="${SWEEP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
   SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
+  SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
   _load_sweep_config
 }
 
@@ -387,44 +389,81 @@ sweep_procs() {
   done < <(_candidate_pids)
 }
 
-# ─── vector 2: Done-ticket worktree removal ─────────────────────────────────
+# ─── vector 2: classification-driven multi-root worktree removal ─────────────
+
+resolve_trunk_ref() {
+  local head
+  head="$(git -C "$1" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)"
+  [[ -n "$head" ]] && printf '%s' "$head" || printf 'origin/main'
+}
+
+discover_worktree_roots() {
+  local root
+  if [[ -d "${SWEEP_WT_ROOT:-}" ]]; then
+    while IFS= read -r root; do
+      [[ -d "$root" ]] && printf '%s\n' "$root"
+    done < <(find "$SWEEP_WT_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+  fi
+  if [[ -d "${SWEEP_PROJECT_CLAUDE_WT:-}" ]]; then printf '%s\n' "$SWEEP_PROJECT_CLAUDE_WT"; fi
+  if [[ "${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}" == "1" && -d "${HOME}/.claude/worktrees" ]]; then
+    printf '%s\n' "${HOME}/.claude/worktrees"
+  fi
+}
+
+enumerate_worktree_dirs() {
+  local d
+  [[ -d "$1" ]] || return 0
+  while IFS= read -r -d "" d; do
+    [[ -e "${d}/.git" ]] && printf '%s\0' "$d"
+  done < <(find "$1" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+}
+
+_is_primary_checkout() {
+  local primary
+  primary="$(git -C "$1" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+  [[ -n "$primary" ]] || return 1
+  local rw rp
+  rw="$(cd "$1" 2>/dev/null && pwd -P)"
+  rp="$(cd "$primary" 2>/dev/null && pwd -P)"
+  [[ "$rw" == "$rp" ]]
+}
 
 sweep_worktrees() {
-  local team id wt
-  for team in $SWEEP_LINEAR_TEAMS; do
-    while IFS= read -r id; do
-      [[ -n "$id" ]] || continue
+  local root wt trunk verdict
 
-      # locate worktree: $SWEEP_WT_ROOT/*/$id
-      wt=""
-      local candidate
-      for candidate in "${SWEEP_WT_ROOT}"/*/"$id"; do
-        [[ -d "$candidate" ]] && { wt="$candidate"; break; }
-      done
-      [[ -n "$wt" ]] || continue
-
-      # clean check first (cheap)
-      if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-        log "skip dirty worktree: $wt"
-        continue
-      fi
-
-      if is_dry; then
-        log "[dry-run] would remove worktree: $wt"
-        continue
-      fi
-
-      # presweep: stop sessions (gate before irreversible remove)
-      if command -v worktree-presweep.sh >/dev/null 2>&1; then
-        worktree-presweep.sh "$wt" 2>/dev/null || { log "skip (sessions remain): $wt"; continue; }
-      fi
-
-      git worktree remove "$wt" 2>/dev/null \
-        && { log "removed worktree: $wt"; emit_reclaim worktree "$wt"; }
-
-    done < <(linearis issues list --team "$team" --status "Done" --limit 200 2>/dev/null \
-               | jq -r '.[].identifier' 2>/dev/null || true)
-  done
+  while IFS= read -r root; do
+    [[ -d "$root" ]] || continue
+    while IFS= read -r -d "" wt; do
+      _is_primary_checkout "$wt" 2>/dev/null && { log "skip primary checkout: $wt"; continue; }
+      trunk="$(resolve_trunk_ref "$wt")"
+      verdict="$(classify_worktree "$wt" "$trunk")"
+      log "verdict $verdict: $wt"
+      case "$verdict" in
+        SAFE)
+          if is_dry; then log "[dry-run] would remove worktree: $wt"; continue; fi
+          if command -v worktree-presweep.sh >/dev/null 2>&1; then
+            worktree-presweep.sh "$wt" 2>/dev/null || { log "skip (sessions remain): $wt"; continue; }
+          fi
+          git worktree remove "$wt" 2>/dev/null \
+            && { log "removed worktree: $wt"; emit_reclaim worktree "$wt"; }
+          ;;
+        ORPHAN_GITFILE)
+          if is_dry; then log "[dry-run] would rm -rf orphan: $wt"; continue; fi
+          rm -rf "$wt" && { log "removed orphan gitfile dir: $wt"; emit_reclaim worktree "$wt"; }
+          ;;
+        SALVAGE_UNPUSHED)
+          log "salvage (unpushed commits, skip+report): $wt"
+          ;;
+        SALVAGE_DIRTY)
+          log "salvage (dirty, skip+report): $wt"
+          ;;
+        KEEP|*)
+          log "keep: $wt"
+          ;;
+      esac
+    done < <(enumerate_worktree_dirs "$root")
+  done < <(discover_worktree_roots)
+  # SWEEP_LINEAR_TEAMS deprecated — Linear Done query removed (CTL-1030)
 }
 
 # ─── main ───────────────────────────────────────────────────────────────────
