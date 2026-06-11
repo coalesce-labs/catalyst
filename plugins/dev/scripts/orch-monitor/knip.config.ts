@@ -16,6 +16,7 @@ const config: KnipConfig = {
         "catalyst-session.ts",
         "analyze-events.ts",
         "cli/hud.tsx",
+        "bin/gen-attribute-audit.ts",
       ],
       project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
     },
