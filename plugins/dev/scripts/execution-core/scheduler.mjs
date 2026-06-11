@@ -3333,7 +3333,11 @@ export function schedulerTick(
             { member, members: anomaly.members },
             "ctl-925 sweep-2: eligible ticket in dependency cycle → needs-human",
           );
-          labelOnce(orchDir, member, "needs-human", writeStatus);
+          // CTL-863 fence: external Linear write — a zombie host that lost its
+          // claim must not label after takeover (mirrors the A.5 cycle site).
+          if (fenceGuard({ ticket: member, orchDir, multiHost })) {
+            labelOnce(orchDir, member, "needs-human", writeStatus);
+          }
         }
       }
     }
