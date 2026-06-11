@@ -325,4 +325,13 @@ describe("CTL-1045 Bug 1 — J2 kill-storm: ineffective-intent suppression in de
 
     expect(killed).toEqual(["ghostjob"]); // guard must not over-suppress
   });
+
+  test("enforce: intentDb=null bypasses the guard entirely — kill still fires", () => {
+    const killed = [];
+    // intentDb omitted → null default → isIntentEffective check is skipped
+    // entirely; killBgJob must still be called (fail-open when beliefs db absent).
+    schedulerTick(orchDir, prodTickOpts({ mode: "enforce", killed, intentDb: null }));
+
+    expect(killed).toEqual(["ghostjob"]);
+  });
 });

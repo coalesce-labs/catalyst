@@ -423,6 +423,23 @@ describe("CTL-1045 Bug 4 — clearStalledLabel onRemoved callback", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(called).toBe(1);
   });
+
+  test("a throwing onRemoved does not propagate — clearStalledLabel stays best-effort", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+
+    // onRemoved throws — clearStalledLabel must not re-throw.
+    expect(() =>
+      clearStalledLabel(
+        orchDir, "CTL-1", "needs-human",
+        { removeLabel: () => ({ removed: true }) },
+        { onRemoved: () => { throw new Error("disk full"); } },
+      )
+    ).not.toThrow();
+    // The marker deletion still completed before onRemoved was called.
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
 });
 
 // ─── CTL-936: labelOnce — operator-visible event on unrecoverable failure ────
