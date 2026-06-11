@@ -46,7 +46,7 @@ function mockFetch(responseData: unknown) {
 
 function mockFetchFail() {
   const originalFetch = globalThis.fetch;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   globalThis.fetch = (() => Promise.reject(new Error("network failure"))) as any;
   return { restore() { globalThis.fetch = originalFetch; } };
 }

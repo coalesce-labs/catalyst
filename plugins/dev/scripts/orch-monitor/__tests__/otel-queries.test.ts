@@ -842,12 +842,12 @@ describe("modelLatency", () => {
     const rows = await modelLatency(loki, "1h");
     expect(rows).not.toBeNull();
     // sorted slowest-p95 first
-    expect(rows![0]!.model).toBe("fable-5");
-    expect(rows![0]!.p50Ms).toBe(3100);
-    expect(rows![0]!.p95Ms).toBe(22000);
-    expect(rows![0]!.requests).toBe(300);
-    expect(rows![0]!.errors).toBe(3);
-    expect(rows![0]!.errorRate).toBeCloseTo(0.01);
+    expect(rows![0].model).toBe("fable-5");
+    expect(rows![0].p50Ms).toBe(3100);
+    expect(rows![0].p95Ms).toBe(22000);
+    expect(rows![0].requests).toBe(300);
+    expect(rows![0].errors).toBe(3);
+    expect(rows![0].errorRate).toBeCloseTo(0.01);
     // haiku has no errors → errorRate 0 (it HAS requests, so not null)
     const haiku = rows!.find((r) => r.model === "haiku-4.5")!;
     expect(haiku.errors).toBe(0);
@@ -1373,8 +1373,8 @@ describe("recentTail", () => {
     expect(res).not.toBeNull();
     expect(res!.rows).toHaveLength(2);
     // newest-first — and the fields came from the LABELS, not the (non-JSON) body.
-    expect(res!.rows[0]!.eventName).toBe("api_request");
-    expect(res!.rows[0]!.model).toBe("fable");
+    expect(res!.rows[0].eventName).toBe("api_request");
+    expect(res!.rows[0].model).toBe("fable");
     // freshness ≈ 4s (allow a little slack for the now() taken inside recentTail)
     expect(res!.freshnessMs).not.toBeNull();
     expect(res!.freshnessMs!).toBeGreaterThanOrEqual(3_000);
@@ -1398,7 +1398,7 @@ describe("recentTail", () => {
       ),
     );
     const res = await recentTail(loki, "15m");
-    const row = res!.rows[0]!;
+    const row = res!.rows[0];
     expect(row.eventName).toBe("tool_result");
     expect(row.toolName).toBe("Bash");
     expect(row.durationMs).toBe(296);
@@ -1421,8 +1421,8 @@ describe("recentTail", () => {
       ]),
     );
     const res = await recentTail(loki, "15m");
-    expect(res!.rows[0]!.sessionId).toBe("abc-123");
-    expect(res!.rows[0]!.linearKey).toBe("CTL-928");
+    expect(res!.rows[0].sessionId).toBe("abc-123");
+    expect(res!.rows[0].linearKey).toBe("CTL-928");
   });
 
   it("an empty stream is an HONEST result with freshnessMs null (QUIET), NOT null", async () => {
@@ -1445,8 +1445,8 @@ describe("recentTail", () => {
     );
     const res = await recentTail(loki, "15m");
     expect(res!.rows).toHaveLength(1);
-    expect(res!.rows[0]!.eventName).toBeNull();
-    expect(res!.rows[0]!.sessionId).toBeNull();
+    expect(res!.rows[0].eventName).toBeNull();
+    expect(res!.rows[0].sessionId).toBeNull();
   });
 });
 

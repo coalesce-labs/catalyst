@@ -56,7 +56,7 @@ function mockFetch(responseData: unknown) {
 
 function mockFetchFail() {
   const originalFetch = globalThis.fetch;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   globalThis.fetch = (() => Promise.reject(new Error("network failure"))) as any;
   return {
     restore() {
@@ -580,7 +580,7 @@ describe("CTL-996: fillTitleDescriptionFallback — labels + relations extension
     const spy = mockFetch({ data: { issues: { nodes: [makeNode()] } } });
     try {
       await withToken(() => fillTitleDescriptionFallback(["CTL-996"]));
-      const query = spy.calls[0].query as string;
+      const query = spy.calls[0].query;
       expect(query).toContain("labels");
       expect(query).toContain("relations");
       expect(query).toContain("inverseRelations");
