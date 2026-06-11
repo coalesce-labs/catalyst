@@ -891,7 +891,7 @@ export function Board({
     <TooltipProvider delayDuration={200}>
       <div style={{
         [BOARD_VH_VAR]: boardRootHeight(embedded),
-        background: C.s0, color: C.fg,
+        background: C.s1, color: C.fg, // CTL-1013: board is the content canvas (s1), not chrome (s0)
         // CTL-989 board-height fix: embedded → fill the AppShell inset content slot
         // via the flex chain (`flex:1; minHeight:0`) so there is no dead space below
         // the columns. Standalone (board.html) keeps the 100vh root. The

@@ -153,10 +153,10 @@ export function DashboardSurface() {
 
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col bg-surface-0 text-fg">
+      <div className="flex h-full min-h-0 flex-col bg-background text-fg">
         {/* Content-level meta row: snapshot timestamp + version. The frame's
             breadcrumb + collapse live in the AppShell top strip now. */}
-        <div className="flex items-center justify-end gap-3 border-b border-border bg-surface-1 px-5 py-2 text-[12px] text-muted">
+        <div className="flex items-center justify-end gap-3 border-b border-border-subtle bg-background px-5 py-2 text-[12px] text-muted">
           {snapshot.timestamp && (
             <span>
               {new Date(snapshot.timestamp).toLocaleDateString(undefined, {
