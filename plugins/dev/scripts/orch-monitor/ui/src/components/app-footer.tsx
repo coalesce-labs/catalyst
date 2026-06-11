@@ -3,13 +3,22 @@
 // surface gets it. Height ~28px, border-t, monospace 11px.
 //
 // Absorbs the SHELL8 sidebar footer health dots:
-//   Left: LIVE/OFFLINE badge + activity summary (active · stuck · queued).
+//   Left: LIVE/OFFLINE badge + categorical activity readout
+//         (active · dead · free · waiting).
 //   Right: per-node health dots with tooltips.
+//
+// CTL-1032: the activity summary now counts HONESTLY. It used to read a single
+// `nav.workerCount` "N active" figure that lumped dead/stale background jobs in
+// with genuinely-working slots. It now derives four categories from the board
+// snapshot via deriveFooterCounts, which imports the SAME CTL-1015 control-tower
+// classification utilities (assignSlots / deadWorkers / groupHoldingBuckets) —
+// so the strip and the control tower can never disagree.
 //
 // The .catalyst-live-dot and .catalystLivePing animations are in app.css (Phase 4
 // hoists them; until then they render without animation on non-board surfaces).
 import { cn } from "@/lib/utils";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
+import { deriveFooterCounts } from "@/components/footer-counts";
 // CTL-945: consume shared context from AppShell — no additional EventSources.
 import { useNavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
@@ -23,12 +32,18 @@ import {
 import { C, LIVE } from "@/board/board-tokens";
 
 export function AppFooter() {
-  const { status } = useBoardSnapshot();
+  const { payload, status } = useBoardSnapshot();
   const nav = useNavSignalContext();
   const cluster = useClusterSignalContext();
 
   const isLive = status === "connected";
-  const config = nav ? { active: nav.workerCount, stuck: 0, queued: nav.queueDepth } : null;
+  // CTL-1032: derive the four honest categories from the board snapshot using the
+  // shared CTL-1015 classification (dead workers excluded from active, free =
+  // empty slots, waiting = admission-gate-held tickets). The board snapshot is
+  // the SAME data source the control tower reads, so the numbers always agree.
+  const counts = payload
+    ? deriveFooterCounts(payload.workers, payload.tickets, payload.config.maxParallel)
+    : null;
 
   return (
     <footer
@@ -69,15 +84,27 @@ export function AppFooter() {
         {isLive ? "LIVE" : "OFFLINE"}
       </span>
 
-      {/* Activity summary */}
-      {config && (
-        <span className="flex items-center gap-1">
-          <span style={{ color: C.fg }}>{config.active} active</span>
-          {config.stuck > 0 && (
-            <span style={{ color: C.red }}> · {config.stuck} stuck</span>
+      {/* Activity summary — honest categorical readout (CTL-1032).
+          active + free always render; dead + waiting collapse away when zero.
+          Muted, Linear-calm: active reads in fg, the rest sit dim/muted. */}
+      {counts && (
+        <span className="flex items-center" style={{ gap: 0 }}>
+          <span style={{ color: C.fg }}>{counts.active} active</span>
+          {counts.dead > 0 && (
+            <span style={{ color: C.fgDim }}>
+              {" · "}
+              {counts.dead} dead
+            </span>
           )}
-          {config.queued > 0 && (
-            <span style={{ color: C.fgDim }}> · {config.queued} queued</span>
+          <span style={{ color: C.fgMuted }}>
+            {" · "}
+            {counts.free} free
+          </span>
+          {counts.waiting > 0 && (
+            <span style={{ color: C.fgDim }}>
+              {" · "}
+              {counts.waiting} waiting
+            </span>
           )}
         </span>
       )}
