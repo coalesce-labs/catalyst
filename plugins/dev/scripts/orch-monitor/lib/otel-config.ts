@@ -5,12 +5,23 @@ interface OtelConfig {
   enabled: boolean;
   prometheusUrl: string | null;
   lokiUrl: string | null;
+  /** CTL-1050: Grafana base URL (probed at `/api/health` by the service-health
+   *  registry). Absent ⇒ null → the grafana entry renders "unknown" (grey),
+   *  never red. New key `otel.grafanaUrl` (env GRAFANA_URL). */
+  grafanaUrl: string | null;
+  /** CTL-1050: OTel collector health_check extension endpoint (probed directly
+   *  by the registry). Absent ⇒ null → the registry falls back to event-recency
+   *  (telemetry-ingest freshness). New key `otel.collectorHealthUrl`
+   *  (env OTEL_COLLECTOR_HEALTH_URL). */
+  collectorHealthUrl: string | null;
 }
 
 interface FileRead {
   enabled: boolean;
   prometheusUrl: string | null;
   lokiUrl: string | null;
+  grafanaUrl: string | null;
+  collectorHealthUrl: string | null;
   deprecatedKeys: string[];
 }
 
@@ -49,10 +60,20 @@ function readOtelFromFile(filePath: string): FileRead | null {
     enabled: false,
     prometheusUrl: null,
     lokiUrl: null,
+    grafanaUrl: null,
+    collectorHealthUrl: null,
     deprecatedKeys: [],
   };
 
   if (typeof otel.enabled === "boolean") out.enabled = otel.enabled;
+
+  // CTL-1050: new keys — no deprecated alias, optional. Absent ⇒ null.
+  if (typeof otel.grafanaUrl === "string" && otel.grafanaUrl) {
+    out.grafanaUrl = otel.grafanaUrl;
+  }
+  if (typeof otel.collectorHealthUrl === "string" && otel.collectorHealthUrl) {
+    out.collectorHealthUrl = otel.collectorHealthUrl;
+  }
 
   if (typeof otel.prometheusUrl === "string" && otel.prometheusUrl) {
     out.prometheusUrl = otel.prometheusUrl;
@@ -82,6 +103,8 @@ export function loadOtelConfig(
   let fileEnabled = false;
   let filePrometheus: string | null = null;
   let fileLoki: string | null = null;
+  let fileGrafana: string | null = null;
+  let fileCollectorHealth: string | null = null;
   const deprecatedKeys = new Set<string>();
 
   for (const p of paths) {
@@ -90,6 +113,8 @@ export function loadOtelConfig(
     fileEnabled = result.enabled;
     filePrometheus = result.prometheusUrl;
     fileLoki = result.lokiUrl;
+    fileGrafana = result.grafanaUrl;
+    fileCollectorHealth = result.collectorHealthUrl;
     for (const k of result.deprecatedKeys) deprecatedKeys.add(k);
     break;
   }
@@ -129,5 +154,19 @@ export function loadOtelConfig(
       ? stripTrailingSlashes(fileLoki)
       : null;
 
-  return { enabled, prometheusUrl, lokiUrl };
+  const envGrafana = process.env.GRAFANA_URL;
+  const grafanaUrl = envGrafana
+    ? stripTrailingSlashes(envGrafana)
+    : fileGrafana
+      ? stripTrailingSlashes(fileGrafana)
+      : null;
+
+  const envCollectorHealth = process.env.OTEL_COLLECTOR_HEALTH_URL;
+  const collectorHealthUrl = envCollectorHealth
+    ? stripTrailingSlashes(envCollectorHealth)
+    : fileCollectorHealth
+      ? stripTrailingSlashes(fileCollectorHealth)
+      : null;
+
+  return { enabled, prometheusUrl, lokiUrl, grafanaUrl, collectorHealthUrl };
 }
