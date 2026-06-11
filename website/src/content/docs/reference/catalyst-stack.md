@@ -51,7 +51,7 @@ Accepted for backward compatibility; no-op (proxy is already off by default).
 
 ### `--hotpatch`
 
-Apply a post-merge update in one command: ff-pull `main`, rsync `plugins/dev/` into the resolved plugin-cache version directory, then start/restart.
+Apply a post-merge update in one command: ff-only pull each `pluginDirs` checkout, then start/restart.
 
 ```bash
 # After merging or pulling new code:
@@ -59,10 +59,27 @@ catalyst-stack restart --hotpatch
 ```
 
 Behavior:
-- Requires `CATALYST_REPO_DIR` to point at the catalyst repo checkout, or defaults to `~/code-repos/github/coalesce-labs/catalyst`.
-- Uses `git pull --ff-only origin main` — aborts on non-fast-forward merges (resolve manually, then retry).
-- Rsyncs with `-ac --exclude=node_modules --exclude=.orphaned_at`. **Never uses `--delete`** — that would wipe `node_modules`.
+- Resolves the checkout(s) from `pluginDirs` via `lib/plugin-dirs.sh` (`CATALYST_PLUGIN_DIRS` env → repo `.catalyst/config.json` → machine config).
+- Uses `git pull --ff-only origin main` — aborts on non-fast-forward merges or a dirty/diverged checkout (resolve manually, then retry).
+- Emits a `node.checkout.updated` event recording the old → new commit.
 - `start --hotpatch` refuses if the stack is already running. Use `restart --hotpatch` instead.
+- The deprecated marketplace-cache rsync survives only behind `catalyst-stack hotpatch --legacy-rsync` (uses `CATALYST_REPO_DIR`).
+
+### `setup-plugin-source.sh`
+
+`plugins/dev/scripts/setup-plugin-source.sh` provisions the pristine, main-only checkout that `--hotpatch` keeps fresh and registers it as `catalyst.orchestration.pluginDirs` in the machine config.
+
+```bash
+plugins/dev/scripts/setup-plugin-source.sh [--path DIR] [--repo-url URL] [--force]
+```
+
+- Clones the repo (main, single-branch) to `~/catalyst/plugin-source` by default (`--path` or `$CATALYST_PLUGIN_SOURCE` to override), or ff-only pulls an existing checkout.
+- Registers `<path>/plugins/dev` as `pluginDirs`, preserving every other machine-config key. Idempotent; `--force` re-points to a new path.
+- **Refuses** a linked git worktree or a non-`main` checkout — the source must stay pristine.
+
+### `parity`
+
+`catalyst-stack parity` reports node-freshness + setup drift for the `pluginDirs` checkout (exit code = number of drift findings). In addition to the freshness/dirty/manifest checks, it flags a checkout that is **off `main`** or is a **linked worktree** (run `setup-plugin-source.sh` to fix).
 
 ### `--yes`
 
@@ -72,7 +89,8 @@ Non-interactive mode under `--proxy`: auto-approves `brew install mitmproxy` ins
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `CATALYST_REPO_DIR` | `~/code-repos/github/coalesce-labs/catalyst` | Repo root used by `--hotpatch`. |
+| `CATALYST_REPO_DIR` | `~/code-repos/github/coalesce-labs/catalyst` | Repo root used by the deprecated `hotpatch --legacy-rsync` path. |
+| `CATALYST_PLUGIN_SOURCE` | `~/catalyst/plugin-source` | Default checkout location used by `setup-plugin-source.sh`. |
 | `MITM_LOG` | `~/catalyst/linear-proxy.jsonl` | JSONL capture path read by the mitmproxy addon (`mitm_linear_addon.py`) — not the process log. The mitmdump process log is fixed at `~/catalyst/mitm.log` and cannot be overridden. |
 
 ## Exit codes

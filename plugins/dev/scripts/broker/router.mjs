@@ -12,6 +12,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import {
   log,
   getEventLogPath,
@@ -66,6 +67,7 @@ import {
   clearWaitingSession,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
+import { handlePluginRefreshEvent, resolveRepoFullName } from "./plugin-refresh.mjs";
 import {
   severityNumber,
   deriveTraceId,
@@ -86,6 +88,76 @@ const orchestratorStatusMap = getOrchestratorStatusMap();
 
 // CTL-352: empty-interests degraded threshold (5-minute startup grace).
 const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
+
+// CTL-993: merge-to-main plugin-checkout refresh wiring. The broker module lives
+// at <repo>/plugins/dev/scripts/broker/router.mjs, so the repo .catalyst config
+// (which carries feedback.githubRepo) is four levels up. The machine config path
+// matches lib/plugin-dirs.sh's resolution (CATALYST_MACHINE_CONFIG override).
+const __REPO_CONFIG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".catalyst",
+  "config.json"
+);
+function __machineConfigPath() {
+  const xdg = process.env.XDG_CONFIG_HOME || `${process.env.HOME ?? ""}/.config`;
+  return resolve(process.env.CATALYST_MACHINE_CONFIG || `${xdg}/catalyst/config.json`);
+}
+// Resolved once per daemon lifetime — the repo identity does not change while
+// the broker runs, and the file walk should not repeat on every event.
+let __repoFullNameCached;
+function __repoFullName() {
+  if (__repoFullNameCached === undefined) {
+    try {
+      __repoFullNameCached = resolveRepoFullName({
+        machineConfigPath: __machineConfigPath(),
+        repoConfigPath: __REPO_CONFIG_PATH,
+      });
+    } catch {
+      __repoFullNameCached = null;
+    }
+  }
+  return __repoFullNameCached;
+}
+// The broker's own HEAD at boot (the code it is actually running). Lets the
+// refresh emit restart_needed when the checkout advances past it. Best-effort —
+// null when not in a checkout (skew simply not flagged). CTL-669 model.
+// __loadedCommitRoot pairs it with the broker's own checkout toplevel so
+// restart_needed only fires for THAT checkout — not for an unrelated
+// pluginDirs checkout that happens to advance.
+let __loadedCommitCached;
+let __loadedCommitRootCached;
+function __loadedCommit() {
+  if (__loadedCommitCached === undefined) {
+    try {
+      __loadedCommitCached = execFileSync(
+        "git",
+        ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "HEAD"],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      __loadedCommitCached = null;
+    }
+  }
+  return __loadedCommitCached;
+}
+function __loadedCommitRoot() {
+  if (__loadedCommitRootCached === undefined) {
+    try {
+      __loadedCommitRootCached = execFileSync(
+        "git",
+        ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "--show-toplevel"],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      __loadedCommitRootCached = null;
+    }
+  }
+  return __loadedCommitRootCached;
+}
 
 // === Emission ===
 // Canonical envelope helpers. Primitives (sha256Hex, severityNumber,
@@ -1708,6 +1780,23 @@ export function processEvent(event) {
   // non-consuming — the projection is a side-channel observer and never
   // returns, so existing routing below is untouched).
   projectWorkerStateEvent(event);
+
+  // CTL-993: on a merge-to-main of the configured repo, ff-only pull the
+  // pluginDirs checkout so fixes go live within seconds. Non-consuming
+  // side-channel like projectWorkerStateEvent — runs ABOVE the shouldSkipEvent /
+  // interests.size gates because GitHub merge events arrive whether or not any
+  // orchestration is active. handlePluginRefreshEvent never throws and the
+  // events it emits carry resource["service.name"]=catalyst.broker, which
+  // shouldSkipEvent drops on re-ingest (no self-wake loop).
+  handlePluginRefreshEvent({
+    event,
+    repoFullName: __repoFullName(),
+    machineConfigPath: __machineConfigPath(),
+    repoConfigPath: __REPO_CONFIG_PATH,
+    emitFn: appendEvent,
+    loadedCommit: __loadedCommit(),
+    loadedCommitRoot: __loadedCommitRoot(),
+  });
 
   if (name === "filter.register") {
     handleRegister(event);

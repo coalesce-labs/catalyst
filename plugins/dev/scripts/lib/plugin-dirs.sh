@@ -88,3 +88,65 @@ plugin_checkout_root() {
   [[ -d "$pd" ]] || return 1
   git -C "$pd" rev-parse --show-toplevel 2>/dev/null
 }
+
+# plugin_source_health PLUGIN_DIR — offline, read-only structural health check
+# of a pluginDirs checkout (CTL-992). Emits zero or more TYPED warning lines to
+# stdout (stable prefix tokens so callers can switch on them, mirroring the
+# catalyst-stack drift() taxonomy) and returns the line count as the exit code
+# (0 = healthy). Dependency-light (only git); never fetches (freshness vs
+# origin stays in `catalyst-stack parity`, which fetches) and never exits.
+#
+# Typed lines (one per detected problem, first match wins per checkout):
+#   MISSING <pd>                  the pluginDirs entry does not exist
+#   NOT_A_CHECKOUT <pd>           exists but is not inside a git checkout
+#   LINKED_WORKTREE <root>        resolves to a git linked worktree, not a
+#                                 standalone pristine checkout
+#   OFF_MAIN <root> <branch>      checkout HEAD is not on main
+#   DIRTY <root>                  working tree has uncommitted changes
+plugin_source_health() {
+  local pd="$1"
+  local n=0
+
+  if [[ ! -d "$pd" ]]; then
+    printf 'MISSING %s\n' "$pd"
+    return 1
+  fi
+
+  local root
+  root="$(git -C "$pd" rev-parse --show-toplevel 2>/dev/null)"
+  if [[ -z "$root" ]]; then
+    printf 'NOT_A_CHECKOUT %s\n' "$pd"
+    return 1
+  fi
+
+  # Linked worktree: its per-worktree git dir differs from the shared common
+  # dir. A pristine plugin source must be a standalone checkout, never a
+  # worktree linked to some other primary repo. Resolve both to absolute paths
+  # ourselves (--git-common-dir can be relative on older git) before comparing.
+  local git_dir common_dir
+  git_dir="$(git -C "$root" rev-parse --absolute-git-dir 2>/dev/null)"
+  common_dir="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)"
+  if [[ -n "$common_dir" && "$common_dir" != /* ]]; then
+    common_dir="$(cd "$root" && cd "$common_dir" 2>/dev/null && pwd -P)"
+  fi
+  if [[ -n "$git_dir" && -n "$common_dir" && "$git_dir" != "$common_dir" ]]; then
+    printf 'LINKED_WORKTREE %s\n' "$root"
+    n=$((n + 1))
+  fi
+
+  # Off main: workers must run from a pristine main-only checkout.
+  local branch
+  branch="$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  if [[ -n "$branch" && "$branch" != "main" ]]; then
+    printf 'OFF_MAIN %s %s\n' "$root" "$branch"
+    n=$((n + 1))
+  fi
+
+  # Dirty: a dirty tree blocks the ff-only auto-pull.
+  if [[ -n "$(git -C "$root" status --porcelain 2>/dev/null)" ]]; then
+    printf 'DIRTY %s\n' "$root"
+    n=$((n + 1))
+  fi
+
+  return "$n"
+}
