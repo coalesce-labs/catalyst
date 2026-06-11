@@ -14,16 +14,15 @@
 // contract); it additionally guards each ticket so one bad ticket can't abort the
 // comparison of the rest.
 //
-// TIMING (shadow fidelity, not a bug): this comparator runs AFTER collectBeliefsTick
-// (so the advance_to/cycle_exhausted beliefs for THIS tick exist) and BEFORE
-// schedulerTick (which runs maybeResetForRemediateCycle + the real dispatch). The
-// comparator re-reads the PRE-reset signals via the injected readSignals seam, so
-// its procedural oracle is computed over the SAME inputs the belief saw — a true
-// apples-to-apples belief-vs-oracle comparison. The sweep's own deriveAdvancement
-// (over POST-reset signals on a remediate→verify re-entry tick) is a different
-// call at a different point in the tick; this comparator deliberately does NOT
-// reproduce the reset (derive-only — it owns no file deletes), so a logged
-// disagreement always reflects a belief/oracle mismatch on identical inputs.
+// TIMING (shadow fidelity): this comparator runs AFTER collectBeliefsTick (so the
+// advance_to/cycle_exhausted beliefs for THIS tick exist) and BEFORE schedulerTick
+// (which runs maybeResetForRemediateCycle + the real dispatch). In production the
+// oracle reads its inputs from the tick-locked EDB snapshot (obs_signal/obs_verdict/
+// obs_cycle for this tickId) — the SAME rows the belief consumed at collectBeliefsTick.
+// This is a true apples-to-apples comparison: a logged disagreement reflects a genuine
+// belief/oracle mismatch on identical inputs, not mid-tick input skew from a phase
+// signal file mutating between Steps 2 and 4 (CTL-1058). The disk seams remain
+// available as test-override hooks; only the production wiring was changed.
 
 // readAdvanceBeliefs — for one tick, the advance_to + cycle_exhausted beliefs
 // keyed by ticket (subject). Returns { advanceTo: Map<ticket,{from,to}>,
