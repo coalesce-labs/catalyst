@@ -2095,40 +2095,67 @@ function emitOrphanDetectedOnce(orchDir, ticket, signals, appendOrphanDetectedEv
   }
 }
 
-// defaultJanitorKillIntentRecorder — CTL-1004 J2's intent-recording seam, backed
-// by the CTL-936 intentDb (beliefs.db) already threaded into the tick. Records a
-// 'kill' intent pinned to the ghost session's bgJobId, with the same
-// sessionNotRegistered postcondition + open-intent de-dupe as recovery.mjs's
-// intentAwareKill — so the next-tick reconciler checks whether the session left
-// the agents listing and the reconciler (NOT this janitor) issues the stop. When
-// intentDb is null (CATALYST_BELIEFS_SHADOW=0, the collector never opened it) the
-// recorder is a no-op: the kill-intent is dropped, fail-open, the same direction
-// as intentAwareKill's null-db fallback. NEVER shells out to `claude stop`.
-function defaultJanitorKillIntentRecorder(intentDb) {
+// defaultJanitorKillIntentRecorder — CTL-1004 J2's kill seam, backed by the
+// CTL-936 intentDb (beliefs.db) already threaded into the tick. Mirrors
+// recovery.mjs's intentAwareKill EXACTLY: it BOTH issues the real stop
+// (killBgJob) AND records the pinned 'kill' intent in the same call.
+//
+// CTL-1004 J2-enforce DEFECT FIX (adversarial-review finding): the original
+// recorder ONLY inserted an intent row and assumed the reconciler would execute
+// the stop. It does NOT — reconcileIntents (beliefs/intent.mjs) is a
+// postcondition VERIFIER (satisfied / retry / ineffective), not an executor; it
+// never calls killBgJob. So the ghost session never died, and worse the intent
+// aged to 'ineffective' and (under CATALYST_INTENTS_ENFORCE=1) recovery.mjs's
+// isIntentEffective guard would then SUPPRESS a later legitimate kill on the
+// same subject. The fix threads killBgJob in so the enforce path actually stops
+// the ghost — exactly like intentAwareKill does for the revive path.
+//
+// The intent row is still recorded (pinned to bgJobId, sessionNotRegistered
+// postcondition, open-intent de-dupe) so the reconciler can VERIFY the session
+// left the agents listing next tick and so the CTL-936 retry-suppression
+// bookkeeping stays consistent across both kill sites. When intentDb is null
+// (CATALYST_BELIEFS_SHADOW=0) we still issue the kill (fail-open, the same
+// direction as intentAwareKill's null-db fallback) and simply skip the record.
+function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob) {
   return ({ subject, bgJobId }) => {
-    if (!intentDb || !subject || !bgJobId) return false;
-    try {
-      // Skip if an open kill-intent already exists for this subject (idempotent).
-      const open = intentDb
-        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
-        .get(subject);
-      if (open) return false;
-      const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
-      if (!tickRow) return false;
-      intentDb.run(
-        `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
-         VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
-        [
-          tickRow.tick_id,
-          subject,
-          JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
-        ],
-      );
-      return true;
-    } catch (err) {
-      log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw (CTL-1004)");
-      return false;
+    if (!subject || !bgJobId) return false;
+    // Issue the real stop FIRST so a record-failure can never swallow the kill
+    // (intentAwareKill records-then-kills, but its record path is best-effort and
+    // never short-circuits the kill either — here the kill is the load-bearing act).
+    let recorded = false;
+    if (intentDb) {
+      try {
+        // Skip the INSERT if an open kill-intent already exists (idempotent).
+        const open = intentDb
+          .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+          .get(subject);
+        const tickRow = open
+          ? null
+          : intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+        if (!open && tickRow) {
+          intentDb.run(
+            `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
+             VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
+            [
+              tickRow.tick_id,
+              subject,
+              JSON.stringify({ kind: "kill", subject, bgJobId, sessionNotRegistered: true }),
+            ],
+          );
+          recorded = true;
+        }
+      } catch (err) {
+        log.warn({ subject, err: err?.message }, "stall-janitor: recordKillIntent threw — continuing kill (CTL-1004)");
+      }
     }
+    // Execute the stop — the actual ghost-session reap (mirrors intentAwareKill).
+    try {
+      killBgJob({ bgJobId });
+    } catch (err) {
+      log.warn({ subject, bgJobId, err: err?.message }, "stall-janitor: killBgJob threw (CTL-1004)");
+      return recorded;
+    }
+    return true;
   };
 }
 
@@ -2660,8 +2687,10 @@ export function schedulerTick(
   // the event-driven reaper never names: J1 orphan worktrees (teardown=done +
   // .terminal-done.applied, on disk, no live session, clean, CTL-791 evidence) →
   // a TARGETED orphans.reap-requested (the REAPER owns removal); J2 idle ghost
-  // sessions (terminal signal >=600s + an idle background session) → a kill-INTENT
-  // via the intent system (the reconciler executes the stop — NEVER `claude stop`).
+  // sessions (terminal signal >=600s + an idle background session) → the janitor
+  // issues killBgJob AND records a pinned kill-intent (mirrors recovery.mjs
+  // intentAwareKill). The reconciler only VERIFIES the stop landed — it is a
+  // postcondition verifier, never an executor, so the JANITOR performs the stop.
   // SHADOW-FIRST: default mode is "shadow" (emit janitor.would.*, mutate nothing).
   // The census producers + emit/intent seams are injected from startScheduler;
   // a bare unit tick that does not opt in collects nothing (empty census → no-op).
@@ -2686,11 +2715,13 @@ export function schedulerTick(
           collectOrphanCandidates: _collectOrphanCandidates ?? (() => []),
           collectGhostCandidates: _collectGhostCandidates ?? (() => []),
           emit: _janitorEmit,
-          // Default intent recorder: thread the CTL-936 intentDb if present, else a
-          // no-op (a kill-intent with no db to record into is dropped — fail-open,
-          // the same direction as intentAwareKill's null-db fallback).
+          // Default kill seam: BOTH issues killBgJob AND records the pinned
+          // intent (mirrors recovery.mjs intentAwareKill). CTL-1004 J2-enforce
+          // defect fix — the reconciler is a verifier, not an executor, so the
+          // janitor itself must issue the stop. killBgJob is the same tick seam
+          // the reclaim path uses (defaultKillBgJob in production, a spy in tests).
           recordKillIntent:
-            _recordKillIntent ?? defaultJanitorKillIntentRecorder(intentDb),
+            _recordKillIntent ?? defaultJanitorKillIntentRecorder(intentDb, killBgJob),
         });
         janitorReaped = jreport.reaped;
         janitorWouldReap = jreport.wouldReap;

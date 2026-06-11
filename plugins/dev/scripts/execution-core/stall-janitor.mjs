@@ -9,18 +9,26 @@
 //       orphans.reap-requested{ticket, worktree_path, bg_job_id}; the REAPER owns
 //       removal (the targeted removal path + CTL-791 evidence gates).
 //   J2 (ghost sessions): a terminal signal present >=600s with an idle background
-//       session for the same subject. The janitor records a kill-INTENT pinned to
-//       that bgJobId via the intent system; the reconciler executes the stop. The
-//       janitor NEVER shells out to `claude stop`.
+//       session for the same subject. The janitor's kill seam (injected
+//       recordKillIntent) BOTH issues the stop via killBgJob AND records a
+//       kill-INTENT pinned to that bgJobId — mirroring recovery.mjs intentAwareKill.
+//       The intent is recorded so the reconciler can VERIFY the session left the
+//       agents listing next tick (and the CTL-936 retry bookkeeping stays
+//       consistent), but the JANITOR — not the reconciler — performs the stop
+//       (the reconciler is a postcondition verifier, never an executor).
 //
 // DOCTRINE (rules DERIVE, executors ACT; shadow-then-gate):
 //   * The janitor only collapses already-terminal, UNAMBIGUOUS states. It never
 //     calls deriveAdvancement, resolves conflicts, or infers liveness.
-//   * It makes NO external writes — events and intents only. (The reaper +
-//     reconciler are the executors; CTL-863 multi-host fences live there.)
-//   * SHADOW-FIRST: in "shadow" it emits janitor.would.* events and records
-//     nothing; in "enforce" it emits the real targeted reap / records the real
-//     kill-intent; in "off" the whole pass is skipped (no census, no events).
+//   * J1 makes NO external writes — it emits a TARGETED reap event and lets the
+//     REAPER (executor) remove the worktree. J2, by contrast, IS the executor for
+//     the ghost-session stop: its kill seam issues killBgJob directly (the
+//     reconciler only VERIFIES the stop landed, it never performs one). CTL-863
+//     multi-host fences live in the reaper.
+//   * SHADOW-FIRST: in "shadow" it emits janitor.would.* events and mutates
+//     nothing (no reap event, no kill, no intent); in "enforce" it emits the real
+//     targeted reap and issues the real ghost-session kill (+ pinned intent); in
+//     "off" the whole pass is skipped (no census, no events).
 //
 // Split mirrors the CTL-729 watchdog: a PURE decision (classifyOrphanWorktree /
 // classifyGhostSession — all evidence injected, no IO) + an action driver
@@ -112,7 +120,11 @@ export function classifyGhostSession(ctx = {}) {
 //                                               ticket/worktreePath/bgJobId/branch)
 //   collectGhostCandidates()  → [ghostCtx]    (classify ctx + ticket/phase/bgJobId)
 //   emit(type, fields)        → Promise<bool>  the reap-intent / shadow emitter
-//   recordKillIntent(intent)  → bool           pins a kill-intent via intent.mjs
+//   recordKillIntent(intent)  → bool           the J2 kill seam: issues killBgJob
+//                                               AND pins the kill-intent (mirrors
+//                                               recovery.mjs intentAwareKill). Named
+//                                               for the bookkeeping half; the stop
+//                                               is the load-bearing act.
 //   terminalIdleMs            → number         J2 threshold (default 600s)
 export function runStallJanitorPass({
   mode = "shadow",
@@ -193,7 +205,10 @@ export function runStallJanitorPass({
     }
   }
 
-  // ---- J2: ghost sessions → kill-INTENT (never claude stop) -------------------
+  // ---- J2: ghost sessions → killBgJob + pinned kill-intent --------------------
+  // In enforce the recordKillIntent seam BOTH stops the ghost (killBgJob) AND
+  // records the intent (mirrors recovery.mjs intentAwareKill). The reconciler is
+  // a verifier, not an executor — so the janitor itself must issue the stop.
   let ghostCandidates = [];
   try {
     ghostCandidates = collectGhostCandidates() ?? [];
@@ -207,8 +222,9 @@ export function runStallJanitorPass({
       if (decision.action !== "kill-intent") continue;
       const subject = `${c.ticket}/${c.phase}`;
       if (enforce) {
-        // Pin the intent to bgJobId so resolvePostcondition distinguishes the
-        // targeted session from a newly-revived worker on the same subject slot.
+        // Issue the stop AND pin the intent to bgJobId (so resolvePostcondition
+        // distinguishes the targeted session from a newly-revived worker on the
+        // same subject slot) — both in one seam call, mirroring intentAwareKill.
         recordKillIntent({ subject, bgJobId: c.bgJobId, ticket: c.ticket, phase: c.phase });
         report.killIntents.push({ ticket: c.ticket, phase: c.phase, bgJobId: c.bgJobId });
       } else {

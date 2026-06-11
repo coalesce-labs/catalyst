@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick } from "./scheduler.mjs";
+import { openBeliefsDb } from "./beliefs/schema.mjs";
 
 const NOW = Date.parse("2026-06-11T12:00:00Z");
 
@@ -195,5 +196,95 @@ describe("CTL-1004 integration — isolation", () => {
       throw new Error("injected census failure");
     };
     expect(() => schedulerTick(orchDir, opts)).not.toThrow();
+  });
+});
+
+// ── CTL-1004 J2 enforce DEFECT FIX (adversarial-review finding) ─────────────
+//
+// THE BUG: in enforce mode the J2 path only INSERTED a kill-intent row; nothing
+// ever executed it. reconcileIntents (beliefs/intent.mjs) is a postcondition
+// VERIFIER, not an executor — it never calls killBgJob. So the ghost session
+// never died, and worse, the intent aged to 'ineffective' and (under
+// CATALYST_INTENTS_ENFORCE=1) recovery.mjs's isIntentEffective guard would then
+// SUPPRESS a later legitimate kill on the same subject.
+//
+// THE FIX (mirror recovery.mjs intentAwareKill EXACTLY): the enforce recorder
+// must BOTH issue killBgJob({bgJobId}) AND record the pinned intent in the same
+// call. These tests exercise the PRODUCTION recorder wiring — no injected
+// recordKillIntent seam — so defaultJanitorKillIntentRecorder(intentDb,
+// killBgJob) is what runs. The assertion is that a REAL stop seam fires (not
+// merely that an intent row was written).
+describe("CTL-1004 J2 enforce — a real stop seam fires (killBgJob), not just an intent row", () => {
+  // A real beliefs.db with a single tick row (defaultJanitorKillIntentRecorder
+  // needs the latest tick_id to anchor the intent insert).
+  function makeIntentDb() {
+    const db = openBeliefsDb({ path: join(orchDir, "beliefs.db") });
+    db.run("INSERT INTO tick (now_ms, host) VALUES (?, 'testhost')", [NOW]);
+    return db;
+  }
+
+  // Tick opts with the PRODUCTION recorder path (recordKillIntent NOT injected),
+  // a real intentDb, and a spy killBgJob so we can observe the stop seam.
+  function prodTickOpts({ mode, killed, intentDb }) {
+    return {
+      readEligible: () => [],
+      dispatch: () => ({ status: "dispatched" }),
+      exec: () => ({ code: null }),
+      reclaimDeadWork: () => ({ class: "alive-suppressed" }),
+      writeStatus: {
+        applyLabel: () => ({ applied: true }),
+        removeLabel: () => ({ removed: true }),
+        runTransition: () => ({ applied: false }),
+      },
+      now: () => NOW,
+      watchdog: { mode: "off" },
+      intentDb,
+      // Spy stop seam — records every bgJobId killBgJob is asked to stop.
+      killBgJob: ({ bgJobId }) => killed.push(bgJobId),
+      stallJanitor: {
+        mode,
+        collectGhostCandidates: () => [
+          {
+            ticket: "CTL-1004G",
+            phase: "monitor-deploy",
+            bgJobId: "ghostjob",
+            terminalForMs: 700_000,
+            sessionKind: "background",
+            sessionStatus: "idle",
+          },
+        ],
+        // recordKillIntent intentionally NOT injected → production recorder.
+      },
+    };
+  }
+
+  test("enforce: killBgJob IS called with the ghost's bgJobId AND an intent row is recorded", () => {
+    const killed = [];
+    const intentDb = makeIntentDb();
+    const result = schedulerTick(orchDir, prodTickOpts({ mode: "enforce", killed, intentDb }));
+
+    // The REAL stop seam fired against the ghost session (the keystone assertion).
+    expect(killed).toEqual(["ghostjob"]);
+    // The pinned intent was ALSO recorded (mirrors intentAwareKill: stop + record).
+    const row = intentDb
+      .query("SELECT subject, postcondition FROM intent WHERE kind = 'kill' AND subject = ?")
+      .get("CTL-1004G/monitor-deploy");
+    expect(row).toBeDefined();
+    expect(JSON.parse(row.postcondition)).toMatchObject({ bgJobId: "ghostjob", sessionNotRegistered: true });
+    expect(result.janitorKillIntents).toEqual([
+      { ticket: "CTL-1004G", phase: "monitor-deploy", bgJobId: "ghostjob" },
+    ]);
+  });
+
+  test("shadow: killBgJob is NEVER called (no real stop), only janitor.would.kill-intent", () => {
+    const killed = [];
+    const intentDb = makeIntentDb();
+    schedulerTick(orchDir, prodTickOpts({ mode: "shadow", killed, intentDb }));
+
+    expect(killed).toEqual([]);
+    const row = intentDb
+      .query("SELECT subject FROM intent WHERE kind = 'kill' AND subject = ?")
+      .get("CTL-1004G/monitor-deploy");
+    expect(row == null).toBe(true); // no intent row recorded in shadow
   });
 });
