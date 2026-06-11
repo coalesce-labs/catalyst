@@ -52,6 +52,19 @@ describe("buildTriageTransitionEvent", () => {
     const ev = JSON.parse(buildTriageTransitionEvent({ ticket: "CTL-1", verified: false }));
     expect(ev.body.payload.reason).toBeNull();
   });
+
+  // CTL-1023: this IS the triage phase — classification is still being decided,
+  // so the work-type dimension defaults to "unknown" here. The attribute must
+  // still be present (never inconsistently missing).
+  test("CTL-1023: catalyst.ticket.type defaults to 'unknown' on the triage event", () => {
+    const ev = JSON.parse(buildTriageTransitionEvent({ ticket: "CTL-1023" }));
+    expect(ev.attributes["catalyst.ticket.type"]).toBe("unknown");
+  });
+
+  test("CTL-1023: catalyst.ticket.type passes through when supplied", () => {
+    const ev = JSON.parse(buildTriageTransitionEvent({ ticket: "CTL-1023", ticketType: "bug" }));
+    expect(ev.attributes["catalyst.ticket.type"]).toBe("bug");
+  });
 });
 
 describe("appendTriageTransitionEvent", () => {

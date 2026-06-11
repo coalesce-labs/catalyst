@@ -2820,6 +2820,42 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.severityNumber).toBe(9);
   });
 
+  // CTL-1023: the work-type dimension rides on every dispatch lifecycle event.
+  // Resolved from workers/<ticket>/triage.json .classification; "unknown" when
+  // no triage.json exists yet (the pre-triage first dispatch).
+  test("CTL-1023: dispatch-requested carries catalyst.ticket.type from triage.json", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl1023-disp-"));
+    mkdirSync(join(orchDir, "workers", "CTL-TT-1"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-TT-1", "triage.json"),
+      JSON.stringify({ classification: "bug" }),
+    );
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir,
+      ticket: "CTL-TT-1",
+      target_phase: "implement",
+      reason: "advance",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("bug");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("CTL-1023: dispatch-requested defaults catalyst.ticket.type to 'unknown' pre-triage", () => {
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir: undefined,
+      ticket: "CTL-TT-2",
+      target_phase: "triage",
+      reason: "new-work",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("unknown");
+  });
+
   test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
     const ok = defaultAppendRunawayEvent({
       ticket: "CTL-9",

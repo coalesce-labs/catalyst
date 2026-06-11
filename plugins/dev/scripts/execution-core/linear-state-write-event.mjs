@@ -26,6 +26,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
 import { hostName, hostId } from "./lib/host-identity.mjs";
+import { UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 
 // defaultAppend — writes a JSONL line to the canonical event log.
 function defaultAppend(line) {
@@ -48,6 +49,10 @@ export function buildLinearStateWriteEvent({
   applied = false,
   verified = false,
   actor = "catalyst.execution-core",
+  // CTL-1023: work-type dimension. Post-triage writes carry the real type; the
+  // caller resolves it from triage.json (resolveTicketType). Defaults to
+  // "unknown" so the attribute is always present.
+  ticketType = UNKNOWN_TICKET_TYPE,
 } = {}) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
@@ -76,6 +81,7 @@ export function buildLinearStateWriteEvent({
         "event.channel": "execution-core",
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
+        "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE, // CTL-1023
       },
       body: {
         payload: {
