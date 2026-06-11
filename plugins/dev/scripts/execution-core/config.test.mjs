@@ -340,3 +340,92 @@ describe("HEARTBEAT_INTERVAL_MS (CTL-859)", () => {
     expect(HEARTBEAT_INTERVAL_MS).toBe(30_000);
   });
 });
+
+import { readWatchdogConfig, phaseBudgetMs, WATCHDOG_MINUTES_PER_TURN } from "./config.mjs";
+
+const WD_ENVS = ["CATALYST_WATCHDOG", "EXECUTION_CORE_WATCHDOG_MODE",
+  "EXECUTION_CORE_WATCHDOG_SILENCE_MS", "EXECUTION_CORE_WATCHDOG_BUDGET_MULTIPLIER",
+  "EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET", "CATALYST_LAYER2_CONFIG_FILE"];
+
+describe("readWatchdogConfig (CTL-729)", () => {
+  let saved = {}, tmp;
+  beforeEach(() => {
+    for (const k of WD_ENVS) { saved[k] = process.env[k]; delete process.env[k]; }
+    tmp = mkdtempSync(join(tmpdir(), "ctl729-wd-"));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp, "absent.json");
+  });
+  afterEach(() => {
+    for (const k of WD_ENVS) { saved[k] === undefined ? delete process.env[k] : (process.env[k] = saved[k]); }
+    saved = {}; rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("defaults: mode=shadow, 30-min silence, mult 1.5, revive 0", () => {
+    const c = readWatchdogConfig();
+    expect(c.mode).toBe("shadow");
+    expect(c.silenceThresholdMs).toBe(30 * 60_000);
+    expect(c.phaseBudgetMultiplier).toBe(1.5);
+    expect(c.reviveBudget).toBe(0);
+  });
+  test("CATALYST_WATCHDOG=0 maps to mode:off", () => {
+    process.env.CATALYST_WATCHDOG = "0";
+    expect(readWatchdogConfig().mode).toBe("off");
+  });
+  test("reads catalyst.watchdog.* from Layer-2", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { watchdog: {
+      mode: "enforce", silenceThresholdMinutes: 45, phaseBudgetMultiplier: 2, reviveBudget: 1 } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    const out = readWatchdogConfig();
+    expect(out.mode).toBe("enforce");
+    expect(out.silenceThresholdMs).toBe(45 * 60_000);
+    expect(out.phaseBudgetMultiplier).toBe(2);
+    expect(out.reviveBudget).toBe(1);
+  });
+  test("env wins over Layer-2 and default", () => {
+    const cfg = join(tmp, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { watchdog: { mode: "off", silenceThresholdMinutes: 45 } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.EXECUTION_CORE_WATCHDOG_MODE = "enforce";
+    process.env.EXECUTION_CORE_WATCHDOG_SILENCE_MS = "600000";
+    const out = readWatchdogConfig();
+    expect(out.mode).toBe("enforce");
+    expect(out.silenceThresholdMs).toBe(600_000);
+  });
+  test("malformed Layer-2 file → code defaults (never throws)", () => {
+    const cfg = join(tmp, "config.json"); writeFileSync(cfg, "{ not json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(readWatchdogConfig().silenceThresholdMs).toBe(30 * 60_000);
+  });
+  test("invalid mode string → falls back to shadow", () => {
+    process.env.EXECUTION_CORE_WATCHDOG_MODE = "banana";
+    expect(readWatchdogConfig().mode).toBe("shadow");
+  });
+  test("reviveBudget=0 from env is honored", () => {
+    process.env.EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET = "0";
+    expect(readWatchdogConfig().reviveBudget).toBe(0);
+  });
+});
+
+describe("phaseBudgetMs (CTL-729)", () => {
+  test("turnCap × MINUTES_PER_TURN × multiplier (plan=25)", () => {
+    const cfg = { phaseBudgetMultiplier: 1.5 };
+    expect(phaseBudgetMs("plan", 25, cfg)).toBe(25 * WATCHDOG_MINUTES_PER_TURN * 1.5 * 60_000);
+  });
+  test("absolute floor engages for tiny turnCap", () => {
+    expect(phaseBudgetMs("x", 3, { phaseBudgetMultiplier: 1.5 })).toBe(20 * 60_000);
+  });
+  test("missing/NaN turnCap → safe fallback budget", () => {
+    expect(phaseBudgetMs("implement", undefined, { phaseBudgetMultiplier: 1.5 })).toBeGreaterThan(0);
+  });
+  test("CTL-729 coverage: undefined turnCap → exact 90-min fallback (WATCHDOG_FALLBACK_BUDGET_MS)", () => {
+    // Pin the exact fallback so a regression swapping it for the 20-min floor or 0
+    // is caught (the toBeGreaterThan(0) assertion above would not notice).
+    expect(phaseBudgetMs("implement", undefined, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+  });
+  test("CTL-729 coverage: cap<=0 (zero/negative turnCap) → 90-min fallback, not the floor", () => {
+    // The `!Number.isFinite(cap) || cap <= 0` guard returns the fallback, NOT the
+    // 20-min floor — exercise both the zero and negative branches.
+    expect(phaseBudgetMs("implement", 0, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+    expect(phaseBudgetMs("implement", -5, { phaseBudgetMultiplier: 1.5 })).toBe(90 * 60_000);
+  });
+});

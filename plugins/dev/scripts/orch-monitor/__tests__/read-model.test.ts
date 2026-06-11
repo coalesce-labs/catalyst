@@ -74,6 +74,8 @@ function ticket(id: string): BoardTicket {
     // CTL-901 (HOME3): per-row duration anchors (null in this fixture).
     heldSince: null,
     currentPhaseSince: null,
+    attention: null,
+    attentionSince: null,
     host: null,
     generation: null,
   };

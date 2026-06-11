@@ -142,6 +142,53 @@ export function heldFor(labels) {
   return null;
 }
 
+// ── CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) ─
+// ONE yellow board accent + ONE Inbox "Needs you" section merge the two ways a
+// ticket can need the OPERATOR's hand:
+//   • 'waiting-on-you' — a LIVE worker's durable bg job is "blocked" (Claude Code
+//     paused for a permission grant / interactive prompt) → isBgJobWaitingOnUser.
+//   • 'needs-human'    — the progress watchdog / a phase escalated the ticket: a
+//     `needs-human` or `needs-input` Linear label (the broker's webhook fold,
+//     CTL-1031), OR the host-local workers/<T>/.linear-label-needs-human.applied
+//     marker (the daemon's labelOnce guard writes this before the Linear label
+//     lands — a host-local fallback so the board lights up immediately).
+// This is DISTINCT from `held` (the admission-gate blocked/waiting pair): held is
+// the scheduler holding a ticket BEFORE pickup; attention is an in-flight ticket
+// asking the operator to act. They never collapse into one another.
+//
+// The escalation labels the watchdog / phase agents apply. `needs-human` is the
+// flat label cleared by respond-ticket.mjs (NEEDS_HUMAN_LABEL); `needs-input` is
+// the worker-paused variant (CTL-768). Either means "a human must act".
+export const ATTENTION_LABEL_NEEDS_HUMAN = "needs-human";
+export const ATTENTION_LABEL_NEEDS_INPUT = "needs-input";
+
+// deriveAttention — PURE classifier for the single needs-attention bucket. Takes
+// the three already-read signals + the candidate anchor timestamps and returns
+// { attention: 'waiting-on-you' | 'needs-human' | null, attentionSince: ISO|null }.
+//   needs-human WINS over waiting-on-you when both fire (the operator decision):
+//   an escalation is the more urgent ask. The anchor follows the WINNING reason —
+//   needsHumanSince for needs-human, waitingSince for waiting-on-you — and is null
+//   (honest, never fabricated) when that reason carries no durable stamp.
+// Exported so the derivation is unit-testable without shelling out / reading fs.
+export function deriveAttention({
+  waitingOnUser = false,
+  labels,
+  needsHumanMarker = false,
+  waitingSince = null,
+  needsHumanSince = null,
+} = {}) {
+  const set = new Set(Array.isArray(labels) ? labels : []);
+  const labelNeedsHuman = set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
+  const needsHuman = labelNeedsHuman || needsHumanMarker === true;
+  if (needsHuman) {
+    return { attention: "needs-human", attentionSince: needsHumanSince ?? null };
+  }
+  if (waitingOnUser === true) {
+    return { attention: "waiting-on-you", attentionSince: waitingSince ?? null };
+  }
+  return { attention: null, attentionSince: null };
+}
+
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
 // CTL-972: remediate maps to "Validate" (the Linear stage it cycles within,
 // alongside verify — both are part of the validate gate loop).
@@ -188,6 +235,10 @@ export function synthesizeQueuedTicket(e, linfo) {
     pr: null,
     updatedAt: e.createdAt || new Date(0).toISOString(),
     held: heldFor(li.labels),
+    // CTL-729: a queued (Todo) ticket has no live worker, so waiting-on-you is
+    // impossible — but it CAN carry a needs-human/needs-input escalation label.
+    // attentionSince has no durable label-applied stamp here → null (honest).
+    ...deriveAttention({ waitingOnUser: false, labels: li.labels, needsHumanMarker: false }),
     blockers: [],
     // CTL-901 (HOME3): a queued ticket has no worker dir / phase signal, so it
     // has no current-phase start (null). Its held duration, when held, comes from
@@ -818,15 +869,21 @@ async function maxParallel() {
 // so derivePhaseWithRemediate overlays it on top of the PHASE_ORDER-based result).
 async function readTicketArtifacts(id) {
   const dir = join(WORKERS_DIR, id);
-  if (!(await exists(dir))) return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [] };
-  const [phaseSigs, remediateSig, triage, prSigs] = await Promise.all([
+  if (!(await exists(dir))) {
+    return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [], needsHumanMarker: false };
+  }
+  const [phaseSigs, remediateSig, triage, prSigs, needsHumanMarker] = await Promise.all([
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
     readJSON(join(dir, `phase-${REMEDIATE_PHASE}.json`)),
     readJSON(join(dir, "triage.json")),
     Promise.all(["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"]
       .map((f) => readJSON(join(dir, f)))),
+    // CTL-729: the host-local needs-human marker the daemon's labelOnce guard
+    // writes (before the Linear label round-trips) → the attention 'needs-human'
+    // fallback so the board lights up immediately without waiting on the webhook.
+    exists(join(dir, ".linear-label-needs-human.applied")),
   ]);
-  return { phaseSigs, remediateSig, triage, prSigs };
+  return { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker };
 }
 
 // CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
@@ -916,7 +973,7 @@ export async function assembleBoard() {
   // the live set feeds inFlight, freeSlots, ticketIds, and the "active" count.
   const liveWorkers = workers.filter((w) => !isWorkerDead(w));
   const inFlightTickets = new Map(liveWorkers.map((w) =>
-    [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs }]));
+    [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs, waitingOnUser: w.waitingOnUser, startedAt: w.startedAt }]));
 
   // tickets = in-flight (have a LIVE worker dir / live agent) ∪ eligible(queued).
   // CTL-928: a workers/<T>/ dir whose latest signal is a terminal INTERMEDIATE
@@ -994,12 +1051,25 @@ export async function assembleBoard() {
   })();
 
   let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
-    const { phaseSigs, remediateSig, triage, prSigs } = await readTicketArtifacts(id);
+    const { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker } = await readTicketArtifacts(id);
     // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
     // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
     const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
     const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
+    // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
+    // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
+    // Linear labels (CTL-1031 webhook fold), and the host-local needs-human marker.
+    // The waiting-on-you anchor is the worker's current-phase start (how long it
+    // has been parked); the needs-human anchor falls back to heldSince downstream
+    // (no separate label-applied stamp is projected) → null here (honest).
+    const attn = deriveAttention({
+      waitingOnUser: live?.waitingOnUser ?? false,
+      labels: linfo[id]?.labels,
+      needsHumanMarker,
+      waitingSince: cur.startedAt ?? null,
+      needsHumanSince: null,
+    });
     return {
       id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
       repo: repoFor(id), team: teamFor(id),
@@ -1040,6 +1110,12 @@ export async function assembleBoard() {
       // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
       // signal) → again rendered unavailable, never now-anchored to a guess.
       currentPhaseSince: cur.startedAt ?? null,
+      // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
+      // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
+      // ISO attentionSince anchor (or null, never fabricated). Drives the ONE
+      // yellow board accent + the Inbox "Needs you" section. needs-human wins.
+      attention: attn.attention,
+      attentionSince: attn.attentionSince,
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
       turns: phaseCostsByTicket[id]
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)

@@ -23,15 +23,19 @@
 
 import type { BoardPayload, BoardTicket } from "./types";
 
-/** The kind of inbox section a row belongs to. */
-export type InboxSectionKind = "blocked" | "waiting" | "running" | "done";
+/** The kind of inbox section a row belongs to. CTL-729: 'attention' is the single
+ *  needs-attention bucket (waiting-on-you ∪ needs-human), at the HEAD of the order. */
+export type InboxSectionKind = "attention" | "blocked" | "waiting" | "running" | "done";
 
 /**
  * Whether a section's rows carry a status accent (the only colored rows on the
  * calm page — the needs-you set) or render fully neutral (the reassurance +
  * done sets). Mirrors Direction A's "color reserved for meaning" non-negotiable.
+ * CTL-729: 'attention' is a needs-you section so counts.needsYou, the all-clear
+ * gate, and the calm header sentence absorb it automatically.
  */
 export const NEEDS_YOU_SECTIONS: readonly InboxSectionKind[] = [
+  "attention",
   "blocked",
   "waiting",
 ] as const;
@@ -91,19 +95,29 @@ export interface InboxModel {
 
 /** Per-section counts the calm header + section chips read. */
 export interface InboxCounts {
+  /** CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human). */
+  attention: number;
   blocked: number;
   waiting: number;
   running: number;
   done: number;
-  /** blocked + waiting — the single "N need you" figure in the header. */
+  /** attention + blocked + waiting — the single "N need you" figure in the header. */
   needsYou: number;
 }
 
 /** Fixed render order of the sections — needs-you first (bright), reassurance
- *  + done last (neutral, collapsed by default in the UI). */
-const SECTION_ORDER: readonly InboxSectionKind[] = ["blocked", "waiting", "running", "done"] as const;
+ *  + done last (neutral, collapsed by default in the UI). CTL-729: 'attention'
+ *  (the single needs-attention bucket) leads. */
+const SECTION_ORDER: readonly InboxSectionKind[] = [
+  "attention",
+  "blocked",
+  "waiting",
+  "running",
+  "done",
+] as const;
 
 const SECTION_LABEL: Record<InboxSectionKind, string> = {
+  attention: "Needs you",
   blocked: "What's blocked",
   waiting: "What's waiting",
   running: "Running on its own",
@@ -122,21 +136,38 @@ function isDone(t: BoardTicket): boolean {
 }
 
 /**
- * Classify ONE ticket into its inbox section. Order matters: a done ticket is
- * done even if it still carries a stale held label; otherwise blocked/waiting
- * (the needs-you cases) take precedence over the running reassurance set.
+ * Classify ONE ticket into its inbox section. Order matters (CTL-729):
+ *   done → attention → blocked → waiting → running.
+ * A done ticket is done even if it still carries a stale attention/held flag;
+ * otherwise the single needs-attention bucket (waiting-on-you ∪ needs-human) is
+ * the MOST urgent operator-action case — it outranks the admission-gate held
+ * (blocked/waiting) pair, which in turn outranks the running reassurance set.
  */
 export function classifyTicket(t: BoardTicket): InboxSectionKind {
   if (isDone(t)) return "done";
+  if (t.attention === "waiting-on-you" || t.attention === "needs-human") return "attention";
   if (t.held === HELD_BLOCKED) return "blocked";
   if (t.held === HELD_WAITING) return "waiting";
   return "running";
 }
 
+/** CTL-729: the muted human sub-label for an attention row, in plain language —
+ *  naming WHY it needs you (the operator-approved small sub-text). */
+function attentionSubLabel(t: BoardTicket): string {
+  return t.attention === "needs-human"
+    ? "escalated — needs human"
+    : "waiting on your answer";
+}
+
 /** The muted human sub-label per section — plain language, never jargon
- *  (Direction A: "waiting on your answer", not "phase-blocked needs-human"). */
+ *  (Direction A: "waiting on your answer", not "phase-blocked needs-human").
+ *  CTL-729: the 'attention' sub-label is reason-specific (see attentionSubLabel),
+ *  so it is resolved in toRow from the ticket, not from the kind alone. */
 function subLabelFor(kind: InboxSectionKind): string {
   switch (kind) {
+    case "attention":
+      // Overridden per-ticket in toRow; this is the neutral fallback.
+      return "needs you";
     case "blocked":
       return "blocked on you";
     case "waiting":
@@ -151,6 +182,8 @@ function subLabelFor(kind: InboxSectionKind): string {
 /** The single primary verb per section — null for the neutral sets (no action). */
 function verbFor(kind: InboxSectionKind): string | null {
   switch (kind) {
+    case "attention":
+      return "Respond";
     case "blocked":
       return "Unblock";
     case "waiting":
@@ -167,7 +200,8 @@ function toRow(t: BoardTicket, kind: InboxSectionKind): InboxRow {
     id: t.id,
     title: t.title,
     section: kind,
-    subLabel: subLabelFor(kind),
+    // CTL-729: an attention row's sub-label names the specific reason.
+    subLabel: kind === "attention" ? attentionSubLabel(t) : subLabelFor(kind),
     verb: verbFor(kind),
     blockers: kind === "blocked" ? (t.blockers ?? []).filter(Boolean) : [],
     ticket: t,
@@ -187,6 +221,7 @@ function toRow(t: BoardTicket, kind: InboxSectionKind): InboxRow {
  */
 export function deriveInbox(payload: BoardPayload): InboxModel {
   const buckets: Record<InboxSectionKind, InboxRow[]> = {
+    attention: [],
     blocked: [],
     waiting: [],
     running: [],
@@ -207,11 +242,13 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
   const order: InboxRow[] = sections.flatMap((s) => s.rows);
 
   const counts: InboxCounts = {
+    attention: buckets.attention.length,
     blocked: buckets.blocked.length,
     waiting: buckets.waiting.length,
     running: buckets.running.length,
     done: buckets.done.length,
-    needsYou: buckets.blocked.length + buckets.waiting.length,
+    // CTL-729: the single "N need you" figure absorbs the attention bucket.
+    needsYou: buckets.attention.length + buckets.blocked.length + buckets.waiting.length,
   };
 
   return {
@@ -345,6 +382,10 @@ export function rowById(model: InboxModel, id: string | null): InboxRow | null {
  *  null when this section has no live duration OR the anchor was never stamped. */
 export function rowDurationAnchor(row: InboxRow): string | null {
   switch (row.section) {
+    case "attention":
+      // CTL-729: how long it has needed you — the attention start (the worker's
+      // current-phase start for waiting-on-you), falling back to the held applied-at.
+      return row.ticket.attentionSince ?? row.ticket.heldSince ?? null;
     case "blocked":
     case "waiting":
       return row.ticket.heldSince ?? null;

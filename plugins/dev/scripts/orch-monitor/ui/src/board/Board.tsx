@@ -348,6 +348,26 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
     </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
   );
 }
+// CTL-729: the single "needs attention" badge (operator-approved 2026-06-11). ONE
+// yellow accent merges the live "waiting on you" (a blocked bg job) and the
+// watchdog/needs-human escalation into one operator-action signal, with small
+// sub-text saying WHY: "waiting on your answer" vs "escalated — needs human". This
+// is DISTINCT from HeldBadge (the admission-gate blocked/waiting pair). The ONLY
+// new color is the single yellow accent (Linear-calm: color reserved for meaning).
+export function AttentionBadge({ attention }: { attention?: "waiting-on-you" | "needs-human" | null }) {
+  if (attention !== "waiting-on-you" && attention !== "needs-human") return null;
+  const label =
+    attention === "needs-human" ? "⚑ escalated — needs human" : "⏸ waiting on your answer";
+  const tip =
+    attention === "needs-human"
+      ? "Escalated to you — a human must act (watchdog / needs-human)"
+      : "Paused waiting for your answer (a permission grant or prompt)";
+  return (
+    <Tooltip><TooltipTrigger asChild>
+      <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: C.yellowSoft, background: `${C.yellow}24`, whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
+    </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
+  );
+}
 // CTL-957: dependency chips — compact `blocked_by: X, Y` and `blocks: A`
 // chips on every ticket card that has deps (not only held ones). Extends the
 // HeldBadge pattern to all cards with dependencies regardless of held state.
@@ -448,6 +468,10 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
+  // CTL-729: the single needs-attention signal — ONE yellow accent for either
+  // 'waiting-on-you' or 'needs-human'. A left inset rule tints the card like the
+  // existing waitingOnUser yellow; stuck (red) still wins the border treatment.
+  const attention = t.attention === "waiting-on-you" || t.attention === "needs-human";
   const compact = density === "compact";
   const reduced = useReducedMotion();
   const variants = reduced ? enterVariantsReduced : enterVariants;
@@ -474,7 +498,11 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       tabIndex={onOpen ? 0 : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
-        border: `1px solid ${stuck ? `${C.red}80` : dim ? C.borderSubtle : C.border}`,
+        border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : dim ? C.borderSubtle : C.border}`,
+        // CTL-729: a quiet yellow left rule when the ticket needs the operator —
+        // the same single accent the Inbox "Needs you" row carries. Stuck (red)
+        // takes precedence so a dead/zombie signal is never masked by attention.
+        boxShadow: !stuck && attention ? `inset 2px 0 0 0 ${C.yellow}` : undefined,
         transition: "background .25s",
         cursor: onOpen ? "pointer" : undefined,
       }}
@@ -509,6 +537,8 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
         <PriorityIcon p={t.priority} />
         <PhasePill phase={t.phase} />
+        {/* CTL-729: the single needs-attention badge — yellow, with WHY sub-text. */}
+        <AttentionBadge attention={t.attention} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
         {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />}
@@ -563,6 +593,17 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
+  // CTL-729: the worker's needs-attention signal — the ONE yellow treatment,
+  // keyed off the SAME concept as the ticket card. A worker's own bg-job
+  // waitingOnUser flag and its ticket's needs-human escalation fold into one
+  // attention value (needs-human wins). The card mirrors the ticket's yellow rule.
+  const attentionState: "waiting-on-you" | "needs-human" | null =
+    info?.attention === "needs-human" || info?.attention === "waiting-on-you"
+      ? info.attention
+      : w.waitingOnUser
+        ? "waiting-on-you"
+        : null;
+  const attention = attentionState != null;
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
   const reduced = useReducedMotion();
@@ -611,8 +652,10 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-        border: `1px solid ${stuck ? `${C.red}80` : C.border}`,
-        boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : undefined,
+        border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : C.border}`,
+        // CTL-729: the ONE yellow rule when this worker needs the operator —
+        // identical accent to the ticket card. Stuck (red) takes precedence.
+        boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : attention ? `inset 2px 0 0 0 ${C.yellow}` : undefined,
         cursor: onOpen ? "pointer" : undefined,
       }}
     >
@@ -633,6 +676,8 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
         {info && <PriorityIcon p={info.priority} />}
         <PhasePill phase={w.phase} />
+        {/* CTL-729: the single needs-attention badge, same yellow as the ticket. */}
+        <AttentionBadge attention={attentionState} />
         {/* CTL-909 / SURF1: owning host.name on every worker card. */}
         <HostChip host={w.host} />
         <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{w.repo}</Badge>

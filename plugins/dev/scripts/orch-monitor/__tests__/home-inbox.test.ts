@@ -130,6 +130,7 @@ describe("deriveInbox — grouped sections + flat walk order (CTL-899)", () => {
 
   it("counts blocked/waiting/running/done and the single needsYou figure", () => {
     expect(model.counts).toEqual({
+      attention: 0,
       blocked: 1,
       waiting: 1,
       running: 2,
@@ -247,29 +248,29 @@ describe("rowById — the reading pane reads the selected row's full ticket", ()
 
 describe("calmHeaderSentence — ONE sentence, never a KPI grid (CTL-899)", () => {
   it('reads "N running on their own · M need you · …"', () => {
-    const s = calmHeaderSentence({ blocked: 0, waiting: 2, running: 4, done: 0, needsYou: 2 });
+    const s = calmHeaderSentence({ attention: 0, blocked: 0, waiting: 2, running: 4, done: 0, needsYou: 2 });
     expect(s).toBe("4 running on their own · 2 need you · nothing on fire");
     // It is ONE sentence: no newline, no metric-grid separators.
     expect(s).not.toContain("\n");
   });
 
   it("names the heat when something is genuinely blocked (never lies)", () => {
-    const s = calmHeaderSentence({ blocked: 1, waiting: 0, running: 6, done: 3, needsYou: 1 });
+    const s = calmHeaderSentence({ attention: 0, blocked: 1, waiting: 0, running: 6, done: 3, needsYou: 1 });
     expect(s).toBe("6 running on their own · 1 needs you · 1 blocked");
   });
 
   it("drops the needs-you clause when nothing needs you", () => {
-    const s = calmHeaderSentence({ blocked: 0, waiting: 0, running: 5, done: 0, needsYou: 0 });
+    const s = calmHeaderSentence({ attention: 0, blocked: 0, waiting: 0, running: 5, done: 0, needsYou: 0 });
     expect(s).toBe("5 running on their own · nothing on fire");
   });
 
   it("uses singular grammar for one running ticket", () => {
-    const s = calmHeaderSentence({ blocked: 0, waiting: 0, running: 1, done: 0, needsYou: 0 });
+    const s = calmHeaderSentence({ attention: 0, blocked: 0, waiting: 0, running: 1, done: 0, needsYou: 0 });
     expect(s).toBe("1 running on its own · nothing on fire");
   });
 
   it("collapses to the celebratory empty-state line when the inbox is empty", () => {
-    const s = calmHeaderSentence({ blocked: 0, waiting: 0, running: 0, done: 0, needsYou: 0 });
+    const s = calmHeaderSentence({ attention: 0, blocked: 0, waiting: 0, running: 0, done: 0, needsYou: 0 });
     expect(s).toBe("All clear — nothing needs you right now.");
   });
 });
@@ -369,6 +370,7 @@ describe("rowDurationMs — elapsed since the durable anchor, honest about absen
 
 // ── CTL-904 / HOME6: the calm all-clear empty state (the relief payoff) ───────
 const counts = (over: Partial<InboxCounts> = {}): InboxCounts => ({
+  attention: 0,
   blocked: 0,
   waiting: 0,
   running: 0,

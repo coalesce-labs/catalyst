@@ -123,13 +123,19 @@ import {
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendHeldStoppedEvent,
-  resolvePhaseSessionId as defaultResolveSession,
   defaultAppendCooldownGcEvent,
   defaultAppendCooldownEscalatedEvent,
   defaultAppendPhaseAdvanceHeldEvent,
   defaultAppendRunawayEvent,
   defaultAppendOrphanDetectedEvent,
 } from "./recovery.mjs";
+import { resolvePhaseSessionId as defaultResolveSession } from "./session-resolve.mjs";
+// CTL-729: progress-watchdog imports.
+import { evaluateHungWorker } from "./hung-detector.mjs";
+import { transcriptAgeMs as defaultTranscriptAgeMs } from "./transcript-silence.mjs";
+import { killHungWorker as defaultKillEscalate } from "./watchdog-action.mjs";
+import { readWatchdogConfig, phaseBudgetMs } from "./config.mjs";
+import { defaultProgressMark } from "./work-done-probes.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -2223,6 +2229,16 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
+    // tick inert (null silence probe → predicate no-ops via "no-transcript").
+    watchdog: {
+      mode: _watchdogMode = undefined, // resolved inside the pass
+      transcriptAgeMs: _transcriptAgeMs = defaultTranscriptAgeMs,
+      progressMark: _progressMark = defaultProgressMark,
+      killEscalate: _killEscalate = defaultKillEscalate,
+      now: _watchdogNow = Date.now,
+      emit: _watchdogEmit = emitReapIntent,
+    } = {},
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -2484,6 +2500,100 @@ export function schedulerTick(
     }
   }
 
+  // (0w) CTL-729 progress-watchdog. Force-kill a worker that is running/dispatched
+  // with a silent transcript and zero commits past its phase budget. Runs AFTER the
+  // phantom sweep and BEFORE the reclaim sweep so a kill flips the signal terminal
+  // first (the sync terminal write is the load-bearing state change — it frees the
+  // slot via isTicketInFlight and prevents re-fire next tick when status:"failed").
+  // Detection + IO ordering live here; side effects delegate to killEscalate.
+  const watchdogKilled = [];
+  const watchdogWouldKill = [];
+  {
+    const wcfg = readWatchdogConfig();
+    const wdMode = _watchdogMode ?? wcfg.mode;
+    if (wdMode !== "off") {
+      for (const sig of readWorkerSignals(orchDir)) {
+        if (!sig.ticket) continue;
+        if (!isTicketInFlight(readPhaseSignals(orchDir, sig.ticket))) continue;
+        if (sig.status === PREEMPTED_STATUS) continue;
+        try {
+          const startedAtMs = Date.parse(sig.raw?.startedAt ?? "");
+          const silenceMs = wcfg.silenceThresholdMs;
+          const budgetMs = phaseBudgetMs(sig.phase, sig.raw?.turnCap, wcfg);
+          const ageMs = _transcriptAgeMs(sig, { now: _watchdogNow() });
+          // Lazy git: only probe commits for a non-fanout worker already silent + over budget.
+          const isFanout = sig.phase === "research" || sig.phase === "plan";
+          const elapsed = _watchdogNow() - startedAtMs;
+          let progress = 0;
+          if (!isFanout && ageMs != null && ageMs > silenceMs && elapsed > budgetMs) {
+            // CTL-729 remediate: defaultProgressMark resolves the ticket worktree
+            // from repoRoot (work-done-probes.mjs:60 resolveWorktree), NOT from a
+            // worktreePath — passing worktreePath was silently dropped, so the
+            // probe always returned 0 and the commit gate could never spare a
+            // committed-but-silent code worker. Resolve repoRoot exactly like the
+            // reclaim sweep below (scheduler.mjs:2098).
+            const team = teamOf(sig.ticket);
+            const repoRoot = team ? (getProjectConfig(team)?.repoRoot ?? null) : null;
+            progress = _progressMark({ ticket: sig.ticket, phase: sig.phase, repoRoot, orchDir });
+          }
+          const decision = evaluateHungWorker({
+            ticket: sig.ticket, phase: sig.phase, status: sig.status,
+            nowMs: _watchdogNow(), startedAtMs, transcriptAgeMs: ageMs,
+            progressMark: progress, silenceMs, budgetMs,
+          });
+          if (decision.action !== "kill-escalate") continue;
+          if (wdMode === "shadow") {
+            watchdogWouldKill.push({ ticket: sig.ticket, phase: sig.phase });
+            log.warn(
+              { ticket: sig.ticket, phase: sig.phase, reason: decision.reason },
+              "scheduler: progress-watchdog WOULD kill (shadow mode, no action) (CTL-729)"
+            );
+            continue;
+          }
+          // enforce: fire-and-forget (async kill, sync tick continues)
+          void _killEscalate(orchDir, sig.ticket, sig, {
+            elapsedMin: decision.elapsedMin, commitCount: progress,
+            reviveBudget: wcfg.reviveBudget,
+            now: _watchdogNow, emit: _watchdogEmit,
+            writeStatus,
+            // CTL-729 remediate: real revive dispatcher. The prior wiring passed
+            // claimDispatch — the cross-host Linear claim soft-CAS, NOT a worker
+            // re-dispatch — so an operator enabling reviveBudget>0 would mark a
+            // hung worker "revived" while spawning NO replacement (a stuck slot).
+            // Mirror the resume sweep (1.5, scheduler.mjs:2807): resolve the dead
+            // bg job to a `claude --resume` UUID and re-dispatch the same phase
+            // with --resume continuity. killHungWorker passes { ticket, phase,
+            // attempt, bgJobId }; we ignore orchDir (closed over above).
+            reviveDispatch: ({ ticket: rt, phase: rp, attempt, bgJobId }) => {
+              const resumeSession = bgJobId ? (resolveSession(bgJobId) ?? undefined) : undefined;
+              return dispatchTicket(orchDir, rt, rp, { dispatch, resumeSession, attempt });
+            },
+          }).catch((err) => log.warn(
+            { ticket: sig.ticket, phase: sig.phase, err: err.message },
+            "scheduler: watchdog kill threw (CTL-729)"
+          ));
+          // CTL-729 remediate: watchdogKilled counts kill-attempts DISPATCHED this
+          // tick, not confirmed kills. The kill is fire-and-forget (the sync tick
+          // cannot await), so the resolved outcome — "escalated" vs "revived"
+          // (reviveBudget>0) vs "already-terminal" (a worker that raced to terminal
+          // between readWorkerSignals and the kill) — lands asynchronously via the
+          // reap pipeline, not in this array. The terminal-signal write inside
+          // killHungWorker is itself synchronous, so the slot is freed correctly
+          // regardless; only this reporting field is attempt-granular.
+          watchdogKilled.push({ ticket: sig.ticket, phase: sig.phase });
+          log.warn(
+            { ticket: sig.ticket, phase: sig.phase, reason: decision.reason, elapsedMin: decision.elapsedMin },
+            "scheduler: progress-watchdog kill dispatched for hung worker (CTL-729)"
+          );
+        } catch (err) {
+          log.warn(
+            { ticket: sig.ticket, step: "watchdog", err: err.message },
+            "scheduler: per-worker watchdog step failed — continuing tick (CTL-729)"
+          );
+        }
+      }
+    }
+  }
   // CTL-644: per-tick approval poll — dispatch any gated tickets that now have an
   // approval sentinel. Cheap (directory scan + existsSync per worker); no API calls
   // unless a dispatch fires. Runs before the reclaim sweep so an approved ticket
@@ -3837,6 +3947,8 @@ export function schedulerTick(
     noProgressStopped,
     escalated,
     quarantinedPhantoms, // CTL-671 — phantom worker dirs stalled this tick
+    watchdogKilled,      // CTL-729 — kill-attempts DISPATCHED this tick (enforce mode); not confirmed kills (see Pass 0w)
+    watchdogWouldKill,   // CTL-729 — workers that WOULD be killed (shadow mode)
     advanced,
     dispatched,
     freeSlots,

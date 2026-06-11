@@ -85,40 +85,11 @@ const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
 
-// resolvePhaseSessionId — JS port of orchestrate-revive's resolve_phase_session_id
-// (orchestrate-revive:160-177). Resolves a `claude --resume`-compatible session
-// UUID from a dead worker's bg_job_id by reading the job's state.json.
-// Returns null on any miss (no bgJobId, no state.json, no session field).
-// MUST stay in sync with the bash resolver — they read the same on-disk contract
-// and honour the same CATALYST_REVIVE_JOBS_DIR override (NOT getJobsRoot's
-// CATALYST_HEALTHCHECK_JOBS_ROOT) so a test overriding one env var matches bash.
-//
-// Claude Code ≥2.x schema: state.json contains `resumeSessionId` directly.
-// Claude Code <2.x schema: state.json contains `linkScanPath` (path to .jsonl);
-//   the basename minus `.jsonl` is the session UUID. Still supported as fallback.
-export function resolvePhaseSessionId(
-  bgJobId,
-  { jobsDir = process.env.CATALYST_REVIVE_JOBS_DIR || join(homedir(), ".claude", "jobs") } = {},
-) {
-  if (!bgJobId) return null;
-  const stateFile = join(jobsDir, bgJobId, "state.json");
-  if (!existsSync(stateFile)) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(stateFile, "utf8"));
-  } catch {
-    return null;
-  }
-  // New schema (Claude Code ≥2.x): resumeSessionId stored directly.
-  if (typeof parsed?.resumeSessionId === "string" && parsed.resumeSessionId) {
-    return parsed.resumeSessionId;
-  }
-  // Legacy schema: derive UUID from linkScanPath basename.
-  const linkPath = parsed?.linkScanPath;
-  if (typeof linkPath !== "string" || !linkPath.endsWith(".jsonl")) return null;
-  const sid = basename(linkPath, ".jsonl");
-  return sid || null;
-}
+// resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
+// transcript-silence.mjs can import it without pulling in recovery.mjs's
+// heavy dependency graph. Imported for local use + re-exported for callers.
+import { resolvePhaseSessionId } from "./session-resolve.mjs";
+export { resolvePhaseSessionId };
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,

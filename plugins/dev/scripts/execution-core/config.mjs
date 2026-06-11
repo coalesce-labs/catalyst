@@ -416,3 +416,63 @@ export const AUTOTUNE_DRIFT_DOWN_STEP =
 // high-water (reuses the legacy ×0.75 trend-up shed factor).
 export const AUTOTUNE_CLAUDE_SHED_FACTOR =
   Number(process.env.EXECUTION_CORE_AUTOTUNE_CLAUDE_SHED_FACTOR) || 0.75;
+
+// --- Progress watchdog for hung phase workers (CTL-729) ---
+// Three-layer precedence per knob (mirrors getHostName): env > Layer-2
+// (catalyst.watchdog.* in ~/.config/catalyst/config.json) > code default.
+// Re-reads on every call (mirrors readMemorySamplerConfig) so tests mutate env
+// freely. Never throws — missing/malformed Layer-2 falls through to defaults.
+
+export const WATCHDOG_MINUTES_PER_TURN =
+  Number(process.env.EXECUTION_CORE_WATCHDOG_MINUTES_PER_TURN) || 2;
+const WATCHDOG_MIN_PHASE_BUDGET_MS = 20 * 60_000;   // absolute floor
+const WATCHDOG_FALLBACK_BUDGET_MS = 90 * 60_000;    // when turnCap unparseable
+const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2Watchdog() {
+  try {
+    const w = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.watchdog;
+    return w && typeof w === "object" ? w : {};
+  } catch { return {}; }
+}
+function resolveMode(envVal, l2Val) {
+  for (const v of [envVal, l2Val]) {
+    if (typeof v === "string" && WATCHDOG_MODES.has(v)) return v;
+  }
+  return "shadow"; // conservative default: detect+log, do not kill, until flipped to enforce
+}
+function resolveCount(envVal, l2Val, def) {
+  for (const v of [envVal, l2Val]) {
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  return def;
+}
+
+export function readWatchdogConfig() {
+  const l2 = readLayer2Watchdog();
+  // CATALYST_WATCHDOG=0 is the kill-switch → mode:off (back-compat).
+  const mode = process.env.CATALYST_WATCHDOG === "0"
+    ? "off"
+    : resolveMode(process.env.EXECUTION_CORE_WATCHDOG_MODE, l2.mode);
+  const silenceThresholdMs =
+    Number(process.env.EXECUTION_CORE_WATCHDOG_SILENCE_MS) ||
+    (Number(l2.silenceThresholdMinutes) || 0) * 60_000 ||
+    30 * 60_000;
+  const phaseBudgetMultiplier =
+    Number(process.env.EXECUTION_CORE_WATCHDOG_BUDGET_MULTIPLIER) ||
+    Number(l2.phaseBudgetMultiplier) || 1.5;
+  const reviveBudget = resolveCount(
+    process.env.EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET, l2.reviveBudget, 0);
+  return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
+}
+
+// phaseBudgetMs — expected wall-clock ceiling (ms) from the dispatch-time turnCap.
+// Pure (no clock/fs) so the predicate gate is cheaply unit-testable.
+export function phaseBudgetMs(phase, turnCap, cfg = readWatchdogConfig()) {
+  const cap = Number(turnCap);
+  if (!Number.isFinite(cap) || cap <= 0) return WATCHDOG_FALLBACK_BUDGET_MS;
+  const mult = Number(cfg?.phaseBudgetMultiplier) || 1.5;
+  return Math.max(cap * WATCHDOG_MINUTES_PER_TURN * mult * 60_000, WATCHDOG_MIN_PHASE_BUDGET_MS);
+}
