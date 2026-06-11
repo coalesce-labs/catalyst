@@ -173,9 +173,21 @@ function __readConfig(path, readFileFn) {
 
 /**
  * resolveRepoFullName — the "owner/repo" whose merges trigger a checkout
- * refresh. Read from .catalyst.feedback.githubRepo, falling back to the first
- * .catalyst.monitor.linear.teams[].vcsRepo. Repo config (.catalyst/config.json)
- * takes precedence over the machine config. Returns null when unconfigured.
+ * refresh.
+ *
+ * Precedence (per config file, repo config before machine config):
+ *   1. canonical catalyst.repository.{org,name} — the schema key
+ *      check-project-setup tells operators to set (joined as "org/name", both
+ *      must be non-empty strings)
+ *   2. legacy catalyst.feedback.githubRepo
+ *   3. legacy first catalyst.monitor.linear.teams[].vcsRepo
+ *
+ * Returns null when unconfigured. Reading the canonical key FIRST is CTL-1014:
+ * without it, hosts configured canonically resolve null here and
+ * isThisRepoMergeEvent rejects every merge, so the CTL-993 merge-to-main
+ * auto-pull never fires (verified live on mini 2026-06-11). A malformed
+ * canonical block (missing/empty/non-string org or name) falls through to the
+ * legacy keys unchanged.
  */
 export function resolveRepoFullName({
   machineConfigPath = defaultMachineConfigPath(),
@@ -184,6 +196,12 @@ export function resolveRepoFullName({
 } = {}) {
   for (const path of [repoConfigPath, machineConfigPath]) {
     const cfg = __readConfig(path, readFileFn);
+    const repo = cfg?.catalyst?.repository;
+    const org = repo?.org;
+    const name = repo?.name;
+    if (typeof org === "string" && org && typeof name === "string" && name) {
+      return `${org}/${name}`;
+    }
     const fromFeedback = cfg?.catalyst?.feedback?.githubRepo;
     if (typeof fromFeedback === "string" && fromFeedback) return fromFeedback;
     const teams = cfg?.catalyst?.monitor?.linear?.teams;
