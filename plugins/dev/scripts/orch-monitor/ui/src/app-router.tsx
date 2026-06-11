@@ -180,12 +180,22 @@ const workersRoute = createRoute({
 
 const queueRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/queue",
+  path: "/dispatch",
   component: () => (
     <S>
       <QueueSurface />
     </S>
   ),
+});
+
+// CTL-1054: /queue is kept as a permanent alias that redirects to /dispatch so
+// any bookmarks, shared links, or external references to the old URL still work.
+const queueAliasRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/queue",
+  beforeLoad: () => {
+    throw redirect({ to: "/dispatch", search: (prev) => prev });
+  },
 });
 
 const telemetryRoute = createRoute({
@@ -296,6 +306,7 @@ const routeTree = rootRoute.addChildren([
   boardRoute,
   workersRoute,
   queueRoute,
+  queueAliasRoute,
   telemetryRoute,
   utilizationRoute,
   finopsRoute,

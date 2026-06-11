@@ -297,6 +297,7 @@ const APP_SURFACE_PATHS: ReadonlySet<string> = new Set([
   "/index.html",
   "/board",
   "/workers",
+  "/dispatch",
   "/queue",
   "/telemetry",
   "/utilization",

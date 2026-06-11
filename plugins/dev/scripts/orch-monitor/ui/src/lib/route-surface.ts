@@ -26,7 +26,7 @@ export const SURFACE_PATH: Record<Surface, string> = {
   home: "/",
   board: "/board",
   workers: "/workers",
-  queue: "/queue",
+  queue: "/dispatch",
   telemetry: "/telemetry",
   utilization: "/utilization",
   finops: "/finops",
