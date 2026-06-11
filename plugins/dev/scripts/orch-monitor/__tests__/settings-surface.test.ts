@@ -114,10 +114,15 @@ describe("Theme routes through the ONE theme system, @/lib/theme (CTL-911)", () 
     expect(settingsSrc).toContain("setTheme");
   });
 
-  it("the footer toggle still drives the SAME hook (SHELL3 wiring intact)", () => {
-    expect(sidebarSrc).toContain("useTheme");
-    expect(sidebarSrc).toContain("@/lib/theme");
-    expect(sidebarSrc).toMatch(/toggle:\s*toggleTheme/);
+  it("the theme control lives in Settings, not the sidebar footer (CTL-1052)", () => {
+    // CTL-1052 §5: the calm-dark ⇄ warm-light toggle moved OUT of the sidebar footer
+    // INTO the Settings surface (Theme → Appearance) so the footer keeps ONLY Settings.
+    // The Settings surface owns the wiring to the SAME @/lib/theme hook (SHELL3 intact);
+    // the sidebar no longer references the theme system at all.
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    expect(sidebarSrc).not.toContain("useTheme");
+    expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
   it("NO parallel data-theme system exists (the SURF3⇄SHELL3 clash resolution)", () => {

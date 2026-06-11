@@ -8,10 +8,8 @@ import {
   InboxIcon,
   LayoutGridIcon,
   ListOrderedIcon,
-  MoonIcon,
   ServerIcon,
   SettingsIcon,
-  SunIcon,
   UsersIcon,
   WalletIcon,
 } from "lucide-react";
@@ -24,7 +22,6 @@ import { useSurface, type Surface } from "@/lib/surface";
 // location). The active surface + Settings-open are READ from the route via
 // useSurface(); scope is written onto the `?scope` typed search param.
 import { surfaceToPath, SETTINGS_PATH } from "@/lib/route-surface";
-import { useTheme } from "@/lib/theme";
 // CTL-945: consume shared context from AppShell — no additional EventSources.
 import { useNavSignalContext } from "@/hooks/use-nav-signal";
 // CTL-898 / SHELL8 — the footer health dot generalizes into a per-node cluster-
@@ -114,6 +111,17 @@ import {
 //   4. Signal survives collapse: a collapsed section whose children carry a live count /
 //      attention state shows a subtle dot on its header so signal is not lost.
 //   The twistie is RIGHT-ALIGNED (ml-auto) per the CTL-977 convention.
+// CTL-1052 — sidebar full-width/height + twistie/dot/footer polish (pre-demo):
+//   §1 nav rows fill the sidebar width (the doubled SidebarContent + SidebarGroup p-2
+//      gutter dropped to px-1; max-sm compresses paddings instead of overflowing).
+//   §2 no scrollbar chrome at rest: SidebarContent carries cat-overlay-scroll (CTL-1036)
+//      + overflow-x-hidden (the horizontal bar is gone; rows now fit the width).
+//   §3 twisties move ADJACENT to the label text (overrides the CTL-977/CTL-1034 ml-auto
+//      right-align); the collapsed Overall/Observe signal dot keeps the right edge.
+//   §4 the project ATTENTION dot is an OVERLAY on the project icon (the StatusDot
+//      worker-presence convention), not a separate inline dot beside the chevron.
+//   §5 the footer keeps ONLY Settings; the Warm-light toggle moved into the Settings
+//      surface (Theme → Appearance). The nav column reclaims the freed height.
 
 /** A status dot overlaid on a nav icon (emerald = live, amber = anomaly). */
 function StatusDot({ kind }: { kind: "live" | "anomaly" }) {
@@ -235,7 +243,6 @@ export function AppSidebar() {
   const { surface, settingsOpen } = useSurface();
   const navigate = useNavigate();
   const { setOpenMobile, isMobile } = useSidebar();
-  const { theme, toggle: toggleTheme } = useTheme();
   // CTL-1034: the Overall + Observe sections are now collapsible with persisted
   // open-state (atomWithStorage), matching the per-project groups. Both default
   // open; a section force-renders open when it contains the active surface.
@@ -499,7 +506,13 @@ export function AppSidebar() {
             communicated by clicking the per-project group items directly. */}
       </SidebarHeader>
 
-      <SidebarContent>
+      {/* CTL-1052 §1/§2: kill the dead horizontal gutter (the doubled SidebarContent
+          + SidebarGroup p-2) so nav rows use the full sidebar width — content padding
+          drops to px-1, and each section's SidebarGroup tightens to px-1 below. §2: the
+          scroller carries cat-overlay-scroll (CTL-1036: no bar at rest, slim overlay
+          thumb only while scrolling) AND overflow-x-hidden so the horizontal scrollbar
+          chrome that was visible at rest is gone entirely (rows now fit the width). */}
+      <SidebarContent className="cat-overlay-scroll gap-1 overflow-x-hidden px-1 max-sm:px-0.5 max-sm:gap-0.5">
         {/* ── OVERALL: collapsible all-projects group (scope = "all") ───────── */}
         {/* CTL-960: "Operate" renamed to "Overall" — single term for the all-projects
             scope consistent with the breadcrumb label from breadcrumbFor("*", "all"). */}
@@ -519,22 +532,25 @@ export function AppSidebar() {
               }}
               className="group/overall"
             >
-              <SidebarGroup className="pb-0">
+              <SidebarGroup className="px-1 pb-0">
                 <SidebarGroupLabel asChild>
-                  <CollapsibleTrigger className="cursor-pointer">
+                  <CollapsibleTrigger className="flex cursor-pointer items-center gap-1">
                     Overall
-                    {/* CTL-1034 §4: collapsed-section signal dot rolls child signal up. */}
-                    {!overallIsOpen && overallSignal && (
-                      <SectionSignalDot kind={overallSignal} />
-                    )}
-                    {/* CTL-1034: twistie right-aligned (CTL-977 convention). */}
+                    {/* CTL-1052 §3: twistie sits IMMEDIATELY adjacent to the label
+                        (no longer ml-auto / far-right) — overrides the CTL-977 →
+                        CTL-1034 right-align convention. */}
                     <ChevronRightIcon
                       className={cn(
                         "size-3 flex-shrink-0 transition-transform duration-200",
                         overallIsOpen ? "rotate-90" : "",
-                        overallIsOpen || !overallSignal ? "ml-auto" : "ml-1",
                       )}
                     />
+                    {/* CTL-1034 §4 / CTL-1052: collapsed-section signal dot rolls child
+                        signal up — now pinned to the right edge (ml-auto) so it reads as
+                        the section's trailing status, freed from the chevron. */}
+                    {!overallIsOpen && overallSignal && (
+                      <SectionSignalDot kind={overallSignal} />
+                    )}
                   </CollapsibleTrigger>
                 </SidebarGroupLabel>
                 <CollapsibleContent>
@@ -554,7 +570,7 @@ export function AppSidebar() {
             project rows — mirrors Linear's "Your teams" parent section label. Only
             render the heading when there is at least one project to show. */}
         {repos.length > 0 && (
-          <SidebarGroup className="pt-0 pb-0">
+          <SidebarGroup className="px-1 pt-0 pb-0">
             <SidebarGroupLabel>Projects</SidebarGroupLabel>
           </SidebarGroup>
         )}
@@ -587,34 +603,46 @@ export function AppSidebar() {
               }}
               className={`group/${groupKey}`}
             >
-              <SidebarGroup className="pt-0">
+              <SidebarGroup className="px-1 pt-0">
                 <CollapsibleTrigger className={PROJECT_HEADER_TRIGGER}>
                   {/* CTL-961: favicon takes priority over the color dot; only show dot
-                      when no favicon is available. Never show a placeholder. */}
-                  {iconDataUrl ? (
-                    <img
-                      src={iconDataUrl}
-                      alt=""
-                      aria-hidden
-                      className="size-4 flex-shrink-0 rounded-sm object-contain"
-                    />
-                  ) : dotColor ? (
-                    <span
-                      aria-hidden
-                      className="size-2 rounded-full flex-shrink-0 inline-block"
-                      style={{ background: dotColor }}
-                    />
-                  ) : null}
+                      when no favicon is available. Never show a placeholder.
+                      CTL-1052 §4: the project ATTENTION dot is now an OVERLAY on the
+                      project icon (same StatusDot convention the worker-presence dot
+                      uses), not a separate inline dot beside the chevron. The wrapping
+                      span anchors the absolute-positioned StatusDot; the dot survives
+                      collapse (rolled-up child signal) AND expansion. */}
+                  <span className="relative flex shrink-0 items-center justify-center">
+                    {iconDataUrl ? (
+                      <img
+                        src={iconDataUrl}
+                        alt=""
+                        aria-hidden
+                        className="size-4 flex-shrink-0 rounded-sm object-contain"
+                      />
+                    ) : dotColor ? (
+                      <span
+                        aria-hidden
+                        className="size-2 rounded-full flex-shrink-0 inline-block"
+                        style={{ background: dotColor }}
+                      />
+                    ) : (
+                      // No favicon and no color: a neutral icon-sized anchor so the
+                      // attention overlay still has something to pin onto.
+                      <span aria-hidden className="size-4 flex-shrink-0" />
+                    )}
+                    {repoSignal && (
+                      <StatusDot kind={repoSignal === "anomaly" ? "anomaly" : "live"} />
+                    )}
+                  </span>
                   <span className="truncate">{repoLabel}</span>
-                  {/* CTL-1034 §4: collapsed-section signal dot. */}
-                  {!isOpen && repoSignal && <SectionSignalDot kind={repoSignal} />}
-                  {/* CTL-1034: twistie RIGHT-aligned (ml-auto) per CTL-977 convention;
-                      falls back to ml-1 when a signal dot already claimed ml-auto. */}
+                  {/* CTL-1052 §3: twistie sits IMMEDIATELY adjacent to the label text
+                      (the PROJECT_HEADER_TRIGGER's gap-1.5 spaces it), NOT floated to the
+                      far edge — overrides the CTL-977 → CTL-1034 ml-auto convention. */}
                   <ChevronRightIcon
                     className={cn(
                       "size-3 flex-shrink-0 transition-transform duration-200",
                       isOpen && "rotate-90",
-                      isOpen || !repoSignal ? "ml-auto" : "ml-1",
                     )}
                   />
                 </CollapsibleTrigger>
@@ -644,11 +672,12 @@ export function AppSidebar() {
           }}
           className="group/observe"
         >
-          <SidebarGroup className="pt-0">
-            <CollapsibleTrigger className={GROUP_TRIGGER_BASE}>
+          <SidebarGroup className="px-1 pt-0">
+            <CollapsibleTrigger className={cn(GROUP_TRIGGER_BASE, "gap-1")}>
               Observe
-              {/* CTL-1034: twistie RIGHT-aligned (ml-auto) per the CTL-977 convention. */}
-              <ChevronRightIcon className="ml-auto size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
+              {/* CTL-1052 §3: twistie immediately adjacent to the label (gap-1), not
+                  ml-auto far-right — overrides the CTL-977 → CTL-1034 convention. */}
+              <ChevronRightIcon className="size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/observe:rotate-90" />
             </CollapsibleTrigger>
             <CollapsibleContent>
               <SidebarGroupContent>
@@ -702,9 +731,11 @@ export function AppSidebar() {
         </Collapsible>
       </SidebarContent>
 
-      {/* ── FOOTER: node filter + settings + theme toggle ─────────────────── */}
-      {/* CTL-930: health dots MOVED to AppFooter (app-footer.tsx). This footer
-          keeps node filter, Settings, and theme toggle only. */}
+      {/* ── FOOTER: node filter (multi-host only) + Settings ──────────────── */}
+      {/* CTL-930: health dots MOVED to AppFooter (app-footer.tsx).
+          CTL-1052 §5: the theme toggle moved INTO Settings (Appearance), so the
+          footer's bottom item is Settings only (single-host shows just Settings;
+          the node filter appears only on a multi-host cluster). */}
       <SidebarFooter>
         <SidebarMenu>
           {/* CTL-898 / SHELL8 — the NODE FILTER. */}
@@ -768,22 +799,10 @@ export function AppSidebar() {
               <span>Settings</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
-
-          {/* CTL-893 / SHELL3 — calm-dark ⇄ warm-light theme toggle. */}
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              onClick={toggleTheme}
-              tooltip={
-                theme === "dark" ? "Switch to warm light" : "Switch to calm dark"
-              }
-              aria-label={
-                theme === "dark" ? "Switch to warm light" : "Switch to calm dark"
-              }
-            >
-              {theme === "dark" ? <SunIcon /> : <MoonIcon />}
-              <span>{theme === "dark" ? "Warm light" : "Calm dark"}</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
+          {/* CTL-1052 §5: the calm-dark ⇄ warm-light toggle moved OUT of the footer
+              into the Settings surface (Theme → Appearance, settings-surface.tsx) so
+              the footer keeps ONLY Settings as its bottom item. The nav column reclaims
+              the freed height (SidebarContent flexes to fill). */}
         </SidebarMenu>
       </SidebarFooter>
 

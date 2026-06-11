@@ -36,7 +36,7 @@ describe("CTL-980 nav proportion v3 — icon size", () => {
   });
 });
 
-describe("CTL-1034 sidebar sections — twistie right-aligned (CTL-977 convention)", () => {
+describe("CTL-1052 sidebar sections — twistie ADJACENT to the label (overrides CTL-977)", () => {
   // Extract ChevronRightIcon className attribute values (the actual class strings, not comments).
   function chevronClassNames(block: string): string[] {
     const re = /<ChevronRightIcon\s+className=\{cn\(\s*\n?\s*"([^"]+)"/g;
@@ -48,25 +48,39 @@ describe("CTL-1034 sidebar sections — twistie right-aligned (CTL-977 conventio
     return results;
   }
 
-  it("per-project group ChevronRightIcon is right-aligned via ml-auto (CTL-1034)", () => {
-    // CTL-1034 §1: the twistie is RIGHT-aligned again (the CTL-977 convention) so each
-    // section header reads "Adva ········ ⌄". The ml-auto lives in the cn() conditional
-    // (ml-auto when there is no leading signal dot); assert the class is referenced.
+  it("per-project group ChevronRightIcon is label-adjacent, NOT right-floated (CTL-1052)", () => {
+    // CTL-1052 §3 overrides the CTL-977 → CTL-1034 ml-auto convention: the twistie now
+    // sits immediately after the label text (spaced by the PROJECT_HEADER_TRIGGER gap),
+    // so its className no longer carries ml-auto.
     const projectBlock = src.slice(
       src.indexOf("PER-PROJECT GROUPS"),
       src.indexOf("OBSERVE — collapsible"),
     );
-    expect(projectBlock).toContain("ml-auto");
+    const classes = chevronClassNames(projectBlock);
+    expect(classes.length).toBeGreaterThan(0);
+    expect(classes.every((c) => !c.includes("ml-auto"))).toBe(true);
   });
 
-  it("Observe section ChevronRightIcon is right-aligned via ml-auto (CTL-1034)", () => {
+  it("Observe section ChevronRightIcon is label-adjacent, NOT right-floated (CTL-1052)", () => {
     const observeBlock = src.slice(
       src.indexOf("OBSERVE — collapsible"),
       src.indexOf("FOOTER"),
     );
     const classes = chevronClassNames(observeBlock);
     expect(classes.length).toBeGreaterThan(0);
-    expect(classes.some((c) => c.includes("ml-auto"))).toBe(true);
+    expect(classes.every((c) => !c.includes("ml-auto"))).toBe(true);
+  });
+
+  it("the project attention dot overlays the project icon via StatusDot (CTL-1052 §4)", () => {
+    // CTL-1052 §4: the per-project attention dot is now an OVERLAY on the project icon
+    // (the StatusDot worker-presence convention), not a separate inline SectionSignalDot
+    // beside the chevron. The project block renders <StatusDot> keyed off repoSignal.
+    const projectBlock = src.slice(
+      src.indexOf("PER-PROJECT GROUPS"),
+      src.indexOf("OBSERVE — collapsible"),
+    );
+    expect(projectBlock).toContain("<StatusDot");
+    expect(projectBlock).not.toContain("<SectionSignalDot");
   });
 });
 
@@ -151,8 +165,10 @@ describe("CTL-1034 — collapsed-section signal dot (§4)", () => {
   it("a SectionSignalDot rolls a collapsed section's child signal onto its header", () => {
     expect(src).toContain("function SectionSignalDot");
     expect(src).toContain("function sectionSignal");
-    // Rendered only while the section is collapsed (the !isOpen / !overallIsOpen guard).
-    expect(src).toMatch(/!isOpen && repoSignal && <SectionSignalDot/);
+    // CTL-1052: the iconless Overall (and Observe) sections still roll their collapsed
+    // child signal up via SectionSignalDot (the per-project sections now overlay the dot
+    // on the project icon via StatusDot instead). Rendered only while collapsed.
+    expect(src).toMatch(/!overallIsOpen && overallSignal && \(\s*<SectionSignalDot/);
   });
 });
 
