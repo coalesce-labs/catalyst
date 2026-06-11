@@ -50,6 +50,35 @@ describe("markdownToRawHtml — fenced code block → hljs spans", () => {
   });
 });
 
+describe("markdownToRawHtml — gherkin highlighting (CTL-996)", () => {
+  it("emits hljs-keyword spans for Given/When/Then/Scenario/Feature keywords", () => {
+    const html = markdownToRawHtml(
+      "```gherkin\nFeature: x\nScenario: y\n  Given a\n  When b\n  Then c\n```",
+    );
+    expect(html).toContain("hljs language-gherkin");
+    // the gherkin keywords are tagged .hljs-keyword (coloured purple by the
+    // existing .ticket-desc .hljs-keyword CSS — no new CSS).
+    expect(html).toContain('class="hljs-keyword"');
+  });
+
+  it("supports the 'feature' alias for gherkin", () => {
+    const html = markdownToRawHtml(
+      "```feature\nScenario: s\n  Then ok\n```",
+    );
+    expect(html).toContain("hljs language-feature");
+    expect(html).toContain('class="hljs-keyword"');
+  });
+
+  it("an unregistered language still escapes the code (no crash, no spans)", () => {
+    const html = markdownToRawHtml("```cobol\nDISPLAY '<x>'.\n```");
+    expect(html).toContain("<pre>");
+    // the angle brackets are escaped (not raw HTML) — proves the unregistered
+    // path escapes rather than highlights.
+    expect(html).toContain("&lt;x&gt;");
+    expect(html).not.toContain('class="hljs-keyword"');
+  });
+});
+
 describe("ticket-ref pill regex (pure seam)", () => {
   it("matches known team prefixes", () => {
     expect(isTicketRef("CTL-926")).toBe(true);

@@ -24,6 +24,10 @@ import bash from "highlight.js/lib/languages/bash";
 import diff from "highlight.js/lib/languages/diff";
 import python from "highlight.js/lib/languages/python";
 import yaml from "highlight.js/lib/languages/yaml";
+// CTL-996: gherkin so a ticket's fenced ```gherkin acceptance criteria highlight
+// (Feature/Scenario/Given/When/Then/And/But → .hljs-keyword, already coloured by
+// the existing .ticket-desc .hljs-keyword CSS — no new CSS needed).
+import gherkin from "highlight.js/lib/languages/gherkin";
 
 // Register ONLY the grammars we expect in ticket descriptions (empty `core`
 // import → no 190-language default bundle). Aliases map to the same grammar.
@@ -42,6 +46,8 @@ import yaml from "highlight.js/lib/languages/yaml";
     ["py", python],
     ["yaml", yaml],
     ["yml", yaml],
+    ["gherkin", gherkin],
+    ["feature", gherkin],
   ] as const
 ).forEach(([name, lang]) => hljs.registerLanguage(name, lang));
 
