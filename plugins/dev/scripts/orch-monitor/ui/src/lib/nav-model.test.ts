@@ -8,11 +8,14 @@ import {
   paletteEntries,
   projectWorkerCount,
   projectQueueDepth,
+  overallWorkerCount,
+  overallQueueDepth,
+  isActiveWorker,
   displayCaseName,
   laneDisplayName,
   type NavGroup,
 } from "./nav-model";
-import type { BoardPayload } from "../board/types";
+import type { BoardPayload, BoardWorker, BoardTicket } from "../board/types";
 
 const payload = (over: Partial<BoardPayload>): BoardPayload => ({
   generatedAt: "",
@@ -22,6 +25,56 @@ const payload = (over: Partial<BoardPayload>): BoardPayload => ({
   tickets: [],
   queue: [],
   ...over,
+});
+
+// Minimal BoardWorker / BoardTicket factories (mirror footer-counts.test.ts) so
+// the count-derivation tests can build honest-classification fixtures concisely.
+const w = (p: Partial<BoardWorker> & { name: string; ticket: string }): BoardWorker => ({
+  tickets: [p.ticket],
+  phase: "implement",
+  status: "running",
+  activeState: "active",
+  working: true,
+  lastActiveMs: 100,
+  repo: "catalyst",
+  team: "CTL",
+  runtimeMs: 1000,
+  costUSD: null,
+  ...p,
+});
+
+const t = (p: Partial<BoardTicket> & { id: string }): BoardTicket => ({
+  title: p.id,
+  type: "feature",
+  repo: "catalyst",
+  team: "CTL",
+  phase: "triage",
+  status: "queued",
+  model: null,
+  linearState: "Todo",
+  workerStatus: null,
+  activeState: null,
+  working: false,
+  lastActiveMs: null,
+  priority: 0,
+  estimate: null,
+  scope: null,
+  project: null,
+  costUSD: null,
+  tokens: null,
+  turns: null,
+  phaseCosts: null,
+  phaseSummary: [],
+  pr: null,
+  updatedAt: "2026-06-11T00:00:00Z",
+  held: null,
+  blockers: [],
+  heldSince: null,
+  currentPhaseSince: null,
+  host: null,
+  generation: null,
+  attention: null,
+  ...p,
 });
 
 const repoColors: Record<string, { text: string }> = {
@@ -165,18 +218,83 @@ describe("nav-model — paletteEntries", () => {
   });
 });
 
+describe("nav-model — isActiveWorker", () => {
+  it("is true ONLY for activeState === 'active' (dead/stale/stuck/null excluded)", () => {
+    expect(isActiveWorker(w({ name: "a", ticket: "CTL-1", activeState: "active" }))).toBe(true);
+    expect(isActiveWorker(w({ name: "b", ticket: "CTL-2", activeState: "dead" }))).toBe(false);
+    expect(isActiveWorker(w({ name: "c", ticket: "CTL-3", activeState: "stuck" }))).toBe(false);
+    expect(isActiveWorker(w({ name: "d", ticket: "CTL-4", activeState: null }))).toBe(false);
+  });
+});
+
 describe("nav-model — projectWorkerCount", () => {
-  it("counts only active workers for the given repo", () => {
+  it("counts only active workers for the given repo (dead/stale excluded)", () => {
+    // adva: 3 active. catalyst: 1 active + 1 dead + 1 stale → 1 (honest count).
     const p = payload({
       workers: [
-        { name: "w1", ticket: "CTL-1", tickets: ["CTL-1"], phase: "implement", status: "active", activeState: "active", working: true, lastActiveMs: null, repo: "catalyst", team: "CTL", runtimeMs: null, costUSD: null },
-        { name: "w2", ticket: "CTL-2", tickets: ["CTL-2"], phase: "implement", status: "active", activeState: null, working: false, lastActiveMs: null, repo: "catalyst", team: "CTL", runtimeMs: null, costUSD: null },
-        { name: "w3", ticket: "ADV-1", tickets: ["ADV-1"], phase: "implement", status: "active", activeState: "active", working: true, lastActiveMs: null, repo: "adva", team: "ADV", runtimeMs: null, costUSD: null },
+        w({ name: "a1", ticket: "ADV-1", repo: "adva", team: "ADV", activeState: "active" }),
+        w({ name: "a2", ticket: "ADV-2", repo: "adva", team: "ADV", activeState: "active" }),
+        w({ name: "a3", ticket: "ADV-3", repo: "adva", team: "ADV", activeState: "active" }),
+        w({ name: "c1", ticket: "CTL-1", repo: "catalyst", activeState: "active" }),
+        w({ name: "c2", ticket: "CTL-2", repo: "catalyst", activeState: "dead", working: false }),
+        w({ name: "c3", ticket: "CTL-3", repo: "catalyst", activeState: null, working: false }),
       ],
     });
+    // Gherkin: adva 3 active, catalyst 1 active.
+    expect(projectWorkerCount(p, "adva")).toBe(3);
     expect(projectWorkerCount(p, "catalyst")).toBe(1);
-    expect(projectWorkerCount(p, "adva")).toBe(1);
+    // A project with zero active workers → 0 (caller hides the dot + count).
     expect(projectWorkerCount(p, "unknown")).toBe(0);
+  });
+
+  it("returns 0 when a repo's only workers are dead/stale (zero hides)", () => {
+    const p = payload({
+      workers: [
+        w({ name: "d1", ticket: "ADV-1", repo: "adva", team: "ADV", activeState: "dead", working: false }),
+        w({ name: "d2", ticket: "ADV-2", repo: "adva", team: "ADV", activeState: null, working: false }),
+      ],
+    });
+    expect(projectWorkerCount(p, "adva")).toBe(0);
+  });
+});
+
+describe("nav-model — overallWorkerCount", () => {
+  it("counts active workers fleet-wide, excluding dead/stale (CTL-1032 honesty)", () => {
+    // 8 workers, 6 genuinely active, 2 dead/stale → 6 (the Gherkin's headline case).
+    const p = payload({
+      workers: [
+        w({ name: "a", ticket: "CTL-1", activeState: "active" }),
+        w({ name: "b", ticket: "CTL-2", activeState: "active" }),
+        w({ name: "c", ticket: "ADV-1", repo: "adva", team: "ADV", activeState: "active" }),
+        w({ name: "d", ticket: "ADV-2", repo: "adva", team: "ADV", activeState: "active" }),
+        w({ name: "e", ticket: "CTL-3", activeState: "active" }),
+        w({ name: "f", ticket: "CTL-4", activeState: "active" }),
+        w({ name: "g", ticket: "CTL-5", activeState: "dead", working: false }),
+        w({ name: "h", ticket: "CTL-6", activeState: null, working: false }),
+      ],
+    });
+    expect(overallWorkerCount(p)).toBe(6);
+  });
+
+  it("is 0 with no active workers", () => {
+    expect(overallWorkerCount(payload({}))).toBe(0);
+  });
+});
+
+describe("nav-model — overallQueueDepth", () => {
+  it("counts all queue items across the fleet", () => {
+    const p = payload({
+      queue: [
+        { repo: "catalyst" } as unknown as BoardPayload["queue"][0],
+        { repo: "adva" } as unknown as BoardPayload["queue"][0],
+        { repo: "catalyst" } as unknown as BoardPayload["queue"][0],
+      ],
+    });
+    expect(overallQueueDepth(p)).toBe(3);
+  });
+
+  it("is 0 when nothing is waiting", () => {
+    expect(overallQueueDepth(payload({}))).toBe(0);
   });
 });
 
@@ -194,6 +312,7 @@ describe("nav-model — projectQueueDepth", () => {
     expect(projectQueueDepth(p, "unknown")).toBe(0);
   });
 });
+
 
 // ── CTL-1012: display-name helpers (the ONE source of spelled-out entity names) ──
 

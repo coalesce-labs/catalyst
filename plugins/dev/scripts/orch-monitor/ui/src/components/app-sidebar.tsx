@@ -42,6 +42,8 @@ import {
   displayCaseName,
   projectWorkerCount,
   projectQueueDepth,
+  overallWorkerCount,
+  overallQueueDepth,
 } from "@/lib/nav-model";
 import {
   repoScopeAtom,
@@ -282,23 +284,49 @@ export function AppSidebar() {
     (item) => item.surface === surface,
   );
 
-  // Derive badge for an OPERATE item from the nav signal.
-  function liveBadge(s: Surface, scopeVal: string): number | null {
-    if (!nav) return null;
+  // CTL-1037 §A/§B — nav-row counts are derived from the RESIDENT board snapshot
+  // (the same source the live-status strip + control tower read), NOT the server's
+  // nav-signal workerCount (which is workers.length — total, including dead/stale).
+  // This makes every count honest and per-project-scopable from one client-side
+  // rule: Workers = genuinely-active workers (activeState === "active"); Queue =
+  // tickets waiting for a slot. Overall ("all") sums the fleet; a repo scope filters
+  // by .repo. Falls back to the nav signal only when the snapshot hasn't loaded yet.
+  //
+  // Returns the numeric count for Workers/Queue, or null for rows that carry no
+  // count. The CALLER decides visibility (Workers hides 0; Queue keeps an
+  // intentional 0 — see renderOperateItem).
+  function rowCount(s: Surface, scopeVal: string): number | null {
     if (s === "workers") {
-      if (scopeVal === "all") return nav.workerCount;
-      return null; // per-project count requires BFF projection (future)
+      if (payload) {
+        return scopeVal === "all"
+          ? overallWorkerCount(payload)
+          : projectWorkerCount(payload, scopeVal);
+      }
+      // Snapshot not loaded yet — fall back to the global signal for the "all" row.
+      return scopeVal === "all" && nav ? nav.workerCount : null;
     }
     if (s === "queue") {
-      if (scopeVal === "all") return nav.queueDepth;
-      return null;
+      if (payload) {
+        return scopeVal === "all"
+          ? overallQueueDepth(payload)
+          : projectQueueDepth(payload, scopeVal);
+      }
+      return scopeVal === "all" && nav ? nav.queueDepth : null;
     }
     return null;
   }
-  function liveDot(s: Surface): "live" | "anomaly" | null {
-    if (!nav) return null;
-    if (s === "workers") return nav.workerCount > 0 ? "live" : null;
-    if (s === "board") return nav.anomaly ? "anomaly" : null;
+  // CTL-1037 §A — the green PRESENCE dot extends to every Workers row (overall AND
+  // per-project): it lights when that scope has at least one genuinely-active
+  // worker, hidden otherwise. The Board row keeps its amber anomaly dot.
+  function liveDot(s: Surface, scopeVal: string): "live" | "anomaly" | null {
+    if (s === "workers") {
+      const c = rowCount("workers", scopeVal);
+      return c != null && c > 0 ? "live" : null;
+    }
+    if (s === "board") {
+      if (!nav) return null;
+      return nav.anomaly ? "anomaly" : null;
+    }
     return null;
   }
 
@@ -323,14 +351,37 @@ export function AppSidebar() {
     scopeVal: string,
     compact = false,
   ) {
-    const dot = liveDot(item.surface);
-    const badge = liveBadge(item.surface, scopeVal);
+    // CTL-1037 §A: the presence dot now lights for the Workers row at EVERY scope
+    // (overall + per-project), keyed off that scope's active-worker count.
+    const dot = liveDot(item.surface, scopeVal);
     const active = isItemActive(item.surface, scopeVal);
+
+    // CTL-1037 §B — resolve the row's count + an unambiguous hover tooltip per row.
+    //   Workers → "N active workers" (active = genuinely running, not dead/stale),
+    //             count hidden when 0 (no signal, and the dot already conveys none).
+    //   Queue   → "N waiting for a slot"; the 0 is KEPT VISIBLE intentionally
+    //             (decision: a Queue row with no number reads as "unknown/loading"
+    //             rather than "empty" — the explicit 0 says "nothing is waiting",
+    //             which is genuine signal for a capacity row). Other rows: no count.
+    const workerN = item.surface === "workers" ? rowCount("workers", scopeVal) : null;
+    const queueN = item.surface === "queue" ? rowCount("queue", scopeVal) : null;
+
+    // The neutral count badge (Workers/Queue) and its clarifying tooltip text.
+    let countBadge: number | null = null;
+    let rowTooltip = item.label;
+    if (item.surface === "workers" && workerN != null) {
+      if (workerN > 0) countBadge = workerN; // hide the zero — the dot says "none"
+      rowTooltip = `${workerN} active worker${workerN === 1 ? "" : "s"}`;
+    } else if (item.surface === "queue" && queueN != null) {
+      countBadge = queueN; // keep the 0 — "nothing waiting" is real signal
+      rowTooltip = `${queueN} waiting for a slot`;
+    }
+
     return (
       <SidebarMenuItem key={`${scopeVal}:${item.surface}`}>
         <SidebarMenuButton
           isActive={active}
-          tooltip={item.label}
+          tooltip={rowTooltip}
           size={compact ? "sm" : "default"}
           onClick={() => go(item.surface, scopeVal)}
           // CTL-981: inactive = font-medium (weight 500) + text-sidebar-foreground/72
@@ -348,13 +399,12 @@ export function AppSidebar() {
               currentColor — inherits the button's muted/active text color. */}
           <span className="relative flex shrink-0 items-center justify-center">
             <item.icon className="size-4 shrink-0" />
-            {dot && scopeVal === "all" && <StatusDot kind={dot} />}
+            {/* CTL-1037 §A: presence dot at every scope, not just "all". */}
+            {dot && <StatusDot kind={dot} />}
           </span>
           <span>{item.label}</span>
         </SidebarMenuButton>
-        {badge != null && (
-          <SidebarMenuBadge>{badge}</SidebarMenuBadge>
-        )}
+        {countBadge != null && <SidebarMenuBadge>{countBadge}</SidebarMenuBadge>}
       </SidebarMenuItem>
     );
   }
@@ -376,14 +426,19 @@ export function AppSidebar() {
   //   - repo scope → that repo's resident-payload worker/queue counts (the per-project
   //                  BFF projection isn't wired yet, so derive from the board snapshot).
   //   - "observe"  → OBSERVE surfaces carry no per-section count today → always null.
+  // CTL-1037 §B: the "all" branch now derives its honest active worker count from
+  // the resident snapshot (overallWorkerCount), falling back to the nav signal only
+  // before the snapshot loads, so the rolled-up dot agrees with the row badges.
   function sectionSignal(scopeVal: string): "live" | "anomaly" | null {
+    if (scopeVal === "observe") return null;
     if (scopeVal === "all") {
-      if (!nav) return null;
-      if (nav.anomaly) return "anomaly";
-      if (nav.workerCount > 0 || nav.queueDepth > 0) return "live";
+      if (!nav && !payload) return null;
+      if (nav?.anomaly) return "anomaly";
+      const workers = payload ? overallWorkerCount(payload) : (nav?.workerCount ?? 0);
+      const queue = payload ? overallQueueDepth(payload) : (nav?.queueDepth ?? 0);
+      if (workers > 0 || queue > 0) return "live";
       return null;
     }
-    if (scopeVal === "observe") return null;
     if (!payload) return null;
     if (
       projectWorkerCount(payload, scopeVal) > 0 ||
