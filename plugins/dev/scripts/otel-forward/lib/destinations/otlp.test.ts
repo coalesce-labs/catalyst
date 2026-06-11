@@ -205,6 +205,48 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
     rmSync(dir, { recursive: true });
   });
 
+  test("mixed batch (some self, some normal) DOES emit failure event for normal events", async () => {
+    global.fetch = mock(() =>
+      Promise.reject(new Error("connection refused"))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const eventLogPath = join(dir, "events-mixed.jsonl");
+    const dlqPath = join(dir, "dlq-mixed.jsonl");
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      eventLogPath,
+      retryDelaysMs: [0, 0, 0],
+    });
+
+    const mixedBatch = [
+      makeEvent({ attributes: { "event.name": "session.heartbeat" } }),
+      makeEvent({
+        resource: {
+          "service.name": "catalyst.otel-forward",
+          "service.namespace": "catalyst" as const,
+          "service.version": "1.0.0",
+          "host.name": "test-host",
+          "host.id": "test-id",
+        },
+        attributes: { "event.name": "catalyst.observability.forward_failed" },
+      }),
+    ];
+
+    await sender.flush(mixedBatch);
+
+    expect(existsSync(eventLogPath)).toBe(true);
+    const lines = readFileSync(eventLogPath, "utf8").trim().split("\n").filter(Boolean);
+    expect(lines.length).toBe(1);
+    const evt = JSON.parse(lines[0]) as CanonicalEvent;
+    expect(evt.attributes["event.name"]).toBe("catalyst.observability.forward_failed");
+    expect((evt.body?.payload as Record<string, unknown>)?.batchSize).toBe(2);
+
+    rmSync(dir, { recursive: true });
+  });
+
   test("successful flush appends no forward_failed event", async () => {
     global.fetch = mock(() =>
       Promise.resolve(new Response(null, { status: 200 }))

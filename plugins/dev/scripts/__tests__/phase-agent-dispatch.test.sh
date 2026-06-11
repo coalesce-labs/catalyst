@@ -2010,6 +2010,29 @@ else
 	pass "catalyst.dispatch_mode correctly absent when neither env nor config provides it"
 fi
 
+# ─── Test 65 (CTL-1008 Phase 3): dispatch_mode from config (env absent) ────
+echo ""
+echo "Test 65 (CTL-1008): catalyst.dispatch_mode read from config when CATALYST_DISPATCH_MODE unset"
+fresh_env t65_dispatch_mode_config
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj",
+    "orchestration": {
+      "dispatchMode": "direct"
+    }
+  }
+}
+EOF
+DRY65=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL65="$(echo "$DRY65" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ $OTEL65 == *"catalyst.dispatch_mode=direct"* ]]; then
+	pass "catalyst.dispatch_mode=direct read from config when env var absent"
+else
+	fail "catalyst.dispatch_mode=direct MISSING from OTEL attrs (config-only path): $OTEL65"
+fi
+
 echo ""
 echo "Test 63 (CTL-864): CATALYST_CLUSTER_GENERATION is included in .settings.env when set"
 fresh_env t63
