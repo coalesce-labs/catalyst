@@ -79,6 +79,7 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.dispatchMode` | `oneshot-legacy` | Which run mode to use (above) |
 | `orchestration.maxParallel` | `3` | How many tickets run at once |
 | `orchestration.worktreeDir` | `~/catalyst/wt/<projectKey>` | Where worktrees are created |
+| `orchestration.pluginDirs` | unset | Path(s) to the plugin checkout(s) workers run from (`<checkout>/plugins/dev`). Set by `setup-plugin-source.sh`; resolved by `phase-agent-dispatch` and refreshed by `catalyst-stack hotpatch` / merge-to-main. String or `:`-joined array. May also live in the machine config (Layer 2); the `CATALYST_PLUGIN_DIRS` env var overrides both. |
 | `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
 | `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
