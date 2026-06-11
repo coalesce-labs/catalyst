@@ -1,11 +1,15 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it } from "bun:test";
 
-// jotai/utils is not installed in the test environment; must be mocked before
-// any dynamic import of the store module.
-await mock.module("jotai/utils", () => ({ atomWithStorage: () => null }));
-
-const { resolveEffectiveColor, applyColorPick, NAMED_COLOR_NAMES } =
-  await import("./repo-color-picks-store");
+// NO mock.module here: jotai/utils IS resolvable from ui/src (ui/node_modules),
+// and bun's mock.module is GLOBAL for the rest of the process — mocking
+// atomWithStorage to null nulls every atomWithStorage atom in test files
+// loaded after this one ("WeakMap keys must be objects" in jotai internals
+// across prefs-store/nav-store/nav-sections/display-options on CI).
+import {
+  resolveEffectiveColor,
+  applyColorPick,
+  NAMED_COLOR_NAMES,
+} from "./repo-color-picks-store";
 
 describe("resolveEffectiveColor", () => {
   it("prefers a valid local pick over the server default", () => {
