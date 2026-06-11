@@ -178,12 +178,43 @@ describe("showLaneChrome — lane-chrome policy", () => {
   });
 });
 
+// ── CTL-1012 — lane.repo (the team→repo icon/name bridge) ─────────────────────
+
+describe("board-grouping — lane.repo (CTL-1012 team→repo bridge)", () => {
+  it("a TEAM lane carries its first member's repo (the icon/name bridge)", () => {
+    // Team "ADV" entities all live in repo "adva" — the lane surfaces that repo so
+    // the header can resolve the project icon + brand name from the team axis.
+    const lanes = buildLanes(
+      [T({ team: "ADV", repo: "adva" }), T({ team: "ADV", repo: "adva" })],
+      "team",
+    );
+    expect(lanes[0]?.label).toBe("ADV");
+    expect(lanes[0]?.repo).toBe("adva");
+  });
+
+  it("a REPO lane carries its repo (== its key)", () => {
+    const lanes = buildLanes([T({ repo: "catalyst" })], "repo");
+    expect(lanes[0]?.repo).toBe("catalyst");
+  });
+
+  it("a lane whose first member has no repo carries repo=null (fail-open)", () => {
+    const lanes = buildLanes([T({ team: "CTL" })], "team");
+    expect(lanes[0]?.repo).toBeNull();
+  });
+
+  it("the synthetic none lane carries the first item's repo", () => {
+    expect(buildLanes([T({ repo: "adva" })], "none")[0]?.repo).toBe("adva");
+    expect(buildLanes([], "none")[0]?.repo).toBeNull();
+  });
+});
+
 // ── Phase 3 — singleLaneHint ─────────────────────────────────────────────────
 
 const makeLane = (label: string, count: number): Lane<unknown> => ({
   key: label === "Unassigned" || label === "No team" ? UNASSIGNED : label,
   label,
   live: null,
+  repo: null,
   items: Array.from({ length: count }, () => ({})),
 });
 

@@ -126,6 +126,69 @@ export function buildNavGroups(
   return [overall, ...repoGroups, observe];
 }
 
+// ── display-name helpers (CTL-1012) ───────────────────────────────────────────
+// ONE source of human-readable entity naming. The sidebar nav groups, the board
+// lane headers (Swimlane + BoardList), and the detail-page Project/Repo/Team rows
+// all derive their spelled-out names here so the casing rule cannot drift.
+//
+// A repo short-name ("adva", "catalyst", "rightsite-cloud") is the only ground
+// truth we have client-side; we display-case it (split on -/_/space, capitalize
+// each token: "adva" → "Adva", "my-app" → "My App"). Team lanes append the bare
+// Linear key in parens — "Adva (ADV)" — so the operator keeps the orientable key
+// while reading the brand. The team→repo bridge is the lane's representative
+// entity (each board entity carries BOTH team + repo), surfaced as `Lane.repo`.
+
+/**
+ * Display-case a repo short-name into a readable brand name.
+ * Splits on `-`, `_`, and whitespace, capitalizes each token's first letter,
+ * and rejoins with a space. Fail-soft: empty/blank input returns "".
+ *   "adva" → "Adva" · "catalyst" → "Catalyst" · "rightsite-cloud" → "Rightsite Cloud"
+ */
+export function displayCaseName(raw: string | null | undefined): string {
+  if (!raw) return "";
+  return raw
+    .split(/[-_\s]+/)
+    .filter((t) => t.length > 0)
+    .map((t) => t.charAt(0).toUpperCase() + t.slice(1))
+    .join(" ");
+}
+
+/** The grouping axes that carry a spelled-out lane name (mirrors the Swimlane union
+ *  minus the host/none axes, which keep their existing label verbatim). */
+export type DisplayAxis = "team" | "repo" | "project" | "host" | "none";
+
+/**
+ * The spelled-out lane-header name for a grouping axis (CTL-1012).
+ *   - team:    "Adva (ADV)" — display-cased repo brand + the bare Linear key in parens.
+ *              Falls back to the bare key when no repo is known ("ADV").
+ *   - repo:    "Catalyst" — display-cased repo short-name. Falls back to the raw key.
+ *   - project: the project name verbatim (already human-readable from Linear).
+ *   - host/none: the existing label verbatim (host = node name; none = "").
+ *
+ * `key` is the lane key (team key / repo short-name / project name / host id).
+ * `label` is buildLanes' resolved label (used verbatim for project/host/none and
+ * for the catch-all "Unassigned"/"No team" lanes). `repo` is the lane's
+ * representative repo short-name (the team→repo bridge); null when absent.
+ */
+export function laneDisplayName(
+  axis: DisplayAxis,
+  key: string,
+  label: string,
+  repo: string | null | undefined,
+): string {
+  // The catch-all lane (Unassigned / No team) keeps its fallback label verbatim.
+  if (label === "Unassigned" || label === "No team") return label;
+  if (axis === "team") {
+    const brand = displayCaseName(repo);
+    return brand ? `${brand} (${key})` : label;
+  }
+  if (axis === "repo") {
+    return displayCaseName(key) || label;
+  }
+  // project / host / none → the existing label is already the right human name.
+  return label;
+}
+
 // ── breadcrumbFor ─────────────────────────────────────────────────────────────
 
 // OBS-5: the OPERATE breadcrumb labels. OBSERVE surfaces resolve their crumb via

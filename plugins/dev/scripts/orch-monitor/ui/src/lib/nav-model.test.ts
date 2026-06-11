@@ -8,6 +8,8 @@ import {
   paletteEntries,
   projectWorkerCount,
   projectQueueDepth,
+  displayCaseName,
+  laneDisplayName,
   type NavGroup,
 } from "./nav-model";
 import type { BoardPayload } from "../board/types";
@@ -190,5 +192,54 @@ describe("nav-model — projectQueueDepth", () => {
     expect(projectQueueDepth(p, "catalyst")).toBe(2);
     expect(projectQueueDepth(p, "adva")).toBe(1);
     expect(projectQueueDepth(p, "unknown")).toBe(0);
+  });
+});
+
+// ── CTL-1012: display-name helpers (the ONE source of spelled-out entity names) ──
+
+describe("nav-model — displayCaseName", () => {
+  it("display-cases a single-word repo short-name", () => {
+    expect(displayCaseName("adva")).toBe("Adva");
+    expect(displayCaseName("catalyst")).toBe("Catalyst");
+  });
+  it("title-cases each token of a multi-word short-name", () => {
+    expect(displayCaseName("rightsite-cloud")).toBe("Rightsite Cloud");
+    expect(displayCaseName("my_app")).toBe("My App");
+    expect(displayCaseName("foo bar")).toBe("Foo Bar");
+  });
+  it("fail-soft on empty/blank/nullish input → ''", () => {
+    expect(displayCaseName("")).toBe("");
+    expect(displayCaseName(null)).toBe("");
+    expect(displayCaseName(undefined)).toBe("");
+    expect(displayCaseName("   ")).toBe("");
+  });
+});
+
+describe("nav-model — laneDisplayName", () => {
+  it("team axis: spelled-out brand + bare key in parens ('Adva (ADV)')", () => {
+    expect(laneDisplayName("team", "ADV", "ADV", "adva")).toBe("Adva (ADV)");
+    expect(laneDisplayName("team", "CTL", "CTL", "catalyst")).toBe("Catalyst (CTL)");
+  });
+  it("team axis with no repo falls back to the bare key/label", () => {
+    expect(laneDisplayName("team", "ADV", "ADV", null)).toBe("ADV");
+    expect(laneDisplayName("team", "ADV", "ADV", undefined)).toBe("ADV");
+  });
+  it("repo axis: display-cased short-name; falls back to the label when blank", () => {
+    expect(laneDisplayName("repo", "adva", "adva", "adva")).toBe("Adva");
+    expect(laneDisplayName("repo", "catalyst", "catalyst", "catalyst")).toBe("Catalyst");
+  });
+  it("project axis: the project name verbatim (already human-readable)", () => {
+    expect(laneDisplayName("project", "Orchestration Monitor UX", "Orchestration Monitor UX", "catalyst")).toBe(
+      "Orchestration Monitor UX",
+    );
+  });
+  it("host/none axes: the label verbatim", () => {
+    expect(laneDisplayName("host", "id-mini", "mini", "catalyst")).toBe("mini");
+    expect(laneDisplayName("none", "__catalyst_unassigned__", "", "catalyst")).toBe("");
+  });
+  it("the catch-all lane keeps its 'Unassigned'/'No team' label on every axis", () => {
+    expect(laneDisplayName("team", "__catalyst_unassigned__", "No team", null)).toBe("No team");
+    expect(laneDisplayName("repo", "__catalyst_unassigned__", "Unassigned", null)).toBe("Unassigned");
+    expect(laneDisplayName("project", "__catalyst_unassigned__", "Unassigned", null)).toBe("Unassigned");
   });
 });
