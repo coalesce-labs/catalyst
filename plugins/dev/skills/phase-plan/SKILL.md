@@ -264,6 +264,11 @@ EOF
 ```
 
 ```bash
+# CTL-866: multi-host thoughts-sync gate. Single-host → exact no-op. Multi-host
+# → commit+push the plan artifact before any other host can read the
+# completion event; on sync failure the gate emits `failed` and we stop here.
+"${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
+
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
 

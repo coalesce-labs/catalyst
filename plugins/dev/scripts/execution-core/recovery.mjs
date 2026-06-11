@@ -2823,6 +2823,7 @@ export async function reclaimDeadHostWork(
       const result = defaultRebuildWorktree(ticket, { orchDir });
       return result;
     },
+    thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
   } = {},
@@ -2852,6 +2853,12 @@ export async function reclaimDeadHostWork(
       const wt = rebuildWorktree(ticket);
       if (!wt?.ok) continue;
 
+      // CTL-866: refresh thoughts/ before the artifact probes read it, so a
+      // takeover host sees the dead host's pushed research/plan docs.
+      // Fail-open: a failed pull must not abort reclaim (worst case the probe
+      // re-dispatches, the prior behavior).
+      try { thoughtsPull(wt.cwd); } catch { /* fail-open */ }
+
       // Infer the next phase to dispatch from durable artifacts.
       const phase = await inferResume(ticket, wt.cwd);
       if (!phase) continue; // terminal — nothing to resume
@@ -2867,6 +2874,19 @@ export async function reclaimDeadHostWork(
   }
 
   return { taken };
+}
+
+// defaultThoughtsPull — refresh the thoughts/ git repo inside the rebuilt
+// worktree before artifact probes read it. Best-effort; `humanlayer thoughts
+// sync` is the available primitive (no `thoughts pull` subcommand exists).
+// Returns { ok }. Never throws (caller also guards).
+function defaultThoughtsPull(cwd) {
+  try {
+    const res = spawnSync("humanlayer", ["thoughts", "sync"], { cwd, stdio: "ignore" });
+    return { ok: res.status === 0 };
+  } catch {
+    return { ok: false };
+  }
 }
 
 // defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
