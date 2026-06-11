@@ -816,7 +816,7 @@ compose_worker_settings_json() {
 	local phase_val="${PHASE-}"
 	local ticket_val="${TICKET-}"
 	local generation_val="${GENERATION-}"
-	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION-}"   # CTL-864
+	local cluster_generation_val="${CATALYST_CLUSTER_GENERATION-}" # CTL-864
 
 	local statusline_script="${SCRIPT_DIR}/catalyst-statusline.sh"
 
@@ -875,7 +875,7 @@ DISPATCH_ENV=(
 	"CATALYST_GENERATION=${GENERATION}"
 	# CTL-864: cross-host cluster fencing token (distinct from the host-local
 	# CATALYST_GENERATION above). Empty on single-host → worker performs no check.
-	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION:-}"
+	"CATALYST_CLUSTER_GENERATION=${CATALYST_CLUSTER_GENERATION-}"
 )
 [[ -n $OTEL_RES_ATTRS ]] &&
 	DISPATCH_ENV+=("OTEL_RESOURCE_ATTRIBUTES=${OTEL_RES_ATTRS}")

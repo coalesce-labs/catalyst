@@ -33,18 +33,27 @@ import {
   EVENT_DEBOUNCE_MS,
   TAILER_POLL_INTERVAL_MS,
   log,
-  getHostName,      // CTL-862
-  getClusterHosts,  // CTL-862
+  getHostName, // CTL-862
+  getClusterHosts, // CTL-862
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
-import { setProjectEligible, removeTicket, dropProject, getEligibleSet, upsertTicket } from "./eligible-set.mjs";
+import {
+  setProjectEligible,
+  removeTicket,
+  dropProject,
+  getEligibleSet,
+  upsertTicket,
+} from "./eligible-set.mjs";
 import { loadCursor, saveCursor, resolveStartOffset } from "./event-cursor.mjs";
 import { dispatchTicket } from "./dispatch.mjs";
 import { abortWorker as defaultAbortWorker } from "./abort-worker.mjs";
-import { applyTriageStatus as defaultApplyTriageStatus, applyAssignee as defaultApplyAssignee } from "./linear-write.mjs";
+import {
+  applyTriageStatus as defaultApplyTriageStatus,
+  applyAssignee as defaultApplyAssignee,
+} from "./linear-write.mjs";
 import { appendTriageTransitionEvent as defaultAppendEvent } from "./triage-transition-event.mjs";
 import { countBackgroundAgents, resetLivenessCache } from "./claude-agents.mjs";
 import { readMaxParallel, computeFreeSlots } from "./scheduler.mjs";
@@ -110,10 +119,15 @@ export function parseIssueUpdatedEvent(event) {
     toProject: payload.toProject ?? null,
     toPriority: typeof payload.toPriority === "number" ? payload.toPriority : null,
     // CTL-957: estimate from the event payload (may be undefined when absent).
-    toEstimate: typeof payload.toEstimate === "number" ? payload.toEstimate : ("toEstimate" in payload ? null : undefined),
+    toEstimate:
+      typeof payload.toEstimate === "number"
+        ? payload.toEstimate
+        : "toEstimate" in payload
+          ? null
+          : undefined,
     description: typeof payload.description === "string" ? payload.description : null, // CTL-749
     descriptionChanged: payload.descriptionChanged === true, // CTL-749
-    actorId: payload.actorId ?? null,   // CTL-749
+    actorId: payload.actorId ?? null, // CTL-749
     actorName: payload.actorName ?? null, // CTL-749
   };
 }
@@ -124,8 +138,7 @@ export function parseCommentCreatedEvent(event) {
   const name = event?.attributes?.["event.name"] ?? event?.event;
   if (name !== "linear.comment.created") return null;
   const payload = event?.body?.payload ?? event?.detail ?? {};
-  const ticket =
-    event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? null;
+  const ticket = event?.attributes?.["linear.issue.identifier"] ?? payload.ticket ?? null;
   return {
     ticket,
     commentId: payload.commentId ?? null,
@@ -163,7 +176,7 @@ export function handleIssueUpdatedEvent(
   {
     cache,
     abortWorker: _abortWorker, // accepted for signature symmetry, never invoked
-    onUpdate,                  // CTL-749: optional issue-update subscriber
+    onUpdate, // CTL-749: optional issue-update subscriber
   } = {}
 ) {
   const parsed = parseIssueUpdatedEvent(event);
@@ -188,8 +201,11 @@ export function handleIssueUpdatedEvent(
     }
   }
   if (typeof onUpdate === "function") {
-    try { onUpdate(parsed); }
-    catch (err) { log.warn({ err: err.message }, "onUpdate subscriber threw — ignored"); }
+    try {
+      onUpdate(parsed);
+    } catch (err) {
+      log.warn({ err: err.message }, "onUpdate subscriber threw — ignored");
+    }
   }
 }
 
@@ -246,7 +262,11 @@ export function reconcileProject(team, { exec, appendHealthEvent } = {}) {
   } catch (err) {
     log.error({ team, err: err.message }, "reconcile poll failed — preserving prior eligible set");
     // CTL-867: escalate persistent failures beyond the buried log line.
-    recordReconcileFailure(team, err.message, appendHealthEvent ? { appendEvent: appendHealthEvent } : {});
+    recordReconcileFailure(
+      team,
+      err.message,
+      appendHealthEvent ? { appendEvent: appendHealthEvent } : {}
+    );
     return;
   }
   // CTL-867: the poll succeeded — reset the failure streak, refresh the
@@ -361,7 +381,9 @@ export function handleStateChangedEvent(
   // multiple matching projects share the same slot budget. When a shared per-drain
   // triageBudget is provided by readNewEvents, use it; otherwise build one for this
   // single call. Either way, the budget gates all dispatchTriage calls below.
-  const budget = triageBudget ?? computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
+  const budget =
+    triageBudget ??
+    computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
   for (const p of listProjects()) {
     const query = resolveEligibleQuery(p);
     if (query.team !== parsed.teamKey) continue;
@@ -385,7 +407,9 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
-          hosts, hostName, claimDispatch, // CTL-862
+          hosts,
+          hostName,
+          claimDispatch, // CTL-862
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -437,7 +461,9 @@ export function handleStateChangedEvent(
           gateway,
           fetchAssignee,
           applyAssignee,
-          hosts, hostName, claimDispatch, // CTL-862
+          hosts,
+          hostName,
+          claimDispatch, // CTL-862
         });
       } else {
         log.debug(
@@ -501,24 +527,27 @@ function computeTriageBudget({
 // CTL-716: budget param — a mutable { remaining } object; when provided and
 // remaining <= 0, the dispatch is deferred (dropped; sweepMissingTriage retries).
 // Only decrements on a successful (code === 0) dispatch. Returns true on success.
-function dispatchTriage(identifier, {
-  dispatch,
-  orchDir,
-  applyTriageStatus = defaultApplyTriageStatus,
-  appendEvent = defaultAppendEvent,
-  orchId,
-  budget,
-  // CTL-781: respect-assignment + self-assign seams.
-  botUserIds,
-  botWriteId,
-  gateway,
-  fetchAssignee = fetchTicketAssignee,
-  applyAssignee = defaultApplyAssignee,
-  // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
-  hosts = undefined,
-  hostName = undefined,
-  claimDispatch = claimDispatchSync,
-}) {
+function dispatchTriage(
+  identifier,
+  {
+    dispatch,
+    orchDir,
+    applyTriageStatus = defaultApplyTriageStatus,
+    appendEvent = defaultAppendEvent,
+    orchId,
+    budget,
+    // CTL-781: respect-assignment + self-assign seams.
+    botUserIds,
+    botWriteId,
+    gateway,
+    fetchAssignee = fetchTicketAssignee,
+    applyAssignee = defaultApplyAssignee,
+    // CTL-862: cross-host coordination seams (left undefined → single-host fallback).
+    hosts = undefined,
+    hostName = undefined,
+    claimDispatch = claimDispatchSync,
+  }
+) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
     return false;
@@ -659,7 +688,12 @@ export function sweepMissingTriage({
     return;
   }
   // CTL-716: read liveness once per sweep (mirrors schedulerTick's once-per-tick read).
-  const budget = computeTriageBudget({ orchDir, concurrency, readMaxParallelFn, liveBackgroundCount });
+  const budget = computeTriageBudget({
+    orchDir,
+    concurrency,
+    readMaxParallelFn,
+    liveBackgroundCount,
+  });
   for (const p of listProjects()) {
     for (const t of getEligibleSet(p.team)) {
       if (budget.remaining <= 0) return; // capacity reached; remainder retries next sweep
@@ -676,7 +710,9 @@ export function sweepMissingTriage({
         gateway,
         fetchAssignee,
         applyAssignee,
-        hosts, hostName, claimDispatch, // CTL-862
+        hosts,
+        hostName,
+        claimDispatch, // CTL-862
       });
     }
   }
@@ -809,7 +845,10 @@ export function readNewEvents({ foldOnly = false } = {}) {
       // handleCommentCreatedEvent's onComment is a side-effect — withhold it on
       // the fold-only boot drain so replayed comments don't re-fire subscribers.
       handleStateChangedEvent(event, { ...tailerOpts, foldOnly, triageBudget });
-      handleIssueUpdatedEvent(event, foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts); // CTL-681 + CTL-749
+      handleIssueUpdatedEvent(
+        event,
+        foldOnly ? { ...tailerOpts, onUpdate: undefined } : tailerOpts
+      ); // CTL-681 + CTL-749
       handleCommentCreatedEvent(event, foldOnly ? {} : tailerOpts); // CTL-681
     }
   } catch {
@@ -849,7 +888,7 @@ export function startMonitor({
   abortWorker,
   cache, // CTL-634: shared state cache for event-driven write-through
   onComment, // CTL-681: optional comment subscriber
-  onUpdate,  // CTL-749: optional issue-update subscriber
+  onUpdate, // CTL-749: optional issue-update subscriber
   // CTL-716: slot-gate seams — threaded into tailerOpts so readNewEvents and
   // sweepMissingTriage use the same ceiling as the scheduler (CTL-665).
   concurrency = {},
@@ -866,9 +905,33 @@ export function startMonitor({
   // undefined, handleStateChangedEvent falls back to its real default.
   // CTL-634: cache rides in tailerOpts too so the tailer's write-through path
   // populates the same instance the scheduler reads.
-  tailerOpts = { exec, debounceMs, orchDir, dispatch, abortWorker, cache, onComment, onUpdate, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway };
+  tailerOpts = {
+    exec,
+    debounceMs,
+    orchDir,
+    dispatch,
+    abortWorker,
+    cache,
+    onComment,
+    onUpdate,
+    concurrency,
+    readMaxParallelFn,
+    liveBackgroundCount,
+    botUserIds,
+    botWriteId,
+    gateway,
+  };
   reconcileAll({ exec });
-  sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway }); // CTL-711: triage pre-existing eligible tickets
+  sweepMissingTriage({
+    orchDir,
+    dispatch,
+    concurrency,
+    readMaxParallelFn,
+    liveBackgroundCount,
+    botUserIds,
+    botWriteId,
+    gateway,
+  }); // CTL-711: triage pre-existing eligible tickets
   if (resumeFromCursor) {
     seedTailerFromCursor();
     // CTL-731 Phase 00: drain the cursor→EOF downtime gap FOLD-ONLY. Pre-CTL-731
@@ -894,7 +957,16 @@ export function startMonitor({
   }
   reconcileTimer = setInterval(() => {
     reconcileAll({ exec });
-    sweepMissingTriage({ orchDir, dispatch, concurrency, readMaxParallelFn, liveBackgroundCount, botUserIds, botWriteId, gateway }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
+    sweepMissingTriage({
+      orchDir,
+      dispatch,
+      concurrency,
+      readMaxParallelFn,
+      liveBackgroundCount,
+      botUserIds,
+      botWriteId,
+      gateway,
+    }); // CTL-711 + CTL-716: catch tickets that appeared between webhooks
   }, reconcileIntervalMs);
 }
 
