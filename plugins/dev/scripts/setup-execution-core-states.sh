@@ -174,6 +174,154 @@ linear_graphql_post() {
     -d "$payload" 2>&1
 }
 
+# --- worker-status label group reconcile (CTL-764) --------------------------
+# Idempotently ensures a workspace-scoped exclusive 'worker-status' label group
+# with 4 members (queued/blocked/needs-input/needs-human) via issueLabelCreate.
+# Workspace-scoped (no teamId) so it applies across CTL + ADV teams without
+# duplication. Re-parents/supersedes CTL-755's team-level blocked/waiting labels
+# (no API delete — avoids stripping labels off historical tickets).
+
+# worker_status_group_name — the workspace-scoped exclusive label group name.
+worker_status_group_name() { echo "worker-status"; }
+
+# worker_status_members — jq array of {name,color} for the 4 group members.
+# Single source of truth: the daemon applies labels by these exact names.
+worker_status_members() {
+  jq -nc '[
+    {"name":"queued",      "color":"#0099cc"},
+    {"name":"blocked",     "color":"#eb5757"},
+    {"name":"needs-input", "color":"#f2c94c"},
+    {"name":"needs-human", "color":"#ff6b00"}
+  ]'
+}
+
+# build_issue_label_group_create_mutation <name> <color>
+# Workspace-scoped: omits teamId so Linear assigns the label to the workspace,
+# not a specific team (the daemon applies via linearis which lists workspace labels).
+build_issue_label_group_create_mutation() {
+  local name="$1" color="$2"
+  cat <<MUTATION
+mutation {
+  issueLabelCreate(input: {
+    name: "${name}",
+    color: "${color}",
+    isGroup: true
+  }) {
+    success
+    issueLabel { id name }
+  }
+}
+MUTATION
+}
+
+# build_issue_label_child_create_mutation <name> <color> <parentId>
+# Workspace-scoped child label: omits teamId, sets parentId for group membership.
+build_issue_label_child_create_mutation() {
+  local name="$1" color="$2" parent_id="$3"
+  cat <<MUTATION
+mutation {
+  issueLabelCreate(input: {
+    name: "${name}",
+    color: "${color}",
+    parentId: "${parent_id}"
+  }) {
+    success
+    issueLabel { id name }
+  }
+}
+MUTATION
+}
+
+# reconcile_worker_status_labels <token>
+# Ensures the workspace-scoped 'worker-status' group and its 4 children exist.
+# Idempotent: re-runs issue zero mutations when all present. Tolerant: any
+# Linear failure WARNs and returns 0 — never alters exit codes 0/2/3/4.
+reconcile_worker_status_labels() {
+  local token="$1"
+  local group_name
+  group_name=$(worker_status_group_name)
+
+  if [[ ${dry_run:-0} -eq 1 ]]; then
+    echo "DRY-RUN: would ensure worker-status label group (${group_name}) with 4 members (queued/blocked/needs-input/needs-human)"
+    return 0
+  fi
+
+  # Query workspace labels (team:null = workspace-scoped, not per-team).
+  local query payload resp
+  query='query { issueLabels(filter: {team: {null: true}}, first: 250) { nodes { id name isGroup parent { id } } } }'
+  payload=$(jq -nc --arg q "$query" '{query: $q}')
+  resp=$(linear_graphql_post "$token" "$payload")
+
+  if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+    local err
+    err=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"')
+    echo "WARNING: reconcile_worker_status_labels: could not query workspace labels: ${err}" >&2
+    return 0
+  fi
+
+  # Parse the response into a JSON array once; all subsequent lookups use jq over this.
+  local labels_json
+  labels_json=$(echo "$resp" | jq -c '.data.issueLabels.nodes // []')
+
+  # Find existing workspace group by name + isGroup:true.
+  local group_id
+  group_id=$(echo "$labels_json" | jq -r --arg n "$group_name" \
+    '.[] | select(.name == $n and .isGroup == true) | .id // empty' | head -1)
+
+  if [[ -z "$group_id" ]]; then
+    # Create the group (workspace-scoped, isGroup:true, no teamId).
+    local group_mutation group_payload group_resp
+    group_mutation=$(build_issue_label_group_create_mutation "$group_name" "#5e6ad2")
+    group_payload=$(jq -nc --arg q "$group_mutation" '{query: $q}')
+    group_resp=$(linear_graphql_post "$token" "$group_payload")
+    if echo "$group_resp" | jq -e '.errors' >/dev/null 2>&1; then
+      local group_err
+      group_err=$(echo "$group_resp" | jq -r '.errors[0].message // "unknown error"')
+      echo "WARNING: reconcile_worker_status_labels: could not create group '${group_name}': ${group_err}" >&2
+      return 0
+    fi
+    group_id=$(echo "$group_resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
+    echo "reconcile_worker_status_labels: created group '${group_name}' (id: ${group_id})"
+  else
+    echo "reconcile_worker_status_labels: group '${group_name}' already present (id: ${group_id})"
+    # Note any pre-existing CTL-755 team-level labels now superseded by the workspace
+    # group (daemon applies by name). No API delete — avoids stripping historical tickets.
+    local stale
+    stale=$(echo "$labels_json" | jq -r \
+      '[ .[] | select((.name == "blocked" or .name == "waiting") and .isGroup == false and (.parent == null)) | .name ] | join(", ")' \
+      2>/dev/null || true)
+    [[ -n "$stale" ]] && echo "INFO: CTL-755 team-level labels (${stale}) superseded by workspace group (no API delete)" >&2
+  fi
+
+  # Create only missing children (those whose parentId matches the group).
+  local members_json child_names
+  members_json=$(worker_status_members)
+  child_names=$(echo "$members_json" | jq -r '.[].name')
+
+  while IFS= read -r member_name; do
+    local already
+    already=$(echo "$labels_json" | jq -r --arg n "$member_name" --arg pid "$group_id" \
+      '.[] | select(.name == $n and .parent.id == $pid) | .name // empty' | head -1)
+    if [[ -n "$already" ]]; then continue; fi
+
+    local member_color child_mutation child_payload child_resp
+    member_color=$(echo "$members_json" | jq -r --arg n "$member_name" \
+      '.[] | select(.name == $n) | .color // "#5e6ad2"')
+    child_mutation=$(build_issue_label_child_create_mutation "$member_name" "$member_color" "$group_id")
+    child_payload=$(jq -nc --arg q "$child_mutation" '{query: $q}')
+    child_resp=$(linear_graphql_post "$token" "$child_payload")
+    if echo "$child_resp" | jq -e '.errors' >/dev/null 2>&1; then
+      local child_err
+      child_err=$(echo "$child_resp" | jq -r '.errors[0].message // "unknown error"')
+      echo "WARNING: reconcile_worker_status_labels: could not create '${member_name}': ${child_err}" >&2
+    else
+      echo "reconcile_worker_status_labels: created child '${member_name}' under '${group_name}'"
+    fi
+  done <<< "$child_names"
+
+  return 0
+}
+
 # --- Linear git-automation reconcile (CTL-759) ------------------------------
 # reconcile_git_automation_states <team_id> <token> <fetched_states_json>
 #
@@ -554,6 +702,11 @@ main() {
     fi
     rm -f "$upsert_err"
   fi
+
+  # --- reconcile worker-status label group (CTL-764) -------------------------
+  # Must run before git automations so the group exists before the daemon starts
+  # applying labels. Best-effort — never alters exit codes 0/2/3/4.
+  reconcile_worker_status_labels "$token" || true
 
   # --- reconcile Linear git automations (CTL-759) — the LAST Linear step ---
   # Best-effort hardening: pins start→PR / merge→Done and removes any review

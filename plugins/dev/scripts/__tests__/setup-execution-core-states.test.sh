@@ -547,6 +547,185 @@ run "post-upsert verification fails when team not in registry.json (exit 4)" \
 run "post-upsert verification surfaces the missing-team in stderr" \
   bash -c "grep -qiE 'not present|missing|not registered|verify' '${SCRATCH}/verify-out'"
 
+# ─── Phase 1 (CTL-764): worker-status label group ────────────────────────────
+# Unit tests for pure helpers (script already sourced above).
+
+run "worker_status_group_name is 'worker-status'" \
+  bash -c "source '$SCRIPT'; [ \"\$(worker_status_group_name)\" = 'worker-status' ]"
+
+run "worker_status_members: valid JSON array with exactly 4 entries" \
+  bash -c "source '$SCRIPT'; worker_status_members | jq -e 'length == 4'"
+
+run "worker_status_members: lists queued blocked needs-input needs-human (no waiting)" \
+  bash -c "source '$SCRIPT'; names=\$(worker_status_members | jq -r '.[].name' | sort | tr '\n' ' '); [ \"\$names\" = 'blocked needs-human needs-input queued ' ]"
+
+run "worker_status_members: does not contain 'waiting'" \
+  bash -c "source '$SCRIPT'; worker_status_members | jq -e '[.[].name] | index(\"waiting\") == null'"
+
+WS_GRP_MUT="\$(source '$SCRIPT' && build_issue_label_group_create_mutation 'worker-status' '#5e6ad2')"
+WS_GRP_MUT_VAL="$(source "$SCRIPT" && build_issue_label_group_create_mutation 'worker-status' '#5e6ad2')"
+
+run "build_issue_label_group_create_mutation: contains issueLabelCreate" \
+  bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'issueLabelCreate'"
+
+run "build_issue_label_group_create_mutation: contains isGroup" \
+  bash -c "echo '$WS_GRP_MUT_VAL' | grep -q 'isGroup'"
+
+run "build_issue_label_group_create_mutation: omits teamId (workspace scope)" \
+  bash -c "! echo '$WS_GRP_MUT_VAL' | grep -q 'teamId'"
+
+WS_CHD_MUT_VAL="$(source "$SCRIPT" && build_issue_label_child_create_mutation 'queued' '#0099cc' 'parent-uuid-123')"
+
+run "build_issue_label_child_create_mutation: contains issueLabelCreate" \
+  bash -c "echo '$WS_CHD_MUT_VAL' | grep -q 'issueLabelCreate'"
+
+run "build_issue_label_child_create_mutation: contains parentId" \
+  bash -c "echo '$WS_CHD_MUT_VAL' | grep -q 'parentId'"
+
+run "build_issue_label_child_create_mutation: omits teamId (workspace scope)" \
+  bash -c "! echo '$WS_CHD_MUT_VAL' | grep -q 'teamId'"
+
+# make_label_curl <bin_dir> <labels_state> <create_ok> <log_file>
+# labels_state: empty | group_only | partial | full | query_error
+make_label_curl() {
+  local bin_dir="$1" labels_state="$2" create_ok="${3:-true}" log="${4:-/dev/null}"
+  mkdir -p "$bin_dir"
+  local labels_nodes create_resp
+  case "$labels_state" in
+    empty)
+      labels_nodes='[]' ;;
+    group_only)
+      labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null}]' ;;
+    partial)
+      labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null},{"id":"lbl-q","name":"queued","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-b","name":"blocked","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-nh","name":"needs-human","isGroup":false,"parent":{"id":"grp-ws"}}]' ;;
+    full)
+      labels_nodes='[{"id":"grp-ws","name":"worker-status","isGroup":true,"parent":null},{"id":"lbl-q","name":"queued","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-b","name":"blocked","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-ni","name":"needs-input","isGroup":false,"parent":{"id":"grp-ws"}},{"id":"lbl-nh","name":"needs-human","isGroup":false,"parent":{"id":"grp-ws"}}]' ;;
+    query_error)
+      labels_nodes='' ;;  # handled specially below
+  esac
+  if [ "$create_ok" = "true" ]; then
+    create_resp='{"data":{"issueLabelCreate":{"success":true,"issueLabel":{"id":"new-lbl-id","name":"x"}}}}'
+  else
+    create_resp='{"errors":[{"message":"insufficient permissions"}]}'
+  fi
+  local query_resp
+  if [ "$labels_state" = "query_error" ]; then
+    query_resp='{"errors":[{"message":"api error"}]}'
+  else
+    query_resp="{\"data\":{\"issueLabels\":{\"nodes\":${labels_nodes}}}}"
+  fi
+  cat > "${bin_dir}/curl" <<SCRIPT
+#!/usr/bin/env bash
+body=""
+for a in "\$@"; do case "\$a" in {*) body="\$a";; esac; done
+if [ -z "\$body" ]; then body="\$(cat 2>/dev/null)"; fi
+echo "\$body" >> "${log}"
+case "\$body" in
+  *issueLabelCreate*) echo '${create_resp}' ;;
+  *) echo '${query_resp}' ;;
+esac
+exit 0
+SCRIPT
+  chmod +x "${bin_dir}/curl"
+}
+
+# Test 1: fresh workspace (empty) → 1 group create + 4 child creates = 5 issueLabelCreate
+WS_T1_BIN="${SCRATCH}/ws-t1/bin"
+WS_T1_LOG="${SCRATCH}/ws-t1/req.log"
+mkdir -p "${SCRATCH}/ws-t1"; : > "$WS_T1_LOG"
+make_label_curl "$WS_T1_BIN" "empty" "true" "$WS_T1_LOG"
+(
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  PATH="$WS_T1_BIN:$PATH"
+  dry_run=0
+  reconcile_worker_status_labels "fake-token"
+) > "${SCRATCH}/ws-t1-out" 2>&1
+
+run "fresh workspace: issues exactly 5 issueLabelCreate calls (1 group + 4 children)" \
+  bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T1_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '5' ]"
+
+run "fresh workspace: returns 0" \
+  bash -c "source '$SCRIPT'; PATH='$WS_T1_BIN:\$PATH' dry_run=0 reconcile_worker_status_labels 'fake-token'"
+
+# Test 2: idempotent (full group + all 4 children present) → 0 issueLabelCreate calls
+WS_T2_BIN="${SCRATCH}/ws-t2/bin"
+WS_T2_LOG="${SCRATCH}/ws-t2/req.log"
+mkdir -p "${SCRATCH}/ws-t2"; : > "$WS_T2_LOG"
+make_label_curl "$WS_T2_BIN" "full" "true" "$WS_T2_LOG"
+(
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  PATH="$WS_T2_BIN:$PATH"
+  dry_run=0
+  reconcile_worker_status_labels "fake-token"
+) > "${SCRATCH}/ws-t2-out" 2>&1
+
+run "idempotent: zero issueLabelCreate calls when all present" \
+  bash -c "! grep -q 'issueLabelCreate' '$WS_T2_LOG'"
+
+run "idempotent: returns 0" \
+  bash -c "source '$SCRIPT'; PATH='$WS_T2_BIN:\$PATH' dry_run=0 reconcile_worker_status_labels 'fake-token'"
+
+# Test 3: partial (group + 3 children; needs-input missing) → 1 issueLabelCreate
+WS_T3_BIN="${SCRATCH}/ws-t3/bin"
+WS_T3_LOG="${SCRATCH}/ws-t3/req.log"
+mkdir -p "${SCRATCH}/ws-t3"; : > "$WS_T3_LOG"
+make_label_curl "$WS_T3_BIN" "partial" "true" "$WS_T3_LOG"
+(
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  PATH="$WS_T3_BIN:$PATH"
+  dry_run=0
+  reconcile_worker_status_labels "fake-token"
+) > "${SCRATCH}/ws-t3-out" 2>&1
+
+run "partial: creates only the missing child (1 issueLabelCreate)" \
+  bash -c "count=\$(grep -c 'issueLabelCreate' '$WS_T3_LOG' 2>/dev/null || echo 0); [ \"\$count\" = '1' ]"
+
+run "partial: the one create is for needs-input" \
+  bash -c "grep 'issueLabelCreate' '$WS_T3_LOG' | grep -q 'needs-input'"
+
+# Test 4: Linear error on group query → WARNING printed, returns 0, main exit unchanged
+WS_T4_BIN="${SCRATCH}/ws-t4/bin"
+WS_T4_LOG="${SCRATCH}/ws-t4/req.log"
+mkdir -p "${SCRATCH}/ws-t4"; : > "$WS_T4_LOG"
+make_label_curl "$WS_T4_BIN" "query_error" "true" "$WS_T4_LOG"
+WS_T4_OUT="${SCRATCH}/ws-t4-out"
+(
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  PATH="$WS_T4_BIN:$PATH"
+  dry_run=0
+  reconcile_worker_status_labels "fake-token"
+) > "$WS_T4_OUT" 2>&1
+WS_T4_RC=$?
+
+run "query error: WARNING is printed" \
+  bash -c "grep -qi 'warning' '$WS_T4_OUT'"
+
+run "query error: returns 0 (never alters exit codes)" \
+  bash -c "[ '$WS_T4_RC' = '0' ]"
+
+# Test 5: --dry-run → no issueLabelCreate mutations, reports intent
+WS_T5_BIN="${SCRATCH}/ws-t5/bin"
+WS_T5_LOG="${SCRATCH}/ws-t5/req.log"
+mkdir -p "${SCRATCH}/ws-t5"; : > "$WS_T5_LOG"
+make_label_curl "$WS_T5_BIN" "empty" "true" "$WS_T5_LOG"
+(
+  # shellcheck source=/dev/null
+  source "$SCRIPT"
+  PATH="$WS_T5_BIN:$PATH"
+  dry_run=1
+  reconcile_worker_status_labels "fake-token"
+) > "${SCRATCH}/ws-t5-out" 2>&1
+
+run "--dry-run: no issueLabelCreate mutations issued" \
+  bash -c "! grep -q 'issueLabelCreate' '$WS_T5_LOG'"
+
+run "--dry-run: reports intent (mentions worker-status or dry-run)" \
+  bash -c "grep -qiE 'dry.run|DRY|worker.status' '${SCRATCH}/ws-t5-out'"
+
 echo ""
 echo "Results: ${PASSES} passed, ${FAILURES} failed"
 [ "$FAILURES" = "0" ]
