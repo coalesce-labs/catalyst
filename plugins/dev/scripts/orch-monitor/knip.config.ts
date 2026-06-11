@@ -26,6 +26,9 @@ const config: KnipConfig = {
         "tailwindcss",
         "tw-animate-css",
         "class-variance-authority",
+        // CTL-1003: loaded via `@plugin "@tailwindcss/typography"` in app.css —
+        // knip doesn't parse CSS @plugin imports, so it can't see the usage.
+        "@tailwindcss/typography",
       ],
     },
   },

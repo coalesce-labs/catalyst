@@ -18,12 +18,12 @@ import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useNavigate } from "@tanstack/react-router";
 import {
   resolveHeldBanner,
-  resolveShippedStatus,
+  resolvePipelineRail,
   linearDeepLink,
   phaseLabel,
+  PIPELINE_PHASES,
   orchChannelFor,
   activityPredicateForTicket,
-  type ShippedStatus,
 } from "@/board/ticket-page-model";
 import {
   buildTelemetryTiles,
@@ -52,10 +52,10 @@ import { ActivityEventRow } from "./activity-event-row";
 import { useActivityStream } from "@/hooks/use-activity";
 import { useRepoColors } from "@/hooks/use-repo-colors";
 import { TabsContent } from "./ui/tabs";
-import { AnimatedTabs, type AnimatedTab } from "./animated-tabs";
+import { PillTabs, type PillTab } from "./pill-tabs";
 import { TicketBadge } from "./ui/ticket-badge";
-import { TicketPipelineIndicator } from "./ticket-pipeline-indicator";
 import { TicketPhaseStepper } from "./ticket-phase-stepper";
+import { PriorityIcon, ScopeChip } from "@/board/Board";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
 
@@ -175,73 +175,152 @@ function statusColorFor(linearState: string): string {
   return SEMANTIC_COLOR[statusSemantic(linearState.toLowerCase())];
 }
 
-function priorityLabel(p: number): string {
-  return p > 0 ? `P${p}` : "—";
+// ── Type kinds eligible for the title-line type pill ─────────────────────────
+const TYPE_KINDS = ["bug", "feature", "refactor", "docs", "chore", "test"] as const;
+
+/** The first label whose name is a known type kind (off-board path uses this to
+ *  derive a type pill from `linear.labels` when there is no resident `ticket`). */
+function typeKindFromLabels(labels: { name: string }[] | null | undefined): string | null {
+  if (!labels) return null;
+  const hit = labels.find((l) => (TYPE_KINDS as readonly string[]).includes(l.name));
+  return hit?.name ?? null;
 }
 
-// ── Reading-column header: the SINGLE title <h1> + the status strip ──────────
-// CTL-996 §B2: one title (the Shell chrome no longer renders a bold title — it
-// shows only the live dot + mono id). No id prefix inside the h1 (the id lives in
-// the chrome + rail). 22px/600/1.3, letterSpacing -0.01em. `realTitle` (live
-// Linear) wins over the stale board title; fail-open falls back to it.
-function ReadingHeader({ ticket, realTitle }: { ticket: BoardTicket; realTitle?: string | null }) {
-  const link = linearDeepLink(ticket.id);
-  const title = realTitle ?? ticket.title;
+// ── PhaseChip (CTL-1003 §A4) ─────────────────────────────────────────────────
+// The compact "where it stands" affordance in the status row — replaces the old
+// pipeline strip + SETTLED box. An 8px phase-color dot + the phase label inside a
+// small ghost pill; clicking it opens the Lifecycle tab (where the full stepper +
+// gantt live). Placement math (phase N of 10) lifted from the deleted
+// ticket-pipeline-indicator before it was removed (D6).
+function PhaseChip({ ticket, onOpen }: { ticket: BoardTicket; onOpen: () => void }) {
+  const segments = resolvePipelineRail(ticket);
+  const idx = segments.findIndex((s) => s.placement === "current");
+  const phaseNum = idx >= 0 ? idx + 1 : segments.length;
+  const total = PIPELINE_PHASES.length; // 10
+  return (
+    <button
+      type="button"
+      data-phase-chip
+      onClick={onOpen}
+      title={`Phase ${phaseNum} of ${total} — open Lifecycle`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        height: 22,
+        padding: "0 9px",
+        borderRadius: 999,
+        border: `1px solid ${C.border}`,
+        background: "transparent",
+        fontSize: 12,
+        color: C.fgMuted,
+        cursor: "pointer",
+      }}
+    >
+      <span
+        style={{ width: 8, height: 8, borderRadius: "50%", background: phaseColor(ticket.phase), display: "inline-block" }}
+      />
+      {phaseLabel(ticket.phase)}
+    </button>
+  );
+}
+
+// ── Reading-column header: the SINGLE title <h1> + the status row ────────────
+// CTL-1003 §A4: a calm title row. The type pill sits at the END of the title line
+// (inside the <h1>); the status row carries the state dot+text, a compact phase
+// chip (opens Lifecycle), Linear signal-bars priority, a board-style points pill,
+// and the right-aligned ↗ Linear. The SETTLED/Shipped box, the pipeline strip,
+// and the floating mono key are GONE (D5/D6).
+//
+// Generalised to a VIEW-MODEL so off-board tickets (CTL-999) render the same row
+// from the live Linear fetch alone: `ticket` may be undefined; each field falls
+// back to its `linear.*` counterpart.
+function ReadingHeader({
+  id,
+  title,
+  stateName,
+  priority,
+  estimate,
+  estimateDisplay,
+  typeKind,
+  ticket,
+  onOpenLifecycle,
+}: {
+  id: string;
+  title: string;
+  /** linearState (resident) or linear.state.name (off-board); null → dim "—" dot. */
+  stateName: string | null;
+  priority: number | null;
+  estimate: number | null;
+  estimateDisplay: string | null;
+  /** type pill kind (bug/feature/…) or null (no pill). */
+  typeKind: string | null;
+  /** resident ticket — drives the PhaseChip (resident-only); undefined off-board. */
+  ticket: BoardTicket | undefined;
+  onOpenLifecycle: () => void;
+}) {
+  const link = linearDeepLink(id);
+  const stateColor = stateName != null ? statusColorFor(stateName) : C.fgDim;
+  const showPriority = priority != null && priority > 0;
   return (
     <div data-ticket-header style={{ marginBottom: 0 }}>
       <h1
         data-ticket-title
         style={{
-          margin: "0 0 16px",
+          margin: "0 0 14px",
           color: C.fg,
           letterSpacing: "-0.01em",
-          font: "600 22px/1.3 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
+          font: "600 21px/1.35 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
         }}
       >
         {title}
+        {/* §A4 D2: the type pill at the END of the title line, inline in the h1. */}
+        {typeKind && (
+          <span style={{ marginLeft: 10, verticalAlign: "3px" }}>
+            <TicketBadge kind={typeKind} />
+          </span>
+        )}
       </h1>
-      {/* Status strip: icon+colored-text (no pill bg) · phase · priority ·
-          estimate · type badge · ↗ Linear (right-aligned). Scope/T-shirt is GONE. */}
+      {/* Status row: state dot+text · phase chip · signal-bars priority · points
+          pill · ↗ Linear (right-aligned). */}
       <div
         data-ticket-status-strip
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 16,
+          gap: 14,
           flexWrap: "wrap",
           fontSize: 12,
         }}
       >
-        {/* Status: colored dot + linearState in the status color, no bg. */}
+        {/* Status: colored dot + state name in the status color, no bg. */}
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
               width: 8,
               height: 8,
               borderRadius: "50%",
-              background: statusColorFor(ticket.linearState),
+              background: stateColor,
               display: "inline-block",
             }}
           />
-          <span style={{ color: statusColorFor(ticket.linearState), fontWeight: 500 }}>
-            {ticket.linearState}
+          <span style={{ color: stateColor, fontWeight: 500 }}>
+            {stateName ?? "—"}
           </span>
         </span>
-        {/* Phase: dot in phaseColor + phaseLabel. */}
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: C.fgMuted }}>
-          <span
-            style={{ width: 8, height: 8, borderRadius: "50%", background: phaseColor(ticket.phase), display: "inline-block" }}
-          />
-          {phaseLabel(ticket.phase)}
-        </span>
-        {/* Priority (muted). */}
-        <span style={{ color: C.fgMuted }}>{priorityLabel(ticket.priority)}</span>
-        {/* Estimate — omitted entirely when null. */}
-        {ticket.estimate != null && (
-          <span style={{ color: C.fgMuted }}>{ticket.estimate} pts</span>
+        {/* Phase chip (resident-only): opens the Lifecycle tab. */}
+        {ticket && <PhaseChip ticket={ticket} onOpen={onOpenLifecycle} />}
+        {/* Priority — Linear signal bars + P{n} (omitted when no priority). */}
+        {showPriority && (
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+            <PriorityIcon p={priority} size={13} />
+            <span style={{ color: C.fgMuted }}>P{priority}</span>
+          </span>
         )}
-        {/* Type badge (the §B7 design system, used here). */}
-        <TicketBadge kind={ticket.type} />
+        {/* Estimate — the SAME board-card points pill; omitted when null. */}
+        {estimate != null && (
+          <ScopeChip scope={null} estimate={estimate} estimateDisplay={estimateDisplay ?? String(estimate)} />
+        )}
         <span style={{ flex: 1 }} />
         {/* ↗ Linear deep-link, right-aligned; absent id → plain text. */}
         {link ? (
@@ -255,7 +334,7 @@ function ReadingHeader({ ticket, realTitle }: { ticket: BoardTicket; realTitle?:
             ↗ Linear
           </a>
         ) : (
-          <span style={{ font: `12px ${C.mono}`, color: C.fgDim }}>{ticket.id}</span>
+          <span style={{ font: `12px ${C.mono}`, color: C.fgDim }}>{id}</span>
         )}
       </div>
     </div>
@@ -397,67 +476,6 @@ function activeNodeRowText(r: StreamEvent): string {
     default:
       return r.type;
   }
-}
-
-// ── SHIPPED hero (DETAIL2-v2 §2 — lead with the answer) ──────────────────────
-/** The hero tone → its skin color. cyan stays RESERVED for the in-flight ● (which
- *  IS live now); shipped/merged use green so cyan keeps meaning "running now". */
-function heroToneColor(tone: ShippedStatus["tone"]): string {
-  switch (tone) {
-    case "success":
-      return C.green;
-    case "info":
-      return C.cyan;
-    case "warning":
-      return C.yellow;
-    default:
-      return C.fgMuted;
-  }
-}
-
-/** The PM "where is it / is it shipped?" answer — one plain-language line, color =
- *  meaning only. First body element after the title (never one tab-click away). */
-function ShippedHero({ ticket }: { ticket: BoardTicket }) {
-  const status = resolveShippedStatus(ticket);
-  const tone = heroToneColor(status.tone);
-  const pr = status.prNumber;
-  return (
-    <section
-      data-ticket-shipped={status.state}
-      data-shipped={status.isShipped}
-      style={{
-        marginBottom: 16,
-        padding: "10px 12px",
-        borderRadius: 8,
-        background: C.s1,
-        border: `1px solid ${tone}55`,
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        flexWrap: "wrap",
-        font: `13px ${C.mono}`,
-      }}
-    >
-      <span data-shipped-glyph style={{ color: tone, fontWeight: 700, fontSize: 14 }}>
-        {status.glyph}
-      </span>
-      <span data-shipped-headline style={{ color: C.fg, fontWeight: 700, letterSpacing: 0.3 }}>
-        {status.headline}
-      </span>
-      <span style={{ color: C.fgDim }}>—</span>
-      <span data-shipped-detail style={{ color: C.fgMuted }}>
-        {status.detail}
-      </span>
-      <span style={{ flex: 1 }} />
-      {/* PR deep-link: render only when a PR number exists (never a dead ↗). No
-          resident repo→owner URL map, so this is the honest-degraded text form. */}
-      {pr != null && (
-        <span data-shipped-pr={pr} style={{ color: "#4ea1ff", font: `12px ${C.mono}` }}>
-          ↗ PR #{pr}
-        </span>
-      )}
-    </section>
-  );
 }
 
 // ── COST summary line (DETAIL2-v2 §4c — the Overview money rollup) ───────────
@@ -818,28 +836,29 @@ export function TicketDetailPage({
       data-ticket-page={ticket.id}
       style={{ maxWidth: 680, margin: "0 auto", paddingTop: 24 }}
     >
-      {/* The SINGLE title + status strip (the Shell chrome no longer renders a
-          bold title — only the live dot + mono id). */}
-      <ReadingHeader ticket={ticket} realTitle={realTitle} />
-
-      {/* Q3 "where it stands" indicator — URL-selected variant (default strip);
-          clicking it opens the Lifecycle tab. */}
-      <TicketPipelineIndicator
+      {/* The SINGLE title + status row (CTL-1003 §A4: type pill on the title
+          line, signal-bars priority, board points pill, compact phase chip). The
+          SETTLED box + pipeline strip + floating mono key are gone. */}
+      <ReadingHeader
+        id={ticket.id}
+        title={realTitle ?? ticket.title}
+        stateName={ticket.linearState}
+        priority={ticket.priority}
+        estimate={ticket.estimate}
+        estimateDisplay={ticket.estimateDisplay ?? null}
+        typeKind={(TYPE_KINDS as readonly string[]).includes(ticket.type) ? ticket.type : null}
         ticket={ticket}
-        variant={search.pipeline}
         onOpenLifecycle={openLifecycle}
       />
 
-      {/* The PM "is it shipped / held?" answer — between the indicator and the
-          tabs, constrained to the 680px column. */}
+      {/* The HELD (blocked/waiting) banner stays in the reading view. */}
       <div style={{ marginTop: 16 }}>
-        <ShippedHero ticket={ticket} />
         <HeldBanner ticket={ticket} />
       </div>
 
       {/* ── TABS — Spec (default) · Lifecycle · Cost · Activity ── */}
       <div style={{ marginTop: 20 }} data-ticket-tabs data-active-tab={value}>
-        <AnimatedTabs value={value} onValueChange={setTab} tabs={TAB_DEFS}>
+        <PillTabs value={value} onValueChange={setTab} tabs={TAB_DEFS}>
           {/* Spec: the description prose — the hero, nothing else. */}
           <TabsContent value="spec">
             <div data-ticket-spec style={{ paddingTop: 16 }}>
@@ -890,14 +909,14 @@ export function TicketDetailPage({
               <ActivitySection ticket={ticket} />
             </div>
           </TabsContent>
-        </AnimatedTabs>
+        </PillTabs>
       </div>
     </div>
   );
 }
 
 /** The visible tab set (Spec default · Lifecycle · Cost · Activity). */
-const TAB_DEFS: AnimatedTab[] = [
+const TAB_DEFS: PillTab[] = [
   { value: "spec", label: "Spec" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },

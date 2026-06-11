@@ -10,7 +10,6 @@ import {
   FROM_VALUES,
   LENS_VALUES,
   TAB_VALUES,
-  PIPELINE_VALUES,
   type DetailSearch,
 } from "../ui/src/board/route-search";
 
@@ -86,16 +85,10 @@ describe("validateDetailSearch — safe-defaults / never-throws (CTL-881)", () =
   });
 });
 
-describe("validateDetailSearch — tab + pipeline params (CTL-996)", () => {
+describe("validateDetailSearch — tab param (CTL-996 / CTL-1003)", () => {
   it("accepts every legal tab value", () => {
     for (const tab of TAB_VALUES) {
       expect(validateDetailSearch({ tab }).tab).toBe(tab);
-    }
-  });
-
-  it("accepts every legal pipeline value", () => {
-    for (const pipeline of PIPELINE_VALUES) {
-      expect(validateDetailSearch({ pipeline }).pipeline).toBe(pipeline);
     }
   });
 
@@ -105,21 +98,26 @@ describe("validateDetailSearch — tab + pipeline params (CTL-996)", () => {
     expect(validateDetailSearch({ tab: "spec" }).tab).toBeUndefined();
   });
 
-  it("drops an unknown tab / pipeline to undefined (→ spec / strip defaults)", () => {
+  it("drops an unknown tab to undefined (→ the spec default)", () => {
     expect(validateDetailSearch({ tab: "overview" }).tab).toBeUndefined();
     expect(validateDetailSearch({ tab: 7 }).tab).toBeUndefined();
-    expect(validateDetailSearch({ pipeline: "bars" }).pipeline).toBeUndefined();
-    expect(validateDetailSearch({ pipeline: {} }).pipeline).toBeUndefined();
   });
 
-  it("keeps tab/pipeline alongside the FND1 context fields", () => {
+  it("CTL-1003: the retired `pipeline` param is dropped entirely (not stored)", () => {
+    // The pipeline-indicator + its strip/chip/dots variants are removed; any
+    // `pipeline` value is ignored (never appears on the parsed contract).
+    const s = validateDetailSearch({ tab: "cost", pipeline: "dots" }) as Record<string, unknown>;
+    expect(s.pipeline).toBeUndefined();
+    expect(s).toEqual({ tab: "cost" });
+  });
+
+  it("keeps tab alongside the FND1 context fields", () => {
     const s = validateDetailSearch({
       from: "board",
       lens: "linear",
       col: "Implement",
       cursor: 2,
       tab: "cost",
-      pipeline: "dots",
     });
     expect(s).toEqual({
       from: "board",
@@ -127,7 +125,6 @@ describe("validateDetailSearch — tab + pipeline params (CTL-996)", () => {
       col: "Implement",
       cursor: 2,
       tab: "cost",
-      pipeline: "dots",
     });
   });
 });

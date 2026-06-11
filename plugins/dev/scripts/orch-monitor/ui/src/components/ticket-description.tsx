@@ -74,7 +74,12 @@ export function TicketDescription({
   return (
     <div
       data-ticket-description
-      className="ticket-desc md-content"
+      // CTL-1003 §A2: Linear-style prose. The `prose prose-invert` plugin gives
+      // the measure/rhythm; the unlayered `.ticket-desc` rules (app.css) map the
+      // prose-invert vars to app tokens and keep the code-chip/pre/hljs/ticket-ref
+      // overrides winning. (md-content is dropped — its h1/h2 underline + 78ch
+      // measure fought Linear.)
+      className="ticket-desc prose prose-invert"
       onClick={interceptTicketLinks}
       dangerouslySetInnerHTML={{ __html: renderTicketDescriptionHtml(markdown) }}
     />
