@@ -46,13 +46,18 @@ describe("emitReapIntent", () => {
     await expect(emitReapIntent("bogus.event", {})).rejects.toThrow(/unknown/);
   });
 
-  it("exposes REAP_INTENT_TYPES with 12 entries", async () => {
+  it("exposes REAP_INTENT_TYPES with 16 entries", async () => {
     const { REAP_INTENT_TYPES } = await freshModule();
-    expect(REAP_INTENT_TYPES.length).toBe(12);
+    expect(REAP_INTENT_TYPES.length).toBe(16);
     expect(REAP_INTENT_TYPES).toContain("phase.yield.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("pr.merged.cleanup-requested");
     expect(REAP_INTENT_TYPES).toContain("orphans.reap-requested");
     expect(REAP_INTENT_TYPES).toContain("worktree.cleanup-deferred"); // CTL-791
+    // CTL-1004 stall-janitor (shadow-first) event vocabulary.
+    expect(REAP_INTENT_TYPES).toContain("janitor.worktree.deferred");
+    expect(REAP_INTENT_TYPES).toContain("janitor.would.reap-request");
+    expect(REAP_INTENT_TYPES).toContain("janitor.would.kill-intent");
+    expect(REAP_INTENT_TYPES).toContain("janitor.would.defer");
   });
 
   it("accepts phase.terminal.reap-requested (CTL-695)", async () => {

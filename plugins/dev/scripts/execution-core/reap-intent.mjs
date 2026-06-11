@@ -33,6 +33,14 @@ export const REAP_INTENT_TYPES = Object.freeze([
   // request — the reaper does not act on it; it surfaces the deferred worktree in
   // the out-of-tree cleanup queue + orch-monitor for an operator / later tick.
   "worktree.cleanup-deferred",
+  // CTL-1004 stall-janitor (shadow-first). In "enforce" the janitor emits the
+  // real targeted orphans.reap-requested (already above) and the deferral flag;
+  // in "shadow" it emits these would.* twins instead of acting. A FLAG class — the
+  // reaper does not act on any of these; they surface in the operator event log.
+  "janitor.worktree.deferred",
+  "janitor.would.reap-request",
+  "janitor.would.kill-intent",
+  "janitor.would.defer",
 ]);
 
 // camelCase → snake_case key mapping. The on-disk schema uses snake_case so
