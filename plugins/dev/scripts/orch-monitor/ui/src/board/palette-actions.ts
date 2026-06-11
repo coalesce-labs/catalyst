@@ -62,6 +62,8 @@ export interface PaletteItem {
   label: string;
   /** Optional right-aligned meta (phase / state / id) shown muted + mono. */
   meta?: string;
+  /** Optional keyboard binding displayed right-aligned in the row (e.g. "g b", "c"). */
+  keybinding?: string;
   /** What firing this row does — absent on a disabled `soon` row. */
   action?: PaletteActionKind;
   /** Disabled `soon` row (no endpoint yet): rendered dim, not activatable. */

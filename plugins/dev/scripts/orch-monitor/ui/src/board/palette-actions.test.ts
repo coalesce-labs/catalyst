@@ -265,3 +265,15 @@ describe("lokiTailUrl", () => {
     expect(url.startsWith("https://grafana.example/explore?")).toBe(true);
   });
 });
+
+// ── CTL-1025: PaletteItem.keybinding field ───────────────────────────────────
+describe("PaletteItem — optional keybinding field (CTL-1025)", () => {
+  it("carries an optional keybinding onto rows that have one", () => {
+    const item: PaletteItem = { id: "nav.surface.board", label: "Go to Tickets", keybinding: "g b" };
+    expect(item.keybinding).toBe("g b");
+  });
+  it("keybinding is optional — rows without one compile and work", () => {
+    const item: PaletteItem = { id: "copy-session-id", label: "Copy session id" };
+    expect(item.keybinding).toBeUndefined();
+  });
+});

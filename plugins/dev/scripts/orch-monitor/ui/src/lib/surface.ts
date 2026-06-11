@@ -14,81 +14,17 @@
 // route-surface.ts.
 import { useRouterState } from "@tanstack/react-router";
 import { pathnameToSurface, SETTINGS_PATH } from "./route-surface";
+import type { Surface } from "./surface-constants";
 
-/** The top-level surfaces the shell can render in SidebarInset.
- *  OBS-5: the five OBSERVE analytics surfaces join the four OPERATE surfaces.
- *  Only Telemetry is wired live tonight (its content ships in OBS-6/7/8); the
- *  other four are declared here so each later surface only needs its own switch
- *  branch (the four-touch routing pattern, build-plan §2.2). */
-export type Surface =
-  | "home"
-  | "board"
-  | "workers"
-  | "queue"
-  | "telemetry"
-  | "utilization"
-  | "finops"
-  | "fleetops"
-  | "devops";
-
-/** Every surface in nav order — the single source the sidebar + palette iterate.
- *  OBS-5: OBSERVE surfaces follow the OPERATE block (after queue). */
-export const SURFACES: readonly Surface[] = [
-  "home",
-  "board",
-  "workers",
-  "queue",
-  "telemetry",
-  "utilization",
-  "finops",
-  "fleetops",
-  "devops",
-] as const;
-
-/** Human label per surface (sidebar item + command palette).
- *  CTL-930: home → "Inbox", board → "Tickets" (internal union keys unchanged).
- *  OBS-5: OBSERVE labels (Telemetry/Utilization/FinOps/Fleet Ops/DevOps). */
-export const SURFACE_LABEL: Record<Surface, string> = {
-  home: "Inbox",
-  board: "Tickets",
-  workers: "Workers",
-  queue: "Dispatch",
-  telemetry: "Telemetry",
-  utilization: "Utilization",
-  finops: "FinOps",
-  fleetops: "Fleet Ops",
-  devops: "DevOps",
-};
-
-/** The `g <key>` jump keys, kept next to the Surface union so they stay in sync.
- *  OBS-5: OBSERVE chords pick keys that don't collide with the existing h/b/w/q —
- *  t(elemetry) / u(tilization) / f(inops) / o(=fleetOps, f taken) / d(evops). */
-export const SURFACE_CHORD: Record<string, Surface> = {
-  h: "home",
-  b: "board",
-  w: "workers",
-  q: "queue",
-  t: "telemetry",
-  u: "utilization",
-  f: "finops",
-  o: "fleetops",
-  d: "devops",
-};
-
-/** Breadcrumb trail per surface — scope-less fallback (used by tests + non-scoped contexts).
- *  CTL-930: scope-aware breadcrumbs use lib/nav-model#breadcrumbFor instead.
- *  OBS-5: OBSERVE surfaces sit under an "Observe" crumb instead of "Overall". */
-export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
-  home: ["Overall", "Inbox"],
-  board: ["Overall", "Tickets"],
-  workers: ["Overall", "Workers"],
-  queue: ["Overall", "Dispatch"],
-  telemetry: ["Observe", "Telemetry"],
-  utilization: ["Observe", "Utilization"],
-  finops: ["Observe", "FinOps"],
-  fleetops: ["Observe", "Fleet Ops"],
-  devops: ["Observe", "DevOps"],
-};
+// Pure constants live in surface-constants.ts (React-/router-free) so tests that
+// import surface-actions.ts don't transitively pull in @tanstack/react-router.
+export {
+  type Surface,
+  SURFACES,
+  SURFACE_LABEL,
+  SURFACE_CHORD,
+  SURFACE_BREADCRUMB,
+} from "./surface-constants";
 
 /**
  * Breadcrumb for the Settings surface (CTL-911 / SURF3). Settings is a FOOTER
@@ -99,21 +35,10 @@ export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
  */
 export const SETTINGS_BREADCRUMB: string[] = ["Settings"];
 
-/**
- * True when focus is in a text-entry context — the shell's `[` / `g` chord
- * handlers must NOT steal those keystrokes. Pure so it can be unit-tested with a
- * minimal `{ tagName, isContentEditable }` shape rather than a real DOM node.
- */
-export function isTypingTarget(
-  target: { tagName?: string; isContentEditable?: boolean } | null,
-): boolean {
-  if (!target) return false;
-  return (
-    target.tagName === "INPUT" ||
-    target.tagName === "TEXTAREA" ||
-    target.isContentEditable === true
-  );
-}
+/** The single canonical input-focus guard (CTL-1025) — re-exported from
+ *  lib/typing-target so the existing callers (command-palette.ts, sidebar-collapse.ts)
+ *  keep compiling unchanged while gaining SELECT + contentEditable coverage. */
+export { isTypingTarget, type TypingTargetLike } from "./typing-target";
 
 /**
  * The route-derived shell location (CTL-989). The old surface-mutating + settings

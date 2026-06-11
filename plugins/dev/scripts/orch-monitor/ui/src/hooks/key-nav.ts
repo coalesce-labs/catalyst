@@ -11,6 +11,9 @@
 // and dispatches the returned action — so the keymap the operator feels can never
 // drift from what key-nav.test.ts locks in.
 
+import { isTypingTarget, type TypingTargetLike } from "../lib/typing-target";
+export { isTypingTarget };
+
 /** The minimal event shape the classifier reads — a structural subset of the DOM
  *  `KeyboardEvent` so the hook can pass the real event AND the test can pass a
  *  plain object (no jsdom needed). */
@@ -40,26 +43,6 @@ export type KeyAction =
   | { type: "chord-start" } // `g` pressed → arm the chord, await the second key
   | { type: "none" }; // ignored keystroke (incl. all input-focus keys)
 
-/**
- * Whether the focused element is a typing target the keymap must not steal keys
- * from. The pre-existing guard (`use-keyboard-nav.ts:24`) checks INPUT / TEXTAREA
- * / SELECT by tag name; kept byte-for-byte (uppercased tag) so `/`-into-a-textarea
- * and j/k-into-an-input still type a literal character. `tag` is the focused
- * element's `tagName` (the hook reads `document.activeElement?.tagName`).
- *
- * CTL-1049: ALSO treat a contentEditable host as a typing target — `Escape` now
- * means "navigate back" (the Escape=back Gherkin), so it must never fire while the
- * operator is editing a rich-text region. The optional `editable` flag is the
- * focused element's `isContentEditable` (the hook reads `(el as HTMLElement)
- * ?.isContentEditable`); absent/false in the no-DOM test path is a no-op.
- */
-export function isTypingTarget(
-  tag: string | undefined | null,
-  editable?: boolean,
-): boolean {
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || editable === true;
-}
-
 /** True when no modifier (other than the explicit ⌘/Ctrl handled for the palette)
  *  is held — single-letter shortcuts must not fire while a chord/shortcut modifier
  *  is down, so a browser hotkey like ⌥j is never swallowed as "next". */
@@ -71,7 +54,9 @@ function isBareKey(e: KeyEventLike): boolean {
  * Classify a keystroke into a nav action (detail design §3.4 keyboard table).
  *
  * @param e            the keystroke (real DOM event or a plain test object).
- * @param focusedTag   `document.activeElement?.tagName` — the input-focus guard.
+ * @param focused      the focused element shape — `{ tagName?, isContentEditable? }` or
+ *                     undefined/null (CTL-1025: unified guard now covers SELECT +
+ *                     contentEditable in addition to INPUT/TEXTAREA).
  * @param chordPending true when a `g` was pressed within the chord window and we
  *                     are awaiting the second key (the hook owns the timer).
  *
@@ -90,19 +75,16 @@ function isBareKey(e: KeyEventLike): boolean {
  */
 export function classifyKey(
   e: KeyEventLike,
-  focusedTag: string | undefined | null,
+  focused: TypingTargetLike | undefined | null,
   chordPending: boolean,
-  focusedEditable?: boolean,
 ): KeyAction {
   // 1. ⌘K / Ctrl-K — the palette toggle pierces the input guard (always reachable).
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
     return { type: "palette", preventDefault: true };
   }
 
-  // 2. Input-focus guard (pre-existing, kept): swallow nothing while typing.
-  //    CTL-1049: a focused contentEditable host counts as a typing target too, so
-  //    Escape-means-back can't fire mid-edit.
-  if (isTypingTarget(focusedTag, focusedEditable)) return { type: "none" };
+  // 2. Input-focus guard (unified, CTL-1025): swallow nothing while typing.
+  if (isTypingTarget(focused)) return { type: "none" };
 
   // 3. Resolve a pending `g`-chord with the second bare key.
   if (chordPending && isBareKey(e)) {

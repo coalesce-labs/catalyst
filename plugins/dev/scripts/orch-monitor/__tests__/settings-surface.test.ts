@@ -71,7 +71,12 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
     expect(surfaceSrc).toContain("SETTINGS_BREADCRUMB");
     expect(SURFACES.map(String)).not.toContain("settings");
     expect(Object.values(SURFACE_CHORD).map(String)).not.toContain("settings");
-    const unionSrc = surfaceSrc.match(/export type Surface =([^;]*);/)?.[1] ?? "";
+    // CTL-1025: the `Surface` union + SURFACE_CHORD were extracted into
+    // surface-constants.ts (React-/router-free so surface-actions.ts can import
+    // them without pulling in @tanstack/react-router); surface.ts re-exports them.
+    // Read the union from its new home.
+    const constantsSrc = read("lib/surface-constants.ts");
+    const unionSrc = constantsSrc.match(/export type Surface =([^;]*);/)?.[1] ?? "";
     expect(unionSrc).toContain('"home"');
     expect(unionSrc).not.toContain('"settings"');
     // The shell shows the Settings breadcrumb when settingsOpen.

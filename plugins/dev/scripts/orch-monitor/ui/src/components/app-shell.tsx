@@ -10,10 +10,11 @@ import {
 
 import {
   SETTINGS_BREADCRUMB,
-  SURFACE_CHORD,
   isTypingTarget,
   type Surface,
 } from "@/lib/surface";
+import { buildSurfaceActions, surfaceChordYieldsToDetail } from "@/lib/surface-actions";
+import { matchAction } from "@/lib/action-keymatch";
 // CTL-989 — the active surface is now DERIVED from the route (URL = source of
 // truth for location); the nav navigates via router.navigate instead of writing
 // React surface state.
@@ -168,7 +169,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // at rest and never shift layout.
   useEffect(() => installOverlayScroll(), []);
 
-  // `[` toggles the rail; `g <key>` chords jump surfaces. Both ignore typing.
+  // CTL-1025: surface jump + create actions, built once per navigate change.
+  // Declared BEFORE the keydown effect below — that effect reads `surfaceActions`
+  // in its dependency array, so the const must already be initialized. A later
+  // declaration is a temporal-dead-zone ReferenceError that crashes AppShell on
+  // first render (target is ES2022, so the bundler keeps the TDZ check).
+  const surfaceActions = useMemo(
+    () =>
+      buildSurfaceActions({
+        jumpToSurface: (s) => void navigate({ to: surfaceToPath(s), search: (prev) => prev }),
+        create: () => setPaletteOpen(true),
+      }),
+    [navigate],
+  );
+
+  // CTL-1025: `[` toggles the rail; `g <key>` chords + bare `c` go through the
+  // action registry (matchAction). Both ignore typing targets.
   useEffect(() => {
     let chordArmed = false;
     let chordTimer: ReturnType<typeof setTimeout> | undefined;
@@ -197,7 +213,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       // the `[` binding above).
       if (isTypingTarget(e.target as HTMLElement | null)) return;
 
-      // `g` arms a chord; the next key picks the surface (g h / g b / g w / g q).
+      // `g` arms a chord; the next key resolves through the surface action registry.
       if (e.key === "g" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         chordArmed = true;
         clearTimeout(chordTimer);
@@ -207,17 +223,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         return;
       }
       if (chordArmed) {
-        const target = SURFACE_CHORD[e.key];
-        if (target) {
-          e.preventDefault();
-          // CTL-989: jumping to a surface is now a client-side route navigation
-          // (URL = source of truth). Preserve the current `?scope` (the search
-          // updater keeps the existing scope).
-          void navigate({ to: surfaceToPath(target), search: (prev) => prev });
+        const pathname = window.location.pathname;
+        // CTL-1025: on a detail route, yield g t/w/a to the detail Shell classifier.
+        if (!surfaceChordYieldsToDetail(pathname, e.key)) {
+          const hit = matchAction(surfaceActions, { surface }, { key: e.key }, true);
+          if (hit) { e.preventDefault(); hit.handler(); }
         }
         chordArmed = false;
         clearTimeout(chordTimer);
+        return;
       }
+      // Bare single-key (when no chord is pending) — e.g. `c` → open create.
+      const hit = matchAction(surfaceActions, { surface }, { key: e.key }, false);
+      if (hit) { e.preventDefault(); hit.handler(); }
     };
 
     window.addEventListener("keydown", onKey);
@@ -225,7 +243,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       window.removeEventListener("keydown", onKey);
       clearTimeout(chordTimer);
     };
-  }, [navigate]);
+  }, [navigate, surfaceActions, surface]);
 
   // ⌘K / Ctrl+K and a bare `/` (outside a field) open the command palette — the
   // SINGLE search affordance for the shell (SHELL5 de-dups the prototype's two
@@ -470,6 +488,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
             </CommandGroup>
           )}
+          {/* CTL-1025: surface navigation commands with keybinding hints. */}
+          <CommandGroup heading="Go to">
+            {surfaceActions.map((entry) => (
+              <CommandItem
+                key={entry.id}
+                value={`${entry.title} ${(entry.keywords ?? []).join(" ")}`}
+                onSelect={() => runAction(entry.handler)}
+              >
+                {entry.title}
+                {entry.keybinding && (
+                  <kbd className="ml-auto rounded border border-border px-1 text-[11px] text-muted-foreground font-mono">
+                    {entry.keybinding}
+                  </kbd>
+                )}
+              </CommandItem>
+            ))}
+          </CommandGroup>
           {/* CTL-1024: settings + board-display commands (board-scoped entries hidden off-board). */}
           <CommandGroup heading="Settings">
             <CommandItem value="Settings" onSelect={openSettings}>
@@ -483,6 +518,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 onSelect={() => runAction(entry.handler)}
               >
                 {entry.title}
+                {entry.keybinding && (
+                  <kbd className="ml-auto rounded border border-border px-1 text-[11px] text-muted-foreground font-mono">
+                    {entry.keybinding}
+                  </kbd>
+                )}
               </CommandItem>
             ))}
           </CommandGroup>
