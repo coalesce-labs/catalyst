@@ -169,10 +169,12 @@ export function readEmissionAge(
   return Math.max(0, now - newestTs);
 }
 
-/** Per-service recency matcher for event-recency entries. */
+/** Per-service recency matcher for event-recency entries. The catalyst event log
+ *  records service.name as "catalyst.<component>" (e.g. "catalyst.broker",
+ *  "catalyst.execution-core") — match the prefixed form, not the bare id. */
 const RECENCY_MATCHERS: Partial<Record<ServiceId, RecencyMatcher>> = {
-  broker: { serviceName: "broker" },
-  "execution-core": { serviceName: "execution-core" },
+  broker: { serviceName: "catalyst.broker" },
+  "execution-core": { serviceName: "catalyst.execution-core" },
 };
 
 export interface ServiceHealthMonitor {
@@ -250,18 +252,34 @@ export function createServiceHealthMonitor(
 
     // event-recency.
     if (d.id === "otel-collector") {
-      // Collector recency fallback = Loki ingest freshness. If LOKI itself is
-      // down we cannot infer the collector → unknown (no cascade red).
+      // Collector recency fallback: we infer collector health from Loki's state
+      // rather than searching the local event log for "claude-code" events (the
+      // catalyst event log doesn't carry claude-code telemetry — those go directly
+      // to Loki via OTel). When Loki is up the collector is almost certainly
+      // forwarding; when Loki is down we cannot distinguish → both are unknown.
       const lokiStatus = statuses.get("loki");
-      if (lokiStatus && lokiStatus.severity === "down") {
+      const lokiSev = lokiStatus?.severity ?? "unknown";
+      if (lokiSev === "down") {
         return {
           kind: "event-recency",
           forcedSeverity: "unknown",
           detail: "inferred from telemetry ingest — Loki unreachable",
         };
       }
-      const age = readRecency({ serviceName: "claude-code" });
-      return { kind: "event-recency", ageMs: age };
+      if (lokiSev === "up") {
+        // Loki is healthy → collector is forwarding (inferred; no direct probe).
+        return {
+          kind: "event-recency",
+          forcedSeverity: "up",
+          detail: "inferred from Loki reachability",
+        };
+      }
+      // Loki degraded/unknown → collector state is indeterminate → unknown (grey).
+      return {
+        kind: "event-recency",
+        forcedSeverity: "unknown",
+        detail: "collector state indeterminate (Loki not fully up)",
+      };
     }
 
     const matcher = RECENCY_MATCHERS[d.id];
