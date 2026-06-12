@@ -640,6 +640,69 @@ new_fixture t20b
 assert_eq "1" "$(cat "$SCRATCH/t20b.marker")" "noise_stash_push reports the deleted noise stashed"
 assert_eq "" "$(cat "$SCRATCH/t20b.afterpush")" "deleted noise path clean after stash push"
 
+# ── 21. real uncommitted source still parks IMMEDIATELY (CTL-1068 preserved) ─
+echo "21. real source dirt → immediate rebase_refused_dirty_tree (no grace)"
+new_fixture t21
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  printf 'dirty-edit\n' >shared.txt            # real tracked source, uncommitted
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t21.rc"
+  echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t21.reason"
+)
+assert_eq "2" "$(cat "$SCRATCH/t21.rc")" "real source dirt → rc 2"
+assert_eq "rebase_refused_dirty_tree" "$(cat "$SCRATCH/t21.reason")" "real source → typed reason"
+
+# ── 22. settling-debris-only (untracked node_modules/) → grace re-probe → clean
+echo "22. untracked node_modules settling-debris → grace re-probe → rc 0"
+new_fixture t22
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  mkdir -p node_modules/pkg
+  printf 'junk\n' >node_modules/pkg/index.js   # untracked settling-debris
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t22.rc"
+  [[ -f upstream.txt ]] && echo yes >"$SCRATCH/t22.base" || echo no >"$SCRATCH/t22.base"
+)
+assert_eq "0" "$(cat "$SCRATCH/t22.rc")" "node_modules-only debris → rc 0 after grace re-probe"
+assert_eq "yes" "$(cat "$SCRATCH/t22.base")" "debris re-probe still advanced onto new base"
+
+# ── 23. mixed real source + debris → stalls (real source dominates) ──────────
+echo "23. real source + debris mixed → rc 2 (real source forces park)"
+new_fixture t23
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  printf 'dirty-edit\n' >shared.txt            # real source
+  mkdir -p node_modules/pkg
+  printf 'junk\n' >node_modules/pkg/index.js   # debris
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t23.rc"
+)
+assert_eq "2" "$(cat "$SCRATCH/t23.rc")" "mixed source+debris → rc 2"
+
+# ── 24. _is_settling_debris_path matches debris, rejects source ───────────────
+echo "24. _is_settling_debris_path classification"
+for d in node_modules/pkg/index.js build/output.log foo.log .claude/scheduled_tasks.lock; do
+  if _is_settling_debris_path "$d"; then pass "_is_settling_debris_path $d → true"
+  else fail "_is_settling_debris_path $d → true (expected debris)"; fi
+done
+for s in src/index.ts shared.txt plugins/dev/scripts/foo.sh; do
+  if _is_settling_debris_path "$s"; then fail "_is_settling_debris_path $s → false (expected source)"
+  else pass "_is_settling_debris_path $s → false"; fi
+done
+
 echo
 echo "results: $PASSES passed, $FAILURES failed"
 [ $FAILURES -eq 0 ]
