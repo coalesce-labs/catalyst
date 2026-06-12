@@ -176,10 +176,31 @@ When an existing open PR is found, promote it (if draft) and finish — **withou
 "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   echo "phase-pr: promoting existing PR #${EXISTING_PR_NUMBER} (draft=${EXISTING_PR_IS_DRAFT})" >&2
+  if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  fi
+  # CTL-1051: prove the remote branch (and the PR head) equal the worktree HEAD
+  # BEFORE announcing the promoted PR — remediation/rebase may have advanced
+  # local HEAD past the draft's pushed commit. Fail-closed: a stale ref is a
+  # phase FAILURE, not a silent complete.
+  if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
+    echo "phase-pr: push-verify failed for #${EXISTING_PR_NUMBER} (stale ref)" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "stale_ref_push_verify_failed"
+    exit 1
+  fi
+  PR_HEAD_OID="$(draft_pr_head_oid || true)"
+  if [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]]; then
+    echo "phase-pr: PR headRefOid ${PR_HEAD_OID} != worktree HEAD ${VERIFIED_SHA}" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "stale_ref_push_verify_failed"
+    exit 1
+  fi
   if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
-    if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
-      # shellcheck source=/dev/null
-      source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+    if type draft_pr_promote >/dev/null 2>&1; then
       draft_pr_promote || gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
     else
       gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
@@ -227,9 +248,27 @@ itself.
    and Linear `inReview` transition.
 
 3. After either path, capture the PR metadata via `gh` and write it into the phase signal file so
-   `phase-monitor-merge` can read it directly without re-querying GitHub:
+   `phase-monitor-merge` can read it directly without re-querying GitHub. For the create-pr path,
+   push-verify before recording metadata (CTL-1051):
 
    ```bash
+   # CTL-1051: ensure create-pr's push left origin == HEAD and the PR points at it.
+   [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+   if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
+     echo "phase-pr: post-create-pr push-verify failed (stale ref)" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "stale_ref_push_verify_failed"
+     exit 1
+   fi
+   PR_HEAD_OID="$(draft_pr_head_oid || true)"
+   if [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]]; then
+     echo "phase-pr: PR headRefOid ${PR_HEAD_OID} != HEAD ${VERIFIED_SHA}" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "stale_ref_push_verify_failed"
+     exit 1
+   fi
    PR_INFO=$(gh pr view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
    PR_NUMBER=$(echo "$PR_INFO" | jq -r '.number // empty')
    PR_URL=$(echo "$PR_INFO" | jq -r '.url // empty')

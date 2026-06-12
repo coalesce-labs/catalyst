@@ -148,13 +148,18 @@ fi
 ### 8. Push branch
 
 ```bash
-# Check if branch has upstream
-if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null; then
-    # No upstream, push with -u
-    git push -u origin HEAD
-else
-    # Has upstream, check if up-to-date
-    git push
+# Push current HEAD and verify origin == HEAD. On a non-fast-forward (branch
+# rebased/amended after a prior push), retry with --force-with-lease so the PR
+# never points at a stale commit (CTL-1051).
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if ! git push -u origin HEAD; then
+    echo "create-pr: fast-forward push failed; retrying with --force-with-lease" >&2
+    git push --force-with-lease -u origin HEAD
+fi
+git fetch --quiet origin "$BRANCH" || true
+if [[ "$(git rev-parse "origin/${BRANCH}")" != "$(git rev-parse HEAD)" ]]; then
+    echo "create-pr: post-push verify failed — origin/${BRANCH} != HEAD" >&2
+    exit 1
 fi
 ```
 

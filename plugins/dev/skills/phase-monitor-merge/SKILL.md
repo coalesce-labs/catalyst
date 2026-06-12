@@ -154,6 +154,20 @@ Once `mergeable_state == "clean"` (and the PR isn't already merged):
 ```bash
 # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
 "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
+# CTL-1051: never merge a stale ref. Compare the PR head to the worktree HEAD;
+# on mismatch, re-push with lease and re-verify before merging.
+if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  PR_HEAD_OID="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+  LOCAL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$PR_HEAD_OID" && -n "$LOCAL_HEAD" && "$PR_HEAD_OID" != "$LOCAL_HEAD" ]]; then
+    echo "phase-monitor-merge: PR head ${PR_HEAD_OID} != worktree HEAD ${LOCAL_HEAD}; re-pushing" >&2
+    if ! draft_pr_push_verify >/dev/null; then
+      echo "phase-monitor-merge: could not reconcile stale ref before merge" >&2
+      exit 1
+    fi
+  fi
+fi
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")

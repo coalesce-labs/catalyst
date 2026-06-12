@@ -141,6 +141,49 @@ draft_pr_promote() {
   return 0
 }
 
+# draft_pr_push_verify — push current HEAD to origin and PROVE the remote tip
+# equals local HEAD. Unlike draft_pr_push (fail-open), this is fail-CLOSED: it
+# returns 0 ONLY when origin/<branch> == local HEAD after the push, so callers
+# can fail the phase rather than announce/merge a stale ref (CTL-1051).
+#   - First attempt: plain push (fast-forward). CTL-693 hook suppression.
+#   - Non-fast-forward (branch rebased/amended after a prior push): retry with
+#     --force-with-lease (mirrors the BEHIND handler in phase-monitor-merge).
+#   - Verify: git fetch the branch, compare origin/<branch> to local HEAD.
+# Echoes the verified SHA on success; nothing on failure.
+draft_pr_push_verify() {
+  command -v git >/dev/null 2>&1 || { _draft_pr_warn "git unavailable"; return 1; }
+  local branch local_sha remote_sha
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [[ -z "$branch" || "$branch" == "HEAD" ]] && { _draft_pr_warn "detached HEAD; cannot push-verify"; return 1; }
+  local_sha="$(git rev-parse HEAD 2>/dev/null || true)"
+  [[ -z "$local_sha" ]] && { _draft_pr_warn "cannot resolve local HEAD"; return 1; }
+
+  if ! git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1; then
+    _draft_pr_warn "fast-forward push failed; retrying with --force-with-lease"
+    git -c core.hooksPath=/dev/null push --force-with-lease -u origin HEAD >/dev/null 2>&1 \
+      || { _draft_pr_warn "force-with-lease push failed"; return 1; }
+  fi
+
+  git fetch --quiet origin "$branch" 2>/dev/null || true
+  remote_sha="$(git rev-parse "origin/${branch}" 2>/dev/null || true)"
+  if [[ -n "$remote_sha" && "$remote_sha" == "$local_sha" ]]; then
+    printf '%s\n' "$local_sha"
+    return 0
+  fi
+  _draft_pr_warn "post-push verify mismatch: local=${local_sha} origin/${branch}=${remote_sha:-<none>}"
+  return 1
+}
+
+# draft_pr_head_oid — echo the open PR's headRefOid (the remote SHA the PR
+# points at) for the current branch. Empty + non-zero when unavailable.
+draft_pr_head_oid() {
+  command -v gh >/dev/null 2>&1 || return 1
+  local oid
+  oid="$(gh pr view --json headRefOid -q '.headRefOid' 2>/dev/null || true)"
+  [[ -n "$oid" ]] && { printf '%s\n' "$oid"; return 0; }
+  return 1
+}
+
 # draft_pr_enabled — read .catalyst/config.json knob. Returns "true" (default) or "false".
 # Fail-open to "true" when jq or the config file are absent.
 # NOTE: cannot use jq's `// true` default — jq's alternative operator treats `false` as
