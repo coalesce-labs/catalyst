@@ -80,6 +80,8 @@ source "${SCRIPT_DIR}/lib/resume.sh"
 source "${SCRIPT_DIR}/lib/phase-sequence.sh"
 # shellcheck source=lib/worktree-rebase.sh
 source "${SCRIPT_DIR}/lib/worktree-rebase.sh"
+# shellcheck source=lib/phase-artifact-gate.sh
+source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
 die() {
 	echo "phase-agent-dispatch: $*" >&2
@@ -111,27 +113,7 @@ phase_default_turn_cap() {
 	esac
 }
 
-# Prior-phase artifact lookup. Returns one of two shapes:
-#   "signal:<filename>"   → file inside ${ORCH_DIR}/workers/<TICKET>/
-#   "glob:<pattern>"      → glob pattern (used for thoughts/ artifacts where
-#                           the filename includes a date)
-# Empty output means this phase is the entry point — no prior artifact.
-prior_artifact_for_phase() {
-	case "$1" in
-	triage) echo "" ;;
-	research) echo "signal:triage.json" ;;
-	plan) echo "glob:thoughts/shared/research/*-${TICKET_LC}.md" ;;
-	implement) echo "glob:thoughts/shared/plans/*-${TICKET_LC}.md" ;;
-	verify) echo "signal:phase-implement.json" ;;
-	review) echo "signal:verify.json" ;;
-	pr) echo "signal:review.json" ;;
-	monitor-merge) echo "signal:phase-pr.json" ;;
-	monitor-deploy) echo "signal:phase-monitor-merge.json" ;;
-	remediate) echo "signal:verify.json" ;; # CTL-653: reads verify's findings[], NOT review.json
-	teardown) echo "signal:phase-monitor-deploy.json" ;;
-	*) echo "" ;;
-	esac
-}
+# prior_artifact_for_phase is now in lib/phase-artifact-gate.sh (CTL-1081).
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
@@ -215,9 +197,6 @@ fi
 if [[ ! $TICKET =~ ^[A-Za-z][A-Za-z0-9_]*-[0-9]+$ ]]; then
 	die "invalid --ticket: $TICKET (expected e.g. CTL-100)"
 fi
-# CTL-1075: portable bash-3 lowercase (replaces bash-4 ${TICKET,,}, which is a
-# "bad substitution" under macOS /bin/bash 3.2 and silently empties the gate spec).
-TICKET_LC="$(printf '%s' "$TICKET" | tr '[:upper:]' '[:lower:]')"
 if [[ $PHASE == *.* ]]; then
 	die "invalid --phase: $PHASE (dots are reserved for event name parsing)"
 fi
@@ -424,29 +403,12 @@ if [[ -n $ARTIFACT_SPEC ]]; then
 		[[ -f $ARTIFACT_FILE ]] || ARTIFACT_OK=0
 		;;
 	glob:*)
-		# CTL-494: two-step match. The lowercase-ticket-at-tail form
-		# (phase-plan prose convention) is tried first; on miss, fall back to
-		# a wider pattern that accepts the canonical create-plan form
-		# (uppercase ticket + descriptive suffix). Case-insensitive nocaseglob
-		# is the final fallback. The ticket is still required to appear in the
-		# filename, so cross-ticket lookalikes do not satisfy this gate.
-		PATTERN="${ARTIFACT_SPEC#glob:}"
-		shopt -s nullglob
-		# shellcheck disable=SC2206  # word-splitting is required for glob expansion
-		MATCHES=($PATTERN)
-		if [[ ${#MATCHES[@]} -eq 0 ]]; then
-			WIDE="${PATTERN/%-${TICKET_LC}.md/*${TICKET}*.md}"
-			# shellcheck disable=SC2206
-			MATCHES=($WIDE)
-			if [[ ${#MATCHES[@]} -eq 0 ]]; then
-				shopt -s nocaseglob
-				# shellcheck disable=SC2206
-				MATCHES=($WIDE)
-				shopt -u nocaseglob
-			fi
-		fi
-		shopt -u nullglob
-		[[ ${#MATCHES[@]} -gt 0 ]] || ARTIFACT_OK=0
+		# CTL-1081: delegate to the shared slug-tolerant matcher (lib/phase-artifact-gate.sh).
+		# The spec carries a directory ("glob:thoughts/shared/research") instead of a
+		# fragile glob pattern; match_thoughts_artifact handles tail form, slug form, and
+		# cross-ticket lookalike rejection in one boundary-safe, case-insensitive pass.
+		GATE_DIR="${ARTIFACT_SPEC#glob:}"
+		match_thoughts_artifact "$GATE_DIR" "$TICKET" >/dev/null || ARTIFACT_OK=0
 		;;
 	esac
 fi
