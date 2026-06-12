@@ -114,6 +114,25 @@ export function detailNavigateOptions(
   } as NavigateOptions;
 }
 
+/**
+ * CTL-1059: decide whether goRoot may use history.back().
+ *
+ * `useCanGoBack()` can spuriously report true on a COLD deep-link when browser
+ * session-restoration leaves a non-null history.state carrying a prior TanStack
+ * session's __TSR_key (so @tanstack/history skips its index-0 stamp). Returning
+ * via back() then pops to whatever browser entry preceded the tab — often `/` —
+ * which is the home bounce. Guard: only honor back() when we are genuinely PAST
+ * the first router-owned entry (__TSR_index >= 1).
+ */
+export function canReturnViaBack(args: {
+  canGoBack: boolean;
+  tsrIndex: number | null | undefined;
+}): boolean {
+  const { canGoBack, tsrIndex } = args;
+  if (!canGoBack) return false;
+  return typeof tsrIndex === "number" && tsrIndex >= 1;
+}
+
 // ── the click → navigate seam (the DOM-touching helpers) ──────────────────────
 
 /**

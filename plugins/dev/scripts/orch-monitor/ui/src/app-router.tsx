@@ -35,7 +35,13 @@ import { SkeletonDashboard } from "./components/ui/skeleton";
 import { validateDetailSearch } from "./board/route-search";
 import { validateRootSearch } from "./lib/root-search";
 import { surfaceToPath } from "./lib/route-surface";
-import { readLandingSurface } from "./lib/prefs";
+import { readLandingSurface, shouldApplyLandingRedirect } from "./lib/prefs";
+
+// CTL-1059: capture the URL the operator actually hard-loaded, evaluated once
+// at module import time (before the router processes any route). This reflects
+// the true cold-load path, not a later in-session `/` visit.
+const INITIAL_PATHNAME =
+  typeof window !== "undefined" ? window.location.pathname : "/";
 
 // ── surface components (the existing surfaces, code-split as before) ──────────
 // Home / Queue / the OBSERVE surfaces stay lazy (HomeSurface pulls its
@@ -136,9 +142,12 @@ const homeRoute = createRoute({
   // beforeLoad redirect lands them there. A real "/" navigation with a preference
   // of "home" (the default) is a no-op, so this never traps the operator on a
   // surface they explicitly navigated to via the URL.
+  // CTL-1059: guard against deep-link initial loads — the redirect only fires
+  // when the app was genuinely hard-loaded at `/`, not when a `/` visit happens
+  // during a deep-link session (e.g. via a stray history.back()).
   beforeLoad: () => {
     const pref = readLandingSurface();
-    if (pref !== "home") {
+    if (shouldApplyLandingRedirect({ initialPathname: INITIAL_PATHNAME, pref })) {
       throw redirect({ to: surfaceToPath(pref), search: (prev) => prev });
     }
   },

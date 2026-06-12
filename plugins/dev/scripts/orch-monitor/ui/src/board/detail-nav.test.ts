@@ -22,6 +22,7 @@ import {
   detailNavigateOptions,
   openDetail,
   isNewTabClick,
+  canReturnViaBack,
 } from "./detail-nav";
 import type { BoardPayload, BoardTicket, BoardWorker } from "./types";
 import { laneColumns, visibleColumnDefs } from "./board-display";
@@ -345,6 +346,25 @@ describe("pager order == board order (CTL-951 deliverable b — the shared compa
   });
 });
 
+describe("canReturnViaBack — cold deep-link guard (CTL-1059)", () => {
+  it("returns false when there is no back entry at all", () => {
+    expect(canReturnViaBack({ canGoBack: false, tsrIndex: 0 })).toBe(false);
+    expect(canReturnViaBack({ canGoBack: false, tsrIndex: 3 })).toBe(false);
+  });
+
+  it("returns false on the FIRST router-owned entry even if canGoBack is spuriously true", () => {
+    // Cold deep-link: session-restoration left a stale __TSR_key but this IS entry 0.
+    expect(canReturnViaBack({ canGoBack: true, tsrIndex: 0 })).toBe(false);
+    expect(canReturnViaBack({ canGoBack: true, tsrIndex: undefined })).toBe(false);
+    expect(canReturnViaBack({ canGoBack: true, tsrIndex: null })).toBe(false);
+  });
+
+  it("returns true only when canGoBack AND we are past the first entry", () => {
+    expect(canReturnViaBack({ canGoBack: true, tsrIndex: 1 })).toBe(true);
+    expect(canReturnViaBack({ canGoBack: true, tsrIndex: 5 })).toBe(true);
+  });
+});
+
 describe("Shell Esc-restore wiring (static source, CTL-989 — client-side back)", () => {
   const shellSrc = readFileSync(join(HERE, "Shell.tsx"), "utf8");
   it("Esc / breadcrumb-root returns to the board via a CLIENT-SIDE router navigation", () => {
@@ -352,6 +372,15 @@ describe("Shell Esc-restore wiring (static source, CTL-989 — client-side back)
     // tree, so goRoot prefers history.back() (replays scroll restoration) and
     // falls back to a forward navigate for a cold deep-link.
     expect(shellSrc).not.toContain("hardNavigate");
+    expect(shellSrc).toContain("router.history.back()");
+    expect(shellSrc).toContain("useCanGoBack");
+  });
+
+  it("goRoot guards history.back() behind the cold-deep-link helper (CTL-1059)", () => {
+    // history.back() must be gated so a stale __TSR_index can't bounce a cold load to /.
+    expect(shellSrc).toContain("canReturnViaBack");
+    expect(shellSrc).toContain("__TSR_index");
+    // The existing wiring stays intact.
     expect(shellSrc).toContain("router.history.back()");
     expect(shellSrc).toContain("useCanGoBack");
   });

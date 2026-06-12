@@ -77,6 +77,20 @@ function browser(): BrowserGlobals {
   return globalThis as unknown as BrowserGlobals;
 }
 
+/**
+ * CTL-1059: a landing-preference redirect is only valid for a genuine fresh `/`
+ * load. If the app was hard-loaded at a deep-link path, any `/` visit during that
+ * session (e.g. a stray navigate) must NOT bounce the operator to their landing
+ * surface — they explicitly asked for the deep link.
+ */
+export function shouldApplyLandingRedirect(args: {
+  initialPathname: string;
+  pref: Surface;
+}): boolean {
+  if (args.pref === "home") return false;
+  return args.initialPathname === "/";
+}
+
 /** Browser-bound read — what the shell seeds its initial surface from. */
 export function readLandingSurface(): Surface {
   return readStoredLandingSurface(browser().window?.localStorage ?? null);

@@ -42,6 +42,7 @@ import {
 } from "./nav-store";
 import type { DetailSearch } from "./route-search";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
+import { canReturnViaBack } from "./detail-nav";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HeaderActions } from "@/components/header-actions";
@@ -561,12 +562,16 @@ export function Shell({
   // navigate forward to the originating surface route (Workers vs the Tickets
   // board, derived from `?from`). Display-options ride their own persisted atoms.
   const goRoot = useCallback(() => {
-    if (canGoBack) {
+    // CTL-1059: __TSR_index is the router-owned position in the history stack.
+    // On a cold deep-link it is 0/undefined even when useCanGoBack() is spuriously
+    // true, so we must NOT back() out of the tab to the prior `/` entry.
+    const tsrIndex = (router.state.location.state as { __TSR_index?: number })
+      .__TSR_index;
+    if (canReturnViaBack({ canGoBack, tsrIndex })) {
       router.history.back();
       return;
     }
-    // Cold deep-link (no back entry): forward to the originating surface route.
-    // A worker page returns to /workers; a ticket page to the Tickets board.
+    // Cold deep-link (or first entry): forward to the originating surface route.
     void navigate({ to: kind === "worker" ? "/workers" : "/board" });
   }, [canGoBack, router, navigate, kind]);
 

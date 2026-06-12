@@ -19,6 +19,7 @@ import {
   LANDING_SURFACES,
   normalizeLandingSurface,
   readStoredLandingSurface,
+  shouldApplyLandingRedirect,
 } from "../ui/src/lib/prefs";
 import { SURFACES } from "../ui/src/lib/surface";
 
@@ -95,5 +96,19 @@ describe("landing-surface pref — survives a (simulated) reload (CTL-911)", () 
       getItem: (k) => store.get(k) ?? null,
     });
     expect(rehydrated).toBe("board");
+  });
+});
+
+describe("shouldApplyLandingRedirect — deep-link guard (CTL-1059)", () => {
+  it("redirects when hard-loaded at / with a non-home preference", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/", pref: "board" })).toBe(true);
+  });
+  it("never redirects when the preference is home (default)", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/", pref: "home" })).toBe(false);
+  });
+  it("does NOT redirect when the app was hard-loaded at a deep-link path", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/ticket/CTL-1", pref: "board" })).toBe(false);
+    expect(shouldApplyLandingRedirect({ initialPathname: "/worker/CTL-1:1", pref: "board" })).toBe(false);
+    expect(shouldApplyLandingRedirect({ initialPathname: "/dep-graph", pref: "fleetops" })).toBe(false);
   });
 });
