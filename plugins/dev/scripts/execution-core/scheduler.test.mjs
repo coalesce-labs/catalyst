@@ -85,6 +85,7 @@ import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
+import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 
 let orchDir;
 let catalystDir;
@@ -3925,6 +3926,114 @@ describe("schedulerTick — label write-back (CTL-558)", () => {
     };
     schedulerTick(orchDir, { readEligible: () => [], dispatch: fakeDispatch(), writeStatus });
     expect(removed).toContainEqual(expect.objectContaining({ t: "CTL-16", l: "needs-human" }));
+  });
+});
+
+// ── CTL-1079: retraction sweep reads from broker cache instead of live API ──
+// These tests use an exec spy + the real removeLabel (from linear-write.mjs)
+// to verify that gateway cache hits suppress the live `linearis issues read`
+// subprocess while the mutation (linearis issues update) still fires.
+
+describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () => {
+  const TICKET = "CTL-1079T";
+
+  function makeExecSpy(labelsJson = JSON.stringify({ labels: { nodes: [{ name: "needs-human" }, { name: "feature" }] } })) {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (cmd === "linearis" && args[0] === "issues" && args[1] === "read") {
+        return { code: 0, stdout: labelsJson, stderr: "" };
+      }
+      // overwrite / clear-labels write
+      if (cmd === "linearis" && args[0] === "issues" && args[1] === "update") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    exec.calls = calls;
+    return exec;
+  }
+
+  const isLiveRead = (c) => c.cmd === "linearis" && c.args[0] === "issues" && c.args[1] === "read";
+  const isOverwrite = (c) => c.cmd === "linearis" && c.args[0] === "issues" && c.args[1] === "update";
+
+  function makeWriteStatus(execSpy) {
+    return {
+      applyPhaseStatus() {},
+      applyTerminalDone() {},
+      applyLabel: () => ({ applied: true }),
+      removeLabel: (t, l, opts = {}) => realRemoveLabel(t, l, { exec: execSpy, ...opts }),
+    };
+  }
+
+  beforeEach(() => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    writeSignal(TICKET, "implement", "done");
+    mkdirSync(join(orchDir, "workers", TICKET), { recursive: true });
+  });
+
+  test("CTL-1079: cache hit → retraction does ZERO live label reads, mutation still fires", async () => {
+    writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
+    const exec = makeExecSpy();
+    const gateway = {
+      getDescriptor: () => ({ ticket: TICKET, removed: false, labels: ["needs-human", "feature"] }),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: makeWriteStatus(exec),
+      gateway,
+    });
+    // The cache hit avoids the live read entirely.
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(0);
+    // The mutation (overwrite without needs-human) still fires.
+    const writes = exec.calls.filter(isOverwrite);
+    expect(writes).toHaveLength(1);
+    // The overwrite carries the filtered remainder — feature kept, needs-human dropped.
+    expect(writes[0].args).toContain("feature");
+    expect(writes[0].args.join(" ")).not.toContain("needs-human");
+  });
+
+  test("CTL-1079: cache miss (gateway returns null) → falls back to ONE live read", async () => {
+    writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
+    const exec = makeExecSpy();
+    const gateway = { getDescriptor: () => null };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: makeWriteStatus(exec),
+      gateway,
+    });
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(1);
+  });
+
+  test("CTL-1079: cache hit, label already absent → idempotent no-op, no read AND no write", async () => {
+    writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
+    const exec = makeExecSpy();
+    // Cache shows label is already absent (just "feature", no "needs-human").
+    const gateway = {
+      getDescriptor: () => ({ ticket: TICKET, removed: false, labels: ["feature"] }),
+    };
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: makeWriteStatus(exec),
+      gateway,
+    });
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(0);
+    expect(exec.calls.filter(isOverwrite)).toHaveLength(0);
+  });
+
+  test("CTL-1079: no gateway injected → unchanged behavior (live read fires)", async () => {
+    writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
+    const exec = makeExecSpy();
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      writeStatus: makeWriteStatus(exec),
+      // gateway intentionally omitted
+    });
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(1);
   });
 });
 

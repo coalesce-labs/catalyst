@@ -91,3 +91,23 @@ export function createGatewayReader({ dbPath = defaultDbPath() } = {}) {
 
   return { getDescriptor, close: dropHandle };
 }
+
+// gatewayLabelsHit — cache-only label probe for the retraction sweep (CTL-1079).
+// Maps the broker projection (ticket_state.labels via getDescriptor) into the
+// { ok, labels } shape removeLabel's readLabels seam expects. Returns null on
+// ANY cache miss — no gateway, no getDescriptor, absent row, tombstoned row, or
+// a labels column that isn't an array — so the caller can fall back to a live
+// read. Pure: never shells out, never throws.
+export function gatewayLabelsHit(gateway, ticket) {
+  if (!gateway || typeof gateway.getDescriptor !== "function") return null;
+  let d;
+  try {
+    d = gateway.getDescriptor(ticket);
+  } catch {
+    return null;
+  }
+  if (d && !d.removed && Array.isArray(d.labels)) {
+    return { ok: true, labels: d.labels };
+  }
+  return null;
+}
