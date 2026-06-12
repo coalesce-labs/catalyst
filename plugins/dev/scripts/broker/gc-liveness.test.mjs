@@ -37,10 +37,10 @@ beforeEach(() => {
     status: "running",
     bg_job_id: "live-job",
   });
-  // Execution-core: all-terminal ticket (monitor-deploy done).
-  writeSignal(execCoreOrchDir, "CTL-701", "monitor-deploy", {
+  // Execution-core: all-terminal ticket (teardown done — TERMINAL_PHASE since the 10-phase pipeline).
+  writeSignal(execCoreOrchDir, "CTL-701", "teardown", {
     ticket: "CTL-701",
-    phase: "monitor-deploy",
+    phase: "teardown",
     status: "done",
   });
   // Execution-core: failed ticket — not in-flight.
