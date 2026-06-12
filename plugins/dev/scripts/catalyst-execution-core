@@ -346,6 +346,7 @@ Commands:
   worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
+  governance  show which governance modes the daemon is actually running (--json)
 
 Backcompat: start|stop|restart|probe|status work as top-level aliases for the daemon verbs.
 
@@ -391,7 +392,7 @@ if ! (return 0 2>/dev/null); then
 		cmd_register "$@"
 		;;
 	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
-	sessions | worktrees | branches | tidy)
+	sessions | worktrees | branches | tidy | governance)
 		module="$1"
 		shift
 		exec_runtime_module "$module" "$@"
