@@ -1036,7 +1036,13 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 			--human-question "resolve the conflict for ${TICKET}/${PHASE} by hand and re-run, or discard the local change?" \
 			2>/dev/null || echo '{}')"
 		tmp="${SIGNAL_FILE}.tmp.$$"
-		if jq --arg ts "$TS" --arg reason "$STALL_REASON" --argjson expl "${EXPL_JSON:-{}}" \
+		# CTL-1065: guard on a prior line — `${EXPL_JSON:-{}}` is a bash trap: the
+		# parser closes the expansion at the FIRST `}`, so a non-empty value like
+		# `{"a":1}` expands to `{"a":1}}` (trailing brace → invalid JSON → jq fails
+		# → the else branch leaves the park signal un-written). Verified in bash
+		# 3.2 and 5.x. Pass the variable directly instead.
+		[ -n "$EXPL_JSON" ] || EXPL_JSON='{}'
+		if jq --arg ts "$TS" --arg reason "$STALL_REASON" --argjson expl "$EXPL_JSON" \
 			'.status = "stalled"
        | .failureReason = $reason
        | .explanation = $expl

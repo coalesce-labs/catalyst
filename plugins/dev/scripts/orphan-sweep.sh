@@ -197,8 +197,14 @@ sweep_signals() {
       --why-gave-up "the bg job is gone but the signal was never finalized" \
       --human-question "re-dispatch ${sig_ticket}/${sig_phase}, or mark it abandoned?" \
       2>/dev/null || echo '{}')"
+    # CTL-1065: guard on a prior line — `${expl_json:-{}}` is a bash trap: the
+    # parser closes the expansion at the FIRST `}`, so a non-empty value like
+    # `{"a":1}` expands to `{"a":1}}` (trailing brace → invalid JSON → jq exit 2
+    # → the `&& mv` is skipped and the stale signal is never flipped). Verified
+    # in bash 3.2 and 5.x. Pass the variable directly instead.
+    [ -n "$expl_json" ] || expl_json='{}'
     local tmp="${f}.tmp.$$"
-    jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson expl "${expl_json:-{}}" \
+    jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson expl "$expl_json" \
        '.status = "failed" | .failureReason = "orphan-sweep-stale" | .explanation = $expl | .updatedAt = $ts' \
        "$f" > "$tmp" && mv "$tmp" "$f"
     log "flipped stale signal: $f"
