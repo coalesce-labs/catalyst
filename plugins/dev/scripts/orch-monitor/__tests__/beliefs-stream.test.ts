@@ -36,7 +36,8 @@ function openInMemory(): Database {
   db.run(`CREATE TABLE IF NOT EXISTS tick (
     tick_id   INTEGER PRIMARY KEY AUTOINCREMENT,
     now_ms    INTEGER NOT NULL,
-    host      TEXT    NOT NULL
+    host      TEXT    NOT NULL,
+    rules_sha TEXT
   )`);
   db.run(`CREATE TABLE IF NOT EXISTS belief (
     belief_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,5 +214,145 @@ describe("BeliefTail cursor logic (CTL-967)", () => {
     const fourth = await smallTail.poll();
     expect(fourth).toEqual([]);
     smallTail.close();
+  });
+});
+
+describe("BeliefTail rules_sha defensive read (CTL-1063)", () => {
+  // A read-only reader may open a beliefs.db whose tick table predates the
+  // rules_sha migration (legacy file, daemon mid-deploy, or the first poll
+  // racing the first new-writer tick). poll() must keep streaming firings,
+  // emitting rules_sha:null, rather than throwing 'no such column: t.rules_sha'
+  // and silently swallowing it into an empty result.
+  function openLegacyInMemory(): Database {
+    const db = new Database(":memory:");
+    db.run("PRAGMA journal_mode = WAL");
+    // Legacy tick DDL — NO rules_sha column (pre-CTL-1063 writer schema).
+    db.run(`CREATE TABLE IF NOT EXISTS tick (
+      tick_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      now_ms    INTEGER NOT NULL,
+      host      TEXT    NOT NULL
+    )`);
+    db.run(`CREATE TABLE IF NOT EXISTS belief (
+      belief_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      tick_id         INTEGER NOT NULL,
+      stratum         INTEGER NOT NULL,
+      name            TEXT NOT NULL,
+      subject         TEXT NOT NULL,
+      value           TEXT,
+      rule_id         TEXT NOT NULL,
+      source_fact_ids TEXT NOT NULL,
+      UNIQUE (tick_id, name, subject)
+    )`);
+    return db;
+  }
+
+  it("keeps streaming rows (rules_sha:null) against an unmigrated tick table", async () => {
+    const db = openLegacyInMemory();
+    const tail = makeInMemoryTail(db);
+    try {
+      tail.lastBeliefId = 0;
+      const t1 = insertTick(db, 7000, "host-legacy");
+      insertBelief(db, t1, "worker_dead", "CTL-700/verify");
+
+      const rows = await tail.poll();
+      // The whole point: a missing column must NOT collapse to [].
+      expect(rows.length).toBe(1);
+      expect(rows[0].name).toBe("worker_dead");
+      expect(rows[0].ts_ms).toBe(7000);
+      expect(rows[0].host).toBe("host-legacy");
+      expect(rows[0].rules_sha).toBeNull();
+    } finally {
+      tail.close();
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  });
+
+  it("surfaces rules_sha when the migrated column is present", async () => {
+    const db = openInMemory(); // migrated schema (includes rules_sha)
+    const tail = makeInMemoryTail(db);
+    try {
+      tail.lastBeliefId = 0;
+      db.run("INSERT INTO tick (now_ms, host, rules_sha) VALUES (?, ?, ?)", [
+        8000,
+        "host-new",
+        "deadbeef",
+      ]);
+      const t1 = (db.query("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
+      insertBelief(db, t1, "worker_dead", "CTL-800/verify");
+
+      const rows = await tail.poll();
+      expect(rows.length).toBe(1);
+      expect(rows[0].rules_sha).toBe("deadbeef");
+    } finally {
+      tail.close();
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  });
+});
+
+describe("BeliefTail poll() error suppression (CTL-1063)", () => {
+  // verify coverage finding (belief-reader.mjs:96): the catch(err) path in
+  // poll() — _warnPollSuppressed (warn-once) + still-returns-[] — was entirely
+  // untested. This is the exact silent-failure seam the code makes observable:
+  // a swallowed query error must NOT look like 'no new rows'. Inject a db whose
+  // query() throws on the belief SELECT but succeeds on the PRAGMA column probe.
+  type ThrowingTail = BeliefTailType & {
+    _dbLoaded: boolean;
+    _db: unknown;
+    _warned: boolean;
+  };
+
+  function makeSelectThrowingDb() {
+    return {
+      query(sql: string) {
+        if (sql.includes("PRAGMA")) {
+          // column probe succeeds → poll() proceeds to the failing SELECT
+          return { all: () => [{ name: "rules_sha" }] };
+        }
+        // the belief SELECT explodes
+        return {
+          all: () => {
+            throw new Error("simulated belief SELECT failure");
+          },
+        };
+      },
+      close() {
+        /* no-op */
+      },
+    };
+  }
+
+  it("returns [] and warns exactly once across two failing polls; _warned latches true", async () => {
+    const tail = new BeliefTail({ dbPath: ":memory:" }) as unknown as ThrowingTail;
+    tail._dbLoaded = true;
+    tail._db = makeSelectThrowingDb();
+    (tail as unknown as BeliefTailType).lastBeliefId = 0;
+
+    const warnCalls: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    try {
+      const first = await (tail as unknown as BeliefTailType).poll();
+      expect(first).toEqual([]); // swallowed, not thrown
+      const second = await (tail as unknown as BeliefTailType).poll();
+      expect(second).toEqual([]); // still suppressed
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(warnCalls.length).toBe(1); // warn-once guard held across both polls
+    expect(tail._warned).toBe(true);
+    // the one warning identifies the suppression for an operator
+    expect(String(warnCalls[0]?.[0])).toContain("[belief-reader]");
   });
 });

@@ -137,9 +137,12 @@ describe("isCurrentGeneration — fencing check", () => {
 // ─── CLI surface (the bash dispatch/emit/skill callers shell into this) ──────
 
 function runCli(args, env = {}) {
+  // Strip CATALYST_GENERATION from base env so tests that simulate a legacy
+  // worker (no env var) aren't polluted by the parent test runner's value.
+  const { CATALYST_GENERATION: _dropped, ...baseEnv } = process.env;
   return spawnSync(process.execPath, [CLAIM_BIN, ...args], {
     encoding: "utf8",
-    env: { ...process.env, ...env },
+    env: { ...baseEnv, ...env },
   });
 }
 

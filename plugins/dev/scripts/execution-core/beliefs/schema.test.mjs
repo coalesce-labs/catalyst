@@ -69,7 +69,7 @@ describe("openBeliefsDb — spec §1 schema", () => {
 
   test("spec §1 columns are present verbatim per table", () => {
     const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
-    expect(columns(db, "tick")).toEqual(["tick_id", "now_ms", "host"]);
+    expect(columns(db, "tick")).toEqual(["tick_id", "now_ms", "host", "rules_sha"]);
     expect(columns(db, "obs_agent")).toEqual([
       "fact_id", "tick_id", "session_id", "short_id", "kind", "status",
       "state", "cwd", "name", "pid", "started_at_ms",
@@ -217,6 +217,40 @@ describe("openBeliefsDb — spec §1 schema", () => {
     const tick = db2.query("SELECT COUNT(*) AS n FROM tick").get();
     expect(tick.n).toBe(1); // existing data survives re-migration
     db2.close();
+  });
+});
+
+describe("openBeliefsDb — CTL-1063 Phase 4: rules_sha column + idx_belief_rule_id", () => {
+  test("tick.rules_sha column exists and is nullable", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    expect(columns(db, "tick")).toContain("rules_sha");
+    const info = colInfo(db, "tick", "rules_sha");
+    expect(info.notnull).toBe(0); // nullable — NULL is valid before RULES_SHA is seeded
+    db.close();
+  });
+
+  test("idx_belief_rule_id index exists on belief table", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+    const indexes = db.query("PRAGMA index_list(belief)").all().map((r) => r.name);
+    expect(indexes).toContain("idx_belief_rule_id");
+    db.close();
+  });
+
+  test("re-opening an existing db that already has rules_sha does NOT throw (idempotent ALTER)", () => {
+    const path = join(scratch(), "beliefs.db");
+    const db1 = openBeliefsDb({ path });
+    db1.run("INSERT INTO tick (now_ms, host, rules_sha) VALUES (1, 'h', 'abc123')");
+    db1.close();
+    // Second open: ALTER TABLE tick ADD COLUMN rules_sha is guarded by the PRAGMA check
+    expect(() => {
+      const db2 = openBeliefsDb({ path });
+      db2.close();
+    }).not.toThrow();
+    // Data survives the re-open
+    const db3 = openBeliefsDb({ path });
+    const row = db3.query("SELECT rules_sha FROM tick").get();
+    expect(row.rules_sha).toBe("abc123");
+    db3.close();
   });
 });
 

@@ -147,6 +147,11 @@ describe("runAdvanceShadow — disagreement is logged (and only logged)", () => 
     expect(events[0].payload.ticket).toBe("CTL-9");
     expect(events[0].payload.signals).toEqual({ triage: "done" });
     expect(events[0].payload.differingInput).toEqual({ verdict: null, remediateCycleCount: 0 });
+    // CTL-1063: the disagree payload carries rules_sha — it is the field that
+    // correlates THIS disagreement to the rules version that produced it (the
+    // stated purpose). A regression dropping it from the per-ticket payload
+    // must be caught here, not only by the tick-summary assertion below.
+    expect("rules_sha" in events[0].payload).toBe(true);
   });
 
   test("oracle says remediate but the comparator's procedural seam is fed a passing verdict → disagree", () => {
@@ -221,7 +226,10 @@ describe("runAdvanceShadow — robustness + no-act contract", () => {
     });
     const summary = events.find((e) => e["event.name"] === "beliefs.advance_shadow.tick");
     expect(summary).toBeTruthy();
-    expect(summary.payload).toEqual({ agree: 1, disagree: 0 });
+    // CTL-1063 Phase 4: rules_sha is included in tick-summary payload (null for test-inserted bare ticks)
+    expect(summary.payload.agree).toBe(1);
+    expect(summary.payload.disagree).toBe(0);
+    expect("rules_sha" in summary.payload).toBe(true);
   });
 });
 
