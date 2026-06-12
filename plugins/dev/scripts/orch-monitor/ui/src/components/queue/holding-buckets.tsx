@@ -23,13 +23,15 @@ import { QueueRowShell } from "./queue-row";
 
 const DOT_COLOR: Record<HoldingBucket["kind"], string> = {
   "needs-you": C.yellow,
+  stalled: C.yellow,
   blocked: C.red,
   waiting: C.fgDim,
 };
 const BUCKET_LABEL: Record<HoldingBucket["kind"], string> = {
   "needs-you": "Needs you",
+  stalled: "Stalled — gave up",
   blocked: "Blocked by dependencies",
-  waiting: "Waiting",
+  waiting: "Held — awaiting capacity",
 };
 
 function ColorDot({ color }: { color: string }) {
@@ -84,6 +86,12 @@ function BucketRow({
 
   const t: BoardTicket = item.ticket;
   const blockers = (t.blockers ?? []).filter(Boolean);
+  const stalledLine =
+    t.status === "stalled" ? (
+      <div style={{ fontSize: 11, color: C.yellowSoft, fontFamily: C.mono, marginTop: 2 }}>
+        gave up — {t.failureReason || "unknown reason"}
+      </div>
+    ) : undefined;
   return wrap(
     <QueueRowShell
       repo={t.repo}
@@ -93,11 +101,12 @@ function BucketRow({
       withTopHairline={withTopHairline}
       onClick={onOpenTicket ? () => onOpenTicket(t.id) : undefined}
       subline={
-        blockers.length > 0 ? (
+        stalledLine ??
+        (blockers.length > 0 ? (
           <div style={{ fontSize: 11, color: C.redSoft, fontFamily: C.mono, marginTop: 2 }}>
             blocked by {blockers.join(", ")}
           </div>
-        ) : undefined
+        ) : undefined)
       }
       meta={
         <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />
@@ -163,6 +172,7 @@ export function HoldingBuckets({
       ) : (
         <>
           <Bucket bucket={buckets.needsYou} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
+          <Bucket bucket={buckets.stalled} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.blocked} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
           <Bucket bucket={buckets.waiting} onOpenTicket={onOpenTicket} titleByTicket={titleByTicket} />
         </>

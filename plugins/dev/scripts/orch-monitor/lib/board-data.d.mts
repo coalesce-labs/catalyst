@@ -154,6 +154,9 @@ export interface BoardTicket {
    *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
    *  isFenceCurrent without a live attachment fetch. null when no fence. */
   generation: number | null;
+  /** CTL-1066: reason a stalled/failed phase gave up, from the surfaced phase
+   *  signal's stalledReason/failureReason. null unless status is stalled/failed. */
+  failureReason: string | null;
 }
 
 export interface BoardQueueItem {
@@ -175,6 +178,9 @@ export interface BoardQueueItem {
   /** CTL-922 (BFF10): the node owning this queued ticket, from the durable fence
    *  projection owner_host (BFF11); null when no fence attachment observed. */
   host: BoardHostRef | null;
+  /** CTL-1066: active dispatch retry cool-down for this queued ticket; null when
+   *  not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
+  dispatchCooldown: { expiresAt: number; consecutiveFailures: number } | null;
 }
 
 export interface BoardConfig {

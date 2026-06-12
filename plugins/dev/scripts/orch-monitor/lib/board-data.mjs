@@ -47,6 +47,7 @@ const HOME = homedir();
 const EC = join(HOME, "catalyst", "execution-core");
 const WORKERS_DIR = join(EC, "workers");
 const ELIGIBLE_DIR = join(EC, "eligible");
+const COOLDOWNS_DIR = join(EC, ".dispatch-cooldowns"); // CTL-1066
 const DB = join(HOME, "catalyst", "catalyst.db");
 // CTL-928: the durable per-`claude --bg`-job state directory. A worker's
 // liveness is proven by its job's state.json HERE, NOT by a phase signal that
@@ -496,14 +497,14 @@ export function deriveCurrentPhase(phaseSigs) {
     const phase = PHASE_ORDER[i];
     const status = sig.status || "unknown";
     if (!TERMINAL.has(status)) {
-      return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+      return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
     }
-    lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+    lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
     lastTerminalIndex = i;
   }
   // No phase has written a signal file yet → pre-pipeline. Surface the first
   // column (Research), never Done (CTL-745).
-  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null };
+  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null, failureReason: null };
   // A failed/stalled phase always surfaces at its own column, wherever it sits.
   if (lastTerminal.status === "failed" || lastTerminal.status === "stalled") return lastTerminal;
   // CTL-745: the pipeline is genuinely "done" ONLY when its FINAL phase
@@ -544,6 +545,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remediateSig.updatedAt ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
     };
   }
   // Case 2: remediate is terminal but more recent than what PHASE_ORDER surfaced.
@@ -557,6 +559,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remUpdated || null,
+      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
     };
   }
   return cur;
@@ -965,11 +968,32 @@ async function readWorkerPhaseSignals(ticket, phase) {
   return sigs;
 }
 
+// CTL-1066: active dispatch cool-downs, keyed by ticket. Markers are
+// `${ticket}-${phase}.json` ({expiresAt, consecutiveFailures}); a queue item is a
+// new-work ticket so we match by ticket id across phases and keep the latest expiry.
+async function loadDispatchCooldowns(now) {
+  const out = new Map();
+  if (!(await exists(COOLDOWNS_DIR))) return out;
+  let files;
+  try { files = await readdir(COOLDOWNS_DIR); } catch { return out; }
+  const markers = await Promise.all(
+    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(COOLDOWNS_DIR, f))),
+  );
+  for (const m of markers) {
+    if (!m?.ticket || typeof m.expiresAt !== "number" || m.expiresAt <= now) continue;
+    const prev = out.get(m.ticket);
+    if (!prev || m.expiresAt > prev.expiresAt) {
+      out.set(m.ticket, { expiresAt: m.expiresAt, consecutiveFailures: m.consecutiveFailures ?? 1 });
+    }
+  }
+  return out;
+}
+
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid] = await Promise.all([
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(),
+    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -1232,6 +1256,7 @@ export async function assembleBoard() {
       // no cluster branch, no live attachment fetch.
       host: deriveHost(phaseSigs, linfo[id] ?? {}),
       generation: deriveGeneration(phaseSigs, linfo[id] ?? {}),
+      failureReason: cur.failureReason ?? null,
     };
   }));
 
@@ -1285,6 +1310,8 @@ export async function assembleBoard() {
         // a queued ticket has no phase signal, so [] forces the fence fallback.
         // null when no fence attachment has been observed — never fabricated.
         host: deriveHost([], linfo[e.id] ?? {}),
+        // CTL-1066: active dispatch retry cool-down; null when not cooling down.
+        dispatchCooldown: cooldowns.get(e.id) ?? null,
       };
     }));
 
