@@ -202,19 +202,19 @@ describe("buildCanonicalEvent", () => {
       resource: { "service.name": "catalyst.github" },
       attributes: {
         "event.name": "github.pr.merged",
-        "event.entity": "pr",
-        "event.action": "merged",
-        "event.label": "PR #342",
-        "event.channel": "webhook",
+        "catalyst.event.entity": "pr",
+        "catalyst.event.action": "merged",
+        "catalyst.event.label": "PR #342",
+        "catalyst.event.channel": "webhook",
         "vcs.repository.name": "org/repo",
         "vcs.pr.number": 342,
       },
       body: { payload: { merged: true } },
     });
-    expect(ev.attributes["event.entity"]).toBe("pr");
-    expect(ev.attributes["event.action"]).toBe("merged");
-    expect(ev.attributes["event.label"]).toBe("PR #342");
-    expect(ev.attributes["event.channel"]).toBe("webhook");
+    expect(ev.attributes["catalyst.event.entity"]).toBe("pr");
+    expect(ev.attributes["catalyst.event.action"]).toBe("merged");
+    expect(ev.attributes["catalyst.event.label"]).toBe("PR #342");
+    expect(ev.attributes["catalyst.event.channel"]).toBe("webhook");
     expect(ev.attributes["vcs.pr.number"]).toBe(342);
   });
 

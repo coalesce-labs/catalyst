@@ -10,8 +10,8 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 14 |
-| → Rename-to | 37 |
+| ✓ Conforming | 19 |
+| → Rename-to | 32 |
 | ● Legitimately Custom | 20 |
 | **Total** | 71 |
 
@@ -21,6 +21,11 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `catalyst.event.action` | `canonical-event.ts:61` | ✓ conforming |  |  |  |
+| `catalyst.event.channel` | `canonical-event.ts:64` | ✓ conforming |  |  |  |
+| `catalyst.event.entity` | `canonical-event.ts:60` | ✓ conforming |  |  |  |
+| `catalyst.event.label` | `canonical-event.ts:62` | ✓ conforming |  |  |  |
+| `catalyst.event.value` | `canonical-event.ts:63` | ✓ conforming |  |  |  |
 | `catalyst.orchestration` | `canonical-event.ts:54` | ● custom |  |  |  |
 | `catalyst.orchestrator.id` | `canonical-event.ts:67` | ● custom |  |  |  |
 | `catalyst.phase` | `canonical-event.ts:70` | ● custom |  |  |  |
@@ -37,12 +42,7 @@ Do **not** edit this file directly.
 | `claude.turn` | `canonical-event.ts:101` | ● custom |  |  |  |
 | `deployment.environment` | `canonical-event.ts:91` | → rename-to | → `deployment.environment.name` | Cluster E |  |
 | `deployment.id` | `canonical-event.ts:92` | ✓ conforming |  |  | type should be string per OTel semconv; currently number |
-| `event.action` | `canonical-event.ts:61` | → rename-to | → `catalyst.event.action` | Cluster A |  |
-| `event.channel` | `canonical-event.ts:64` | → rename-to | → `catalyst.event.channel` | Cluster A |  |
-| `event.entity` | `canonical-event.ts:60` | → rename-to | → `catalyst.event.entity` | Cluster A |  |
-| `event.label` | `canonical-event.ts:62` | → rename-to | → `catalyst.event.label` | Cluster A |  |
 | `event.name` | `canonical-event.ts:59` | ✓ conforming |  |  |  |
-| `event.value` | `canonical-event.ts:63` | → rename-to | → `catalyst.event.value` | Cluster A |  |
 | `host.id` | `canonical-event.ts:48` | ✓ conforming |  |  |  |
 | `host.name` | `canonical-event.ts:47` | ✓ conforming |  |  |  |
 | `linear.actor.id` | `canonical-event.ts:88` | ● custom |  |  |  |
@@ -115,25 +115,6 @@ derived from the manifest. Per the operator decision (Ryan, 2026-06-11),
 every rename uses a **hard cutover** — no dual-emit period, no deprecated-name
 emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,
 validated against live Loki.
-
-### Cluster A — event.* non-name fields
-
-- **Emit-side files**: `canonical-event.ts`
-- **Where**: emit
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `event.action` | `catalyst.event.action` |  |
-| `event.channel` | `catalyst.event.channel` |  |
-| `event.entity` | `catalyst.event.entity` |  |
-| `event.label` | `catalyst.event.label` |  |
-| `event.value` | `catalyst.event.value` |  |
 
 ### Cluster B — ratelimit.* / account.* / subscription.*
 

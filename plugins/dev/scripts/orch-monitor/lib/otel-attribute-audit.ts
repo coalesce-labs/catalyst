@@ -34,11 +34,11 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   // ── TS emitter — Attributes interface (canonical-event.ts) ───────────────
   // §4b: Event classifier family
   { key: "event.name",    emitter: "ts", source: "canonical-event.ts:59", classification: "conforming" },
-  { key: "event.entity",  emitter: "ts", source: "canonical-event.ts:60", classification: "rename-to", targetName: "catalyst.event.entity",  remediationCluster: "A", where: "emit" },
-  { key: "event.action",  emitter: "ts", source: "canonical-event.ts:61", classification: "rename-to", targetName: "catalyst.event.action",  remediationCluster: "A", where: "emit" },
-  { key: "event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "rename-to", targetName: "catalyst.event.label",   remediationCluster: "A", where: "emit" },
-  { key: "event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "rename-to", targetName: "catalyst.event.value",   remediationCluster: "A", where: "emit" },
-  { key: "event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "rename-to", targetName: "catalyst.event.channel", remediationCluster: "A", where: "emit" },
+  { key: "catalyst.event.entity",  emitter: "ts", source: "canonical-event.ts:60", classification: "conforming" },
+  { key: "catalyst.event.action",  emitter: "ts", source: "canonical-event.ts:61", classification: "conforming" },
+  { key: "catalyst.event.label",   emitter: "ts", source: "canonical-event.ts:62", classification: "conforming" },
+  { key: "catalyst.event.value",   emitter: "ts", source: "canonical-event.ts:63", classification: "conforming" },
+  { key: "catalyst.event.channel", emitter: "ts", source: "canonical-event.ts:64", classification: "conforming" },
 
   // §4c: Catalyst internal — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.orchestrator.id", emitter: "ts", source: "canonical-event.ts:67", classification: "legitimately-custom" },

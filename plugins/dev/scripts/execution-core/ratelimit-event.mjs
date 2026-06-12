@@ -52,9 +52,9 @@ export function buildRatelimitEnvelope(name, payload = {}, { now } = {}) {
   // collector never promotes an empty label.
   const attributes = {
     "event.name": name,
-    "event.entity": "account",
-    "event.action": action,
-    "event.label": email ?? "unknown",
+    "catalyst.event.entity": "account",
+    "catalyst.event.action": action,
+    "catalyst.event.label": email ?? "unknown",
   };
   const put = (key, value) => {
     if (value !== null && value !== undefined) attributes[key] = value;

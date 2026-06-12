@@ -57,11 +57,11 @@ export interface Resource {
 export interface Attributes {
   // catalyst-internal classifier
   "event.name": string;
-  "event.entity"?: string;
-  "event.action"?: string;
-  "event.label"?: string;
-  "event.value"?: string | number;
-  "event.channel"?: "webhook" | "sme.io";
+  "catalyst.event.entity"?: string;
+  "catalyst.event.action"?: string;
+  "catalyst.event.label"?: string;
+  "catalyst.event.value"?: string | number;
+  "catalyst.event.channel"?: "webhook" | "sme.io";
 
   // catalyst entities
   "catalyst.orchestrator.id"?: string;

@@ -71,7 +71,7 @@ function classifySource(event: CanonicalEvent): string {
   if (name.startsWith("github.")) return "github";
   if (name.startsWith("linear.")) return "linear";
   if (name === "comms.message.posted") {
-    const label = event.attributes["event.label"];
+    const label = event.attributes["catalyst.event.label"];
     if (label) return label;
     const worker = event.attributes["catalyst.worker.ticket"];
     if (worker) return worker;
@@ -570,7 +570,7 @@ export function formatDetails(event: CanonicalEvent): string {
   // the natural place — DETAILS already carries the message body for comms
   // events, and the prefix reads cleanly with the body.
   if (name === "comms.message.posted") {
-    const sender = event.attributes?.["event.label"]
+    const sender = event.attributes?.["catalyst.event.label"]
       ?? event.attributes?.["catalyst.worker.ticket"];
     const p = payload as Record<string, unknown> | undefined;
     const rawType = p?.["type"];

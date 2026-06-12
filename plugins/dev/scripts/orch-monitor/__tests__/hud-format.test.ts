@@ -123,7 +123,7 @@ describe("formatSource", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
     } as unknown as CanonicalEvent;
@@ -883,7 +883,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
       body: { message: "stalled: CI failed", payload: { type: "attention", channel: "orch-demo", to: "all" } },
@@ -917,7 +917,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
       },
       body: { message: "msg", payload: {} },
     } as unknown as CanonicalEvent;
@@ -929,7 +929,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
       },
       body: { payload: { type: "attention" } },
     } as unknown as CanonicalEvent;
@@ -1229,7 +1229,7 @@ describe("formatIcon (CTL-391, Nerd Font enabled)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
       body: { payload: { type: "attention" } },

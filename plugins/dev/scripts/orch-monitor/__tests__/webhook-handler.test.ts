@@ -733,10 +733,10 @@ describe("buildEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["event.name"]).toBe("github.pr.merged");
     expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
     expect(env!.attributes["vcs.pr.number"]).toBe(1);
-    expect(env!.attributes["event.entity"]).toBe("pr");
-    expect(env!.attributes["event.action"]).toBe("merged");
-    expect(env!.attributes["event.label"]).toBe("PR #1");
-    expect(env!.attributes["event.channel"]).toBe("webhook");
+    expect(env!.attributes["catalyst.event.entity"]).toBe("pr");
+    expect(env!.attributes["catalyst.event.action"]).toBe("merged");
+    expect(env!.attributes["catalyst.event.label"]).toBe("PR #1");
+    expect(env!.attributes["catalyst.event.channel"]).toBe("webhook");
     expect(env!.resource["service.name"]).toBe("catalyst.github");
   });
 
@@ -837,7 +837,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.release.published");
     expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
-    expect(env!.attributes["event.label"]).toBe("catalyst-dev-v8.0.0");
+    expect(env!.attributes["catalyst.event.label"]).toBe("catalyst-dev-v8.0.0");
   });
 
   it("maps workflow_run.completed → github.workflow_run.completed with cicd attrs", () => {
@@ -1070,7 +1070,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
       TS,
     );
     expect(env!.attributes["event.name"]).toBe("github.status.failure");
-    expect(env!.attributes["event.label"]).toBe("abcdef0");
+    expect(env!.attributes["catalyst.event.label"]).toBe("abcdef0");
     expect(env!.severityText).toBe("ERROR");
   });
 

@@ -35,12 +35,12 @@ describe("buildRatelimitEnvelope", () => {
     expect(env.resource["service.namespace"]).toBe("catalyst");
   });
 
-  test("event.* identity attributes", () => {
+  test("catalyst.event.* identity attributes", () => {
     const env = buildRatelimitEnvelope(RATELIMIT_EVENT_SAMPLED, basePayload);
     expect(env.attributes["event.name"]).toBe("account.ratelimit.sampled");
-    expect(env.attributes["event.entity"]).toBe("account");
-    expect(env.attributes["event.action"]).toBe("ratelimit.sampled");
-    expect(env.attributes["event.label"]).toBe("ryan@rozich.com");
+    expect(env.attributes["catalyst.event.entity"]).toBe("account");
+    expect(env.attributes["catalyst.event.action"]).toBe("ratelimit.sampled");
+    expect(env.attributes["catalyst.event.label"]).toBe("ryan@rozich.com");
   });
 
   test("DOT-form attributes present with correct values", () => {
@@ -81,9 +81,9 @@ describe("buildRatelimitEnvelope", () => {
     expect("rate_limit.tier" in a).toBe(false);
   });
 
-  test("event.label falls back to 'unknown' when email absent", () => {
+  test("catalyst.event.label falls back to 'unknown' when email absent", () => {
     const env = buildRatelimitEnvelope(RATELIMIT_EVENT_SAMPLED, { fiveHourPct: 1 });
-    expect(env.attributes["event.label"]).toBe("unknown");
+    expect(env.attributes["catalyst.event.label"]).toBe("unknown");
     expect("account.email" in env.attributes).toBe(false);
   });
 

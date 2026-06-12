@@ -861,9 +861,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
           resource: { "service.name": "monitor" },
           attributes: {
             "event.name": "catalyst.service.health",
-            "event.entity": "service",
-            "event.action": t.action,
-            "event.label": t.serviceId,
+            "catalyst.event.entity": "service",
+            "catalyst.event.action": t.action,
+            "catalyst.event.label": t.serviceId,
           },
           body: { message: t.body },
         }),

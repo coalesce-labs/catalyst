@@ -323,11 +323,11 @@ build_canonical_line() {
       ),
       attributes: (
         { "event.name": $event_name }
-        + (if $entity  == "" then {} else { "event.entity": $entity }  end)
-        + (if $action  == "" then {} else { "event.action": $action }  end)
-        + (if $label   == "" then {} else { "event.label":  $label }   end)
-        + (if $value   == "" then {} else { "event.value":  $value }   end)
-        + (if $channel == "" then {} else { "event.channel": $channel } end)
+        + (if $entity  == "" then {} else { "catalyst.event.entity": $entity }  end)
+        + (if $action  == "" then {} else { "catalyst.event.action": $action }  end)
+        + (if $label   == "" then {} else { "catalyst.event.label":  $label }   end)
+        + (if $value   == "" then {} else { "catalyst.event.value":  $value }   end)
+        + (if $channel == "" then {} else { "catalyst.event.channel": $channel } end)
         + (if $orch    == "" then {} else { "catalyst.orchestrator.id": $orch } end)
         + (if $worker  == "" then {} else { "catalyst.worker.ticket": $worker } end)
         + (if $session == "" then {} else { "catalyst.session.id": $session } end)
