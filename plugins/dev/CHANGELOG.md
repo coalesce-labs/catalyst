@@ -1,5 +1,52 @@
 # Changelog
 
+## [12.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.5.0...catalyst-dev-v12.6.0) (2026-06-12)
+
+
+### Features
+
+* **dev:** chrome batch — one header per surface, numbered slots, overlay scrollbars, titles first (CTL-1018/1035/1036/1041) ([1051cae](https://github.com/coalesce-labs/catalyst/commit/1051cae1e8cf37bdd4141b6ee305e039d772999d))
+* **dev:** CTL-1004 — stall-janitor: targeted orphan reap-requests + ghost-session kill-intents (shadow-first) ([#1817](https://github.com/coalesce-labs/catalyst/issues/1817)) ([a581efd](https://github.com/coalesce-labs/catalyst/commit/a581efda9c9bf6e9c45d0d4d19074b22d5dde128))
+* **dev:** CTL-1005 — J3 artifact-complete auto-clear + CTL-1004 J2-enforce fix ([#1821](https://github.com/coalesce-labs/catalyst/issues/1821)) ([c35ac18](https://github.com/coalesce-labs/catalyst/commit/c35ac18ac00ecbf0f116581c15bb01ec27a7a989))
+* **dev:** CTL-1008 — unified event log OTel completeness ([#1793](https://github.com/coalesce-labs/catalyst/issues/1793)) ([3a3fa00](https://github.com/coalesce-labs/catalyst/commit/3a3fa0034f9767d0869305630e75697451d748c5))
+* **dev:** CTL-1009 — OTel attribute conformance manifest + drift guard ([#1830](https://github.com/coalesce-labs/catalyst/issues/1830)) ([d46efa7](https://github.com/coalesce-labs/catalyst/commit/d46efa75686fc31498013c7c99cb6a2b00038d7c))
+* **dev:** CTL-1013 elevation inversion — dark chrome lowest, content and cards stack lighter ([#1788](https://github.com/coalesce-labs/catalyst/issues/1788)) ([108a957](https://github.com/coalesce-labs/catalyst/commit/108a9578bb63490173b677e9c102100cba3b8957))
+* **dev:** CTL-1015 queue becomes a capacity-centric control tower — slots hero, dispatch ranking, motion ([#1790](https://github.com/coalesce-labs/catalyst/issues/1790)) ([c6c8a52](https://github.com/coalesce-labs/catalyst/commit/c6c8a5297484ffdcc8ed4fa3a56cb44fa66089ac))
+* **dev:** CTL-1022 card type reads as a colored symbol; description tooltip removed ([#1796](https://github.com/coalesce-labs/catalyst/issues/1796)) ([47d8bdc](https://github.com/coalesce-labs/catalyst/commit/47d8bdc66bc5cf9bbd523141a2568afb0a3604db))
+* **dev:** CTL-1023 work-type dimension on phase telemetry (catalyst.ticket.type) ([#1806](https://github.com/coalesce-labs/catalyst/issues/1806)) ([f1de97a](https://github.com/coalesce-labs/catalyst/commit/f1de97a3e460c0b7f1a3fa65d9c45f742da983a9))
+* **dev:** CTL-1024 Cmd+K command palette — action registry, settings commands, ticket search ([#1851](https://github.com/coalesce-labs/catalyst/issues/1851)) ([1ca339d](https://github.com/coalesce-labs/catalyst/commit/1ca339d03a1a3ed70ef88cd9953c89d6842dd479))
+* **dev:** CTL-1027 per-project color picker + swimlane tint ([#1854](https://github.com/coalesce-labs/catalyst/issues/1854)) ([12fd997](https://github.com/coalesce-labs/catalyst/commit/12fd997152d5b17696d9e4743bcc6524054b1df1))
+* **dev:** CTL-1032 status strip counts honestly — active, dead, free, waiting ([#1803](https://github.com/coalesce-labs/catalyst/issues/1803)) ([ee85ff1](https://github.com/coalesce-labs/catalyst/commit/ee85ff14d6aac5a98f25d1bd97fcac34b0a88f47))
+* **dev:** CTL-1033 elevation v2 — perceptible surface ladder + one token system across every page ([fa8bedd](https://github.com/coalesce-labs/catalyst/commit/fa8bedd1a1fe083a69985c1694da5df9e2cab9be))
+* **dev:** CTL-1034 sidebar — collapsible sections, real project headings, child indentation ([#1808](https://github.com/coalesce-labs/catalyst/issues/1808)) ([be27787](https://github.com/coalesce-labs/catalyst/commit/be27787734ed4adbfa7abc5027da746aa4b7ed29))
+* **dev:** CTL-1037 sidebar presence — per-project worker dots, honest counts, inbox attention badges ([#1825](https://github.com/coalesce-labs/catalyst/issues/1825)) ([a27b5b5](https://github.com/coalesce-labs/catalyst/commit/a27b5b531f2ecb00be8f787126853a78d0151a96))
+* **dev:** CTL-1049 back-stack entry state — fresh defaults on push, exact restore on back/escape ([1d8eb32](https://github.com/coalesce-labs/catalyst/commit/1d8eb3282e310eb28aa84656ced9427171f49ed7))
+* **dev:** CTL-1050+1039 stack service health — Fleet Ops strip, inbox outage events, proportional severity ([#1846](https://github.com/coalesce-labs/catalyst/issues/1846)) ([d74f63c](https://github.com/coalesce-labs/catalyst/commit/d74f63cd0fa42d1e11f5b574050e33b7b521f0a5))
+* **dev:** CTL-1052 sidebar full-width/height, adjacent twisties, overlay dots, settings consolidation ([#1844](https://github.com/coalesce-labs/catalyst/issues/1844)) ([81c853d](https://github.com/coalesce-labs/catalyst/commit/81c853d00a11746a73cd24732b9d8efcd31780bf))
+* **dev:** CTL-1054 Queue becomes Dispatch + uniform slot-card anatomy ([#1848](https://github.com/coalesce-labs/catalyst/issues/1848)) ([d1168e5](https://github.com/coalesce-labs/catalyst/commit/d1168e54af043052d2392626aaeb688b070a1db3))
+* **dev:** CTL-1055 exclude terminal ghost sessions from admission-gate count ([#1860](https://github.com/coalesce-labs/catalyst/issues/1860)) ([489f36e](https://github.com/coalesce-labs/catalyst/commit/489f36e4ca08d0d4fa4bd28f36ec51b0d3b08053))
+* **dev:** CTL-1058 — fix advance-shadow input-skew false disagreements via EDB-locked oracle ([#1862](https://github.com/coalesce-labs/catalyst/issues/1862)) ([477556b](https://github.com/coalesce-labs/catalyst/commit/477556bcb31d150d6a1c9a380167c56ae7dbeffc))
+* **dev:** CTL-1064 — Auto-Unstuck Deep-Dive Sweep (classify-then-act, Pass 0u) ([#1880](https://github.com/coalesce-labs/catalyst/issues/1880)) ([e5e99f9](https://github.com/coalesce-labs/catalyst/commit/e5e99f9b089156b0d0f56c16ca16ffac49519d52))
+* **dev:** CTL-1066 — queue board distinguishes held, retrying, and gave-up tickets ([#1875](https://github.com/coalesce-labs/catalyst/issues/1875)) ([c2e8929](https://github.com/coalesce-labs/catalyst/commit/c2e892975a34daa0fa14922bce2fe8fa4fe972cd))
+* **dev:** CTL-1068 — retract orphaned held labels for admitted-then-failed tickets ([#1878](https://github.com/coalesce-labs/catalyst/issues/1878)) ([0cd8281](https://github.com/coalesce-labs/catalyst/commit/0cd82810d827adf4523a6d803655bff9c14f6a51))
+* **dev:** CTL-1071 — Catalyst Warm-Textbook Identity Spike ([#1883](https://github.com/coalesce-labs/catalyst/issues/1883)) ([9d34b28](https://github.com/coalesce-labs/catalyst/commit/9d34b28f5b8d416882881b96a6e4447a2dd5733f))
+* **dev:** CTL-729 — hung-worker watchdog + needs-attention surfacing (board + Inbox) ([#1814](https://github.com/coalesce-labs/catalyst/issues/1814)) ([095e514](https://github.com/coalesce-labs/catalyst/commit/095e5149b4197ed4523d9b2f66a40410d26f3f3e))
+* **dev:** CTL-863 — surviving hosts take over a dead host's tickets and fence the zombie's Linear writes ([#1795](https://github.com/coalesce-labs/catalyst/issues/1795)) ([a7b4d0e](https://github.com/coalesce-labs/catalyst/commit/a7b4d0ec97fb33ecbb5b2d1fca5fe167fa45cc85))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1020 dependency graph draws its edges — directed blocker arrows ([0f7a9a9](https://github.com/coalesce-labs/catalyst/commit/0f7a9a9dc6cd00e1bab6e573e4a4d498d72e1c1f))
+* **dev:** CTL-1028 plumb cluster generation through triage dispatch path ([#1859](https://github.com/coalesce-labs/catalyst/issues/1859)) ([cb8bdad](https://github.com/coalesce-labs/catalyst/commit/cb8bdadb51009df9b5b1692d1a4c7e217b8c1e43))
+* **dev:** CTL-1031 — Linear label changes reach the read-model (Inbox lights up) ([#1798](https://github.com/coalesce-labs/catalyst/issues/1798)) ([ad21f42](https://github.com/coalesce-labs/catalyst/commit/ad21f4253d0054794b3acfab0297d41b18d721cc))
+* **dev:** CTL-1044 — shadow clock records evidence (operator-event appender + daemon wiring) ([#1819](https://github.com/coalesce-labs/catalyst/issues/1819)) ([10f16d8](https://github.com/coalesce-labs/catalyst/commit/10f16d8f7b9cbeb6c576d21ee7917519d3c2b841))
+* **dev:** CTL-1045 — stall-janitor enforce-readiness hardening (J2 kill-storm, J3 cause + prior-signal, once-marker) ([#1826](https://github.com/coalesce-labs/catalyst/issues/1826)) ([4dacdfb](https://github.com/coalesce-labs/catalyst/commit/4dacdfb5e83ac045619d5f75935e872c9f2bc7bb))
+* **dev:** CTL-1046 cross-team rows show titles on the control tower ([4fdf722](https://github.com/coalesce-labs/catalyst/commit/4fdf72232e1c335dfa69798e99ad213c573b66a5))
+* **dev:** CTL-1048 detail pages scroll from anywhere — dead wheel zones removed ([#1837](https://github.com/coalesce-labs/catalyst/issues/1837)) ([02a1391](https://github.com/coalesce-labs/catalyst/commit/02a1391eaa2bce2a7df2114d2aa290d866f136a0))
+* **dev:** CTL-1057 — gate HRW read-side filter on multiHost, add membership warning ([#1863](https://github.com/coalesce-labs/catalyst/issues/1863)) ([9ab5804](https://github.com/coalesce-labs/catalyst/commit/9ab580415a9de37999eb7e486d3e0e665e4e4784))
+* **dev:** CTL-1075 — fix plan/implement dispatch gates silently fail open on macOS bash 3.2 ([#1877](https://github.com/coalesce-labs/catalyst/issues/1877)) ([af1387d](https://github.com/coalesce-labs/catalyst/commit/af1387d19076a8abde836774d4355c904e668b0c))
+* **dev:** janitor shadow verdicts reach the log + dispatch failures carry stderr ([#1847](https://github.com/coalesce-labs/catalyst/issues/1847)) ([eb84808](https://github.com/coalesce-labs/catalyst/commit/eb84808657fd41618acb7001400aca41022a6b63))
+
 ## [12.5.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.4.0...catalyst-dev-v12.5.0) (2026-06-11)
 
 
