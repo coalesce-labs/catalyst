@@ -34,6 +34,7 @@ import {
   workerHistoryLogQL,
   parseHistoryLine,
   isValidCcSessionId,
+  throughputByWorkType,
 } from "../lib/otel-queries";
 import type { PrometheusFetcher, PrometheusQueryResult } from "../lib/prometheus";
 import type { LokiFetcher, LokiQueryResult } from "../lib/loki";
@@ -1569,5 +1570,55 @@ describe("activeTimeRatio", () => {
 
   it("returns null ONLY when Prometheus is unavailable (query failed)", async () => {
     expect(await activeTimeRatio(mockProm(null), "1h")).toBeNull();
+  });
+});
+
+// CTL-1040: throughput-by-work-type — counts phase.teardown.complete.* events
+// per catalyst_ticket_type over the window. Loki-backed matrix parse that takes
+// the LAST value of each series (count_over_time is monotone within the range).
+// Added by phase-verify (test-only) — the pure rankCountMap sibling is already
+// covered in utilization-kit.test.ts; this pins the untested Loki parse path.
+describe("throughputByWorkType", () => {
+  it("maps catalyst_ticket_type → count, taking the last value of each series", async () => {
+    const loki = mockLoki({
+      data: {
+        resultType: "matrix",
+        result: [
+          {
+            metric: { catalyst_ticket_type: "feature" },
+            values: [
+              [1713100000, "2"],
+              [1713100600, "5"],
+            ],
+          },
+          { metric: { catalyst_ticket_type: "bug" }, values: [[1713100600, "3"]] },
+        ],
+      },
+    });
+    const result = await throughputByWorkType(loki, "24h");
+    expect(result).toEqual({ feature: 5, bug: 3 });
+  });
+
+  it("returns null when Loki is unavailable", async () => {
+    expect(await throughputByWorkType(mockLoki(null), "24h")).toBeNull();
+  });
+
+  it("returns an empty map for an empty result set (honest zero state)", async () => {
+    const loki = mockLoki({ data: { resultType: "matrix", result: [] } });
+    expect(await throughputByWorkType(loki, "24h")).toEqual({});
+  });
+
+  it("skips series with a missing type label or no values (no fabricated rows)", async () => {
+    const loki = mockLoki({
+      data: {
+        resultType: "matrix",
+        result: [
+          { metric: { catalyst_ticket_type: "feature" }, values: [[1713100600, "4"]] },
+          { metric: {}, values: [[1713100600, "9"]] },
+          { metric: { catalyst_ticket_type: "docs" }, values: [] },
+        ],
+      },
+    });
+    expect(await throughputByWorkType(loki, "24h")).toEqual({ feature: 4 });
   });
 });
