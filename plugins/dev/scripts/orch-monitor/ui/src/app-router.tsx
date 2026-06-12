@@ -51,11 +51,6 @@ const HomeSurface = lazy(() =>
     default: m.HomeSurface,
   })),
 );
-const QueueSurface = lazy(() =>
-  import("./components/queue/queue-surface").then((m) => ({
-    default: m.QueueSurface,
-  })),
-);
 const TelemetrySurface = lazy(() =>
   import("./components/observe/telemetry-surface").then((m) => ({
     default: m.TelemetrySurface,
@@ -178,24 +173,18 @@ const workersRoute = createRoute({
   ),
 });
 
-const queueRoute = createRoute({
+// CTL-1016: /dispatch and /queue redirect to /workers. Bookmarks and shared
+// links keep working; the Dispatch surface is retired and folded into Workers.
+const dispatchRedirectRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/dispatch",
-  component: () => (
-    <S>
-      <QueueSurface />
-    </S>
-  ),
+  beforeLoad: () => { throw redirect({ to: "/workers", search: (prev) => prev }); },
 });
 
-// CTL-1054: /queue is kept as a permanent alias that redirects to /dispatch so
-// any bookmarks, shared links, or external references to the old URL still work.
 const queueAliasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/queue",
-  beforeLoad: () => {
-    throw redirect({ to: "/dispatch", search: (prev) => prev });
-  },
+  beforeLoad: () => { throw redirect({ to: "/workers", search: (prev) => prev }); },
 });
 
 const telemetryRoute = createRoute({
@@ -305,7 +294,7 @@ const routeTree = rootRoute.addChildren([
   homeRoute,
   boardRoute,
   workersRoute,
-  queueRoute,
+  dispatchRedirectRoute,
   queueAliasRoute,
   telemetryRoute,
   utilizationRoute,

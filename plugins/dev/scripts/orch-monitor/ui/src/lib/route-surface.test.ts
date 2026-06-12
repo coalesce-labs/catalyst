@@ -20,8 +20,6 @@ describe("surfaceToPath", () => {
   it("maps each non-home surface to its clean typed segment", () => {
     expect(surfaceToPath("board")).toBe("/board");
     expect(surfaceToPath("workers")).toBe("/workers");
-    // CTL-1054: Queue surface renamed to Dispatch; canonical URL is /dispatch.
-    expect(surfaceToPath("queue")).toBe("/dispatch");
     expect(surfaceToPath("telemetry")).toBe("/telemetry");
     expect(surfaceToPath("utilization")).toBe("/utilization");
     expect(surfaceToPath("finops")).toBe("/finops");

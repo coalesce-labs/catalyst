@@ -7,7 +7,6 @@ import {
   GaugeIcon,
   InboxIcon,
   LayoutGridIcon,
-  ListOrderedIcon,
   ServerIcon,
   SettingsIcon,
   UsersIcon,
@@ -197,7 +196,6 @@ const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof Inbox
   { surface: "home", label: "Inbox", icon: InboxIcon },
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
-  { surface: "queue", label: "Dispatch", icon: ListOrderedIcon },
 ];
 
 // CTL-977: Shared classes for collapsible group trigger rows.
@@ -330,14 +328,6 @@ export function AppSidebar() {
       // Snapshot not loaded yet — fall back to the global signal for the "all" row.
       return scopeVal === "all" && nav ? nav.workerCount : null;
     }
-    if (s === "queue") {
-      if (payload) {
-        return scopeVal === "all"
-          ? overallQueueDepth(payload)
-          : projectQueueDepth(payload, scopeVal);
-      }
-      return scopeVal === "all" && nav ? nav.queueDepth : null;
-    }
     return null;
   }
   // CTL-1037 (C) — the Inbox attention count for a scope (overall or per-project):
@@ -396,18 +386,14 @@ export function AppSidebar() {
     //             rather than "empty" — the explicit 0 says "nothing is waiting",
     //             which is genuine signal for a capacity row). Other rows: no count.
     const workerN = item.surface === "workers" ? rowCount("workers", scopeVal) : null;
-    const queueN = item.surface === "queue" ? rowCount("queue", scopeVal) : null;
     const attentionN = item.surface === "home" ? inboxCount(scopeVal) : 0;
 
-    // The neutral count badge (Workers/Queue) and its clarifying tooltip text.
+    // The neutral count badge (Workers) and its clarifying tooltip text.
     let countBadge: number | null = null;
     let rowTooltip = item.label;
     if (item.surface === "workers" && workerN != null) {
       if (workerN > 0) countBadge = workerN; // hide the zero — the dot says "none"
       rowTooltip = `${workerN} active worker${workerN === 1 ? "" : "s"}`;
-    } else if (item.surface === "queue" && queueN != null) {
-      countBadge = queueN; // keep the 0 — "nothing waiting" is real signal
-      rowTooltip = `${queueN} waiting for a slot`;
     }
     // CTL-1025: show the keybinding hint in the tooltip for nav items that have one.
     const kb = surfaceKeybinding(item.surface);

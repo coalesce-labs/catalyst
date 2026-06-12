@@ -47,6 +47,5 @@ describe("surfaceKeybinding — hover-hint source", () => {
     expect(surfaceKeybinding("board")).toBe("g b");
     expect(surfaceKeybinding("workers")).toBe("g w");
     expect(surfaceKeybinding("home")).toBe("g h");
-    expect(surfaceKeybinding("queue")).toBe("g q");
   });
 });
