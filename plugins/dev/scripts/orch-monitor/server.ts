@@ -234,6 +234,8 @@ import {
   workerBurnSeries,
   ticketTelemetrySeries,
   isValidLinearKey,
+  costByWorkType,
+  throughputByWorkType,
 } from "./lib/otel-queries";
 import {
   openDb,
@@ -2167,6 +2169,28 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const range = url.searchParams.get("range") ?? "24h";
           const result = await costByDimension(prom, dim, range);
+          return Response.json({ data: result });
+        }
+
+        // CTL-1040 (FINOPS): cost grouped by work type. Board-backed — groups the SAME
+        // signal-file costs the expensive-tickets table shows (BoardTicket.costUSD) by
+        // BoardTicket.type. Prometheus carries no catalyst_ticket_type label, so this
+        // is the honest current-state source (UI carries a "data since 2026-06-11"
+        // caption). Always 200 — no Prometheus dependency.
+        if (url.pathname === "/api/otel/cost-by-work-type") {
+          const board = await boardSnapshot.getLatest();
+          const tickets = (board?.tickets ?? []).map((t) => ({ type: t.type, costUSD: t.costUSD }));
+          return Response.json({ data: costByWorkType(tickets) });
+        }
+
+        // CTL-1040 (UTILIZATION): throughput grouped by work type. Loki-backed —
+        // counts phase.teardown.complete.* events per catalyst_ticket_type over the
+        // window. 503 when Loki is not configured (the ChartCard degrades via the ladder).
+        if (url.pathname === "/api/otel/throughput-by-work-type") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await throughputByWorkType(loki, range);
+          if (result === null) return Response.json({ error: "Loki unavailable" }, { status: 503 });
           return Response.json({ data: result });
         }
 

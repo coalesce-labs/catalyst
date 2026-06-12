@@ -38,11 +38,14 @@ import {
   occupancyPct,
   idleBetweenPhases,
   rateLimitErrors,
+  rankCountMap,
   type IdleTicketInput,
+  type CountRow,
 } from "@/components/observe/utilization-kit";
-import { errorTrendSparkline } from "@/components/observe/telemetry-panels";
+import { errorTrendSparkline, barPercent } from "@/components/observe/telemetry-panels";
 import { Sparkline } from "@/components/sparkline";
 import { fmtRelativeDuration } from "@/lib/formatters";
+import { typeSymbol } from "@/board/type-icon";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 /** The active-time payload from /api/otel/active-time (mirrors otel-queries
@@ -78,6 +81,10 @@ export function UtilizationSurface() {
   // P_active [prom] — the active-time ratio.
   const [activeTime, setActiveTime] = useState<ActiveTimePayload | null>(null);
   const [activeReachable, setActiveReachable] = useState<boolean>(true);
+
+  // CTL-1040: throughput by work type [loki].
+  const [throughputByType, setThroughputByType] = useState<Record<string, number> | null>(null);
+  const [throughputByTypeReachable, setThroughputByTypeReachable] = useState<boolean>(true);
 
   // Health probe (10s TTL) — drives the ChartCard ladder for the [loki]/[prom]
   // panels. The board-backed hero/badge/idle-list never read it.
@@ -150,13 +157,30 @@ export function UtilizationSurface() {
       }
     }
 
+    // CTL-1040: throughput grouped by work type [loki].
+    async function loadThroughputByType() {
+      try {
+        const resp = await fetch(`/api/otel/throughput-by-work-type?range=${otelRange}`);
+        if (!alive) return;
+        if (resp.status === 503) return setThroughputByTypeReachable(false);
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: Record<string, number> | null };
+        setThroughputByType(body.data ?? null);
+        setThroughputByTypeReachable(true);
+      } catch {
+        if (alive) setThroughputByTypeReachable(false);
+      }
+    }
+
     void loadBoard();
     void loadErrors();
     void loadActiveTime();
+    void loadThroughputByType();
     const id = setInterval(() => {
       void loadBoard();
       void loadErrors();
       void loadActiveTime();
+      void loadThroughputByType();
     }, refreshIntervalMs(range));
     return () => {
       alive = false;
@@ -192,6 +216,12 @@ export function UtilizationSurface() {
   const computingPct = hasBusySlots
     ? Math.max(0, Math.min(100, Math.round((activeRate / config.inFlight) * 100)))
     : 0;
+
+  // CTL-1040: ranked throughput rows for the type panel.
+  const throughputRows = useMemo<CountRow[]>(
+    () => rankCountMap(throughputByType),
+    [throughputByType],
+  );
 
   // Per-panel health for the [loki]/[prom] cards (layer the per-route reachability
   // over the global probe — same idiom telemetry uses).
@@ -376,6 +406,56 @@ export function UtilizationSurface() {
           locked={{ reason: "needs event-log reader", ticket: "OBS-15" }}
           bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-3"
         />
+
+        {/* CTL-1040: throughput by work type [loki] — completed tickets per type.
+            Ranked count bars colored by the TYPE palette. Degrades via the ChartCard
+            ladder when Loki is unconfigured. */}
+        <ChartCard
+          title="Throughput by work type"
+          dataSource="[loki]"
+          health={lokiHealth(throughputByTypeReachable)}
+          hasData={throughputRows.length > 0}
+          bodyClassName="min-h-[180px] h-[min(28vh,220px)] p-2"
+          headerExtra={
+            <span className="font-mono text-[10px] text-muted/60">since 2026-06-11</span>
+          }
+        >
+          {(() => {
+            const maxCount = throughputRows[0]?.count ?? 0;
+            return (
+              <div className="flex h-full flex-col gap-1">
+                <div className="flex items-center justify-between px-3 text-[10px] text-muted/70">
+                  <span>type · completed</span>
+                  <span>ranked ↓</span>
+                </div>
+                <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border bg-surface-2">
+                  {throughputRows.map((row) => (
+                    <div
+                      key={row.label}
+                      className="flex w-full items-center gap-3 border-b border-border/40 px-3 py-1.5 last:border-b-0"
+                    >
+                      <span className="w-24 shrink-0 truncate font-mono text-[11px] text-fg">
+                        {row.label}
+                      </span>
+                      <span className="relative h-2.5 flex-1 overflow-hidden rounded-sm bg-surface-3">
+                        <span
+                          className="absolute inset-y-0 left-0 rounded-sm"
+                          style={{
+                            width: `${barPercent(row.count, maxCount)}%`,
+                            backgroundColor: typeSymbol(row.label).color,
+                          }}
+                        />
+                      </span>
+                      <span className="w-8 shrink-0 text-right font-mono text-[11px] tabular-nums text-fg">
+                        {row.count}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+        </ChartCard>
 
         {/* P_occupancy OCCUPANCY TIMELINE [events] — LOCKED (OBS-15), full-width
             (bottom). Will be a stepped area of phase.scheduler.parallelism-sampled

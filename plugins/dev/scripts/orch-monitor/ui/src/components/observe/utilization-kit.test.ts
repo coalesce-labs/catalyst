@@ -14,6 +14,7 @@ import {
   idleBetweenPhases,
   isRateLimitError,
   rateLimitErrors,
+  rankCountMap,
   type Pathology,
   type IdleTicketInput,
 } from "./utilization-kit";
@@ -172,6 +173,24 @@ describe("idleBetweenPhases — the CTL-928 lane derivation (P3)", () => {
       now,
     );
     expect(rows.map((r) => r.id)).toEqual(["CTL-B", "CTL-A"]);
+  });
+});
+
+describe("rankCountMap — CTL-1040 throughput count ranking", () => {
+  it("ranks type→count descending and drops zero/negative/non-finite", () => {
+    expect(rankCountMap({ feature: 3, bug: 5, chore: 0, docs: NaN })).toEqual([
+      { label: "bug", count: 5 },
+      { label: "feature", count: 3 },
+    ]);
+  });
+
+  it("keeps an 'unknown' bucket with a positive count", () => {
+    expect(rankCountMap({ unknown: 2 })).toEqual([{ label: "unknown", count: 2 }]);
+  });
+
+  it("null/empty map → empty array (honest empty state)", () => {
+    expect(rankCountMap(null)).toEqual([]);
+    expect(rankCountMap({})).toEqual([]);
   });
 });
 
