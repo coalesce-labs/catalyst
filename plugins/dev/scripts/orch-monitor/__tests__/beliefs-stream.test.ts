@@ -36,7 +36,8 @@ function openInMemory(): Database {
   db.run(`CREATE TABLE IF NOT EXISTS tick (
     tick_id   INTEGER PRIMARY KEY AUTOINCREMENT,
     now_ms    INTEGER NOT NULL,
-    host      TEXT    NOT NULL
+    host      TEXT    NOT NULL,
+    rules_sha TEXT
   )`);
   db.run(`CREATE TABLE IF NOT EXISTS belief (
     belief_id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,5 +214,86 @@ describe("BeliefTail cursor logic (CTL-967)", () => {
     const fourth = await smallTail.poll();
     expect(fourth).toEqual([]);
     smallTail.close();
+  });
+});
+
+describe("BeliefTail rules_sha defensive read (CTL-1063)", () => {
+  // A read-only reader may open a beliefs.db whose tick table predates the
+  // rules_sha migration (legacy file, daemon mid-deploy, or the first poll
+  // racing the first new-writer tick). poll() must keep streaming firings,
+  // emitting rules_sha:null, rather than throwing 'no such column: t.rules_sha'
+  // and silently swallowing it into an empty result.
+  function openLegacyInMemory(): Database {
+    const db = new Database(":memory:");
+    db.run("PRAGMA journal_mode = WAL");
+    // Legacy tick DDL — NO rules_sha column (pre-CTL-1063 writer schema).
+    db.run(`CREATE TABLE IF NOT EXISTS tick (
+      tick_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      now_ms    INTEGER NOT NULL,
+      host      TEXT    NOT NULL
+    )`);
+    db.run(`CREATE TABLE IF NOT EXISTS belief (
+      belief_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      tick_id         INTEGER NOT NULL,
+      stratum         INTEGER NOT NULL,
+      name            TEXT NOT NULL,
+      subject         TEXT NOT NULL,
+      value           TEXT,
+      rule_id         TEXT NOT NULL,
+      source_fact_ids TEXT NOT NULL,
+      UNIQUE (tick_id, name, subject)
+    )`);
+    return db;
+  }
+
+  it("keeps streaming rows (rules_sha:null) against an unmigrated tick table", async () => {
+    const db = openLegacyInMemory();
+    const tail = makeInMemoryTail(db);
+    try {
+      tail.lastBeliefId = 0;
+      const t1 = insertTick(db, 7000, "host-legacy");
+      insertBelief(db, t1, "worker_dead", "CTL-700/verify");
+
+      const rows = await tail.poll();
+      // The whole point: a missing column must NOT collapse to [].
+      expect(rows.length).toBe(1);
+      expect(rows[0].name).toBe("worker_dead");
+      expect(rows[0].ts_ms).toBe(7000);
+      expect(rows[0].host).toBe("host-legacy");
+      expect(rows[0].rules_sha).toBeNull();
+    } finally {
+      tail.close();
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  });
+
+  it("surfaces rules_sha when the migrated column is present", async () => {
+    const db = openInMemory(); // migrated schema (includes rules_sha)
+    const tail = makeInMemoryTail(db);
+    try {
+      tail.lastBeliefId = 0;
+      db.run("INSERT INTO tick (now_ms, host, rules_sha) VALUES (?, ?, ?)", [
+        8000,
+        "host-new",
+        "deadbeef",
+      ]);
+      const t1 = (db.query("SELECT last_insert_rowid() AS id").get() as { id: number }).id;
+      insertBelief(db, t1, "worker_dead", "CTL-800/verify");
+
+      const rows = await tail.poll();
+      expect(rows.length).toBe(1);
+      expect(rows[0].rules_sha).toBe("deadbeef");
+    } finally {
+      tail.close();
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    }
   });
 });

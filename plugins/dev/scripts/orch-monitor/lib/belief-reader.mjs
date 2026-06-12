@@ -60,6 +60,51 @@ export class BeliefTail {
     /** lazy-opened DB handle; null while absent/unreadable. */
     this._db = null;
     this._dbLoaded = false;
+    /** tri-state cache: does the tick table carry rules_sha? undefined = unprobed. */
+    this._tickHasRulesSha = undefined;
+    /** one-shot guard so a swallowed poll() error is logged at most once. */
+    this._warned = false;
+  }
+
+  /**
+   * Detect whether the `tick` table carries the rules_sha column. That column
+   * is added only by the WRITER's migration (schema.mjs ALTER TABLE tick); a
+   * read-only reader opened against a legacy / not-yet-migrated beliefs.db
+   * (daemon mid-deploy, or the first poll racing the first new-writer tick)
+   * would otherwise throw 'no such column: t.rules_sha'. Probed once via
+   * PRAGMA and cached for the life of the handle (CTL-1063).
+   *
+   * @param {import("bun:sqlite").Database} db
+   * @returns {boolean}
+   */
+  _tickColumnsHaveRulesSha(db) {
+    if (this._tickHasRulesSha !== undefined) return this._tickHasRulesSha;
+    let has = false;
+    try {
+      const cols = db.query("PRAGMA table_info(tick)").all();
+      has = cols.some((c) => c.name === "rules_sha");
+    } catch {
+      has = false;
+    }
+    this._tickHasRulesSha = has;
+    return has;
+  }
+
+  /**
+   * Log a swallowed poll() error exactly once so a silent zero-firing state is
+   * observable rather than indistinguishable from 'no new rows' (CTL-1063).
+   * @param {unknown} err
+   */
+  _warnPollSuppressed(err) {
+    if (this._warned) return;
+    this._warned = true;
+    try {
+      console.warn(
+        `[belief-reader] poll() suppressed an error (further occurrences silenced): ${err?.message ?? err}`,
+      );
+    } catch {
+      /* never let logging failures escape poll() */
+    }
   }
 
   /** Lazy-load the DB handle (read-only). */
@@ -102,12 +147,19 @@ export class BeliefTail {
     if (this.lastBeliefId === -1) {
       await this.prime();
     }
+    // CTL-1063: select rules_sha only when the tick table actually has it.
+    // A read-only reader against an unmigrated DB (legacy file, daemon mid-
+    // deploy, first poll racing the first new-writer tick) must keep streaming
+    // firings — emit rules_sha:null rather than throwing on a missing column.
+    const tickCols = this._tickColumnsHaveRulesSha(db)
+      ? "t.now_ms AS ts_ms, t.host, t.rules_sha"
+      : "t.now_ms AS ts_ms, t.host, NULL AS rules_sha";
     try {
       const rows = db
         .query(
           `SELECT b.belief_id, b.tick_id, b.rule_id, b.name, b.subject,
                   b.value, b.source_fact_ids, b.stratum,
-                  t.now_ms AS ts_ms, t.host, t.rules_sha
+                  ${tickCols}
              FROM belief b
              LEFT JOIN tick t ON t.tick_id = b.tick_id
             WHERE b.belief_id > ?
@@ -119,7 +171,8 @@ export class BeliefTail {
         this.lastBeliefId = rows[rows.length - 1].belief_id;
       }
       return rows;
-    } catch {
+    } catch (err) {
+      this._warnPollSuppressed(err);
       return [];
     }
   }
