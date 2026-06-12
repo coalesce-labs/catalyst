@@ -86,7 +86,7 @@ describe("keymap — stays in sync with the live DETAIL1 classifier (key-nav.ts)
 
 // CTL-1025: surface chords + create key documented in the cheatsheet AND bound in registry.
 describe("keymap — documents the surface g-chords + create (CTL-1025)", () => {
-  for (const k of ["g h", "g b", "g w", "g q", "g t", "g u", "g f", "g o", "g d", "c"]) {
+  for (const k of ["g h", "g b", "g w", "g t", "g u", "g f", "g o", "g d", "c"]) {
     it(`documents "${k}"`, () => {
       expect(KEYMAP_BOUND_KEYS.has(k)).toBe(true);
     });
@@ -96,7 +96,7 @@ describe("keymap — documents the surface g-chords + create (CTL-1025)", () => 
 describe("keymap — surface chords cross-check the REGISTRY (not classifyKey)", () => {
   const actions = buildSurfaceActions({ jumpToSurface: () => {}, create: () => {} });
   const bound = new Set(actions.map((a) => a.keybinding));
-  for (const k of ["g h", "g b", "g q", "g u", "g f", "g o", "g d", "c"]) {
+  for (const k of ["g h", "g b", "g u", "g f", "g o", "g d", "c"]) {
     it(`"${k}" is documented AND a registry action binds it`, () => {
       expect(KEYMAP_BOUND_KEYS.has(k)).toBe(true);
       expect(bound.has(k)).toBe(true);

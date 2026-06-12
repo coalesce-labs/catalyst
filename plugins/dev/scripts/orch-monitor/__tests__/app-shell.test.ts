@@ -50,12 +50,12 @@ const shellCode = stripComments(shellSrc);
 // ── Pure surface contract (lib/surface.ts) ───────────────────────────────────
 describe("surface contract (CTL-891)", () => {
   it("declares the OPERATE surfaces then the OBSERVE surfaces in nav order", () => {
-    // OBS-5: the five OBSERVE analytics surfaces follow the four OPERATE surfaces.
+    // OBS-5: the five OBSERVE analytics surfaces follow the three OPERATE surfaces.
+    // CTL-1016: the queue surface is retired — its control tower folded into Workers.
     expect([...SURFACES]).toEqual([
       "home",
       "board",
       "workers",
-      "queue",
       "telemetry",
       "utilization",
       "finops",
@@ -64,14 +64,13 @@ describe("surface contract (CTL-891)", () => {
     ]);
   });
 
-  it("maps a g-chord key to every surface (OPERATE h/b/w/q + OBSERVE t/u/f/o/d)", () => {
-    // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w/q —
+  it("maps a g-chord key to every surface (OPERATE h/b/w + OBSERVE t/u/f/o/d)", () => {
+    // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w —
     // t(elemetry) / u(tilization) / f(inops) / o(=fleetOps) / d(evops).
     expect(SURFACE_CHORD).toEqual({
       h: "home",
       b: "board",
       w: "workers",
-      q: "queue",
       t: "telemetry",
       u: "utilization",
       f: "finops",
@@ -138,10 +137,12 @@ describe("shadcn Sidebar primitive is the foundation (CTL-891)", () => {
     }
   });
 
-  it("the OPERATE group lists Inbox, Tickets, Workers, Queue", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers", () => {
     // CTL-930: surface labels renamed Home→Inbox, Board→Tickets.
     // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
-    for (const label of ["Inbox", "Tickets", "Workers", "Dispatch"]) {
+    // CTL-1016: the Dispatch (queue) surface is retired — its control tower folded
+    // into Workers — so OPERATE is now just Inbox / Tickets / Workers.
+    for (const label of ["Inbox", "Tickets", "Workers"]) {
       expect(sidebarComponentSrc).toContain(label);
     }
     expect(sidebarComponentSrc).toMatch(/Operate/i);
@@ -221,16 +222,15 @@ describe("one header: no search box, no SidebarTrigger collapse icon (CTL-1003)"
 });
 
 // ── CTL-1018: ONE header per surface — no second toolbar bar below the shell ──
-// The board, the queue control tower, and the four OBSERVE surfaces each used to
-// stack a SECOND header bar (a "Tickets"/"Capacity & queue"/"Telemetry" toolbar)
-// below the app-shell breadcrumb row. CTL-1018 folds each one's controls into the
-// SINGLE header row via the HeaderActions portal. Static source analysis (no DOM):
-// each surface must portal through HeaderActions and must NOT render its own
-// stacked header. Detail pages are intentionally excluded (already single-header
-// via the CTL-1003 chrome="bare" path).
+// The board and the four OBSERVE surfaces each used to stack a SECOND header bar
+// (a "Tickets"/"Telemetry" toolbar) below the app-shell breadcrumb row. CTL-1018
+// folds each one's controls into the SINGLE header row via the HeaderActions
+// portal. Static source analysis (no DOM): each surface must portal through
+// HeaderActions and must NOT render its own stacked header. Detail pages are
+// intentionally excluded (already single-header via the CTL-1003 chrome="bare"
+// path). CTL-1016 retired the queue control tower surface (folded into Workers).
 describe("one header per surface — secondary toolbar bars folded up (CTL-1018)", () => {
   const boardSrc = read("board/Board.tsx");
-  const queueSrc = read("components/queue/queue-surface.tsx");
   const observe = [
     "components/observe/telemetry-surface.tsx",
     "components/observe/finops-surface.tsx",
@@ -246,12 +246,6 @@ describe("one header per surface — secondary toolbar bars folded up (CTL-1018)
     expect(stripComments(boardSrc)).not.toContain(
       'view === "tickets" ? "Tickets" : "Workers"',
     );
-  });
-
-  it("the queue control tower portals its subtitle + LIVE badge (no Capacity header bar)", () => {
-    expect(queueSrc).toContain("HeaderActions");
-    // The "Capacity & queue" <h1> header bar is removed.
-    expect(stripComments(queueSrc)).not.toContain("Capacity &amp; queue");
   });
 
   it("every OBSERVE surface portals its controls (no stacked <header> title bar)", () => {
@@ -304,7 +298,6 @@ test("SURFACES round-trips the Surface union", () => {
     home: false,
     board: false,
     workers: false,
-    queue: false,
     telemetry: false,
     utilization: false,
     finops: false,

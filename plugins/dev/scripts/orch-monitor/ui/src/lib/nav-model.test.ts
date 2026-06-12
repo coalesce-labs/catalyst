@@ -94,18 +94,18 @@ describe("nav-model — buildNavGroups", () => {
     expect(repoGroups.map((g) => g.scope)).toEqual(["catalyst", "adva"]);
   });
 
-  it("Overall group has exactly 4 items: Inbox, Tickets, Workers, Dispatch", () => {
+  it("Overall group has exactly 3 items: Inbox, Tickets, Workers", () => {
     const groups = buildNavGroups(["catalyst"], repoColors);
     const overall = groups.find((g) => g.scope === "all")!;
     expect(overall.items.map((i) => i.target.surface)).toEqual([
-      "home", "board", "workers", "queue",
+      "home", "board", "workers",
     ]);
     expect(overall.items.map((i) => i.label)).toEqual([
-      "Inbox", "Tickets", "Workers", "Dispatch",
+      "Inbox", "Tickets", "Workers",
     ]);
   });
 
-  it("per-repo group has the same 4 items scoped to that repo", () => {
+  it("per-repo group has the same 3 items scoped to that repo", () => {
     const groups = buildNavGroups(["catalyst"], repoColors);
     const catGroup = groups.find((g) => g.scope === "catalyst")!;
     expect(catGroup).toBeDefined();
@@ -113,7 +113,7 @@ describe("nav-model — buildNavGroups", () => {
     expect(catGroup.dotColor).toBe("#4ea1ff");
     expect(catGroup.items.every((i) => i.target.scope === "catalyst")).toBe(true);
     expect(catGroup.items.map((i) => i.target.surface)).toEqual([
-      "home", "board", "workers", "queue",
+      "home", "board", "workers",
     ]);
   });
 
@@ -184,16 +184,8 @@ describe("nav-model — breadcrumbFor", () => {
     expect(breadcrumbFor("workers", "all")).toEqual(["Overall", "Workers"]);
   });
 
-  it("overall queue → ['Overall', 'Dispatch']", () => {
-    expect(breadcrumbFor("queue", "all")).toEqual(["Overall", "Dispatch"]);
-  });
-
   it("project board → ['catalyst', 'Tickets']", () => {
     expect(breadcrumbFor("board", "catalyst")).toEqual(["catalyst", "Tickets"]);
-  });
-
-  it("project queue → ['adva', 'Dispatch']", () => {
-    expect(breadcrumbFor("queue", "adva")).toEqual(["adva", "Dispatch"]);
   });
 });
 
@@ -205,7 +197,7 @@ describe("nav-model — paletteEntries", () => {
     expect(entries.length).toBeGreaterThan(0);
     // Overall group is first
     expect(entries[0]?.group).toBe("Overall");
-    expect(entries[0]?.items.length).toBe(4);
+    expect(entries[0]?.items.length).toBe(3);
   });
 
   it("each entry item has a target with surface and scope", () => {

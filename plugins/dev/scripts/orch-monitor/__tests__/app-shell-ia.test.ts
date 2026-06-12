@@ -45,14 +45,16 @@ const sidebarCode = stripComments(sidebarSrc);
 
 // ── Scenario: OPERATE is the always-visible primary tier ─────────────────────
 describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
-  it("the OPERATE group lists Inbox, Tickets, Workers, Dispatch in nav order", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers in nav order", () => {
     // CTL-930: labels renamed Home→Inbox, Board→Tickets; array renamed OPERATE_ITEMS.
     // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
+    // CTL-1016: the Dispatch (queue) surface is retired — its control tower folded
+    // into Workers — so OPERATE is now the three surfaces Inbox / Tickets / Workers.
     // OBSERVE is declared before OPERATE_ITEMS in source (observe first, items after).
     const operateBlock = sidebarSrc.slice(
       sidebarSrc.indexOf("const OPERATE_ITEMS"),
     );
-    const order = ["Inbox", "Tickets", "Workers", "Dispatch"].map((l) =>
+    const order = ["Inbox", "Tickets", "Workers"].map((l) =>
       operateBlock.indexOf(`"${l}"`),
     );
     for (const i of order) expect(i).toBeGreaterThan(-1);

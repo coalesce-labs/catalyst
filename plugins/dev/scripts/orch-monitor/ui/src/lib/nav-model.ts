@@ -6,13 +6,13 @@
 // said "no separate Workers item in the left nav" (Workers rides a lens toggle in
 // the display popover). The operator's 2026-06-09 brief overrides this: Workers
 // stays a FIRST-CLASS nav destination in every group so the user makes the
-// Tickets vs Workers choice upfront at the nav level. Queue is not folded.
+// Tickets vs Workers choice upfront at the nav level.
+// CTL-1016: Queue/Dispatch surface retired; control tower folded into Workers.
 
 import {
   InboxIcon,
   LayoutGridIcon,
   UsersIcon,
-  ListOrderedIcon,
   ActivityIcon,
   GaugeIcon,
   WalletIcon,
@@ -64,7 +64,6 @@ const OPERATE_DEFS: Array<{ surface: Surface; label: string; icon: LucideIcon }>
   { surface: "home", label: "Inbox", icon: InboxIcon },
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
-  { surface: "queue", label: "Dispatch", icon: ListOrderedIcon },
 ];
 
 const OBSERVE_DEFS: Array<{ label: string; icon: LucideIcon }> = [
@@ -201,7 +200,6 @@ const SURFACE_LABEL: Partial<Record<Surface, string>> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
-  queue: "Dispatch",
 };
 
 /**

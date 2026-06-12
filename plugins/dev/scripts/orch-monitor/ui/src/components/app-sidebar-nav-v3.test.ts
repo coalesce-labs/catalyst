@@ -209,16 +209,13 @@ describe("CTL-1037 §B — honest nav counts + clarifying tooltips", () => {
     expect(src).toContain("projectQueueDepth(payload, scopeVal)");
   });
 
-  it("the Workers row count hides the zero, the Queue row keeps it", () => {
+  it("the Workers row count hides the zero", () => {
     // Workers: only assigned when > 0.
     expect(src).toContain("if (workerN > 0) countBadge = workerN");
-    // Queue: assigned unconditionally so the 0 stays visible (capacity signal).
-    expect(src).toContain("countBadge = queueN");
   });
 
   it("rows carry an unambiguous hover tooltip", () => {
     expect(src).toContain("active worker");
-    expect(src).toContain("waiting for a slot");
     // The tooltip string is threaded into the SidebarMenuButton.
     expect(src).toContain("tooltip={rowTooltip}");
   });

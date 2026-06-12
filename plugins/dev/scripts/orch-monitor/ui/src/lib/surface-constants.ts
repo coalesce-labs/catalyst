@@ -6,7 +6,6 @@ export type Surface =
   | "home"
   | "board"
   | "workers"
-  | "queue"
   | "telemetry"
   | "utilization"
   | "finops"
@@ -17,7 +16,6 @@ export const SURFACES: readonly Surface[] = [
   "home",
   "board",
   "workers",
-  "queue",
   "telemetry",
   "utilization",
   "finops",
@@ -29,7 +27,6 @@ export const SURFACE_LABEL: Record<Surface, string> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
-  queue: "Dispatch",
   telemetry: "Telemetry",
   utilization: "Utilization",
   finops: "FinOps",
@@ -41,7 +38,6 @@ export const SURFACE_CHORD: Record<string, Surface> = {
   h: "home",
   b: "board",
   w: "workers",
-  q: "queue",
   t: "telemetry",
   u: "utilization",
   f: "finops",
@@ -53,7 +49,6 @@ export const SURFACE_BREADCRUMB: Record<Surface, string[]> = {
   home: ["Overall", "Inbox"],
   board: ["Overall", "Tickets"],
   workers: ["Overall", "Workers"],
-  queue: ["Overall", "Dispatch"],
   telemetry: ["Observe", "Telemetry"],
   utilization: ["Observe", "Utilization"],
   finops: ["Observe", "FinOps"],

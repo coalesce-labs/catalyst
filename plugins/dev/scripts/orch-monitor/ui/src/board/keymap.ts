@@ -59,7 +59,6 @@ export const KEYMAP: readonly KeymapSection[] = [
       { keys: "g h", description: "Inbox" },
       { keys: "g b", description: "Tickets" },
       { keys: "g w", description: "Workers (on non-detail pages)" },
-      { keys: "g q", description: "Dispatch" },
       { keys: "g t", description: "Telemetry (on non-detail pages)" },
       { keys: "g u", description: "Utilization" },
       { keys: "g f", description: "FinOps" },

@@ -3,7 +3,6 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   InboxIcon,
   LayoutGridIcon,
-  ListOrderedIcon,
   SettingsIcon,
   UsersIcon,
 } from "lucide-react";
@@ -100,7 +99,6 @@ const SURFACE_ICON: Partial<Record<Surface, typeof InboxIcon>> = {
   home: InboxIcon,
   board: LayoutGridIcon,
   workers: UsersIcon,
-  queue: ListOrderedIcon,
 };
 
 export function AppShell({ children }: { children: React.ReactNode }) {
