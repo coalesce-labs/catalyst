@@ -360,16 +360,22 @@ export function collectTickFacts({
           const lastSha =
             db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get()
               ?.value_text ?? null;
-          if (lastSha !== RULES_SHA) {
-            if (typeof appendEvent === "function") {
-              try {
-                appendEvent({
-                  "event.name": "rules.version.changed",
-                  payload: { old_sha: lastSha, new_sha: RULES_SHA },
-                });
-              } catch {
-                /* operator-event append is best-effort */
-              }
+          // CTL-1063 remediate (verify silent-failure collector.mjs:374):
+          // couple the last-seen cursor advance to a WIRED appender. When
+          // appendEvent is null (pre-wiring boot path, or a unit test that
+          // omits it) the cursor must NOT advance — otherwise the one-shot
+          // rules.version.changed signal is silently consumed before any
+          // observer exists and never fires again. Only once the appender is
+          // threaded (collectBeliefsTick → scheduler) does the event emit AND
+          // the cursor advance, together.
+          if (lastSha !== RULES_SHA && typeof appendEvent === "function") {
+            try {
+              appendEvent({
+                "event.name": "rules.version.changed",
+                payload: { old_sha: lastSha, new_sha: RULES_SHA },
+              });
+            } catch {
+              /* operator-event append is best-effort */
             }
             db.run(
               "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', ?)",
@@ -744,7 +750,12 @@ export function collectTickFacts({
 // scheduler already touches and logs (never throws). This is the only call
 // site in scheduler.mjs (kept to ~2 lines there to avoid conflicting with
 // parallel work on the tick loop).
-export function collectBeliefsTick({ orchDir, linearCache, appendIntentEvent = null } = {}) {
+export function collectBeliefsTick({
+  orchDir,
+  linearCache,
+  appendIntentEvent = null,
+  appendEvent = null,
+} = {}) {
   if ((process.env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
     return { ok: false, skipped: "disabled" }; // cheap pre-gate: no wiring work at all
   }
@@ -765,6 +776,12 @@ export function collectBeliefsTick({ orchDir, linearCache, appendIntentEvent = n
       // CTL-936: operator-event seam for intent.ineffective — threaded from
       // runTick when CATALYST_INTENTS_ENFORCE=1. Null → legacy shadow-only.
       appendIntentEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
+      // CTL-1063 remediate (verify high review collector.mjs:734): thread the
+      // operator-event appender so the one-shot rules.version.changed signal
+      // can actually fire in the live daemon. Mirrors appendIntentEvent —
+      // without this the emit (gated on `typeof appendEvent === 'function'`)
+      // was dead in production because the wrapper never forwarded it.
+      appendEvent: typeof appendEvent === "function" ? appendEvent : null,
     });
     if (!res.ok && !res.skipped) {
       log.warn({ err: res.error }, "beliefs: collector tick failed (shadow — tick unaffected)");

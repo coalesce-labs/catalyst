@@ -297,3 +297,62 @@ describe("BeliefTail rules_sha defensive read (CTL-1063)", () => {
     }
   });
 });
+
+describe("BeliefTail poll() error suppression (CTL-1063)", () => {
+  // verify coverage finding (belief-reader.mjs:96): the catch(err) path in
+  // poll() — _warnPollSuppressed (warn-once) + still-returns-[] — was entirely
+  // untested. This is the exact silent-failure seam the code makes observable:
+  // a swallowed query error must NOT look like 'no new rows'. Inject a db whose
+  // query() throws on the belief SELECT but succeeds on the PRAGMA column probe.
+  type ThrowingTail = BeliefTailType & {
+    _dbLoaded: boolean;
+    _db: unknown;
+    _warned: boolean;
+  };
+
+  function makeSelectThrowingDb() {
+    return {
+      query(sql: string) {
+        if (sql.includes("PRAGMA")) {
+          // column probe succeeds → poll() proceeds to the failing SELECT
+          return { all: () => [{ name: "rules_sha" }] };
+        }
+        // the belief SELECT explodes
+        return {
+          all: () => {
+            throw new Error("simulated belief SELECT failure");
+          },
+        };
+      },
+      close() {
+        /* no-op */
+      },
+    };
+  }
+
+  it("returns [] and warns exactly once across two failing polls; _warned latches true", async () => {
+    const tail = new BeliefTail({ dbPath: ":memory:" }) as unknown as ThrowingTail;
+    tail._dbLoaded = true;
+    tail._db = makeSelectThrowingDb();
+    (tail as unknown as BeliefTailType).lastBeliefId = 0;
+
+    const warnCalls: unknown[][] = [];
+    const realWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnCalls.push(args);
+    };
+    try {
+      const first = await (tail as unknown as BeliefTailType).poll();
+      expect(first).toEqual([]); // swallowed, not thrown
+      const second = await (tail as unknown as BeliefTailType).poll();
+      expect(second).toEqual([]); // still suppressed
+    } finally {
+      console.warn = realWarn;
+    }
+
+    expect(warnCalls.length).toBe(1); // warn-once guard held across both polls
+    expect(tail._warned).toBe(true);
+    // the one warning identifies the suppression for an operator
+    expect(String(warnCalls[0]?.[0])).toContain("[belief-reader]");
+  });
+});

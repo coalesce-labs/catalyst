@@ -74,12 +74,19 @@ export class BeliefTail {
    * would otherwise throw 'no such column: t.rules_sha'. Probed once via
    * PRAGMA and cached for the life of the handle (CTL-1063).
    *
+   * The cache LATCHES once per handle (positive or negative): a reader that
+   * probes BEFORE the writer's migration sees the column absent and emits
+   * rules_sha:null for the rest of this connection's life. This prevents the
+   * crash, not a mid-deploy upgrade — picking up a freshly-migrated column
+   * requires a reader reconnect (bounded by per-SSE-stream reconnect). rules_sha
+   * is metadata, so the firing stream itself is unaffected meanwhile.
+   *
    * @param {import("bun:sqlite").Database} db
    * @returns {boolean}
    */
   _tickColumnsHaveRulesSha(db) {
     if (this._tickHasRulesSha !== undefined) return this._tickHasRulesSha;
-    let has = false;
+    let has; // assigned in every branch below — no useless initializer (eslint)
     try {
       const cols = db.query("PRAGMA table_info(tick)").all();
       has = cols.some((c) => c.name === "rules_sha");

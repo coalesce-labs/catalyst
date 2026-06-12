@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
-import { collectTickFacts, __resetBeliefsCollectorForTests } from "./collector.mjs";
+import {
+  collectTickFacts,
+  collectBeliefsTick,
+  __resetBeliefsCollectorForTests,
+} from "./collector.mjs";
 import { RULES_SHA } from "./rules.mjs";
 
 const DAY = 86_400_000;
@@ -799,6 +803,87 @@ describe("collectTickFacts — CTL-1063 Phase 4: rules_sha stamping + boot event
     collect(db, orchDir, { appendEvent });
     const after2 = events.filter((e) => e["event.name"] === "rules.version.changed").length;
     expect(after2).toBe(1); // still 1 — no new event on tick 2
+    db.close();
+  });
+
+  test("version differs but appendEvent is NOT a function → no event AND cfg cursor stays put (coupled)", () => {
+    // verify silent-failure finding (collector.mjs:374) + low-coverage finding
+    // (collector.mjs:367): the cfg write is now coupled to a wired appender, so
+    // the one-shot signal is never silently consumed before an observer exists.
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    db.run(
+      "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', 'stale000000feed0')",
+    );
+    const res = collect(db, scratch(), { appendEvent: null }); // no appender (prod boot path)
+    expect(res.ok).toBe(true);
+    // cursor MUST NOT advance — otherwise the change is observed-by-nobody
+    const row = db
+      .query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'")
+      .get();
+    expect(row.value_text).toBe("stale000000feed0");
+    db.close();
+  });
+});
+
+describe("collectBeliefsTick — daemon wrapper threads appendEvent (CTL-1063 remediate)", () => {
+  // verify HIGH finding (collector.mjs:734): the wrapper destructured only
+  // {orchDir, linearCache, appendIntentEvent}, so appendEvent stayed null in
+  // the live daemon and rules.version.changed could NEVER fire in production.
+  // These drive the WRAPPER (not collectTickFacts directly) to prove the
+  // one-shot boot event now reaches the injected appender AND that the cfg
+  // cursor is coupled to a wired appender (verify silent-failure finding:374).
+  function withWrapperEnv(dbPath, fn) {
+    const prevShadow = process.env.CATALYST_BELIEFS_SHADOW;
+    const prevDbPath = process.env.CATALYST_BELIEFS_DB;
+    process.env.CATALYST_BELIEFS_SHADOW = "1";
+    process.env.CATALYST_BELIEFS_DB = dbPath;
+    __resetBeliefsCollectorForTests(); // fresh module db at our temp path
+    try {
+      return fn();
+    } finally {
+      __resetBeliefsCollectorForTests(); // close the module handle before re-opening the file
+      if (prevShadow === undefined) delete process.env.CATALYST_BELIEFS_SHADOW;
+      else process.env.CATALYST_BELIEFS_SHADOW = prevShadow;
+      if (prevDbPath === undefined) delete process.env.CATALYST_BELIEFS_DB;
+      else process.env.CATALYST_BELIEFS_DB = prevDbPath;
+    }
+  }
+
+  test("forwards appendEvent → rules.version.changed reaches the event log and cfg advances", () => {
+    const dbPath = join(scratch(), "wrapper-beliefs.db");
+    const events = withWrapperEnv(dbPath, () => {
+      const captured = [];
+      const res = collectBeliefsTick({
+        orchDir: scratch(),
+        linearCache: { get: () => undefined },
+        appendEvent: (e) => captured.push(e),
+      });
+      expect(res.ok).toBe(true);
+      return captured;
+    });
+    const evt = events.find((e) => e["event.name"] === "rules.version.changed");
+    expect(evt).toBeTruthy();
+    expect(evt.payload.new_sha).toBe(RULES_SHA);
+    // and the cursor advanced, durably, once the event was observed
+    const db = openBeliefsDb({ path: dbPath });
+    const row = db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get();
+    expect(row?.value_text).toBe(RULES_SHA);
+    db.close();
+  });
+
+  test("appendEvent omitted (the pre-fix wiring) → cfg cursor never stamped", () => {
+    const dbPath = join(scratch(), "wrapper-noappender.db");
+    withWrapperEnv(dbPath, () => {
+      const res = collectBeliefsTick({
+        orchDir: scratch(),
+        linearCache: { get: () => undefined },
+        // appendEvent intentionally omitted → reproduces the dead-event path
+      });
+      expect(res.ok).toBe(true);
+    });
+    const db = openBeliefsDb({ path: dbPath });
+    const row = db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get();
+    expect(row).toBeFalsy(); // one-shot signal NOT silently consumed
     db.close();
   });
 });

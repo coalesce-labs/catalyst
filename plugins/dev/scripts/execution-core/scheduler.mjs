@@ -4612,6 +4612,11 @@ function runTick() {
       orchDir: runningOpts.orchDir,
       linearCache: runningOpts.cache,
       appendIntentEvent: intentEventAppender,
+      // CTL-1063 remediate (verify high review collector.mjs:734): thread the
+      // same event-log appender the adjacent executeEscalations/runAdvanceShadow
+      // already receive, so the one-shot rules.version.changed boot event can
+      // fire in the live daemon instead of staying dead behind a null appendEvent.
+      appendEvent: intentEventAppender,
     });
     // CTL-937: bounded stall-diagnostician wake wiring (opt-in CATALYST_DIAGNOSTICIAN=1).
     // Reads wake_diagnostician beliefs for the current tick from the shared beliefs.db
