@@ -68,6 +68,8 @@ import {
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
 import { handlePluginRefreshEvent, resolveRepoFullName } from "./plugin-refresh.mjs";
+import { handleStackReloadEvent } from "./stack-reload.mjs";
+import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
   deriveTraceId,
@@ -1788,7 +1790,7 @@ export function processEvent(event) {
   // orchestration is active. handlePluginRefreshEvent never throws and the
   // events it emits carry resource["service.name"]=catalyst.broker, which
   // shouldSkipEvent drops on re-ingest (no self-wake loop).
-  handlePluginRefreshEvent({
+  const __refreshResults = handlePluginRefreshEvent({
     event,
     repoFullName: __repoFullName(),
     machineConfigPath: __machineConfigPath(),
@@ -1796,6 +1798,13 @@ export function processEvent(event) {
     emitFn: appendEvent,
     loadedCommit: __loadedCommit(),
     loadedCommitRoot: __loadedCommitRoot(),
+  });
+  // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
+  handleStackReloadEvent({
+    results: __refreshResults,
+    loadedCommitRoot: __loadedCommitRoot(),
+    emitFn: appendEvent,
+    currentByteOffset: getLastByteOffset(),
   });
 
   if (name === "filter.register") {

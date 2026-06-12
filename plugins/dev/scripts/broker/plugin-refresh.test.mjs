@@ -607,6 +607,126 @@ describe("handlePluginRefreshEvent", () => {
   });
 });
 
+// ─── CTL-1077 regression-guard: enriched result shape ───────────────────────
+// refreshPluginCheckout must return root/oldSha/newSha/restartNeeded so the
+// new stack-reload module can drive the reload decision without a second git
+// call. Existing CTL-993 emit assertions must still pass unchanged.
+
+describe("refreshPluginCheckout — enriched result shape (CTL-1077)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("changed pull returns root/oldSha/newSha/restartNeeded", () => {
+    let head = "old";
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 1,
+      gitFn: (root, args) => {
+        if (args[0] === "rev-parse") return head;
+        if (args[0] === "pull") { head = "new"; return ""; }
+        return "";
+      },
+      emitFn: () => {},
+      loadedCommit: "old",
+      loadedCommitRoot: "/co",
+    });
+    expect(res).toMatchObject({
+      root: "/co", oldSha: "old", newSha: "new", changed: true, restartNeeded: true,
+    });
+  });
+
+  test("throttled pull returns root with null shas", () => {
+    // prime the throttle
+    refreshPluginCheckout({ root: "/co", now: 0, gitFn: () => "sha", emitFn: () => {} });
+    const res = refreshPluginCheckout({ root: "/co", now: 1, gitFn: () => "sha", emitFn: () => {} });
+    expect(res.throttled).toBe(true);
+    expect(res.root).toBe("/co");
+    expect(res.oldSha).toBeNull();
+    expect(res.newSha).toBeNull();
+  });
+
+  test("pull failure returns root with oldSha and null newSha", () => {
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 1,
+      gitFn: (root, args) => {
+        if (args[0] === "rev-parse") return "oldsha";
+        throw new Error("not fast-forwardable");
+      },
+      emitFn: () => {},
+    });
+    expect(res.failed).toBe(true);
+    expect(res.root).toBe("/co");
+    expect(res.oldSha).toBe("oldsha");
+    expect(res.newSha).toBeNull();
+  });
+
+  test("no-change pull returns root/oldSha/newSha with changed false", () => {
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 1,
+      gitFn: () => "sameSha",
+      emitFn: () => {},
+    });
+    expect(res.changed).toBe(false);
+    expect(res.root).toBe("/co");
+    expect(res.oldSha).toBe("sameSha");
+    expect(res.newSha).toBe("sameSha");
+  });
+});
+
+describe("handlePluginRefreshEvent — returns per-root results array (CTL-1077)", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("returns an array of per-root results on a merge event", () => {
+    let pulled = false;
+    const results = handlePluginRefreshEvent({
+      event: {
+        attributes: {
+          "event.name": "github.pr.merged",
+          "vcs.repository.name": "coalesce-labs/catalyst",
+        },
+        body: { payload: { merged: true } },
+      },
+      now: 0,
+      env: {},
+      repoFullName: "coalesce-labs/catalyst",
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: (p) => {
+        if (p === "/no/machine.json")
+          return JSON.stringify({ catalyst: { orchestration: { pluginDirs: "/co/plugins/dev" } } });
+        throw new Error("ENOENT");
+      },
+      gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
+      gitFn: (root, args) => {
+        if (args[0] === "pull") { pulled = true; return ""; }
+        if (args[0] === "rev-parse") return pulled ? "new" : "old";
+        return "";
+      },
+      emitFn: () => {},
+    });
+    expect(Array.isArray(results)).toBe(true);
+    expect(results.length).toBe(1);
+    expect(results[0]).toMatchObject({ root: "/co", changed: true });
+  });
+
+  test("returns null for non-merge events (existing CTL-993 behavior preserved)", () => {
+    const results = handlePluginRefreshEvent({
+      event: { attributes: { "event.name": "linear.issue.created" }, body: {} },
+      now: 0,
+      env: {},
+      repoFullName: "coalesce-labs/catalyst",
+      machineConfigPath: "/no/machine.json",
+      repoConfigPath: "/no/repo.json",
+      readFileFn: () => "{}",
+      gitToplevelFn: (pd) => pd,
+      gitFn: () => "",
+      emitFn: () => {},
+    });
+    expect(results).toBeNull();
+  });
+});
+
 // ─── self-filter loop guard (CTL-346 / CTL-993) ──────────────────────────────
 // The events this module emits must be dropped by shouldSkipEvent on re-ingest
 // so the broker never wakes itself on its own plugin.checkout.* output.

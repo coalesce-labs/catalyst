@@ -16,8 +16,9 @@
 // index.mjs is the thin daemon entrypoint (main/shutdown, PID + key-health)
 // plus the re-export barrel that preserves the public import surface.
 
-import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync } from "node:fs";
-import { dirname } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   openBrokerStateDb,
@@ -149,7 +150,7 @@ export {
   processEvent,
   handleWorkerStateChanged,
 } from "./router.mjs";
-export { loadExistingRegistrations } from "./tailer.mjs";
+export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";
 // CTL-993: merge-to-main plugin-checkout refresh. router.mjs calls
 // handlePluginRefreshEvent in processEvent; the rest are pure units re-exported
 // through the barrel so the public import surface stays complete.
@@ -162,6 +163,37 @@ export {
   PLUGIN_REFRESH_THROTTLE_MS,
   __clearThrottleForTest,
 } from "./plugin-refresh.mjs";
+// CTL-1077: automatic hot-reload of the running stack on checkout advance.
+// router.mjs calls handleStackReloadEvent after handlePluginRefreshEvent;
+// the rest are pure units re-exported for testability.
+export {
+  decideStackReload,
+  handleStackReloadEvent,
+  STACK_RELOAD_DEBOUNCE_MS,
+  __clearReloadStateForTest,
+} from "./stack-reload.mjs";
+
+/**
+ * resolveBootByteOffset — pick the tailer start offset on broker boot.
+ *
+ * When the broker self-reloads (CTL-1077), it writes a handoff file with the
+ * last-processed byte offset so the successor can resume exactly where it left
+ * off instead of reseeding to EOF and skipping events appended during the gap.
+ *
+ * Falls back to `eofSize` (the existing behavior) when:
+ *   - no handoff file
+ *   - handoff logPath ≠ current logPath (different month file)
+ *   - handoff is stale (older than maxAgeMs)
+ *
+ * @param {{ handoff, logPath, eofSize, now?, maxAgeMs? }} opts
+ * @returns {number}
+ */
+export function resolveBootByteOffset({ handoff, logPath, eofSize, now = Date.now(), maxAgeMs = 60_000 }) {
+  if (!handoff) return eofSize;
+  if (handoff.logPath !== logPath) return eofSize;
+  if (now - handoff.ts > maxAgeMs) return eofSize;
+  return handoff.byteOffset;
+}
 
 // Identity-stable aliases for the shared maps main()/shutdown() read.
 const interests = getInterests();
@@ -335,8 +367,18 @@ function main() {
     const fd = openSync(logPath, "r");
     const stat = fstatSync(fd);
     closeSync(fd);
-    seedTailer({ logPath, byteOffset: stat.size });
-    log.info({ byteOffset: stat.size, logPath }, "starting");
+    // CTL-1077: honor broker self-reload handoff — resume from saved offset
+    // rather than reseeding to EOF, so events appended during the restart gap
+    // are not silently dropped.
+    const handoffPath = resolve(homedir(), "catalyst", "broker", "reload-handoff.json");
+    let handoff = null;
+    try { handoff = JSON.parse(readFileSync(handoffPath, "utf8")); } catch { /* no handoff */ }
+    const byteOffset = resolveBootByteOffset({ handoff, logPath, eofSize: stat.size, now: Date.now() });
+    if (handoff && byteOffset !== stat.size) {
+      try { unlinkSync(handoffPath); } catch { /* ok */ }
+    }
+    seedTailer({ logPath, byteOffset });
+    log.info({ byteOffset, logPath }, "starting");
   } catch {
     log.info({ logPath }, "starting (no log file yet)");
   }
