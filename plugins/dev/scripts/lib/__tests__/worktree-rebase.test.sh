@@ -653,9 +653,16 @@ advance_origin_main_clean
     rebase_onto_base_classified "main"
   echo "$?" >"$SCRATCH/t21.rc"
   echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t21.reason"
+  # 21b: capture RT_PRECHECK inside the subshell where it is set (CTL-1076 Phase 3)
+  printf '%s\n' "${RT_PRECHECK[@]+"${RT_PRECHECK[@]}"}" >"$SCRATCH/t21.files"
 )
 assert_eq "2" "$(cat "$SCRATCH/t21.rc")" "real source dirt → rc 2"
 assert_eq "rebase_refused_dirty_tree" "$(cat "$SCRATCH/t21.reason")" "real source → typed reason"
+
+# ── 21b. RT_PRECHECK carries offending file name after stall ──────────────────
+echo "21b. RT_PRECHECK carries offending file name after stall"
+assert_eq "shared.txt" "$(grep -Fx shared.txt "$SCRATCH/t21.files")" \
+  "RT_PRECHECK lists the dirty source file"
 
 # ── 22. settling-debris-only (untracked node_modules/) → grace re-probe → clean
 echo "22. untracked node_modules settling-debris → grace re-probe → rc 0"
@@ -702,6 +709,22 @@ for s in src/index.ts shared.txt plugins/dev/scripts/foo.sh; do
   if _is_settling_debris_path "$s"; then fail "_is_settling_debris_path $s → false (expected source)"
   else pass "_is_settling_debris_path $s → false"; fi
 done
+
+# ── 25. escalation-explain.mjs threads observed.dirtyFiles through unchanged ─
+echo "25. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1076 Phase 3)"
+EXPLAIN_MJS="${SCRIPT_DIR}/../../execution-core/escalation-explain.mjs"
+if [[ -f "$EXPLAIN_MJS" ]] && command -v node >/dev/null 2>&1; then
+  OBS='{"rebaseRc":2,"stallReason":"rebase_refused_dirty_tree","dirtyFiles":["shared.txt"]}'
+  EXPL_OUT="$(node "$EXPLAIN_MJS" \
+    --ticket CTL-1076 --phase plan \
+    --what-failed "x" --why-gave-up "y" --human-question "z" \
+    --observed "$OBS" 2>/dev/null || echo '{}')"
+  assert_eq "shared.txt" \
+    "$(printf '%s' "$EXPL_OUT" | jq -r '.observed.dirtyFiles[0]' 2>/dev/null)" \
+    "escalation-explain: observed.dirtyFiles[0] passes through unchanged"
+else
+  echo "  SKIP: escalation-explain.mjs or node not available"
+fi
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"
