@@ -156,7 +156,7 @@ export interface BoardTicket {
   generation: number | null;
   /** CTL-1066: reason a stalled/failed phase gave up, from the surfaced phase
    *  signal's stalledReason/failureReason. null unless status is stalled/failed. */
-  failureReason: string | null;
+  failureReason?: string | null;
 }
 
 export interface BoardQueueItem {
@@ -180,7 +180,7 @@ export interface BoardQueueItem {
   host: BoardHostRef | null;
   /** CTL-1066: active dispatch retry cool-down for this queued ticket; null when
    *  not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
-  dispatchCooldown: { expiresAt: number; consecutiveFailures: number } | null;
+  dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
 }
 
 export interface BoardConfig {
