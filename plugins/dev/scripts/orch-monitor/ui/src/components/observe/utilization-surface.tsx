@@ -20,6 +20,7 @@
 // ChartCard ladder. The two deferred panels render the dashed "needs event-log
 // reader · OBS-15" locked state — never blank, never fabricated.
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "@tanstack/react-router";
 import { useAtom } from "jotai";
 import { HeaderActions } from "@/components/header-actions";
 import type { OtelHealth, OtelLogEntry } from "@/lib/types";
@@ -67,6 +68,7 @@ const EMPTY_CONFIG: BoardConfig = {
 };
 
 export function UtilizationSurface() {
+  const navigate = useNavigate();
   const [range, setRange] = useAtom(timeRangeAtom);
 
   const [health, setHealth] = useState<OtelHealth | null>(null);
@@ -278,13 +280,13 @@ export function UtilizationSurface() {
         maxParallel={config.maxParallel}
         queueLen={queueLen}
         onAction={(target) => {
-          // Cross-surface drill: STARVED → eligible set, JAMMED → FleetOps reconcile.
-          // FleetOps ships its own surface later; until then a full-document nav to
-          // the dashboard's health view is the closest existing destination.
+          // Cross-surface drill: STARVED → eligible set (Dispatch), JAMMED →
+          // FleetOps reconcile. Both are client-side router navigations to the
+          // surface's own route (no full-document reload).
           if (target === "eligible") {
-            window.location.assign("/?surface=queue");
+            void navigate({ to: "/dispatch" });
           } else {
-            window.location.assign("/?surface=fleetops");
+            void navigate({ to: "/fleetops" });
           }
         }}
       />

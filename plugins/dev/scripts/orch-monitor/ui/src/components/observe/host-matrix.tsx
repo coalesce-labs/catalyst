@@ -12,6 +12,7 @@
 // the grid wrapper (the collapse-bug rule — see fleetops-surface.tsx).
 
 import { Lock } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import { Panel, PanelHeader, SectionLabel } from "@/components/ui/panel";
 import type { ClusterSignalNode } from "@/lib/cluster-signal";
 import type { BoardWorker } from "@/board/types";
@@ -38,6 +39,7 @@ const GRID_COLS =
   "grid-cols-[1.4fr_auto_auto_auto_auto_minmax(0,1.6fr)]";
 
 export function HostMatrix({ nodes, workers, maxParallel, boardAgeMs }: HostMatrixProps) {
+  const navigate = useNavigate();
   const brokerFresh = boardAgeMs != null && boardAgeMs < BROKER_STALE_MS;
 
   return (
@@ -75,7 +77,7 @@ export function HostMatrix({ nodes, workers, maxParallel, boardAgeMs }: HostMatr
               <button
                 key={n.host}
                 type="button"
-                onClick={() => window.location.assign("/?surface=queue")}
+                onClick={() => void navigate({ to: "/dispatch" })}
                 title={`${shortHostName(n.host)} — host swimlane`}
                 className={`grid ${GRID_COLS} h-10 items-center gap-x-3 rounded px-2 text-left text-[12px] tabular-nums hover:bg-surface-3`}
               >

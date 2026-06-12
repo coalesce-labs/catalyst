@@ -168,6 +168,12 @@ describe("Shell preferences persist (CTL-911)", () => {
     expect(routerSrc).toMatch(/redirect\(\{\s*to:\s*surfaceToPath\(pref\)/);
   });
 
+  it("the home-route redirect is guarded against deep-link initial loads (CTL-1059)", () => {
+    // The beforeLoad must consult the captured initial pathname so a cold deep-link
+    // never bounces a non-home-preference operator to their landing surface.
+    expect(routerSrc).toContain("shouldApplyLandingRedirect");
+  });
+
   it("Settings exposes the landing-surface control and writes it through lib/prefs", () => {
     expect(settingsSrc).toContain("writeLandingSurface");
     expect(settingsSrc).toContain("LANDING_SURFACES");
