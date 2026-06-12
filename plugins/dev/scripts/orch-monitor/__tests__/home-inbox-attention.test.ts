@@ -202,3 +202,41 @@ describe("rowDurationAnchor — attention rows anchor to attentionSince ?? heldS
     expect(rowDurationAnchor(row)).toBeNull();
   });
 });
+
+// ── CTL-1065: humanQuestion surfaces as attention sub-label ───────────────────
+
+describe("CTL-1065: attentionSubLabel uses humanQuestion when present", () => {
+  it("needs-human row uses humanQuestion as sub-label when present", () => {
+    const t = mkTicket("CTL-1065", {
+      attention: "needs-human",
+      humanQuestion: "restart CTL-1065 implement, or extend the threshold?",
+    });
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-1065")!;
+    expect(row.subLabel).toBe("restart CTL-1065 implement, or extend the threshold?");
+  });
+
+  it("falls back to 'escalated — needs human' when humanQuestion absent", () => {
+    const t = mkTicket("CTL-1065", { attention: "needs-human" });
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-1065")!;
+    expect(row.subLabel).toBe("escalated — needs human");
+  });
+
+  it("falls back when humanQuestion is empty string", () => {
+    const t = mkTicket("CTL-1065", { attention: "needs-human", humanQuestion: "" });
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-1065")!;
+    expect(row.subLabel).toBe("escalated — needs human");
+  });
+
+  it("waiting-on-you still uses 'waiting on your answer' regardless of humanQuestion", () => {
+    const t = mkTicket("CTL-1065", {
+      attention: "waiting-on-you",
+      humanQuestion: "which path?",
+    });
+    const model = deriveInbox(mkPayload([t]));
+    const row = model.order.find((r) => r.id === "CTL-1065")!;
+    expect(row.subLabel).toBe("waiting on your answer");
+  });
+});

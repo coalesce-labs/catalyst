@@ -134,6 +134,10 @@ export interface BoardTicket {
    *  has it been running / in its current state" anchor for the running set.
    *  null when the surfaced phase carried no startedAt. */
   currentPhaseSince?: string | null;
+  /** CTL-1065: structured escalation question from the most-recent stalled/failed
+   *  signal's explanation.human_question. Used by home-inbox attentionSubLabel as
+   *  the sub-label for needs-human rows. null when absent (back-compat). */
+  humanQuestion?: string | null;
   /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
    *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
    *  escalation via a needs-human/needs-input label or the host-local marker) |

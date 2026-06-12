@@ -709,6 +709,21 @@ function ticketUpdatedAt(phaseSigs) {
   return max;
 }
 
+/** CTL-1065: extract human_question from the most-recent phase signal that
+ *  carries a structured explanation. Scanned newest-phase-first so the most
+ *  actionable question surfaces. Returns null when no signal has one. */
+export function deriveHumanQuestion(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const expl = sig.explanation;
+    if (expl && typeof expl === "object" && typeof expl.human_question === "string") {
+      return expl.human_question;
+    }
+  }
+  return null;
+}
+
 // CTL-1041: the TITLE is the outcome line and must lead on every surface (slot
 // cards, inbox detail, holding rows). The triage `summary` is the DESCRIPTION
 // (e.g. "Live probe confirmed the unified event log…") and must NEVER stand in
@@ -1235,6 +1250,9 @@ export async function assembleBoard() {
       // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
       // signal) → again rendered unavailable, never now-anchored to a guess.
       currentPhaseSince: cur.startedAt ?? null,
+      // CTL-1065: human_question from the most-recent phase signal's explanation,
+      // surfaced as the inbox sub-label for needs-human rows.
+      humanQuestion: deriveHumanQuestion(phaseSigs),
       // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
       // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
       // ISO attentionSince anchor (or null, never fabricated). Drives the ONE

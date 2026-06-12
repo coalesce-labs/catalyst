@@ -43,6 +43,9 @@ export interface InboxItemState {
    *  null when the transcript is absent or unreadable. */
   transcriptTail: string | null;
   bgJobId: string | null;
+  /** CTL-1065: structured escalation question from signal.explanation.human_question.
+   *  null when no explanation is present or the field is absent (back-compat). */
+  humanQuestion: string | null;
 }
 
 export interface CollectOptions {
@@ -243,6 +246,10 @@ export function collectInboxItemState(
     jobsDir,
   );
 
+  const expl = isRecord(signal.explanation) ? signal.explanation : null;
+  const humanQuestion =
+    expl !== null && typeof expl.human_question === "string" ? expl.human_question : null;
+
   return Promise.resolve({
     ticket,
     title: opts.title,
@@ -256,5 +263,6 @@ export function collectInboxItemState(
     raisedQuestion,
     transcriptTail,
     bgJobId,
+    humanQuestion,
   });
 }
