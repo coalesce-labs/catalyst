@@ -699,6 +699,84 @@ else
   fail "Suite 2 ext: draft_pr_ensure --title should be 'feat: CTL-709 work commit', got: '$TITLE_LINE'"
 fi
 
+# ─── Suite 6: draft_pr_push_verify + draft_pr_head_oid (CTL-1051) ─────────────
+echo ""
+echo "Suite 6: draft_pr_push_verify and draft_pr_head_oid"
+
+# 6a: fast-forward push — no prior remote ref; returns 0, echoes HEAD sha, origin == HEAD.
+echo "6a: fast-forward push → returns 0, echoes HEAD sha, origin/feature == HEAD"
+new_fixture pv-ff
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-ff.exit"
+  echo "$out" > "${SCRATCH}/pv-ff.out"
+  git rev-parse HEAD > "${SCRATCH}/pv-ff.local"
+  git rev-parse origin/feature > "${SCRATCH}/pv-ff.remote" 2>/dev/null || echo "" > "${SCRATCH}/pv-ff.remote"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/pv-ff.exit" 2>/dev/null)" "6a: push_verify ff returns 0"
+assert_eq "$(cat "${SCRATCH}/pv-ff.local")" "$(cat "${SCRATCH}/pv-ff.out")" "6a: push_verify ff echoes HEAD sha"
+assert_eq "$(cat "${SCRATCH}/pv-ff.local")" "$(cat "${SCRATCH}/pv-ff.remote")" "6a: origin/feature == HEAD after ff"
+
+# 6b: non-fast-forward (rebase/amend) — plain push fails; force-with-lease succeeds;
+#     rc==0, origin/feature advances to HEAD.
+echo "6b: non-fast-forward (rebase) → force-with-lease; rc==0; origin advanced"
+new_fixture pv-nff
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1   # commit A on origin
+  git commit --quiet --amend -m "feat: amended work commit"              # diverge → commit B
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-nff.exit"
+  git rev-parse HEAD > "${SCRATCH}/pv-nff.local"
+  git rev-parse origin/feature > "${SCRATCH}/pv-nff.remote" 2>/dev/null || echo "" > "${SCRATCH}/pv-nff.remote"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/pv-nff.exit" 2>/dev/null)" "6b: push_verify rebase returns 0 (force-with-lease)"
+assert_eq "$(cat "${SCRATCH}/pv-nff.local")" "$(cat "${SCRATCH}/pv-nff.remote")" "6b: origin/feature advanced to HEAD"
+
+# 6c: detached HEAD — fail-closed; returns non-zero; echoes nothing.
+echo "6c: detached HEAD → fail-closed; rc!=0; no output"
+new_fixture pv-detached
+(
+  cd "$WORK"
+  git checkout --quiet --detach HEAD
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-det.exit"
+  echo "$out" > "${SCRATCH}/pv-det.out"
+) || true
+DET_EXIT="$(cat "${SCRATCH}/pv-det.exit" 2>/dev/null)"
+DET_OUT="$(cat "${SCRATCH}/pv-det.out" 2>/dev/null)"
+if [[ "$DET_EXIT" != "0" ]]; then pass "6c: push_verify detached HEAD returns non-zero"
+else fail "6c: detached HEAD should return non-zero — got rc=$DET_EXIT"; fi
+if [[ -z "$DET_OUT" ]]; then pass "6c: push_verify detached HEAD echoes nothing"
+else fail "6c: detached HEAD should echo nothing — got '$DET_OUT'"; fi
+
+# 6d: draft_pr_head_oid reads PR.headRefOid from gh stub.
+echo "6d: draft_pr_head_oid reads PR.headRefOid"
+P6D_BIN="${SCRATCH}/hoid/bin"
+mkdir -p "$P6D_BIN"
+cat > "${P6D_BIN}/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then echo "deadbeefcafe"; exit 0; fi
+exit 1
+STUB
+chmod +x "${P6D_BIN}/gh"
+(
+  source "$DRAFT_PR_LIB"
+  out="$(PATH="${P6D_BIN}:$PATH" draft_pr_head_oid 2>/dev/null)"
+  echo "$out" > "${SCRATCH}/hoid.out"
+) || true
+assert_eq "deadbeefcafe" "$(cat "${SCRATCH}/hoid.out" 2>/dev/null)" "6d: head_oid echoes PR.headRefOid"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
