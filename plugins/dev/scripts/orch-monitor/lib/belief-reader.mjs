@@ -43,8 +43,8 @@ async function openBeliefsDbRO(dbPath) {
  * Shape of each emitted row (matches the FiringFeed / FiringEvent interface
  * the Rules Explorer UI expects from /api/beliefs/stream):
  *   { belief_id, tick_id, rule_id, name, subject, value,
- *     source_fact_ids, stratum, ts_ms, host }
- * ts_ms and host are JOIN'd from the tick table for the same tick_id.
+ *     source_fact_ids, stratum, ts_ms, host, rules_sha }
+ * ts_ms, host, and rules_sha are JOIN'd from the tick table for the same tick_id.
  */
 export class BeliefTail {
   /**
@@ -87,12 +87,12 @@ export class BeliefTail {
 
   /**
    * poll() — return new belief rows since the cursor, advancing the cursor.
-   * Each row is enriched with ts_ms + host from the tick table.
+   * Each row is enriched with ts_ms + host + rules_sha from the tick table.
    * Returns [] if the db is absent, empty, or an error occurs.
    *
    * @returns {Promise<Array<{belief_id:number,tick_id:number,rule_id:string,
    *   name:string,subject:string,value:string|null,source_fact_ids:string,
-   *   stratum:number,ts_ms:number|null,host:string|null}>>}
+   *   stratum:number,ts_ms:number|null,host:string|null,rules_sha:string|null}>>}
    */
   async poll() {
     const db = await this._ensureDb();
@@ -107,7 +107,7 @@ export class BeliefTail {
         .query(
           `SELECT b.belief_id, b.tick_id, b.rule_id, b.name, b.subject,
                   b.value, b.source_fact_ids, b.stratum,
-                  t.now_ms AS ts_ms, t.host
+                  t.now_ms AS ts_ms, t.host, t.rules_sha
              FROM belief b
              LEFT JOIN tick t ON t.tick_id = b.tick_id
             WHERE b.belief_id > ?

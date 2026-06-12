@@ -16,6 +16,8 @@ export interface BeliefRow {
   ts_ms: number | null;
   /** host name from the parent tick row; null when tick row is missing */
   host: string | null;
+  /** rules source hash (16-char hex) from the parent tick row; null for pre-CTL-1063 rows */
+  rules_sha: string | null;
 }
 
 export interface BeliefTailOptions {

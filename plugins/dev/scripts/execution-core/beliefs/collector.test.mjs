@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
 import { collectTickFacts, __resetBeliefsCollectorForTests } from "./collector.mjs";
+import { RULES_SHA } from "./rules.mjs";
 
 const DAY = 86_400_000;
 const NOW = 1781030108000; // spec §5 tick: 2026-06-09T18:35:08Z
@@ -715,5 +716,89 @@ describe("collectTickFacts — shadow gate (OPT-IN, default OFF) + db path", () 
     });
     expect(res.ok).toBe(true);
     expect(existsSync(target)).toBe(true);
+  });
+});
+
+describe("collectTickFacts — CTL-1063 Phase 4: rules_sha stamping + boot event", () => {
+  test("tick row is stamped with RULES_SHA after collectTickFacts", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch());
+    expect(res.ok).toBe(true);
+    const row = db.query("SELECT rules_sha FROM tick WHERE tick_id = ?").get(res.tickId);
+    expect(row.rules_sha).toBe(RULES_SHA);
+    db.close();
+  });
+
+  test("when rules_sha_last_seen is absent, appendEvent receives rules.version.changed with old_sha=null and new_sha=RULES_SHA", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const events = [];
+    const appendEvent = (e) => events.push(e);
+    const res = collect(db, scratch(), { appendEvent });
+    expect(res.ok).toBe(true);
+    const evt = events.find((e) => e["event.name"] === "rules.version.changed");
+    expect(evt).toBeTruthy();
+    expect(evt.payload.old_sha).toBe(null);
+    expect(evt.payload.new_sha).toBe(RULES_SHA);
+    db.close();
+  });
+
+  test("when rules_sha_last_seen differs from current RULES_SHA, appendEvent fires rules.version.changed", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // Pre-seed a stale sha
+    db.run(
+      "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', 'deadbeef00000000')",
+    );
+    const events = [];
+    const appendEvent = (e) => events.push(e);
+    const res = collect(db, scratch(), { appendEvent });
+    expect(res.ok).toBe(true);
+    const evt = events.find((e) => e["event.name"] === "rules.version.changed");
+    expect(evt).toBeTruthy();
+    expect(evt.payload.old_sha).toBe("deadbeef00000000");
+    expect(evt.payload.new_sha).toBe(RULES_SHA);
+    db.close();
+  });
+
+  test("when rules_sha_last_seen equals RULES_SHA, no rules.version.changed event fires", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    // Pre-seed the CURRENT sha
+    db.run(
+      "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', ?)",
+      [RULES_SHA],
+    );
+    const events = [];
+    const appendEvent = (e) => events.push(e);
+    const res = collect(db, scratch(), { appendEvent });
+    expect(res.ok).toBe(true);
+    const evt = events.find((e) => e["event.name"] === "rules.version.changed");
+    expect(evt).toBeUndefined();
+    db.close();
+  });
+
+  test("after first emit, cfg.rules_sha_last_seen equals RULES_SHA", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const res = collect(db, scratch(), { appendEvent: () => {} });
+    expect(res.ok).toBe(true);
+    const row = db
+      .query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'")
+      .get();
+    expect(row?.value_text).toBe(RULES_SHA);
+    db.close();
+  });
+
+  test("boot event fires AT MOST ONCE per process — second tick does not re-fire even after reset is NOT called", () => {
+    const db = openBeliefsDb({ path: join(scratch(), "b.db") });
+    const events = [];
+    const appendEvent = (e) => events.push(e);
+    // Tick 1 — _rulesVersionChecked was reset by beforeEach; event fires
+    const orchDir = scratch();
+    collect(db, orchDir, { appendEvent });
+    const after1 = events.filter((e) => e["event.name"] === "rules.version.changed").length;
+    expect(after1).toBe(1);
+    // Tick 2 — same module state (_rulesVersionChecked=true); must NOT fire again
+    collect(db, orchDir, { appendEvent });
+    const after2 = events.filter((e) => e["event.name"] === "rules.version.changed").length;
+    expect(after2).toBe(1); // still 1 — no new event on tick 2
+    db.close();
   });
 });

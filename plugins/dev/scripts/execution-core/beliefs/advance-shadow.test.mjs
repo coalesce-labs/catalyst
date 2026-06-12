@@ -221,7 +221,10 @@ describe("runAdvanceShadow — robustness + no-act contract", () => {
     });
     const summary = events.find((e) => e["event.name"] === "beliefs.advance_shadow.tick");
     expect(summary).toBeTruthy();
-    expect(summary.payload).toEqual({ agree: 1, disagree: 0 });
+    // CTL-1063 Phase 4: rules_sha is included in tick-summary payload (null for test-inserted bare ticks)
+    expect(summary.payload.agree).toBe(1);
+    expect(summary.payload.disagree).toBe(0);
+    expect("rules_sha" in summary.payload).toBe(true);
   });
 });
 

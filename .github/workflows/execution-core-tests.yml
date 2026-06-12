@@ -88,8 +88,11 @@ jobs:
             beliefs/collector-advance.test.mjs \
             beliefs/collector-relation.test.mjs \
             beliefs/collector.test.mjs \
+            beliefs/compiler/index.test.mjs \
+            beliefs/compiler-equivalence.test.mjs \
             beliefs/escalate.test.mjs \
             beliefs/intent.test.mjs \
+            beliefs/manifest.test.mjs \
             beliefs/recursive-rules.test.mjs \
             beliefs/rules.test.mjs \
             beliefs/schema.test.mjs \

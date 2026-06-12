@@ -43,7 +43,7 @@ import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
-import { evaluateBeliefs } from "./rules.mjs";
+import { evaluateBeliefs, RULES_SHA } from "./rules.mjs";
 import { reconcileIntents, getMaxAttempts } from "./intent.mjs";
 import { shortIdFromSessionId } from "../claude-ids.mjs";
 import { getAgentsCached } from "../claude-agents.mjs";
@@ -67,9 +67,14 @@ const PRUNE_EVERY_TICKS = 120;
 // cadence counter. Reset hook below keeps tests hermetic.
 let _moduleDb = null;
 let _tickCount = 0;
+// CTL-1063 Phase 4: rules.version.changed fires AT MOST ONCE per process (per
+// module load). The flag is reset by __resetBeliefsCollectorForTests so tests
+// can observe the event from a fresh process state.
+let _rulesVersionChecked = false;
 
 export function __resetBeliefsCollectorForTests() {
   _tickCount = 0;
+  _rulesVersionChecked = false;
   if (_moduleDb) {
     try {
       _moduleDb.close();
@@ -317,6 +322,8 @@ export function collectTickFacts({
   linearCache,
   // CTL-936: intent reconciliation
   appendIntentEvent = null,
+  // CTL-1063 Phase 4: operator-event seam for rules.version.changed boot event.
+  appendEvent = null,
 } = {}) {
   // Shadow gate FIRST — disabled must cost nothing (no db open, no clock read).
   if ((env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
@@ -340,8 +347,39 @@ export function collectTickFacts({
 
     db.run("BEGIN");
     try {
-      db.run("INSERT INTO tick (now_ms, host) VALUES (?, ?)", [now, host]);
+      // CTL-1063 Phase 4: stamp rules_sha on every tick row so disagreements can
+      // be correlated to the rules version that was active when the tick ran.
+      db.run("INSERT INTO tick (now_ms, host, rules_sha) VALUES (?, ?, ?)", [now, host, RULES_SHA]);
       const tickId = db.query("SELECT last_insert_rowid() AS id").get().id;
+
+      // CTL-1063 Phase 4: emit rules.version.changed once per process when the
+      // rules sha differs from the last-seen value persisted in cfg.
+      if (!_rulesVersionChecked) {
+        _rulesVersionChecked = true;
+        try {
+          const lastSha =
+            db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get()
+              ?.value_text ?? null;
+          if (lastSha !== RULES_SHA) {
+            if (typeof appendEvent === "function") {
+              try {
+                appendEvent({
+                  "event.name": "rules.version.changed",
+                  payload: { old_sha: lastSha, new_sha: RULES_SHA },
+                });
+              } catch {
+                /* operator-event append is best-effort */
+              }
+            }
+            db.run(
+              "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', ?)",
+              [RULES_SHA],
+            );
+          }
+        } catch {
+          /* best-effort — version check must never break the tick */
+        }
+      }
 
       // ── obs_agent — the agents listing, ALL fields ──────────────────────
       let agents = [];

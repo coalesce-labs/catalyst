@@ -170,6 +170,11 @@ export function runAdvanceShadow(
 
   const { advanceTo, cycleExhausted } = readAdvanceBeliefs(db, tickId);
 
+  // CTL-1063 Phase 4: hoist rules_sha read once per run (not per ticket) so
+  // the event payloads include the rules version active when this tick ran.
+  const rulesShaTick =
+    db.query("SELECT rules_sha FROM tick WHERE tick_id = ?").get(tickId)?.rules_sha ?? null;
+
   let tickets = [];
   try {
     tickets = listInFlight(orchDir) ?? [];
@@ -216,7 +221,7 @@ export function runAdvanceShadow(
           try {
             appendEvent({
               "event.name": "beliefs.advance_shadow.disagree",
-              payload: disagreement,
+              payload: { ...disagreement, rules_sha: rulesShaTick },
             });
           } catch {
             /* operator-event append is best-effort — never breaks the tick */
@@ -234,7 +239,7 @@ export function runAdvanceShadow(
     try {
       appendEvent({
         "event.name": "beliefs.advance_shadow.tick",
-        payload: { agree: result.agree, disagree: result.disagree },
+        payload: { agree: result.agree, disagree: result.disagree, rules_sha: rulesShaTick },
       });
     } catch {
       /* best-effort */
