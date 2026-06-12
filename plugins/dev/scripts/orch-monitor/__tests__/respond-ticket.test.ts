@@ -229,6 +229,74 @@ describe("respondTicket — Scenario 3: single-host pass-through (fence no-op)",
   });
 });
 
+describe("findHeldRun — match stalled escalation runs (CTL-1067)", () => {
+  it("returns the stalled run + its verbatim signal", () => {
+    const out = findHeldRun("CTL-1067", {
+      readDir: () => ["phase-research.json", "phase-implement.json"],
+      read: (p: string) =>
+        p.includes("research")
+          ? JSON.stringify({ status: "done", phase: "research" })
+          : JSON.stringify({
+              status: "stalled",
+              phase: "implement",
+              stalledReason: "prior-artifact-retry-exhausted",
+              generation: 4,
+            }),
+    });
+    expect(out?.phase).toBe("implement");
+    expect(out?.signal?.status).toBe("stalled");
+  });
+
+  it("prefers a needs-input run over a stalled one in PHASE_ORDER", () => {
+    const out = findHeldRun("CTL-1067", {
+      readDir: () => ["phase-research.json", "phase-implement.json"],
+      read: (p: string) =>
+        p.includes("research")
+          ? JSON.stringify({ status: "needs-input", phase: "research" })
+          : JSON.stringify({ status: "stalled", phase: "implement" }),
+    });
+    expect(out?.phase).toBe("research");
+    expect(out?.signal?.status).toBe("needs-input");
+  });
+});
+
+describe("respondTicket — CTL-1067 stalled run is answerable", () => {
+  it("a stalled run is answerable — records, clears marker, emits, returns resuming", () => {
+    const recorded: unknown[] = [], cleared: unknown[] = [], emitted: unknown[] = [];
+    const out = respondTicket(
+      { ticket: "CTL-1067", response: "looked into it, retry", confirm: "CTL-1067" },
+      {
+        findHeld: () => ({ phase: "implement", signal: { status: "stalled", phase: "implement", generation: 4 } }),
+        fenceCheck: () => ({ ok: true, noop: true, stale: false }),
+        record: (a) => recorded.push(a),
+        clearMarker: (a) => cleared.push(a),
+        emit: (a) => emitted.push(a),
+      },
+    );
+    expect(out.status).toBe("resuming");
+    expect((out as { phase: string }).phase).toBe("implement");
+    expect(recorded).toEqual([{ ticket: "CTL-1067", phase: "implement", response: "looked into it, retry" }]);
+    expect(cleared).toEqual([{ ticket: "CTL-1067" }]);
+    expect(emitted).toEqual([{ ticket: "CTL-1067", response: "looked into it, retry" }]);
+  });
+
+  it("stalled run + wrong typed-confirm → confirm_mismatch, NO mutation", () => {
+    const recorded: unknown[] = [], cleared: unknown[] = [], emitted: unknown[] = [];
+    const out = respondTicket(
+      { ticket: "CTL-1067", response: "x", confirm: "WRONG" },
+      {
+        findHeld: () => ({ phase: "implement", signal: { status: "stalled", phase: "implement" } }),
+        fenceCheck: () => ({ ok: true, noop: true, stale: false }),
+        record: (a) => recorded.push(a),
+        clearMarker: (a) => cleared.push(a),
+        emit: (a) => emitted.push(a),
+      },
+    );
+    expect(out.status).toBe("confirm_mismatch");
+    expect([recorded, cleared, emitted]).toEqual([[], [], []]);
+  });
+});
+
 describe("findHeldRun — locate the parked needs-input run", () => {
   it("returns the held run + its verbatim signal", () => {
     const out = findHeldRun("CTL-845", {

@@ -1153,7 +1153,7 @@ describe("handleCommentWake (CTL-549)", () => {
         removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
       },
     );
-    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human/question" });
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // CTL-1067 Bug 3
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
@@ -1311,6 +1311,34 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(resolveSpy).toEqual([]);             // resolveSession never called
     const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
     expect(sig.status).toBe("needs-input");     // not reset
+  });
+
+  test("CTL-1067: a stalled signal is cleared via clearStall, not re-dispatched", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement", generation: 2 });
+    const dispatched = [], clears = [], removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => dispatched.push(a),
+        removeLabel: async (t, l) => removed.push({ ticket: t, label: l }),
+        clearStall: ({ ticket, phase }) => { clears.push({ ticket, phase }); return true; },
+      },
+    );
+    expect(clears).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(dispatched).toEqual([]);
+  });
+
+  test("CTL-1067: stalled signal is a no-op when clearStall is not injected", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      { orchDir: orch, dispatch: (...a) => dispatched.push(a), removeLabel: async () => {} },
+    );
+    expect(dispatched).toEqual([]);
   });
 });
 
