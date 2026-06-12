@@ -52,6 +52,11 @@
 
 import { labelOnce } from "../label-guard.mjs";
 import { log } from "../config.mjs";
+import { coerceExplanation } from "../escalation-explanation.mjs";
+
+function firstLine(s) {
+  return String(s ?? "").split(/\r?\n/)[0].slice(0, 200);
+}
 
 // ── executeEscalations — per-tick executor for R12 escalate_human beliefs.
 //
@@ -79,6 +84,7 @@ export function executeEscalations(
     enforce = false,
     labelOnceFn = labelOnce,
     env = process.env,
+    evidenceBySubject = {},
   } = {},
 ) {
   let escalated = 0; // subjects whose intent we flipped to 'escalated'
@@ -147,9 +153,25 @@ export function executeEscalations(
         paged++;
         if (typeof appendEvent === "function") {
           try {
+            const ev = evidenceBySubject[subject] ?? {};
+            const phaseName = subject.split("/")[1] ?? null;
+            const explanation = coerceExplanation(
+              {
+                what_failed: ev.logsOutput
+                  ? `${phaseName ?? "phase"} failed: ${firstLine(ev.logsOutput)}`
+                  : `${phaseName ?? "phase"} escalated (${why ?? "no diagnosis"})`,
+                observed: ev.jobState ?? {},
+                attempts: ev.attempts ?? [],
+                why_gave_up: why
+                  ? `diagnostician reason: ${why}`
+                  : "diagnostician produced no actionable verdict",
+                human_question: ev.humanQuestion ?? "",
+              },
+              { ticket, phase: phaseName },
+            );
             appendEvent({
               "event.name": "escalate.human",
-              payload: { subject, ticket, why },
+              payload: { subject, ticket, why, explanation },
             });
           } catch (evtErr) {
             errors.push({ subject, phase: "appendEvent", err: String(evtErr?.message ?? evtErr) });
