@@ -83,8 +83,8 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "claude.ratelimit.seven_day_sonnet_pct", emitter: "sh", source: "canonical-event.sh:346", classification: "legitimately-custom", note: "CTL-763" },
 
   // §4h: Phase attempt tracking (CTL-761) — rename-to cluster F
-  { key: "phase.attempt",      emitter: "sh", source: "canonical-event.sh:347", classification: "rename-to", targetName: "catalyst.phase.attempt",      remediationCluster: "F", where: "emit", note: "CTL-761" },
-  { key: "phase.revive_count", emitter: "sh", source: "canonical-event.sh:348", classification: "rename-to", targetName: "catalyst.phase.revive_count", remediationCluster: "F", where: "emit", note: "CTL-761" },
+  { key: "catalyst.phase.attempt",      emitter: "sh", source: "canonical-event.sh:347", classification: "conforming" },
+  { key: "catalyst.phase.revive_count", emitter: "sh", source: "canonical-event.sh:348", classification: "conforming" },
 
   // CTL-1023: work-type dimension — legitimately-custom (catalyst.* namespace)
   { key: "catalyst.ticket.type", emitter: "sh", source: "canonical-event.sh:349", classification: "legitimately-custom", note: "CTL-1023" },

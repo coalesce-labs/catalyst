@@ -344,8 +344,8 @@ build_canonical_line() {
         + (if $claude_rl_7d == "" then {} else { "claude.ratelimit.seven_day_pct": ($claude_rl_7d | tonumber) } end)
         + (if $claude_rl_7d_opus   == "" then {} else { "claude.ratelimit.seven_day_opus_pct":   ($claude_rl_7d_opus   | tonumber) } end)
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
-        + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
-        + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + (if $phase_attempt == "" then {} else { "catalyst.phase.attempt": ($phase_attempt | tonumber) } end)
+        + (if $phase_revive_count == "" then {} else { "catalyst.phase.revive_count": ($phase_revive_count | tonumber) } end)
         + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (

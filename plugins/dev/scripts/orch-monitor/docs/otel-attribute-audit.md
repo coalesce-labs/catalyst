@@ -10,8 +10,8 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 26 |
-| → Rename-to | 25 |
+| ✓ Conforming | 28 |
+| → Rename-to | 23 |
 | ● Legitimately Custom | 20 |
 | **Total** | 71 |
 
@@ -63,13 +63,13 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
+| `catalyst.phase.attempt` | `canonical-event.sh:347` | ✓ conforming |  |  |  |
+| `catalyst.phase.revive_count` | `canonical-event.sh:348` | ✓ conforming |  |  |  |
 | `catalyst.ticket.type` | `canonical-event.sh:349` | ● custom |  |  | CTL-1023 |
 | `claude.ratelimit.five_hour_pct` | `canonical-event.sh:343` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_opus_pct` | `canonical-event.sh:345` | ● custom |  |  | CTL-763 |
 | `claude.ratelimit.seven_day_pct` | `canonical-event.sh:344` | ● custom |  |  | CTL-760 |
 | `claude.ratelimit.seven_day_sonnet_pct` | `canonical-event.sh:346` | ● custom |  |  | CTL-763 |
-| `phase.attempt` | `canonical-event.sh:347` | → rename-to | → `catalyst.phase.attempt` | Cluster F | CTL-761 |
-| `phase.revive_count` | `canonical-event.sh:348` | → rename-to | → `catalyst.phase.revive_count` | Cluster F | CTL-761 |
 
 ### MJS (execution-core / catalyst-agent)
 
@@ -161,22 +161,6 @@ validated against live Loki.
 | `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
-
-### Cluster F — phase.* unnamespaced fields
-
-- **Emit-side files**: `canonical-event.sh`
-- **Where**: emit
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `phase.attempt` | `catalyst.phase.attempt` | CTL-761 |
-| `phase.revive_count` | `catalyst.phase.revive_count` | CTL-761 |
 
 ### Cluster G — emit-otel-event.sh legacy bare attributes
 

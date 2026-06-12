@@ -32,7 +32,7 @@ export const EXPECTED_CLUSTER_COUNTS: Readonly<Record<RemediationCluster, number
   C: 9,
   D: 0,
   E: 0,
-  F: 2,
+  F: 0,
   G: 4,
   H: 1,
 };
