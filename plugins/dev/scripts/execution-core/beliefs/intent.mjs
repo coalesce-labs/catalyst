@@ -169,6 +169,13 @@ function resolvePostcondition(postcondition, worldSnapshot) {
         // Operator-acknowledged out-of-band; treat as satisfied-after-N to
         // avoid runaway paging. Caller drives max_attempts for this kind.
         return false; // never auto-satisfied — R11 will mark ineffective
+      case "unstuck-sweep": {
+        // CTL-1064: satisfied when the signal for this subject is no longer
+        // stalled. Absent map entry → retry (unreadable → never auto-satisfied).
+        const signalStatus = worldSnapshot.signalStatusBySubject?.get(pc.subject);
+        if (signalStatus == null) return false; // unreadable → retry
+        return signalStatus !== "stalled" && signalStatus !== "failed";
+      }
       default:
         return false;
     }

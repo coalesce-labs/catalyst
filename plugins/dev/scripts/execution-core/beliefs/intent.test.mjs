@@ -666,3 +666,89 @@ describe("unreadable world facts", () => {
     expect(row.outcome).toBeNull();
   });
 });
+
+// ── CTL-1064: unstuck-sweep postcondition ────────────────────────────────────
+// Uses the outer `db` + `beforeEach`/`afterEach` already wired at the top of
+// this file — no nested setup needed. Each test inserts its own intent; the
+// outer beforeEach provides a fresh db + tick_id=1 for each test.
+describe("unstuck-sweep intent postcondition (CTL-1064)", () => {
+  test("signalStatus not 'stalled' or 'failed' → satisfied", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "running"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+
+  test("signalStatus 'stalled' → not satisfied, retried", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "stalled"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
+  });
+
+  test("signalStatus 'failed' → not satisfied, retried", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "failed"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("subject absent from signalStatusBySubject → unreadable, intent stays open (retry)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    // subject absent from map → .get() returns undefined → null → retry
+    const result = reconcileIntents(db, 1, { signalStatusBySubject: new Map() }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("signalStatusBySubject absent from worldSnapshot → intent stays open (retry)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    // No signalStatusBySubject key at all in worldSnapshot.
+    const result = reconcileIntents(db, 1, {}, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("status 'done' → satisfied (not stalled, not failed)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "done"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(1);
+  });
+});
