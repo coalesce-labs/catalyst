@@ -108,10 +108,10 @@ export const SEMANTIC_BADGE_CLASSES: Record<StatusSemantic, string> = {
 };
 
 export const SEMANTIC_PILL_CLASSES: Record<StatusSemantic, string> = {
-  success: "bg-[#1a4a3a] text-[#8af4cc]",
-  info: "bg-[#1f3a5a] text-[#9ec7f4]",
-  danger: "bg-[#5a2a2a] text-[#f4a8a8]",
-  warning: "bg-[#5a4a1a] text-[#f4dc8a]",
+  success: "bg-green/25 text-green-soft",
+  info: "bg-blue/25 text-blue-soft",
+  danger: "bg-red/25 text-red-soft",
+  warning: "bg-yellow/25 text-yellow-soft",
   neutral: "bg-surface-3 text-fg border border-border",
 };
 
