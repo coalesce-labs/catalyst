@@ -11,8 +11,8 @@ Do **not** edit this file directly.
 | Classification | Count |
 | --- | --- |
 | ✓ Conforming | 28 |
-| → Rename-to | 19 |
-| ● Legitimately Custom | 22 |
+| → Rename-to | 18 |
+| ● Legitimately Custom | 23 |
 | **Total** | 69 |
 
 ## Classification by Emitter
@@ -29,6 +29,7 @@ Do **not** edit this file directly.
 | `catalyst.orchestration` | `canonical-event.ts:54` | ● custom |  |  |  |
 | `catalyst.orchestrator.id` | `canonical-event.ts:67` | ● custom |  |  |  |
 | `catalyst.phase` | `canonical-event.ts:70` | ● custom |  |  |  |
+| `catalyst.project` | `canonical-event.ts:52` | ● custom |  |  |  |
 | `catalyst.session.id` | `canonical-event.ts:69` | ● custom |  |  |  |
 | `catalyst.worker.ticket` | `canonical-event.ts:68` | ● custom |  |  |  |
 | `cicd.pipeline.name` | `canonical-event.ts:82` | ✓ conforming |  |  |  |
@@ -50,7 +51,6 @@ Do **not** edit this file directly.
 | `linear.issue.identifier` | `canonical-event.ts:85` | ● custom |  |  |  |
 | `linear.key` | `canonical-event.ts:53` | ● custom |  |  |  |
 | `linear.team.key` | `canonical-event.ts:87` | ● custom |  |  |  |
-| `project` | `canonical-event.ts:52` | → rename-to | → `catalyst.project` | Cluster H |  |
 | `service.name` | `canonical-event.ts:43` | ✓ conforming |  |  |  |
 | `service.namespace` | `canonical-event.ts:44` | ✓ conforming |  |  |  |
 | `service.version` | `canonical-event.ts:45` | ✓ conforming |  |  |  |
@@ -159,21 +159,6 @@ validated against live Loki.
 | `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
-
-### Cluster H — resource project field
-
-- **Emit-side files**: `canonical-event.ts`
-- **Where**: both
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `project` | `catalyst.project` |  |
 
 ---
 

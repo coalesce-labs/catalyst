@@ -152,7 +152,7 @@ describe("buildCanonicalEvent", () => {
       });
       expect("linear.key" in ev.resource).toBe(false);
       expect("catalyst.orchestration" in ev.resource).toBe(false);
-      expect("project" in ev.resource).toBe(false);
+      expect("catalyst.project" in ev.resource).toBe(false);
     } finally {
       if (prev === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
       else process.env.OTEL_RESOURCE_ATTRIBUTES = prev;
@@ -175,7 +175,7 @@ describe("buildCanonicalEvent", () => {
   it("sources project from OTEL_RESOURCE_ATTRIBUTES when present (CTL-636)", () => {
     const prev = process.env.OTEL_RESOURCE_ATTRIBUTES;
     process.env.OTEL_RESOURCE_ATTRIBUTES =
-      "project=catalyst-workspace,linear.key=CTL-636,catalyst.orchestration=CTL-636";
+      "catalyst.project=catalyst-workspace,linear.key=CTL-636,catalyst.orchestration=CTL-636";
     try {
       const ev = buildCanonicalEvent({
         ts: "2026-05-25T18:00:00.000Z",
@@ -186,7 +186,7 @@ describe("buildCanonicalEvent", () => {
         attributes: { "event.name": "x" },
         body: {},
       });
-      expect(ev.resource["project"]).toBe("catalyst-workspace");
+      expect(ev.resource["catalyst.project"]).toBe("catalyst-workspace");
     } finally {
       if (prev === undefined) delete process.env.OTEL_RESOURCE_ATTRIBUTES;
       else process.env.OTEL_RESOURCE_ATTRIBUTES = prev;

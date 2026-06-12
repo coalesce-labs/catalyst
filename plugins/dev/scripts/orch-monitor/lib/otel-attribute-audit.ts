@@ -27,7 +27,7 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "host.name",         emitter: "ts", source: "canonical-event.ts:47", classification: "conforming" },
   { key: "host.id",           emitter: "ts", source: "canonical-event.ts:48", classification: "conforming" },
   // CTL-636 optional resource context
-  { key: "project",                 emitter: "ts", source: "canonical-event.ts:52", classification: "rename-to",            targetName: "catalyst.project",        remediationCluster: "H", where: "both" },
+  { key: "catalyst.project",         emitter: "ts", source: "canonical-event.ts:52", classification: "legitimately-custom" },
   { key: "linear.key",              emitter: "ts", source: "canonical-event.ts:53", classification: "legitimately-custom" },
   { key: "catalyst.orchestration",  emitter: "ts", source: "canonical-event.ts:54", classification: "legitimately-custom" },
 

@@ -49,7 +49,7 @@ export interface Resource {
   // CTL-636: optional orchestration-context resource keys. Present only when
   // the event carries the corresponding data; omitted otherwise so external
   // (webhook / broker-daemon) events keep the bare 3-key block.
-  "project"?: string;
+  "catalyst.project"?: string;
   "linear.key"?: string;
   "catalyst.orchestration"?: string;
 }
@@ -131,7 +131,7 @@ export interface BuildInput {
   resource: {
     "service.name": string;
     "service.version"?: string;
-    "project"?: string;
+    "catalyst.project"?: string;
     "linear.key"?: string;
     "catalyst.orchestration"?: string;
   };
@@ -174,13 +174,13 @@ export function pluginVersion(): string {
   return cachedVersion;
 }
 
-/** CTL-636: pull `project=<val>` out of the ambient OTEL_RESOURCE_ATTRIBUTES
+/** CTL-636: pull `catalyst.project=<val>` out of the ambient OTEL_RESOURCE_ATTRIBUTES
  *  env (set by phase-agent-dispatch for --bg workers and by direnv for
- *  interactive sessions). Mirrors the bash parse in emit-otel-event.sh:82-88. */
+ *  interactive sessions). Mirrors the bash parse in canonical-event.sh. */
 function projectFromEnv(): string | undefined {
   const raw = process.env.OTEL_RESOURCE_ATTRIBUTES;
   if (!raw) return undefined;
-  const m = raw.match(/(?:^|,)project=([^,]+)/);
+  const m = raw.match(/(?:^|,)catalyst\.project=([^,]+)/);
   return m ? m[1] : undefined;
 }
 
@@ -206,8 +206,8 @@ export function buildCanonicalEvent(input: BuildInput): CanonicalEvent {
   // CTL-636: promote orchestration context into resource. Explicit resource
   // input wins; otherwise fall back to the matching attribute (TS emitters
   // already set these) or the ambient env (project only).
-  const project = input.resource["project"] ?? projectFromEnv();
-  if (project) resource["project"] = project;
+  const project = input.resource["catalyst.project"] ?? projectFromEnv();
+  if (project) resource["catalyst.project"] = project;
   const linearKey =
     input.resource["linear.key"] ?? input.attributes["linear.issue.identifier"];
   if (linearKey) resource["linear.key"] = linearKey;

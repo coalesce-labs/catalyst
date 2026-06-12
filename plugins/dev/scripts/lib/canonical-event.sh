@@ -251,7 +251,7 @@ build_canonical_line() {
   [[ -n "$cat_orch" ]]   || cat_orch="$orch"
   if [[ -z "$project" && -n "${OTEL_RESOURCE_ATTRIBUTES:-}" ]]; then
     project="$(printf '%s\n' "$OTEL_RESOURCE_ATTRIBUTES" \
-      | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
+      | grep -oE 'catalyst\.project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
   local sev_num event_id host_name host_id_val
@@ -317,7 +317,7 @@ build_canonical_line() {
           "host.name": $host_name,
           "host.id": $host_id
         }
-        + (if $project    == "" then {} else { "project": $project } end)
+        + (if $project    == "" then {} else { "catalyst.project": $project } end)
         + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)
         + (if $cat_orch   == "" then {} else { "catalyst.orchestration": $cat_orch } end)
       ),
