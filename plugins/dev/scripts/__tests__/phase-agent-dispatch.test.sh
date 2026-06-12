@@ -370,6 +370,41 @@ STATUS_D=$(jq -r '.status' "${TEST_DIR}/glob-d.out")
 assert_eq "2" "$RC_D" "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
 assert_eq "refused" "$STATUS_D" "Form D: stdout JSON status = refused"
 
+# ─── Test 5c: gate spec is non-empty under macOS system bash (bash 3.2) — CTL-1075
+echo ""
+echo "Test 5c: plan/implement gate specs survive macOS system bash (bash 3.2)"
+fresh_env t5c
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+
+# plan with NO research doc present → must refuse with a non-empty glob spec.
+(cd "${TEST_DIR}/proj" &&
+	/bin/bash "$DISPATCH" --phase plan --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/sysbash-plan.out" 2>"${TEST_DIR}/sysbash-plan.err")
+RC_PLAN=$?
+STATUS_PLAN=$(jq -r '.status'   "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || echo "")
+ART_PLAN=$(jq -r '.artifact'    "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_PLAN" "5c plan: /bin/bash refuses when research doc absent (exit 2)"
+assert_eq "refused" "$STATUS_PLAN" "5c plan: status=refused under /bin/bash"
+assert_contains "$ART_PLAN" "thoughts/shared/research/" "5c plan: artifact spec is the non-empty research glob"
+assert_not_contains "$(cat "${TEST_DIR}/sysbash-plan.err")" "bad substitution" "5c plan: no bad-substitution under /bin/bash"
+
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-plan.json"
+
+# implement with NO plan doc present → must refuse with a non-empty glob spec.
+(cd "${TEST_DIR}/proj" &&
+	/bin/bash "$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/sysbash-impl.out" 2>"${TEST_DIR}/sysbash-impl.err")
+RC_IMPL=$?
+STATUS_IMPL=$(jq -r '.status'  "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || echo "")
+ART_IMPL=$(jq -r '.artifact'   "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_IMPL" "5c implement: /bin/bash refuses when plan doc absent (exit 2)"
+assert_eq "refused" "$STATUS_IMPL" "5c implement: status=refused under /bin/bash"
+assert_contains "$ART_IMPL" "thoughts/shared/plans/" "5c implement: artifact spec is the non-empty plan glob"
+assert_not_contains "$(cat "${TEST_DIR}/sysbash-impl.err")" "bad substitution" "5c implement: no bad-substitution under /bin/bash"
+
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"
