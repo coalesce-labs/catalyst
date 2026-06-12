@@ -578,24 +578,67 @@ export function isThrottled(lastRunMs, intervalMs, nowMs) {
   return (nowMs - lastRunMs) < intervalMs;
 }
 
-// --- Governance snapshot for operator visibility (CTL-1062) ---
+// --- Governance snapshot for operator visibility (CTL-1062/CTL-1084) ---
 // READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
 // its per-tick gate site does so the heartbeat payload and the
 // `catalyst-execution-core governance` CLI can show what the daemon is actually
 // running with — without grepping `ps eww`. Does NOT replace the gate reads
 // (see audit-proxy-must-not-be-load-bearing): the gates keep their own inline
 // reads; this is a parallel, side-effect-free view.
+//
+// CTL-1084: beliefs-family flags are now THREE-LAYER (env override > Layer-2
+// catalyst.governance.<flag> boolean > default false) so a restart with an
+// empty launching shell preserves the operator's intent. Per-tick gate sites
+// (scheduler.mjs/collector.mjs/diagnostician.mjs) keep reading process.env
+// unchanged — the launcher (catalyst-execution-core cmd_start) evals the
+// resolved exports so the daemon process inherits the durable value.
+
+function readLayer2Governance() {
+  try {
+    const g = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.governance;
+    return g && typeof g === "object" ? g : {};
+  } catch { return {}; }
+}
+
+// Three-layer beliefs flag: explicit env ("1"/"0") > Layer-2 boolean > default false.
+// Returns both the effective boolean and its source so the boot self-report can flag overrides.
+function resolveBeliefsFlag(envVal, l2Val) {
+  if (envVal === "1") return { value: true,  source: "env-override" };
+  if (envVal === "0") return { value: false, source: "env-override" };
+  if (typeof l2Val === "boolean") return { value: l2Val, source: "config" };
+  return { value: false, source: "default" };
+}
+
+const BELIEFS_FLAGS = {
+  beliefsShadow:        "CATALYST_BELIEFS_SHADOW",
+  diagnostician:        "CATALYST_DIAGNOSTICIAN",
+  intentsEnforce:       "CATALYST_INTENTS_ENFORCE",
+  advanceShadowSummary: "CATALYST_ADVANCE_SHADOW_SUMMARY",
+};
+
 export function readGovernanceConfig(env = process.env) {
-  const isOne = (v) => (v ?? "0") === "1";
+  const l2 = readLayer2Governance();
+  const beliefs = {};
+  for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
+    beliefs[key] = resolveBeliefsFlag(env[envName], l2[key]).value;
+  }
   return {
-    // beliefs family — env-only, "0" default, exact "1" → on
-    beliefsShadow: isOne(env.CATALYST_BELIEFS_SHADOW),
-    diagnostician: isOne(env.CATALYST_DIAGNOSTICIAN),
-    intentsEnforce: isOne(env.CATALYST_INTENTS_ENFORCE),
-    advanceShadowSummary: isOne(env.CATALYST_ADVANCE_SHADOW_SUMMARY),
+    ...beliefs,
     // mode subsystems — reuse existing three-layer readers so Layer-2 flows through
     stallJanitor: { mode: readStallJanitorConfig().mode },
     watchdog: { mode: readWatchdogConfig().mode },
     unstuckSweep: { mode: readUnstuckSweepConfig().mode },
   };
+}
+
+// readGovernanceSources — parallel view of where each beliefs flag's effective
+// value came from: "env-override" | "config" | "default". Used by the boot
+// self-report (boot-event.mjs) and catalyst-stack status to surface env overrides.
+export function readGovernanceSources(env = process.env) {
+  const l2 = readLayer2Governance();
+  const out = {};
+  for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
+    out[key] = resolveBeliefsFlag(env[envName], l2[key]).source;
+  }
+  return out;
 }
