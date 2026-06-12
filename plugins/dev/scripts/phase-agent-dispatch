@@ -1027,10 +1027,19 @@ if [[ -z $RESUME_SESSION ]] && is_rebase_phase "$PHASE"; then
 		# retries into the same conflict.
 		echo "phase-agent-dispatch: rebase conflict (rc=${REBASE_RC}) for ${TICKET}/${PHASE}; parking with reason=${STALL_REASON}" >&2
 		TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+		# CTL-1065: build a structured explanation via the CLI shim (always exits 0).
+		EXPL_JSON="$(node "${SCRIPT_DIR}/execution-core/escalation-explain.mjs" \
+			--ticket "$TICKET" --phase "$PHASE" \
+			--what-failed "rebase conflict (rc=${REBASE_RC}) parking ${TICKET}/${PHASE}" \
+			--observed "$(jq -nc --arg r "${REBASE_RC}" --arg reason "${STALL_REASON}" '{rebaseRc:($r|tonumber),stallReason:$reason}' 2>/dev/null || echo '{}')" \
+			--why-gave-up "auto-rebase could not proceed (${STALL_REASON})" \
+			--human-question "resolve the conflict for ${TICKET}/${PHASE} by hand and re-run, or discard the local change?" \
+			2>/dev/null || echo '{}')"
 		tmp="${SIGNAL_FILE}.tmp.$$"
-		if jq --arg ts "$TS" --arg reason "$STALL_REASON" \
+		if jq --arg ts "$TS" --arg reason "$STALL_REASON" --argjson expl "${EXPL_JSON:-{}}" \
 			'.status = "stalled"
        | .failureReason = $reason
+       | .explanation = $expl
        | .updatedAt = $ts
        | .phaseTimestamps = ((.phaseTimestamps // {}) | .stalled = $ts)' \
 			"$SIGNAL_FILE" >"$tmp" 2>/dev/null; then
