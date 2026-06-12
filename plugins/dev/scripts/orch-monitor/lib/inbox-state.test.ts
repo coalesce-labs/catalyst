@@ -229,3 +229,58 @@ describe("computeQuestionHash — stable cache key", () => {
     expect(h).toMatch(/^[0-9a-f]{12}$/);
   });
 });
+
+// ── CTL-1065: humanQuestion surfaced from signal.explanation ──────────────────
+
+describe("CTL-1065: humanQuestion threaded from signal.explanation.human_question", () => {
+  test("humanQuestion is read from signal.explanation.human_question", async () => {
+    const opts = makeWorkerFixture("CTL-1065", {
+      "phase-implement.json": {
+        status: "stalled",
+        phase: "implement",
+        stalledReason: "busy-ceiling-max-escalations",
+        explanation: {
+          what_failed: "implement phase hit busy-ceiling escalation limit",
+          observed: { elapsedMin: 90, commitCount: 0, bgJobId: "ab12ef34" },
+          attempts: [],
+          why_gave_up: "exceeded the busy-ceiling escalation budget",
+          human_question: "restart CTL-1065 implement from scratch, or extend the threshold?",
+        },
+      },
+    });
+
+    const state = await collectInboxItemState("CTL-1065", opts);
+    expect(state).not.toBeNull();
+    expect(state!.humanQuestion).toBe(
+      "restart CTL-1065 implement from scratch, or extend the threshold?",
+    );
+  });
+
+  test("humanQuestion is null when no explanation present (back-compat)", async () => {
+    const opts = makeWorkerFixture("CTL-1065", {
+      "phase-implement.json": {
+        status: "stalled",
+        phase: "implement",
+        stalledReason: "busy-ceiling-max-escalations",
+      },
+    });
+
+    const state = await collectInboxItemState("CTL-1065", opts);
+    expect(state).not.toBeNull();
+    expect(state!.humanQuestion).toBeNull();
+  });
+
+  test("humanQuestion is null when explanation.human_question is absent", async () => {
+    const opts = makeWorkerFixture("CTL-1065", {
+      "phase-implement.json": {
+        status: "stalled",
+        phase: "implement",
+        explanation: { what_failed: "x", observed: {}, attempts: [], why_gave_up: "y" },
+      },
+    });
+
+    const state = await collectInboxItemState("CTL-1065", opts);
+    expect(state).not.toBeNull();
+    expect(state!.humanQuestion).toBeNull();
+  });
+});

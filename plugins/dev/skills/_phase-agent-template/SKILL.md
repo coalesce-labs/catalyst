@@ -211,6 +211,65 @@ fi
 [[ -n "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
 ```
 
+## Structured escalation explanation (CTL-1065)
+
+Whenever a phase writes a failed/stalled signal that will be shown to the
+operator (e.g. via the Inbox "Needs you" section), it MUST populate an
+`explanation` block alongside `failureReason`. The contract shape:
+
+```json
+{
+  "what_failed":    "<specific symptom in plain language>",
+  "observed":       { "<key>": "<value>", ... },
+  "attempts":       ["<what was tried>", ...],
+  "why_gave_up":    "<reason no further autonomous action was taken>",
+  "human_question": "<one specific, answerable question for the operator>"
+}
+```
+
+Use the CLI shim so the shell can build the JSON without risk of syntax
+errors or missing fields:
+
+```bash
+EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+  --ticket "$TICKET" --phase "$PHASE" \
+  --what-failed "{{ specific symptom }}" \
+  --observed "$(jq -nc '{key:"value"}' 2>/dev/null || echo '{}')" \
+  --why-gave-up "{{ reason }}" \
+  --human-question "{{ specific question }}" \
+  2>/dev/null || echo '{}')"
+```
+
+Then merge it into the signal alongside `failureReason`. Guard the value on a
+prior line and pass the variable directly — never inline `${EXPL_JSON:-{}}`: the
+bash parser closes the parameter expansion at the FIRST `}`, so a non-empty value
+like `{"a":1}` expands to `{"a":1}}` (trailing brace → invalid JSON → jq exits
+non-zero → the `&& mv` is skipped and the signal is never written). Verified in
+bash 3.2 and 5.x.
+
+```bash
+[ -n "$EXPL_JSON" ] || EXPL_JSON='{}'
+jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson expl "$EXPL_JSON" \
+   '.status = "failed" | .failureReason = "{{ reason }}" | .explanation = $expl | .updatedAt = $ts' \
+   "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp.$$" && mv "$SIGNAL_FILE.tmp.$$" "$SIGNAL_FILE"
+```
+
+### Banned human_question phrases (tautology gate)
+
+The CLI shim rejects these with `degraded: true` and substitutes a
+generic fallback. Never write:
+
+- "needs a human" / "requires human intervention" / "needs human review"
+- "a human must decide" / "someone must decide"
+- "escalate to operator" / "escalate to human"
+- "requires intervention" / "requires action" (bare)
+- "needs attention" (bare)
+
+Write the **specific question** instead:
+- Bad: "this phase needs human attention"
+- Good: "should the rebase conflict in foo/bar.ts be resolved by discarding
+  the local change or by cherry-picking the remote version?"
+
 ## Failure handling
 
 Any non-recoverable failure (turn cap hit, prior artifact missing, scope

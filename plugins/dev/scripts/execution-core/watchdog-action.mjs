@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { log } from "./config.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 import { labelOnce, recordEscalation } from "./label-guard.mjs";
+import { coerceExplanation } from "./escalation-explanation.mjs";
 
 const SETTLED = new Set(["done", "failed", "stalled", "aborted", "skipped", "complete"]);
 
@@ -100,10 +101,22 @@ export async function killHungWorker(
   try {
     const cur = JSON.parse(readFileSync(sigPath, "utf8"));
     if (SETTLED.has(cur.status)) return { outcome: "already-terminal" };
+    // CTL-1065: build structured explanation alongside failureReason.
+    const explanation = coerceExplanation(
+      {
+        what_failed: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes`,
+        observed: { elapsedMin: Math.floor(elapsedMin), commitCount, bgJobId },
+        attempts: [],
+        why_gave_up: `watchdog killed the worker — no progress within the hung-worker threshold`,
+        human_question: `restart ${ticket} ${phase} from scratch, or is this a known slow/flaky step (extend the threshold)?`,
+      },
+      { ticket, phase },
+    );
     const updated = {
       ...cur,
       status: "failed",
       failureReason,
+      explanation,
       failedAt: new Date(now()).toISOString(),
     };
     const tmp = `${sigPath}.tmp.${process.pid}`;

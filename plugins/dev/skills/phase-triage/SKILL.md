@@ -406,3 +406,26 @@ guard fails the build if this skill ever emits a `linearis issues update` call.
 
 The refinement step is deliberately optional — the orchestrator hand-off in CTL-452 only needs the
 `phase.triage.complete.<TICKET>` event, and the bash body already emits that.
+
+## Structured escalation (CTL-1065)
+
+If triage genuinely cannot proceed (e.g., the ticket description is too
+ambiguous to classify, or a required external resource is unavailable), emit
+`failed` with a structured `explanation` block. Use the CLI shim:
+
+```bash
+EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+  --ticket "$TICKET" --phase triage \
+  --what-failed "{{ specific symptom }}" \
+  --why-gave-up "{{ reason autonomous triage cannot complete }}" \
+  --human-question "{{ one specific answerable question }}" \
+  2>/dev/null || echo '{}')"
+```
+
+The `human_question` MUST be specific and answerable — never:
+- "needs a human" / "requires human review"
+- "a human must decide" / "escalate to operator"
+
+Write the specific question instead:
+- Good: "should CTL-NNN be classified as a feature or a refactor — the
+  description mentions both adding a new API and removing the old one?"

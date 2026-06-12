@@ -4602,3 +4602,51 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     expect(emit.calls.length).toBe(0);
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-1065: escalateOnce carries a valid structured explanation
+// ──────────────────────────────────────────────────────────────────────────
+import { validateExplanation } from "./escalation-explanation.mjs";
+
+describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanation", () => {
+  const orch = mkdtempSync(join(tmpdir(), "ctl1065-reclaim-"));
+  afterEach(() => { try { rmSync(orch, { recursive: true, force: true }); } catch { /* */ } });
+
+  function impl1065(extra = {}) {
+    mkdirSync(join(orch, "workers", "CTL-65"), { recursive: true });
+    return {
+      ticket: "CTL-65", phase: "implement", status: "running",
+      startedAt: new Date(0).toISOString(),
+      liveness: { kind: "bg", value: "abcd1234" },
+      raw: { bg_job_id: "abcd1234", generation: 1, startedAt: new Date(0).toISOString() },
+      ...extra,
+    };
+  }
+
+  test("busy-ceiling escalation carries a valid explanation alongside reason", () => {
+    const captured = [];
+    const appendEscalatedEvent = (obj) => captured.push(obj);
+    reclaimDeadWorkIfPossible(
+      orch,
+      impl1065(),
+      {
+        statJob: () => ({ mtimeMs: Date.now(), exists: true }),
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+        applyStalledLabel: recorder({ applied: true }),
+        inEscalationCooldownFn: () => false,
+        recordEscalationFn: () => {},
+        breaker: { isOpen: () => false },
+      },
+    );
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    const call = captured[0];
+    expect(call.reason).toBe("busy-ceiling-exceeded"); // unchanged
+    const expl = call.extras?.explanation;
+    expect(expl).toBeTruthy();
+    expect(validateExplanation(expl).valid).toBe(true);
+  });
+});

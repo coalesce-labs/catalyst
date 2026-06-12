@@ -529,3 +529,65 @@ describe("MULTI-TICK LADDER — R4 → R10 → R11 → R12 in real tick order, p
     expect(events.filter((e) => e["event.name"] === "escalate.human")).toHaveLength(1);
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-1065: structured explanation in escalate.human events
+// ──────────────────────────────────────────────────────────────────────────
+import { validateExplanation } from "../escalation-explanation.mjs";
+
+describe("CTL-1065: executeEscalations emits structured explanation", () => {
+  test("page emits escalate.human with a valid explanation when evidenceBySubject provided", () => {
+    seedCfg("max_attempts", 2);
+    const tickId = insertTick(NOW);
+    const subject = "CTL-7/implement";
+    insertEscalateHuman(tickId, subject, "stalled-alive");
+    insertWakeIntent(tickId, subject, { attempts: 2, outcome: null });
+
+    const events = [];
+    const evidenceBySubject = {
+      "CTL-7/implement": {
+        logsOutput: "Error: tsc failed with 3 errors",
+        jobState: { elapsedMin: 42, commitCount: 0, bgJobId: "ab12ef34" },
+      },
+    };
+
+    executeEscalations(db, tickId, {
+      orchDir: scratch(),
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => true,
+      evidenceBySubject,
+    });
+
+    const ev = events.find((e) => e["event.name"] === "escalate.human");
+    expect(ev).toBeTruthy();
+    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
+    expect(ev.payload.explanation.observed.bgJobId).toBe("ab12ef34");
+    // backward compat: why still present
+    expect(ev.payload.why).toBe("stalled-alive");
+  });
+
+  test("missing evidence still pages with a coerced explanation", () => {
+    seedCfg("max_attempts", 2);
+    const tickId = insertTick(NOW);
+    const subject = "CTL-7/implement";
+    insertEscalateHuman(tickId, subject, "stalled-alive");
+    insertWakeIntent(tickId, subject, { attempts: 2, outcome: null });
+
+    const events = [];
+    executeEscalations(db, tickId, {
+      orchDir: scratch(),
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => true,
+      // no evidenceBySubject
+    });
+
+    const ev = events.find((e) => e["event.name"] === "escalate.human");
+    expect(ev).toBeTruthy();
+    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
+    expect(ev.payload.explanation.human_question).toContain("CTL-7");
+  });
+});

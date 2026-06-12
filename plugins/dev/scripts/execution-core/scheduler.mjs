@@ -4459,6 +4459,10 @@ function runTick() {
     // when CATALYST_BELIEFS_SHADOW=1 (collector opened the db) AND
     // CATALYST_DIAGNOSTICIAN=1 (diagnostician gate).
     if (beliefsRes?.ok && beliefsRes?.tickId != null) {
+      // CTL-1065: diagResult is populated by the diagnostician block below and
+      // consumed by executeEscalations to enrich the escalation payload.
+      let diagResult = null;
+
       try {
         const diagDb = getBeliefsDb();
         if (diagDb) {
@@ -4466,7 +4470,9 @@ function runTick() {
           // applies needs-human. The single label owner is executeEscalations
           // (beliefs/escalate.mjs), called immediately after, which pages off the
           // same R12 escalate_human beliefs exactly once.
-          processDiagnosticianWakes(diagDb, beliefsRes.tickId, {});
+          // CTL-1065: capture the result so escalated[].evidence can be threaded
+          // into executeEscalations as evidenceBySubject.
+          diagResult = processDiagnosticianWakes(diagDb, beliefsRes.tickId, {});
         }
       } catch (diagErr) {
         try {
@@ -4487,12 +4493,20 @@ function runTick() {
       try {
         const escDb = getBeliefsDb();
         if (escDb) {
+          // CTL-1065: build evidenceBySubject from the diagnostician's escalated
+          // subjects so the explanation payload carries real observed data.
+          const evidenceBySubject = Object.fromEntries(
+            (diagResult?.escalated ?? [])
+              .filter((x) => x?.subject)
+              .map((x) => [x.subject, x.evidence ?? {}]),
+          );
           executeEscalations(escDb, beliefsRes.tickId, {
             orchDir: runningOpts.orchDir,
             writeStatus: runningOpts.writeStatus,
             appendEvent: intentEventAppender,
             enforce: (process.env.CATALYST_INTENTS_ENFORCE ?? "0") === "1",
             env: process.env,
+            evidenceBySubject,
           });
         }
       } catch (escErr) {

@@ -170,12 +170,16 @@ export function classifyTicket(t: BoardTicket): InboxSectionKind {
   return "running";
 }
 
-/** CTL-729: the muted human sub-label for an attention row, in plain language —
- *  naming WHY it needs you (the operator-approved small sub-text). */
+/** CTL-729/CTL-1065: the muted human sub-label for an attention row, in plain
+ *  language — naming WHY it needs you. For needs-human rows, uses the structured
+ *  explanation's human_question when present; falls back to the generic phrase. */
 function attentionSubLabel(t: BoardTicket): string {
-  return t.attention === "needs-human"
-    ? "escalated — needs human"
-    : "waiting on your answer";
+  if (t.attention === "needs-human") {
+    return t.humanQuestion && t.humanQuestion.trim() !== ""
+      ? t.humanQuestion
+      : "escalated — needs human";
+  }
+  return "waiting on your answer";
 }
 
 /** The muted human sub-label per section — plain language, never jargon

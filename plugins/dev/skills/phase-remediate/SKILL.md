@@ -326,10 +326,20 @@ fi
 
 ## Failure handling
 
-One failure mode — hard error (caller-supplied reason).
+One failure mode — hard error (caller-supplied reason). When escalating to
+`stalled`/`needs-human`, populate an `explanation` block per CTL-1065 using
+the CLI shim (always exits 0; degrades gracefully on bad input):
 
 ```bash
 REASON="${1:-remediation failed}"  # caller-supplied short string
+
+# CTL-1065: build structured explanation for the operator inbox.
+EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+  --ticket "$TICKET" --phase "$PHASE" \
+  --what-failed "remediation failed: ${REASON}" \
+  --why-gave-up "exhausted remediation budget or encountered an unrecoverable error" \
+  --human-question "should ${TICKET} be re-remediated manually, or should verify findings be waived?" \
+  2>/dev/null || echo '{}')"
 
 # Hard-error: emit failed + attention, exit non-zero. A `failed` event lets
 # the FSM revive remediate once (REVIVE_BUDGET) before stalling — distinct

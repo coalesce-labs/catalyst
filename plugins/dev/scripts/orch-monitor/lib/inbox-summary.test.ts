@@ -34,6 +34,7 @@ const STATE_FIXTURE: InboxItemState = {
   raisedQuestion: "Should the cache key include the model id?",
   transcriptTail: "Worker was implementing the cache. Should the cache key include the model id?",
   bgJobId: "testjob1",
+  humanQuestion: null,
 };
 
 const ANTHROPIC_OK_RESPONSE = JSON.stringify({
