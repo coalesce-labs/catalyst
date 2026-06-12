@@ -69,7 +69,9 @@ import {
   classifyTicketResolution,
   fetchTicketAssignee,
   isAssigneeClaimable,
+  readTicketLabels,
 } from "./linear-query.mjs";
+import { gatewayLabelsHit } from "./gateway-read.mjs"; // CTL-1079
 import { getProjectConfig, listProjects } from "./registry.mjs";
 // CTL-703: worktree teardown is now handled by the dedicated phase-teardown
 // phase agent (the 10th pipeline phase), not the scheduler's terminal sweep.
@@ -4366,6 +4368,24 @@ export function schedulerTick(
   for (const sig of readWorkerSignals(orchDir)) {
     if (sig.ticket) signalByTicket.set(sig.ticket, sig);
   }
+  // CTL-1079: serve removeLabel's read-before-mutate from the broker projection so
+  // the retraction sweep stops spending live Linear API read budget. The live read
+  // (readTicketLabels) remains the fallback on any cache miss. Staleness is
+  // fail-safe: removeLabel is idempotent on an already-absent label. When no gateway
+  // is injected the bare writeStatus is used unchanged (back-compat).
+  const retractionWriteStatus = gateway
+    ? {
+        ...writeStatus,
+        removeLabel: (t, l, opts = {}) =>
+          writeStatus.removeLabel(t, l, {
+            ...opts,
+            readLabels:
+              opts.readLabels ??
+              ((tk, ro = {}) => gatewayLabelsHit(gateway, tk) ?? readTicketLabels(tk, ro)),
+          }),
+      }
+    : writeStatus;
+
   for (const ticket of listStartedTickets(orchDir)) {
     const signals = readPhaseSignals(orchDir, ticket);
     // CTL-703: the terminal phase is now `teardown` (not `monitor-deploy`) —
@@ -4382,7 +4402,7 @@ export function schedulerTick(
       // CTL-646: terminal Done unconditionally clears needs-human (belt + teardown path).
       // CTL-703: worktree teardown is now the `teardown` FSM phase (teardownWorktreeOnce
       // removed) — only the label clear remains inline here.
-      clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+      clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
     }
     // CTL-758: reconcile backstop — re-Done a merged ticket whose Linear state
     // drifted back to non-terminal (a late echo). Gated by the .terminal-done.applied
@@ -4419,7 +4439,7 @@ export function schedulerTick(
       // removeLabel API calls (steady-state-zero-writes invariant).
       const base = join(orchDir, "workers", ticket, ".linear-label-needs-human");
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
-        clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
+        clearStalledLabel(orchDir, ticket, "needs-human", retractionWriteStatus);
       }
     }
     // CTL-1068 — retract orphaned held labels for STARTED (admitted) tickets. The
@@ -4433,7 +4453,7 @@ export function schedulerTick(
       !("research" in signals) &&
       !Object.values(signals).some((v) => v === PREEMPTED_STATUS);
     if (!isPrePickup) {
-      convergeStartedHeldLabels(orchDir, ticket, writeStatus, {
+      convergeStartedHeldLabels(orchDir, ticket, retractionWriteStatus, {
         desired: null,
         multiHost,
         emitStateWrite,
