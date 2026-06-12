@@ -3,12 +3,16 @@
 // singleton getters return identity-stable references. Goes RED if any
 // extraction phase drops a re-export or breaks getter identity.
 //
-// Note: the barrel re-exports 75 public symbols (CTL-529 established 55; CTL-532
+// Note: the barrel re-exports 83 public symbols (CTL-529 established 55; CTL-532
 // added 12 worker-state-projection symbols — 9 store helpers, the reducer, and
-// the two projection drivers; CTL-993 added 7 plugin-refresh symbols). The count
-// is the length of the enumerated REQUIRED_EXPORTS list below — `grep -cE
-// '^export '` undercounts because most re-exports are multi-name `export { … }
-// from` blocks.
+// the two projection drivers; CTL-993 added 7 plugin-refresh symbols; CTL-1077
+// added 6 stack-reload symbols — 4 stack-reload module re-exports,
+// resolveBootByteOffset direct export, and getLastByteOffset from tailer;
+// CTL-1077 remediate added 2 more — BROKER_HANDOFF_MAX_AGE_MS and the extracted
+// parseBootHandoff boot seam).
+// The count is the length of the enumerated REQUIRED_EXPORTS list below —
+// `grep -cE '^export '` undercounts because most re-exports are multi-name
+// `export { … } from` blocks.
 import { describe, test, expect } from "bun:test";
 import * as barrel from "./index.mjs";
 
@@ -97,14 +101,24 @@ const REQUIRED_EXPORTS = [
   "handlePluginRefreshEvent",
   "PLUGIN_REFRESH_THROTTLE_MS",
   "__clearThrottleForTest",
+  // CTL-1077: automatic hot-reload of the running stack (stack-reload.mjs + index.mjs)
+  "decideStackReload",
+  "handleStackReloadEvent",
+  "STACK_RELOAD_DEBOUNCE_MS",
+  "__clearReloadStateForTest",
+  "resolveBootByteOffset",
+  "getLastByteOffset",
+  // CTL-1077 remediate: handoff freshness budget + extracted boot-parse seam (index.mjs)
+  "BROKER_HANDOFF_MAX_AGE_MS",
+  "parseBootHandoff",
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 75 public symbols re-export from ./index.mjs", () => {
+  test("all 83 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(75);
+    expect(REQUIRED_EXPORTS.length).toBe(83);
   });
 
   test("singleton getters return identity-stable live references", () => {

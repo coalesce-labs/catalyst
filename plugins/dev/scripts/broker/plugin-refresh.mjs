@@ -265,11 +265,11 @@ export function refreshPluginCheckout({
   loadedCommit = null,
   loadedCommitRoot = null,
 }) {
-  if (!root) return { pulled: false, throttled: false, changed: false, failed: false };
+  if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
   const last = _lastPullByRoot.get(root);
   if (last !== undefined && now - last < PLUGIN_REFRESH_THROTTLE_MS) {
-    return { pulled: false, throttled: true, changed: false, failed: false };
+    return { pulled: false, throttled: true, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
   }
   // Reserve the slot BEFORE the (possibly slow) pull so a duplicate event that
   // arrives mid-pull is throttled rather than launching a second git process.
@@ -296,7 +296,7 @@ export function refreshPluginCheckout({
         error: err?.message ?? String(err),
       },
     });
-    return { pulled: false, throttled: false, changed: false, failed: true };
+    return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
   }
 
   let newSha = null;
@@ -308,7 +308,7 @@ export function refreshPluginCheckout({
 
   // HEAD did not advance — nothing changed, stay quiet (no event noise).
   if (oldSha && newSha && oldSha === newSha) {
-    return { pulled: true, throttled: false, changed: false, failed: false };
+    return { pulled: true, throttled: false, changed: false, failed: false, root, oldSha, newSha, restartNeeded: false };
   }
 
   // Daemon skew: the checkout advanced, but the long-lived daemon still runs the
@@ -337,7 +337,7 @@ export function refreshPluginCheckout({
       restart_needed: restartNeeded,
     },
   });
-  return { pulled: true, throttled: false, changed: true, failed: false };
+  return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
 }
 
 /**
@@ -362,7 +362,7 @@ export function handlePluginRefreshEvent({
   loadedCommitRoot = null,
 }) {
   try {
-    if (!isThisRepoMergeEvent(event, { repoFullName })) return;
+    if (!isThisRepoMergeEvent(event, { repoFullName })) return null;
     const roots = resolvePluginCheckoutRoots({
       env,
       machineConfigPath,
@@ -370,11 +370,14 @@ export function handlePluginRefreshEvent({
       readFileFn,
       gitToplevelFn,
     });
+    const results = [];
     for (const root of roots) {
-      refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot });
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot }));
     }
+    return results;
   } catch {
     // Best-effort — a refresh failure must never break event routing. Genuine
     // pull failures are already surfaced as refresh_failed events above.
+    return null;
   }
 }

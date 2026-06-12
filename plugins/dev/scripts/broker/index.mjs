@@ -16,8 +16,9 @@
 // index.mjs is the thin daemon entrypoint (main/shutdown, PID + key-health)
 // plus the re-export barrel that preserves the public import surface.
 
-import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync } from "node:fs";
-import { dirname } from "node:path";
+import { writeFileSync, unlinkSync, mkdirSync, openSync, fstatSync, closeSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   openBrokerStateDb,
@@ -149,7 +150,7 @@ export {
   processEvent,
   handleWorkerStateChanged,
 } from "./router.mjs";
-export { loadExistingRegistrations } from "./tailer.mjs";
+export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";
 // CTL-993: merge-to-main plugin-checkout refresh. router.mjs calls
 // handlePluginRefreshEvent in processEvent; the rest are pure units re-exported
 // through the barrel so the public import surface stays complete.
@@ -162,6 +163,77 @@ export {
   PLUGIN_REFRESH_THROTTLE_MS,
   __clearThrottleForTest,
 } from "./plugin-refresh.mjs";
+// CTL-1077: automatic hot-reload of the running stack on checkout advance.
+// router.mjs calls handleStackReloadEvent after handlePluginRefreshEvent;
+// the rest are pure units re-exported for testability.
+export {
+  decideStackReload,
+  handleStackReloadEvent,
+  STACK_RELOAD_DEBOUNCE_MS,
+  __clearReloadStateForTest,
+} from "./stack-reload.mjs";
+
+/**
+ * resolveBootByteOffset — pick the tailer start offset on broker boot.
+ *
+ * When the broker self-reloads (CTL-1077), it writes a handoff file with the
+ * last-processed byte offset so the successor can resume exactly where it left
+ * off instead of reseeding to EOF and skipping events appended during the gap.
+ *
+ * Falls back to `eofSize` (the existing behavior) when:
+ *   - no handoff file
+ *   - handoff logPath ≠ current logPath (different month file)
+ *   - handoff is stale (older than maxAgeMs)
+ *
+ * CTL-1077 remediate (M4): the default freshness budget is 5 min, not 60 s. A
+ * broker self-restart can land >60 s after the handoff write — the
+ * defaultConfirmReload path itself documents ~90 s EADDRINUSE restart races — so
+ * a 60 s budget would reject the fresh handoff as stale, reseed to EOF, and drop
+ * exactly the restart-gap events this handoff exists to preserve. The logPath
+ * equality check and one-shot unlink already bound staleness/replay risk, so a
+ * generous age budget costs little.
+ *
+ * @param {{ handoff, logPath, eofSize, now?, maxAgeMs? }} opts
+ * @returns {number}
+ */
+export const BROKER_HANDOFF_MAX_AGE_MS = 5 * 60_000;
+
+export function resolveBootByteOffset({ handoff, logPath, eofSize, now = Date.now(), maxAgeMs = BROKER_HANDOFF_MAX_AGE_MS }) {
+  if (!handoff) return eofSize;
+  if (handoff.logPath !== logPath) return eofSize;
+  if (now - handoff.ts > maxAgeMs) return eofSize;
+  return handoff.byteOffset;
+}
+
+/**
+ * parseBootHandoff — read + parse the broker self-reload handoff file on boot.
+ *
+ * CTL-1077 remediate (#8): extracted from main()'s inline boot block into a
+ * pure, seam-injected helper so the corrupt-handoff warn branch and the
+ * ENOENT-is-silent branch are directly unit-testable (previously only the pure
+ * resolveBootByteOffset was covered; this fs-touching branch had no seam).
+ *
+ * A missing handoff (ENOENT) is the normal no-reload case → silent null. A
+ * corrupt/partial handoff means we are about to reseed from EOF and drop the
+ * restart-gap events → surface it via log.warn so the gap-drop is observable
+ * instead of swallowed.
+ *
+ * @param {{ handoffPath, readFileFn, log? }} opts
+ * @returns {object|null} the parsed handoff, or null when absent/corrupt
+ */
+export function parseBootHandoff({ handoffPath, readFileFn, log: logger = log }) {
+  try {
+    return JSON.parse(readFileFn(handoffPath, "utf8"));
+  } catch (err) {
+    if (err && err.code !== "ENOENT") {
+      logger.warn(
+        { err: err.message, handoffPath },
+        "unreadable/corrupt broker reload handoff; reseeding from EOF"
+      );
+    }
+    return null;
+  }
+}
 
 // Identity-stable aliases for the shared maps main()/shutdown() read.
 const interests = getInterests();
@@ -335,8 +407,30 @@ function main() {
     const fd = openSync(logPath, "r");
     const stat = fstatSync(fd);
     closeSync(fd);
-    seedTailer({ logPath, byteOffset: stat.size });
-    log.info({ byteOffset: stat.size, logPath }, "starting");
+    // CTL-1077: honor broker self-reload handoff — resume from saved offset
+    // rather than reseeding to EOF, so events appended during the restart gap
+    // are not silently dropped.
+    const handoffPath = resolve(homedir(), "catalyst", "broker", "reload-handoff.json");
+    // CTL-1077 remediate (#8): parse via the extracted, unit-tested seam — the
+    // corrupt-warn / ENOENT-silent branches now have direct coverage.
+    const handoff = parseBootHandoff({ handoffPath, readFileFn: readFileSync, log });
+    const byteOffset = resolveBootByteOffset({
+      handoff,
+      logPath,
+      eofSize: stat.size,
+      now: Date.now(),
+      // M4: explicit generous freshness budget (~90 s restart races can exceed 60 s).
+      maxAgeMs: BROKER_HANDOFF_MAX_AGE_MS,
+    });
+    // CTL-1077 remediate: unlink whenever a handoff was read (not only when the
+    // resolved offset differs from EOF). When a fresh handoff's byteOffset happens
+    // to coincide with EOF the old guard left the file on disk, risking one extra
+    // re-process on a fast subsequent restart. Consuming it once is always correct.
+    if (handoff) {
+      try { unlinkSync(handoffPath); } catch { /* ok */ }
+    }
+    seedTailer({ logPath, byteOffset });
+    log.info({ byteOffset, logPath }, "starting");
   } catch {
     log.info({ logPath }, "starting (no log file yet)");
   }
