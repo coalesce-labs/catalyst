@@ -198,11 +198,10 @@ export function recordResponse(
 }
 
 // ── find the held run for a ticket ───────────────────────────────────────────
-// findHeldRun — scan the ticket's worker dir for the phase signal that is parked
-// awaiting human input (status === "needs-input"), the exact predicate the
-// daemon's handleCommentWake uses. Returns { phase, signal } for the first held
-// run (PHASE_ORDER precedence so the result is deterministic) or null when no run
-// is held. Reads in PHASE_ORDER so a multi-phase worker dir resolves predictably.
+// findHeldRun — scan the ticket's worker dir for the phase signal that is held
+// awaiting an operator: parked for input (status "needs-input") OR a stalled
+// escalation (status "stalled") the daemon flagged needs-human (CTL-1067).
+// Returns { phase, signal } for the first held run in PHASE_ORDER, or null.
 export function findHeldRun(
   ticket,
   { workersDir = DEFAULT_WORKERS_DIR, readDir = readdirSync, read = readFileSync } = {},
@@ -225,7 +224,11 @@ export function findHeldRun(
     } catch {
       continue;
     }
-    if (sig && typeof sig === "object" && sig.status === "needs-input") {
+    if (
+      sig &&
+      typeof sig === "object" &&
+      (sig.status === "needs-input" || sig.status === "stalled")
+    ) {
       return { phase, signal: sig };
     }
   }
@@ -236,7 +239,7 @@ export function findHeldRun(
 // respondTicket — drive the full BFF12 contract for
 // `POST /api/ticket/<ticket>/respond`. Outcome is a discriminated result the route
 // maps to an HTTP status:
-//   { status: "not_held" }                          → 404: no parked (needs-input)
+//   { status: "not_held" }                          → 404: no parked or stalled
 //                                                      run for the ticket — nothing
 //                                                      to answer / unblock.
 //   { status: "confirm_mismatch", expected }         → 400: typed confirm wrong.

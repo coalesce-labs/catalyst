@@ -246,7 +246,7 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 
 // removeLabel — remove a single label from a ticket while preserving its OTHER
 // labels (CTL-549). Counterpart to applyLabel; used by handleCommentWake to
-// clear needs-human/question when re-dispatching a parked worker.
+// clear `needs-human` when re-dispatching a parked worker (CTL-1067: flat label name).
 //
 // linearis 2026.4.9 has NO single-label-remove primitive: `--label-mode` only
 // accepts `add` or `overwrite` (the old `remove` value is REJECTED with
