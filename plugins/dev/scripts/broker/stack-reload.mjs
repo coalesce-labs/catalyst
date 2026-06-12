@@ -11,10 +11,11 @@
 // timers, or log files. Mirrors the plugin-refresh.mjs / gc-liveness.mjs
 // seam-injection convention.
 
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
+import { log } from "./config.mjs";
 
 // Trailing-edge debounce window. Coalesces merge-train bursts: three merges
 // within this window produce exactly one reload after the last merge.
@@ -55,17 +56,56 @@ function defaultSpawnFn(cmd, args) {
   } catch { /* best-effort — caller's try/catch also wraps this */ }
 }
 
+// defaultConfirmReload — bounded check that a restarted component actually came
+// back up before we report success. CTL-1077 remediate: the original code fired
+// `stack.reload.complete` UNCONDITIONALLY right after a fire-and-forget detached
+// `restart`. A restart that races its own stop hits EADDRINUSE on the listen port
+// and leaves the component DOWN (~90 s observed) while the event log falsely
+// reports success. Only the monitor exposes a stable listen port we can probe
+// from here; the exec-core restart is confirmed best-effort by spawn success.
+// Polls with a small budget to absorb the stop→start gap (the monitor start
+// itself polls up to ~2 s for its pid file). Returns false if the port never
+// comes back, so performReload can emit `stack.reload.degraded` instead of
+// `complete` and retry once.
+function defaultConfirmReload(component) {
+  if (!component || component.name !== "monitor") return true;
+  const port = process.env.MONITOR_PORT || "7400";
+  const attempts = 10; // ≤ ~5 s total (10 × 500 ms) — covers stop + start
+  for (let i = 0; i < attempts; i++) {
+    try {
+      // `lsof` exits 0 only when a process is LISTENing on the port — i.e. the
+      // restarted monitor rebound it. EADDRINUSE-down state never satisfies this.
+      execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, { stdio: "ignore" });
+      return true;
+    } catch { /* not listening yet (or lsof missing) */ }
+    try { execSync("sleep 0.5", { stdio: "ignore" }); } catch { /* ok */ }
+  }
+  return false;
+}
+
 function defaultHandoffPath() {
   return resolve(homedir(), "catalyst", "broker", "reload-handoff.json");
 }
 
 function defaultWriteHandoffFn({ logPath, byteOffset, pid, ts }) {
   const dir = resolve(homedir(), "catalyst", "broker");
-  mkdirSync(dir, { recursive: true });
   const path = defaultHandoffPath();
   const tmp = path + ".tmp." + process.pid;
-  writeFileSync(tmp, JSON.stringify({ logPath, byteOffset, pid, ts }), "utf8");
-  renameSync(tmp, path);
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(tmp, JSON.stringify({ logPath, byteOffset, pid, ts }), "utf8");
+    renameSync(tmp, path);
+  } catch (err) {
+    // CTL-1077 remediate (silent-failure): a failed handoff write/rename used to
+    // be swallowed by the caller's best-effort catch, so the successor silently
+    // reseeded to EOF and dropped the restart-gap events with no trace. Surface
+    // it, then re-throw to preserve the caller's best-effort restart fallback.
+    log.error(
+      { err: err?.message, handoffPath: path },
+      "failed to write broker reload handoff; successor will reseed from EOF (possible gap re-process)"
+    );
+    throw err;
+  }
 }
 
 // --- pure decision core ------------------------------------------------------
@@ -111,6 +151,7 @@ function performReload({
   writeHandoffFn,
   currentByteOffset,
   logPath,
+  confirmFn = defaultConfirmReload,
 }) {
   emitFn?.({
     event: "stack.reload.started",
@@ -119,22 +160,58 @@ function performReload({
     detail: { components: decision.components.map((c) => c.name), ts: now },
   });
 
+  // CTL-1077 remediate (high): restart each component, then CONFIRM it came back
+  // before reporting success. The prior code emitted `stack.reload.complete`
+  // unconditionally right after the fire-and-forget spawn, so a restart that
+  // raced its own stop (EADDRINUSE) left the component DOWN while the event log
+  // falsely reported success. We now gate the complete event on confirmation and
+  // retry once before declaring a component degraded.
+  const confirmed = [];
+  const unconfirmed = [];
   for (const c of decision.components) {
     try { spawnFn(c.cmd, ["restart"]); } catch { /* best-effort per component */ }
+    let ok = false;
+    try { ok = confirmFn(c) !== false; } catch { ok = false; }
+    if (!ok) {
+      // Retry once before declaring failure (the recommendation's "retry once").
+      try { spawnFn(c.cmd, ["restart"]); } catch { /* best-effort per component */ }
+      try { ok = confirmFn(c) !== false; } catch { ok = false; }
+    }
+    (ok ? confirmed : unconfirmed).push(c);
   }
 
-  emitFn?.({
-    event: "stack.reload.complete",
-    orchestrator: null,
-    worker: null,
-    detail: {
-      components: decision.components.map((c) => ({
-        name: c.name,
-        old_sha: c.oldSha,
-        new_sha: c.newSha,
-      })),
-    },
-  });
+  if (unconfirmed.length === 0) {
+    emitFn?.({
+      event: "stack.reload.complete",
+      orchestrator: null,
+      worker: null,
+      detail: {
+        components: decision.components.map((c) => ({
+          name: c.name,
+          old_sha: c.oldSha,
+          new_sha: c.newSha,
+        })),
+      },
+    });
+  } else {
+    // At least one component could not be confirmed back up — report degraded
+    // (NOT complete) so the event log reflects reality and an operator/HUD can
+    // see the stalled restart instead of a false success.
+    emitFn?.({
+      event: "stack.reload.degraded",
+      orchestrator: null,
+      worker: null,
+      detail: {
+        reason: "restart_not_confirmed",
+        confirmed: confirmed.map((c) => c.name),
+        unconfirmed: unconfirmed.map((c) => ({
+          name: c.name,
+          old_sha: c.oldSha,
+          new_sha: c.newSha,
+        })),
+      },
+    });
+  }
 
   // Broker self-reload: write tail-offset handoff then re-exec via catalyst-broker restart.
   // The handoff lets the successor pick up exactly where we left off rather than
@@ -162,16 +239,18 @@ function performReload({
  * produces exactly one reload after the last merge. The latest decision (newest
  * SHAs) always wins.
  *
- * Injected seams: spawnFn, emitFn, writeHandoffFn, setTimeoutFn,
+ * Injected seams: spawnFn, confirmFn, emitFn, writeHandoffFn, setTimeoutFn,
  * clearTimeoutFn, now, nowFn, currentByteOffset, logPath — for deterministic testing.
  * `now` is the event-capture instant (used for the started-event detail); `nowFn` is
  * evaluated at handoff-write time (after the debounce) so the staleness ts reflects when
- * the handoff was actually persisted.
+ * the handoff was actually persisted. `confirmFn(component) => boolean` gates the
+ * complete event on the restart actually coming back up (CTL-1077 remediate).
  */
 export function handleStackReloadEvent({
   results,
   loadedCommitRoot = null,
   spawnFn = defaultSpawnFn,
+  confirmFn = defaultConfirmReload,
   emitFn,
   now = Date.now(),
   nowFn = Date.now,
@@ -195,6 +274,7 @@ export function handleStackReloadEvent({
 
     // Capture closure seams for the debounce callback.
     const capturedSpawnFn = spawnFn;
+    const capturedConfirmFn = confirmFn;
     const capturedEmitFn = emitFn;
     const capturedNow = now;
     const capturedNowFn = nowFn;
@@ -212,6 +292,7 @@ export function handleStackReloadEvent({
         performReload({
           decision: d,
           spawnFn: capturedSpawnFn,
+          confirmFn: capturedConfirmFn,
           emitFn: capturedEmitFn,
           now: capturedNow,
           nowFn: capturedNowFn,

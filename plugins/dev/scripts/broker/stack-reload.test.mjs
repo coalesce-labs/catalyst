@@ -137,6 +137,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: false }],
       loadedCommitRoot: "/co",
       spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
+      confirmFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -176,6 +177,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
         results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
         loadedCommitRoot: "/co",
         spawnFn: () => { throw new Error("boom"); },
+        confirmFn: () => true,
         emitFn: () => {},
         now: 1000,
         ...immediate,
@@ -209,6 +211,7 @@ describe("non-disruption contract (Phase 4)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
       loadedCommitRoot: "/co",
       spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
+      confirmFn: () => true,
       emitFn: () => {},
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -217,6 +220,99 @@ describe("non-disruption contract (Phase 4)", () => {
     timers.advance(STACK_RELOAD_DEBOUNCE_MS);
     expect(spawned).toContain("catalyst-execution-core restart");
     expect(spawned.some((s) => /kill|pkill|SIGKILL|-9/.test(s))).toBe(false);
+  });
+});
+
+// ─── restart confirmation gating (CTL-1077 remediate) ───────────────────────
+//
+// The original code emitted stack.reload.complete UNCONDITIONALLY right after a
+// fire-and-forget detached restart. A restart that raced its own stop hit
+// EADDRINUSE and left the component DOWN (~90 s observed) while the event log
+// falsely reported success. performReload now confirms each restart came back
+// (confirmFn), retries once, and emits stack.reload.degraded — not complete —
+// when a component cannot be confirmed.
+describe("restart confirmation gating (CTL-1077 remediate)", () => {
+  beforeEach(() => __clearReloadStateForTest());
+
+  test("an unconfirmable component → degraded event (not complete) + retry once", () => {
+    const emitted = [];
+    const spawned = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
+      confirmFn: (c) => c.name !== "monitor", // monitor never rebinds its port
+      emitFn: (e) => emitted.push(e),
+      now: 1000,
+      ...immediate,
+    });
+    const names = emitted.map((e) => e.event);
+    expect(names).toContain("stack.reload.started");
+    expect(names).toContain("stack.reload.degraded");
+    expect(names).not.toContain("stack.reload.complete");
+    const degraded = emitted.find((e) => e.event === "stack.reload.degraded");
+    expect(degraded.detail.reason).toBe("restart_not_confirmed");
+    expect(degraded.detail.unconfirmed.map((c) => c.name)).toContain("monitor");
+    expect(degraded.detail.confirmed).toContain("execution-core");
+    // monitor was retried once before being declared degraded; exec-core, confirmed
+    // on the first probe, was spawned exactly once.
+    expect(spawned.filter((s) => s === "catalyst-monitor restart").length).toBe(2);
+    expect(spawned.filter((s) => s === "catalyst-execution-core restart").length).toBe(1);
+  });
+
+  test("retry-once recovers a slow restart → complete, restart spawned twice", () => {
+    const emitted = [];
+    const spawned = [];
+    const calls = {};
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
+      // monitor: first confirm fails, second (after the retry) succeeds.
+      confirmFn: (c) => {
+        calls[c.name] = (calls[c.name] || 0) + 1;
+        return c.name !== "monitor" || calls[c.name] >= 2;
+      },
+      emitFn: (e) => emitted.push(e),
+      now: 1000,
+      ...immediate,
+    });
+    const names = emitted.map((e) => e.event);
+    expect(names).toContain("stack.reload.complete");
+    expect(names).not.toContain("stack.reload.degraded");
+    expect(spawned.filter((s) => s === "catalyst-monitor restart").length).toBe(2);
+  });
+
+  test("all components confirmed → complete (the happy path)", () => {
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 1000,
+      ...immediate,
+    });
+    const names = emitted.map((e) => e.event);
+    expect(names).toContain("stack.reload.complete");
+    expect(names).not.toContain("stack.reload.degraded");
+  });
+
+  test("a throwing confirmFn is treated as unconfirmed (best-effort, no throw)", () => {
+    const emitted = [];
+    expect(() =>
+      handleStackReloadEvent({
+        results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+        loadedCommitRoot: "/co",
+        spawnFn: () => {},
+        confirmFn: () => { throw new Error("lsof boom"); },
+        emitFn: (e) => emitted.push(e),
+        now: 1000,
+        ...immediate,
+      })
+    ).not.toThrow();
+    expect(emitted.map((e) => e.event)).toContain("stack.reload.degraded");
   });
 });
 
@@ -232,6 +328,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b" + n, changed: true }],
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => reloads.push(cmd),
+      confirmFn: () => true,
       emitFn: () => {},
       setTimeoutFn: timers.setTimeoutFn,
       clearTimeoutFn: timers.clearTimeoutFn,
@@ -254,6 +351,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
       loadedCommitRoot: "/co",
       spawnFn: (c) => reloads.push(c),
+      confirmFn: () => true,
       emitFn: () => {},
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -271,6 +369,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b1", changed: true }],
       loadedCommitRoot: "/co",
       spawnFn: () => {},
+      confirmFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -281,6 +380,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b2", changed: true }],
       loadedCommitRoot: "/co",
       spawnFn: () => {},
+      confirmFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 5_000,
       setTimeoutFn: timers.setTimeoutFn,
@@ -307,6 +407,7 @@ describe("broker self-reload (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => spawned.push(cmd),
+      confirmFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 4096,
       emitFn: () => {},
@@ -328,6 +429,7 @@ describe("broker self-reload (Tier 2)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: false }],
       loadedCommitRoot: "/co",
       spawnFn: (c) => spawned.push(c),
+      confirmFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 10,
       emitFn: () => {},
@@ -347,6 +449,7 @@ describe("broker self-reload (Tier 2)", () => {
         results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
         loadedCommitRoot: "/co",
         spawnFn: () => {},
+        confirmFn: () => true,
         writeHandoffFn: () => { throw new Error("disk full"); },
         currentByteOffset: 0,
         emitFn: () => {},
@@ -439,6 +542,7 @@ describe("self-reload handoff round-trip (write → resolveBootByteOffset)", () 
       results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
       loadedCommitRoot: "/co",
       spawnFn: () => {},
+      confirmFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 4096,
       emitFn: () => {},

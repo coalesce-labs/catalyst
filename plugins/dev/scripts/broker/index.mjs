@@ -372,9 +372,26 @@ function main() {
     // are not silently dropped.
     const handoffPath = resolve(homedir(), "catalyst", "broker", "reload-handoff.json");
     let handoff = null;
-    try { handoff = JSON.parse(readFileSync(handoffPath, "utf8")); } catch { /* no handoff */ }
+    try {
+      handoff = JSON.parse(readFileSync(handoffPath, "utf8"));
+    } catch (err) {
+      // CTL-1077 remediate (silent-failure): a missing handoff (ENOENT) is the
+      // normal no-reload case and stays silent, but a corrupt/partial handoff
+      // means we are about to reseed from EOF and drop the restart-gap events —
+      // surface that so the gap-drop is observable instead of swallowed.
+      if (err && err.code !== "ENOENT") {
+        log.warn(
+          { err: err.message, handoffPath },
+          "unreadable/corrupt broker reload handoff; reseeding from EOF"
+        );
+      }
+    }
     const byteOffset = resolveBootByteOffset({ handoff, logPath, eofSize: stat.size, now: Date.now() });
-    if (handoff && byteOffset !== stat.size) {
+    // CTL-1077 remediate: unlink whenever a handoff was read (not only when the
+    // resolved offset differs from EOF). When a fresh handoff's byteOffset happens
+    // to coincide with EOF the old guard left the file on disk, risking one extra
+    // re-process on a fast subsequent restart. Consuming it once is always correct.
+    if (handoff) {
       try { unlinkSync(handoffPath); } catch { /* ok */ }
     }
     seedTailer({ logPath, byteOffset });
