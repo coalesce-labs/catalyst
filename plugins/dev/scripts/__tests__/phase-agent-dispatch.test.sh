@@ -387,7 +387,7 @@ STATUS_PLAN=$(jq -r '.status'   "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || ec
 ART_PLAN=$(jq -r '.artifact'    "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || echo "")
 assert_eq "2" "$RC_PLAN" "5c plan: /bin/bash refuses when research doc absent (exit 2)"
 assert_eq "refused" "$STATUS_PLAN" "5c plan: status=refused under /bin/bash"
-assert_contains "$ART_PLAN" "thoughts/shared/research/" "5c plan: artifact spec is the non-empty research glob"
+assert_contains "$ART_PLAN" "thoughts/shared/research" "5c plan: artifact spec is the non-empty research glob"
 assert_not_contains "$(cat "${TEST_DIR}/sysbash-plan.err")" "bad substitution" "5c plan: no bad-substitution under /bin/bash"
 
 rm -f "${ORCH_DIR}/workers/CTL-100/phase-plan.json"
@@ -402,7 +402,7 @@ STATUS_IMPL=$(jq -r '.status'  "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || ech
 ART_IMPL=$(jq -r '.artifact'   "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || echo "")
 assert_eq "2" "$RC_IMPL" "5c implement: /bin/bash refuses when plan doc absent (exit 2)"
 assert_eq "refused" "$STATUS_IMPL" "5c implement: status=refused under /bin/bash"
-assert_contains "$ART_IMPL" "thoughts/shared/plans/" "5c implement: artifact spec is the non-empty plan glob"
+assert_contains "$ART_IMPL" "thoughts/shared/plans" "5c implement: artifact spec is the non-empty plan glob"
 assert_not_contains "$(cat "${TEST_DIR}/sysbash-impl.err")" "bad substitution" "5c implement: no bad-substitution under /bin/bash"
 
 # ─── Test 6: dispatcher resolves model from config (default + override paths)

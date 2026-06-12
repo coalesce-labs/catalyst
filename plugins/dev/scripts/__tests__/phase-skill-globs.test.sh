@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Verify phase-plan and phase-research SKILLs use the same glob-relax pattern
-# as the dispatcher (CTL-494 Phase 3). They share the same defense-in-depth
-# artifact confirmation logic and must accept both filename conventions
-# (lowercase-tail and uppercase + descriptive suffix).
+# Verify phase-plan and phase-research SKILLs route artifact matching through
+# the shared lib/phase-artifact-gate.sh (CTL-1081) and preserve the failure-reason
+# strings that the orchestrator's wake-handler depends on.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -41,13 +40,10 @@ for f in "$PHASE_PLAN" "$PHASE_RESEARCH"; do
   fi
 done
 
-echo "Test: phase-plan SKILL has the relaxed glob pattern at both sites"
-# Site 1: research-doc check. Site 2: plan-doc check. Both should reference
-# the wider *${TICKET}*.md pattern and nocaseglob fallback.
-assert_count_at_least "$PHASE_PLAN" '\*\$\{TICKET\}\*\.md' 2 \
-  "phase-plan SKILL uses *\${TICKET}*.md pattern at >= 2 sites"
-assert_count_at_least "$PHASE_PLAN" 'nocaseglob' 2 \
-  "phase-plan SKILL uses nocaseglob fallback at >= 2 sites"
+echo "Test: phase-plan SKILL routes through match_thoughts_artifact (CTL-1081)"
+# The inline 3-step glob is replaced — both artifact checks now use the shared matcher.
+assert_count_at_least "$PHASE_PLAN" 'match_thoughts_artifact' 2 \
+  "phase-plan SKILL uses match_thoughts_artifact at >= 2 sites"
 # Failure-reason names must be preserved so the orchestrator's wake-handler
 # can still distinguish the two kinds of artifact miss.
 assert_grep "$PHASE_PLAN" 'prior_artifact_missing:research_doc' \
@@ -56,11 +52,9 @@ assert_grep "$PHASE_PLAN" 'plan_doc_not_written' \
   "phase-plan SKILL preserves plan_doc_not_written failure reason"
 
 echo ""
-echo "Test: phase-research SKILL has the relaxed glob pattern"
-assert_grep "$PHASE_RESEARCH" '\*\$\{TICKET\}\*\.md' \
-  "phase-research SKILL uses *\${TICKET}*.md pattern"
-assert_grep "$PHASE_RESEARCH" 'nocaseglob' \
-  "phase-research SKILL uses nocaseglob fallback"
+echo "Test: phase-research SKILL routes through match_thoughts_artifact (CTL-1081)"
+assert_grep "$PHASE_RESEARCH" 'match_thoughts_artifact' \
+  "phase-research SKILL uses match_thoughts_artifact"
 assert_grep "$PHASE_RESEARCH" 'research_doc_not_written' \
   "phase-research SKILL preserves research_doc_not_written failure reason"
 
