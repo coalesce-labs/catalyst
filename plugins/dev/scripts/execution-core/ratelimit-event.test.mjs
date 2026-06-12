@@ -43,18 +43,18 @@ describe("buildRatelimitEnvelope", () => {
     expect(env.attributes["catalyst.event.label"]).toBe("ryan@rozich.com");
   });
 
-  test("DOT-form attributes present with correct values", () => {
+  test("catalyst.* attributes present with correct values", () => {
     const env = buildRatelimitEnvelope(RATELIMIT_EVENT_SAMPLED, basePayload);
     const a = env.attributes;
-    expect(a["account.email"]).toBe("ryan@rozich.com");
-    expect(a["ratelimit.five_hour_pct"]).toBe(42);
-    expect(a["ratelimit.seven_day_pct"]).toBe(17);
-    expect(a["ratelimit.five_hour_resets_at"]).toBe("2026-06-06T18:00:00Z");
-    expect(a["ratelimit.seven_day_resets_at"]).toBe("2026-06-13T00:00:00Z");
-    expect(a["ratelimit.seven_day_opus_pct"]).toBe(12);
-    expect(a["ratelimit.seven_day_sonnet_pct"]).toBe(5);
-    expect(a["subscription.type"]).toBe("active");
-    expect(a["rate_limit.tier"]).toBe("default_claude_max_20x");
+    expect(a["catalyst.account.email"]).toBe("ryan@rozich.com");
+    expect(a["catalyst.ratelimit.five_hour_pct"]).toBe(42);
+    expect(a["catalyst.ratelimit.seven_day_pct"]).toBe(17);
+    expect(a["catalyst.ratelimit.five_hour_resets_at"]).toBe("2026-06-06T18:00:00Z");
+    expect(a["catalyst.ratelimit.seven_day_resets_at"]).toBe("2026-06-13T00:00:00Z");
+    expect(a["catalyst.ratelimit.seven_day_opus_pct"]).toBe(12);
+    expect(a["catalyst.ratelimit.seven_day_sonnet_pct"]).toBe(5);
+    expect(a["catalyst.subscription.type"]).toBe("active");
+    expect(a["catalyst.ratelimit.tier"]).toBe("default_claude_max_20x");
   });
 
   test("zero utilization is preserved (not dropped as falsy)", () => {
@@ -63,8 +63,8 @@ describe("buildRatelimitEnvelope", () => {
       fiveHourPct: 0,
       sevenDayPct: 0,
     });
-    expect(env.attributes["ratelimit.five_hour_pct"]).toBe(0);
-    expect(env.attributes["ratelimit.seven_day_pct"]).toBe(0);
+    expect(env.attributes["catalyst.ratelimit.five_hour_pct"]).toBe(0);
+    expect(env.attributes["catalyst.ratelimit.seven_day_pct"]).toBe(0);
   });
 
   test("absent keys are omitted when null", () => {
@@ -73,18 +73,18 @@ describe("buildRatelimitEnvelope", () => {
       fiveHourPct: 42,
     });
     const a = env.attributes;
-    expect("ratelimit.seven_day_pct" in a).toBe(false);
-    expect("ratelimit.five_hour_resets_at" in a).toBe(false);
-    expect("ratelimit.seven_day_opus_pct" in a).toBe(false);
-    expect("ratelimit.seven_day_sonnet_pct" in a).toBe(false);
-    expect("subscription.type" in a).toBe(false);
-    expect("rate_limit.tier" in a).toBe(false);
+    expect("catalyst.ratelimit.seven_day_pct" in a).toBe(false);
+    expect("catalyst.ratelimit.five_hour_resets_at" in a).toBe(false);
+    expect("catalyst.ratelimit.seven_day_opus_pct" in a).toBe(false);
+    expect("catalyst.ratelimit.seven_day_sonnet_pct" in a).toBe(false);
+    expect("catalyst.subscription.type" in a).toBe(false);
+    expect("catalyst.ratelimit.tier" in a).toBe(false);
   });
 
   test("catalyst.event.label falls back to 'unknown' when email absent", () => {
     const env = buildRatelimitEnvelope(RATELIMIT_EVENT_SAMPLED, { fiveHourPct: 1 });
     expect(env.attributes["catalyst.event.label"]).toBe("unknown");
-    expect("account.email" in env.attributes).toBe(false);
+    expect("catalyst.account.email" in env.attributes).toBe(false);
   });
 
   test("body.payload mirrors the same fields for human readability", () => {
@@ -134,7 +134,7 @@ describe("emitRatelimitEvent", () => {
     expect(lines.length).toBe(1);
     const parsed = JSON.parse(lines[0]);
     expect(parsed.attributes["event.name"]).toBe(RATELIMIT_EVENT_SAMPLED);
-    expect(parsed.attributes["account.email"]).toBe("ryan@rozich.com");
+    expect(parsed.attributes["catalyst.account.email"]).toBe("ryan@rozich.com");
     expect(parsed.body.payload.opusPct).toBe(12);
   });
 

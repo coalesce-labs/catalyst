@@ -11,8 +11,8 @@ Do **not** edit this file directly.
 | Classification | Count |
 | --- | --- |
 | ✓ Conforming | 28 |
-| → Rename-to | 18 |
-| ● Legitimately Custom | 23 |
+| → Rename-to | 9 |
+| ● Legitimately Custom | 32 |
 | **Total** | 69 |
 
 ## Classification by Emitter
@@ -75,9 +75,17 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
-| `account.email` | `ratelimit-event.mjs:62` | → rename-to | → `catalyst.account.email` | Cluster B |  |
+| `catalyst.account.email` | `ratelimit-event.mjs:62` | ● custom |  |  |  |
 | `catalyst.process.phase` | `processes.mjs:287` | ✓ conforming |  |  |  |
 | `catalyst.process.ticket` | `processes.mjs:286` | ✓ conforming |  |  |  |
+| `catalyst.ratelimit.five_hour_pct` | `ratelimit-event.mjs:63` | ● custom |  |  |  |
+| `catalyst.ratelimit.five_hour_resets_at` | `ratelimit-event.mjs:65` | ● custom |  |  |  |
+| `catalyst.ratelimit.seven_day_opus_pct` | `ratelimit-event.mjs:67` | ● custom |  |  |  |
+| `catalyst.ratelimit.seven_day_pct` | `ratelimit-event.mjs:64` | ● custom |  |  |  |
+| `catalyst.ratelimit.seven_day_resets_at` | `ratelimit-event.mjs:66` | ● custom |  |  |  |
+| `catalyst.ratelimit.seven_day_sonnet_pct` | `ratelimit-event.mjs:68` | ● custom |  |  |  |
+| `catalyst.ratelimit.tier` | `ratelimit-event.mjs:70` | ● custom |  |  |  |
+| `catalyst.subscription.type` | `ratelimit-event.mjs:69` | ● custom |  |  |  |
 | `host.cpu_count` | `host.mjs:274` | → rename-to | → `system.cpu.logical_count` | Cluster C |  |
 | `host.cpu_pct` | `host.mjs:273` | → rename-to | → `system.cpu.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
 | `host.disk_total_gb` | `host.mjs:280` | → rename-to | → `system.filesystem.capacity` | Cluster C | unit: ×1073741824 → bytes |
@@ -90,14 +98,6 @@ Do **not** edit this file directly.
 | `process.command` | `processes.mjs:283` | ✓ conforming |  |  |  |
 | `process.cpu.utilization` | `processes.mjs:284` | ✓ conforming |  |  |  |
 | `process.memory.usage` | `processes.mjs:285` | ✓ conforming |  |  |  |
-| `rate_limit.tier` | `ratelimit-event.mjs:71` | → rename-to | → `catalyst.ratelimit.tier` | Cluster B |  |
-| `ratelimit.five_hour_pct` | `ratelimit-event.mjs:64` | → rename-to | → `catalyst.ratelimit.five_hour_pct` | Cluster B |  |
-| `ratelimit.five_hour_resets_at` | `ratelimit-event.mjs:66` | → rename-to | → `catalyst.ratelimit.five_hour_resets_at` | Cluster B |  |
-| `ratelimit.seven_day_opus_pct` | `ratelimit-event.mjs:68` | → rename-to | → `catalyst.ratelimit.seven_day_opus_pct` | Cluster B |  |
-| `ratelimit.seven_day_pct` | `ratelimit-event.mjs:65` | → rename-to | → `catalyst.ratelimit.seven_day_pct` | Cluster B |  |
-| `ratelimit.seven_day_resets_at` | `ratelimit-event.mjs:67` | → rename-to | → `catalyst.ratelimit.seven_day_resets_at` | Cluster B |  |
-| `ratelimit.seven_day_sonnet_pct` | `ratelimit-event.mjs:69` | → rename-to | → `catalyst.ratelimit.seven_day_sonnet_pct` | Cluster B |  |
-| `subscription.type` | `ratelimit-event.mjs:70` | → rename-to | → `catalyst.subscription.type` | Cluster B |  |
 
 ### Legacy Bash (`emit-otel-event.sh`)
 
@@ -113,29 +113,6 @@ derived from the manifest. Per the operator decision (Ryan, 2026-06-11),
 every rename uses a **hard cutover** — no dual-emit period, no deprecated-name
 emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,
 validated against live Loki.
-
-### Cluster B — ratelimit.* / account.* / subscription.*
-
-- **Emit-side files**: `ratelimit-event.mjs`
-- **Where**: both
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `account.email` | `catalyst.account.email` |  |
-| `rate_limit.tier` | `catalyst.ratelimit.tier` |  |
-| `ratelimit.five_hour_pct` | `catalyst.ratelimit.five_hour_pct` |  |
-| `ratelimit.five_hour_resets_at` | `catalyst.ratelimit.five_hour_resets_at` |  |
-| `ratelimit.seven_day_opus_pct` | `catalyst.ratelimit.seven_day_opus_pct` |  |
-| `ratelimit.seven_day_pct` | `catalyst.ratelimit.seven_day_pct` |  |
-| `ratelimit.seven_day_resets_at` | `catalyst.ratelimit.seven_day_resets_at` |  |
-| `ratelimit.seven_day_sonnet_pct` | `catalyst.ratelimit.seven_day_sonnet_pct` |  |
-| `subscription.type` | `catalyst.subscription.type` |  |
 
 ### Cluster C — host.* system metrics
 

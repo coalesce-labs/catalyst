@@ -90,16 +90,16 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "catalyst.ticket.type", emitter: "sh", source: "canonical-event.sh:349", classification: "legitimately-custom", note: "CTL-1023" },
 
   // ── MJS emitter — execution-core/ratelimit-event.mjs ─────────────────────
-  // §4i: Account rate-limit cluster B — rename-to
-  { key: "account.email",               emitter: "mjs", source: "ratelimit-event.mjs:62", classification: "rename-to", targetName: "catalyst.account.email",               remediationCluster: "B", where: "both" },
-  { key: "ratelimit.five_hour_pct",     emitter: "mjs", source: "ratelimit-event.mjs:64", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_pct",     remediationCluster: "B", where: "both" },
-  { key: "ratelimit.seven_day_pct",     emitter: "mjs", source: "ratelimit-event.mjs:65", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_pct",     remediationCluster: "B", where: "both" },
-  { key: "ratelimit.five_hour_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:66", classification: "rename-to", targetName: "catalyst.ratelimit.five_hour_resets_at", remediationCluster: "B", where: "both" },
-  { key: "ratelimit.seven_day_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:67", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_resets_at", remediationCluster: "B", where: "both" },
-  { key: "ratelimit.seven_day_opus_pct",   emitter: "mjs", source: "ratelimit-event.mjs:68", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_opus_pct",   remediationCluster: "B", where: "both" },
-  { key: "ratelimit.seven_day_sonnet_pct", emitter: "mjs", source: "ratelimit-event.mjs:69", classification: "rename-to", targetName: "catalyst.ratelimit.seven_day_sonnet_pct", remediationCluster: "B", where: "both" },
-  { key: "subscription.type", emitter: "mjs", source: "ratelimit-event.mjs:70", classification: "rename-to", targetName: "catalyst.subscription.type", remediationCluster: "B", where: "both" },
-  { key: "rate_limit.tier",   emitter: "mjs", source: "ratelimit-event.mjs:71", classification: "rename-to", targetName: "catalyst.ratelimit.tier",    remediationCluster: "B", where: "both" },
+  // §4i: Account rate-limit cluster B — now legitimately-custom (renamed in place)
+  { key: "catalyst.account.email",               emitter: "mjs", source: "ratelimit-event.mjs:62", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.five_hour_pct",     emitter: "mjs", source: "ratelimit-event.mjs:63", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.seven_day_pct",     emitter: "mjs", source: "ratelimit-event.mjs:64", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.five_hour_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:65", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.seven_day_resets_at", emitter: "mjs", source: "ratelimit-event.mjs:66", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.seven_day_opus_pct",   emitter: "mjs", source: "ratelimit-event.mjs:67", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.seven_day_sonnet_pct", emitter: "mjs", source: "ratelimit-event.mjs:68", classification: "legitimately-custom" },
+  { key: "catalyst.subscription.type", emitter: "mjs", source: "ratelimit-event.mjs:69", classification: "legitimately-custom" },
+  { key: "catalyst.ratelimit.tier",    emitter: "mjs", source: "ratelimit-event.mjs:70", classification: "legitimately-custom" },
 
   // ── MJS emitter — catalyst-agent/host.mjs ────────────────────────────────
   // §4j: Host system metrics cluster C — rename-to (host.* → system.*)
