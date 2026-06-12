@@ -12,10 +12,11 @@
 //   6. stale-label candidate in shadow → would-clear-label event
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schedulerTick, __resetForTests } from "./scheduler.mjs";
+import { openBeliefsDb } from "./beliefs/schema.mjs";
 
 let orchDir;
 beforeEach(() => {
@@ -55,7 +56,32 @@ function makeTickOpts({
   nowMs = undefined,
   candidates = [],
   intervalMs = 1, // very short so the throttle never blocks in tests
+  intentDb = null, // CTL-1064: pass a real beliefs db to exercise the intent gate
+  omitEmit = false, // CTL-1064: omit the emit seam so the production default fires
 } = {}) {
+  const unstuckSweep = {
+    mode,
+    intervalMs,
+    collectCandidates: () => candidates,
+    actByCategory: {
+      "dirty-tree": (c) => actCalls.push({ ticket: c.ticket, category: "dirty-tree" }),
+      "stale-label": (c) => actCalls.push({ ticket: c.ticket, category: "stale-label" }),
+    },
+    escalate: (c) => escalateCalls.push({ ticket: c.ticket, phase: c.phase }),
+    emit: (type, fields) => {
+      events.push({ type, ...fields });
+      return Promise.resolve(true);
+    },
+    postComment: (ticket, category, phase) => {
+      commentCalls.push({ ticket, category, phase });
+    },
+    nowMs: typeof nowMs === "function" ? nowMs : (nowMs != null ? () => nowMs : undefined),
+  };
+  // CTL-1064: when omitEmit, drop the seam entirely so schedulerTick's
+  // production default (emitUnstuckEvent) is exercised — no test should mask the
+  // real default emit (the original HIGH silent-failure: emitReapIntent threw on
+  // unstuck.* and the rejection was swallowed).
+  if (omitEmit) delete unstuckSweep.emit;
   return {
     readEligible: () => [],
     dispatch: () => ({ code: 0, stdout: "", stderr: "" }),
@@ -67,24 +93,8 @@ function makeTickOpts({
       runTransition: () => ({ applied: false }),
     },
     watchdog: { mode: "off" },
-    unstuckSweep: {
-      mode,
-      intervalMs,
-      collectCandidates: () => candidates,
-      actByCategory: {
-        "dirty-tree": (c) => actCalls.push({ ticket: c.ticket, category: "dirty-tree" }),
-        "stale-label": (c) => actCalls.push({ ticket: c.ticket, category: "stale-label" }),
-      },
-      escalate: (c) => escalateCalls.push({ ticket: c.ticket, phase: c.phase }),
-      emit: (type, fields) => {
-        events.push({ type, ...fields });
-        return Promise.resolve(true);
-      },
-      postComment: (ticket, category, phase) => {
-        commentCalls.push({ ticket, category, phase });
-      },
-      nowMs: typeof nowMs === "function" ? nowMs : (nowMs != null ? () => nowMs : undefined),
-    },
+    intentDb,
+    unstuckSweep,
   };
 }
 
@@ -349,5 +359,114 @@ describe("CTL-1064 Pass 0u integration — multiple candidates", () => {
     expect(result.unstuckWouldEscalate[0].ticket).toBe("CTL-B");
     expect(events.find((e) => e.type === "unstuck.would.clear-noise")).toBeDefined();
     expect(events.find((e) => e.type === "unstuck.would.escalate")).toBeDefined();
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// CTL-1064 remediation (verify⇄remediate): regression coverage for the bugs the
+// verify phase found in the original Pass 0u landing. These drive the REAL
+// schedulerTick wiring (NOT injected stubs that masked the production default).
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("CTL-1064 remediation — real default emit seam (HIGH silent-failure)", () => {
+  let prevDir;
+  beforeEach(() => { prevDir = process.env.CATALYST_DIR; });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+  });
+
+  test("schedulerTick with NO injected emit lands unstuck.* events in the unified log", () => {
+    // The original bug: the production default emit was emitReapIntent, whose
+    // closed vocabulary throws on unstuck.* — and the fire-and-forget path
+    // swallowed the rejection, so EVERY unstuck event was silently dropped.
+    // Here we omit the emit seam so the schedulerTick default (emitUnstuckEvent)
+    // is exercised, and assert the shadow event actually reaches getEventLogPath().
+    process.env.CATALYST_DIR = orchDir; // getEventLogPath → <orchDir>/events/<ym>.jsonl
+    seedStall(TICKET_DIRTY, PHASE, "rebase_refused_dirty_tree");
+    const candidates = [{
+      ticket: TICKET_DIRTY,
+      phase: PHASE,
+      evidence: { reason: "rebase_refused_dirty_tree", ticket: TICKET_DIRTY, phase: PHASE, liveSessionInWorktree: false, linearTerminal: false },
+    }];
+
+    const result = schedulerTick(orchDir, makeTickOpts({ mode: "shadow", candidates, omitEmit: true }));
+
+    expect(result.unstuckWouldAct).toHaveLength(1);
+    const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+    const logPath = join(orchDir, "events", `${ym}.jsonl`);
+    expect(existsSync(logPath)).toBe(true);
+    const lines = readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    const ev = lines.find((l) => l.event === "unstuck.would.clear-noise");
+    expect(ev).toBeDefined();
+    expect(ev.ticket).toBe(TICKET_DIRTY);
+  });
+});
+
+describe("CTL-1064 remediation — enforce false-success when no act seam (HIGH review)", () => {
+  test("enforce + category with no act seam: no act, no emit, no comment, not reported acted", () => {
+    // source_conflict maps to category 'source-conflict', which has NO entry in
+    // actByCategory (production default is {} entirely). The original code fell
+    // through to emit the success event + post a comment + report.acted even
+    // though nothing ran. The fix skips with reason 'no-act-seam'.
+    const TICKET_SC = "CTL-1064-SOURCECONFLICT";
+    seedStall(TICKET_SC, PHASE, "source_conflict_ctl708_unavailable");
+    const events = [];
+    const actCalls = [];
+    const commentCalls = [];
+    const candidates = [{
+      ticket: TICKET_SC,
+      phase: PHASE,
+      evidence: { reason: "source_conflict_ctl708_unavailable", ticket: TICKET_SC, phase: PHASE, liveSessionInWorktree: false, linearTerminal: false },
+    }];
+
+    const result = schedulerTick(orchDir, makeTickOpts({ mode: "enforce", events, actCalls, commentCalls, candidates }));
+
+    expect(actCalls).toHaveLength(0);
+    expect(commentCalls).toHaveLength(0);
+    expect(events.find((e) => e.type === "unstuck.pushed.force-with-lease")).toBeUndefined();
+    expect(result.unstuckActed).toHaveLength(0);
+  });
+});
+
+describe("CTL-1064 remediation — intent gate act-once-then-skip + no duplicate intent (MEDIUM)", () => {
+  test("two enforce passes with a real intentDb: act once, exactly one open intent row", () => {
+    const dbPath = join(orchDir, "beliefs.db");
+    const intentDb = openBeliefsDb({ path: dbPath });
+    try {
+      // intent.tick_id is NOT NULL → the recorder anchors to the latest tick row.
+      // Production seeds ticks via collectBeliefsTick; seed one here.
+      intentDb.run("INSERT INTO tick (now_ms, host) VALUES (?, ?)", [1_000_000, "test-host"]);
+      seedStall(TICKET_DIRTY, PHASE, "rebase_refused_dirty_tree");
+      const actCalls = [];
+      const candidates = [{
+        ticket: TICKET_DIRTY,
+        phase: PHASE,
+        evidence: { reason: "rebase_refused_dirty_tree", ticket: TICKET_DIRTY, phase: PHASE, liveSessionInWorktree: false, linearTerminal: false },
+      }];
+      let clock = 1_000_000;
+      const opts = makeTickOpts({ mode: "enforce", actCalls, candidates, intentDb, nowMs: () => clock });
+
+      // Pass 1: no open intent yet → acts + records exactly one intent.
+      schedulerTick(orchDir, opts);
+      expect(actCalls).toHaveLength(1);
+      const subject = `${TICKET_DIRTY}/${PHASE}`;
+      const after1 = intentDb
+        .query("SELECT COUNT(*) AS n FROM intent WHERE kind = 'unstuck-sweep' AND subject = ?")
+        .get(subject).n;
+      expect(after1).toBe(1);
+
+      // Pass 2 (past the throttle window): the open intent gate suppresses re-acting,
+      // and the recordIntent dedup inserts no duplicate row.
+      clock += 1_000_000;
+      schedulerTick(orchDir, opts);
+      expect(actCalls).toHaveLength(1); // still 1 — NOT re-acted
+      const after2 = intentDb
+        .query("SELECT COUNT(*) AS n FROM intent WHERE kind = 'unstuck-sweep' AND subject = ?")
+        .get(subject).n;
+      expect(after2).toBe(1); // no duplicate intent
+    } finally {
+      intentDb.close();
+    }
   });
 });

@@ -1,7 +1,7 @@
 // unstuck-sweep.test.mjs — CTL-1064 pure router, action driver, census.
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,6 +11,9 @@ import {
   UNSTUCK_SWEEP_EVENT_TYPES,
   defaultCollectUnstuckCandidates,
   runUnstuckSweepPass,
+  buildAuditComment,
+  defaultPostUnstuckComment,
+  emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
 
 // ---------------------------------------------------------------------------
@@ -396,5 +399,157 @@ describe("defaultCollectUnstuckCandidates — shared census builder (CTL-1064)",
     const candidates = defaultCollectUnstuckCandidates({ orchDir });
     // CTL-OK still found despite CTL-BAD being malformed
     expect(candidates.some(c => c.ticket === "CTL-OK")).toBe(true);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// CTL-1064 remediation (verify⇄remediate) — regression coverage for the verify
+// findings against the original Pass 0u landing.
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("runUnstuckSweepPass — enforce false-success when no act seam (CTL-1064)", () => {
+  test("clearable category with NO act seam: skipped (no-act-seam), no intent/comment/emit/acted", () => {
+    const emitted = [];
+    const recordCalls = [];
+    const commentCalls = [];
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [{
+        ticket: "CTL-X", phase: "implement",
+        evidence: { reason: "rebase_refused_dirty_tree", ticket: "CTL-X", phase: "implement" },
+      }],
+      actByCategory: {}, // no seam for 'dirty-tree' — the production default
+      emit: (type, fields) => { emitted.push({ type, ...fields }); return Promise.resolve(true); },
+      recordIntent: (kind, subject) => recordCalls.push({ kind, subject }),
+      postComment: (t, c, p) => commentCalls.push({ t, c, p }),
+    });
+
+    expect(report.acted).toHaveLength(0);
+    expect(report.skipped).toHaveLength(1);
+    expect(report.skipped[0]).toMatchObject({ ticket: "CTL-X", reason: "no-act-seam" });
+    expect(recordCalls).toHaveLength(0);
+    expect(commentCalls).toHaveLength(0);
+    expect(emitted).toHaveLength(0);
+  });
+
+  test("clearable category WITH an act seam still acts, records, comments, emits", () => {
+    const emitted = [];
+    const recordCalls = [];
+    const commentCalls = [];
+    const acted = [];
+    const report = runUnstuckSweepPass({
+      mode: "enforce",
+      collectCandidates: () => [{
+        ticket: "CTL-Y", phase: "implement",
+        evidence: { reason: "rebase_refused_dirty_tree", ticket: "CTL-Y", phase: "implement" },
+      }],
+      actByCategory: { "dirty-tree": (c) => acted.push(c.ticket) },
+      emit: (type, fields) => { emitted.push({ type, ...fields }); return Promise.resolve(true); },
+      recordIntent: (kind, subject) => recordCalls.push({ kind, subject }),
+      postComment: (t, c, p) => commentCalls.push({ t, c, p }),
+    });
+
+    expect(acted).toEqual(["CTL-Y"]);
+    expect(report.acted).toHaveLength(1);
+    expect(recordCalls).toHaveLength(1);
+    expect(commentCalls).toHaveLength(1);
+    expect(emitted.find((e) => e.type === "unstuck.cleared.noise")).toBeDefined();
+  });
+});
+
+describe("emitUnstuckEvent — dedicated unified-log emitter (CTL-1064)", () => {
+  let SCRATCH, LOG_PATH, prevDir;
+  beforeEach(() => {
+    SCRATCH = mkdtempSync(join(tmpdir(), "unstuck-emit-"));
+    const ym = `${new Date().getUTCFullYear()}-${String(new Date().getUTCMonth() + 1).padStart(2, "0")}`;
+    LOG_PATH = join(SCRATCH, "events", `${ym}.jsonl`);
+    prevDir = process.env.CATALYST_DIR;
+    process.env.CATALYST_DIR = SCRATCH;
+  });
+  afterEach(() => {
+    if (prevDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevDir;
+    rmSync(SCRATCH, { recursive: true, force: true });
+  });
+
+  test("appends a valid unstuck.* line to the unified log (does NOT throw like emitReapIntent)", async () => {
+    const ok = await emitUnstuckEvent("unstuck.would.clear-noise", {
+      ticket: "CTL-Z", phase: "implement", category: "dirty-tree",
+    });
+    expect(ok).toBe(true);
+    expect(existsSync(LOG_PATH)).toBe(true);
+    const last = JSON.parse(readFileSync(LOG_PATH, "utf8").trim().split("\n").pop());
+    expect(last.event).toBe("unstuck.would.clear-noise");
+    expect(last.ticket).toBe("CTL-Z");
+    expect(last.category).toBe("dirty-tree");
+    expect(last.ts).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+  });
+
+  test("accepts every type in the sweep vocabulary", async () => {
+    for (const t of UNSTUCK_SWEEP_EVENT_TYPES) {
+      expect(await emitUnstuckEvent(t, { ticket: "CTL-Z" })).toBe(true);
+    }
+  });
+
+  test("rejects an event type outside the sweep vocabulary", async () => {
+    await expect(emitUnstuckEvent("phase.yield.reap-requested", {})).rejects.toThrow(/unknown unstuck-sweep event type/);
+  });
+});
+
+describe("defaultPostUnstuckComment — success-gated idempotency marker (CTL-1064)", () => {
+  let orchDir, ticket, markerPath;
+  beforeEach(() => {
+    orchDir = mkdtempSync(join(tmpdir(), "unstuck-comment-"));
+    ticket = "CTL-CM";
+    mkdirSync(join(orchDir, "workers", ticket), { recursive: true });
+    markerPath = join(orchDir, "workers", ticket, ".unstuck-comment-dirty-tree-implement.applied");
+  });
+  afterEach(() => rmSync(orchDir, { recursive: true, force: true }));
+
+  test("poster returns {status:0} → marker written", () => {
+    defaultPostUnstuckComment(ticket, "dirty-tree", "implement", "body", {
+      runCommentPost: () => ({ status: 0 }), orchDir,
+    });
+    expect(existsSync(markerPath)).toBe(true);
+  });
+
+  test("poster returns null → marker ABSENT (next pass retries) — the fixed branch", () => {
+    defaultPostUnstuckComment(ticket, "dirty-tree", "implement", "body", {
+      runCommentPost: () => null, orchDir,
+    });
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  test("poster returns {status:1} → marker ABSENT", () => {
+    defaultPostUnstuckComment(ticket, "dirty-tree", "implement", "body", {
+      runCommentPost: () => ({ status: 1 }), orchDir,
+    });
+    expect(existsSync(markerPath)).toBe(false);
+  });
+
+  test("marker already present → idempotent skip (poster never called)", () => {
+    writeFileSync(markerPath, "");
+    let called = 0;
+    defaultPostUnstuckComment(ticket, "dirty-tree", "implement", "body", {
+      runCommentPost: () => { called++; return { status: 0 }; }, orchDir,
+    });
+    expect(called).toBe(0);
+  });
+});
+
+describe("buildAuditComment — three-section assembler (CTL-1064)", () => {
+  test("renders all three sections when provided", () => {
+    const out = buildAuditComment({ found: "F", done: "D", verified: "V" });
+    expect(out).toContain("**What was found**");
+    expect(out).toContain("F");
+    expect(out).toContain("**What was done**");
+    expect(out).toContain("D");
+    expect(out).toContain("**What was verified after**");
+    expect(out).toContain("V");
+  });
+
+  test("falls back to _unavailable_ for missing sections", () => {
+    const out = buildAuditComment({});
+    expect(out.match(/_unavailable_/g)).toHaveLength(3);
   });
 });

@@ -91,6 +91,68 @@ describe("classifyCleanRebaseForcePush — pure safety gate (CTL-1064 catB)", ()
     };
     expect(classifyCleanRebaseForcePush(evidence).action).toBe("force-push");
   });
+
+  // CTL-1064 remediation: Gate 2 is the SOLE ownership guard, so the prior
+  // substring match (subjectNorm.includes(ticketNorm)) was a force-push safety
+  // hole — short keys prefix-matched longer ones and the key matched anywhere in
+  // the body. Now a whole-token (\b…\b) match.
+  test("short ticket key must NOT prefix-match a longer one (CTL-1 vs CTL-10)", () => {
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-1",
+      commitSubjects: ["CTL-10: someone else's commit"],
+    };
+    const r = classifyCleanRebaseForcePush(evidence);
+    expect(r.action).toBe("skip");
+    expect(r.reason).toBe("foreign-commits");
+  });
+
+  test("longer key must NOT match a shorter one (CTL-10 vs CTL-1)", () => {
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-10",
+      commitSubjects: ["CTL-1: someone else's commit"],
+    };
+    expect(classifyCleanRebaseForcePush(evidence).reason).toBe("foreign-commits");
+  });
+
+  test("foreign commit that merely mentions another ticket id → skip/foreign-commits", () => {
+    // A CTL-999 commit body referencing CTL-1025 must not be accepted when our
+    // ticket is CTL-1064 (the key appears nowhere as a token).
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-1064",
+      commitSubjects: ["CTL-999: revert CTL-1025 fix"],
+    };
+    expect(classifyCleanRebaseForcePush(evidence).reason).toBe("foreign-commits");
+  });
+
+  test("default git-revert subject of a FOREIGN ticket → skip/foreign-commits", () => {
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-1064",
+      commitSubjects: ['Revert "CTL-1025: fix widget rendering"'],
+    };
+    expect(classifyCleanRebaseForcePush(evidence).reason).toBe("foreign-commits");
+  });
+
+  test("conventional-commit prefix carrying our key as a token → force-push", () => {
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-1064",
+      commitSubjects: ["feat(dev): CTL-1064 — wire the sweep", "fix(CTL-1064): follow-up"],
+    };
+    expect(classifyCleanRebaseForcePush(evidence).action).toBe("force-push");
+  });
+
+  test("leading-zero tolerance in the subject (CTL-1064 matches CTL-01064)", () => {
+    const evidence = {
+      ...BASE,
+      ticket: "CTL-1064",
+      commitSubjects: ["CTL-01064: zero-padded subject"],
+    };
+    expect(classifyCleanRebaseForcePush(evidence).action).toBe("force-push");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -174,5 +236,22 @@ describe("collectForcePushCandidates — census (injected git seams) (CTL-1064 c
       runGit: git,
     });
     expect(candidates).toHaveLength(0);
+  });
+
+  // CTL-1064 remediation: exercise the DEFAULT git seam (no runGit injected). The
+  // prior in-body `require("node:child_process")` is undefined under node (this
+  // package is type:module) and threw; it is now a top-level ESM import. Against
+  // a nonexistent worktree the spawned git exits non-zero (porcelain→null), but
+  // the default seam itself must resolve and not throw.
+  test("default git seam (no injected runGit) resolves via ESM import without throwing", () => {
+    let candidates;
+    expect(() => {
+      candidates = collectForcePushCandidates({
+        candidates: [makeCandidate({ worktreePath: "/nonexistent/worktree/CTL-1025" })],
+      });
+    }).not.toThrow();
+    // The probe ran (real git, non-zero on a bogus path) → porcelain stays null.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0].evidence.porcelain).toBeNull();
   });
 });

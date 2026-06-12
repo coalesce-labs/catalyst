@@ -161,6 +161,7 @@ import {
 import {
   runUnstuckSweepPass,
   defaultCollectUnstuckCandidates,
+  emitUnstuckEvent,
 } from "./unstuck-sweep.mjs";
 import {
   readUnstuckSweepConfig,
@@ -2525,7 +2526,12 @@ export function schedulerTick(
       collectCandidates: _collectUnstuckCandidates = undefined,
       actByCategory: _unstuckActByCategory = undefined,
       escalate: _unstuckEscalate = undefined,
-      emit: _unstuckEmit = emitReapIntent,
+      // CTL-1064: the unstuck sweep's emit seam MUST be emitUnstuckEvent, NOT
+      // emitReapIntent — the latter's closed vocabulary excludes unstuck.* and
+      // throws, and the fire-and-forget path swallowed the rejection, silently
+      // dropping every unstuck event. emitUnstuckEvent validates against the
+      // sweep's own vocabulary and appends to the same unified log.
+      emit: _unstuckEmit = emitUnstuckEvent,
       postComment: _unstuckPostComment = undefined,
       nowMs: _unstuckNowMs = undefined,
     } = {},
@@ -3016,8 +3022,24 @@ export function schedulerTick(
           recordIntent: intentDb
             ? (kind, subject) => {
                 try {
+                  // Dedup: skip the INSERT when an open intent already exists for
+                  // this kind/subject (mirrors the stall-janitor recorder at
+                  // scheduler.mjs:2199-2206). Without this, every pass would insert
+                  // a duplicate intent row for the same subject (CTL-1064).
+                  const open = intentDb
+                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .get(kind, subject);
+                  if (open) return;
+                  // intent.tick_id is NOT NULL — the prior tickId:null always
+                  // failed the insert (the intent was never recorded, so the gate
+                  // never suppressed re-acting). Anchor to the latest tick row,
+                  // exactly as the stall-janitor recorder does (CTL-1064).
+                  const tickRow = intentDb
+                    .query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1")
+                    .get();
+                  if (!tickRow) return; // no tick yet → cannot anchor the intent
                   recordIntentBelief(intentDb, {
-                    tickId: null,
+                    tickId: tickRow.tick_id,
                     kind,
                     subject,
                     postcondition: { kind: "unstuck-sweep", subject },
@@ -3025,10 +3047,22 @@ export function schedulerTick(
                 } catch { /* best-effort */ }
               }
             : () => {},
+          // CTL-1064: the driver gate is act-once-then-skip (unstuck-sweep.mjs:257
+          // — true = an open intent already exists → skip). That is NOT
+          // isIntentEffective's semantics: isIntentEffective returns true for a
+          // FRESH subject with no intent (viable channel), which would skip the
+          // very first act; the prior `!isIntentEffective` instead returned false
+          // while open-under-cap, RE-ACTING every pass until the cap. Probe for an
+          // open intent directly so pass 1 acts (no open row yet) and every later
+          // pass skips while the intent stays open — pairs with the recordIntent
+          // dedup above (same `outcome IS NULL` predicate).
           isIntentEffective: intentDb
             ? (kind, subject) => {
                 try {
-                  return !isIntentEffective(intentDb, kind, subject, { maxAttempts: getMaxAttempts(intentDb) });
+                  const open = intentDb
+                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .get(kind, subject);
+                  return open != null;
                 } catch { return false; }
               }
             : () => false,
@@ -4789,12 +4823,34 @@ function runTick() {
               const state = fetchTicketState(id);
               return state != null && isLinearTerminal(state);
             },
+            // CTL-1064: thread the worktree resolver from each worker's signal so
+            // the live-session gate (unstuck-sweep.mjs:118) and the classifier's
+            // live-session short-circuit are reachable in production. Without it
+            // resolveWorktreePath defaulted to () => null and worktreePath was
+            // always null, making the live-session skip dead (a latent footgun
+            // once act seams are enabled). Mirrors the prAdapter closure below.
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
           }),
         // actByCategory: production seams undefined → no-op (escalate handles
         // all whitelisted categories in the initial shadow rollout). Operators
-        // enable per-category enforcement via Layer-2 config.
+        // enable per-category enforcement via Layer-2 config. Pass 0u ships
+        // shadow-/escalate-only: catA-D mechanical enforcement is DEFERRED and
+        // actByCategory:{} is an intentional no-op (no real act seams exist yet).
         actByCategory: runningOpts.unstuckActByCategory ?? {},
-        // postComment: defaultPostUnstuckComment closure over orchDir.
+        // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
+        // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here
+        // so the production wiring does not silently depend on the schedulerTick
+        // default.
+        emit: emitUnstuckEvent,
+        // postComment: intentionally unwired in this rollout (no Linear audit
+        // comment) unless an operator injects runningOpts.unstuckPostComment —
+        // defaultPostUnstuckComment is NOT closed over orchDir here. Mirrors the
+        // intentional actByCategory no-op above.
         postComment: typeof runningOpts.unstuckPostComment === "function"
           ? runningOpts.unstuckPostComment
           : undefined,

@@ -14,6 +14,7 @@
 //
 // All git probes are injected as evidence fields; the classifier is pure.
 
+import { spawnSync } from "node:child_process";
 import { filterMachineLocalDirt, REBASE_NOISE_PATHS } from "./dirty-tree-classifier.mjs";
 
 // normalizeTicketKey — lowercase, strip leading zeros for comparison.
@@ -21,6 +22,22 @@ import { filterMachineLocalDirt, REBASE_NOISE_PATHS } from "./dirty-tree-classif
 function normalizeTicketKey(key) {
   if (!key) return "";
   return key.toLowerCase().replace(/(\w+-)0+(\d)/, "$1$2");
+}
+
+// buildTicketKeyRegex — whole-token matcher for a ticket key. Returns a RegExp
+// that matches the key as a bounded token (\b<prefix>-0*<num>\b), tolerant of
+// leading zeros in the subject, case-insensitive. Replaces the prior substring
+// `subjectNorm.includes(ticketNorm)` test, which prefix-matched short keys onto
+// longer ones (CTL-1 matched CTL-10) and matched the key anywhere in the body
+// (a foreign `CTL-999: revert CTL-1025 fix` or the default git-revert subject
+// `Revert "CTL-1025: ..."` false-accepted). Gate 2 is the SOLE ownership guard,
+// so a false-accept could force-push a branch carrying foreign commits (CTL-1064).
+// Returns null when the key is unparseable → caller falls back to exact-token.
+function buildTicketKeyRegex(ticket) {
+  const m = String(ticket ?? "").match(/^([A-Za-z][A-Za-z0-9]*)-0*(\d+)$/);
+  if (!m) return null;
+  const [, prefix, num] = m;
+  return new RegExp(`\\b${prefix}-0*${num}\\b`, "i");
 }
 
 // classifyCleanRebaseForcePush — PURE safety gate. No IO.
@@ -76,10 +93,15 @@ export function classifyCleanRebaseForcePush(evidence = {}) {
   if (!Array.isArray(commitSubjects) || commitSubjects.length === 0) {
     return { action: "skip", reason: "empty-commits" };
   }
+  const ticketRe = buildTicketKeyRegex(ticket);
   const ticketNorm = normalizeTicketKey(ticket);
   for (const subject of commitSubjects) {
-    const subjectNorm = normalizeTicketKey(subject);
-    if (!subjectNorm.includes(ticketNorm)) {
+    const matches = ticketRe
+      ? ticketRe.test(String(subject))
+      // Fallback for an unparseable key: exact normalized-token equality rather
+      // than substring (still avoids the CTL-1/CTL-10 prefix false-accept).
+      : normalizeTicketKey(subject).split(/\b/).some((t) => t === ticketNorm);
+    if (!matches) {
       return { action: "skip", reason: "foreign-commits" };
     }
   }
@@ -107,10 +129,11 @@ export function collectForcePushCandidates({
       if (c.evidence?.reason !== "source_conflict_ctl708_unavailable") continue;
       if (!c.worktreePath) continue;
 
-      const git = runGit ?? ((args, cwd) => {
-        const { spawnSync } = require("node:child_process");
-        return spawnSync("git", args, { encoding: "utf8", cwd: cwd ?? process.cwd() });
-      });
+      // Default git seam uses the top-level ESM import (this package is
+      // type:module — an in-body `require("node:child_process")` is undefined
+      // under node and threw, working only via bun's CJS shim) (CTL-1064).
+      const git = runGit ?? ((args, cwd) =>
+        spawnSync("git", args, { encoding: "utf8", cwd: cwd ?? process.cwd() }));
 
       // Probe 1: porcelain — non-zero exit → null (skip gates handled by classifier)
       let porcelain = null;

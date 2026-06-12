@@ -12,15 +12,52 @@
 // injected). Runs as a low-frequency throttled Pass 0u (default 15 min).
 // Ships with mode='off'; operators roll out via shadow → enforce.
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
-import { log } from "./config.mjs";
+import { log, getEventLogPath } from "./config.mjs";
 import { UNSTUCK_SWEEP_EVENT_TYPES } from "./unstuck-sweep-event-types.mjs";
 
 export { UNSTUCK_SWEEP_EVENT_TYPES };
 
 export const UNSTUCK_SWEEP_INTENT_KIND = "unstuck-sweep";
+
+// emitUnstuckEvent — dedicated unified-log emitter for the unstuck-sweep
+// vocabulary (CTL-1064). The sweep owns UNSTUCK_SWEEP_EVENT_TYPES and MUST NOT
+// route through emitReapIntent: reap-intent.mjs's vocabulary is closed and
+// deliberately EXCLUDES unstuck.* (unstuck-sweep-event-types.mjs §"What We're
+// NOT Doing"). Passing an unstuck.* type to emitReapIntent throws "unknown
+// reap-intent event type"; because the sweep's emit is fire-and-forget, that
+// rejected promise was swallowed by runUnstuckSweepPass's fire() p.catch and
+// EVERY unstuck event (shadow would.* twins AND enforce cleared/pushed/
+// emitted/escalated) was silently dropped — an operator in shadow mode saw zero
+// events and would wrongly conclude the sweep found nothing. This emitter
+// validates against the sweep's OWN closed list and appends to the same unified
+// log getEventLogPath() resolves to. Best-effort on write failure (returns
+// false; never throws on EACCES / disk full) — mirrors emitReapIntent.
+export async function emitUnstuckEvent(eventType, fields = {}) {
+  if (!UNSTUCK_SWEEP_EVENT_TYPES.includes(eventType)) {
+    throw new Error(`unknown unstuck-sweep event type: ${eventType}`);
+  }
+  const payload = {
+    ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    event: eventType,
+  };
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined || v === null || v === "") continue;
+    payload[k] = v;
+  }
+  const line = JSON.stringify(payload) + "\n";
+  const logPath = getEventLogPath();
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, line);
+    return true;
+  } catch (err) {
+    log.error({ err: err?.message, eventType }, "emitUnstuckEvent: append failed (CTL-1064)");
+    return false;
+  }
+}
 
 // Named accessors over the frozen list — one per unstuck emit type. Indexing
 // the frozen array keeps the strings in ONE place; a typo here is a load error.
@@ -196,7 +233,12 @@ export function defaultPostUnstuckComment(
   try {
     const poster = runCommentPost ?? defaultRunCommentPost;
     const r = typeof poster === "function" ? poster(ticket, commentBody) : null;
-    if (!r || r.status === 0) {
+    // Treat a null/undefined poster result as FAILURE (leave the marker absent
+    // so the next pass retries) — mirrors recovery.mjs:596 (hardened under
+    // CTL-835). The prior `!r || r.status === 0` wrote the idempotency marker on
+    // a null result, permanently suppressing future comment attempts for this
+    // ticket/phase/category even though nothing posted (CTL-1064).
+    if (r && r.status === 0) {
       try {
         mkdirSync(workerDir, { recursive: true });
         writeMarker(markerPath);
@@ -355,19 +397,30 @@ export function runUnstuckSweepPass({
         continue;
       }
 
-      // call the per-category act seam.
+      // call the per-category act seam. When NO act seam is wired for this
+      // category (the production default is actByCategory:{}), we must NOT fall
+      // through to record an intent, post a comment, emit a success event, or
+      // push report.acted — that asserts work that never ran (false success).
+      // Skip with reason 'no-act-seam' so telemetry reflects reality (CTL-1064).
       const actFn = actByCategory[decision.category];
-      if (actFn) {
-        try {
-          actFn(c, decision);
-        } catch (err) {
-          logger.warn(
-            { ticket: c.ticket, category: decision.category, err: err?.message },
-            "unstuck-sweep: act seam threw (CTL-1064)",
-          );
-          report.failed.push({ ticket: c.ticket, phase: c.phase, category: decision.category, err: err?.message });
-          continue;
-        }
+      if (!actFn) {
+        report.skipped.push({
+          ticket: c.ticket,
+          phase: c.phase,
+          category: decision.category,
+          reason: "no-act-seam",
+        });
+        continue;
+      }
+      try {
+        actFn(c, decision);
+      } catch (err) {
+        logger.warn(
+          { ticket: c.ticket, category: decision.category, err: err?.message },
+          "unstuck-sweep: act seam threw (CTL-1064)",
+        );
+        report.failed.push({ ticket: c.ticket, phase: c.phase, category: decision.category, err: err?.message });
+        continue;
       }
 
       // record intent with kind:'unstuck-sweep', subject:'<ticket>/<phase>'.
