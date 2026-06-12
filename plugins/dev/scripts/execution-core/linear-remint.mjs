@@ -18,9 +18,11 @@ const DEFAULT_COOLDOWN_MS = 60_000;
 // loosely (message wording unverified against a live expired token; the
 // GraphQL contract is errors[].extensions.code === "AUTHENTICATION_ERROR"
 // with "Authentication required" messages; the oauth layer can serve 401).
-// Deliberately does NOT overlap isRateLimitError.
+// CTL-1078: broadened to also match OAuth scope rejections (400 invalid_scope,
+// 403 forbidden, insufficient_scope) which the CTL-835 incident produced.
+// Deliberately does NOT overlap isRateLimitError (no 429/rate-limit).
 export function isAuthError(stderr) {
-  return /authentication[ _-]?(required|error)|unauthorized|\b401\b/i.test(
+  return /authentication[ _-]?(required|error)|unauthorized|\b401\b|\b403\b|invalid[_ -]?scope|insufficient[_ -]?scope|forbidden/i.test(
     String(stderr ?? ""),
   );
 }

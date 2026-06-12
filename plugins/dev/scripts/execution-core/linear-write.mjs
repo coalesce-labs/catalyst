@@ -9,9 +9,9 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
-import { fetchTicketLabels, fetchTicketState } from "./linear-query.mjs";
+import { fetchTicketLabels, readTicketLabels, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
-import { withAuthRemint } from "./linear-remint.mjs";
+import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
 // set, NOT TERMINAL_LINEAR_KEY which is the transition KEY "done"). Gates the
 // backward-write guard below.
@@ -257,22 +257,35 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 // This keeps the write inside linearis and preserves the issue's other labels.
 //
 // Idempotent: if the label is already absent we return { removed: true } without
-// a write. A failed read (fetchLabels returns non-array) is { removed: false,
-// reason: 'transient' } so the caller retries. Mirrors applyLabel's shape for
-// logging + failure classification. Never throws.
+// a write. A failed read is { removed: false, reason } where reason is
+// "auth-error" when the read's stderr matches isAuthError, otherwise "transient".
+// CTL-1078: injectable readLabels seam (defaults to readTicketLabels) returns the
+// richer { ok, labels, code, stderr } shape so the auth-vs-transient distinction
+// can be made. fetchLabels is accepted for back-compat (old test stubs). Never throws.
 export async function removeLabel(
   ticket,
   label,
-  { exec = defaultExec, fetchLabels = fetchTicketLabels } = {}
+  { exec = defaultExec, fetchLabels = null, readLabels = null } = {}
 ) {
+  // Resolve the reader: prefer readLabels (richer), wrap legacy fetchLabels,
+  // or default to readTicketLabels.
+  const reader = readLabels
+    ?? (fetchLabels
+      ? (t, opts) => {
+          const arr = fetchLabels(t, opts);
+          return arr === null
+            ? { ok: false, labels: null, code: 1, stderr: "" }
+            : { ok: true, labels: arr };
+        }
+      : readTicketLabels);
   try {
-    const current = fetchLabels(ticket, { exec });
-    if (!Array.isArray(current)) {
-      // Read failed (linearis non-zero / non-JSON) — cannot safely overwrite
-      // without knowing the current set, so retry next tick.
-      log.warn({ ticket, label, reason: "transient" }, "removeLabel: read failed");
-      return { removed: false, reason: "transient" };
+    const readResult = reader(ticket, { exec });
+    if (!readResult.ok) {
+      const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
+      log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
+      return { removed: false, reason };
     }
+    const current = readResult.labels;
     if (!current.includes(label)) {
       // Idempotent: the label is already gone, no write needed.
       return { removed: true };
@@ -525,5 +538,6 @@ export function classifyLabelFailure(stderr) {
   if (s.includes("incorrect team")) return "missing-label";
   if (s.includes("not exclusive")) return "exclusive-conflict";
   if (s.includes("Rate limit")) return "rate-limited";
+  if (isAuthError(s)) return "auth-error";
   return "transient";
 }

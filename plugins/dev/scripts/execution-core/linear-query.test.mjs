@@ -7,6 +7,7 @@ import {
   runEligibleQuery,
   fetchTicketState,
   fetchTicketLabels,
+  readTicketLabels,
   fetchTicketRelations,
   fetchTicketsBatch,
   authHeader,
@@ -296,6 +297,51 @@ describe("fetchTicketLabels", () => {
     fetchTicketLabels("CTL-9", { exec });
     expect(calls[0].cmd).toBe("linearis");
     expect(calls[0].args).toEqual(["issues", "read", "CTL-9"]);
+  });
+});
+
+// CTL-1078 — readTicketLabels: richer shape { ok, labels, code, stderr }
+describe("readTicketLabels", () => {
+  test("success → { ok: true, labels: [...] }", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-9",
+        labels: { nodes: [{ name: "triaged" }, { name: "needs-human" }] },
+      }),
+      stderr: "",
+    });
+    expect(readTicketLabels("CTL-9", { exec })).toEqual({ ok: true, labels: ["triaged", "needs-human"] });
+  });
+
+  test("non-zero exit → { ok: false, labels: null, code, stderr }", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "400 invalid_scope" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("400 invalid_scope");
+  });
+
+  test("non-JSON stdout → { ok: false, labels: null }", () => {
+    const exec = () => ({ code: 0, stdout: "not-json", stderr: "" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+  });
+
+  test("fetchTicketLabels back-compat: returns array on success", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ labels: { nodes: [{ name: "blocked" }] } }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual(["blocked"]);
+  });
+
+  test("fetchTicketLabels back-compat: returns null on failure", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    expect(fetchTicketLabels("CTL-9", { exec })).toBeNull();
   });
 });
 

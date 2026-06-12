@@ -40,6 +40,19 @@ describe("isAuthError", () => {
     expect(isAuthError(null)).toBe(false));
   test("does NOT match undefined", () =>
     expect(isAuthError(undefined)).toBe(false));
+  // CTL-1078: OAuth scope-rejection shapes
+  test("matches '400 invalid_scope'", () =>
+    expect(isAuthError("error: 400 invalid_scope")).toBe(true));
+  test("matches 'invalid_scope' standalone", () =>
+    expect(isAuthError("invalid_scope")).toBe(true));
+  test("matches 'forbidden'", () =>
+    expect(isAuthError("forbidden")).toBe(true));
+  test("matches 'HTTP 403'", () =>
+    expect(isAuthError("HTTP 403")).toBe(true));
+  test("matches 'insufficient_scope'", () =>
+    expect(isAuthError("insufficient_scope")).toBe(true));
+  test("does NOT match '429 Rate limit' (must not overlap isRateLimitError)", () =>
+    expect(isAuthError("429 Rate limit exceeded")).toBe(false));
 });
 
 // ── isBatchAuthError ──────────────────────────────────────────────────────────
