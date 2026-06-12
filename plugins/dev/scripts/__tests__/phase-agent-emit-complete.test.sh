@@ -600,6 +600,54 @@ LINE=$(read_event_line)
 TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
 assert_eq "feature" "$TTYPE" "catalyst.ticket.type present on failed event"
 
+# ─── CTL-1081 Phase 2: artifact self-check in emit-complete ──────────────────
+# For thoughts-producing phases (research, plan), --status complete is downgraded
+# to failed with reason=artifact_not_gate_visible when the own artifact is absent.
+# Non-thoughts phases and non-complete statuses are unaffected.
+
+echo ""
+echo "Test 39 (CTL-1081 P2): research + doc present → complete emits phase.research.complete"
+fresh_env t39
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+touch "${PROJ_DIR}/thoughts/shared/research/2026-06-12-ctl-1081-x.md"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.research.complete.CTL-1081" "$EVENT_NAME" "doc present → complete event emitted"
+
+echo ""
+echo "Test 40 (CTL-1081 P2): research + doc absent → complete downgraded to failed with artifact_not_gate_visible"
+fresh_env t40
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.research.failed.CTL-1081" "$EVENT_NAME" "doc absent → failed event emitted"
+assert_eq "artifact_not_gate_visible" "$REASON" "failure_reason=artifact_not_gate_visible"
+
+echo ""
+echo "Test 41 (CTL-1081 P2): verify (non-thoughts phase) → complete unaffected"
+fresh_env t41
+(cd "${TEST_DIR}" && "$EMIT_SCRIPT" --phase verify --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.verify.complete.CTL-1081" "$EVENT_NAME" "non-thoughts phase: complete unaffected by self-check"
+
+echo ""
+echo "Test 42 (CTL-1081 P2): research + status failed → NOT altered by self-check"
+fresh_env t42
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status failed --reason "tests red" >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.research.failed.CTL-1081" "$EVENT_NAME" "non-complete status: event name unchanged"
+assert_eq "tests red" "$REASON" "non-complete status: caller reason preserved"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"
