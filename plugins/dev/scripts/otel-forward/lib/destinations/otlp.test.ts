@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildOtlpPayload } from "./otlp.ts";
+import { appendToDlq, dlqDepth, drainDlq } from "../dlq.ts";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 
 const SAMPLE_EVENT: CanonicalEvent = {
@@ -261,6 +262,154 @@ describe("OtlpSender flush failure events (CTL-1008 Phase 4)", () => {
 
     expect(existsSync(eventLogPath)).toBe(false);
 
+    rmSync(dir, { recursive: true });
+  });
+});
+
+describe("OtlpSender DLQ drain — outside withRetry (CTL-1060)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "otlp-drain-test-"));
+  });
+
+  function makeEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
+    return { ...SAMPLE_EVENT, ...overrides };
+  }
+
+  test("drain failure does not re-dead-letter the primary (drain is outside withRetry)", async () => {
+    // Primary fetch succeeds; all subsequent calls (drain) fail.
+    let callCount = 0;
+    global.fetch = mock(() => {
+      callCount++;
+      if (callCount === 1) return Promise.resolve(new Response(null, { status: 200 }));
+      return Promise.reject(new Error("drain network failure"));
+    }) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "drain-dlq.jsonl");
+    const eventLogPath = join(dir, "drain-events.jsonl");
+
+    // Seed DLQ with a known batch
+    appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": "queued.event" } })]);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      eventLogPath,
+      retryDelaysMs: [0, 0, 0],
+    });
+    await sender.flush([makeEvent({ attributes: { "event.name": "primary.event" } })]);
+
+    // Primary was delivered successfully — it must NOT be in the DLQ.
+    // Only the original queued.event batch should remain (drain failed).
+    const remaining = drainDlq(dlqPath);
+    expect(remaining.length).toBe(1);
+    expect((remaining[0][0] as any).attributes["event.name"]).toBe("queued.event");
+    // Drain was attempted (fetch called > 1 time)
+    expect(callCount).toBeGreaterThan(1);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("no drain when primary fails: DLQ grows by primary, drain never attempted", async () => {
+    global.fetch = mock(() =>
+      Promise.reject(new Error("always fail"))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "nofail-dlq.jsonl");
+
+    // Seed DLQ with one existing batch
+    appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": "existing.batch" } })]);
+    expect(dlqDepth(dlqPath)).toBe(1);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      retryDelaysMs: [0, 0, 0],
+    });
+    await sender.flush([makeEvent({ attributes: { "event.name": "primary.event" } })]);
+
+    // DLQ now has both: original batch + newly dead-lettered primary
+    expect(dlqDepth(dlqPath)).toBe(2);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("bounded drain across cycles: 60 batches → 10 remain after first flush, 0 after second", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 200 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "bounded-dlq.jsonl");
+
+    // Seed DLQ with 60 batches
+    for (let i = 0; i < 60; i++) {
+      appendToDlq(dlqPath, [makeEvent({ attributes: { "event.name": `batch.${i}` } })]);
+    }
+    expect(dlqDepth(dlqPath)).toBe(60);
+
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      retryDelaysMs: [0],
+      maxDrainBatches: 50,
+    });
+
+    // First flush: drains 50, leaves 10
+    await sender.flush([makeEvent()]);
+    expect(dlqDepth(dlqPath)).toBe(10);
+
+    // Second flush: drains remaining 10
+    await sender.flush([makeEvent()]);
+    expect(dlqDepth(dlqPath)).toBe(0);
+
+    rmSync(dir, { recursive: true });
+  });
+
+  test("onBatchDelivered is called for primary + each drained batch on success (CTL-1060 Phase 3)", async () => {
+    global.fetch = mock(() =>
+      Promise.resolve(new Response(null, { status: 200 }))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "obd-dlq.jsonl");
+    appendToDlq(dlqPath, [makeEvent()]);
+    appendToDlq(dlqPath, [makeEvent()]);
+
+    let deliveredCount = 0;
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:4318",
+      dlqPath,
+      retryDelaysMs: [0],
+      onBatchDelivered: () => { deliveredCount++; },
+    });
+
+    await sender.flush([makeEvent()]);
+    // 1 primary + 2 DLQ batches = 3 calls to onBatchDelivered
+    expect(deliveredCount).toBe(3);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("onBatchDelivered is NOT called when primary flush fails (CTL-1060 Phase 3)", async () => {
+    global.fetch = mock(() =>
+      Promise.reject(new Error("down"))
+    ) as unknown as typeof fetch;
+
+    const { OtlpSender } = await import("./otlp.ts");
+    const dlqPath = join(dir, "obd-fail-dlq.jsonl");
+
+    let deliveredCount = 0;
+    const sender = new OtlpSender({
+      endpoint: "http://127.0.0.1:1",
+      dlqPath,
+      retryDelaysMs: [0, 0, 0],
+      onBatchDelivered: () => { deliveredCount++; },
+    });
+
+    await sender.flush([makeEvent()]);
+    expect(deliveredCount).toBe(0);
     rmSync(dir, { recursive: true });
   });
 });

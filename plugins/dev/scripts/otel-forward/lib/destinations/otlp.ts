@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { CanonicalEvent } from "../../../orch-monitor/lib/canonical-event.ts";
 import { withRetry, DEFAULT_RETRY_DELAYS_MS } from "../retry.ts";
-import { appendToDlq, drainDlq } from "../dlq.ts";
+import { appendToDlq, drainDlqBounded, DEFAULT_MAX_DRAIN_BATCHES } from "../dlq.ts";
 import { log } from "../logger.ts";
 import { buildCanonicalEnvelope } from "../canonical.ts";
 
@@ -66,6 +66,10 @@ export interface OtlpSenderOpts {
   retryDelaysMs?: number[];
   /** Path to append a canonical forward_failed event on flush failure (CTL-1008 Phase 4). */
   eventLogPath?: string;
+  /** Max DLQ batches to drain per flush cycle. Defaults to DEFAULT_MAX_DRAIN_BATCHES. */
+  maxDrainBatches?: number;
+  /** Called after each successfully delivered batch (primary or DLQ). Used by Phase 3 lag tracking. */
+  onBatchDelivered?: (batch: CanonicalEvent[]) => void;
 }
 
 // CTL-1008 Phase 4: guard against re-amplifying our own failure events —
@@ -81,23 +85,21 @@ export class OtlpSender {
   async flush(batch: CanonicalEvent[]): Promise<void> {
     const url = `${this.opts.endpoint.replace(/:4317/, ":4318").replace(/\/$/, "")}/v1/logs`;
     const retryDelays = this.opts.retryDelaysMs ?? [...DEFAULT_RETRY_DELAYS_MS];
+
+    // sendBatch is the raw network call — only retried for the PRIMARY batch.
+    const sendBatch = async (b: CanonicalEvent[]) => {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildOtlpPayload(b)),
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
+      });
+      if (!res.ok) throw new Error(`OTLP HTTP ${res.status}`);
+    };
+
     try {
-      await withRetry(
-        async () => {
-          const res = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(buildOtlpPayload(batch)),
-            signal: AbortSignal.timeout(this.opts.timeoutMs ?? 5000),
-          });
-          if (!res.ok) throw new Error(`OTLP HTTP ${res.status}`);
-          for (const dlqBatch of drainDlq(this.opts.dlqPath)) {
-            await this.flush(dlqBatch as CanonicalEvent[]);
-          }
-        },
-        3,
-        retryDelays
-      );
+      // CTL-1060: PRIMARY only inside withRetry — drain is OUTSIDE.
+      await withRetry(() => sendBatch(batch), 3, retryDelays);
     } catch (err) {
       appendToDlq(this.opts.dlqPath, batch);
       destLog.error(
@@ -126,6 +128,21 @@ export class OtlpSender {
           // Best-effort — failure to write the failure event must never throw
         }
       }
+      // Primary failed → backend unhealthy → do not attempt to drain
+      return;
     }
+
+    // Primary delivered → backend healthy → bounded, failure-isolated drain OUTSIDE withRetry.
+    this.opts.onBatchDelivered?.(batch);
+    await drainDlqBounded(
+      this.opts.dlqPath,
+      (b) => withRetry(() => sendBatch(b as CanonicalEvent[]), 3, [...retryDelays]),
+      {
+        maxBatches: this.opts.maxDrainBatches ?? DEFAULT_MAX_DRAIN_BATCHES,
+        onBatchDelivered: this.opts.onBatchDelivered
+          ? (b) => this.opts.onBatchDelivered!(b as CanonicalEvent[])
+          : undefined,
+      }
+    );
   }
 }

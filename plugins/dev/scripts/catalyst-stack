@@ -153,10 +153,12 @@ stop_mitmproxy() {
   fi
 }
 
-start_broker()  { catalyst-broker start 2>&1 | sed 's/^/  /'; }
-stop_broker()   { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
-start_monitor() { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
-stop_monitor()  { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
+stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
+stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
+stop_forward()   { catalyst-monitor forward-stop  2>&1 | sed 's/^/  /'; }
 
 start_daemon() {
   local use_proxy="$1"
@@ -433,6 +435,7 @@ cmd_start() {
   start_broker
   start_monitor
   start_daemon "$use_proxy"
+  start_forward
 
   log ""
   log "stack up — current state:"
@@ -441,6 +444,7 @@ cmd_start() {
 
 cmd_stop() {
   stop_daemon
+  stop_forward
   stop_monitor
   stop_broker
   stop_mitmproxy
@@ -466,6 +470,7 @@ cmd_status() {
   echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
+  echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
 }
 
 # ─── Dispatch ───────────────────────────────────────────────────────────────

@@ -4,6 +4,41 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTailer } from "./lib/tail.ts";
 import { readCheckpoint, writeCheckpoint } from "./lib/checkpoint.ts";
+import { computeLagMs, buildLagEvent } from "./index.ts";
+
+describe("computeLagMs (CTL-1060 Phase 3)", () => {
+  test("returns ms delta between localNewestTs and lastForwardedTs", () => {
+    expect(computeLagMs("2026-06-12T10:00:10Z", "2026-06-12T10:00:00Z")).toBe(10_000);
+  });
+
+  test("returns 0 when lastForwardedTs >= localNewestTs (caught-up or ahead)", () => {
+    expect(computeLagMs("2026-06-12T10:00:00Z", "2026-06-12T10:00:10Z")).toBe(0);
+    expect(computeLagMs("2026-06-12T10:00:00Z", "2026-06-12T10:00:00Z")).toBe(0);
+  });
+
+  test("returns 0 when either timestamp is undefined", () => {
+    expect(computeLagMs(undefined, "2026-06-12T10:00:00Z")).toBe(0);
+    expect(computeLagMs("2026-06-12T10:00:00Z", undefined)).toBe(0);
+    expect(computeLagMs(undefined, undefined)).toBe(0);
+  });
+});
+
+describe("buildLagEvent (CTL-1060 Phase 3)", () => {
+  test("returns canonical event with forward_lag name and correct payload fields", () => {
+    const ev = buildLagEvent({
+      localNewestTs: "2026-06-12T10:00:10Z",
+      lastForwardedTs: "2026-06-12T10:00:00Z",
+      dlqDepth: 5,
+    });
+    expect(ev.attributes["event.name"]).toBe("catalyst.observability.forward_lag");
+    expect(ev.resource["service.name"]).toBe("catalyst.otel-forward");
+    const payload = ev.body?.payload as Record<string, unknown>;
+    expect(payload.lagMs).toBe(10_000);
+    expect(payload.localNewestTs).toBe("2026-06-12T10:00:10Z");
+    expect(payload.lastForwardedTs).toBe("2026-06-12T10:00:00Z");
+    expect(payload.dlqDepth).toBe(5);
+  });
+});
 
 describe("checkpoint persists real read offset (CTL-766)", () => {
   test("a checkpoint written from tailer.currentOffset() resumes past the backlog", async () => {
