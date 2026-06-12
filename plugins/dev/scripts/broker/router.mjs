@@ -1805,11 +1805,18 @@ export function processEvent(event) {
   // it writes logPath:"" into the handoff, which never matches the real path on boot, so the
   // successor silently reseeds to EOF and drops events appended during the restart gap —
   // defeating the gap-free handoff entirely.
+  //
+  // CTL-1077 remediate (M5): pass getByteOffsetFn (the live accessor), not an
+  // eagerly-evaluated currentByteOffset. The handoff is written ~30 s later when
+  // the debounce fires; capturing the offset HERE at processEvent time would make
+  // the successor resume from a low-water mark and re-process ~30 s of events
+  // (double-firing non-idempotent handlers). The accessor is evaluated at
+  // handoff-write time so the successor resumes from the true tail position.
   handleStackReloadEvent({
     results: __refreshResults,
     loadedCommitRoot: __loadedCommitRoot(),
     emitFn: appendEvent,
-    currentByteOffset: getLastByteOffset(),
+    getByteOffsetFn: getLastByteOffset,
     logPath: getEventLogPath(),
   });
 

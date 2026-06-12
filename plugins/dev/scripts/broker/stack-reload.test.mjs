@@ -18,6 +18,7 @@ import {
   handleStackReloadEvent,
   __clearReloadStateForTest,
   STACK_RELOAD_DEBOUNCE_MS,
+  STACK_RELOAD_CONFIRM_POLL_MS,
 } from "./stack-reload.mjs";
 
 // ─── fake-timer helper ───────────────────────────────────────────────────────
@@ -516,6 +517,99 @@ describe("resolveBootByteOffset", () => {
       resolveBootByteOffset({ handoff: null, logPath: "/ev.jsonl", eofSize: eof })
     ).toBe(eof);
   });
+
+  // CTL-1077 remediate (M4): the default freshness budget is widened to 5 min so a
+  // self-restart that lands >60 s after the handoff write (the ~90 s EADDRINUSE
+  // race the confirm path documents) still resumes from the saved offset instead
+  // of reseeding to EOF and dropping the restart-gap events.
+  test("default maxAgeMs accepts a handoff ~90 s old (was rejected at the old 60 s budget)", () => {
+    const eof = 9000;
+    // No maxAgeMs passed → exercises the production default.
+    expect(
+      resolveBootByteOffset({
+        handoff: { logPath: "/ev.jsonl", byteOffset: 4096, ts: 0 },
+        logPath: "/ev.jsonl",
+        eofSize: eof,
+        now: 90_000, // 90 s after the handoff write
+      })
+    ).toBe(4096);
+  });
+
+  test("default maxAgeMs still rejects a genuinely stale handoff (>5 min)", () => {
+    const eof = 9000;
+    expect(
+      resolveBootByteOffset({
+        handoff: { logPath: "/ev.jsonl", byteOffset: 4096, ts: 0 },
+        logPath: "/ev.jsonl",
+        eofSize: eof,
+        now: 6 * 60_000, // 6 min after the handoff write
+      })
+    ).toBe(eof);
+  });
+});
+
+// ─── parseBootHandoff (CTL-1077 remediate #8) ────────────────────────────────
+//
+// Extracted from main()'s inline boot block into a seam-injected helper so the
+// corrupt-warn branch and the ENOENT-is-silent branch have direct coverage (the
+// verify coverage finding: only the pure resolveBootByteOffset was tested before;
+// the fs-touching boot parse had no seam).
+describe("parseBootHandoff", () => {
+  let parseBootHandoff;
+  beforeEach(async () => {
+    ({ parseBootHandoff } = await import("./index.mjs"));
+  });
+
+  test("valid handoff → parsed object", () => {
+    const handoff = { logPath: "/ev.jsonl", byteOffset: 4096, ts: 1000 };
+    const result = parseBootHandoff({
+      handoffPath: "/h.json",
+      readFileFn: () => JSON.stringify(handoff),
+      log: { warn: () => {} },
+    });
+    expect(result).toEqual(handoff);
+  });
+
+  test("missing handoff (ENOENT) → null, NO warn (normal no-reload case)", () => {
+    const warns = [];
+    const result = parseBootHandoff({
+      handoffPath: "/h.json",
+      readFileFn: () => {
+        const err = new Error("ENOENT: no such file");
+        err.code = "ENOENT";
+        throw err;
+      },
+      log: { warn: (...a) => warns.push(a) },
+    });
+    expect(result).toBeNull();
+    expect(warns.length).toBe(0);
+  });
+
+  test("corrupt handoff → null AND warns (gap-drop must be observable)", () => {
+    const warns = [];
+    const result = parseBootHandoff({
+      handoffPath: "/h.json",
+      readFileFn: () => "{not valid json",
+      log: { warn: (...a) => warns.push(a) },
+    });
+    expect(result).toBeNull();
+    expect(warns.length).toBe(1);
+  });
+
+  test("non-ENOENT read error (e.g. EACCES) → null AND warns", () => {
+    const warns = [];
+    const result = parseBootHandoff({
+      handoffPath: "/h.json",
+      readFileFn: () => {
+        const err = new Error("EACCES: permission denied");
+        err.code = "EACCES";
+        throw err;
+      },
+      log: { warn: (...a) => warns.push(a) },
+    });
+    expect(result).toBeNull();
+    expect(warns.length).toBe(1);
+  });
 });
 
 // ─── self-reload handoff round-trip (CTL-1077 remediate) ─────────────────────
@@ -610,5 +704,147 @@ describe("self-reload handoff round-trip (write → resolveBootByteOffset)", () 
         maxAgeMs: 60_000,
       })
     ).toBe(4096);
+  });
+});
+
+// ─── remediate hardening (CTL-1077 remediate cycle) ──────────────────────────
+//
+// New behaviors added by the verify⇄remediate cycle:
+//  M1 a synchronous restart-spawn failure partitions the component unconfirmed
+//     (→ degraded), so a failed exec-core restart is no longer reported complete.
+//  M2 a failed broker self-reload spawn emits stack.reload.degraded(broker_restart_failed)
+//     instead of being double-swallowed and leaving the broker on stale code.
+//  M3 confirmation polling waits OFF the event loop via the injected setTimeoutFn,
+//     not a synchronous sleep loop.
+//  M5 the byte offset is read at handoff-write time via getByteOffsetFn, not captured
+//     ~30 s earlier at processEvent time.
+//  #6 brokerSelfReload is latched (OR-ed) across coalesced debounce decisions.
+describe("remediate hardening (CTL-1077 remediate cycle)", () => {
+  beforeEach(() => __clearReloadStateForTest());
+
+  test("M1: a synchronous spawn failure for exec-core → degraded (not complete)", () => {
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      // exec-core restart cannot even launch; monitor spawns fine.
+      spawnFn: (cmd) => { if (cmd === "catalyst-execution-core") throw new Error("ENOENT"); },
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 1000,
+      ...immediate,
+    });
+    const names = emitted.map((e) => e.event);
+    expect(names).toContain("stack.reload.degraded");
+    expect(names).not.toContain("stack.reload.complete");
+    const degraded = emitted.find((e) => e.event === "stack.reload.degraded" && e.detail.reason === "restart_not_confirmed");
+    expect(degraded.detail.unconfirmed.map((c) => c.name)).toContain("execution-core");
+    expect(degraded.detail.confirmed).toContain("monitor");
+  });
+
+  test("M2: a failed broker self-reload spawn → degraded(broker_restart_failed)", () => {
+    const emitted = [];
+    const timers = makeFakeTimers();
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
+      loadedCommitRoot: "/co",
+      // monitor + exec-core restart fine; only the broker self-reload spawn fails.
+      spawnFn: (cmd) => { if (cmd === "catalyst-broker") throw new Error("ENOENT"); },
+      confirmFn: () => true,
+      writeHandoffFn: () => {},
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    timers.advance(STACK_RELOAD_DEBOUNCE_MS);
+    const brokerDegraded = emitted.find(
+      (e) => e.event === "stack.reload.degraded" && e.detail.reason === "broker_restart_failed"
+    );
+    expect(brokerDegraded).toBeDefined();
+    expect(brokerDegraded.detail.component).toBe("broker");
+  });
+
+  test("M3: confirmation polling for an unconfirmed component waits via setTimeoutFn (non-blocking)", () => {
+    const scheduled = [];
+    let confirmCalls = 0;
+    const fakeSetTimeout = (fn, ms) => { scheduled.push(ms); fn(); return 0; };
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      // monitor confirms only on the 3rd probe → forces poll waits via setTimeoutFn.
+      confirmFn: (c) => {
+        if (c.name !== "monitor") return true;
+        confirmCalls++;
+        return confirmCalls >= 3;
+      },
+      emitFn: () => {},
+      now: 0,
+      setTimeoutFn: fakeSetTimeout,
+      clearTimeoutFn: () => {},
+    });
+    // The debounce uses STACK_RELOAD_DEBOUNCE_MS; the inter-probe waits use the
+    // non-blocking confirm poll cadence — proving the wait is off the event loop.
+    expect(scheduled).toContain(STACK_RELOAD_CONFIRM_POLL_MS);
+  });
+
+  test("M5: byte offset is read at handoff-write time via getByteOffsetFn", () => {
+    const handoffs = [];
+    const timers = makeFakeTimers();
+    let liveOffset = 100;
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      confirmFn: () => true,
+      writeHandoffFn: (h) => handoffs.push(h),
+      getByteOffsetFn: () => liveOffset, // accessor read lazily at write time
+      emitFn: () => {},
+      now: 0,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    // Offset advances between processEvent and the debounced handoff write.
+    liveOffset = 8192;
+    timers.advance(STACK_RELOAD_DEBOUNCE_MS);
+    expect(handoffs.length).toBe(1);
+    expect(handoffs[0].byteOffset).toBe(8192); // live value, not the processEvent-time 100
+  });
+
+  test("#6: brokerSelfReload latches across coalesced decisions (earlier true survives a later false)", () => {
+    const spawned = [];
+    const handoffs = [];
+    const timers = makeFakeTimers();
+    // First decision in the window demands a broker self-reload (its root).
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b1", changed: true, restartNeeded: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd) => spawned.push(cmd),
+      confirmFn: () => true,
+      writeHandoffFn: (h) => handoffs.push(h),
+      currentByteOffset: 1,
+      emitFn: () => {},
+      now: 0,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    // Second decision (different root) coalesces but does NOT need a broker reload.
+    handleStackReloadEvent({
+      results: [{ root: "/other", oldSha: "a", newSha: "b2", changed: true, restartNeeded: false }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd) => spawned.push(cmd),
+      confirmFn: () => true,
+      writeHandoffFn: (h) => handoffs.push(h),
+      currentByteOffset: 1,
+      emitFn: () => {},
+      now: 5_000,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    timers.advance(STACK_RELOAD_DEBOUNCE_MS);
+    // The broker self-reload from the first decision must NOT be dropped.
+    expect(handoffs.length).toBe(1);
+    expect(spawned).toContain("catalyst-broker");
   });
 });
