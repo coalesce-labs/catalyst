@@ -630,6 +630,17 @@ const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".ico",
 ]);
 
+// CTL-1088: choose the served public dir. Prefer the out-of-repo dist the wrapper
+// built into (MONITOR_PUBLIC_DIR); fall back to the committed bundle when the env
+// var is unset/empty or points at a missing dir (cold-start path).
+export function resolvePublicDir(
+  envDir: string | undefined,
+  fallback: string,
+): string {
+  if (envDir && envDir.length > 0 && existsSync(envDir)) return envDir;
+  return fallback;
+}
+
 function resolveSafeStaticPath(
   publicDir: string,
   relative: string,
@@ -3892,12 +3903,17 @@ if (import.meta.main) {
       });
     }
   } else {
+    const PUBLIC_DIR = resolvePublicDir(
+      process.env.MONITOR_PUBLIC_DIR,
+      join(import.meta.dir, "public"),
+    );
     const srv = createServer({
       port: PORT,
       wtDir: WT_DIR,
       runsDir: RUNS_DIR,
       dbPath: DB_PATH,
       pidFile: pidFilePath,
+      publicDir: PUBLIC_DIR,
       prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
       lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
       grafanaUrl: otelCfg.enabled ? otelCfg.grafanaUrl : null,
