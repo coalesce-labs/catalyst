@@ -121,13 +121,24 @@ export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = n
 // permanently disarmed. Best-effort and never throws (mirrors labelOnce).
 // The marker is deleted ONLY on a confirmed removal so a transient API failure
 // is retried next tick.
-export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemoved = null } = {}) {
+//
+// CTL-1078: accepts optional `now` seam (defaults to Date.now) for testability.
+// After REMOVAL_ESCALATION_THRESHOLD consecutive failures, activates a back-off
+// window (inRemovalBackoff) that short-circuits before calling removeLabel — the
+// storm-break. Escalates once with a log.error on the threshold trip.
+export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemoved = null, now = () => Date.now() } = {}) {
   const base = labelMarkerBase(orchDir, ticket, label);
+  // CTL-1078: guard at entry — if we're in backoff, skip the doomed removeLabel.
+  if (inRemovalBackoff(orchDir, ticket, label, now())) {
+    return;
+  }
   try {
     const res = writeStatus.removeLabel(ticket, label);
     const finalize = (r) => {
       // undefined (test stub) treated as success; otherwise require removed:true.
       if (r === undefined || r?.removed) {
+        // Success: clear the failure counter and delete the once-markers.
+        clearRemovalFailures(orchDir, ticket, label);
         for (const suffix of [".applied", ".skipped"]) {
           const p = `${base}${suffix}`;
           if (existsSync(p)) { try { unlinkSync(p); } catch { /* best-effort */ } }
@@ -140,6 +151,15 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemov
             log.warn({ ticket, label, err: err?.message }, "clearStalledLabel: onRemoved threw — continuing");
           }
         }
+      } else if (r?.removed === false) {
+        // CTL-1078: record failure and escalate once at threshold.
+        const { count } = recordRemovalFailure(orchDir, ticket, label, r.reason, now());
+        if (count === REMOVAL_ESCALATION_THRESHOLD) {
+          log.error(
+            { ticket, label, reason: r.reason, count },
+            "clearStalledLabel: removal failed threshold times — entering back-off (CTL-1078)"
+          );
+        }
       }
     };
     if (res && typeof res.then === "function") {
@@ -151,6 +171,68 @@ export function clearStalledLabel(orchDir, ticket, label, writeStatus, { onRemov
   } catch (err) {
     log.warn({ ticket, label, err: err.message }, "clearStalledLabel: threw — continuing tick");
   }
+}
+
+// ─── CTL-1078: per-(ticket, label) removal failure counter + backoff ───
+//
+// Mirrors the escalation-cooldown subsystem above but for the REMOVE path.
+// Counts consecutive removeLabel failures per (ticket, label) and activates a
+// back-off window (reusing ESCALATION_COOLDOWN_MS) after REMOVAL_ESCALATION_THRESHOLD
+// consecutive failures. This breaks the per-tick retry storm without requiring
+// the underlying auth issue to be resolved first.
+//
+// Marker lives under orchDir/.removal-failures/ (same rationale as
+// .escalation-cooldowns/ — outside workers/<T>/ to avoid manufacturing worker dirs).
+const REMOVAL_ESCALATION_THRESHOLD =
+  Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+
+function removalFailurePath(orchDir, ticket, label) {
+  return join(orchDir, ".removal-failures", `${ticket}-${label}.json`);
+}
+
+export function recordRemovalFailure(orchDir, ticket, label, reason, now) {
+  const p = removalFailurePath(orchDir, ticket, label);
+  const dir = join(orchDir, ".removal-failures");
+  let count = 1;
+  let firstFailedAt = now;
+  try {
+    try {
+      const existing = JSON.parse(readFileSync(p, "utf8"));
+      count = (existing?.count ?? 0) + 1;
+      firstFailedAt = existing?.firstFailedAt ?? now;
+    } catch {
+      // absent or malformed → start fresh
+    }
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(p, JSON.stringify({ ticket, label, count, firstFailedAt, lastReason: reason, lastFailedAt: now }));
+  } catch (err) {
+    log.warn({ ticket, label, err: err.message }, "label-guard: removal-failure marker write failed — continuing");
+    return { count };
+  }
+  return { count };
+}
+
+export function clearRemovalFailures(orchDir, ticket, label) {
+  const p = removalFailurePath(orchDir, ticket, label);
+  try {
+    if (existsSync(p)) unlinkSync(p);
+  } catch (err) {
+    log.warn({ ticket, label, err: err.message }, "label-guard: removal-failure marker delete failed — continuing");
+  }
+}
+
+export function inRemovalBackoff(orchDir, ticket, label, now) {
+  const p = removalFailurePath(orchDir, ticket, label);
+  let data;
+  try {
+    data = JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    return false;
+  }
+  if (typeof data?.count !== "number" || data.count < REMOVAL_ESCALATION_THRESHOLD) return false;
+  const lastFailedAt = data?.lastFailedAt ?? data?.firstFailedAt;
+  if (typeof lastFailedAt !== "number") return false;
+  return now - lastFailedAt < ESCALATION_COOLDOWN_MS;
 }
 
 // ─── CTL-638: per-(ticket, phase) escalation cool-down ───

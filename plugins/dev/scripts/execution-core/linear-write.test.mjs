@@ -501,6 +501,17 @@ describe("classifyLabelFailure (CTL-834)", () => {
     expect(classifyLabelFailure("anything else")).toBe("transient");
     expect(classifyLabelFailure(undefined)).toBe("transient");
   });
+  // CTL-1078: auth/scope failures classify as auth-error, not transient
+  test("'400 invalid_scope' → 'auth-error'", () => {
+    expect(classifyLabelFailure("error: 400 invalid_scope")).toBe("auth-error");
+  });
+  test("'forbidden' → 'auth-error'", () => {
+    expect(classifyLabelFailure("forbidden")).toBe("auth-error");
+  });
+  test("auth-error does not steal 'not found' (ordering guard)", () => {
+    expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+  });
 });
 
 // CTL-704: applyTriageStatus — verified Todo→Triage write-back with pre/post state reads.
@@ -638,6 +649,27 @@ describe("removeLabel (CTL-549)", () => {
     const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
     const fetchLabels = () => null; // linearis read failed
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("transient");
+    expect(cmds).toHaveLength(0);
+  });
+
+  // CTL-1078: richer readLabels seam — auth-error vs transient classification
+  test("read failure with auth stderr (readLabels) → removed:false, reason:auth-error, no write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: false, labels: null, code: 1, stderr: "400 invalid_scope" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, readLabels });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("auth-error");
+    expect(cmds).toHaveLength(0);
+  });
+
+  test("read failure with non-auth stderr (readLabels) → removed:false, reason:transient, no write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: false, labels: null, code: 1, stderr: "network timeout" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, readLabels });
     expect(result.removed).toBe(false);
     expect(result.reason).toBe("transient");
     expect(cmds).toHaveLength(0);
