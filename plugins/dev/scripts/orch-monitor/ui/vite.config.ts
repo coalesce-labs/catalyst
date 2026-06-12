@@ -4,6 +4,14 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { assembleBoard } from "../lib/board-data.mjs";
 
+// CTL-1088: build out of the pristine plugin clone. When the wrapper provides a
+// dist dir, writes outside the tracked public/; falls back to ../public so plain
+// `bunx vite build` from a checkout still behaves as before.
+export const OUT_DIR =
+  process.env.MONITOR_UI_DIST_DIR && process.env.MONITOR_UI_DIST_DIR.length > 0
+    ? resolve(process.env.MONITOR_UI_DIST_DIR)
+    : resolve(__dirname, "../public");
+
 // CTL-727/730: serve the live board payload from the dev server (Node side), so
 // the React board can fetch real execution-core state without the legacy :7400
 // monitor. Matches the SAME path the production monitor serves (`/api/board`,
@@ -41,7 +49,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: resolve(__dirname, "../public"),
+    outDir: OUT_DIR,
     emptyOutDir: false,
     rollupOptions: {
       // CTL-989: SINGLE entry. The two SPA bundles are unified into ONE TanStack

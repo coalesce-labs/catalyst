@@ -43,6 +43,9 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 SERVER_SCRIPT="${MONITOR_SERVER_SCRIPT:-$SCRIPT_DIR/orch-monitor/server.ts}"
 MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
+# CTL-1088: default out-of-repo dist dir for the vite build (single definition
+# used by both bootstrap and cmd_start).
+MONITOR_UI_DIST_DIR="${MONITOR_UI_DIST_DIR:-$CATALYST_DIR/monitor-ui-dist}"
 FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"
 FORWARD_LOG="${CATALYST_DIR}/otel-forward.log"
 FORWARD_SCRIPT="${SCRIPT_DIR}/otel-forward/index.ts"
@@ -199,9 +202,26 @@ bootstrap() {
       (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
 
-    if [[ -d "$MONITOR_DIR/ui" && ! -d "$MONITOR_DIR/ui/dist" ]]; then
-      echo "Building orch-monitor frontend..."
-      (cd "$MONITOR_DIR/ui" && bunx vite build)
+    if [[ -d "$MONITOR_DIR/ui" ]]; then
+      mkdir -p "$MONITOR_UI_DIST_DIR"
+      export MONITOR_UI_DIST_DIR
+
+      # CTL-1088: build only when the out-of-repo dist has no built index.html yet.
+      # The old guard (`! -d ui/dist`) was always true — vite never wrote there.
+      # Force a rebuild with MONITOR_FORCE_BUILD=1.
+      if [[ "${MONITOR_FORCE_BUILD:-}" == "1" || ! -f "$MONITOR_UI_DIST_DIR/index.html" ]]; then
+        echo "Building orch-monitor frontend → $MONITOR_UI_DIST_DIR ..."
+        (cd "$MONITOR_DIR/ui" && bunx vite build)
+      fi
+
+      # Complete the dist: copy non-vite static assets so the out-of-repo dir is a
+      # full served root (server uses one publicDir for everything). Idempotent.
+      for _asset in history.html favicon.ico favicon.svg; do
+        [[ -f "$MONITOR_DIR/public/$_asset" ]] && cp -f "$MONITOR_DIR/public/$_asset" "$MONITOR_UI_DIST_DIR/" 2>/dev/null || true
+      done
+      for _dir in vendor mockups; do
+        [[ -d "$MONITOR_DIR/public/$_dir" ]] && cp -R "$MONITOR_DIR/public/$_dir" "$MONITOR_UI_DIST_DIR/" 2>/dev/null || true
+      done
     fi
   fi
 }
@@ -227,7 +247,9 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
-  MONITOR_PORT="$PORT" nohup bun run "$SERVER_SCRIPT" --pid-file "$PID_FILE" \
+  MONITOR_PORT="$PORT" \
+  MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
+  nohup bun run "$SERVER_SCRIPT" --pid-file "$PID_FILE" \
     > "$CATALYST_DIR/monitor.log" 2>&1 &
   local server_pid=$!
   disown "$server_pid" 2>/dev/null || true
