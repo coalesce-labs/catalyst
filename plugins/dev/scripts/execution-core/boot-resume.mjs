@@ -360,6 +360,14 @@ function resolveAgents(agents) {
 // the existing budget-gated per-tick reclaim sweep keeps chronic-failure
 // protection. No single failure throws out of the loop — a boot pass must never
 // crash daemon boot.
+//
+// CTL-1084: per-boot cheap-dispatch cap. Default BOOT_REWALK_MAX_PER_TICK (2)
+// limits the burst: deferred items drain via the scheduler's Sweep 1.5 on
+// subsequent ticks (they are NOT lost). The cap is independent of the per-tick
+// dispatch-cooldown markers — it never resets them.
+const BOOT_REWALK_MAX_PER_TICK =
+  Number(process.env.CATALYST_BOOT_REWALK_MAX_PER_TICK) || 2;
+
 export function reconcileBootResume({
   orchDir,
   report,
@@ -381,6 +389,9 @@ export function reconcileBootResume({
   resolveSession = resolvePhaseSessionId,
   orchId = undefined, // threaded into the audit envelope
   concurrency = {}, // CTL-665: committed executionCore concurrency knobs (from startDaemon)
+  // CTL-1084: per-boot dispatch cap for cheap phases. Deferred items drain via
+  // Sweep 1.5 on subsequent ticks. Default from BOOT_REWALK_MAX_PER_TICK const.
+  maxRewalkPerTick = BOOT_REWALK_MAX_PER_TICK,
 } = {}) {
   // CTL-1006 Scenario 1: eligible on a cold start OR a daemon bounce. The old
   // `report.coldStart !== true` gate was a permanent production no-op because
@@ -402,10 +413,13 @@ export function reconcileBootResume({
       appendRegressionEvent({ phase, ticket, dominantPhase, orchId }),
   });
 
+  // CTL-1084: planned = total candidates found (before any cap or cooldown filter).
+  const planned = candidates.length;
   let dispatched = 0;
   let resumed = 0;
   let failed = 0;
   let gated = 0;
+  let deferred = 0; // CTL-1084: cheap candidates held back by the per-boot cap
   for (const { ticket, phase, worktreePath, bgJobId } of candidates) {
     // CTL-644: gate expensive phases behind operator approval; auto-dispatch cheap ones.
     if (!isCheapPhase(phase)) {
@@ -418,6 +432,13 @@ export function reconcileBootResume({
           "boot-resume: expensive phase gated — awaiting operator approval"
         );
       }
+      continue;
+    }
+
+    // CTL-1084: per-boot cheap-dispatch cap — defer to Sweep 1.5 once reached.
+    // Cooldown markers are never reset here; the cap is purely additive.
+    if (dispatched >= maxRewalkPerTick) {
+      deferred++;
       continue;
     }
 
@@ -460,10 +481,10 @@ export function reconcileBootResume({
   }
 
   log.info(
-    { dispatched, resumed, gated, failed, candidates: candidates.length },
+    { dispatched, resumed, gated, failed, deferred, planned, candidates: candidates.length },
     "boot-resume: cold-start reconciliation complete"
   );
-  return { dispatched, resumed, gated, failed, candidates: candidates.length };
+  return { dispatched, resumed, gated, failed, deferred, planned, candidates: candidates.length };
 }
 
 // processApprovedResumes — CTL-644. Dispatch gated tickets whose operator
