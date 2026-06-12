@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Catalyst · Warm Board Prototype (CTL-1071)</title>
+<style>
+  /* ── CTL-1071 warm dense-board prototype ────────────────────────────────
+   * Uses the CTL-1033 surface ladder + Phase-1 terracotta accent + retired
+   * chart-5. Two themed sections: warm-light (default) and warm-graphite
+   * dark companion (deferred variant — palette placeholder for the epic).
+   *
+   * This is the legibility baseline catalyst-board.html cannot provide
+   * (it ships the pre-CTL-1033 ramp). Do NOT overwrite catalyst-board.html.
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  /* ── WARM-LIGHT tokens (CTL-1033 semantic ladder) ───────────────────── */
+  :root {
+    --surface-chrome: #ece7dd;
+    --surface-canvas: #faf7f2;
+    --surface-subtle: #fcfaf5;
+    --surface-card: #fffdf9;
+    --surface-elevated: #ffffff;
+    --surface-hover: #d8d1c2;
+    --border-strong: #ddd5c7;
+    --border-subtle: #e7e1d4;
+    --fg: #2b2722;
+    --fg-muted: #76705f;
+    --color-accent: #a9512f;
+    --color-live: #53cde2;
+    --color-green: #41bd7d;
+    --color-red: #e36b6b;
+    --color-yellow: #d9a843;
+    --color-blue: #5e9ee8;
+    --color-purple: #a98ee3;
+    --chart-5: #3aa6b9;
+    --shadow-card: 0 1px 3px rgba(43,39,34,0.08);
+    --shadow-elevated: 0 8px 24px rgba(43,39,34,0.16);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+
+  /* ── WARM-GRAPHITE DARK tokens (deferred variant — epic item) ────────
+   * Placeholder palette: dark canvas tinted slightly warm (hue ≈ 30°),
+   * terracotta accent carried over. Not a finished product; legibility
+   * check only. The finished dark variant needs a 3-way theme toggle
+   * (theme.ts redesign) and its own surface-contract assertion. */
+  .warm-dark {
+    --surface-chrome: #14100d;
+    --surface-canvas: #1c1714;
+    --surface-subtle: #241e1a;
+    --surface-card: #302822;
+    --surface-elevated: #3e332b;
+    --surface-hover: #4a3d34;
+    --border-strong: rgba(255,220,200,0.12);
+    --border-subtle: rgba(255,220,200,0.07);
+    --fg: #f0ebe4;
+    --fg-muted: #a89880;
+    --color-accent: #c15f3c;
+    --color-live: #53cde2;
+    --color-green: #41bd7d;
+    --color-red: #e36b6b;
+    --color-yellow: #d9a843;
+    --color-blue: #5e9ee8;
+    --color-purple: #a98ee3;
+    --chart-5: #3aa6b9;
+    --shadow-card: inset 0 1px 0 rgba(255,220,200,0.07), 0 1px 4px rgba(0,0,0,0.35);
+    --shadow-elevated: inset 0 1px 0 rgba(255,220,200,0.06), 0 8px 24px rgba(0,0,0,0.45);
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { min-height: 100%; }
+
+  /* ── Base ──────────────────────────────────────────────────────────────── */
+  .board-theme {
+    background: var(--surface-canvas);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 13px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 32px;
+  }
+
+  /* ── Header chrome ─────────────────────────────────────────────────────── */
+  .app-header {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 16px;
+    background: var(--surface-chrome);
+    border-bottom: 1px solid var(--border-strong);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+    font-size: 13.5px;
+    letter-spacing: 0.01em;
+  }
+  .brand-mark {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+    background: var(--color-accent);
+    opacity: 0.9;
+  }
+  .header-nav {
+    display: flex;
+    gap: 2px;
+    margin-left: 12px;
+  }
+  .nav-btn {
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--fg-muted);
+    cursor: pointer;
+  }
+  .nav-btn.active {
+    background: var(--surface-card);
+    color: var(--fg);
+    border-color: var(--border-strong);
+    box-shadow: var(--shadow-card);
+  }
+  .header-right {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--fg-muted);
+  }
+  .live-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--color-live);
+    display: inline-block;
+  }
+
+  /* ── Board layout ─────────────────────────────────────────────────────── */
+  .board-canvas {
+    display: flex;
+    gap: 0;
+    overflow-x: auto;
+    padding: 0;
+    min-height: 500px;
+  }
+
+  /* ── Lane ─────────────────────────────────────────────────────────────── */
+  .lane {
+    flex: 0 0 220px;
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+  }
+  .lane:last-child { border-right: none; }
+
+  .lane-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 12px 7px;
+    background: var(--surface-subtle);
+    border-bottom: 1px solid var(--border-subtle);
+    position: sticky;
+    top: 44px;
+    z-index: 5;
+  }
+  .lane-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .lane-name {
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--fg);
+    flex: 1;
+  }
+  .lane-count {
+    font-size: 11px;
+    color: var(--fg-muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .lane-body {
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1;
+  }
+
+  /* ── Worker card ──────────────────────────────────────────────────────── */
+  .worker-card {
+    background: var(--surface-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: 7px;
+    padding: 8px 10px;
+    box-shadow: var(--shadow-card);
+    cursor: pointer;
+    transition: box-shadow 0.1s;
+  }
+  .worker-card:hover {
+    background: var(--surface-elevated);
+  }
+
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 5px;
+  }
+  .card-ticket {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+    border-radius: 4px;
+    padding: 0 5px;
+    line-height: 18px;
+  }
+  .card-phase-pill {
+    font-size: 10.5px;
+    font-weight: 500;
+    padding: 1px 7px;
+    border-radius: 9999px;
+    line-height: 17px;
+  }
+  .card-live-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--color-live);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-live) 30%, transparent);
+    animation: live-ping 1.9s infinite;
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+
+  @keyframes live-ping {
+    0%   { box-shadow: 0 0 0 0 rgba(83,205,226,0.6); }
+    70%  { box-shadow: 0 0 0 5px rgba(83,205,226,0); }
+    100% { box-shadow: 0 0 0 0 rgba(83,205,226,0); }
+  }
+
+  .card-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--fg);
+    line-height: 1.35;
+    margin-bottom: 5px;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .card-meta {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--fg-muted);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* LIVE card ring */
+  .worker-card.is-live {
+    border-left: 2px solid rgba(83,205,226,0.8);
+    animation: live-ring 2.4s ease-in-out infinite;
+  }
+  @keyframes live-ring {
+    0%,100% { box-shadow: var(--shadow-card), inset 0 0 0 1px rgba(83,205,226,0.25); }
+    50%      { box-shadow: var(--shadow-card), inset 0 0 0 1px rgba(83,205,226,0.5), 0 0 8px rgba(83,205,226,0.08); }
+  }
+
+  /* stalled card */
+  .worker-card.is-stalled {
+    border-left: 2px solid var(--color-yellow);
+    opacity: 0.85;
+  }
+
+  /* ── Phase pill color map ─────────────────────────────────────────────── */
+  .pill-implement { background: rgba(69,192,138,0.18); color: #45c08a; }
+  .pill-verify    { background: rgba(219,161,79,0.18);  color: #dba14f; }
+  .pill-review    { background: rgba(205,184,78,0.18);  color: #cdb84e; }
+  .pill-pr        { background: rgba(69,188,171,0.18);  color: #45bcab; }
+  .pill-research  { background: rgba(94,158,232,0.18);  color: #5e9ee8; }
+  .pill-plan      { background: rgba(169,142,227,0.18); color: #a98ee3; }
+  .pill-stalled   { background: rgba(217,168,67,0.18);  color: #d9a843; }
+  .pill-done      { background: rgba(120,133,150,0.18); color: #788596; }
+
+  /* ── Theme section wrapper ───────────────────────────────────────────── */
+  .theme-label-bar {
+    padding: 10px 16px;
+    background: var(--surface-chrome);
+    border-bottom: 1px solid var(--border-strong);
+    font-size: 11px;
+    font-family: var(--mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════ WARM-LIGHT BOARD ══════════════════════════════════════════ -->
+<div class="board-theme">
+  <div class="theme-label-bar">⬜ warm-light theme · CTL-1033 surface ladder · terracotta accent #a9512f · chart-5 #3aa6b9 (distinct from LIVE)</div>
+
+  <div class="app-header">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      Catalyst
+    </div>
+    <div class="header-nav">
+      <button class="nav-btn active">Board</button>
+      <button class="nav-btn">Queue</button>
+      <button class="nav-btn">OBSERVE</button>
+    </div>
+    <div class="header-right">
+      <span class="live-dot"></span>
+      <span>3 active</span>
+      <span style="font-family:var(--mono);font-size:11px">CTL-1071</span>
+    </div>
+  </div>
+
+  <div class="board-canvas">
+
+    <!-- Implement lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#45c08a"></div>
+        <span class="lane-name">Implement</span>
+        <span class="lane-count">3</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card is-live">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1071</span>
+            <span class="card-phase-pill pill-implement">implement</span>
+            <div class="card-live-dot"></div>
+          </div>
+          <div class="card-title">Catalyst Warm-Textbook Identity Spike — accent fork, chart re-pick, typography</div>
+          <div class="card-meta"><span>4m 12s</span><span>142k</span><span>$0.84</span></div>
+        </div>
+
+        <div class="worker-card is-live">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1068</span>
+            <span class="card-phase-pill pill-implement">implement</span>
+            <div class="card-live-dot"></div>
+          </div>
+          <div class="card-title">Retract orphaned held labels for admitted-then-failed tickets</div>
+          <div class="card-meta"><span>7m 55s</span><span>98k</span><span>$0.61</span></div>
+        </div>
+
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1065</span>
+            <span class="card-phase-pill pill-implement">implement</span>
+          </div>
+          <div class="card-title">Every escalation should state plainly what failed</div>
+          <div class="card-meta"><span>12m 03s</span><span>201k</span><span>$1.22</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Verify lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#dba14f"></div>
+        <span class="lane-name">Verify</span>
+        <span class="lane-count">2</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card is-stalled">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1064</span>
+            <span class="card-phase-pill pill-stalled">stalled</span>
+          </div>
+          <div class="card-title">Auto-Unstuck Deep-Dive Sweep — classify-then-act Pass 0u</div>
+          <div class="card-meta"><span>28m 14s</span><span>315k</span><span>$1.89</span></div>
+        </div>
+
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1060</span>
+            <span class="card-phase-pill pill-verify">verify</span>
+          </div>
+          <div class="card-title">Phase lifecycle signal ordering guarantee</div>
+          <div class="card-meta"><span>3m 40s</span><span>67k</span><span>$0.41</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Review lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#cdb84e"></div>
+        <span class="lane-name">Review</span>
+        <span class="lane-count">1</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1058</span>
+            <span class="card-phase-pill pill-review">review</span>
+          </div>
+          <div class="card-title">Broker dedup window for phase-lifecycle events</div>
+          <div class="card-meta"><span>2m 18s</span><span>44k</span><span>$0.27</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- PR lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#45bcab"></div>
+        <span class="lane-name">PR</span>
+        <span class="lane-count">2</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1055</span>
+            <span class="card-phase-pill pill-pr">pr</span>
+          </div>
+          <div class="card-title">Phase-agent yield check for redispatched duplicates</div>
+          <div class="card-meta"><span>—</span><span>189k</span><span>$1.14</span></div>
+        </div>
+
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1052</span>
+            <span class="card-phase-pill pill-pr">pr</span>
+          </div>
+          <div class="card-title">Warmth dimension token architecture (spike)</div>
+          <div class="card-meta"><span>—</span><span>122k</span><span>$0.73</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Research lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#5e9ee8"></div>
+        <span class="lane-name">Research</span>
+        <span class="lane-count">1</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card is-live">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1076</span>
+            <span class="card-phase-pill pill-research">research</span>
+            <div class="card-live-dot"></div>
+          </div>
+          <div class="card-title">Finished phase debris should not park the next phase for half an hour</div>
+          <div class="card-meta"><span>1m 44s</span><span>38k</span><span>$0.23</span></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Done lane -->
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#788596"></div>
+        <span class="lane-name">Done</span>
+        <span class="lane-count">4</span>
+      </div>
+      <div class="lane-body">
+
+        <div class="worker-card" style="opacity:0.65">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1075</span>
+            <span class="card-phase-pill pill-done">done</span>
+          </div>
+          <div class="card-title">Fix plan/implement dispatch gates silently fail open on macOS bash 3.2</div>
+          <div class="card-meta"><span>—</span><span>91k</span><span>$0.55</span></div>
+        </div>
+
+        <div class="worker-card" style="opacity:0.55">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1033</span>
+            <span class="card-phase-pill pill-done">done</span>
+          </div>
+          <div class="card-title">CTL-1033 canonical token system and contract tests</div>
+          <div class="card-meta"><span>—</span><span>—</span><span>—</span></div>
+        </div>
+
+      </div>
+    </div>
+
+  </div><!-- /board-canvas warm-light -->
+</div><!-- /warm-light board -->
+
+
+<!-- ══════════ WARM-GRAPHITE DARK COMPANION ══════════════════════════════
+     Deferred variant — epic item. Palette placeholder for design sign-off;
+     not a finished product. The finished dark variant needs the 3-way toggle
+     and its own surface-contract assertion. ══════════════════════════════ -->
+<div class="board-theme warm-dark">
+  <div class="theme-label-bar">⬛ warm-graphite dark companion (deferred epic item) · placeholder palette — terracotta accent #c15f3c · LIVE #53cde2 reserved</div>
+
+  <div class="app-header">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      Catalyst
+    </div>
+    <div class="header-nav">
+      <button class="nav-btn active">Board</button>
+      <button class="nav-btn">Queue</button>
+      <button class="nav-btn">OBSERVE</button>
+    </div>
+    <div class="header-right">
+      <span class="live-dot"></span>
+      <span>3 active</span>
+      <span style="font-family:var(--mono);font-size:11px">CTL-1071</span>
+    </div>
+  </div>
+
+  <div class="board-canvas">
+
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#45c08a"></div>
+        <span class="lane-name">Implement</span>
+        <span class="lane-count">3</span>
+      </div>
+      <div class="lane-body">
+        <div class="worker-card is-live">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1071</span>
+            <span class="card-phase-pill pill-implement">implement</span>
+            <div class="card-live-dot"></div>
+          </div>
+          <div class="card-title">Catalyst Warm-Textbook Identity Spike — accent fork, chart re-pick, typography</div>
+          <div class="card-meta"><span>4m 12s</span><span>142k</span><span>$0.84</span></div>
+        </div>
+        <div class="worker-card is-stalled">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1064</span>
+            <span class="card-phase-pill pill-stalled">stalled</span>
+          </div>
+          <div class="card-title">Auto-Unstuck Deep-Dive — stalled · amber vs terracotta accent check</div>
+          <div class="card-meta"><span>28m</span><span>315k</span><span>$1.89</span></div>
+        </div>
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1068</span>
+            <span class="card-phase-pill pill-implement">implement</span>
+          </div>
+          <div class="card-title">Retract orphaned held labels for admitted-then-failed tickets</div>
+          <div class="card-meta"><span>7m 55s</span><span>98k</span><span>$0.61</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#dba14f"></div>
+        <span class="lane-name">Verify</span>
+        <span class="lane-count">1</span>
+      </div>
+      <div class="lane-body">
+        <div class="worker-card is-live">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1060</span>
+            <span class="card-phase-pill pill-verify">verify</span>
+            <div class="card-live-dot"></div>
+          </div>
+          <div class="card-title">Phase lifecycle signal ordering guarantee</div>
+          <div class="card-meta"><span>3m 40s</span><span>67k</span><span>$0.41</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#45bcab"></div>
+        <span class="lane-name">PR</span>
+        <span class="lane-count">1</span>
+      </div>
+      <div class="lane-body">
+        <div class="worker-card">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1055</span>
+            <span class="card-phase-pill pill-pr">pr</span>
+          </div>
+          <div class="card-title">Phase-agent yield check for redispatched duplicates</div>
+          <div class="card-meta"><span>—</span><span>189k</span><span>$1.14</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="lane">
+      <div class="lane-header">
+        <div class="lane-dot" style="background:#788596"></div>
+        <span class="lane-name">Done</span>
+        <span class="lane-count">2</span>
+      </div>
+      <div class="lane-body">
+        <div class="worker-card" style="opacity:0.65">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1033</span>
+            <span class="card-phase-pill pill-done">done</span>
+          </div>
+          <div class="card-title">CTL-1033 canonical token system and contract tests</div>
+          <div class="card-meta"><span>—</span><span>—</span><span>—</span></div>
+        </div>
+        <div class="worker-card" style="opacity:0.55">
+          <div class="card-top">
+            <span class="card-ticket">CTL-1075</span>
+            <span class="card-phase-pill pill-done">done</span>
+          </div>
+          <div class="card-title">Fix dispatch gates on macOS bash 3.2</div>
+          <div class="card-meta"><span>—</span><span>91k</span><span>$0.55</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /board-canvas dark -->
+</div><!-- /warm-dark board -->
+
+</body>
+</html>

@@ -68,6 +68,7 @@
   --color-chart-6: var(--chart-6);
 
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, serif;
 
   /* shadcn/ui semantic color utilities — aliased to existing tokens via :root */
   --color-background: var(--background);
@@ -126,7 +127,7 @@
   --color-light-border: #ddd5c7;
   --color-light-fg: #2b2722;
   --color-light-muted: #76705f;
-  --color-light-accent: #1f6feb;
+  --color-light-accent: #a9512f; /* CTL-1071: terracotta accent (warm-light only) */
 
   /* CTL-1033: warm-light SEMANTIC ladder (same upward direction as dark):
      chrome darkest-tinted → canvas → subtle → card → elevated (lightest paper).
@@ -181,7 +182,7 @@
   --chart-2: #39d07a;
   --chart-3: #eabc3b;
   --chart-4: #ef5d5d;
-  --chart-5: #53cde2;
+  --chart-5: #3aa6b9; /* CTL-1071: deep teal — distinct from reserved LIVE #53cde2 */
   --chart-6: #a98ee3;
 
   --sidebar: var(--surface-0); /* CTL-1013: chrome visibly tinted (#ece7dd) */
@@ -252,7 +253,7 @@
   --chart-2: #39d07a;
   --chart-3: #eabc3b;
   --chart-4: #ef5d5d;
-  --chart-5: #53cde2;
+  --chart-5: #3aa6b9; /* CTL-1071: deep teal — distinct from reserved LIVE #53cde2 */
   --chart-6: #a98ee3;
 
   /* CTL-1013: sidebar/nav is the DARKEST chrome (surface-0); the SidebarInset
@@ -643,6 +644,7 @@ body {
 /* section headings: semibold, NO underline (Linear), generous top rhythm */
 .ticket-desc h1,
 .ticket-desc h2 {
+  font-family: var(--font-serif); /* CTL-1071: serif voice on reading surfaces */
   font-size: 17px;
   font-weight: 600;
   color: var(--color-fg);
