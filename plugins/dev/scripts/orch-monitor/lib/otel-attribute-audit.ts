@@ -122,9 +122,9 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "catalyst.process.phase",   emitter: "mjs", source: "processes.mjs:287", classification: "conforming" },
 
   // ── Legacy SH emitter — emit-otel-event.sh (OTLP direct) ─────────────────
-  // §4l: Legacy bare attributes cluster G — rename-to
-  { key: "outcome",    emitter: "legacy-sh", source: "emit-otel-event.sh:130", classification: "rename-to", targetName: "catalyst.outcome",   remediationCluster: "G", where: "emit" },
-  { key: "session_id", emitter: "legacy-sh", source: "emit-otel-event.sh:131", classification: "rename-to", targetName: "claude.session.id",  remediationCluster: "G", where: "emit" },
-  { key: "reason",     emitter: "legacy-sh", source: "emit-otel-event.sh:135", classification: "rename-to", targetName: "catalyst.reason",    remediationCluster: "G", where: "emit" },
-  { key: "phase",      emitter: "legacy-sh", source: "emit-otel-event.sh:141", classification: "rename-to", targetName: "catalyst.phase",     remediationCluster: "G", where: "emit" },
+  // §4l: Legacy bare attributes cluster G — now conforming (renamed in place).
+  // catalyst.phase and claude.session.id are owned by the TS emitter and filtered
+  // by tsKeys in extractLegacyOtlpKeys; only emit-only keys are listed here.
+  { key: "catalyst.outcome", emitter: "legacy-sh", source: "emit-otel-event.sh:130", classification: "legitimately-custom" },
+  { key: "catalyst.reason",  emitter: "legacy-sh", source: "emit-otel-event.sh:135", classification: "legitimately-custom" },
 ];

@@ -11,9 +11,9 @@ Do **not** edit this file directly.
 | Classification | Count |
 | --- | --- |
 | ✓ Conforming | 28 |
-| → Rename-to | 23 |
-| ● Legitimately Custom | 20 |
-| **Total** | 71 |
+| → Rename-to | 19 |
+| ● Legitimately Custom | 22 |
+| **Total** | 69 |
 
 ## Classification by Emitter
 
@@ -103,10 +103,8 @@ Do **not** edit this file directly.
 
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
-| `outcome` | `emit-otel-event.sh:130` | → rename-to | → `catalyst.outcome` | Cluster G |  |
-| `phase` | `emit-otel-event.sh:141` | → rename-to | → `catalyst.phase` | Cluster G |  |
-| `reason` | `emit-otel-event.sh:135` | → rename-to | → `catalyst.reason` | Cluster G |  |
-| `session_id` | `emit-otel-event.sh:131` | → rename-to | → `claude.session.id` | Cluster G |  |
+| `catalyst.outcome` | `emit-otel-event.sh:130` | ● custom |  |  |  |
+| `catalyst.reason` | `emit-otel-event.sh:135` | ● custom |  |  |  |
 
 ## Remediation Map (CTL-1008 Handoff)
 
@@ -161,24 +159,6 @@ validated against live Loki.
 | `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
-
-### Cluster G — emit-otel-event.sh legacy bare attributes
-
-- **Emit-side files**: `emit-otel-event.sh`
-- **Where**: emit
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `outcome` | `catalyst.outcome` |  |
-| `phase` | `catalyst.phase` |  |
-| `reason` | `catalyst.reason` |  |
-| `session_id` | `claude.session.id` |  |
 
 ### Cluster H — resource project field
 
