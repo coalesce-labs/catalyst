@@ -900,7 +900,7 @@ export function Board({
   const navigate = useNavigate();
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
+  const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("phase");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
   const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
