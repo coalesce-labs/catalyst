@@ -280,9 +280,9 @@ export function UtilizationSurface() {
         maxParallel={config.maxParallel}
         queueLen={queueLen}
         onAction={(target) => {
-          // Cross-surface drill: STARVED → eligible set, JAMMED → FleetOps reconcile.
-          // FleetOps ships its own surface later; until then a full-document nav to
-          // the dashboard's health view is the closest existing destination.
+          // Cross-surface drill: STARVED → eligible set (Dispatch), JAMMED →
+          // FleetOps reconcile. Both are client-side router navigations to the
+          // surface's own route (no full-document reload).
           if (target === "eligible") {
             void navigate({ to: "/dispatch" });
           } else {
