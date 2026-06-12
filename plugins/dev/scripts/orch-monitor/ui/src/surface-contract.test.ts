@@ -126,7 +126,6 @@ describe("CTL-1033 surface contract — every route shell consumes the shared to
   const SHELLS = [
     "board/Board.tsx",
     "board/Shell.tsx",
-    "components/queue/queue-surface.tsx",
     "components/home/home-surface.tsx",
     "components/settings-surface.tsx",
     "components/observe/finops-surface.tsx",

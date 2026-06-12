@@ -105,6 +105,7 @@ import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
 // its own swimlane sectioning (groupListRows), so it is NOT wrapped in SwimlaneBoard.
 import { BoardList } from "./BoardList";
 import { EntityMarker } from "./entity-marker";
+import { ControlTower } from "../components/queue/control-tower";
 import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
@@ -864,8 +865,7 @@ function WorkerSwimlaneBoard({
 // engine over the full none|repo|team|project|host axis.
 
 // ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
-// CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
-// Queue is now its own left-nav destination (QueueSurface), never a board view.
+// CTL-930/CTL-1016: Board view is narrowed to "tickets"|"workers".
 // CTL-948: "graph" is not a Board view — it navigates to the /dep-graph route;
 // the Board exposes `onDepGraph` so BoardRoot (router.tsx) can inject the
 // navigate() callback without leaking router coupling into the component.
@@ -1121,6 +1121,12 @@ export function Board({
             )
           )}
           {data && view === "workers" && (
+            <ControlTower
+              payload={data}
+              onOpenTicket={(key) => openDetail(navigate, "ticket", key, { ids: [] })}
+            />
+          )}
+          {data && view === "workers" && (
             // CTL-909 / SURF1: the node FILTER scopes the grid to one host
             // (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
             // node filter (scope) are orthogonal: filter first, then group. R3b: when
@@ -1138,8 +1144,6 @@ export function Board({
               laneColors={laneColors}
             />
           )}
-          {/* CTL-930: queue view branch removed — Queue is now its own left-nav
-              destination (QueueSurface). Board view is narrowed to tickets|workers. */}
         </div>
         {/* CTL-951: the TicketDetailDrawer is removed — a plain card click now
             navigates STRAIGHT to /ticket/$id (the full detail page). */}

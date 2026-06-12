@@ -10,3 +10,9 @@ describe("CTL-1016 — Workers grouping defaults to Pipeline", () => {
     expect(src).not.toContain('useState<WorkerGrouping>("status")');
   });
 });
+
+describe("CTL-1016 — Workers view mounts the ControlTower", () => {
+  it("imports and renders ControlTower in the workers view", () => {
+    expect(src).toContain("ControlTower");
+  });
+});
