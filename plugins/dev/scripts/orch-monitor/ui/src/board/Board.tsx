@@ -1121,28 +1121,40 @@ export function Board({
             )
           )}
           {data && view === "workers" && (
-            <ControlTower
-              payload={data}
-              onOpenTicket={(key) => openDetail(navigate, "ticket", key, { ids: [] })}
-            />
-          )}
-          {data && view === "workers" && (
-            // CTL-909 / SURF1: the node FILTER scopes the grid to one host
-            // (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
-            // node filter (scope) are orthogonal: filter first, then group. R3b: when
-            // the HOST swimlane is active the column lens falls back to status/phase
-            // inside each lane so host is not double-encoded (rows AND columns).
-            // CTL-950: shared header + single horizontal scroll across the lanes.
-            <WorkerSwimlaneBoard
-              workers={nodeWorkers}
-              tickets={data.tickets}
-              swimlane={swimlane}
-              grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
-              fill
-              embedded={embedded}
-              onOpen={onOpen}
-              laneColors={laneColors}
-            />
+            // CTL-1082: ONE vertical scroll container around the Workers surface.
+            // CTL-1016 Phase 3 extracted ControlTower out of the deleted QueueSurface
+            // and dropped its overflow-y wrapper, leaving ControlTower and the swimlane
+            // scroller as sibling flex children; the zero-basis scroller (flex:1 1 0)
+            // got 100% of the shrink and collapsed to 0px. This wrapper restores the
+            // missing scroll context; WorkerSwimlaneBoard sizes to content
+            // (fill={false} embedded={false} → height:auto) so the wrapper owns the
+            // vertical scroll. The inner board keeps its own overflow-x for columns.
+            <div
+              className="cat-overlay-scroll cat-board-scroll"
+              data-scroll-restoration-id="workers-scroll"
+              style={{ flex: 1, minHeight: 0, overflowY: "auto" }}
+            >
+              <ControlTower
+                payload={data}
+                onOpenTicket={(key) => openDetail(navigate, "ticket", key, { ids: [] })}
+              />
+              {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host
+                  (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
+                  node filter (scope) are orthogonal: filter first, then group. R3b: when
+                  the HOST swimlane is active the column lens falls back to status/phase
+                  inside each lane so host is not double-encoded (rows AND columns).
+                  CTL-950: shared header + single horizontal scroll across the lanes. */}
+              <WorkerSwimlaneBoard
+                workers={nodeWorkers}
+                tickets={data.tickets}
+                swimlane={swimlane}
+                grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
+                fill={false}
+                embedded={false}
+                onOpen={onOpen}
+                laneColors={laneColors}
+              />
+            </div>
           )}
         </div>
         {/* CTL-951: the TicketDetailDrawer is removed — a plain card click now
