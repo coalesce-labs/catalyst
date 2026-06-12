@@ -60,6 +60,7 @@ new_fixture() {
 		mkdir -p .catalyst .claude
 		printf '{"committed":true}\n' >.catalyst/config.json
 		printf '{"claude":true}\n' >.claude/config.json
+		printf '{"sessionId":"seed","pid":1,"acquiredAt":0}\n' >.claude/scheduled_tasks.lock
 		git add -A
 		git commit --quiet -m "initial"
 		git push --quiet origin main
@@ -606,6 +607,38 @@ assert_eq '{"committed":false,"dirty":true}' "$(cat "$WORK/.catalyst/config.json
   "refresh: dirty noise restored after rebase"
 T18_BASE="no"; [[ -f "$WORK/upstream.txt" ]] && T18_BASE="yes"
 assert_eq "yes" "$T18_BASE" "refresh: worktree advanced onto new base"
+
+# ── 20. deleted tracked .claude/scheduled_tasks.lock → stashed noise, clean rebase
+echo "20. deleted scheduled_tasks.lock is settling-debris noise → rc 0"
+new_fixture t20
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # Simulate the dying worker: delete the tracked lock file (unstaged deletion).
+  rm -f .claude/scheduled_tasks.lock
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t20.rc"
+  [[ -f upstream.txt ]] && echo yes >"$SCRATCH/t20.base" || echo no >"$SCRATCH/t20.base"
+  git diff --quiet && echo clean >"$SCRATCH/t20.tree" || echo dirty >"$SCRATCH/t20.tree"
+)
+assert_eq "0" "$(cat "$SCRATCH/t20.rc")" "deleted scheduled_tasks.lock → rc 0 (stashed as noise)"
+assert_eq "yes" "$(cat "$SCRATCH/t20.base")" "rebase still advanced onto new base"
+
+# ── 20b. noise_stash_push captures a deleted tracked noise path
+echo "20b. noise_stash_push stashes a deleted tracked noise file"
+new_fixture t20b
+(
+  cd "$WORK"
+  rm -f .claude/scheduled_tasks.lock           # tracked deletion, file absent on disk
+  marker="$(noise_stash_push)"
+  echo "$marker" >"$SCRATCH/t20b.marker"
+  git status --porcelain -- .claude/scheduled_tasks.lock >"$SCRATCH/t20b.afterpush"
+  noise_stash_pop "$marker"
+)
+assert_eq "1" "$(cat "$SCRATCH/t20b.marker")" "noise_stash_push reports the deleted noise stashed"
+assert_eq "" "$(cat "$SCRATCH/t20b.afterpush")" "deleted noise path clean after stash push"
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"

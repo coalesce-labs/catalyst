@@ -34,10 +34,14 @@ _WR_DIR="$(cd "$(dirname "$_WR_SELF")" && pwd)"
 # incidents. NOTE: only these EXACT paths are noise; the rest of .claude/
 # (skills/agents/rules) is real committed content and must keep classifying
 # as source (see _is_noise_path).
+# CTL-1076: .claude/scheduled_tasks.lock is a tracked file the Claude Code
+# scheduler DELETES on worker exit (settling debris). The deletion shows in
+# `git diff --name-only` and trips the precheck, but is machine-local noise.
 # shellcheck disable=SC2034
 WORKTREE_NOISE_PATHS=(
   .catalyst/config.json
   .claude/config.json .claude/settings.json
+  .claude/scheduled_tasks.lock
   .trunk/actions .trunk/logs .trunk/notifications .trunk/out .trunk/tools
 )
 
@@ -79,7 +83,12 @@ noise_stash_push() {
   local present=()
   local p
   for p in "${WORKTREE_NOISE_PATHS[@]}"; do
-    [[ -e $p ]] && present+=("$p")
+    # CTL-1076: include a path if present on disk OR reported changed by git
+    # (a tracked-but-DELETED noise file is absent on disk — `[[ -e ]]` misses it —
+    # yet shows in `git status --porcelain` and blocks the rebase precheck).
+    if [[ -e $p ]] || [[ -n "$(git status --porcelain -- "$p" 2>/dev/null)" ]]; then
+      present+=("$p")
+    fi
   done
   [[ ${#present[@]} -eq 0 ]] && { printf ''; return 0; }
   # Only stash if at least one present noise path is actually dirty/untracked.
