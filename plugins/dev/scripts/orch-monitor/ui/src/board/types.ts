@@ -151,6 +151,9 @@ export interface BoardTicket {
   /** CTL-922 (BFF10): the fence generation (HOME5 unblock passes it to the
    *  fence-check). null when no fence. */
   generation?: number | null;
+  /** CTL-1066: reason a stalled/failed phase gave up; drives the "Stalled — gave
+   *  up" holding bucket copy. null/absent unless status is stalled/failed. */
+  failureReason?: string | null;
   // ── CTL-902 (HOME4): the reading-pane CONTENT fields ─────────────────────
   // The "What's needed now" hero + the About block read these. They are NOT in
   // the board payload today — they derive from the ticket's AI summary + the
@@ -209,6 +212,9 @@ export interface BoardQueueItem {
    *  column), from the durable fence projection owner_host (BFF11). null when
    *  no fence attachment has been observed. */
   host?: BoardHostRef | null;
+  /** CTL-1066: active dispatch retry cool-down; drives the "retrying in …" chip.
+   *  null when not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
+  dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
 }
 
 export interface BoardConfig {

@@ -6,6 +6,7 @@ import type { BoardWorker, BoardTicket } from "../../board/types";
 import {
   ordinal,
   fmtAge,
+  fmtCountdown,
   assignSlots,
   slotLabel,
   groupHoldingBuckets,
@@ -60,6 +61,7 @@ function t(p: Partial<BoardTicket> & { id: string }): BoardTicket {
     currentPhaseSince: null,
     host: null,
     generation: null,
+    failureReason: null,
     ...p,
   };
 }
@@ -233,6 +235,49 @@ describe("slotLabel — vacant slots keep their numbers (CTL-1035)", () => {
       slotLabel(a.occupied.length + i + 1),
     );
     expect(emptyLabels).toEqual(["SLOT 1", "SLOT 2", "SLOT 3", "SLOT 4"]);
+  });
+});
+
+describe("groupHoldingBuckets — stalled bucket (CTL-1066)", () => {
+  it("stalled bucket = tickets with status 'stalled' NOT in flight, carrying the reason", () => {
+    const tickets = [
+      t({ id: "CTL-1", status: "stalled", failureReason: "prior-artifact-retry-exhausted" }),
+      t({ id: "CTL-2", status: "stalled" }),
+      t({ id: "CTL-3", held: "waiting" }),
+    ];
+    const b = groupHoldingBuckets(tickets, [], 4);
+    expect(b.stalled.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-1", "CTL-2"]);
+    expect(b.waiting.items.map((i) => (i.kind === "ticket" ? i.ticket.id : ""))).toEqual(["CTL-3"]);
+  });
+
+  it("a stalled ticket attached to a LIVE worker is excluded (not double-listed)", () => {
+    const tickets = [t({ id: "CTL-1", status: "stalled" })];
+    const workers = [w({ name: "w1", ticket: "CTL-1", startedAt: 1 })];
+    const b = groupHoldingBuckets(tickets, workers, 4);
+    expect(b.stalled.items).toHaveLength(0);
+  });
+
+  it("allEmpty is false when only a stalled ticket is present", () => {
+    const b = groupHoldingBuckets([t({ id: "CTL-1", status: "stalled" })], [], 4);
+    expect(b.allEmpty).toBe(false);
+  });
+
+  it("holdingTicketIds includes stalled ids", () => {
+    const b = groupHoldingBuckets([t({ id: "CTL-1", status: "stalled" })], [], 4);
+    expect(holdingTicketIds(b)).toContain("CTL-1");
+  });
+});
+
+describe("fmtCountdown (CTL-1066)", () => {
+  it("formats remaining time, flooring to the coarsest unit", () => {
+    expect(fmtCountdown(18 * 60_000)).toBe("18m");
+    expect(fmtCountdown(2 * 3_600_000)).toBe("2h");
+    expect(fmtCountdown(30_000)).toBe("<1m");
+  });
+  it("non-positive / non-finite → 'now'", () => {
+    expect(fmtCountdown(0)).toBe("now");
+    expect(fmtCountdown(-5)).toBe("now");
+    expect(fmtCountdown(NaN)).toBe("now");
   });
 });
 

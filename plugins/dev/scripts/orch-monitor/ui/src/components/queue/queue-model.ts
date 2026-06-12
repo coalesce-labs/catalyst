@@ -31,6 +31,17 @@ export function fmtAge(ms: number): string {
   return `${Math.floor(h / 24)}d`;
 }
 
+/** CTL-1066: compact "time until X" countdown: "2h", "18m", "<1m"; non-positive/non-finite → "now". */
+export function fmtCountdown(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "now";
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "<1m";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
 // ── ordinal ──────────────────────────────────────────────────────────────────
 
 /**
@@ -102,7 +113,7 @@ export function slotLabel(slot: number): string {
 
 // ── holding buckets ("why work isn't moving") ──────────────────────────────────
 
-export type HoldingBucketKind = "needs-you" | "blocked" | "waiting";
+export type HoldingBucketKind = "needs-you" | "stalled" | "blocked" | "waiting";
 
 export interface HoldingBucketWorkerItem {
   kind: "worker";
@@ -126,9 +137,11 @@ export interface HoldingBucket {
 
 export interface HoldingBuckets {
   needsYou: HoldingBucket;
+  /** CTL-1066: tickets with status=stalled — the circuit breaker gave up; human must intervene. */
+  stalled: HoldingBucket;
   blocked: HoldingBucket;
   waiting: HoldingBucket;
-  /** True when all three buckets are empty (render the "nothing blocked" line). */
+  /** True when all four buckets are empty (render the "nothing blocked" line). */
   allEmpty: boolean;
 }
 
@@ -175,17 +188,21 @@ export function groupHoldingBuckets(
     }
   }
 
+  const stalled: HoldingBucketItem[] = [];
   const blocked: HoldingBucketItem[] = [];
   const waiting: HoldingBucketItem[] = [];
   for (const t of tickets) {
     if (inFlightTicketIds.has(t.id)) continue;
-    if (t.held === "blocked") blocked.push({ kind: "ticket", ticket: t });
+    if (t.status === "stalled") stalled.push({ kind: "ticket", ticket: t });
+    else if (t.held === "blocked") blocked.push({ kind: "ticket", ticket: t });
     else if (t.held === "waiting") waiting.push({ kind: "ticket", ticket: t });
   }
 
-  const allEmpty = needsYou.length === 0 && blocked.length === 0 && waiting.length === 0;
+  const allEmpty =
+    needsYou.length === 0 && stalled.length === 0 && blocked.length === 0 && waiting.length === 0;
   return {
     needsYou: { kind: "needs-you", items: needsYou },
+    stalled: { kind: "stalled", items: stalled },
     blocked: { kind: "blocked", items: blocked },
     waiting: { kind: "waiting", items: waiting },
     allEmpty,
@@ -194,7 +211,7 @@ export function groupHoldingBuckets(
 
 /** Flatten all bucket items to their ticket ids — for the bucket ∉ queue test. */
 export function holdingTicketIds(b: HoldingBuckets): string[] {
-  return [...b.needsYou.items, ...b.blocked.items, ...b.waiting.items].map(itemTicketId);
+  return [...b.needsYou.items, ...b.stalled.items, ...b.blocked.items, ...b.waiting.items].map(itemTicketId);
 }
 
 // ── dead / stale ───────────────────────────────────────────────────────────────

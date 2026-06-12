@@ -340,7 +340,7 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
   const ids = (blockers ?? []).filter(Boolean);
   const label = isBlocked
     ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
-    : "⏸ waiting";
+    : "⏸ held";
   const tip = isBlocked
     ? ids.length
       ? `Held — blocked on open dependency: ${ids.join(", ")}`
