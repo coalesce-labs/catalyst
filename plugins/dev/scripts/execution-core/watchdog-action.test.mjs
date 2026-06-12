@@ -180,3 +180,37 @@ describe("killHungWorker — revive-budget", () => {
     expect(dispatch.calls.length).toBe(0);
   });
 });
+
+// CTL-1065: structured explanation written to signal on hung-worker kill
+import { validateExplanation } from "./escalation-explanation.mjs";
+
+describe("CTL-1065: killHungWorker writes signal.explanation alongside failureReason", () => {
+  test("escalated path writes a valid explanation with observed elapsedMin/commitCount/bgJobId", async () => {
+    const sig = writeSignal("running");
+    await killHungWorker(orchDir, T, sig, {
+      elapsedMin: 42, commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1_000_000,
+    });
+    const onDisk = JSON.parse(readFileSync(join(orchDir, "workers", T, `phase-${PHASE}.json`), "utf8"));
+    expect(onDisk.failureReason).toContain("hung_no_progress"); // unchanged
+    expect(validateExplanation(onDisk.explanation).valid).toBe(true);
+    expect(onDisk.explanation.observed.elapsedMin).toBe(42);
+    expect(onDisk.explanation.observed.bgJobId).toBe("abcd1234");
+  });
+
+  test("already-terminal path does NOT overwrite existing signal", async () => {
+    const sig = writeSignal("failed");
+    const r = await killHungWorker(orchDir, T, sig, {
+      elapsedMin: 42, commitCount: 0,
+      writeStatus: { applyLabel: recorder({ applied: true }) },
+      emit: recorder(Promise.resolve(true)),
+      now: () => 1,
+    });
+    expect(r.outcome).toBe("already-terminal");
+    const onDisk = JSON.parse(readFileSync(join(orchDir, "workers", T, `phase-${PHASE}.json`), "utf8"));
+    // explanation was not written (already-terminal early return)
+    expect(onDisk.explanation).toBeUndefined();
+  });
+});

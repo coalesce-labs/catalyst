@@ -90,6 +90,7 @@ const EMIT_COMPLETE_BIN = fileURLToPath(
 // heavy dependency graph. Imported for local use + re-exported for callers.
 import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
+import { coerceExplanation } from "./escalation-explanation.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
@@ -1908,6 +1909,22 @@ export function reclaimDeadWorkIfPossible(
   // CTL-932: `extras` (optional) rides evidence into the escalated event
   // payload (e.g. the wedge screen captures). Cool-down/breaker behaviour is
   // untouched.
+  // reasonToWhyGaveUp — central map so per-reason phrasing is testable.
+  function reasonToWhyGaveUp(r, n) {
+    switch (r) {
+      case "busy-ceiling-exceeded":
+        return "worker was alive past the busy ceiling with no committed work";
+      case "no-progress":
+        return `no forward progress after ${n} attempt(s) — stop-and-escalate`;
+      case "no-probe-for-phase":
+        return "no probe available for this phase — cannot verify work is done";
+      case "wedged-never-started-exhausted":
+        return `wedged-never-started replacement budget exhausted after ${n} attempt(s)`;
+      default:
+        return `escalation reason: ${r} (after ${n} attempt(s))`;
+    }
+  }
+
   function escalateOnce(reason, finalAttemptCount, extras) {
     // CTL-679 — while the Linear breaker is open we are rate-limited; the
     // needs-human apply would 429 and write no marker, re-firing every tick.
@@ -1924,13 +1941,26 @@ export function reclaimDeadWorkIfPossible(
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }
+    // CTL-1065: build a coerced explanation and attach it to extras so the
+    // escalated event payload carries structured, decision-shaped context.
+    const explanation = coerceExplanation(
+      {
+        what_failed: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+        observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+        attempts: extras?.attempts ?? [],
+        why_gave_up: reasonToWhyGaveUp(reason, finalAttemptCount),
+        human_question: extras?.human_question ?? "",
+      },
+      { ticket, phase },
+    );
+    const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
       ticket,
       orchId,
       reason,
       final_attempt_count: finalAttemptCount,
-      ...(extras ? { extras } : {}),
+      extras: enrichedExtras,
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
