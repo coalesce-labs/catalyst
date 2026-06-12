@@ -1800,11 +1800,17 @@ export function processEvent(event) {
     loadedCommitRoot: __loadedCommitRoot(),
   });
   // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
+  // logPath MUST be threaded through: the broker self-reload handoff records it so the
+  // successor's resolveBootByteOffset can confirm it resumes the same month file. Omitting
+  // it writes logPath:"" into the handoff, which never matches the real path on boot, so the
+  // successor silently reseeds to EOF and drops events appended during the restart gap —
+  // defeating the gap-free handoff entirely.
   handleStackReloadEvent({
     results: __refreshResults,
     loadedCommitRoot: __loadedCommitRoot(),
     emitFn: appendEvent,
     currentByteOffset: getLastByteOffset(),
+    logPath: getEventLogPath(),
   });
 
   if (name === "filter.register") {

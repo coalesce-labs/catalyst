@@ -107,6 +107,7 @@ function performReload({
   spawnFn,
   emitFn,
   now,
+  nowFn,
   writeHandoffFn,
   currentByteOffset,
   logPath,
@@ -140,7 +141,12 @@ function performReload({
   // reseeding to EOF and dropping events appended during the restart gap.
   if (decision.brokerSelfReload) {
     try {
-      writeHandoffFn({ logPath, byteOffset: currentByteOffset, pid: process.pid, ts: now });
+      // Stamp ts at write time, not event-capture time: this handoff is written
+      // ~STACK_RELOAD_DEBOUNCE_MS after the triggering merge (plus any merge-train
+      // coalescing), and the successor's resolveBootByteOffset measures staleness
+      // against its own boot clock. Using the event-capture `now` would burn most of
+      // the maxAgeMs budget on the debounce window and reject otherwise-fresh handoffs.
+      writeHandoffFn({ logPath, byteOffset: currentByteOffset, pid: process.pid, ts: nowFn() });
       spawnFn("catalyst-broker", ["restart"]);
     } catch { /* best-effort — script-layer restart is the backstop */ }
   }
@@ -157,7 +163,10 @@ function performReload({
  * SHAs) always wins.
  *
  * Injected seams: spawnFn, emitFn, writeHandoffFn, setTimeoutFn,
- * clearTimeoutFn, now, currentByteOffset, logPath — for deterministic testing.
+ * clearTimeoutFn, now, nowFn, currentByteOffset, logPath — for deterministic testing.
+ * `now` is the event-capture instant (used for the started-event detail); `nowFn` is
+ * evaluated at handoff-write time (after the debounce) so the staleness ts reflects when
+ * the handoff was actually persisted.
  */
 export function handleStackReloadEvent({
   results,
@@ -165,6 +174,7 @@ export function handleStackReloadEvent({
   spawnFn = defaultSpawnFn,
   emitFn,
   now = Date.now(),
+  nowFn = Date.now,
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
   writeHandoffFn = defaultWriteHandoffFn,
@@ -187,6 +197,7 @@ export function handleStackReloadEvent({
     const capturedSpawnFn = spawnFn;
     const capturedEmitFn = emitFn;
     const capturedNow = now;
+    const capturedNowFn = nowFn;
     const capturedWriteHandoffFn = writeHandoffFn;
     const capturedByteOffset = currentByteOffset;
     const capturedLogPath = logPath;
@@ -203,6 +214,7 @@ export function handleStackReloadEvent({
           spawnFn: capturedSpawnFn,
           emitFn: capturedEmitFn,
           now: capturedNow,
+          nowFn: capturedNowFn,
           writeHandoffFn: capturedWriteHandoffFn,
           currentByteOffset: capturedByteOffset,
           logPath: capturedLogPath,

@@ -414,3 +414,97 @@ describe("resolveBootByteOffset", () => {
     ).toBe(eof);
   });
 });
+
+// ─── self-reload handoff round-trip (CTL-1077 remediate) ─────────────────────
+//
+// Guards the wiring the unit seams could not: the handoff written by
+// handleStackReloadEvent must carry the real logPath so the successor's
+// resolveBootByteOffset resumes the saved byteOffset instead of reseeding to
+// EOF. Verify caught that router.mjs omitted logPath at the call site, so the
+// handoff recorded logPath:"" and the boot-time guard `handoff.logPath !== logPath`
+// was ALWAYS true → silent fallback to EOF → events appended during the restart
+// gap dropped. This exercises write → boot end-to-end so that omission cannot
+// regress silently again.
+describe("self-reload handoff round-trip (write → resolveBootByteOffset)", () => {
+  let resolveBootByteOffset;
+  beforeEach(async () => {
+    __clearReloadStateForTest();
+    ({ resolveBootByteOffset } = await import("./index.mjs"));
+  });
+
+  function captureHandoff({ logPath, nowFn }) {
+    const handoffs = [];
+    const timers = makeFakeTimers();
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      writeHandoffFn: (h) => handoffs.push(h),
+      currentByteOffset: 4096,
+      emitFn: () => {},
+      now: 1000,
+      ...(nowFn ? { nowFn } : {}),
+      ...(logPath !== undefined ? { logPath } : {}),
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+    });
+    timers.advance(STACK_RELOAD_DEBOUNCE_MS);
+    return handoffs[0];
+  }
+
+  test("real logPath threaded through → successor resumes the saved byteOffset (not EOF)", () => {
+    const realLogPath = "/Users/x/catalyst/events/2026-06.jsonl";
+    const handoff = captureHandoff({ logPath: realLogPath, nowFn: () => 5000 });
+    expect(handoff).toMatchObject({ logPath: realLogPath, byteOffset: 4096 });
+    // Boot resolves against the SAME logPath the broker is tailing.
+    expect(
+      resolveBootByteOffset({
+        handoff,
+        logPath: realLogPath,
+        eofSize: 9000,
+        now: 6000,
+        maxAgeMs: 60_000,
+      })
+    ).toBe(4096);
+  });
+
+  test("omitting logPath (the verify-caught bug) → handoff logPath:'' → boot reseeds to EOF", () => {
+    // Reproduce the original defect: caller does not pass logPath at all.
+    const handoff = captureHandoff({ nowFn: () => 5000 });
+    expect(handoff.logPath).toBe("");
+    // The successor tails the real month file; the empty logPath never matches,
+    // so it silently falls back to EOF and drops the gap events.
+    expect(
+      resolveBootByteOffset({
+        handoff,
+        logPath: "/Users/x/catalyst/events/2026-06.jsonl",
+        eofSize: 9000,
+        now: 6000,
+        maxAgeMs: 60_000,
+      })
+    ).toBe(9000);
+  });
+
+  test("handoff ts is stamped at write time, not event-capture time (staleness budget)", () => {
+    // now (event capture) = 1000, but the handoff is written after the debounce;
+    // nowFn() models the write-time clock. The staleness ts must reflect write time
+    // so the debounce window does not eat the maxAgeMs budget.
+    const writeTime = 1000 + STACK_RELOAD_DEBOUNCE_MS + 500;
+    const handoff = captureHandoff({
+      logPath: "/ev.jsonl",
+      nowFn: () => writeTime,
+    });
+    expect(handoff.ts).toBe(writeTime);
+    expect(handoff.ts).not.toBe(1000);
+    // Fresh relative to a boot that happens shortly after the write.
+    expect(
+      resolveBootByteOffset({
+        handoff,
+        logPath: "/ev.jsonl",
+        eofSize: 9000,
+        now: writeTime + 2000,
+        maxAgeMs: 60_000,
+      })
+    ).toBe(4096);
+  });
+});
