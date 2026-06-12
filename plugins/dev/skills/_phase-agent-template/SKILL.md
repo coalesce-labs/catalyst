@@ -240,10 +240,16 @@ EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs"
   2>/dev/null || echo '{}')"
 ```
 
-Then merge it into the signal alongside `failureReason`:
+Then merge it into the signal alongside `failureReason`. Guard the value on a
+prior line and pass the variable directly — never inline `${EXPL_JSON:-{}}`: the
+bash parser closes the parameter expansion at the FIRST `}`, so a non-empty value
+like `{"a":1}` expands to `{"a":1}}` (trailing brace → invalid JSON → jq exits
+non-zero → the `&& mv` is skipped and the signal is never written). Verified in
+bash 3.2 and 5.x.
 
 ```bash
-jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson expl "${EXPL_JSON:-{}}" \
+[ -n "$EXPL_JSON" ] || EXPL_JSON='{}'
+jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson expl "$EXPL_JSON" \
    '.status = "failed" | .failureReason = "{{ reason }}" | .explanation = $expl | .updatedAt = $ts' \
    "$SIGNAL_FILE" > "$SIGNAL_FILE.tmp.$$" && mv "$SIGNAL_FILE.tmp.$$" "$SIGNAL_FILE"
 ```
