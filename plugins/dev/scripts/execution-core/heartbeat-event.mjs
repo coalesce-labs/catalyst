@@ -16,7 +16,7 @@
 import { mkdirSync, appendFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomBytes } from "node:crypto";
-import { getEventLogPath, getHostName, HEARTBEAT_INTERVAL_MS, log } from "./config.mjs";
+import { getEventLogPath, getHostName, HEARTBEAT_INTERVAL_MS, log, readGovernanceConfig } from "./config.mjs";
 import { hostName, hostId } from "./lib/host-identity.mjs";
 
 export const HEARTBEAT_EVENT = "node.heartbeat";
@@ -33,12 +33,14 @@ export const HEARTBEAT_EVENT = "node.heartbeat";
  * @param {object} [opts]
  * @param {Function} [opts.now]  injectable timestamp fn (returns ISO string)
  * @param {Function} [opts.epochFn]  injectable epoch fn (returns ms number)
+ * @param {Function} [opts.governanceFn]  injectable governance snapshot fn (CTL-1062)
  * @returns {object} the envelope object
  */
-export function buildHeartbeatEnvelope({ now, epochFn } = {}) {
+export function buildHeartbeatEnvelope({ now, epochFn, governanceFn } = {}) {
   const ts = now ? now() : new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   const epoch = epochFn ? epochFn() : Date.now();
   const host = getHostName();
+  const governance = governanceFn ? governanceFn() : readGovernanceConfig();
 
   return {
     ts,
@@ -64,6 +66,7 @@ export function buildHeartbeatEnvelope({ now, epochFn } = {}) {
       payload: {
         "host.name": host,
         epoch,
+        governance, // CTL-1062: live governance snapshot for operator visibility
       },
     },
   };

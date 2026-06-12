@@ -577,3 +577,25 @@ export function readUnstuckSweepConfig() {
 export function isThrottled(lastRunMs, intervalMs, nowMs) {
   return (nowMs - lastRunMs) < intervalMs;
 }
+
+// --- Governance snapshot for operator visibility (CTL-1062) ---
+// READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
+// its per-tick gate site does so the heartbeat payload and the
+// `catalyst-execution-core governance` CLI can show what the daemon is actually
+// running with — without grepping `ps eww`. Does NOT replace the gate reads
+// (see audit-proxy-must-not-be-load-bearing): the gates keep their own inline
+// reads; this is a parallel, side-effect-free view.
+export function readGovernanceConfig(env = process.env) {
+  const isOne = (v) => (v ?? "0") === "1";
+  return {
+    // beliefs family — env-only, "0" default, exact "1" → on
+    beliefsShadow: isOne(env.CATALYST_BELIEFS_SHADOW),
+    diagnostician: isOne(env.CATALYST_DIAGNOSTICIAN),
+    intentsEnforce: isOne(env.CATALYST_INTENTS_ENFORCE),
+    advanceShadowSummary: isOne(env.CATALYST_ADVANCE_SHADOW_SUMMARY),
+    // mode subsystems — reuse existing three-layer readers so Layer-2 flows through
+    stallJanitor: { mode: readStallJanitorConfig().mode },
+    watchdog: { mode: readWatchdogConfig().mode },
+    unstuckSweep: { mode: readUnstuckSweepConfig().mode },
+  };
+}

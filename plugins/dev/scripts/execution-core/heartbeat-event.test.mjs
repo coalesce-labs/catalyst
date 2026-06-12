@@ -202,3 +202,30 @@ describe("readClusterHeartbeats (CTL-859)", () => {
     expect(typeof seen.mini).toBe("string");
   });
 });
+
+describe("heartbeat governance block (CTL-1062)", () => {
+  test("payload carries a governance snapshot", () => {
+    const env = buildHeartbeatEnvelope({
+      governanceFn: () => ({ beliefsShadow: true, diagnostician: false, intentsEnforce: true,
+        advanceShadowSummary: false, stallJanitor: { mode: "shadow" },
+        watchdog: { mode: "shadow" }, unstuckSweep: { mode: "off" } }),
+    });
+    expect(env.body.payload.governance.beliefsShadow).toBe(true);
+    expect(env.body.payload.governance.intentsEnforce).toBe(true);
+    expect(env.body.payload.governance.stallJanitor.mode).toBe("shadow");
+  });
+
+  test("still carries host.name + epoch alongside governance (no regression)", () => {
+    process.env.CATALYST_HOST_NAME = "mini";
+    const env = buildHeartbeatEnvelope({ epochFn: () => 1700000000000, governanceFn: () => ({}) });
+    expect(env.body.payload["host.name"]).toBe("mini");
+    expect(env.body.payload.epoch).toBe(1700000000000);
+    expect(env.body.payload.governance).toEqual({});
+  });
+
+  test("defaults to the real readGovernanceConfig when no governanceFn is injected", () => {
+    const env = buildHeartbeatEnvelope();
+    expect(typeof env.body.payload.governance).toBe("object");
+    expect(env.body.payload.governance).toHaveProperty("beliefsShadow");
+  });
+});
