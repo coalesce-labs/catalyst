@@ -49,6 +49,7 @@ import {
   hasTokenData,
   type CostDimension,
 } from "@/components/observe/finops-breakdowns";
+import { typeSymbol } from "@/board/type-icon";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 /** The clicked-spike focus: the hour's epoch second + its label + the fetched
@@ -90,6 +91,7 @@ export function FinopsSurface() {
   const [byDim, setByDim] = useState<CostMap>(null);
   const [byDimReachable, setByDimReachable] = useState(true);
   const [costDim, setCostDim] = useState<CostDimension>("model");
+  const [byType, setByType] = useState<CostMap>(null);
   const [tokens, setTokens] = useState<TokenSplit | null>(null);
   const [tokensReachable, setTokensReachable] = useState(true);
   const [validation, setValidation] = useState<CostValidationRow[] | null>(null);
@@ -193,6 +195,19 @@ export function FinopsSurface() {
       }
     }
 
+    // CTL-1040: cost grouped by work type. Board-backed → always reachable (no prom gate).
+    async function loadByType() {
+      try {
+        const resp = await fetch("/api/otel/cost-by-work-type");
+        if (!alive) return;
+        if (!resp.ok) return;
+        const body = (await resp.json()) as { data: CostMap };
+        setByType(body.data ?? null);
+      } catch {
+        /* board-backed — fail silently, show honest empty state */
+      }
+    }
+
     // OBS-11 P-E (token type split) — the 4 buckets + cache hit rate.
     async function loadTokens() {
       try {
@@ -226,6 +241,7 @@ export function FinopsSurface() {
     void loadCache();
     void loadCost();
     void loadByStage();
+    void loadByType();
     void loadTokens();
     void loadValidation();
     const id = setInterval(() => {
@@ -234,6 +250,7 @@ export function FinopsSurface() {
       void loadCache();
       void loadCost();
       void loadByStage();
+      void loadByType();
       void loadTokens();
       void loadValidation();
     }, refreshIntervalMs(range));
@@ -315,6 +332,7 @@ export function FinopsSurface() {
   const costHasData = useMemo(() => rankCostMap(cost).length > 0, [cost]);
   const byStageHasData = useMemo(() => rankCostMap(byStage).length > 0, [byStage]);
   const byDimHasData = useMemo(() => rankCostMap(byDim).length > 0, [byDim]);
+  const byTypeHasData = useMemo(() => rankCostMap(byType).length > 0, [byType]);
   const tokensHasData = useMemo(
     () => hasTokenData(tokens?.tokens ?? null),
     [tokens],
@@ -462,6 +480,27 @@ export function FinopsSurface() {
           <CostBreakdownBars
             data={byDim}
             labelHeader={costDim === "model" ? "model" : "agent"}
+          />
+        </ChartCard>
+
+        {/* CTL-1040: cost by work type (board-backed ranked bar). Colored by the
+            CTL-1033 TYPE palette so feature=blue, bug=red, etc. Board-backed →
+            always available (no Prometheus gate); caption is honest about coverage. */}
+        <ChartCard
+          title="Cost by work type"
+          dataSource="[board]"
+          health={null}
+          hasData={byTypeHasData}
+          className="shrink-0"
+          bodyClassName="min-h-[220px] h-[280px] p-2"
+          headerExtra={
+            <span className="font-mono text-[10px] text-muted/60">since 2026-06-11</span>
+          }
+        >
+          <CostBreakdownBars
+            data={byType}
+            labelHeader="type"
+            colorFor={(label) => typeSymbol(label).color}
           />
         </ChartCard>
       </div>

@@ -1449,6 +1449,54 @@ export async function activeTimeRatio(
   return { activeSecondsPerSecond: extractScalar(result) };
 }
 
+// ── CTL-1040: cost / throughput grouped by work type ─────────────────────────
+
+/** Sum signal-file cost (BoardTicket.costUSD) by work type. Null/empty/"task"
+ *  types fold into "unknown" so the bucket is HONEST, never dropped (CTL-1040).
+ *  Returns a type→USD map; feed through rankCostMap() for the mandatory zero-filter
+ *  + descending order. PURE. */
+export function costByWorkType(
+  tickets: ReadonlyArray<{ type: string | null | undefined; costUSD: number | null | undefined }>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const t of tickets) {
+    const raw = (t.type ?? "").toLowerCase();
+    const key = raw === "" || raw === "task" ? "unknown" : raw;
+    const usd = Number.isFinite(t.costUSD as number) ? (t.costUSD as number) : 0;
+    out[key] = (out[key] ?? 0) + Math.max(0, usd);
+  }
+  return out;
+}
+
+/** Count completed tickets by work type from Loki `phase.teardown.complete.*`
+ *  events keyed by `catalyst_ticket_type`. Returns a type→count map, or null
+ *  when Loki is unreachable. PURE side of the throughput panel (CTL-1040). */
+export async function throughputByWorkType(
+  loki: LokiFetcher,
+  range: string,
+): Promise<Record<string, number> | null> {
+  const r = safeDuration(range, "24h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    `sum by (catalyst_ticket_type) (count_over_time(` +
+      `{service_name=~"catalyst.*"} | event_name=~"phase\\.teardown\\.complete\\..+" ` +
+      `| catalyst_ticket_type=~".+" [${r}]))`,
+    start.toISOString(),
+    now.toISOString(),
+  );
+  if (!result) return null;
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const m = entry as { metric?: Record<string, string>; values?: Array<[number, string]> };
+    const name = m.metric?.["catalyst_ticket_type"];
+    if (!name || !m.values?.length) continue;
+    const last = m.values[m.values.length - 1];
+    if (last) map[name] = parseInt(last[1], 10) || 0;
+  }
+  return map;
+}
+
 function parseDuration(s: string): number {
   const match = /^(\d+)(ms|s|m|h|d)$/.exec(s);
   if (!match) return 3600_000;

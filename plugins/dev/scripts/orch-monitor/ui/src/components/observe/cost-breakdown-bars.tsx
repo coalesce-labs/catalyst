@@ -41,6 +41,9 @@ export interface CostBreakdownBarsProps {
   onSelect?: (label: string) => void;
   /** Cap the rendered rows (default 12 — by-stage has ~12 task_types, by-model ~6). */
   limit?: number;
+  /** CTL-1040: per-label fill override (e.g. typeSymbol(label).color). When
+   *  omitted, rows keep the --chart-N round-robin (P-B / P-D unchanged). */
+  colorFor?: (label: string) => string;
 }
 
 function BreakdownRow({
@@ -93,6 +96,7 @@ export function CostBreakdownBars({
   labelHeader,
   onSelect,
   limit = 12,
+  colorFor,
 }: CostBreakdownBarsProps) {
   const rows = useMemo(() => rankCostMap(data).slice(0, limit), [data, limit]);
   const max = useMemo(() => maxUsd(rows), [rows]);
@@ -111,7 +115,7 @@ export function CostBreakdownBars({
             row={row}
             max={max}
             total={total}
-            colorVar={CHART_VARS[i % CHART_VARS.length]!}
+            colorVar={colorFor ? colorFor(row.label) : CHART_VARS[i % CHART_VARS.length]!}
             onSelect={onSelect ? () => onSelect(row.label) : undefined}
           />
         ))}
