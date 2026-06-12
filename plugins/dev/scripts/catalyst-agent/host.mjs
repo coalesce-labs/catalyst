@@ -12,15 +12,15 @@
 // bun. The standalone agent does NOT import from execution-core.
 //
 // Contract attrs (host.metrics.sampled, entity=host, event.label=hostname):
-//   host.cpu_pct       1 decimal, clamped 0..100
-//   host.cpu_count     integer (os.cpus().length)
-//   host.load1         os.loadavg()[0], 2 decimals
-//   host.mem_used_mb   integer
-//   host.mem_total_mb  integer
-//   host.mem_used_pct  1 decimal, clamped 0..100
-//   host.disk_used_gb  1 decimal
-//   host.disk_total_gb 1 decimal
-//   host.disk_used_pct 1 decimal, clamped 0..100
+//   system.cpu.utilization       0.0–1.0 (clamped), 3 decimals
+//   system.cpu.logical_count     integer (os.cpus().length)
+//   system.linux.cpu.load_1m     os.loadavg()[0], 2 decimals
+//   system.memory.usage          bytes (roundInt(MB) × 1048576)
+//   system.memory.limit          bytes (roundInt(MB) × 1048576)
+//   system.memory.utilization    0.0–1.0 (clamped), 3 decimals
+//   system.filesystem.usage      bytes (round1(GB) × 1073741824, rounded to int)
+//   system.filesystem.capacity   bytes (round1(GB) × 1073741824, rounded to int)
+//   system.filesystem.utilization 0.0–1.0 (clamped), 3 decimals
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -269,16 +269,23 @@ export async function sampleHost({
   const diskUsedPct =
     isPos(disk.totalGb) && disk.usedGb != null ? (disk.usedGb / disk.totalGb) * 100 : null;
 
+  const cpuUtil = round1(clampPct(cpu.cpuPct));
+  const memUsedMb = roundInt(mem.usedMb);
+  const memTotalMb = roundInt(mem.totalMb);
+  const memUtil = round1(clampPct(memUsedPct));
+  const diskUsedGb = round1(disk.usedGb);
+  const diskTotalGb = round1(disk.totalGb);
+  const diskUtil = round1(clampPct(diskUsedPct));
   const attrs = {
-    "host.cpu_pct": round1(clampPct(cpu.cpuPct)),
-    "host.cpu_count": roundInt(cpu.cpuCount),
-    "host.load1": round2(load1),
-    "host.mem_used_mb": roundInt(mem.usedMb),
-    "host.mem_total_mb": roundInt(mem.totalMb),
-    "host.mem_used_pct": round1(clampPct(memUsedPct)),
-    "host.disk_used_gb": round1(disk.usedGb),
-    "host.disk_total_gb": round1(disk.totalGb),
-    "host.disk_used_pct": round1(clampPct(diskUsedPct)),
+    "system.cpu.utilization":      cpuUtil    == null ? null : cpuUtil / 100,
+    "system.cpu.logical_count":    roundInt(cpu.cpuCount),
+    "system.linux.cpu.load_1m":    round2(load1),
+    "system.memory.usage":         memUsedMb  == null ? null : memUsedMb  * 1048576,
+    "system.memory.limit":         memTotalMb == null ? null : memTotalMb * 1048576,
+    "system.memory.utilization":   memUtil    == null ? null : memUtil / 100,
+    "system.filesystem.usage":     diskUsedGb  == null ? null : Math.round(diskUsedGb  * 1073741824),
+    "system.filesystem.capacity":  diskTotalGb == null ? null : Math.round(diskTotalGb * 1073741824),
+    "system.filesystem.utilization": diskUtil  == null ? null : diskUtil / 100,
   };
 
   // `await` normalizes both emit seams: the default async defaultEmit (which

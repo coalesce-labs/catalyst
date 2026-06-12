@@ -29,7 +29,7 @@ export function isAllowedTargetNamespace(target: string): boolean {
 export const EXPECTED_CLUSTER_COUNTS: Readonly<Record<RemediationCluster, number>> = {
   A: 0,
   B: 0,
-  C: 9,
+  C: 0,
   D: 0,
   E: 0,
   F: 0,

@@ -102,16 +102,16 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "catalyst.ratelimit.tier",    emitter: "mjs", source: "ratelimit-event.mjs:70", classification: "legitimately-custom" },
 
   // ── MJS emitter — catalyst-agent/host.mjs ────────────────────────────────
-  // §4j: Host system metrics cluster C — rename-to (host.* → system.*)
-  { key: "host.cpu_pct",      emitter: "mjs", source: "host.mjs:273", classification: "rename-to", targetName: "system.cpu.utilization",       remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
-  { key: "host.cpu_count",    emitter: "mjs", source: "host.mjs:274", classification: "rename-to", targetName: "system.cpu.logical_count",     remediationCluster: "C", where: "both" },
-  { key: "host.load1",        emitter: "mjs", source: "host.mjs:275", classification: "rename-to", targetName: "system.linux.cpu.load_1m",     remediationCluster: "C", where: "both" },
-  { key: "host.mem_used_mb",  emitter: "mjs", source: "host.mjs:276", classification: "rename-to", targetName: "system.memory.usage",          remediationCluster: "C", where: "both", note: "unit: ×1048576 → bytes, state=used" },
-  { key: "host.mem_total_mb", emitter: "mjs", source: "host.mjs:277", classification: "rename-to", targetName: "system.memory.limit",          remediationCluster: "C", where: "both", note: "unit: ×1048576 → bytes" },
-  { key: "host.mem_used_pct", emitter: "mjs", source: "host.mjs:278", classification: "rename-to", targetName: "system.memory.utilization",    remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
-  { key: "host.disk_used_gb", emitter: "mjs", source: "host.mjs:279", classification: "rename-to", targetName: "system.filesystem.usage",      remediationCluster: "C", where: "both", note: "unit: ×1073741824 → bytes, state=used" },
-  { key: "host.disk_total_gb",emitter: "mjs", source: "host.mjs:280", classification: "rename-to", targetName: "system.filesystem.capacity",   remediationCluster: "C", where: "both", note: "unit: ×1073741824 → bytes" },
-  { key: "host.disk_used_pct",emitter: "mjs", source: "host.mjs:281", classification: "rename-to", targetName: "system.filesystem.utilization",remediationCluster: "C", where: "both", note: "unit: ÷100 → 0.0–1.0" },
+  // §4j: Host system metrics cluster C — now conforming (renamed in place, units converted)
+  { key: "system.cpu.utilization",       emitter: "mjs", source: "host.mjs:278", classification: "conforming" },
+  { key: "system.cpu.logical_count",     emitter: "mjs", source: "host.mjs:279", classification: "conforming" },
+  { key: "system.linux.cpu.load_1m",     emitter: "mjs", source: "host.mjs:280", classification: "conforming" },
+  { key: "system.memory.usage",          emitter: "mjs", source: "host.mjs:281", classification: "conforming" },
+  { key: "system.memory.limit",          emitter: "mjs", source: "host.mjs:282", classification: "conforming" },
+  { key: "system.memory.utilization",    emitter: "mjs", source: "host.mjs:283", classification: "conforming" },
+  { key: "system.filesystem.usage",      emitter: "mjs", source: "host.mjs:284", classification: "conforming" },
+  { key: "system.filesystem.capacity",   emitter: "mjs", source: "host.mjs:285", classification: "conforming" },
+  { key: "system.filesystem.utilization",emitter: "mjs", source: "host.mjs:286", classification: "conforming" },
 
   // ── MJS emitter — catalyst-agent/processes.mjs ───────────────────────────
   // §4k: Process metrics — partially conforming, cluster D

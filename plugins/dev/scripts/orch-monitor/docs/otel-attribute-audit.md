@@ -10,8 +10,8 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 28 |
-| → Rename-to | 9 |
+| ✓ Conforming | 37 |
+| → Rename-to | 0 |
 | ● Legitimately Custom | 32 |
 | **Total** | 69 |
 
@@ -86,18 +86,18 @@ Do **not** edit this file directly.
 | `catalyst.ratelimit.seven_day_sonnet_pct` | `ratelimit-event.mjs:68` | ● custom |  |  |  |
 | `catalyst.ratelimit.tier` | `ratelimit-event.mjs:70` | ● custom |  |  |  |
 | `catalyst.subscription.type` | `ratelimit-event.mjs:69` | ● custom |  |  |  |
-| `host.cpu_count` | `host.mjs:274` | → rename-to | → `system.cpu.logical_count` | Cluster C |  |
-| `host.cpu_pct` | `host.mjs:273` | → rename-to | → `system.cpu.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
-| `host.disk_total_gb` | `host.mjs:280` | → rename-to | → `system.filesystem.capacity` | Cluster C | unit: ×1073741824 → bytes |
-| `host.disk_used_gb` | `host.mjs:279` | → rename-to | → `system.filesystem.usage` | Cluster C | unit: ×1073741824 → bytes, state=used |
-| `host.disk_used_pct` | `host.mjs:281` | → rename-to | → `system.filesystem.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
-| `host.load1` | `host.mjs:275` | → rename-to | → `system.linux.cpu.load_1m` | Cluster C |  |
-| `host.mem_total_mb` | `host.mjs:277` | → rename-to | → `system.memory.limit` | Cluster C | unit: ×1048576 → bytes |
-| `host.mem_used_mb` | `host.mjs:276` | → rename-to | → `system.memory.usage` | Cluster C | unit: ×1048576 → bytes, state=used |
-| `host.mem_used_pct` | `host.mjs:278` | → rename-to | → `system.memory.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
 | `process.command` | `processes.mjs:283` | ✓ conforming |  |  |  |
 | `process.cpu.utilization` | `processes.mjs:284` | ✓ conforming |  |  |  |
 | `process.memory.usage` | `processes.mjs:285` | ✓ conforming |  |  |  |
+| `system.cpu.logical_count` | `host.mjs:279` | ✓ conforming |  |  |  |
+| `system.cpu.utilization` | `host.mjs:278` | ✓ conforming |  |  |  |
+| `system.filesystem.capacity` | `host.mjs:285` | ✓ conforming |  |  |  |
+| `system.filesystem.usage` | `host.mjs:284` | ✓ conforming |  |  |  |
+| `system.filesystem.utilization` | `host.mjs:286` | ✓ conforming |  |  |  |
+| `system.linux.cpu.load_1m` | `host.mjs:280` | ✓ conforming |  |  |  |
+| `system.memory.limit` | `host.mjs:282` | ✓ conforming |  |  |  |
+| `system.memory.usage` | `host.mjs:281` | ✓ conforming |  |  |  |
+| `system.memory.utilization` | `host.mjs:283` | ✓ conforming |  |  |  |
 
 ### Legacy Bash (`emit-otel-event.sh`)
 
@@ -110,32 +110,9 @@ Do **not** edit this file directly.
 
 Each cluster below is a unit of work for CTL-1008. Emit-side files are
 derived from the manifest. Per the operator decision (Ryan, 2026-06-11),
-every rename uses a **hard cutover** — no dual-emit period, no deprecated-name
+every rename uses a **hard-cutover** — no dual-emit period, no deprecated-name
 emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,
 validated against live Loki.
-
-### Cluster C — host.* system metrics
-
-- **Emit-side files**: `host.mjs`
-- **Where**: both
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `host.cpu_count` | `system.cpu.logical_count` |  |
-| `host.cpu_pct` | `system.cpu.utilization` | unit: ÷100 → 0.0–1.0 |
-| `host.disk_total_gb` | `system.filesystem.capacity` | unit: ×1073741824 → bytes |
-| `host.disk_used_gb` | `system.filesystem.usage` | unit: ×1073741824 → bytes, state=used |
-| `host.disk_used_pct` | `system.filesystem.utilization` | unit: ÷100 → 0.0–1.0 |
-| `host.load1` | `system.linux.cpu.load_1m` |  |
-| `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
-| `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
-| `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
 
 ---
 
