@@ -82,6 +82,70 @@ describe("collector recency fallback — no cascade", () => {
   });
 });
 
+describe("collector inference from Loki state (CTL-1087)", () => {
+  const config = {
+    lokiUrl: "http://loki",
+    prometheusUrl: null,
+    grafanaUrl: null,
+    collectorHealthUrl: null, // ⇒ collector falls back to recency/inference
+    webhookConfigured: false,
+  };
+
+  it("reports collector up (inferred) when Loki probes up", async () => {
+    const monitor = createServiceHealthMonitor({
+      config,
+      catalystDir,
+      fetcher: () => Promise.resolve(new Response("ready", { status: 200 })),
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "loki")!.severity).toBe("up");
+    const collector = snap.services.find((s) => s.id === "otel-collector")!;
+    expect(collector.severity).toBe("up");
+    expect(collector.detail).toContain("inferred from Loki reachability");
+  });
+
+  it("reports collector unknown while Loki is only degraded", async () => {
+    // One failing tick ⇒ Loki degraded (not yet down). Collector must read
+    // unknown — neither an inferred up nor a cascaded down.
+    const monitor = createServiceHealthMonitor({
+      config,
+      catalystDir,
+      fetcher: () => Promise.reject(new Error("unreachable")),
+      probeCacheTtlMs: 0,
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "loki")!.severity).toBe("degraded");
+    expect(snap.services.find((s) => s.id === "otel-collector")!.severity).toBe("unknown");
+  });
+});
+
+describe("daemon recency matches catalyst-prefixed service names (CTL-1087)", () => {
+  it("reports broker and execution-core up from fresh catalyst.* events", async () => {
+    // The unified event log records service.name as "catalyst.<component>" —
+    // the monitor's matchers must use the prefixed form end-to-end.
+    const nowMs = Date.parse("2026-06-11T12:00:00.000Z");
+    writeEvent("2026-06-11T11:59:30.000Z", "catalyst.broker"); // 30s ago
+    writeEvent("2026-06-11T11:59:30.000Z", "catalyst.execution-core");
+    const monitor = createServiceHealthMonitor({
+      config: {
+        lokiUrl: null,
+        prometheusUrl: null,
+        grafanaUrl: null,
+        collectorHealthUrl: null,
+        webhookConfigured: false,
+      },
+      catalystDir,
+      now: () => nowMs,
+    });
+    await monitor.tick();
+    const snap = monitor.snapshot();
+    expect(snap.services.find((s) => s.id === "broker")!.severity).toBe("up");
+    expect(snap.services.find((s) => s.id === "execution-core")!.severity).toBe("up");
+  });
+});
+
 describe("probe-url crosses to down only after 3 ticks", () => {
   it("degraded on ticks 1-2, down on tick 3", async () => {
     const monitor = createServiceHealthMonitor({
