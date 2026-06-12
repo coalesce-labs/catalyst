@@ -1448,6 +1448,62 @@ export function convergeHeldLabel(
 // the write every tick (CTL-834). Mirrors label-guard.labelOnce's .skipped set.
 const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
 
+// CTL-1068 — convergeStartedHeldLabels: retract orphaned held labels for a STARTED
+// (already-admitted) ticket. The admission A.7 loop only converges the pre-pickup
+// pool (triagedWaiting); a ticket that was picked up and then failed while wearing
+// blocked/waiting is never revisited there. This is the converge-shaped retraction
+// executor — for Stage 1b `desired` is always null (a started ticket has no valid
+// hold); Stage 2 will pass a belief-derived desired and this same seam keeps that
+// label while retracting the others.
+//
+// Mechanism mirrors the sibling needs-human clear (scheduler.mjs:4210-4216): guard on
+// the once-marker so a no-marker tick fires ZERO removeLabel calls (steady-state-zero-
+// writes), use clearStalledLabel so the marker is deleted only on confirmed removal
+// (re-arming labelOnce). Fence-guarded for multi-host zombie safety (CTL-863).
+export function convergeStartedHeldLabels(
+  orchDir,
+  ticket,
+  writeStatus,
+  {
+    desired = null,
+    multiHost = false,
+    emitStateWrite = null,
+    onRetract = null,
+    fenceGuard: fence = fenceGuard,
+  } = {}
+) {
+  for (const label of HELD_LABELS) {
+    if (label === desired) continue;
+    const base = join(orchDir, "workers", ticket, `.linear-label-${label}`);
+    if (!existsSync(`${base}.applied`) && !existsSync(`${base}.skipped`)) continue;
+    if (!fence({ ticket, orchDir, multiHost })) {
+      log.warn(
+        { ticket, label },
+        "ctl-1068: stale fence — suppressing held-label retraction (zombie guard)"
+      );
+      continue;
+    }
+    clearStalledLabel(orchDir, ticket, label, writeStatus, {
+      onRemoved: () => {
+        if (typeof emitStateWrite === "function") {
+          emitStateWrite({
+            writerResult: {
+              applied: true,
+              reason: "held-label-orphaned-in-flight",
+              action: "remove-held-label",
+            },
+            ticket,
+            phase: "held-label",
+            source: "held-label-orphaned-in-flight",
+            orchId: ticket,
+          });
+        }
+        if (typeof onRetract === "function") onRetract(label);
+      },
+    });
+  }
+}
+
 // CTL-834 held-label apply cool-down — the same time-boxed-marker shape as the
 // CTL-624 dispatch cool-down: a per-(ticket,label) JSON marker carrying failedAt,
 // kept OUTSIDE workers/<T>/ so it survives worker-dir GC (see dispatchCooldownPath
@@ -2225,7 +2281,7 @@ function defaultJanitorKillIntentRecorder(intentDb, killBgJob = defaultKillBgJob
 //      or an operator re-arms via orch-monitor respond-ticket. Storm-prevention is
 //      preserved — the marker is still written at most once; a failed clear is
 //      intentionally left re-armable (a future genuine escalation must get through).
-function defaultClearStall(orchDir, writeStatus) {
+export function defaultClearStall(orchDir, writeStatus) {
   return ({ ticket, phase }) => {
     if (!ticket || !phase) return false;
     const workerDir = join(orchDir, "workers", ticket);
@@ -4214,6 +4270,24 @@ export function schedulerTick(
       if (existsSync(`${base}.applied`) || existsSync(`${base}.skipped`)) {
         clearStalledLabel(orchDir, ticket, "needs-human", writeStatus);
       }
+    }
+    // CTL-1068 — retract orphaned held labels for STARTED (admitted) tickets. The
+    // admission A.7 loop only converges the pre-pickup pool; a ticket that was picked
+    // up and then failed wearing blocked/waiting is never revisited there, so its label
+    // lingers and WHAT'S WAITING shows a dead row forever. Gate on the pre-pickup
+    // predicate (A.1, scheduler.mjs:3113-3115) so we NEVER fight A.7 over a ticket it
+    // still owns. desired=null: a started ticket has no legitimate hold.
+    const isPrePickup =
+      signals.triage === "done" &&
+      !("research" in signals) &&
+      !Object.values(signals).some((v) => v === PREEMPTED_STATUS);
+    if (!isPrePickup) {
+      convergeStartedHeldLabels(orchDir, ticket, writeStatus, {
+        desired: null,
+        multiHost,
+        emitStateWrite,
+        onRetract: () => lastHeldEmitState.delete(ticket),
+      });
     }
     // CTL-695: nominate terminal workers for reaping once. Covers the gaps the
     // happy-path emitPredecessorReap (advance-success only) never reaches:

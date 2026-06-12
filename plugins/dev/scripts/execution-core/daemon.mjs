@@ -82,11 +82,13 @@ import {
   mergeExecutionCoreConcurrency,
   readAllEligibleTickets, // CTL-862: boot-log ownership count
   clearHoldStopCooldown, // CTL-768
+  defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
+import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
 import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
-import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
+import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
@@ -260,13 +262,18 @@ function ensureState(orchDir) {
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
 // `linear.comment.created` event by the daemon's `onComment` callback wired
 // into startMonitor. Scans all phase signals for the comment's ticket; for
-// each signal with status === "needs-input", removes the needs-human/question
-// label and re-dispatches via dispatchTicket with the parked handoffPath.
-// Fail-open throughout — a bad signal file or removeLabel failure is logged
+// each signal with status === "needs-input", removes the needs-human label
+// and re-dispatches via dispatchTicket with the parked handoffPath. For
+// status === "stalled", clears the stall via the J3 seam (CTL-1067).
+// Fail-open throughout — a bad signal file or clearStall failure is logged
 // and skipped, never fatal.
 export async function handleCommentWake(
   parsed,
-  { orchDir, dispatch, removeLabel, botUserId, resolveSession = resolvePhaseSessionId },
+  {
+    orchDir, dispatch, removeLabel, botUserId,
+    resolveSession = resolvePhaseSessionId,
+    clearStall = () => false, // CTL-1067: J3 stall-clear seam; default no-op
+  },
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -291,6 +298,19 @@ export async function handleCommentWake(
     try {
       sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8"));
     } catch {
+      continue;
+    }
+
+    // CTL-1067: an operator answered a STALLED escalation row. Clear the stall via
+    // the J3 seam (delete the synthetic stalled signal + remove the needs-human
+    // label & markers + .orphan-detected). The scheduler re-derives advancement
+    // from the preserved prior-done signal and re-dispatches the phase fresh.
+    if (sig.status === "stalled") {
+      const phase = fname.slice("phase-".length, -".json".length);
+      try { clearStall({ ticket, phase }); }
+      catch (err) {
+        log.warn({ ticket, phase, err: err?.message }, "handleCommentWake: clearStall threw — skipping");
+      }
       continue;
     }
 
@@ -327,7 +347,7 @@ export async function handleCommentWake(
     }
 
     try {
-      await removeLabel(ticket, "needs-human/question");
+      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
     } catch {
       /* fail-open */
     }
@@ -510,7 +530,7 @@ export function startDaemon({
       gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
     }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781
