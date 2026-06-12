@@ -18,4 +18,24 @@ describe("checkpoint", () => {
     expect(ck?.path).toBe("/events/2026-05.jsonl");
     rmSync(dir, { recursive: true });
   });
+
+  test("round-trips lastForwardedTs when present", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ck-lag-"));
+    const path = join(dir, "ck.json");
+    const ts = "2026-06-12T10:00:00Z";
+    writeCheckpoint(path, { path: "/events/2026-06.jsonl", offset: 100, lastForwardedTs: ts });
+    const ck = readCheckpoint(path);
+    expect(ck?.lastForwardedTs).toBe(ts);
+    rmSync(dir, { recursive: true });
+  });
+
+  test("readCheckpoint returns undefined for lastForwardedTs on legacy files lacking it", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ck-legacy-"));
+    const path = join(dir, "ck.json");
+    // Write a legacy checkpoint without lastForwardedTs
+    writeCheckpoint(path, { path: "/events/2026-06.jsonl", offset: 0 });
+    const ck = readCheckpoint(path);
+    expect(ck?.lastForwardedTs).toBeUndefined();
+    rmSync(dir, { recursive: true });
+  });
 });
