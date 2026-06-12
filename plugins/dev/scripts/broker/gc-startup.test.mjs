@@ -54,7 +54,7 @@ beforeEach(() => {
     bg_job_id: "live-job",
   });
   // Terminal tickets (worker dir exists, all signals terminal).
-  writeSignal(execCoreOrchDir, "CTL-701", "monitor-deploy", "done");
+  writeSignal(execCoreOrchDir, "CTL-701", "teardown", "done");
   writeSignal(execCoreOrchDir, "CTL-702", "verify", "failed");
   // CTL-999 has no dir at all → pure orphan.
 
