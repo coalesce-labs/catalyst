@@ -557,6 +557,7 @@ describe("reconcileBootResume", () => {
       },
       resolveSession,
       appendEvent: () => {},
+      maxRewalkPerTick: 100, // no cap — this test validates routing, not damping (CTL-1084)
     });
     expect(res.dispatched).toBe(3);
     expect(res.resumed).toBe(1);
@@ -710,6 +711,7 @@ describe("reconcileBootResume — cheap/expensive classification (CTL-644)", () 
       appendEvent,
       appendGatedEvent,
       resolveSession: () => null,
+      maxRewalkPerTick: 100, // no cap — this test validates cheap/expensive routing (CTL-1084)
     });
 
     expect(reviveDispatch.calls.length).toBe(3);
@@ -1176,5 +1178,78 @@ describe("reconcileBootResume — expensive gate holds under bounce shape (CTL-1
     expect(existsSync(bootResumePendingPath(orchDir, "CTL-50"))).toBe(true);
     expect(gatedEvents).toHaveLength(1);
     expect(gatedEvents[0]).toMatchObject({ ticket: "CTL-50", phase: "implement" });
+  });
+});
+
+// ─── CTL-1084: boot re-walk damping + running-workers-undisturbed guard ───────
+describe("boot re-walk damping (CTL-1084)", () => {
+  test("dispatches at most maxRewalkPerTick cheap candidates per pass", () => {
+    writeMaxParallel(orchDir, 10); // slot ceiling well above cap
+    writeSignal(orchDir, "CTL-D1", "research", { worktreePath: "/wt/CTL-D1", status: "running" });
+    writeSignal(orchDir, "CTL-D2", "plan",     { worktreePath: "/wt/CTL-D2", status: "running" });
+    writeSignal(orchDir, "CTL-D3", "triage",   { worktreePath: "/wt/CTL-D3", status: "running" });
+    writeSignal(orchDir, "CTL-D4", "research", { worktreePath: "/wt/CTL-D4", status: "running" });
+    writeSignal(orchDir, "CTL-D5", "plan",     { worktreePath: "/wt/CTL-D5", status: "running" });
+    const dispatched = [];
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch: (a) => { dispatched.push(a.ticket); return { code: 0 }; },
+      appendEvent: () => {},
+      maxRewalkPerTick: 2,
+    });
+    expect(dispatched.length).toBe(2);
+    expect(res.dispatched).toBe(2);
+    expect(res.planned).toBe(5);
+    expect(res.deferred).toBe(3);
+  });
+
+  test("running workers (live bg_job) are never selected for re-walk (undisturbed guard)", () => {
+    writeMaxParallel(orchDir, 10);
+    writeSignal(orchDir, "CTL-RUN", "implement", { worktreePath: "/wt/CTL-RUN", status: "running" });
+    const dispatched = [];
+    reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      // Provide a live agent for CTL-RUN's worktree
+      agents: [{ kind: "background", cwd: "/wt/CTL-RUN" }],
+      dispatch: (a) => { dispatched.push(a.ticket); return { code: 0 }; },
+      appendEvent: () => {},
+    });
+    expect(dispatched).not.toContain("CTL-RUN");
+  });
+
+  test("planned equals total cheap candidates before the cap", () => {
+    writeMaxParallel(orchDir, 10);
+    writeSignal(orchDir, "CTL-P1", "triage",   { worktreePath: "/wt/CTL-P1", status: "running" });
+    writeSignal(orchDir, "CTL-P2", "research", { worktreePath: "/wt/CTL-P2", status: "running" });
+    writeSignal(orchDir, "CTL-P3", "plan",     { worktreePath: "/wt/CTL-P3", status: "running" });
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch: (a) => ({ code: 0 }),
+      appendEvent: () => {},
+      maxRewalkPerTick: 10, // no cap — all should dispatch
+    });
+    expect(res.planned).toBe(3);
+    expect(res.dispatched).toBe(3);
+    expect(res.deferred).toBe(0);
+  });
+
+  test("zero candidates: planned=0, deferred=0, dispatched=0", () => {
+    writeMaxParallel(orchDir, 10);
+    const res = reconcileBootResume({
+      orchDir,
+      report: { coldStart: true },
+      agents: [],
+      dispatch: () => ({ code: 0 }),
+      appendEvent: () => {},
+      maxRewalkPerTick: 2,
+    });
+    expect(res.planned).toBe(0);
+    expect(res.deferred).toBe(0);
+    expect(res.dispatched).toBe(0);
   });
 });

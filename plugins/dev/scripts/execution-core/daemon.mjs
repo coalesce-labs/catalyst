@@ -48,6 +48,7 @@ import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.m
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
+import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
   startMonitor,
@@ -488,18 +489,24 @@ export function startDaemon({
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
   // try/catch logs and process.exit(1)s as before.
+  // CTL-1084: hoisted so emitBootEvent at the boot-log site can reference them
+  // after the try block completes without a throw.
+  let _bootReport;
+  let _bootResume;
   try {
     // CTL-539 — rebuild routing + worker state on boot. CTL-654: capture the
     // RecoveryReport (previously discarded) so the boot-resume pass can consume
     // its `coldStart` verdict + worker buckets.
     const report = recover({ orchDir });
+    _bootReport = report;
     // CTL-654: boot-resume — on a cold start, re-dispatch in-flight tickets whose
     // worktree has no live --bg worker, BEFORE the monitor/scheduler start. This
     // bypasses the per-tick reclaim sweep's revive budget (a clean reboot is not
     // a chronic-failure storm) and is bounded by maxParallel so a reboot never
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
-    reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    const bootResume = reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
     processApprovedResumes({ orchDir });
@@ -664,6 +671,17 @@ export function startDaemon({
   const bootSelf = bootHostName ?? getHostName();
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+  // CTL-1084: emit a structured node.boot event so catalyst-stack status can
+  // prove what the restart did (version, effective flags, adopted/cleared/rewalk counts).
+  // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
+  emitBootEvent({
+    summary: {
+      adoptedWorkers:   _bootReport?.workers?.running?.length ?? 0,
+      zombiesCleared:   (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
+      rewalkPlanned:    _bootResume?.planned    ?? _bootResume?.dispatched ?? 0,
+      rewalkDispatched: _bootResume?.dispatched ?? 0,
+    },
+  });
   log.info(
     { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
     "execution-core daemon started"
