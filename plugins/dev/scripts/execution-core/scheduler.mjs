@@ -81,7 +81,7 @@ import { readWorkerSignals } from "./signal-reader.mjs";
 // CTL-937: getBeliefsDb exposes the module-level db handle for the diagnostician.
 import { collectBeliefsTick, getBeliefsDb } from "./beliefs/collector.mjs";
 // CTL-1045 Bug 1: kill-storm suppression guard for defaultJanitorKillIntentRecorder.
-import { isIntentEffective, getMaxAttempts } from "./beliefs/intent.mjs";
+import { isIntentEffective, getMaxAttempts, recordIntent as recordIntentBelief } from "./beliefs/intent.mjs";
 // CTL-966 + CTL-935: the advancement shadow comparator — compares the procedural
 // deriveAdvancement oracle against the advance_to / cycle_exhausted beliefs and
 // logs disagreements. SHADOW ONLY (reads beliefs + computes oracle + logs; never
@@ -154,6 +154,19 @@ import {
   defaultCollectGhostCandidates,
   defaultCollectStallClearCandidates, // CTL-1005 J3
 } from "./stall-janitor.mjs";
+// CTL-1064: unstuck-sweep (Pass 0u) — throttled classify-then-act sweep for
+// the stalled/needs-human ticket backlog. Pure classifiers + action driver in
+// unstuck-sweep.mjs; census producers below. Mode='off' by default; operators
+// opt in via CATALYST_UNSTUCK_SWEEP=shadow then =enforce (or Layer-2 config).
+import {
+  runUnstuckSweepPass,
+  defaultCollectUnstuckCandidates,
+  emitUnstuckEvent,
+} from "./unstuck-sweep.mjs";
+import {
+  readUnstuckSweepConfig,
+  isThrottled,
+} from "./config.mjs";
 // CTL-558: the deterministic Linear status/label write seam. The whole module
 // is injected as `writeStatus` so tests pass fakes; production uses the real
 // module (best-effort — every write swallows its own failures).
@@ -1281,7 +1294,15 @@ export function maybeEscalateRemediateExhausted(
   signals,
   verdict,
   cycleCount,
-  { writeFile = writeFileSync, readFile = readFileSync } = {}
+  {
+    writeFile = writeFileSync,
+    readFile = readFileSync,
+    // CTL-1064: optional seam to pre-compute the round-history summary so
+    // the unstuck-sweep's escalation comment has it available on the signal.
+    // Injected; undefined in production until a follow-up wires the real
+    // events/YYYY-MM.jsonl scanner (explicitly out of scope for this plan).
+    summarizeHistory = undefined,
+  } = {}
 ) {
   if (signals.verify !== "done" || verdict !== "fail" || cycleCount < REMEDIATE_CYCLE_CAP) {
     return false;
@@ -1290,6 +1311,10 @@ export function maybeEscalateRemediateExhausted(
   try {
     const cur = JSON.parse(readFile(p, "utf8"));
     if (cur.status === "stalled") return true; // idempotent
+    let remediateSummary;
+    if (typeof summarizeHistory === "function") {
+      try { remediateSummary = summarizeHistory(ticket); } catch { /* best-effort */ }
+    }
     writeFile(
       p,
       JSON.stringify({
@@ -1297,6 +1322,7 @@ export function maybeEscalateRemediateExhausted(
         status: "stalled",
         stalledReason: "remediate-cycle-cap-exhausted",
         updatedAt: new Date().toISOString(),
+        ...(remediateSummary !== undefined ? { remediateSummary } : {}),
       })
     );
   } catch {
@@ -2490,6 +2516,25 @@ export function schedulerTick(
       emit: _janitorEmit = emitReapIntent,
       recordKillIntent: _recordKillIntent = undefined,
     } = {},
+    // CTL-1064: unstuck-sweep seams (Pass 0u). Mode resolves from
+    // readUnstuckSweepConfig() (env > Layer-2 > 'off') unless overridden.
+    // Defaults keep a bare tick fully inert — no census means nothing runs.
+    // Production wires the real census + act seams via startScheduler.
+    unstuckSweep: {
+      mode: _unstuckMode = undefined,
+      intervalMs: _unstuckIntervalMs = undefined,
+      collectCandidates: _collectUnstuckCandidates = undefined,
+      actByCategory: _unstuckActByCategory = undefined,
+      escalate: _unstuckEscalate = undefined,
+      // CTL-1064: the unstuck sweep's emit seam MUST be emitUnstuckEvent, NOT
+      // emitReapIntent — the latter's closed vocabulary excludes unstuck.* and
+      // throws, and the fire-and-forget path swallowed the rejection, silently
+      // dropping every unstuck event. emitUnstuckEvent validates against the
+      // sweep's own vocabulary and appends to the same unified log.
+      emit: _unstuckEmit = emitUnstuckEvent,
+      postComment: _unstuckPostComment = undefined,
+      nowMs: _unstuckNowMs = undefined,
+    } = {},
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -2882,6 +2927,11 @@ export function schedulerTick(
   let janitorDeferred = [];
   let janitorStallsCleared = [];
   let janitorWouldClear = [];
+  // CTL-1064: Pass 0u report arrays (populated below if the pass runs).
+  let unstuckActed = [];
+  let unstuckWouldAct = [];
+  let unstuckEscalated = [];
+  let unstuckWouldEscalate = [];
   {
     const jcfg = readStallJanitorConfig();
     const jMode = _janitorMode ?? jcfg.mode;
@@ -2942,6 +2992,107 @@ export function schedulerTick(
         log.warn(
           { step: "stall-janitor", err: err.message },
           "scheduler: stall-janitor pass failed — continuing tick (CTL-1004)"
+        );
+      }
+    }
+  }
+
+  // CTL-1064: Pass 0u — throttled unstuck-sweep. Low-frequency (default 15 min)
+  // classify-then-act pass over the stalled/needs-human ticket backlog. A bare tick
+  // has no census producer → skip cleanly. Mode='off' by default; operators opt in
+  // via env (CATALYST_UNSTUCK_SWEEP=shadow / =enforce) or Layer-2 config.
+  {
+    const ucfg = readUnstuckSweepConfig();
+    const uMode = _unstuckMode ?? ucfg.mode;
+    const uIntervalMs = _unstuckIntervalMs ?? ucfg.intervalMs;
+    const nowMs = typeof _unstuckNowMs === "function" ? _unstuckNowMs() : Date.now();
+    if (
+      uMode !== "off" &&
+      _collectUnstuckCandidates &&
+      !isThrottled(_unstuckLastRunMs, uIntervalMs, nowMs)
+    ) {
+      _unstuckLastRunMs = nowMs;
+      try {
+        const ureport = runUnstuckSweepPass({
+          mode: uMode,
+          collectCandidates: _collectUnstuckCandidates,
+          actByCategory: _unstuckActByCategory ?? {},
+          escalate: _unstuckEscalate ?? (() => {}),
+          emit: _unstuckEmit,
+          recordIntent: intentDb
+            ? (kind, subject) => {
+                try {
+                  // Dedup: skip the INSERT when an open intent already exists for
+                  // this kind/subject (mirrors the stall-janitor recorder at
+                  // scheduler.mjs:2199-2206). Without this, every pass would insert
+                  // a duplicate intent row for the same subject (CTL-1064).
+                  const open = intentDb
+                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .get(kind, subject);
+                  if (open) return;
+                  // intent.tick_id is NOT NULL — the prior tickId:null always
+                  // failed the insert (the intent was never recorded, so the gate
+                  // never suppressed re-acting). Anchor to the latest tick row,
+                  // exactly as the stall-janitor recorder does (CTL-1064).
+                  const tickRow = intentDb
+                    .query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1")
+                    .get();
+                  if (!tickRow) return; // no tick yet → cannot anchor the intent
+                  recordIntentBelief(intentDb, {
+                    tickId: tickRow.tick_id,
+                    kind,
+                    subject,
+                    postcondition: { kind: "unstuck-sweep", subject },
+                  });
+                } catch { /* best-effort */ }
+              }
+            : () => {},
+          // CTL-1064: the driver gate is act-once-then-skip (unstuck-sweep.mjs:257
+          // — true = an open intent already exists → skip). That is NOT
+          // isIntentEffective's semantics: isIntentEffective returns true for a
+          // FRESH subject with no intent (viable channel), which would skip the
+          // very first act; the prior `!isIntentEffective` instead returned false
+          // while open-under-cap, RE-ACTING every pass until the cap. Probe for an
+          // open intent directly so pass 1 acts (no open row yet) and every later
+          // pass skips while the intent stays open — pairs with the recordIntent
+          // dedup above (same `outcome IS NULL` predicate).
+          isIntentEffective: intentDb
+            ? (kind, subject) => {
+                try {
+                  const open = intentDb
+                    .query("SELECT 1 FROM intent WHERE kind = ? AND subject = ? AND outcome IS NULL LIMIT 1")
+                    .get(kind, subject);
+                  return open != null;
+                } catch { return false; }
+              }
+            : () => false,
+          postComment: _unstuckPostComment ?? (() => {}),
+        });
+        unstuckActed = ureport.acted;
+        unstuckWouldAct = ureport.wouldAct;
+        unstuckEscalated = ureport.escalated;
+        unstuckWouldEscalate = ureport.wouldEscalate;
+        if (
+          ureport.acted.length || ureport.wouldAct.length ||
+          ureport.escalated.length || ureport.wouldEscalate.length
+        ) {
+          log.info(
+            {
+              mode: uMode,
+              acted: ureport.acted.length,
+              wouldAct: ureport.wouldAct.length,
+              escalated: ureport.escalated.length,
+              wouldEscalate: ureport.wouldEscalate.length,
+              skipped: ureport.skipped.length,
+              failed: ureport.failed.length,
+            },
+            "scheduler: unstuck-sweep pass (CTL-1064)"
+          );
+        }
+      } catch (err) {
+        log.warn(
+          { step: "unstuck-sweep", err: err.message },
+          "scheduler: unstuck-sweep pass failed — continuing tick (CTL-1064)"
         );
       }
     }
@@ -4329,6 +4480,10 @@ export function schedulerTick(
     janitorDeferred,     // CTL-1004 — dirty worktrees deferred (no removal, no queue)
     janitorStallsCleared, // CTL-1005 — prior-artifact-retry-exhausted stalls CLEARED this tick (enforce)
     janitorWouldClear,   // CTL-1005 — stalls that WOULD be cleared (shadow)
+    unstuckActed,        // CTL-1064 — Pass 0u actions taken this tick (enforce)
+    unstuckWouldAct,     // CTL-1064 — Pass 0u would-act (shadow)
+    unstuckEscalated,    // CTL-1064 — Pass 0u escalations this tick (enforce)
+    unstuckWouldEscalate, // CTL-1064 — Pass 0u would-escalate (shadow)
     advanced,
     dispatched,
     freeSlots,
@@ -4407,6 +4562,11 @@ const observedYieldFiles = new Set();
 // An admitted/cleared ticket is deleted so a future re-hold re-emits. Cleared on
 // daemon restart (via __resetForTests).
 const lastHeldEmitState = new Map();
+
+// CTL-1064: Pass 0u throttle — epoch-ms of the last unstuck-sweep run.
+// Module-level so the 15-min gate persists across ticks without a db write.
+// Reset to 0 on daemon restart (module reload) or via __resetForTests.
+let _unstuckLastRunMs = 0;
 
 function runTick() {
   try {
@@ -4649,6 +4809,52 @@ function runTick() {
           }),
         clearStall: defaultClearStall(runningOpts.orchDir, runningOpts.writeStatus ?? linearWrite),
       },
+      // CTL-1064: wire the unstuck-sweep census (Pass 0u). The census collects
+      // stalled/failed workers lazily; the pass only runs when mode !== 'off'
+      // AND the 15-min throttle window has elapsed. Mode defaults to 'off' so
+      // a plain startScheduler caller gets a fully inert pass unless explicitly
+      // opted in via env (CATALYST_UNSTUCK_SWEEP=shadow / =enforce) or Layer-2.
+      unstuckSweep: runningOpts.unstuckSweep ?? {
+        collectCandidates: () =>
+          defaultCollectUnstuckCandidates({
+            orchDir: runningOpts.orchDir,
+            agentsSnapshot: getAgentsCached().agents,
+            isLinearTerminal: (id) => {
+              const state = fetchTicketState(id);
+              return state != null && isLinearTerminal(state);
+            },
+            // CTL-1064: thread the worktree resolver from each worker's signal so
+            // the live-session gate (unstuck-sweep.mjs:118) and the classifier's
+            // live-session short-circuit are reachable in production. Without it
+            // resolveWorktreePath defaulted to () => null and worktreePath was
+            // always null, making the live-session skip dead (a latent footgun
+            // once act seams are enabled). Mirrors the prAdapter closure below.
+            resolveWorktreePath: (ticket) => {
+              for (const sig of readWorkerSignals(runningOpts.orchDir)) {
+                if (sig.ticket === ticket && sig.worktreePath) return sig.worktreePath;
+              }
+              return null;
+            },
+          }),
+        // actByCategory: production seams undefined → no-op (escalate handles
+        // all whitelisted categories in the initial shadow rollout). Operators
+        // enable per-category enforcement via Layer-2 config. Pass 0u ships
+        // shadow-/escalate-only: catA-D mechanical enforcement is DEFERRED and
+        // actByCategory:{} is an intentional no-op (no real act seams exist yet).
+        actByCategory: runningOpts.unstuckActByCategory ?? {},
+        // emit: the dedicated unstuck unified-log emitter (NOT emitReapIntent,
+        // whose closed vocabulary throws on unstuck.* — CTL-1064). Explicit here
+        // so the production wiring does not silently depend on the schedulerTick
+        // default.
+        emit: emitUnstuckEvent,
+        // postComment: intentionally unwired in this rollout (no Linear audit
+        // comment) unless an operator injects runningOpts.unstuckPostComment —
+        // defaultPostUnstuckComment is NOT closed over orchDir here. Mirrors the
+        // intentional actByCategory no-op above.
+        postComment: typeof runningOpts.unstuckPostComment === "function"
+          ? runningOpts.unstuckPostComment
+          : undefined,
+      },
     });
     // CTL-863: host-death takeover sweep — complement to worker-death reclaim.
     // Skip entirely on single-host installs (no-op inside the function, but the
@@ -4814,6 +5020,7 @@ export function __resetForTests() {
   stopScheduler();
   observedYieldFiles.clear(); // CTL-702: reset per-lifetime dedup set between tests
   lastHeldEmitState.clear(); // CTL-755: reset held-event only-on-change dedup
+  _unstuckLastRunMs = 0; // CTL-1064: reset Pass 0u throttle between tests
   // rankedAboveSince is cleared by stopScheduler above (CTL-705)
 }
 

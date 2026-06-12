@@ -660,9 +660,22 @@ export function collectTickFacts({
           return m;
         })();
 
+        // signalStatusBySubject: "ticket/phase" → status string, for the
+        // unstuck-sweep postcondition (CTL-1064). Built from the SAME signals
+        // already in scope — zero extra I/O. Key: only stalled/failed entries
+        // matter; everything else returns null → intent retries next tick.
+        const signalStatusBySubject = (() => {
+          const m = new Map();
+          for (const s of signals) {
+            if (!s?.ticket || s.phase == null) continue;
+            m.set(`${s.ticket}/${s.phase}`, s.status ?? null);
+          }
+          return m;
+        })();
+
         const maxAttempts = getMaxAttempts(db);
         const intentsEnforce = (env.CATALYST_INTENTS_ENFORCE ?? "0") === "1";
-        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket }, {
+        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket, signalStatusBySubject }, {
           maxAttempts,
           enforce: intentsEnforce,
           appendEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,

@@ -534,3 +534,46 @@ export function readStallJanitorConfig() {
     STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS;
   return { mode, terminalIdleMs };
 }
+
+// --- Unstuck sweep (CTL-1064) ---
+// OFF by default — operators opt in via shadow then enforce. Same three-layer
+// precedence as CTL-1004/CTL-1029 (env > Layer-2 catalyst.unstuckSweep.* >
+// code default). Runs as a low-frequency throttled Pass 0u (default 15 min).
+const UNSTUCK_SWEEP_MODES = new Set(["off", "shadow", "enforce"]);
+export const UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS = 900_000; // 15 minutes
+
+function readLayer2UnstuckSweep() {
+  try {
+    const us = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.unstuckSweep;
+    return us && typeof us === "object" ? us : {};
+  } catch { return {}; }
+}
+
+export function readUnstuckSweepConfig() {
+  const l2 = readLayer2UnstuckSweep();
+  // CATALYST_UNSTUCK_SWEEP is the single operator knob:
+  //   "0" → off (kill-switch), off|shadow|enforce → that mode, anything else → off.
+  const env = process.env.CATALYST_UNSTUCK_SWEEP ?? process.env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && UNSTUCK_SWEEP_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && UNSTUCK_SWEEP_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // safe default: off — operators opt into shadow then enforce
+  }
+  const intervalMs =
+    Number(process.env.CATALYST_UNSTUCK_SWEEP_INTERVAL_MS) ||
+    (Number(l2.intervalSeconds) || 0) * 1000 ||
+    UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS;
+  return { mode, intervalMs };
+}
+
+// isThrottled — returns true when (nowMs - lastRunMs) < intervalMs.
+// Extracted as a standalone export so tests can assert the throttle guard
+// and future low-frequency passes can reuse the same helper.
+export function isThrottled(lastRunMs, intervalMs, nowMs) {
+  return (nowMs - lastRunMs) < intervalMs;
+}
