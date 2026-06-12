@@ -96,8 +96,11 @@ describe("nav-signal UI contract (CTL-896 / SHELL6)", () => {
     });
 
     it("derives the Workers count + Queue depth badges from the signal", () => {
-      expect(sidebarCode).toContain("nav.workerCount");
-      expect(sidebarCode).toContain("nav.queueDepth");
+      // CTL-1016: the queue surface retired, but the Queue-depth BADGE still rides
+      // the live signal — the sidebar now reads it through optional chaining
+      // (`nav?.queueDepth ?? 0`) since `nav` can be null before the signal loads.
+      expect(sidebarCode).toMatch(/nav\??\.workerCount/);
+      expect(sidebarCode).toMatch(/nav\??\.queueDepth/);
     });
 
     it("derives the Board anomaly dot from the signal", () => {

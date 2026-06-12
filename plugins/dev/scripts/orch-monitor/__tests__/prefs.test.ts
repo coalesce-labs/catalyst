@@ -35,16 +35,15 @@ describe("landing-surface pref — documented defaults (CTL-911)", () => {
 
   it("the eligible landing surfaces are the OPERATE surfaces plus shipped OBSERVE surfaces", () => {
     // Settings is a footer destination, never a landing.
-    // OBS-5: LANDING_SURFACES is the four OPERATE surfaces plus any OBSERVE surface
+    // OBS-5: LANDING_SURFACES is the three OPERATE surfaces plus any OBSERVE surface
     // that ships live content. Telemetry is the first OBSERVE surface to qualify;
     // the not-yet-shipped OBSERVE surfaces (utilization/finops/fleetops/devops) are
     // deliberately NOT offered as a landing default — so LANDING is a strict subset
-    // of SURFACES, never the full nav array.
+    // of SURFACES, never the full nav array. CTL-1016 retired the queue surface.
     expect([...LANDING_SURFACES]).toEqual([
       "home",
       "board",
       "workers",
-      "queue",
       "telemetry",
     ]);
     // The not-yet-shipped OBSERVE surfaces are excluded.
