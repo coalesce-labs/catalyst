@@ -10,8 +10,8 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 23 |
-| → Rename-to | 28 |
+| ✓ Conforming | 26 |
+| → Rename-to | 25 |
 | ● Legitimately Custom | 20 |
 | **Total** | 71 |
 
@@ -32,15 +32,15 @@ Do **not** edit this file directly.
 | `catalyst.session.id` | `canonical-event.ts:69` | ● custom |  |  |  |
 | `catalyst.worker.ticket` | `canonical-event.ts:68` | ● custom |  |  |  |
 | `cicd.pipeline.name` | `canonical-event.ts:82` | ✓ conforming |  |  |  |
-| `cicd.pipeline.run.conclusion` | `canonical-event.ts:81` | → rename-to | → `cicd.pipeline.run.result` | Cluster E |  |
 | `cicd.pipeline.run.id` | `canonical-event.ts:79` | ✓ conforming |  |  |  |
+| `cicd.pipeline.run.result` | `canonical-event.ts:81` | ✓ conforming |  |  |  |
 | `cicd.pipeline.run.status` | `canonical-event.ts:80` | ✓ conforming |  |  |  |
 | `claude.context.tokens` | `canonical-event.ts:100` | ● custom |  |  |  |
 | `claude.context.used_pct` | `canonical-event.ts:99` | ● custom |  |  |  |
 | `claude.model` | `canonical-event.ts:98` | ● custom |  |  |  |
 | `claude.session.id` | `canonical-event.ts:97` | ● custom |  |  |  |
 | `claude.turn` | `canonical-event.ts:101` | ● custom |  |  |  |
-| `deployment.environment` | `canonical-event.ts:91` | → rename-to | → `deployment.environment.name` | Cluster E |  |
+| `deployment.environment.name` | `canonical-event.ts:91` | ✓ conforming |  |  |  |
 | `deployment.id` | `canonical-event.ts:92` | ✓ conforming |  |  | type should be string per OTel semconv; currently number |
 | `event.name` | `canonical-event.ts:59` | ✓ conforming |  |  |  |
 | `host.id` | `canonical-event.ts:48` | ✓ conforming |  |  |  |
@@ -56,8 +56,8 @@ Do **not** edit this file directly.
 | `service.version` | `canonical-event.ts:45` | ✓ conforming |  |  |  |
 | `vcs.pr.number` | `canonical-event.ts:74` | ✓ conforming |  |  |  |
 | `vcs.ref.name` | `canonical-event.ts:75` | ✓ conforming |  |  |  |
+| `vcs.ref.revision` | `canonical-event.ts:76` | ✓ conforming |  |  |  |
 | `vcs.repository.name` | `canonical-event.ts:73` | ✓ conforming |  |  |  |
-| `vcs.revision` | `canonical-event.ts:76` | → rename-to | → `vcs.ref.revision` | Cluster E |  |
 
 ### Bash (`canonical-event.sh`)
 
@@ -161,23 +161,6 @@ validated against live Loki.
 | `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
-
-### Cluster E — vcs.revision / cicd.conclusion / deployment.environment
-
-- **Emit-side files**: `canonical-event.ts`
-- **Where**: emit
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `cicd.pipeline.run.conclusion` | `cicd.pipeline.run.result` |  |
-| `deployment.environment` | `deployment.environment.name` |  |
-| `vcs.revision` | `vcs.ref.revision` |  |
 
 ### Cluster F — phase.* unnamespaced fields
 

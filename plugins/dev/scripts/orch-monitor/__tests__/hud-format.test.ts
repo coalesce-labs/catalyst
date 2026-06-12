@@ -267,7 +267,7 @@ describe("formatEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_suite.completed",
-        "cicd.pipeline.run.conclusion": "failure",
+        "cicd.pipeline.run.result": "failure",
       },
     } as unknown as CanonicalEvent;
     expect(formatEvent(e)).toBe("github.check_suite.completed");
@@ -1023,7 +1023,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "success",
+        "cicd.pipeline.run.result": "success",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(true);
@@ -1034,7 +1034,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "neutral",
+        "cicd.pipeline.run.result": "neutral",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(true);
@@ -1045,7 +1045,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "failure",
+        "cicd.pipeline.run.result": "failure",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(false);

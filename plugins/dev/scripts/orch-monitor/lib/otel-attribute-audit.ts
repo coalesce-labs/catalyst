@@ -50,12 +50,12 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "vcs.repository.name", emitter: "ts", source: "canonical-event.ts:73", classification: "conforming" },
   { key: "vcs.pr.number",       emitter: "ts", source: "canonical-event.ts:74", classification: "conforming" },
   { key: "vcs.ref.name",        emitter: "ts", source: "canonical-event.ts:75", classification: "conforming" },
-  { key: "vcs.revision",        emitter: "ts", source: "canonical-event.ts:76", classification: "rename-to", targetName: "vcs.ref.revision", remediationCluster: "E", where: "emit" },
+  { key: "vcs.ref.revision",    emitter: "ts", source: "canonical-event.ts:76", classification: "conforming" },
 
   // §4e: CI/CD semconv
   { key: "cicd.pipeline.run.id",         emitter: "ts", source: "canonical-event.ts:79", classification: "conforming" },
   { key: "cicd.pipeline.run.status",     emitter: "ts", source: "canonical-event.ts:80", classification: "conforming" },
-  { key: "cicd.pipeline.run.conclusion", emitter: "ts", source: "canonical-event.ts:81", classification: "rename-to", targetName: "cicd.pipeline.run.result", remediationCluster: "E", where: "emit" },
+  { key: "cicd.pipeline.run.result",     emitter: "ts", source: "canonical-event.ts:81", classification: "conforming" },
   { key: "cicd.pipeline.name",           emitter: "ts", source: "canonical-event.ts:82", classification: "conforming" },
 
   // Linear — legitimately-custom (no OTel semconv; linear.* vendor namespace)
@@ -65,7 +65,7 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   { key: "linear.actor.id",         emitter: "ts", source: "canonical-event.ts:88", classification: "legitimately-custom" },
 
   // §4f: Deployment semconv
-  { key: "deployment.environment", emitter: "ts", source: "canonical-event.ts:91", classification: "rename-to", targetName: "deployment.environment.name", remediationCluster: "E", where: "emit" },
+  { key: "deployment.environment.name", emitter: "ts", source: "canonical-event.ts:91", classification: "conforming" },
   { key: "deployment.id",          emitter: "ts", source: "canonical-event.ts:92", classification: "conforming", note: "type should be string per OTel semconv; currently number" },
 
   // §4g: Claude Code metadata (CTL-374) — legitimately-custom (claude.* vendor namespace)

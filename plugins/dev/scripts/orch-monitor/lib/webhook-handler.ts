@@ -237,14 +237,14 @@ export function buildEventLogEnvelope(
         "vcs.repository.name": event.repo,
         "cicd.pipeline.run.status": event.status,
       };
-      if (event.headSha) attrs["vcs.revision"] = event.headSha;
+      if (event.headSha) attrs["vcs.ref.revision"] = event.headSha;
       const effectivePr =
         event.prNumbers.length >= 1
           ? event.prNumbers[0]
           : opts?.cachedPrNumber ?? null;
       if (effectivePr !== null) attrs["vcs.pr.number"] = effectivePr;
       if (event.conclusion !== null) {
-        attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
+        attrs["cicd.pipeline.run.result"] = event.conclusion;
       }
       return canonical({
         ts,
@@ -275,7 +275,7 @@ export function buildEventLogEnvelope(
         severity: statusSeverity(event.state),
         attrs: {
           "vcs.repository.name": event.repo,
-          "vcs.revision": event.sha,
+          "vcs.ref.revision": event.sha,
         },
         message: `${eventName} for ${event.repo} sha ${event.sha.slice(0, 7)}`,
         payload: { state: event.state },
@@ -292,7 +292,7 @@ export function buildEventLogEnvelope(
         attrs: {
           "vcs.repository.name": event.repo,
           "vcs.ref.name": event.ref,
-          "vcs.revision": event.headSha,
+          "vcs.ref.revision": event.headSha,
         },
         message: `github.push to ${event.repo} ${event.ref} (${event.headSha.slice(0, 7)})`,
         payload: {
@@ -356,9 +356,9 @@ export function buildEventLogEnvelope(
         severity: "INFO",
         attrs: {
           "vcs.repository.name": event.repo,
-          "vcs.revision": event.sha,
+          "vcs.ref.revision": event.sha,
           "vcs.ref.name": event.refName,
-          "deployment.environment": event.environment,
+          "deployment.environment.name": event.environment,
           "deployment.id": event.deploymentId,
         },
         message: `github.deployment.created in ${event.repo} env ${event.environment}`,
@@ -379,7 +379,7 @@ export function buildEventLogEnvelope(
         severity: deploymentStatusSeverity(event.state),
         attrs: {
           "vcs.repository.name": event.repo,
-          "deployment.environment": event.environment,
+          "deployment.environment.name": event.environment,
           "deployment.id": event.deploymentId,
         },
         message: `${eventName} in ${event.repo} env ${event.environment}`,
@@ -418,7 +418,7 @@ export function buildEventLogEnvelope(
       const eventName = `github.workflow_run.${event.action}`;
       const attrs: Omit<Attributes, "event.name"> = {
         "vcs.repository.name": event.repo,
-        "vcs.revision": event.headSha,
+        "vcs.ref.revision": event.headSha,
         "cicd.pipeline.run.id": event.runId,
         "cicd.pipeline.run.status": event.status,
         "cicd.pipeline.name": event.name,
@@ -430,7 +430,7 @@ export function buildEventLogEnvelope(
           : opts?.cachedPrNumber ?? null;
       if (effectivePr !== null) attrs["vcs.pr.number"] = effectivePr;
       if (event.conclusion !== null) {
-        attrs["cicd.pipeline.run.conclusion"] = event.conclusion;
+        attrs["cicd.pipeline.run.result"] = event.conclusion;
       }
       return canonical({
         ts,

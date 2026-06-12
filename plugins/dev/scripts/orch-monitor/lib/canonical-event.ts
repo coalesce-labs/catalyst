@@ -73,12 +73,12 @@ export interface Attributes {
   "vcs.repository.name"?: string;
   "vcs.pr.number"?: number;
   "vcs.ref.name"?: string;
-  "vcs.revision"?: string;
+  "vcs.ref.revision"?: string;
 
   // CI/CD semconv (OTel published)
   "cicd.pipeline.run.id"?: number;
   "cicd.pipeline.run.status"?: string;
-  "cicd.pipeline.run.conclusion"?: string;
+  "cicd.pipeline.run.result"?: string;
   "cicd.pipeline.name"?: string;
 
   // Linear (catalyst-defined; no OTel semconv yet)
@@ -88,7 +88,7 @@ export interface Attributes {
   "linear.actor.id"?: string;
 
   // Deployment semconv (OTel published)
-  "deployment.environment"?: string;
+  "deployment.environment.name"?: string;
   "deployment.id"?: number;
 
   // Claude Code metadata (CTL-374). PII note: cost is intentionally absent
