@@ -30,7 +30,7 @@ export const EXPECTED_CLUSTER_COUNTS: Readonly<Record<RemediationCluster, number
   A: 0,
   B: 9,
   C: 9,
-  D: 4,
+  D: 0,
   E: 3,
   F: 2,
   G: 4,

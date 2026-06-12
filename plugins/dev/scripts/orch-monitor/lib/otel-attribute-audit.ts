@@ -116,10 +116,10 @@ export const AUDIT_MANIFEST: AttributeAuditEntry[] = [
   // ── MJS emitter — catalyst-agent/processes.mjs ───────────────────────────
   // §4k: Process metrics — partially conforming, cluster D
   { key: "process.command",  emitter: "mjs", source: "processes.mjs:283", classification: "conforming" },
-  { key: "process.cpu_pct",  emitter: "mjs", source: "processes.mjs:284", classification: "rename-to", targetName: "process.cpu.utilization", remediationCluster: "D", where: "emit", note: "unit: ÷100 → 0.0–1.0" },
-  { key: "process.rss_mb",   emitter: "mjs", source: "processes.mjs:285", classification: "rename-to", targetName: "process.memory.usage",    remediationCluster: "D", where: "emit", note: "unit: ×1048576 → bytes" },
-  { key: "process.ticket",   emitter: "mjs", source: "processes.mjs:286", classification: "rename-to", targetName: "catalyst.process.ticket", remediationCluster: "D", where: "emit" },
-  { key: "process.phase",    emitter: "mjs", source: "processes.mjs:287", classification: "rename-to", targetName: "catalyst.process.phase",  remediationCluster: "D", where: "emit" },
+  { key: "process.cpu.utilization",  emitter: "mjs", source: "processes.mjs:284", classification: "conforming" },
+  { key: "process.memory.usage",     emitter: "mjs", source: "processes.mjs:285", classification: "conforming" },
+  { key: "catalyst.process.ticket",  emitter: "mjs", source: "processes.mjs:286", classification: "conforming" },
+  { key: "catalyst.process.phase",   emitter: "mjs", source: "processes.mjs:287", classification: "conforming" },
 
   // ── Legacy SH emitter — emit-otel-event.sh (OTLP direct) ─────────────────
   // §4l: Legacy bare attributes cluster G — rename-to

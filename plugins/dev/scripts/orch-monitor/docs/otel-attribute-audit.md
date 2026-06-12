@@ -10,8 +10,8 @@ Do **not** edit this file directly.
 
 | Classification | Count |
 | --- | --- |
-| ✓ Conforming | 19 |
-| → Rename-to | 32 |
+| ✓ Conforming | 23 |
+| → Rename-to | 28 |
 | ● Legitimately Custom | 20 |
 | **Total** | 71 |
 
@@ -76,6 +76,8 @@ Do **not** edit this file directly.
 | Key | Source | Classification | Target | Cluster | Note |
 | --- | --- | --- | --- | --- | --- |
 | `account.email` | `ratelimit-event.mjs:62` | → rename-to | → `catalyst.account.email` | Cluster B |  |
+| `catalyst.process.phase` | `processes.mjs:287` | ✓ conforming |  |  |  |
+| `catalyst.process.ticket` | `processes.mjs:286` | ✓ conforming |  |  |  |
 | `host.cpu_count` | `host.mjs:274` | → rename-to | → `system.cpu.logical_count` | Cluster C |  |
 | `host.cpu_pct` | `host.mjs:273` | → rename-to | → `system.cpu.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
 | `host.disk_total_gb` | `host.mjs:280` | → rename-to | → `system.filesystem.capacity` | Cluster C | unit: ×1073741824 → bytes |
@@ -86,10 +88,8 @@ Do **not** edit this file directly.
 | `host.mem_used_mb` | `host.mjs:276` | → rename-to | → `system.memory.usage` | Cluster C | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `host.mjs:278` | → rename-to | → `system.memory.utilization` | Cluster C | unit: ÷100 → 0.0–1.0 |
 | `process.command` | `processes.mjs:283` | ✓ conforming |  |  |  |
-| `process.cpu_pct` | `processes.mjs:284` | → rename-to | → `process.cpu.utilization` | Cluster D | unit: ÷100 → 0.0–1.0 |
-| `process.phase` | `processes.mjs:287` | → rename-to | → `catalyst.process.phase` | Cluster D |  |
-| `process.rss_mb` | `processes.mjs:285` | → rename-to | → `process.memory.usage` | Cluster D | unit: ×1048576 → bytes |
-| `process.ticket` | `processes.mjs:286` | → rename-to | → `catalyst.process.ticket` | Cluster D |  |
+| `process.cpu.utilization` | `processes.mjs:284` | ✓ conforming |  |  |  |
+| `process.memory.usage` | `processes.mjs:285` | ✓ conforming |  |  |  |
 | `rate_limit.tier` | `ratelimit-event.mjs:71` | → rename-to | → `catalyst.ratelimit.tier` | Cluster B |  |
 | `ratelimit.five_hour_pct` | `ratelimit-event.mjs:64` | → rename-to | → `catalyst.ratelimit.five_hour_pct` | Cluster B |  |
 | `ratelimit.five_hour_resets_at` | `ratelimit-event.mjs:66` | → rename-to | → `catalyst.ratelimit.five_hour_resets_at` | Cluster B |  |
@@ -161,24 +161,6 @@ validated against live Loki.
 | `host.mem_total_mb` | `system.memory.limit` | unit: ×1048576 → bytes |
 | `host.mem_used_mb` | `system.memory.usage` | unit: ×1048576 → bytes, state=used |
 | `host.mem_used_pct` | `system.memory.utilization` | unit: ÷100 → 0.0–1.0 |
-
-### Cluster D — process.* non-conforming fields
-
-- **Emit-side files**: `processes.mjs`
-- **Where**: emit
-- **Migration**: hard-cutover (no dual-emit)
-- **Consumer-update checklist** (all in ONE PR, validated against live Loki):
-  - [ ] emit-side rename in the file(s) above
-  - [ ] Grafana dashboard JSON updates
-  - [ ] orch-monitor otel-queries updates
-- **Historical-data note**: queries spanning the rename date must use an old-name-OR-new-name clause (2y Prometheus retention keeps the old name)
-
-| Current key | Target name | Note |
-| --- | --- | --- |
-| `process.cpu_pct` | `process.cpu.utilization` | unit: ÷100 → 0.0–1.0 |
-| `process.phase` | `catalyst.process.phase` |  |
-| `process.rss_mb` | `process.memory.usage` | unit: ×1048576 → bytes |
-| `process.ticket` | `catalyst.process.ticket` |  |
 
 ### Cluster E — vcs.revision / cicd.conclusion / deployment.environment
 

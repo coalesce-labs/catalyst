@@ -409,8 +409,8 @@ describe("sampleProcesses", () => {
     const claude = envelopes.find((e) => e.body.payload.pid === 1200);
     // dot-form value attributes
     expect(claude.attributes["process.command"]).toBe("claude");
-    expect(claude.attributes["process.cpu_pct"]).toBe(25.5);
-    expect(claude.attributes["process.rss_mb"]).toBe(Math.round(900000 / 1024));
+    expect(claude.attributes["process.cpu.utilization"]).toBeCloseTo(25.5 / 100, 4);
+    expect(claude.attributes["process.memory.usage"]).toBe(Math.round(900000 * 1024));
     // high-cardinality fields live ONLY in the payload, never as attributes
     expect("pid" in claude.attributes).toBe(false);
     expect("args" in claude.attributes).toBe(false);
@@ -423,8 +423,8 @@ describe("sampleProcesses", () => {
     const { emit, envelopes } = recordingEmit();
     await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const root = envelopes.find((e) => e.body.payload.pid === 1000);
-    expect(root.attributes["process.ticket"]).toBe("CTL-555");
-    expect(root.attributes["process.phase"]).toBe("implement");
+    expect(root.attributes["catalyst.process.ticket"]).toBe("CTL-555");
+    expect(root.attributes["catalyst.process.phase"]).toBe("implement");
     expect(root.body.payload.bg_job_id).toBe("job-9");
   });
 
@@ -432,8 +432,8 @@ describe("sampleProcesses", () => {
     const { emit, envelopes } = recordingEmit();
     await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const claude = envelopes.find((e) => e.body.payload.pid === 1200);
-    expect(claude.attributes["process.ticket"]).toBe("CTL-555");
-    expect(claude.attributes["process.phase"]).toBe("implement");
+    expect(claude.attributes["catalyst.process.ticket"]).toBe("CTL-555");
+    expect(claude.attributes["catalyst.process.phase"]).toBe("implement");
     expect(claude.body.payload.bg_job_id).toBe("job-9");
   });
 
@@ -441,8 +441,8 @@ describe("sampleProcesses", () => {
     const { emit, envelopes } = recordingEmit();
     await sampleProcesses({ psLines: psSnapshot, readWorkerMap: workerMap, topN: 5, emit, ...DARWIN });
     const chrome = envelopes.find((e) => e.body.payload.pid === 2000);
-    expect("process.ticket" in chrome.attributes).toBe(false);
-    expect("process.phase" in chrome.attributes).toBe(false);
+    expect("catalyst.process.ticket" in chrome.attributes).toBe(false);
+    expect("catalyst.process.phase" in chrome.attributes).toBe(false);
     expect(chrome.body.payload.bg_job_id).toBeNull();
   });
 
@@ -456,8 +456,8 @@ describe("sampleProcesses", () => {
       ...DARWIN,
     });
     for (const e of envelopes) {
-      expect("process.ticket" in e.attributes).toBe(false);
-      expect("process.phase" in e.attributes).toBe(false);
+      expect("catalyst.process.ticket" in e.attributes).toBe(false);
+      expect("catalyst.process.phase" in e.attributes).toBe(false);
       expect(e.body.payload.bg_job_id).toBeNull();
     }
   });
@@ -499,7 +499,7 @@ describe("sampleProcesses", () => {
     }
     expect(threw).toBe(false);
     expect(envelopes.length).toBe(2);
-    for (const e of envelopes) expect("process.ticket" in e.attributes).toBe(false);
+    for (const e of envelopes) expect("catalyst.process.ticket" in e.attributes).toBe(false);
   });
 
   test("a throwing emit does not abort the tick (best-effort per row)", async () => {
