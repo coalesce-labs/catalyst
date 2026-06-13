@@ -46,6 +46,14 @@
           {
             "key": "OTL",
             "vcsRepo": "coalesce-labs/catalyst-otel"
+          },
+          {
+            "key": "SLI",
+            "vcsRepo": "ryanrozich/slides"
+          },
+          {
+            "key": "EVR",
+            "vcsRepo": "coalesce-labs/evergreen"
           }
         ]
       }
