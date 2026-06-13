@@ -4285,6 +4285,43 @@ describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
     expect(result.laptop).toBe("2026-06-13T00:55:00Z");
     expect(result.mini).toBeUndefined();
   });
+
+  // CTL-1090 review hardening: a peer's last_seen is untrusted. An unparseable
+  // value must never enter the merged map — otherwise it sorts above real ISO
+  // strings and (via deadHosts' Date.parse → NaN) makes the host look
+  // forever-alive, silently defeating takeover.
+  test("garbage peer last_seen is dropped, never poisons the merge", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "zzz-not-a-date", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: local ts is second-precision (millis stripped),
+  // peers publish millisecond ISO. A genuinely newer peer ts within the same
+  // second must win — a lexicographic compare would wrongly discard it because
+  // "…00.500Z" < "…00Z".
+  test("mixed-precision: a newer millisecond peer ts beats a second-precision local ts", () => {
+    const localTs = "2026-06-13T01:00:00Z";        // second precision (from event log)
+    const peerTs = "2026-06-13T01:00:00.500Z";     // 500ms later, same second
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(peerTs); // newer peer wins under numeric compare
+  });
 });
 
 // ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─

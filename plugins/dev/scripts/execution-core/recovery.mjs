@@ -2771,8 +2771,20 @@ export function readClusterHeartbeats({
     for (const [host, rec] of Object.entries(peers)) {
       const ts = rec?.last_seen;
       if (typeof ts !== "string" || ts.length === 0) continue;
-      // Keep freshest ts per host (ISO-8601 lexicographic sort = correct ISO comparison).
-      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+      // would sort ABOVE real ISO strings lexicographically and then make the host
+      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+      // false) — can never poison the merge.
+      const peerMs = Date.parse(ts);
+      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+      // lexicographically: the local event log carries second-precision ts
+      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+      // lexicographic compare would discard a genuinely newer peer ts.
+      const cur = lastSeen[host];
+      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
     }
   }
 
