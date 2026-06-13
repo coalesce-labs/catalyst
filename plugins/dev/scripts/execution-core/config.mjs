@@ -257,6 +257,14 @@ export const HEARTBEAT_INTERVAL_MS =
 export const HEARTBEAT_GRACE_MS =
   Number(process.env.EXECUTION_CORE_HEARTBEAT_GRACE_MS) || 600_000;
 
+// LIVENESS_SHED_THRESHOLD — CTL-1091. Consecutive same-direction scheduler ticks
+// required before SHEDDING (down) or RESTORING (up) a host from the ownership
+// roster. 3 ticks at the 30s scheduler cadence = ~90s of confirmed signal layered
+// ON TOP of the 10-min HEARTBEAT_GRACE_MS down-window, biasing hard against
+// ownership flap on a laptop lid-close / brief wake. Env-overridable for tests.
+export const LIVENESS_SHED_THRESHOLD =
+  Number(process.env.EXECUTION_CORE_LIVENESS_SHED_THRESHOLD) || 3;
+
 // --- Intervals ---
 // The periodic reconcile poll — the missed-webhook correctness backstop.
 export const RECONCILE_INTERVAL_MS =

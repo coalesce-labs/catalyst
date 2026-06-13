@@ -84,6 +84,7 @@ import { fetchTicketsBatch } from "./linear-query.mjs"; // CTL-784: cache-reuse 
 import { reclaimDeadWorkIfPossible } from "./recovery.mjs";
 import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 import { ownerForTicket } from "./hrw.mjs"; // CTL-850: HRW owner computation for the ownership-filter tests
+import { __resetLivenessState } from "./liveness-roster.mjs"; // CTL-1091: test isolation — reset per-tick singleton
 import { REMEDIATE_CYCLE_CAP } from "../lib/phase-fsm.mjs";
 import { removeLabel as realRemoveLabel } from "./linear-write.mjs"; // CTL-1079: exec-spy harness
 
@@ -97,6 +98,9 @@ beforeEach(() => {
   prevCatalystDir = process.env.CATALYST_DIR;
   catalystDir = mkdtempSync(join(tmpdir(), "sched-cat-"));
   process.env.CATALYST_DIR = catalystDir;
+  // CTL-1091: reset liveness singleton so hysteresis state does not bleed
+  // across tests (the module is shared when bun runs files in one process).
+  __resetLivenessState();
 });
 afterEach(() => {
   rmSync(orchDir, { recursive: true, force: true });
@@ -9627,5 +9631,93 @@ describe("drained-sentinel emission (CTL-1095)", () => {
       emitDrained: emitDrainedMock,
     });
     expect(emitDrainedMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── CTL-1091: liveness-filtered HRW ownership (new-work eligible filter) ──
+//
+// The scheduler passes the full static roster to ownedBy() today. CTL-1091 adds
+// a `resolveLiveRoster` seam that lets the scheduler substitute the LIVE roster
+// (shed offline hosts) before ownership evaluation. When laptop is shed, mini
+// dispatches tickets that hash to laptop — the backlog never starves.
+//
+// ROSTER = ["mini", "laptop"]; CTL-200 HRW-hashes to "laptop" under this roster.
+// Injection seam `resolveLiveRoster` mirrors the existing `claimDispatch` seam.
+describe("CTL-1091 — liveness-filtered HRW ownership (schedulerTick)", () => {
+  const ROSTER = ["mini", "laptop"];
+  // CTL-200 hashes to "laptop" under this roster (verified with ownerForTicket).
+  const LAPTOP_TICKET = ownerForTicket("CTL-200", ROSTER) === "laptop" ? "CTL-200" : "CTL-3";
+
+  const eligibleLaptop = () => [
+    {
+      identifier: LAPTOP_TICKET,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("laptop shed (liveHosts=['mini']) → mini dispatches a laptop-hashing ticket", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleLaptop(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      resolveLiveRoster: () => ["mini"], // laptop shed
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).toContain(LAPTOP_TICKET);
+  });
+
+  test("both live (liveHosts=ROSTER) → laptop-hashing ticket excluded on mini", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleLaptop(),
+      dispatch,
+      hosts: ROSTER,
+      hostName: "mini",
+      resolveLiveRoster: () => ROSTER, // both live
+      claimDispatch,
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(dispatch.calls.map((c) => c.ticket)).not.toContain(LAPTOP_TICKET);
+  });
+
+  test("single-host roster: resolveLiveRoster is not consulted (multiHost gate short-circuits)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 1 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    let resolverCalled = false;
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleLaptop(),
+      dispatch,
+      hosts: ["mini"], // single-host
+      hostName: "mini",
+      resolveLiveRoster: () => { resolverCalled = true; return ["mini"]; },
+      claimDispatch: recordClaim({ won: false, generation: null }),
+      verifyDispatched: verifyOk,
+      liveBackgroundCount: () => 0,
+      now: () => 1_000,
+    });
+    expect(resolverCalled).toBe(false); // multiHost===false → guard skipped resolver
+    expect(dispatch.calls).toHaveLength(1); // ticket still dispatched (single-host no-op)
   });
 });
