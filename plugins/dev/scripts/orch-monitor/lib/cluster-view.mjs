@@ -70,6 +70,9 @@ export function assembleClusterView({
   now = Date.now(),
   intervalMs,
   graceMs,
+  // CTL-1095: injectable drain reader. Default → no drain info (fail-open:
+  // draining:false). Production wires it from the local isDraining + inFlightCount.
+  drainReader = null,
 }) {
   const roster = Array.isArray(hosts) && hosts.length > 0 ? hosts : [];
   // SINGLE-HOST: roster absent or length 1 → identity no-op. Everything belongs
@@ -86,6 +89,17 @@ export function assembleClusterView({
       : heartbeatReader({ logPath });
   const liveness = overlayClusterLiveness(roster, lastSeen, { now, intervalMs, graceMs });
   const livenessByHost = new Map(liveness.map((n) => [n.host, n]));
+
+  // CTL-1095: resolve drain state per host — fail-open on error or absent reader.
+  const resolveDrain = (host) => {
+    if (!drainReader || host === null) return { draining: false, inFlightCount: 0 };
+    try {
+      const d = drainReader(host);
+      return { draining: Boolean(d?.draining), inFlightCount: d?.inFlightCount ?? 0 };
+    } catch {
+      return { draining: false, inFlightCount: 0 };
+    }
+  };
 
   // ── grouping ──────────────────────────────────────────────────────────────
   // A node entry is { host, status, lastSeen, tickets[] }. The `null` host is the
@@ -106,6 +120,7 @@ export function assembleClusterView({
           host,
           status: node.status,
           lastSeen: node.lastSeen,
+          ...resolveDrain(host),
           tickets: tickets.map((t) => makeTicket(t, host)),
         },
       ],
@@ -134,7 +149,7 @@ export function assembleClusterView({
       continue;
     }
     const node = livenessByHost.get(host) ?? { status: "offline", lastSeen: null };
-    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, tickets: groupTickets });
+    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), tickets: groupTickets });
   }
 
   return {

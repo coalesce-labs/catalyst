@@ -2041,3 +2041,38 @@ describe("CTL-1028 — triage forwards + persists cluster generation (monitor di
     }
   });
 });
+
+describe("dispatchTriage — drain gate (CTL-1095)", () => {
+  const orchDir = "/orch-1095-drain";
+
+  function toTriageEvent(ticket) {
+    return {
+      event: "linear.issue.state_changed",
+      detail: { ticket, teamKey: "ENG", toState: "Triage" },
+    };
+  }
+
+  test("dispatchTriage returns false and does not dispatch while draining", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-DR1"), {
+      dispatch,
+      orchDir,
+      isDraining: () => true,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("dispatchTriage dispatches normally when not draining (regression guard)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-DR2"), {
+      dispatch,
+      orchDir,
+      isDraining: () => false,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+});
