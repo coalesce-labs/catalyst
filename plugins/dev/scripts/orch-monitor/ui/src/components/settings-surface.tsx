@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/toggle-group";
 import { useSidebar } from "@/components/ui/sidebar";
 import { THEMES, THEME_LABEL, useTheme } from "@/lib/theme";
+import { BRANDS, BRAND_LABEL, useBrand } from "@/lib/brand";
 import {
   LANDING_SURFACES,
   readLandingSurface,
@@ -130,8 +131,11 @@ export function SettingsSurface() {
   const patch = (d: Partial<BoardPrefs>) =>
     setBoardPrefs((p) => patchBoardPrefs(p, d));
 
-  // Theme — the SHELL3 theme system (`.dark` class + catalyst:theme key).
+  // Theme — TWO orthogonal axes (CTL-1099):
+  //   MODE  → the SHELL3 theme system (`.dark` class + catalyst:theme key).
+  //   BRAND → the CTL-1099 brand system (`data-theme` attr + catalyst:brand key).
   const { theme, setTheme } = useTheme();
+  const { brand, setBrand } = useBrand();
 
   // Sidebar collapse — the shell's controlled provider (persisted by the
   // shell's writeSidebarOpen effect, SHELL4).
@@ -223,15 +227,26 @@ export function SettingsSurface() {
         </Section>
 
         {/* ── Theme ──────────────────────────────────────────────────────────── */}
+        {/* CTL-1099: two orthogonal axes. "Appearance" = MODE (dark ⇄ light, the
+            SHELL3 `.dark` class). "Theme" = BRAND (Warm ⇄ Slate, the data-theme
+            attribute). Warm is the no-attribute default. */}
         <Section
           title="Theme"
-          description="Calm dark is the default. The footer toggle writes this same choice."
+          description="Warm is the default theme; Slate is the cooler graphite alternative. Appearance picks dark or light mode."
         >
           <Field
             label="Appearance"
+            hint="Dark or light mode — the footer toggle writes this same choice."
             value={theme}
             onChange={(v) => setTheme(v)}
             options={THEMES.map((t) => ({ k: t, label: THEME_LABEL[t] }))}
+          />
+          <Field
+            label="Theme"
+            hint="Warm (terracotta) or Slate (Linear blue/graphite)."
+            value={brand}
+            onChange={(v) => setBrand(v)}
+            options={BRANDS.map((b) => ({ k: b, label: BRAND_LABEL[b] }))}
           />
         </Section>
 

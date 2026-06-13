@@ -43,7 +43,11 @@
   --color-border-subtle: var(--border-subtle);
   --color-fg: var(--fg);
   --color-muted: var(--fg-muted);
-  --color-accent: #5e9ee8;
+  /* CTL-1099: accent is now a per-theme/brand var (was the literal blue #5e9ee8),
+     so text-accent + every var(--color-accent) consumer (md-content links,
+     ticket-ref pills, blockquote borders, prose-invert links) flips with the
+     brand axis: terracotta in warm (light + dark), Linear-blue in slate. */
+  --color-accent: var(--accent);
   --color-green: #41bd7d;
   --color-red: #e36b6b;
   --color-yellow: #d9a843;
@@ -128,6 +132,10 @@
   --color-light-fg: #2b2722;
   --color-light-muted: #76705f;
   --color-light-accent: #a9512f; /* CTL-1071: terracotta accent (warm-light only) */
+  /* CTL-1099: --accent is the per-brand accent var --color-accent now resolves to
+     (@theme inline). On warm-light it IS the terracotta light accent; this also
+     corrects text-accent, which previously resolved to a stray blue in :root. */
+  --accent: var(--color-light-accent);
 
   /* CTL-1033: warm-light SEMANTIC ladder (same upward direction as dark):
      chrome darkest-tinted → canvas → subtle → card → elevated (lightest paper).
@@ -195,22 +203,21 @@
   --sidebar-ring: var(--color-light-accent);
 }
 
-/* CTL-893 / SHELL3 — the CALM-DARK theme (the boot default). These are the
-   exact dark mappings that previously lived on `:root` (CTL-891 / SHELL1),
-   now scoped to `.dark` so the toggle can flip between the two themes. */
+/* CTL-1099 — base `.dark` is now the WARM-DARK theme (the boot default, FOUC-free:
+   no data-theme attribute needed). Charcoal ramp extracted VERBATIM from
+   mockups/governance-rulebook-v2-textbook.html :root (sidebar-bg #11100e → hairline
+   #34312a), remapped onto the app's semantic surface ladder. Accent is TERRACOTTA
+   (#d28e63), NOT the textbook's amber clay #e8ad4a. The prior calm-dark
+   blue-graphite identity (CTL-893 / SHELL3) moves verbatim to
+   `.dark[data-theme="slate"]` (the slate brand override, appended below). */
 .dark {
-  /* CTL-1033: per-theme dark SEMANTIC elevation ladder (OKLCH-derived, blue-tinted
-     hue H≈257 preserved; +0.04–0.06 L between neighbors so cards FLOAT, not emboss).
-     chrome (anchor, sidebar GOOD — unchanged) → canvas → subtle (lane bands/zebra) →
-     card → elevated (popovers). --surface-hover is the interaction tint (top, NOT an
-     elevation level). The previous ramp's card step was a +0.03 imperceptible nudge;
-     the new card sits +0.089 L above canvas → a clearly visible step. */
-  --surface-chrome: #0e1116; /* chrome (sidebar/nav/footer) — anchor, UNCHANGED */
-  --surface-canvas: #181d24; /* every route's content shell */
-  --surface-subtle: #20262f; /* lane bands, zebra, column-header chips, inset wells */
-  --surface-card: #2b333d; /* cards / panels */
-  --surface-elevated: #39424f; /* popovers, command palette, dropdowns, modals */
-  --surface-hover: #434d5b; /* hover fills, scrollbar thumbs/tracks (interaction) */
+  /* warm-charcoal semantic elevation ladder (monotonic, +luminance each step) */
+  --surface-chrome: #11100e; /* chrome (sidebar/nav/footer) — anchor (textbook --sidebar-bg) */
+  --surface-canvas: #161513; /* content shell (textbook --canvas) */
+  --surface-subtle: #1b1a17; /* lane bands / zebra / inset wells (textbook --panel) */
+  --surface-card: #1e1d1a; /* cards / panels (textbook --surface) */
+  --surface-elevated: #242220; /* popovers / palette / dropdowns (textbook --surface-2) */
+  --surface-hover: #2e2c27; /* hover fills / scrollbar thumbs (textbook --border) — interaction, EXEMPT */
   /* Numeric aliases onto the semantic ladder (back-compat for --surface-N + the
      shadcn bridge below). --surface-3 → elevated, --surface-4 → hover. */
   --surface-0: var(--surface-chrome);
@@ -218,16 +225,18 @@
   --surface-2: var(--surface-card);
   --surface-3: var(--surface-elevated);
   --surface-4: var(--surface-hover);
-  /* CTL-1033: alpha-WHITE borders, scaled inversely with surface lightness (the
-     embossing cure's garnish — lightness is load-bearing, borders are the edge). */
+  /* warm hairline borders (textbook --border / --border-soft family). Keep the
+     alpha-white form so card edges read on the charcoal ramp like the prior dark. */
   --border-strong: rgba(255, 255, 255, 0.11); /* inputs, interactive outlines */
   --border-subtle: rgba(255, 255, 255, 0.07); /* card edges, in-card hairlines */
-  --fg: #edf1f7;
-  --fg-muted: #9ba6b5;
+  --fg: #e9e5dc; /* textbook --ink */
+  --fg-muted: #a39d91; /* textbook --ink-dim */
+  /* warm-dark accent — terracotta (NOT amber). Drives --primary/--ring/--sidebar-primary. */
+  --accent: #d28e63;
 
   /* CTL-1033: dark card lift — soft ambient outer shadow + inset top-edge highlight
      (the standard Stripe/Linear/Vercel combo, the single best embossing cure). Card
-     bg is the PRIMARY lift (lightness); the shadow is the secondary signal. */
+     bg is the PRIMARY lift (lightness); the shadow is the secondary signal. UNCHANGED. */
   --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
   --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
 
@@ -248,7 +257,7 @@
   --ring: var(--color-accent);
 
   /* OBS-1: categorical chart palette (same values as :root — the palette is
-     theme-independent; status color is reserved for health, not series). */
+     theme-invariant; status color is reserved for health, not series). UNCHANGED. */
   --chart-1: #4ea1ff;
   --chart-2: #39d07a;
   --chart-3: #eabc3b;
@@ -266,6 +275,73 @@
   --sidebar-accent: var(--surface-2); /* gentler active-item lift on the darker rail */
   --sidebar-accent-foreground: var(--color-fg);
   --sidebar-border: var(--border-subtle); /* seam already separated by luminance */
+  --sidebar-ring: var(--color-accent);
+}
+
+/* ── CTL-1099 :root[data-theme="slate"] = SLATE-LIGHT. The pre-CTL-1071
+   blue-on-paper light identity. Reuses warm-light's paper-warm neutral surface ramp
+   VERBATIM (inherited from :root above) and ONLY overrides the accent family to
+   Linear blue #1f6feb. Placed AFTER :root so it wins on specificity-equal
+   (:root[data-theme] is higher specificity than :root anyway). Must NOT redefine any
+   --color-{green,red,yellow,live} or --chart-* (semantic-invariant contract). ── */
+:root[data-theme="slate"] {
+  --accent: #1f6feb; /* drives text-accent + all var(--color-accent) */
+  --primary: #1f6feb;
+  --ring: #1f6feb;
+  --sidebar-primary: #1f6feb;
+  --sidebar-ring: #1f6feb;
+  --input: var(--color-light-border); /* unchanged; restated for clarity */
+  /* surfaces (--surface-*, --fg, --border-*, --background, --card, --popover,
+     --secondary, --destructive, --chart-*) all INHERIT from :root unchanged —
+     slate only forks the accent. Do NOT restate the surface ramp. */
+}
+
+/* ── CTL-1099 .dark[data-theme="slate"] = SLATE-DARK. The CURRENT/old calm-dark
+   blue-graphite identity (CTL-893 / SHELL3, CTL-1033 ladder) moved VERBATIM. The
+   blue accent #5e9ee8 flows through --primary/--ring/--sidebar-primary via
+   var(--color-accent) = var(--accent). Must NOT redefine any --color-{green,red,
+   yellow,live} or --chart-* beyond the historical --chart-5 already shared. ── */
+.dark[data-theme="slate"] {
+  --surface-chrome: #0e1116; /* chrome (sidebar/nav/footer) — anchor */
+  --surface-canvas: #181d24; /* every route's content shell */
+  --surface-subtle: #20262f; /* lane bands, zebra, column-header chips, inset wells */
+  --surface-card: #2b333d; /* cards / panels */
+  --surface-elevated: #39424f; /* popovers, command palette, dropdowns, modals */
+  --surface-hover: #434d5b; /* hover fills, scrollbar thumbs/tracks (interaction) */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: var(--surface-elevated);
+  --surface-4: var(--surface-hover);
+  --border-strong: rgba(255, 255, 255, 0.11);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --fg: #edf1f7;
+  --fg-muted: #9ba6b5;
+  --accent: #5e9ee8; /* slate-dark accent — Linear-graphite blue */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
+  --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --background: var(--surface-1);
+  --foreground: var(--color-fg);
+  --card: var(--surface-2);
+  --card-foreground: var(--color-fg);
+  --popover: var(--surface-3);
+  --popover-foreground: var(--color-fg);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--surface-0);
+  --secondary: var(--surface-3);
+  --secondary-foreground: var(--color-fg);
+  --muted-foreground: var(--color-muted);
+  --accent-foreground: var(--color-fg);
+  --destructive: var(--color-red);
+  --input: var(--border-strong);
+  --ring: var(--color-accent);
+  --sidebar: var(--surface-0);
+  --sidebar-foreground: var(--color-fg);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--surface-0);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--color-fg);
+  --sidebar-border: var(--border-subtle);
   --sidebar-ring: var(--color-accent);
 }
 

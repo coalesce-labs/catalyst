@@ -38,6 +38,26 @@ function selectorBlock(selector: string): string {
   throw new Error(`unbalanced block for ${selector}`);
 }
 
+/** Balanced body of the CTL-1099 `.dark[data-theme="slate"]` slate-dark rule.
+ *  (The generic selectorBlock can't escape the `[...]` attribute selector, so
+ *  match the literal rule head directly.) */
+function slateDarkBlock(): string {
+  // Match the literal rule HEAD (selector immediately followed by optional
+  // whitespace + `{`), not a mention inside a comment.
+  const m = /\.dark\[data-theme="slate"\]\s*\{/.exec(css);
+  if (!m) throw new Error("slate-dark rule not found");
+  const open = css.indexOf("{", m.index);
+  let depth = 0;
+  for (let i = open; i < css.length; i++) {
+    if (css[i] === "{") depth++;
+    else if (css[i] === "}") {
+      depth--;
+      if (depth === 0) return css.slice(open, i + 1);
+    }
+  }
+  throw new Error("unbalanced slate-dark block");
+}
+
 // ── Phase 1 (Pass A): warm-light accent fork ──────────────────────────────
 
 describe("CTL-1071 Pass A — warm-light accent fork", () => {
@@ -46,8 +66,14 @@ describe("CTL-1071 Pass A — warm-light accent fork", () => {
     expect(tokenHex(root, "--color-light-accent")).toBe("#a9512f");
     expect(root).not.toContain("#1f6feb");
   });
-  it("dark accent is untouched (still blue)", () => {
-    expect(css).toContain("--color-accent: #5e9ee8");
+  it("warm-dark accent is terracotta; slate-dark preserves blue (CTL-1099)", () => {
+    // CTL-1099: the base `.dark` accent is now TERRACOTTA, and the @theme inline
+    // `--color-accent` became `var(--accent)` (so it flips with the brand axis).
+    // The OLD blue identity moved verbatim to `.dark[data-theme="slate"]`.
+    expect(selectorBlock(".dark").trim()).toContain("--accent: #d28e63");
+    expect(slateDarkBlock()).toContain("--accent: #5e9ee8");
+    // The @theme inline accent is the per-brand var, not a literal blue.
+    expect(css).toContain("--color-accent: var(--accent)");
   });
 });
 

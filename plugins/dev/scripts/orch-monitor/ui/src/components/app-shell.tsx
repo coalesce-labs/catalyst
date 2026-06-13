@@ -53,6 +53,7 @@ import { useTicketSearch } from "@/hooks/use-ticket-search";
 import { ticketSearchItems } from "@/lib/ticket-search-items";
 import { ticketDetailHref } from "@/board/detail-nav";
 import { useTheme } from "@/lib/theme";
+import { useBrand } from "@/lib/brand";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import {
   Breadcrumb,
@@ -299,13 +300,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   }, [navigate]);
 
   // CTL-1024: theme toggle, sidebar toggle, and board-display commands in the palette.
+  // CTL-1099: brand cycle (Warm ⇄ Slate) too.
   const { toggle: toggleTheme } = useTheme();
+  const { cycle: cycleBrand } = useBrand();
   const setBoardPrefs = useSetAtom(boardPrefsAtom);
   const settingsActions = useMemo(
     () =>
       visibleActions(
         buildSettingsActions({
           toggleTheme,
+          cycleBrand,
           toggleSidebar: () => setOpen((o) => !o),
           setGroupBy: (groupBy) => setBoardPrefs((p) => patchBoardPrefs(p, { groupBy })),
           setOrder: (order) => setBoardPrefs((p) => patchBoardPrefs(p, { order })),
@@ -313,7 +317,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         }),
         { surface },
       ),
-    [toggleTheme, setBoardPrefs, surface],
+    [toggleTheme, cycleBrand, setBoardPrefs, surface],
   );
 
   // CTL-1024: live ticket search via /api/search, debounced in the hook.

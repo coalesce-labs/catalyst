@@ -19,6 +19,11 @@ import {
   readStoredTheme,
   applyTheme,
 } from "../ui/src/lib/theme";
+import {
+  BRANDS,
+  DEFAULT_BRAND,
+  BRAND_STORAGE_KEY,
+} from "../ui/src/lib/brand";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -258,6 +263,22 @@ describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
 describe("theme metadata is exhaustive (CTL-893)", () => {
   it("every theme is labelled", () => {
     for (const t of THEMES) expect(THEME_LABEL[t]).toBeTruthy();
+  });
+});
+
+// ── CTL-1099: the orthogonal BRAND axis (Warm / Slate) ───────────────────────
+describe("brand axis is the second, orthogonal theme dimension (CTL-1099)", () => {
+  it("declares exactly the two brands warm + slate, default warm, pinned key", () => {
+    expect([...BRANDS]).toEqual(["warm", "slate"]);
+    expect(DEFAULT_BRAND).toBe("warm");
+    expect(BRAND_STORAGE_KEY).toBe("catalyst:brand");
+  });
+
+  it("the Settings surface + the shell both wire the brand hook (useBrand)", () => {
+    const settingsSrc = read("components/settings-surface.tsx");
+    const shellSrc = read("components/app-shell.tsx");
+    expect(settingsSrc).toContain("useBrand");
+    expect(shellSrc).toContain("useBrand");
   });
 });
 
