@@ -47,6 +47,8 @@ import {
   beliefRecent,
   beliefCfg,
 } from "./lib/belief-store-queries.mjs";
+// CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
+import { assembleJourney } from "./lib/journey.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -2900,6 +2902,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
             eventCount24h: stats.eventCount24h,
             eventCount24hByRepo: stats.eventCount24hByRepo,
           });
+        }
+
+        // CTL-1100: GET /api/journey/:ticket — chronological hop timeline + gates + verdict.
+        // bun:sqlite-free (assembleJourney uses sqlite3 binary via ticket-runs.mjs).
+        // Mirrors ticketRunsMatch guard for input validation.
+        const journeyMatch = url.pathname.match(/^\/api\/journey\/([^/]+)$/);
+        if (journeyMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(journeyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          return Response.json(await assembleJourney(ticket, {
+            orchDir: wtDir,
+            workersDir: `${wtDir}/workers`,
+            dbPath,
+          }));
         }
 
         // CTL-886 (BFF4) keystone P2: a ticket's full run history. One run entity
