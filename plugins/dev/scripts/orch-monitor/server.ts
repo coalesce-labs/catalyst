@@ -2921,7 +2921,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(await assembleJourney(ticket, {
             orchDir: wtDir,
             workersDir: `${wtDir}/workers`,
-            dbPath,
+            dbPath: dbPath ?? undefined,
           }));
         }
 

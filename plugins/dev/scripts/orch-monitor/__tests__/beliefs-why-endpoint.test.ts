@@ -66,6 +66,7 @@ beforeAll(async () => {
     port: 0,
     startWatcher: false,
     dbPath,
+    wtDir: seededDir,
     beliefStoreDbPath: beliefPath,
   });
   seededUrl = `http://localhost:${seededServer.port}`;
@@ -89,6 +90,7 @@ beforeAll(() => {
     port: 0,
     startWatcher: false,
     dbPath,
+    wtDir: absentDir,
     beliefStoreDbPath: join(absentDir, "nonexistent.db"), // absent
   });
   absentUrl = `http://localhost:${absentServer.port}`;

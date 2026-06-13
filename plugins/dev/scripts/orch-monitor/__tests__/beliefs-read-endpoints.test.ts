@@ -27,6 +27,7 @@ const {
 };
 
 // Load RULE_MANIFEST via computed specifier (no static bun:sqlite chain).
+// @ts-ignore — execution-core mjs module has no .d.mts; runtime types are correct
 const rulesMod = await import("../../execution-core/beliefs/rules.mjs");
 const { RULE_MANIFEST } = rulesMod as { RULE_MANIFEST: { strata: unknown[]; rules: Array<{ rule_id: string; name: string }> } };
 
@@ -238,6 +239,7 @@ beforeAll(() => {
     port: 0,
     startWatcher: false,
     dbPath,
+    wtDir: tmpDir,
     beliefStoreDbPath: beliefsDbPath, // explicitly absent — forces degradation
   });
   baseUrl = `http://localhost:${server.port}`;
@@ -274,6 +276,7 @@ describe("GET /api/beliefs/* HTTP (with seeded db)", () => {
       port: 0,
       startWatcher: false,
       dbPath,
+      wtDir: seededDir,
       beliefStoreDbPath: beliefPath,
     });
     seededUrl = `http://localhost:${seededServer.port}`;

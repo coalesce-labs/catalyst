@@ -27,7 +27,7 @@ let tmpDir: string;
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "fsm-descriptor-test-"));
   const dbPath = join(tmpDir, "catalyst.db");
-  server = createServer({ port: 0, startWatcher: false, dbPath });
+  server = createServer({ port: 0, startWatcher: false, dbPath, wtDir: tmpDir });
   baseUrl = `http://localhost:${server.port}`;
 });
 
