@@ -298,11 +298,37 @@ Then the empty-branch self-emit gate (CTL-608). Runs **before** the terminal `--
 a worker cannot self-report implement success on an empty ticket branch (0 commits ahead of its
 integration base). This is the ADV-1128 failure mode: sub-agent commits stranded in nested
 `.claude/worktrees/agent-*` worktrees never reach `refs/heads/<ticket>`, leaving HEAD at base and
-opening an empty PR. Uniquely-named fence so the e2e harness can extract+exercise it; uses only
+opening an empty PR. The gate now also refuses when HEAD is on a `worktree-*` branch or the
+worktree resolves under `.claude/worktrees/` (CTL-1105) — the stranding case the commits-ahead
+check alone cannot see. Uniquely-named fence so the e2e harness can extract+exercise it; uses only
 POSIX/zsh-safe `git rev-list --count` (no `${VAR,,}` / `shopt`). Fail-open (warn + allow) only when
 the base is unresolvable, mirroring the mirror block's `_base branch unknown_` tolerance.
 
 ```bash phase-implement-empty-branch-gate
+# CTL-1105: stranded-in-transient-worktree guard. Claude Code bgIsolation can
+# migrate a phase worker into .claude/worktrees/<name> on a worktree-* branch;
+# commits there never reach refs/heads/<ticket>. The CTL-608 commits-ahead arm
+# below does NOT catch this (the transient worktree has real commits), so check
+# it explicitly first. Deterministic + local; POSIX/zsh-safe.
+GATE_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+GATE_BRANCH="$(git branch --show-current 2>/dev/null || true)"
+case "${GATE_TOPLEVEL}" in
+  */.claude/worktrees/*) GATE_STRANDED="claude_worktree:${GATE_TOPLEVEL}";;
+  *) GATE_STRANDED="";;
+esac
+case "${GATE_BRANCH}" in
+  worktree-*) GATE_STRANDED="${GATE_STRANDED:-transient_branch:${GATE_BRANCH}}";;
+esac
+if [[ -n "${GATE_STRANDED}" ]]; then
+  echo "phase-implement: stranded in a transient isolation worktree (${GATE_STRANDED}); refusing to emit complete (CTL-1105)" >&2
+  "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+    --phase "$PHASE" --ticket "$TICKET" --status failed \
+    --reason "stranded_transient_worktree:${GATE_STRANDED}"
+  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+    "phase-implement failed: stranded in transient worktree (${GATE_STRANDED})" \
+    --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+  exit 1
+fi
 EMPTY_BRANCH_GATE_BASE=""
 if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   EMPTY_BRANCH_GATE_BASE="origin/main"

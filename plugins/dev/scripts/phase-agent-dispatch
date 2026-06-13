@@ -816,7 +816,12 @@ compose_worker_settings_json() {
          + (if $ticket == "" then {} else { "CATALYST_TICKET": $ticket } end)
          + (if $generation == "" then {} else { "CATALYST_GENERATION": $generation } end)
          + (if $cluster_generation == "" then {} else { "CATALYST_CLUSTER_GENERATION": $cluster_generation } end)
-       )
+       ),
+       # CTL-1105: phase workers run with cwd = the ticket worktree (not under
+       # .claude/worktrees/), so the default bgIsolation would force EnterWorktree
+       # and strand commits on a transient worktree-* branch. Opt out so the worker
+       # edits the ticket worktree directly. --settings MERGES with the user settings.
+       worktree: { bgIsolation: "none" }
      }
      + (if $have_statusline
         then { statusLine: { type: "command", command: $statusline_cmd } }

@@ -2099,6 +2099,37 @@ assert_eq "true" "$T64_HAS_GEN" "CATALYST_GENERATION still present alongside the
 assert_eq "yes" "$T64_VALID" "settings JSON valid with CATALYST_CLUSTER_GENERATION absent"
 
 echo ""
+echo "Test 65 (CTL-1105): spawn carries --settings with worktree.bgIsolation = none"
+fresh_env t65
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{ "catalyst": { "projectKey": "test-proj" } }
+EOF
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_T65="$(settings_json_from_log)"
+T65_BG_ISO=$(echo "$SETTINGS_T65" | jq -r '.worktree.bgIsolation // empty' 2>/dev/null)
+assert_eq "none" "$T65_BG_ISO" ".settings.worktree.bgIsolation = none"
+
+echo ""
+echo "Test 66 (CTL-1105): worktree.bgIsolation coexists with telemetry env + statusLine"
+T66_HAS_ENV=$(echo "$SETTINGS_T65" | jq -r '.env | has("CLAUDE_CODE_ENABLE_TELEMETRY")' 2>/dev/null)
+T66_VALID=$(echo "$SETTINGS_T65" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "true" "$T66_HAS_ENV" "settings still carries the telemetry env block alongside worktree"
+assert_eq "yes" "$T66_VALID" "settings JSON remains valid with worktree key present"
+
+echo ""
+echo "Test 67 (CTL-1105): --dry-run JSON includes worktree.bgIsolation = none"
+fresh_env t67
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{ "catalyst": { "projectKey": "test-proj" } }
+EOF
+DRY_OUT_T67=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+T67_BG_ISO=$(echo "$DRY_OUT_T67" | jq -r '.settings.worktree.bgIsolation // empty' 2>/dev/null)
+assert_eq "none" "$T67_BG_ISO" "dry-run .settings.worktree.bgIsolation = none"
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-dispatch: ${PASSES} passed, ${FAILURES} failed"
 if [[ $FAILURES -gt 0 ]]; then
