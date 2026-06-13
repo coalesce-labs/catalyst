@@ -12,7 +12,7 @@
 // seam-injection convention.
 
 import { spawn, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, renameSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { homedir } from "node:os";
 import { log } from "./config.mjs";
@@ -125,6 +125,35 @@ function defaultConfirmReload(component) {
   }
 }
 
+// pidFilePathForComponent — resolves the PID file path for a named component.
+// Mirrors the bash wrappers' env overrides + default paths so JS and bash agree.
+// Returns null for components with no probeable PID file (e.g. broker). (CTL-1089)
+export function pidFilePathForComponent(name) {
+  if (name === "monitor")
+    return process.env.MONITOR_PID_FILE || resolve(homedir(), "catalyst", "monitor.pid");
+  if (name === "execution-core")
+    return process.env.EXECUTION_CORE_PID_FILE
+      || resolve(homedir(), "catalyst", "execution-core", "daemon.pid");
+  return null;
+}
+
+// defaultIsRunningFn — liveness probe via PID file + kill(pid, 0), the Node
+// equivalent of the wrappers' `is_alive`. Conservative by design (CTL-1089):
+// any uncertainty resolves to "not running" so hot-reload never starts a
+// daemon the operator deliberately left stopped.
+export function defaultIsRunningFn(component) {
+  const pidPath = pidFilePathForComponent(component?.name);
+  if (!pidPath || !existsSync(pidPath)) return false;
+  try {
+    const pid = parseInt(readFileSync(pidPath, "utf8").trim(), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    process.kill(pid, 0); // throws ESRCH if gone, EPERM if unsignalable
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function defaultHandoffPath() {
   return resolve(homedir(), "catalyst", "broker", "reload-handoff.json");
 }
@@ -195,15 +224,26 @@ function performReload({
   getByteOffsetFn,
   logPath,
   confirmFn = defaultConfirmReload,
+  isRunningFn = defaultIsRunningFn,
   setTimeoutFn = setTimeout,
   confirmPollMs = STACK_RELOAD_CONFIRM_POLL_MS,
   confirmMaxAttempts = STACK_RELOAD_CONFIRM_MAX_ATTEMPTS,
 }) {
+  // CTL-1089: Partition reload candidates by running-state. Hot-reload must never
+  // start a daemon the operator deliberately left stopped. Unknown liveness → skip.
+  const toReload = [];
+  const skipped = [];
+  for (const c of decision.components) {
+    let running = false;
+    try { running = isRunningFn(c) !== false; } catch { running = false; }
+    (running ? toReload : skipped).push(c);
+  }
+
   emitFn?.({
     event: "stack.reload.started",
     orchestrator: null,
     worker: null,
-    detail: { components: decision.components.map((c) => c.name), ts: now },
+    detail: { components: toReload.map((c) => c.name), skipped: skipped.map((c) => c.name), ts: now },
   });
 
   // CTL-1077 remediate: restart each component, then CONFIRM it came back before
@@ -221,7 +261,7 @@ function performReload({
   const confirmed = [];
   const unconfirmed = [];
   const pending = [];
-  for (const c of decision.components) {
+  for (const c of toReload) {
     if (trySpawn(spawnFn, c.cmd, ["restart"])) {
       pending.push({ c, attempts: 0, retried: false });
     } else {
@@ -237,11 +277,12 @@ function performReload({
         orchestrator: null,
         worker: null,
         detail: {
-          components: decision.components.map((c) => ({
+          components: toReload.map((c) => ({
             name: c.name,
             old_sha: c.oldSha,
             new_sha: c.newSha,
           })),
+          skipped: skipped.map((c) => ({ name: c.name, reason: "not_running" })),
         },
       });
     } else {
@@ -260,6 +301,7 @@ function performReload({
             old_sha: c.oldSha,
             new_sha: c.newSha,
           })),
+          skipped: skipped.map((c) => ({ name: c.name, reason: "not_running" })),
         },
       });
     }
@@ -361,9 +403,9 @@ function performReload({
  * coalesced decisions (CTL-1077 remediate, #6) so a true broker-self-reload from
  * an earlier decision in the window is never dropped by a later false one.
  *
- * Injected seams: spawnFn, confirmFn, emitFn, writeHandoffFn, setTimeoutFn,
- * clearTimeoutFn, now, nowFn, currentByteOffset, getByteOffsetFn, logPath — for
- * deterministic testing. `now` is the event-capture instant (used for the
+ * Injected seams: spawnFn, confirmFn, isRunningFn, emitFn, writeHandoffFn,
+ * setTimeoutFn, clearTimeoutFn, now, nowFn, currentByteOffset, getByteOffsetFn,
+ * logPath — for deterministic testing. `now` is the event-capture instant (used for the
  * started-event detail); `nowFn` is evaluated at handoff-write time (after the
  * debounce) so the staleness ts reflects when the handoff was actually persisted.
  * `getByteOffsetFn` (when supplied) is evaluated at handoff-write time so the
@@ -376,6 +418,7 @@ export function handleStackReloadEvent({
   loadedCommitRoot = null,
   spawnFn = defaultSpawnFn,
   confirmFn = defaultConfirmReload,
+  isRunningFn = defaultIsRunningFn,
   emitFn,
   now = Date.now(),
   nowFn = Date.now,
@@ -408,6 +451,7 @@ export function handleStackReloadEvent({
     // Capture closure seams for the debounce callback.
     const capturedSpawnFn = spawnFn;
     const capturedConfirmFn = confirmFn;
+    const capturedIsRunningFn = isRunningFn;
     const capturedEmitFn = emitFn;
     const capturedNow = now;
     const capturedNowFn = nowFn;
@@ -428,6 +472,7 @@ export function handleStackReloadEvent({
           decision: d,
           spawnFn: capturedSpawnFn,
           confirmFn: capturedConfirmFn,
+          isRunningFn: capturedIsRunningFn,
           emitFn: capturedEmitFn,
           now: capturedNow,
           nowFn: capturedNowFn,

@@ -12,13 +12,17 @@
 //
 // Run: bun test plugins/dev/scripts/broker/stack-reload.test.mjs
 
-import { describe, test, expect, beforeEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { writeFileSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import {
   decideStackReload,
   handleStackReloadEvent,
   __clearReloadStateForTest,
   STACK_RELOAD_DEBOUNCE_MS,
   STACK_RELOAD_CONFIRM_POLL_MS,
+  pidFilePathForComponent,
+  defaultIsRunningFn,
 } from "./stack-reload.mjs";
 
 // ─── fake-timer helper ───────────────────────────────────────────────────────
@@ -139,6 +143,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -164,6 +169,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
       results: [{ root: "/co", oldSha: "a", newSha: "a", changed: false }],
       loadedCommitRoot: "/co",
       spawnFn: (c, a) => spawned.push(`${c} ${a.join(" ")}`),
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -179,6 +185,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
         loadedCommitRoot: "/co",
         spawnFn: () => { throw new Error("boom"); },
         confirmFn: () => true,
+        isRunningFn: () => true,
         emitFn: () => {},
         now: 1000,
         ...immediate,
@@ -192,6 +199,7 @@ describe("handleStackReloadEvent — spawn + emit (Tier 1)", () => {
       results: null,
       loadedCommitRoot: "/co",
       spawnFn: (c, a) => spawned.push(`${c} ${a.join(" ")}`),
+      isRunningFn: () => true,
       emitFn: () => {},
       now: 1000,
       ...immediate,
@@ -213,6 +221,7 @@ describe("non-disruption contract (Phase 4)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: () => {},
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -243,6 +252,7 @@ describe("restart confirmation gating (CTL-1077 remediate)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd, args) => spawned.push(`${cmd} ${args.join(" ")}`),
       confirmFn: (c) => c.name !== "monitor", // monitor never rebinds its port
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -274,6 +284,7 @@ describe("restart confirmation gating (CTL-1077 remediate)", () => {
         calls[c.name] = (calls[c.name] || 0) + 1;
         return c.name !== "monitor" || calls[c.name] >= 2;
       },
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -291,6 +302,7 @@ describe("restart confirmation gating (CTL-1077 remediate)", () => {
       loadedCommitRoot: "/co",
       spawnFn: () => {},
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -308,6 +320,7 @@ describe("restart confirmation gating (CTL-1077 remediate)", () => {
         loadedCommitRoot: "/co",
         spawnFn: () => {},
         confirmFn: () => { throw new Error("lsof boom"); },
+        isRunningFn: () => true,
         emitFn: (e) => emitted.push(e),
         now: 1000,
         ...immediate,
@@ -330,6 +343,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => reloads.push(cmd),
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: () => {},
       setTimeoutFn: timers.setTimeoutFn,
       clearTimeoutFn: timers.clearTimeoutFn,
@@ -353,6 +367,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (c) => reloads.push(c),
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: () => {},
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -371,6 +386,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: () => {},
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 0,
       setTimeoutFn: timers.setTimeoutFn,
@@ -382,6 +398,7 @@ describe("trailing debounce — merge trains (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: () => {},
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 5_000,
       setTimeoutFn: timers.setTimeoutFn,
@@ -409,6 +426,7 @@ describe("broker self-reload (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => spawned.push(cmd),
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 4096,
       emitFn: () => {},
@@ -431,6 +449,7 @@ describe("broker self-reload (Tier 2)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (c) => spawned.push(c),
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 10,
       emitFn: () => {},
@@ -451,6 +470,7 @@ describe("broker self-reload (Tier 2)", () => {
         loadedCommitRoot: "/co",
         spawnFn: () => {},
         confirmFn: () => true,
+        isRunningFn: () => true,
         writeHandoffFn: () => { throw new Error("disk full"); },
         currentByteOffset: 0,
         emitFn: () => {},
@@ -707,6 +727,148 @@ describe("self-reload handoff round-trip (write → resolveBootByteOffset)", () 
   });
 });
 
+// ─── running-state probe (CTL-1089) ─────────────────────────────────────────
+//
+// Hot-reload must never start a daemon the operator deliberately left stopped.
+// The isRunningFn seam partitions reload candidates into running (restarted)
+// and stopped (skipped) at performReload time — after the debounce — so the
+// probe reflects live state. Unknown liveness (throwing probe) resolves
+// to not-running (fail-safe direction).
+describe("running-state probe (CTL-1089)", () => {
+  beforeEach(() => __clearReloadStateForTest());
+
+  test("stopped execution-core is skipped, never restarted", () => {
+    const spawned = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd, args) => spawned.push([cmd, args]),
+      isRunningFn: (c) => c.name === "monitor",
+      confirmFn: () => true,
+      emitFn: () => {},
+      now: 0,
+      ...immediate,
+    });
+    expect(spawned.some(([cmd]) => cmd === "catalyst-monitor")).toBe(true);
+    expect(spawned.some(([cmd]) => cmd === "catalyst-execution-core")).toBe(false);
+  });
+
+  test("stopped execution-core appears in the skipped partition of events", () => {
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      isRunningFn: (c) => c.name === "monitor",
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+    const started = emitted.find((e) => e.event === "stack.reload.started");
+    expect(started.detail.components).toEqual(["monitor"]);
+    expect(started.detail.skipped).toEqual(["execution-core"]);
+    const complete = emitted.find((e) => e.event === "stack.reload.complete");
+    expect(complete.detail.components.map((c) => c.name)).toEqual(["monitor"]);
+    expect(complete.detail.skipped).toEqual([{ name: "execution-core", reason: "not_running" }]);
+  });
+
+  test("both running → both restarted, empty skipped (no regression)", () => {
+    const spawned = [];
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd) => spawned.push(cmd),
+      isRunningFn: () => true,
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+    expect(spawned).toContain("catalyst-monitor");
+    expect(spawned).toContain("catalyst-execution-core");
+    const started = emitted.find((e) => e.event === "stack.reload.started");
+    expect(started.detail.skipped).toEqual([]);
+  });
+
+  test("all components stopped → nothing restarted, all skipped, still completes", () => {
+    const spawned = [];
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd, args) => spawned.push([cmd, args]),
+      isRunningFn: () => false,
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+    expect(spawned.some(([cmd]) => cmd === "catalyst-monitor")).toBe(false);
+    expect(spawned.some(([cmd]) => cmd === "catalyst-execution-core")).toBe(false);
+    const complete = emitted.find((e) => e.event === "stack.reload.complete");
+    expect(complete).toBeDefined();
+    expect(complete.detail.components).toEqual([]);
+    expect(complete.detail.skipped.map((s) => s.name).sort()).toEqual(["execution-core", "monitor"]);
+  });
+
+  test("all stopped but broker code changed → broker still self-reloads", () => {
+    const spawned = [];
+    const handoffs = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true, restartNeeded: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd) => spawned.push(cmd),
+      isRunningFn: () => false,
+      confirmFn: () => true,
+      writeHandoffFn: (h) => handoffs.push(h),
+      emitFn: () => {},
+      now: 0,
+      ...immediate,
+    });
+    expect(spawned.some((cmd) => cmd === "catalyst-monitor")).toBe(false);
+    expect(spawned.some((cmd) => cmd === "catalyst-execution-core")).toBe(false);
+    expect(spawned.some((cmd) => cmd === "catalyst-broker")).toBe(true);
+    expect(handoffs.length).toBe(1);
+  });
+
+  test("skipped component is NOT counted as unconfirmed/degraded", () => {
+    const emitted = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: () => {},
+      isRunningFn: (c) => c.name === "monitor",
+      confirmFn: () => true,
+      emitFn: (e) => emitted.push(e),
+      now: 0,
+      ...immediate,
+    });
+    const events = emitted.map((e) => e.event);
+    expect(events).toContain("stack.reload.complete");
+    expect(events).not.toContain("stack.reload.degraded");
+  });
+
+  test("a throwing isRunningFn is treated as not-running (fail-safe, no throw)", () => {
+    const spawned = [];
+    expect(() =>
+      handleStackReloadEvent({
+        results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+        loadedCommitRoot: "/co",
+        spawnFn: (cmd) => spawned.push(cmd),
+        isRunningFn: () => { throw new Error("probe boom"); },
+        confirmFn: () => true,
+        emitFn: () => {},
+        now: 0,
+        ...immediate,
+      })
+    ).not.toThrow();
+    expect(spawned.some((cmd) => cmd === "catalyst-monitor")).toBe(false);
+    expect(spawned.some((cmd) => cmd === "catalyst-execution-core")).toBe(false);
+  });
+});
+
 // ─── remediate hardening (CTL-1077 remediate cycle) ──────────────────────────
 //
 // New behaviors added by the verify⇄remediate cycle:
@@ -730,6 +892,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
       // exec-core restart cannot even launch; monitor spawns fine.
       spawnFn: (cmd) => { if (cmd === "catalyst-execution-core") throw new Error("ENOENT"); },
       confirmFn: () => true,
+      isRunningFn: () => true,
       emitFn: (e) => emitted.push(e),
       now: 1000,
       ...immediate,
@@ -751,6 +914,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
       // monitor + exec-core restart fine; only the broker self-reload spawn fails.
       spawnFn: (cmd) => { if (cmd === "catalyst-broker") throw new Error("ENOENT"); },
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: () => {},
       emitFn: (e) => emitted.push(e),
       now: 0,
@@ -779,6 +943,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
         confirmCalls++;
         return confirmCalls >= 3;
       },
+      isRunningFn: () => true,
       emitFn: () => {},
       now: 0,
       setTimeoutFn: fakeSetTimeout,
@@ -798,6 +963,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
       loadedCommitRoot: "/co",
       spawnFn: () => {},
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       getByteOffsetFn: () => liveOffset, // accessor read lazily at write time
       emitFn: () => {},
@@ -822,6 +988,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => spawned.push(cmd),
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 1,
       emitFn: () => {},
@@ -835,6 +1002,7 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
       loadedCommitRoot: "/co",
       spawnFn: (cmd) => spawned.push(cmd),
       confirmFn: () => true,
+      isRunningFn: () => true,
       writeHandoffFn: (h) => handoffs.push(h),
       currentByteOffset: 1,
       emitFn: () => {},
@@ -846,5 +1014,95 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
     // The broker self-reload from the first decision must NOT be dropped.
     expect(handoffs.length).toBe(1);
     expect(spawned).toContain("catalyst-broker");
+  });
+});
+
+// ─── defaultIsRunningFn / pidFilePathForComponent (CTL-1089) ────────────────
+//
+// Unit tests for the production liveness probe. Uses a temp file + env override
+// so no real daemon processes are needed — the test runner's own PID is
+// guaranteed alive; a synthetic dead PID is used for the not-running case.
+describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
+  let origMonitorPidFile, origExecCorePidFile, tmpFile;
+
+  beforeEach(() => {
+    origMonitorPidFile = process.env.MONITOR_PID_FILE;
+    origExecCorePidFile = process.env.EXECUTION_CORE_PID_FILE;
+    tmpFile = `${tmpdir()}/ctl1089-pid-test-${process.pid}.tmp`;
+  });
+
+  afterEach(() => {
+    if (origMonitorPidFile !== undefined) process.env.MONITOR_PID_FILE = origMonitorPidFile;
+    else delete process.env.MONITOR_PID_FILE;
+    if (origExecCorePidFile !== undefined) process.env.EXECUTION_CORE_PID_FILE = origExecCorePidFile;
+    else delete process.env.EXECUTION_CORE_PID_FILE;
+    try { unlinkSync(tmpFile); } catch { /* ok */ }
+  });
+
+  test("monitor → ends with catalyst/monitor.pid; honors MONITOR_PID_FILE override", () => {
+    const defaultPath = pidFilePathForComponent("monitor");
+    expect(defaultPath).toMatch(/catalyst[/\\]monitor\.pid$/);
+    process.env.MONITOR_PID_FILE = "/custom/monitor.pid";
+    expect(pidFilePathForComponent("monitor")).toBe("/custom/monitor.pid");
+  });
+
+  test("execution-core → ends with daemon.pid; honors EXECUTION_CORE_PID_FILE override", () => {
+    const defaultPath = pidFilePathForComponent("execution-core");
+    expect(defaultPath).toMatch(/catalyst[/\\]execution-core[/\\]daemon\.pid$/);
+    process.env.EXECUTION_CORE_PID_FILE = "/custom/exec-core.pid";
+    expect(pidFilePathForComponent("execution-core")).toBe("/custom/exec-core.pid");
+  });
+
+  test("unknown name (e.g. broker) → null", () => {
+    expect(pidFilePathForComponent("broker")).toBeNull();
+    expect(pidFilePathForComponent("nope")).toBeNull();
+    expect(pidFilePathForComponent(undefined)).toBeNull();
+  });
+
+  test("live pid → true", () => {
+    writeFileSync(tmpFile, String(process.pid));
+    process.env.EXECUTION_CORE_PID_FILE = tmpFile;
+    expect(defaultIsRunningFn({ name: "execution-core" })).toBe(true);
+  });
+
+  test("dead pid → false", () => {
+    writeFileSync(tmpFile, "2147483646");
+    process.env.EXECUTION_CORE_PID_FILE = tmpFile;
+    expect(defaultIsRunningFn({ name: "execution-core" })).toBe(false);
+  });
+
+  test("missing pid file → false", () => {
+    process.env.EXECUTION_CORE_PID_FILE = `${tmpdir()}/ctl1089-nonexistent-${process.pid}.pid`;
+    expect(defaultIsRunningFn({ name: "execution-core" })).toBe(false);
+  });
+
+  test("garbage pid file → false", () => {
+    writeFileSync(tmpFile, "not-a-number");
+    process.env.EXECUTION_CORE_PID_FILE = tmpFile;
+    expect(defaultIsRunningFn({ name: "execution-core" })).toBe(false);
+  });
+
+  test("unknown component → false", () => {
+    expect(defaultIsRunningFn({ name: "broker" })).toBe(false);
+    expect(defaultIsRunningFn({ name: "nope" })).toBe(false);
+  });
+
+  test("default is wired — omitting isRunningFn uses real probe; stopped components are skipped", () => {
+    // Point both overrides at non-existent paths → real probe returns false → skipped
+    process.env.MONITOR_PID_FILE = `${tmpdir()}/ctl1089-no-monitor-${process.pid}.pid`;
+    process.env.EXECUTION_CORE_PID_FILE = `${tmpdir()}/ctl1089-no-execcore-${process.pid}.pid`;
+    const spawned = [];
+    handleStackReloadEvent({
+      results: [{ root: "/co", oldSha: "a", newSha: "b", changed: true }],
+      loadedCommitRoot: "/co",
+      spawnFn: (cmd) => spawned.push(cmd),
+      confirmFn: () => true,
+      emitFn: () => {},
+      now: 0,
+      ...immediate,
+      // No isRunningFn — exercises the production default
+    });
+    expect(spawned.some((cmd) => cmd === "catalyst-monitor")).toBe(false);
+    expect(spawned.some((cmd) => cmd === "catalyst-execution-core")).toBe(false);
   });
 });
