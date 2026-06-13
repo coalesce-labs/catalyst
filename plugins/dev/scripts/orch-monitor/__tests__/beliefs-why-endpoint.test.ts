@@ -45,6 +45,7 @@ beforeAll(async () => {
     startWatcher: false,
     dbPath,
     wtDir: seededDir,
+    annotationsDbPath: join(seededDir, "annotations.db"), // hermetic — never the host ~/catalyst path
     beliefStoreDbPath: beliefPath,
   });
   seededUrl = `http://localhost:${seededServer.port}`;
@@ -69,6 +70,7 @@ beforeAll(() => {
     startWatcher: false,
     dbPath,
     wtDir: absentDir,
+    annotationsDbPath: join(absentDir, "annotations.db"), // hermetic — never the host ~/catalyst path
     beliefStoreDbPath: join(absentDir, "nonexistent.db"), // absent
   });
   absentUrl = `http://localhost:${absentServer.port}`;

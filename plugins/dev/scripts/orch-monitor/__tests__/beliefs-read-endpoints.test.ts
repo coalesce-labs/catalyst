@@ -240,6 +240,7 @@ beforeAll(() => {
     startWatcher: false,
     dbPath,
     wtDir: tmpDir,
+    annotationsDbPath: join(tmpDir, "annotations.db"), // hermetic — never the host ~/catalyst path
     beliefStoreDbPath: beliefsDbPath, // explicitly absent — forces degradation
   });
   baseUrl = `http://localhost:${server.port}`;
@@ -277,6 +278,7 @@ describe("GET /api/beliefs/* HTTP (with seeded db)", () => {
       startWatcher: false,
       dbPath,
       wtDir: seededDir,
+      annotationsDbPath: join(seededDir, "annotations.db"), // hermetic — never the host ~/catalyst path
       beliefStoreDbPath: beliefPath,
     });
     seededUrl = `http://localhost:${seededServer.port}`;

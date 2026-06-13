@@ -71,6 +71,7 @@ beforeAll(() => {
     startWatcher: false,
     dbPath: join(tmpDir, "catalyst.db"),
     wtDir: tmpDir,
+    annotationsDbPath: join(tmpDir, "annotations.db"), // hermetic — never the host ~/catalyst path
   });
   baseUrl = `http://localhost:${server.port}`;
 });

@@ -29,7 +29,7 @@ let tmpDir: string;
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "gov-rules-contract-"));
-  server = createServer({ port: 0, startWatcher: false, dbPath: join(tmpDir, "catalyst.db"), wtDir: tmpDir });
+  server = createServer({ port: 0, startWatcher: false, dbPath: join(tmpDir, "catalyst.db"), wtDir: tmpDir, annotationsDbPath: join(tmpDir, "annotations.db") });
   baseUrl = `http://localhost:${server.port}`;
 });
 
