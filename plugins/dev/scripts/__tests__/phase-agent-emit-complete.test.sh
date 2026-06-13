@@ -648,6 +648,57 @@ REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo
 assert_eq "phase.research.failed.CTL-1081" "$EVENT_NAME" "non-complete status: event name unchanged"
 assert_eq "tests red" "$REASON" "non-complete status: caller reason preserved"
 
+
+# ─── CTL-1097: artifact self-check resolves against signal.worktreePath ──────
+# A revived worker may re-emit from a cwd that is NOT the ticket worktree. The
+# gate must resolve the relative thoughts dir against signal.worktreePath
+# (CTL-615) rather than the emit process's cwd.
+
+echo ""
+echo "Test 43 (CTL-1097): revived worker — artifact in worktreePath, emit from a different cwd → complete stands"
+fresh_env t43
+WT_DIR="${TEST_DIR}/worktree"
+OTHER_CWD="${TEST_DIR}/elsewhere"
+mkdir -p "${WT_DIR}/thoughts/shared/plans" "${OTHER_CWD}"
+touch "${WT_DIR}/thoughts/shared/plans/2026-06-13-ctl-1097-x.md"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+jq -nc --arg wt "$WT_DIR" '{ticket:"CTL-1097",phase:"plan",worktreePath:$wt,generation:1,attempt:1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$OTHER_CWD" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.plan.complete.CTL-1097" "$EVENT_NAME" "worktreePath resolution: complete stands from foreign cwd"
+
+echo ""
+echo "Test 44 (CTL-1097): no worktreePath in signal (pre-CTL-615) → fail-open to cwd-relative"
+fresh_env t44
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/plans"
+touch "${PROJ_DIR}/thoughts/shared/plans/2026-06-13-ctl-1097-x.md"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+echo '{"ticket":"CTL-1097","phase":"plan","generation":1,"attempt":1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.plan.complete.CTL-1097" "$EVENT_NAME" "no worktreePath: cwd-relative fallback still passes"
+
+echo ""
+echo "Test 45 (CTL-1097): worktreePath set but artifact genuinely absent there → downgraded to failed"
+fresh_env t45
+WT_DIR="${TEST_DIR}/worktree"
+OTHER_CWD="${TEST_DIR}/elsewhere"
+mkdir -p "${WT_DIR}/thoughts/shared/plans" "${OTHER_CWD}"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+jq -nc --arg wt "$WT_DIR" '{ticket:"CTL-1097",phase:"plan",worktreePath:$wt,generation:1,attempt:1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$OTHER_CWD" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.plan.failed.CTL-1097" "$EVENT_NAME" "genuine miss in worktreePath → failed"
+assert_eq "artifact_not_gate_visible" "$REASON" "genuine miss preserves artifact_not_gate_visible reason"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

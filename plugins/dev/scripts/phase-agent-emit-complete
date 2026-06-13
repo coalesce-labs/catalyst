@@ -234,9 +234,26 @@ if [[ $STATUS == complete ]]; then
 	_OWN_DIR=""
 	_OWN_DIR="$(own_thoughts_artifact_dir_for_phase "$PHASE" 2>/dev/null || true)"
 	if [[ -n $_OWN_DIR ]]; then
-		if ! match_thoughts_artifact "$_OWN_DIR" "$TICKET" >/dev/null 2>&1; then
+		# CTL-1097: a revived worker can re-emit from outside the ticket worktree
+		# (repo root, ~, another worktree). The artifact lives under the worktree
+		# captured at dispatch (signal.worktreePath, CTL-615), so resolve the
+		# relative artifact dir against it before globbing — otherwise the gate
+		# inspects the wrong tree and downgrades a valid complete on a false miss.
+		# Fail-open: when worktreePath is absent/empty/non-dir (pre-CTL-615 signal,
+		# or no ORCH_DIR) or _OWN_DIR is already absolute, keep cwd-relative.
+		_GATE_DIR="$_OWN_DIR"
+		if [[ $_OWN_DIR != /* && -n $ORCH_DIR ]]; then
+			_WT_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+			if [[ -f $_WT_SIGNAL ]] && command -v jq >/dev/null 2>&1; then
+				_WT_FROM_SIGNAL=$(jq -r '.worktreePath // empty' "$_WT_SIGNAL" 2>/dev/null || echo "")
+				if [[ -n $_WT_FROM_SIGNAL && -d $_WT_FROM_SIGNAL ]]; then
+					_GATE_DIR="${_WT_FROM_SIGNAL%/}/${_OWN_DIR}"
+				fi
+			fi
+		fi
+		if ! match_thoughts_artifact "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
 			echo "phase-agent-emit-complete: refusing 'complete' for ${TICKET}/${PHASE}: own artifact not gate-visible" >&2
-			echo "  expected: ${_OWN_DIR}/*-${TICKET}*.md   cwd: $(pwd)" >&2
+			echo "  expected: ${_GATE_DIR}/*-${TICKET}*.md   cwd: $(pwd)" >&2
 			STATUS="failed"
 			REASON="artifact_not_gate_visible"
 		fi
