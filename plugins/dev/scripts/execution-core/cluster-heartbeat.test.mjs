@@ -35,7 +35,7 @@ describe("heartbeatUrl", () => {
 describe("parseHeartbeatMetadata", () => {
   test("normalises in_flight_tickets to an array", () => {
     expect(parseHeartbeatMetadata({ host: "mini", last_seen: "2026-06-13T01:00:00Z" }))
-      .toEqual({ host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] });
+      .toMatchObject({ host: "mini", last_seen: "2026-06-13T01:00:00Z", in_flight_tickets: [] });
     expect(parseHeartbeatMetadata({ in_flight_tickets: ["CTL-1"] }).in_flight_tickets)
       .toEqual(["CTL-1"]);
   });
@@ -47,12 +47,14 @@ describe("parseHeartbeatMetadata", () => {
   });
 
   test("missing/null metadata returns all-null record with empty tickets", () => {
-    expect(parseHeartbeatMetadata(undefined)).toEqual({
+    expect(parseHeartbeatMetadata(undefined)).toMatchObject({
       host: null,
       last_seen: null,
       in_flight_tickets: [],
+      max_parallel: null,
+      in_flight_count: 0,
     });
-    expect(parseHeartbeatMetadata(null)).toEqual({
+    expect(parseHeartbeatMetadata(null)).toMatchObject({
       host: null,
       last_seen: null,
       in_flight_tickets: [],

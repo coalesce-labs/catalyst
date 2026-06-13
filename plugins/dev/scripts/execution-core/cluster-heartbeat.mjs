@@ -77,15 +77,22 @@ const READ_ATTACHMENTS_QUERY = `query ReadFence($id: String!) {
 
 // parseHeartbeatMetadata — normalise an attachment's metadata into the flat
 // liveness record callers consume. `in_flight_tickets` is normalised to a
-// string array (non-string entries filtered). Exported for unit coverage.
+// string array (non-string entries filtered). CTL-1092: adds max_parallel
+// (finite int or null) and in_flight_count (int ≥ 0). Exported for unit coverage.
 export function parseHeartbeatMetadata(metadata) {
   const m = metadata ?? {};
   const raw = m.in_flight_tickets;
   const tickets = Array.isArray(raw) ? raw.filter((t) => typeof t === "string") : [];
+  const maxP = m.max_parallel;
+  const maxParallel = Number.isInteger(maxP) && maxP > 0 ? maxP : null;
+  const rawCount = m.in_flight_count;
+  const inFlightCount = Number.isInteger(rawCount) && rawCount >= 0 ? rawCount : tickets.length;
   return {
     host: m.host ?? null,
     last_seen: m.last_seen ?? null,
     in_flight_tickets: tickets,
+    max_parallel: maxParallel,
+    in_flight_count: inFlightCount,
   };
 }
 
@@ -121,13 +128,19 @@ const WRITE_ATTACHMENT_MUTATION = `mutation UpsertFence($input: AttachmentCreate
 // (resolve issue UUID, then attachmentCreate UPSERT). Returns the parsed
 // heartbeat record written, throwing on a resolution miss or success:false.
 export async function publishHeartbeat(
-  { anchorIssue, host, inFlightTickets = [] },
+  { anchorIssue, host, inFlightTickets = [], maxParallel = null },
   { post = defaultPost, now } = {},
 ) {
   const issueId = await resolveIssueId(anchorIssue, { post });
   if (!issueId) throw new Error(`cluster-heartbeat: no issue found for anchor ${anchorIssue}`);
   const last_seen = now ? now() : new Date().toISOString();
-  const metadata = { host, last_seen, in_flight_tickets: inFlightTickets };
+  const metadata = {
+    host,
+    last_seen,
+    in_flight_tickets: inFlightTickets,
+    max_parallel: maxParallel ?? null,
+    in_flight_count: inFlightTickets.length,
+  };
   const data = await post(WRITE_ATTACHMENT_MUTATION, {
     input: {
       issueId,

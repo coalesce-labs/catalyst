@@ -15,6 +15,12 @@ export interface ClusterNode {
   status: HostLivenessStatus | null;
   lastSeen: string | null;
   tickets: ClusterTicket[];
+  /** CTL-1092: per-node capacity. Present when capacityReader is wired; 0/0/0 for offline nodes. */
+  maxParallel?: number;
+  inFlightCount?: number;
+  freeSlots?: number;
+  /** CTL-1095: drain state. Present when drainReader is wired. */
+  draining?: boolean;
 }
 
 export interface ClusterView {

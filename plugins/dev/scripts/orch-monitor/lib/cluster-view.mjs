@@ -37,6 +37,7 @@
 //   and are dropped; roster hosts are always shown regardless of status.
 
 import { overlayClusterLiveness } from "./node-liveness.mjs";
+import { resolveHostAlias } from "../../execution-core/host-alias.mjs";
 
 // readClusterHeartbeats lives in execution-core/recovery.mjs — a heavy Node-only
 // module chain (config.mjs/pino, monitor.mjs, registry.mjs). We DO NOT statically
@@ -82,6 +83,11 @@ export function assembleClusterView({
   // CTL-1095: injectable drain reader. Default → no drain info (fail-open:
   // draining:false). Production wires it from the local isDraining + inFlightCount.
   drainReader = null,
+  // CTL-1092: injectable capacity reader. (host) → { maxParallel, inFlightCount, freeSlots } | null.
+  // Default → no capacity info (offline nodes get zeros). Offline nodes always return zeros regardless.
+  capacityReader = null,
+  // CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys.
+  aliases = null,
 }) {
   const roster = Array.isArray(hosts) && hosts.length > 0 ? hosts : [];
   const tickets = Array.isArray(board?.tickets) ? board.tickets : [];
@@ -93,10 +99,29 @@ export function assembleClusterView({
   // real node (a Stage-0 SHADOW node or a roster-lagging peer) and is surfaced;
   // a stale anchor attachment (offline) from a decommissioned node is dropped.
   // Roster hosts are ALWAYS shown, whatever their status.
-  const lastSeen =
+  const rawLastSeen =
     heartbeats && typeof heartbeats === "object"
       ? heartbeats
       : heartbeatReader({ logPath });
+
+  // CTL-1092: apply the alias map to collapse pre-pin hostnames onto pinned roster
+  // names BEFORE the display-host set is derived. This MUST run first: the raw
+  // heartbeat key (a pre-pin OS hostname like "Ryans-Mac-mini-250233") would
+  // otherwise enter `heartbeatHosts`/`allHosts` as its own node and the pinned
+  // roster name ("mini") would classify offline. Folding the heartbeat onto the
+  // pinned name makes the anchor model see ONE live node, not two. Newest-wins:
+  // if both the old name and the pinned name carry entries, keep the latest.
+  let lastSeen = rawLastSeen;
+  if (aliases && typeof aliases === "object") {
+    lastSeen = {};
+    for (const [rawHost, ts] of Object.entries(rawLastSeen)) {
+      const resolved = resolveHostAlias(rawHost, aliases);
+      if (!(resolved in lastSeen) || ts > lastSeen[resolved]) {
+        lastSeen[resolved] = ts;
+      }
+    }
+  }
+
   const heartbeatHosts = lastSeen && typeof lastSeen === "object" ? Object.keys(lastSeen) : [];
   const allHosts = [...new Set([...roster, ...heartbeatHosts])];
   const rosterSet = new Set(roster);
@@ -120,6 +145,22 @@ export function assembleClusterView({
     }
   };
 
+  // CTL-1092: resolve capacity per host — offline nodes always get zeros; fail-open.
+  const resolveCapacity = (host, status) => {
+    if (status === "offline" || !capacityReader || host === null) {
+      return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
+    }
+    try {
+      const c = capacityReader(host);
+      if (!c) return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
+      const mp = c.maxParallel ?? 0;
+      const ifc = c.inFlightCount ?? 0;
+      return { maxParallel: mp, inFlightCount: ifc, freeSlots: Math.max(0, mp - ifc) };
+    } catch {
+      return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
+    }
+  };
+
   // ── grouping ──────────────────────────────────────────────────────────────
   // A node entry is { host, status, lastSeen, tickets[] }. The `null` host is the
   // synthetic "unassigned" bucket for tickets with no fence owner — used ONLY in
@@ -140,6 +181,7 @@ export function assembleClusterView({
           status: node.status,
           lastSeen: node.lastSeen,
           ...resolveDrain(host),
+          ...resolveCapacity(host, node.status),
           tickets: tickets.map((t) => makeTicket(t, host)),
         },
       ],
@@ -170,7 +212,7 @@ export function assembleClusterView({
       continue;
     }
     const node = livenessByHost.get(host) ?? { status: "offline", lastSeen: null };
-    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), tickets: groupTickets });
+    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), ...resolveCapacity(host, node.status), tickets: groupTickets });
   }
 
   return {
