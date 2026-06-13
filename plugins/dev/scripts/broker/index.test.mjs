@@ -4267,3 +4267,19 @@ describe("CTL-381 end-to-end: check-in → canonical webhook → filter.wake", (
     expect(countWakesInLog("filter.wake.sess-e2e")).toBe(3);
   });
 });
+
+describe("CTL-1094: broker opens broker-state DB before startup GC", () => {
+  // Read the broker boot source and compare the byte positions of the two
+  // *calls* (not the imports). openBrokerStateDb() must run before
+  // gcStaleInterests(), or the GC's deleteFilterState callback throws
+  // "broker-state DB not opened" and leaks an orphaned filter_state row.
+  const src = readFileSync(join(import.meta.dir, "index.mjs"), "utf8");
+
+  test("openBrokerStateDb() call precedes the gcStaleInterests() call", () => {
+    const openIdx = src.indexOf("openBrokerStateDb();");
+    const gcIdx = src.indexOf("gcStaleInterests({");
+    expect(openIdx).toBeGreaterThan(-1);
+    expect(gcIdx).toBeGreaterThan(-1);
+    expect(openIdx).toBeLessThan(gcIdx);
+  });
+});

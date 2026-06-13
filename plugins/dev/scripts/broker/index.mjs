@@ -24,6 +24,7 @@ import {
   openBrokerStateDb,
   closeBrokerStateDb,
   getActiveWaitingSessions,
+  deleteFilterState,
 } from "./broker-state.mjs";
 // CTL-532: re-export the worker-state store helpers through the barrel.
 export {
@@ -76,7 +77,6 @@ import {
   clearDebounceTimers,
 } from "./router.mjs";
 import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
-import { deleteFilterState } from "./broker-state.mjs";
 import { gcStaleInterests } from "./gc-startup.mjs";
 import { getExecutionCoreDir, getRunsRoot } from "../execution-core/config.mjs";
 import { defaultStatJob } from "../execution-core/recovery.mjs";
@@ -352,6 +352,12 @@ function main() {
   loadPersistedInterests();
   loadExistingRegistrations();
 
+  // CTL-1094: open the broker-state DB before the startup GC. gcStaleInterests
+  // can call deleteFilterState() for pruned pr_lifecycle interests, which
+  // requires an open DB (ensure() throws otherwise). openBrokerStateDb() is
+  // idempotent and has no earlier-boot-step dependency.
+  openBrokerStateDb();
+
   // CTL-643: GC stale interests left over from dead orchestrators / sessions
   // before the live tailer starts ingesting filter.register events. Bulk
   // pattern (mirrors handleOrchestratorTerminated) — one log line per pruned
@@ -376,8 +382,6 @@ function main() {
   // is off by default. Single-shot info event so the HUD/operator can see them
   // without grepping broker-interests.json.
   maybeEmitProseDisabled();
-
-  openBrokerStateDb();
 
   // CTL-532: rebuild the event-sourced worker_state projection from the
   // current-month event log. Idempotent — safe to run on every (re)start.
