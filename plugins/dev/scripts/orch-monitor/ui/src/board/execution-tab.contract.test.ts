@@ -3,6 +3,12 @@
 // Phase 3: ensures pure inputs degrade safely when journey/ticket are absent.
 import { describe, it, expect } from "bun:test";
 import { TAB_VALUES } from "./route-search";
+import {
+  buildArtifactsRows,
+  buildExceptionsList,
+  buildNowCard,
+  buildNarrativeSummary,
+} from "./execution-tab-model";
 
 describe("CTL-1102 Execution tab contract", () => {
   it("exposes 'execution' as a valid detail tab value", () => {
@@ -13,5 +19,14 @@ describe("CTL-1102 Execution tab contract", () => {
     for (const t of ["lifecycle", "cost", "activity"]) {
       expect((TAB_VALUES as readonly string[]).includes(t)).toBe(true);
     }
+  });
+});
+
+describe("Execution tab degrades safely", () => {
+  it("renders nothing fabricated when journey is null and ticket off-board", () => {
+    expect(buildNowCard(undefined, null)).toBeNull();
+    expect(buildExceptionsList(null, undefined)).toEqual([]);
+    expect(buildArtifactsRows([], undefined, null)).toEqual([]);
+    expect(typeof buildNarrativeSummary(null)).toBe("string");
   });
 });

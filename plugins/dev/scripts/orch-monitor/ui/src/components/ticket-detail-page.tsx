@@ -60,6 +60,7 @@ import { TicketPhaseStepper } from "./ticket-phase-stepper";
 import { PriorityIcon, ScopeChip } from "@/board/Board";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
+import { ExecutionTab } from "./execution-tab";
 
 // CTL-974: the markdown DESCRIPTION renderer is lazy-loaded so its heavy engine
 // (marked-highlight + highlight.js) code-splits OUT of the board entry chunk
@@ -959,16 +960,7 @@ export function TicketDetailPage({
           {/* Execution: the record of what happened — NOW card, narrative, Gantt,
               artifacts, exceptions & decisions, hop log (CTL-1102). */}
           <TabsContent value="execution">
-            <div data-ticket-execution style={{ paddingTop: 16 }}>
-              {ticket ? (
-                <SectionLabel>Execution</SectionLabel>
-              ) : (
-                <EmptyState
-                  icon={Radio}
-                  message="No resident telemetry — this ticket is not in the live board payload"
-                />
-              )}
-            </div>
+            <ExecutionTab ticket={ticket} id={id} artifacts={artifacts} />
           </TabsContent>
         </PillTabs>
       </div>
