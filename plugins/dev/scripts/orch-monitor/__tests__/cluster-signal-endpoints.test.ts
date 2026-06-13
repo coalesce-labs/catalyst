@@ -80,7 +80,8 @@ describe("GET /api/cluster (CTL-898 one-shot)", () => {
     const res = await fetch(`${baseUrl}/api/cluster`);
     const body = (await res.json()) as ClusterSignal;
     expect(body.singleHost).toBe(false);
-    expect(body.nodes).toEqual([
+    // CTL-1092: nodes now carry capacity fields; check only status contract
+    expect(body.nodes).toMatchObject([
       { host: "mini", status: "live" },
       { host: "studio", status: "offline" },
     ]);
@@ -140,7 +141,8 @@ describe("GET /api/cluster — single-host identity no-op", () => {
       const res = await fetch(`http://localhost:${single.port}/api/cluster`);
       const body = (await res.json()) as ClusterSignal;
       expect(body.singleHost).toBe(true);
-      expect(body.nodes).toEqual([{ host: "mini", status: "live" }]);
+      // CTL-1092: nodes now carry capacity fields; check only status contract
+      expect(body.nodes).toMatchObject([{ host: "mini", status: "live" }]);
     } finally {
       void single.stop(true);
       rmSync(tmp2, { recursive: true, force: true });
