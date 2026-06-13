@@ -28,6 +28,7 @@
 //   ONLY once a real multi-host roster exists.
 
 import { overlayClusterLiveness } from "./node-liveness.mjs";
+import { resolveHostAlias } from "../../execution-core/host-alias.mjs";
 
 // readClusterHeartbeats lives in execution-core/recovery.mjs — a heavy Node-only
 // module chain (config.mjs/pino, monitor.mjs, registry.mjs). We DO NOT statically
@@ -73,6 +74,11 @@ export function assembleClusterView({
   // CTL-1095: injectable drain reader. Default → no drain info (fail-open:
   // draining:false). Production wires it from the local isDraining + inFlightCount.
   drainReader = null,
+  // CTL-1092: injectable capacity reader. (host) → { maxParallel, inFlightCount, freeSlots } | null.
+  // Default → no capacity info (offline nodes get zeros). Offline nodes always return zeros regardless.
+  capacityReader = null,
+  // CTL-1092: host alias map { oldName → pinnedName } for collapsing pre-pin heartbeat keys.
+  aliases = null,
 }) {
   const roster = Array.isArray(hosts) && hosts.length > 0 ? hosts : [];
   // SINGLE-HOST: roster absent or length 1 → identity no-op. Everything belongs
@@ -83,10 +89,24 @@ export function assembleClusterView({
   // Resolve liveness ONCE — read the local event log a single time (the reader is
   // injected so tests don't touch fs; the read-model passes the real one). On a
   // single node this is the ONE local log; there is no per-peer fan-out.
-  const lastSeen =
+  const rawLastSeen =
     heartbeats && typeof heartbeats === "object"
       ? heartbeats
       : heartbeatReader({ logPath });
+
+  // CTL-1092: apply alias map to collapse pre-pin hostnames onto pinned roster names.
+  // Newest-wins: if both the old name and the pinned name have entries, keep the latest.
+  let lastSeen = rawLastSeen;
+  if (aliases && typeof aliases === "object") {
+    lastSeen = {};
+    for (const [rawHost, ts] of Object.entries(rawLastSeen)) {
+      const resolved = resolveHostAlias(rawHost, aliases);
+      if (!(resolved in lastSeen) || ts > lastSeen[resolved]) {
+        lastSeen[resolved] = ts;
+      }
+    }
+  }
+
   const liveness = overlayClusterLiveness(roster, lastSeen, { now, intervalMs, graceMs });
   const livenessByHost = new Map(liveness.map((n) => [n.host, n]));
 
@@ -98,6 +118,22 @@ export function assembleClusterView({
       return { draining: Boolean(d?.draining), inFlightCount: d?.inFlightCount ?? 0 };
     } catch {
       return { draining: false, inFlightCount: 0 };
+    }
+  };
+
+  // CTL-1092: resolve capacity per host — offline nodes always get zeros; fail-open.
+  const resolveCapacity = (host, status) => {
+    if (status === "offline" || !capacityReader || host === null) {
+      return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
+    }
+    try {
+      const c = capacityReader(host);
+      if (!c) return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
+      const mp = c.maxParallel ?? 0;
+      const ifc = c.inFlightCount ?? 0;
+      return { maxParallel: mp, inFlightCount: ifc, freeSlots: Math.max(0, mp - ifc) };
+    } catch {
+      return { maxParallel: 0, inFlightCount: 0, freeSlots: 0 };
     }
   };
 
@@ -121,6 +157,7 @@ export function assembleClusterView({
           status: node.status,
           lastSeen: node.lastSeen,
           ...resolveDrain(host),
+          ...resolveCapacity(host, node.status),
           tickets: tickets.map((t) => makeTicket(t, host)),
         },
       ],
@@ -149,7 +186,7 @@ export function assembleClusterView({
       continue;
     }
     const node = livenessByHost.get(host) ?? { status: "offline", lastSeen: null };
-    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), tickets: groupTickets });
+    nodes.push({ host, status: node.status, lastSeen: node.lastSeen, ...resolveDrain(host), ...resolveCapacity(host, node.status), tickets: groupTickets });
   }
 
   return {
