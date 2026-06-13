@@ -127,13 +127,19 @@ function defaultConfirmReload(component) {
 
 // pidFilePathForComponent — resolves the PID file path for a named component.
 // Mirrors the bash wrappers' env overrides + default paths so JS and bash agree.
+// The wrappers (catalyst-monitor.sh:36, catalyst-execution-core:24) resolve their
+// default pidfile *through* CATALYST_DIR, and the sibling probes in this directory
+// (broker-state.mjs:26, session-liveness.mjs:30) honor it too — so the default
+// base must follow CATALYST_DIR, not a hardcoded ~/catalyst, or a relocated daemon
+// is wrongly probed as not-running and a running daemon gets silently skipped.
 // Returns null for components with no probeable PID file (e.g. broker). (CTL-1089)
 export function pidFilePathForComponent(name) {
+  const base = process.env.CATALYST_DIR || resolve(homedir(), "catalyst");
   if (name === "monitor")
-    return process.env.MONITOR_PID_FILE || resolve(homedir(), "catalyst", "monitor.pid");
+    return process.env.MONITOR_PID_FILE || resolve(base, "monitor.pid");
   if (name === "execution-core")
     return process.env.EXECUTION_CORE_PID_FILE
-      || resolve(homedir(), "catalyst", "execution-core", "daemon.pid");
+      || resolve(base, "execution-core", "daemon.pid");
   return null;
 }
 

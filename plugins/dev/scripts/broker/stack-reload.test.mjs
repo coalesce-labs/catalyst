@@ -1023,11 +1023,12 @@ describe("remediate hardening (CTL-1077 remediate cycle)", () => {
 // so no real daemon processes are needed — the test runner's own PID is
 // guaranteed alive; a synthetic dead PID is used for the not-running case.
 describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
-  let origMonitorPidFile, origExecCorePidFile, tmpFile;
+  let origMonitorPidFile, origExecCorePidFile, origCatalystDir, tmpFile;
 
   beforeEach(() => {
     origMonitorPidFile = process.env.MONITOR_PID_FILE;
     origExecCorePidFile = process.env.EXECUTION_CORE_PID_FILE;
+    origCatalystDir = process.env.CATALYST_DIR;
     tmpFile = `${tmpdir()}/ctl1089-pid-test-${process.pid}.tmp`;
   });
 
@@ -1036,6 +1037,8 @@ describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
     else delete process.env.MONITOR_PID_FILE;
     if (origExecCorePidFile !== undefined) process.env.EXECUTION_CORE_PID_FILE = origExecCorePidFile;
     else delete process.env.EXECUTION_CORE_PID_FILE;
+    if (origCatalystDir !== undefined) process.env.CATALYST_DIR = origCatalystDir;
+    else delete process.env.CATALYST_DIR;
     try { unlinkSync(tmpFile); } catch { /* ok */ }
   });
 
@@ -1057,6 +1060,26 @@ describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
     expect(pidFilePathForComponent("broker")).toBeNull();
     expect(pidFilePathForComponent("nope")).toBeNull();
     expect(pidFilePathForComponent(undefined)).toBeNull();
+  });
+
+  // CATALYST_DIR is the standard relocation override, honored by the bash wrappers
+  // (catalyst-monitor.sh:36, catalyst-execution-core:24) and sibling .mjs probes.
+  // The JS probe must resolve its default pidfile through it too, else a relocated
+  // running daemon is wrongly probed as not-running and silently skipped. (CTL-1089)
+  test("default pidfile follows CATALYST_DIR when no *_PID_FILE override is set", () => {
+    delete process.env.MONITOR_PID_FILE;
+    delete process.env.EXECUTION_CORE_PID_FILE;
+    process.env.CATALYST_DIR = "/relocated/catalyst";
+    expect(pidFilePathForComponent("monitor")).toBe("/relocated/catalyst/monitor.pid");
+    expect(pidFilePathForComponent("execution-core")).toBe(
+      "/relocated/catalyst/execution-core/daemon.pid",
+    );
+  });
+
+  test("*_PID_FILE override still wins over CATALYST_DIR", () => {
+    process.env.CATALYST_DIR = "/relocated/catalyst";
+    process.env.MONITOR_PID_FILE = "/custom/monitor.pid";
+    expect(pidFilePathForComponent("monitor")).toBe("/custom/monitor.pid");
   });
 
   test("live pid → true", () => {
