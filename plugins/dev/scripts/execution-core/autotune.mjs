@@ -29,6 +29,11 @@ import {
   defaultAppendParallelismAdjustedEvent,
   defaultAppendAutotuneGaugeEvent,
 } from "./recovery.mjs";
+import { emitCapacityChangedEvent } from "./capacity-event.mjs";
+
+function defaultAppendCapacityChangedEvent(args) {
+  emitCapacityChangedEvent(args);
+}
 import {
   AUTOTUNE_SAMPLE_INTERVAL_MS,
   AUTOTUNE_WINDOW_SAMPLES,
@@ -486,6 +491,7 @@ export function autoTuneTick(state, seams) {
     appendSampledEvent,
     appendAdjustedEvent,
     appendGaugeEvent,       // CTL-771: per-tick setpoint gauge emitter
+    appendCapacityChangedEvent, // CTL-1092: node.capacity.changed alongside parallelism-adjusted
   } = seams;
 
   try {
@@ -618,6 +624,14 @@ export function autoTuneTick(state, seams) {
           reason,
         });
       } catch {}
+      try {
+        appendCapacityChangedEvent?.({
+          label: "execution-core",
+          oldMaxParallel: current,
+          newMaxParallel: next,
+          reason,
+        });
+      } catch {}
     }
   } catch {}
 }
@@ -648,6 +662,7 @@ export function startAutoTuner({
   appendSampledEvent = defaultAppendParallelismSampledEvent,
   appendAdjustedEvent = defaultAppendParallelismAdjustedEvent,
   appendGaugeEvent = defaultAppendAutotuneGaugeEvent,  // CTL-771
+  appendCapacityChangedEvent = defaultAppendCapacityChangedEvent,  // CTL-1092
 } = {}) {
   if (!enabled) return () => {};
 
@@ -687,6 +702,7 @@ export function startAutoTuner({
     appendSampledEvent,
     appendAdjustedEvent,
     appendGaugeEvent,  // CTL-771
+    appendCapacityChangedEvent,  // CTL-1092
   };
 
   _timer = setIntervalFn(() => autoTuneTick(_state, seams), sampleIntervalMs);
