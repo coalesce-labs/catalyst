@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { getProvider, calculateCost } from "../lib/summarize/providers";
 import { claudeCliProvider } from "../lib/summarize/providers/claude-cli";
 import type { AiFetcher } from "../lib/ai-briefing";
+import type { ClaudeCliResult, RunClaudeCli } from "../lib/claude-cli";
 
 interface RequestRecord {
   url: string;
@@ -159,29 +160,33 @@ describe("anthropicProvider", () => {
   });
 });
 
-type FakeSpawnResult = { status: number; stdout: string; stderr: string };
-function fakeCliSpawn(result: FakeSpawnResult) {
-  return (..._args: unknown[]) => result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
+// CTL-1109: the provider was remediated to drive `claude --bg` via the
+// injectable `runClaudeCli` seam (lib/claude-cli.ts). Tests inject a fake
+// `runClaudeCli` so they touch no real CLI/fs/clock — the old `spawn` double
+// no longer matches the provider's injection point and fell through to the
+// real CLI (5s --bg timeout).
+function fakeRunClaudeCli(result: ClaudeCliResult): RunClaudeCli {
+  return () => Promise.resolve(result);
 }
 
 describe("claudeCliProvider", () => {
-  it("returns stdout as summary with zero cost", async () => {
+  it("returns CLI text as summary with zero cost", async () => {
     const res = await claudeCliProvider.summarize({
       systemPrompt: "SYS", userPrompt: "USR", model: "claude-haiku-4-5-20251001",
       apiKey: "",
-      spawn: fakeCliSpawn({ status: 0, stdout: "A concise summary.\n", stderr: "" }),
+      runClaudeCli: fakeRunClaudeCli({ text: "A concise summary.", tokens: 0 }),
     } as never);
     expect(res.summary).toBe("A concise summary.");
     expect(res.cost).toBe(0);
     expect(res.tokens).toBe(0);
   });
 
-  it("rejects (maps to 502) on CLI failure", async () => {
+  it("rejects when the CLI produces no output", async () => {
     let caught: Error | null = null;
     try {
       await claudeCliProvider.summarize({
         systemPrompt: "", userPrompt: "x", model: "m", apiKey: "",
-        spawn: fakeCliSpawn({ status: 1, stdout: "", stderr: "boom" }),
+        runClaudeCli: fakeRunClaudeCli({ text: null, tokens: 0 }),
       } as never);
     } catch (err) {
       caught = err as Error;
