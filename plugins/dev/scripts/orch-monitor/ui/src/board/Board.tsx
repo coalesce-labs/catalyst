@@ -901,6 +901,11 @@ export function Board({
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("phase");
+  // CTL-1098: the Workers surface is two one-at-a-time screens — the dispatch
+  // panel (ControlTower) and the pipeline board (WorkerSwimlaneBoard). A header
+  // Seg switches between them so the swimlane's sticky column header can never
+  // float over dispatch content (they are never co-mounted). Defaults to dispatch.
+  const [workerSurface, setWorkerSurface] = useState<"dispatch" | "board">("dispatch");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
   const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
@@ -1037,18 +1042,23 @@ export function Board({
               ONE Display-options popover, reading/writing the persisted prefs. */}
           {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
           {view === "workers" && <>
-            {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
-            <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
-            {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
-                only for a multi-node fleet — with a single node the filter is
-                inert, so the single-host case stays chrome-free (identity no-op). */}
-            {showNodeFilter && (
-              <Seg
-                value={activeHostFilter}
-                onChange={setHostFilter}
-                options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
-              />
-            )}
+            {/* CTL-1098: Dispatch vs Board surface switch — labeled "Board" (not
+                "Pipeline") to avoid colliding with the grouping toggle's Pipeline option. */}
+            <Seg value={workerSurface} onChange={setWorkerSurface} options={[{ k: "dispatch", label: "Dispatch" }, { k: "board", label: "Board" }]} />
+            {workerSurface === "board" && <>
+              {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node — board screen only. */}
+              <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
+              {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
+                  only for a multi-node fleet — with a single node the filter is
+                  inert, so the single-host case stays chrome-free (identity no-op). */}
+              {showNodeFilter && (
+                <Seg
+                  value={activeHostFilter}
+                  onChange={setHostFilter}
+                  options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
+                />
+              )}
+            </>}
           </>}
           {/* CTL-948 / CTL-989: dep-graph link — a client-side navigate to
               /dep-graph (an `onDepGraph` prop still wins for back-compat callers). */}
@@ -1120,41 +1130,41 @@ export function Board({
               />
             )
           )}
-          {data && view === "workers" && (
-            // CTL-1082: ONE vertical scroll container around the Workers surface.
-            // CTL-1016 Phase 3 extracted ControlTower out of the deleted QueueSurface
-            // and dropped its overflow-y wrapper, leaving ControlTower and the swimlane
-            // scroller as sibling flex children; the zero-basis scroller (flex:1 1 0)
-            // got 100% of the shrink and collapsed to 0px. This wrapper restores the
-            // missing scroll context; WorkerSwimlaneBoard sizes to content
-            // (fill={false} embedded={false} → height:auto) so the wrapper owns the
-            // vertical scroll. The inner board keeps its own overflow-x for columns.
+          {data && view === "workers" && workerSurface === "dispatch" && (
+            // CTL-1098: Dispatch screen — ControlTower owns its own scroll container.
+            // The pipeline board is NOT mounted here, so the swimlane's sticky header
+            // cannot escape into this scroller.
             <div
               className="cat-overlay-scroll cat-board-scroll"
-              data-scroll-restoration-id="workers-scroll"
+              data-scroll-restoration-id="dispatch-scroll"
               style={{ flex: 1, minHeight: 0, overflowY: "auto" }}
             >
               <ControlTower
                 payload={data}
                 onOpenTicket={(key) => openDetail(navigate, "ticket", key, { ids: [] })}
               />
-              {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host
-                  (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
-                  node filter (scope) are orthogonal: filter first, then group. R3b: when
-                  the HOST swimlane is active the column lens falls back to status/phase
-                  inside each lane so host is not double-encoded (rows AND columns).
-                  CTL-950: shared header + single horizontal scroll across the lanes. */}
-              <WorkerSwimlaneBoard
-                workers={nodeWorkers}
-                tickets={data.tickets}
-                swimlane={swimlane}
-                grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
-                fill={false}
-                embedded={false}
-                onOpen={onOpen}
-                laneColors={laneColors}
-              />
             </div>
+          )}
+          {data && view === "workers" && workerSurface === "board" && (
+            // CTL-1098: Board screen — WorkerSwimlaneBoard owns its own scroll
+            // (fill embedded → SwimlaneBoard root is flex:1/minHeight:0, Swimlane.tsx:722),
+            // so the sticky ColumnHeaderRow pins inside the board's own scroller.
+            // CTL-909 / SURF1: the node FILTER scopes the grid to one host
+            // (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
+            // node filter (scope) are orthogonal: filter first, then group. R3b: when
+            // the HOST swimlane is active the column lens falls back to status/phase
+            // inside each lane so host is not double-encoded (rows AND columns).
+            // CTL-950: shared header + single horizontal scroll across the lanes.
+            <WorkerSwimlaneBoard
+              workers={nodeWorkers}
+              tickets={data.tickets}
+              swimlane={swimlane}
+              grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
+              fill={true}
+              embedded={true}
+              onOpen={onOpen}
+              laneColors={laneColors}
+            />
           )}
         </div>
         {/* CTL-951: the TicketDetailDrawer is removed — a plain card click now
