@@ -1,0 +1,44 @@
+{
+  "*->revive": {
+    "guardText": "reviveCount < REVIVE_BUDGET (1); 2nd failure escalates to stalled",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:189-192",
+    "classification": "crash-revive"
+  },
+  "*->stalled": {
+    "guardText": "reviveCount >= REVIVE_BUDGET — escalation to terminal failure sink",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:192",
+    "classification": "escalation"
+  },
+  "*->needs-input": {
+    "guardText": "event.type === 'park' — operator-initiated pause",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:198-199",
+    "classification": "park"
+  },
+  "needs-input->resume": {
+    "guardText": "event.type === 'resume' from needs-input state",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:167-168",
+    "classification": "resume"
+  },
+  "verify->remediate": {
+    "guardText": "deriveAdvancement: verify.json regression_risk > 0 and remediateCycleCount < REMEDIATE_CYCLE_CAP",
+    "datalog": "advance_to('remediate', T) :- phase_done('verify', T), regression_risk(T, R), R > 0, cycle_count(T, C), C < 3.",
+    "sourceRef": "plugins/dev/scripts/execution-core/scheduler.mjs:1188",
+    "classification": "remediate-cycle"
+  },
+  "remediate->verify": {
+    "guardText": "deriveAdvancement: after remediate completes, advance back to verify",
+    "datalog": "advance_to('verify', T) :- phase_done('remediate', T).",
+    "sourceRef": "plugins/dev/scripts/execution-core/scheduler.mjs:1188",
+    "classification": "remediate-cycle"
+  },
+  "*->turn-cap": {
+    "guardText": "event.type === 'turn-cap-exhausted' — continuation self-loop, revive budget untouched",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:194-196",
+    "classification": "turn-cap"
+  }
+}

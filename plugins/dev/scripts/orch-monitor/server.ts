@@ -36,6 +36,9 @@ import {
   assembleTicketRuns,
   readPhaseSignalVerbatim,
 } from "./lib/ticket-runs.mjs";
+// CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
+// specifier needed — plain static import is safe for Vite/esbuild graph).
+import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -3687,6 +3690,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
               "Access-Control-Allow-Origin": "*",
             },
           });
+        }
+
+        // ── CTL-1100 governance read endpoints ──────────────────────────────
+        // Inserted between the /api/beliefs/stream block and the 404 fallthrough.
+        // Re-locate by grep after each insertion — line numbers shift.
+
+        if (url.pathname === "/api/fsm/descriptor") {
+          return Response.json(await buildFsmDescriptor());
         }
 
         return new Response("Not Found", { status: 404 });
