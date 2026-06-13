@@ -1,0 +1,4 @@
+[test]
+# CTL-1086 test-leak guard: pin CATALYST_DIR to a hermetic temp dir before any
+# *.test.mjs loads, so no broker test can append to the real ~/catalyst event log.
+preload = ["./test-setup.mjs"]
