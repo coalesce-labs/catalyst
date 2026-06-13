@@ -61,6 +61,8 @@ describe("surface contract (CTL-891)", () => {
       "finops",
       "fleetops",
       "devops",
+      "process",
+      "rulebook",
     ]);
   });
 
@@ -76,6 +78,8 @@ describe("surface contract (CTL-891)", () => {
       f: "finops",
       o: "fleetops",
       d: "devops",
+      j: "process",
+      r: "rulebook",
     });
     // Every surface is reachable by some chord, and every chord targets a real surface.
     const chordTargets = new Set(Object.values(SURFACE_CHORD));
@@ -303,6 +307,8 @@ test("SURFACES round-trips the Surface union", () => {
     finops: false,
     fleetops: false,
     devops: false,
+    process: false,
+    rulebook: false,
   };
   for (const s of SURFACES) seen[s] = true;
   expect(Object.values(seen).every(Boolean)).toBe(true);

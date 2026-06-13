@@ -91,6 +91,17 @@ const DashboardSurface = lazy(() =>
   })),
 );
 
+const ProcessRoute = lazy(() =>
+  import("./components/reason/process-route").then((m) => ({
+    default: m.ProcessRoute,
+  })),
+);
+const RulebookStub = lazy(() =>
+  import("./components/reason/rulebook-stub").then((m) => ({
+    default: m.RulebookStub,
+  })),
+);
+
 // ── detail routes (code-split — the entry-split that forced board.html to ship
 //    them eagerly is gone, so split them now to keep the main bundle lean) ─────
 const TicketDetailRoute = lazy(() =>
@@ -248,6 +259,27 @@ const devopsRoute = createRoute({
   ),
 });
 
+// CTL-1101: REASON surfaces — Process (FSM machine map) + Rulebook
+const processRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/process",
+  component: () => (
+    <S>
+      <ProcessRoute />
+    </S>
+  ),
+});
+
+const rulebookRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/rules",
+  component: () => (
+    <S>
+      <RulebookStub />
+    </S>
+  ),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -310,6 +342,8 @@ const routeTree = rootRoute.addChildren([
   finopsRoute,
   fleetopsRoute,
   devopsRoute,
+  processRoute,
+  rulebookRoute,
   settingsRoute,
   ticketRoute,
   workerRoute,

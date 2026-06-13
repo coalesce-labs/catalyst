@@ -77,6 +77,8 @@ describe("isAppRoute (CTL-989)", () => {
       "/fleetops",
       "/devops",
       "/settings",
+      "/process",
+      "/rules",
     ]) {
       expect(isAppRoute(p)).toBe(true);
     }
@@ -175,6 +177,8 @@ describe("GET app-route SPA fallback serves index.html (CTL-989)", () => {
       "/fleetops",
       "/devops",
       "/settings",
+      "/process",
+      "/rules",
     ]) {
       const res = await fetch(`${baseUrl}${path}`);
       expect(res.status).toBe(200);
