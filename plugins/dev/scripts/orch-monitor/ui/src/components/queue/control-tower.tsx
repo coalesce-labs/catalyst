@@ -15,7 +15,7 @@ export function ControlTower({
 }) {
   const multiHost = queueHostMode(payload.queue) === "multi";
   return (
-    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "8px 24px 32px", display: "flex", flexDirection: "column", gap: 28, flexShrink: 0, maxHeight: "45vh", overflowY: "auto" }}>
+    <div style={{ maxWidth: 1120, margin: "0 auto", padding: "8px 24px 32px", display: "flex", flexDirection: "column", gap: 28 }}>
       <SlotDeck
         workers={payload.workers}
         tickets={payload.tickets}

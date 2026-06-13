@@ -1,23 +1,18 @@
-// workers-scroll-contract.test.ts — CTL-1082 acceptance guard for the Workers-surface
-// scroll architecture.
+// workers-scroll-contract.test.ts — CTL-1098 acceptance guard for the Workers-surface
+// screen-split architecture.
 //
-// The bug: CTL-1016 Phase 3 (PR #1888) extracted ControlTower out of the deleted
-// QueueSurface and dropped the overflow-y wrapper that QueueSurface supplied.
-// Board.tsx then rendered ControlTower and WorkerSwimlaneBoard as two sibling
-// flex children inside a fixed-height flex column. The zero-basis swimlane scroller
-// (flex:1 1 0) was assigned 100% of the flex shrink and collapsed to 0px whenever
-// ControlTower's natural height crowded the column.
-//
-// The fix wraps both Workers children in a single overflow-y:auto flex child
-// (flex:1; minHeight:0) carrying the "workers-scroll" scroll-restoration id,
-// and passes fill={false} embedded={false} to WorkerSwimlaneBoard so the inner
-// board sizes to content while the wrapper owns vertical scrolling.
+// CTL-1082 established a single shared scroll wrapper around ControlTower +
+// WorkerSwimlaneBoard to fix the zero-height swimlane collapse. CTL-1083 added
+// ControlTower's 45vh height cap. CTL-1098 supersedes both: the two panels are
+// now separate screens rendered one-at-a-time, switched by a header Seg. This
+// eliminates the sticky ColumnHeaderRow overlap structurally — the panels are
+// never co-mounted, so the swimlane header can never escape into the dispatch
+// scroller.
 //
 // `bun test` has no DOM, so — following detail-scroll-contract.test.ts and
 // detail-nav.test.ts — this guards the load-bearing structure via static source
-// analysis. Live scroll behaviour (a real viewport revealing the kanban at short
-// height) was verified manually; the static guards below lock the CSS architecture
-// that makes that behaviour possible.
+// analysis. Live scroll behaviour (a real viewport) was verified manually; the
+// static guards below lock the CSS architecture that makes that behaviour possible.
 import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -45,34 +40,42 @@ function styleAfterAttr(src: string, attr: string): string {
   return src.slice(start, i);
 }
 
-describe("CTL-1082 — Workers surface scroll contract", () => {
-  it("wraps the Workers view in a single vertical scroll container", () => {
-    const style = styleAfterAttr(boardSrc, 'data-scroll-restoration-id="workers-scroll"');
+describe("CTL-1098 — Workers surface is two one-at-a-time screens", () => {
+  it("declares a workerSurface sub-mode defaulting to dispatch", () => {
+    // local sub-mode state, not co-rendered panels
+    expect(boardSrc).toMatch(/workerSurface/);
+    expect(boardSrc).toMatch(/setWorkerSurface/);
+    expect(boardSrc).toMatch(/useState<\s*"dispatch"\s*\|\s*"board"\s*>\(\s*"dispatch"\s*\)/);
+  });
+
+  it("renders the Dispatch and Board screens mutually exclusively", () => {
+    // exactly one ControlTower mount, guarded by the dispatch sub-mode
+    expect(boardSrc).toMatch(/workerSurface === "dispatch"/);
+    expect(boardSrc).toMatch(/workerSurface === "board"/);
+  });
+
+  it("gives the Board screen a self-contained scroll via fill+embedded", () => {
+    const at = boardSrc.indexOf("<WorkerSwimlaneBoard");
+    expect(at).toBeGreaterThan(-1);
+    const tag = boardSrc.slice(at, boardSrc.indexOf("/>", at));
+    expect(tag).toContain("fill={true}");
+    expect(tag).toContain("embedded={true}");
+  });
+
+  it("keeps the Dispatch screen in its own scroll container", () => {
+    // distinct restoration id so the two screens don't share a scroll anchor
+    expect(boardSrc).toContain('data-scroll-restoration-id="dispatch-scroll"');
+    const idx = boardSrc.indexOf('data-scroll-restoration-id="dispatch-scroll"');
+    const tagStart = boardSrc.lastIndexOf("<div", idx);
+    expect(boardSrc.slice(tagStart, idx)).toContain("cat-overlay-scroll");
+    const style = styleAfterAttr(boardSrc, 'data-scroll-restoration-id="dispatch-scroll"');
     expect(style).toContain("overflowY");
     expect(style).toContain('"auto"');
     expect(style).toContain("flex: 1");
     expect(style).toContain("minHeight: 0");
   });
 
-  it("uses the overlay-scroll class on the Workers wrapper", () => {
-    const idx = boardSrc.indexOf('data-scroll-restoration-id="workers-scroll"');
-    const tagStart = boardSrc.lastIndexOf("<div", idx);
-    expect(boardSrc.slice(tagStart, idx)).toContain("cat-overlay-scroll");
-  });
-
-  it("renders WorkerSwimlaneBoard as a content-sized child (no inner vertical fill)", () => {
-    const at = boardSrc.indexOf("<WorkerSwimlaneBoard");
-    expect(at).toBeGreaterThan(-1);
-    const tag = boardSrc.slice(at, boardSrc.indexOf("/>", at));
-    expect(tag).toContain("fill={false}");
-    expect(tag).toContain("embedded={false}");
-  });
-
-  it("keeps a single Workers-view body block (ControlTower + board co-located)", () => {
-    // Guard against the original split: two separate `data && view === "workers" &&`
-    // blocks (one for ControlTower, one for WorkerSwimlaneBoard). The toolbar header
-    // also uses `view === "workers" &&` (without `data &&`) — we only count body blocks.
-    const blocks = boardSrc.match(/data && view === "workers" &&/g) ?? [];
-    expect(blocks.length).toBe(1);
+  it("wires the surface switch to local state", () => {
+    expect(boardSrc).toContain("onChange={setWorkerSurface}");
   });
 });

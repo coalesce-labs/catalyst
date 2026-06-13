@@ -8,13 +8,14 @@ const towerSrc = readFileSync(
 );
 const boardSrc = readFileSync(join(import.meta.dir, "Board.tsx"), "utf8");
 
-describe("CTL-1083 — ControlTower is height-bounded inside the workers flex column", () => {
-  it("does not shrink (keeps natural height, never collapses the board)", () => {
-    expect(towerSrc).toContain("flexShrink: 0");
+describe("CTL-1098 — ControlTower fills its own Dispatch screen (no 45vh cap)", () => {
+  it("no longer caps its height at a viewport fraction", () => {
+    // ControlTower owns the Dispatch screen; the screen's scroll container owns overflow.
+    expect(towerSrc).not.toMatch(/maxHeight:\s*"45vh"/);
   });
-  it("caps its height and scrolls internally instead of starving the swimlane board", () => {
-    expect(towerSrc).toMatch(/overflowY:\s*"auto"/);
-    expect(towerSrc).toMatch(/maxHeight:/);
+  it("does not pin its own internal vertical scroll", () => {
+    // overflow is owned by the dispatch-scroll container in Board.tsx, not ControlTower.
+    expect(towerSrc).not.toMatch(/overflowY:\s*"auto"/);
   });
 });
 
