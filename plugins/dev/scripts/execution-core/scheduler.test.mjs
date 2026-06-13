@@ -1677,6 +1677,75 @@ describe("CTL-653: maybeEscalateRemediateExhausted", () => {
       maybeEscalateRemediateExhausted(orchDir, "CTL-653", { verify: "running" }, "fail", 99)
     ).toBe(false);
   });
+
+  // CTL-1108: explanation wiring
+  test("CTL-1108: writes explanation.human_question sourced from verify.json HIGH findings", () => {
+    const wdir = join(orchDir, "workers", "CTL-1108a");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      join(wdir, "phase-verify.json"),
+      JSON.stringify({ ticket: "CTL-1108a", phase: "verify", status: "done" })
+    );
+    writeFileSync(
+      join(wdir, "verify.json"),
+      JSON.stringify({
+        regression_risk: 6,
+        findings: [
+          {
+            severity: "high",
+            file: "broker/router.mjs",
+            line: 352,
+            message: "getEventScope reads retired attr vcs.revision",
+            recommendation: "read vcs.ref.revision",
+          },
+        ],
+      })
+    );
+    expect(
+      maybeEscalateRemediateExhausted(orchDir, "CTL-1108a", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+    ).toBe(true);
+    const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.stalledReason).toBe("remediate-cycle-cap-exhausted");
+    expect(sig.explanation).toBeTruthy();
+    expect(typeof sig.explanation.human_question).toBe("string");
+    expect(sig.explanation.human_question).toContain("broker/router.mjs:352");
+  });
+
+  test("CTL-1108: missing verify.json → still stalls with a (degraded) explanation, never throws", () => {
+    const wdir = join(orchDir, "workers", "CTL-1108b");
+    mkdirSync(wdir, { recursive: true });
+    writeFileSync(
+      join(wdir, "phase-verify.json"),
+      JSON.stringify({ ticket: "CTL-1108b", phase: "verify", status: "done" })
+    );
+    // no verify.json on disk
+    expect(
+      maybeEscalateRemediateExhausted(orchDir, "CTL-1108b", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+    ).toBe(true);
+    const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.explanation).toBeTruthy();
+    expect(typeof sig.explanation.human_question).toBe("string");
+  });
+
+  test("CTL-1108: idempotent — already-stalled signal with existing explanation is not clobbered", () => {
+    const wdir = join(orchDir, "workers", "CTL-1108c");
+    mkdirSync(wdir, { recursive: true });
+    const existing = {
+      ticket: "CTL-1108c",
+      phase: "verify",
+      status: "stalled",
+      stalledReason: "remediate-cycle-cap-exhausted",
+      explanation: { human_question: "original question" },
+    };
+    writeFileSync(join(wdir, "phase-verify.json"), JSON.stringify(existing));
+    expect(
+      maybeEscalateRemediateExhausted(orchDir, "CTL-1108c", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP)
+    ).toBe(true);
+    const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
+    expect(sig.explanation.human_question).toBe("original question");
+  });
 });
 
 // ─── CTL-712: escalateDispatchExhausted — retry ceiling → stalled ───
@@ -1739,6 +1808,69 @@ describe("CTL-712: escalateDispatchExhausted — retry ceiling → stalled", () 
     const sig = JSON.parse(readFileSync(join(orchDir, "workers", "CTL-712", "phase-pr.json"), "utf8"));
     expect(sig.dispatchFailureCode).toBeNull();
     expect(sig.dispatchFailureCause).toBeNull();
+  });
+
+  // CTL-1108: explanation coverage
+  test("CTL-1108: escalateDispatchExhausted attaches an explanation with non-empty human_question", () => {
+    expect(escalateDispatchExhausted(orchDir, "CTL-1108e", "pr")).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", "CTL-1108e", "phase-pr.json"), "utf8")
+    );
+    expect(sig.stalledReason).toBe("prior-artifact-retry-exhausted");
+    expect(sig.explanation).toBeTruthy();
+    expect(typeof sig.explanation.human_question).toBe("string");
+    expect(sig.explanation.human_question.trim()).not.toBe("");
+  });
+});
+
+// ─── CTL-1108: writeTerminalStalled explanation coverage ───
+describe("CTL-1108: writeTerminalStalled explanation coverage", () => {
+  test("dispatch-circuit-breaker stall carries an explanation", () => {
+    const t = "CTL-1108f", phase = "research";
+    writeSignal(t, phase, "running");
+    for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+      recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+    expect(maybeTripCircuitBreaker(orchDir, t, phase)).toBe(true);
+    const sig = JSON.parse(
+      readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+    );
+    expect(sig.stalledReason).toBe("dispatch-circuit-breaker");
+    expect(sig.explanation).toBeTruthy();
+    expect(typeof sig.explanation.human_question).toBe("string");
+    expect(sig.explanation.human_question.trim()).not.toBe("");
+  });
+
+  test("coverage guard: every scheduler stall reason produces a non-null explanation.human_question", () => {
+    // remediate-cycle-cap-exhausted (maybeEscalateRemediateExhausted)
+    {
+      const wdir = join(orchDir, "workers", "CTL-1108g");
+      mkdirSync(wdir, { recursive: true });
+      writeFileSync(join(wdir, "phase-verify.json"),
+        JSON.stringify({ ticket: "CTL-1108g", phase: "verify", status: "done" }));
+      maybeEscalateRemediateExhausted(orchDir, "CTL-1108g", { verify: "done" }, "fail", REMEDIATE_CYCLE_CAP);
+      const sig = JSON.parse(readFileSync(join(wdir, "phase-verify.json"), "utf8"));
+      expect(sig.explanation?.human_question?.trim()).toBeTruthy();
+    }
+    // prior-artifact-retry-exhausted (escalateDispatchExhausted)
+    {
+      escalateDispatchExhausted(orchDir, "CTL-1108h", "plan");
+      const sig = JSON.parse(
+        readFileSync(join(orchDir, "workers", "CTL-1108h", "phase-plan.json"), "utf8")
+      );
+      expect(sig.explanation?.human_question?.trim()).toBeTruthy();
+    }
+    // dispatch-circuit-breaker (maybeTripCircuitBreaker → writeTerminalStalled)
+    {
+      const t = "CTL-1108i", phase = "implement";
+      writeSignal(t, phase, "running");
+      for (let i = 1; i <= CIRCUIT_BREAKER_THRESHOLD; i++)
+        recordDispatchFailure(orchDir, t, phase, 1, i * 1000);
+      maybeTripCircuitBreaker(orchDir, t, phase);
+      const sig = JSON.parse(
+        readFileSync(join(orchDir, "workers", t, `phase-${phase}.json`), "utf8")
+      );
+      expect(sig.explanation?.human_question?.trim()).toBeTruthy();
+    }
   });
 });
 

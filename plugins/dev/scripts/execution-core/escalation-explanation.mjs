@@ -70,6 +70,40 @@ export function coerceExplanation(fields, ctx = {}) {
   return Object.freeze(e);
 }
 
+// CTL-1108: map a verify.json (HIGH findings + regression_risk) into the
+// escalation explanation shape for a remediate-cycle-cap-exhausted stall.
+export function buildRemediateCapExplanation(verifyJson, { ticket, cycleCount } = {}) {
+  const v = verifyJson && typeof verifyJson === "object" ? verifyJson : {};
+  const findings = Array.isArray(v.findings) ? v.findings : [];
+  const highs = findings.filter((f) => f?.severity === "high");
+  const blocker = highs[0];
+
+  const blockerDesc = blocker
+    ? `${blocker.file ?? "?"}:${blocker.line ?? "?"} — ${blocker.message ?? "(no message)"}`
+    : `regression_risk ${v.regression_risk ?? "?"} above threshold with no HIGH finding`;
+
+  const fields = {
+    what_failed: `verify still failing after ${cycleCount ?? "?"} remediation cycles. Blocking: ${blockerDesc}`,
+    observed: {
+      regression_risk: typeof v.regression_risk === "number" ? v.regression_risk : null,
+      highFindingCount: highs.length,
+      highFindings: highs.slice(0, 5).map((f) => ({
+        file: f.file,
+        line: f.line,
+        kind: f.kind,
+        message: f.message,
+        recommendation: f.recommendation,
+      })),
+    },
+    attempts: [`${cycleCount ?? 0} verify⇄remediate cycles (cap reached)`],
+    why_gave_up: `remediation budget exhausted: ${cycleCount ?? "?"} cycles attempted, verify still fails`,
+    human_question: blocker
+      ? `${ticket}: verify keeps failing on ${blocker.file ?? "?"}:${blocker.line ?? "?"} (${blocker.message ?? "blocking finding"}). Fix it on the branch, or abandon / re-scope?`
+      : `${ticket}: verify keeps failing after ${cycleCount ?? "?"} fix attempts (regression_risk ${v.regression_risk ?? "?"}). Fix on the branch, or abandon / re-scope?`,
+  };
+  return coerceExplanation(fields, { ticket, phase: "verify" });
+}
+
 function normalizeShape(f = {}) {
   return {
     what_failed: typeof f.what_failed === "string" ? f.what_failed : "",
