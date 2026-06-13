@@ -3783,6 +3783,47 @@ export function createServer(opts: CreateServerOptions): BunServer {
           );
         }
 
+        // GET /api/beliefs/why?ticket=<ticket>[&tick=<tickId>]
+        // HTTP wrapper over traceTicket() — same resolver as `catalyst why`.
+        // Input validation (ticket required, /^[A-Za-z]+-\d+$/, tick must be
+        // integer) happens BEFORE any db touch so traversal attempts are
+        // rejected before reaching the db. Degrades to 200+empty trace when
+        // beliefs.db absent or unreadable (no 500).
+        // NOTE: DO NOT inline the specifier — computed import required (CTL-883).
+        if (url.pathname === "/api/beliefs/why") {
+          const rawTicket = url.searchParams.get("ticket");
+          if (!rawTicket) return new Response("ticket required", { status: 400 });
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(rawTicket);
+          } catch {
+            return new Response("invalid ticket encoding", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("invalid ticket format", { status: 400 });
+          }
+          const rawTick = url.searchParams.get("tick");
+          let tickId: number | undefined;
+          if (rawTick != null) {
+            const parsed = parseInt(rawTick, 10);
+            if (!Number.isInteger(parsed) || String(parsed) !== rawTick.trim()) {
+              return new Response("tick must be an integer", { status: 400 });
+            }
+            tickId = parsed;
+          }
+          // DO NOT inline this specifier (VITE-GRAPH GUARD, CTL-883).
+          const whyMod = ["./lib/belief-why.mjs"].join("");
+          try {
+            const { traceTicketJson } = await import(whyMod) as {
+              traceTicketJson: (opts: { ticket: string; tickId?: number; dbPath: string }) => Promise<unknown>;
+            };
+            const trace = await traceTicketJson({ ticket, tickId, dbPath: govDbPath() });
+            return Response.json(trace);
+          } catch {
+            return Response.json({ ticket, tickId: null, beliefs: [] });
+          }
+        }
+
         return new Response("Not Found", { status: 404 });
       } catch (err) {
         console.error(`[server] fetch handler error:`, err);
