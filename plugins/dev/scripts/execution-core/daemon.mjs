@@ -48,6 +48,7 @@ import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.m
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
+import { startLivenessPublisher as realStartLivenessPublisher } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness
 import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
@@ -119,6 +120,8 @@ let _memorySampler = null;
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
 let _heartbeat = null;
+// CTL-1090: cross-host liveness publisher handle (multi-host only; single-host no-op).
+let _livenessPublisher = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -406,6 +409,9 @@ export function startDaemon({
   // in dispatch/claim consumes them in PR1.
   startHeartbeat = realStartHeartbeat,
   enableHeartbeat = process.env.CATALYST_HEARTBEAT !== "0",
+  // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
+  // installs get an inert no-op handle from startLivenessPublisher itself.
+  startLivenessPublisher = realStartLivenessPublisher,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -644,6 +650,9 @@ export function startDaemon({
     // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
     if (enableHeartbeat) {
       _heartbeat = startHeartbeat();
+      // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
+      // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
+      _livenessPublisher = startLivenessPublisher({ orchDir });
     }
   } catch (err) {
     stopDaemon();
@@ -999,6 +1008,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: heartbeat stop failed");
     }
     _heartbeat = null;
+  }
+  // CTL-1090: stop the cross-host liveness publisher.
+  if (_livenessPublisher) {
+    try {
+      _livenessPublisher.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: liveness-publisher stop failed");
+    }
+    _livenessPublisher = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {
