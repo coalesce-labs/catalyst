@@ -115,9 +115,12 @@ export function HostMatrix({ nodes, workers, maxParallel, boardAgeMs }: HostMatr
                 {/* monitor — self: if this page renders, the monitor is up. */}
                 <span style={{ color: "var(--chart-2)" }}>ok</span>
 
-                {/* wkrs — busy/total from the board (live = 0/6 on idle mini). */}
+                {/* wkrs — busy/total: per-node maxParallel from the cluster signal
+                    (CTL-1092) when available; falls back to the global prop so
+                    single-host fleets behave identically to before. Offline rows
+                    show 0/0 (no dead-worker counts). */}
                 <span className="text-muted">
-                  {busy}/{maxParallel}
+                  {n.status === "offline" ? "0/0" : `${busy}/${n.maxParallel ?? maxParallel}`}
                 </span>
 
                 {/* DEFERRED — ONE merged dimmed locked cell spanning disk/load/version.

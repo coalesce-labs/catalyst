@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { BoardPayload } from "../../board/types";
 import { C } from "../../board/board-tokens";
 import { queueHostMode } from "../../board/queue-grouping";
@@ -5,6 +6,9 @@ import { SlotDeck } from "./slot-deck";
 import { DispatchQueue } from "./dispatch-queue";
 import { HoldingBuckets } from "./holding-buckets";
 import { DeadStrip } from "./dead-strip";
+import { NodeFilter } from "./node-filter";
+import { isClusterMode } from "./cluster-capacity";
+import { useClusterSignalContext } from "@/hooks/use-cluster-signal";
 
 export function ControlTower({
   payload,
@@ -14,13 +18,26 @@ export function ControlTower({
   onOpenTicket: (key: string) => void;
 }) {
   const multiHost = queueHostMode(payload.queue) === "multi";
+  const cluster = useClusterSignalContext();
+  const clusterMode = isClusterMode(cluster);
+  const [selectedNode, setSelectedNode] = useState<string | "all">("all");
+
   return (
     <div style={{ maxWidth: 1120, margin: "0 auto", padding: "8px 24px 32px", display: "flex", flexDirection: "column", gap: 28, flexShrink: 0, maxHeight: "45vh", overflowY: "auto" }}>
+      {clusterMode && cluster && (
+        <NodeFilter
+          nodes={cluster.nodes}
+          selected={selectedNode}
+          onSelect={setSelectedNode}
+        />
+      )}
       <SlotDeck
         workers={payload.workers}
         tickets={payload.tickets}
         config={payload.config}
         onOpenTicket={onOpenTicket}
+        clusterSignal={clusterMode ? cluster : null}
+        selectedNode={clusterMode ? selectedNode : "all"}
       />
       <DispatchQueue
         queue={payload.queue}

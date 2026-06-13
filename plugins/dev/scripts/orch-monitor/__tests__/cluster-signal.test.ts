@@ -81,10 +81,10 @@ describe("deriveClusterSignal — Scenario: Single node is an exact no-op", () =
     const signal = deriveClusterSignal(view);
     expect(signal.singleHost).toBe(true);
     expect(signal.nodes).toHaveLength(1);
-    expect(signal.nodes[0]).toEqual({ host: "mini", status: "live" });
-    // the projection carries NO ticket lists (footer/filter wire shape is tiny);
-    // toEqual above already proves the node has EXACTLY host + status and no more
-    expect(Object.keys(signal.nodes[0])).toEqual(["host", "status"]);
+    expect(signal.nodes[0]).toMatchObject({ host: "mini", status: "live" });
+    // CTL-1092: nodes now carry capacity fields (maxParallel/inFlightCount/freeSlots)
+    // in addition to host + status; no ticket lists (footer/filter wire shape stays slim)
+    expect(signal.nodes[0]).not.toHaveProperty("tickets");
     expect(signal.generatedAt).toBe(view.generatedAt);
   });
 
@@ -117,7 +117,9 @@ describe("deriveClusterSignal — Scenario: Multiple nodes show per-node health"
     });
     const signal = deriveClusterSignal(view);
     expect(signal.singleHost).toBe(false);
-    expect(signal.nodes).toEqual([
+    // CTL-1092: nodes now carry capacity fields; use toMatchObject to check the
+    // status-per-host contract without requiring an exact shape snapshot.
+    expect(signal.nodes).toMatchObject([
       { host: "mini", status: "live" },
       { host: "studio", status: "degraded" },
       { host: "laptop", status: "offline" },

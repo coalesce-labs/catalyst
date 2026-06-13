@@ -18,8 +18,16 @@ import {
   useReducedMotion,
 } from "../../board/motion-utils";
 import type { BoardWorker, BoardTicket, BoardConfig } from "../../board/types";
+import type { ClusterSignal } from "@/lib/cluster-signal";
 import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
+import {
+  aggregateClusterCapacity,
+  assignClusterSlots,
+  filterSlotsByNode,
+  nodeCapacity,
+} from "./cluster-capacity";
+import type { ClusterSlot } from "./cluster-capacity";
 
 // The state word + its color for a slot's worker (mirrors workerStatusText).
 function slotState(w: BoardWorker): { word: string; color: string } {
@@ -154,18 +162,112 @@ function EmptyCard({ slotLabel, first }: { slotLabel: string; first: boolean }) 
   );
 }
 
+// RemoteSlotCard — lightweight card for a remote node's in-flight ticket (CTL-1092).
+// Shows host chip + ticket id only; no worker detail (cross-node tail is CTL-885).
+function RemoteSlotCard({ slot }: { slot: ClusterSlot }) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        background: C.s2,
+        border: `1px solid ${C.borderSubtle}`,
+        borderRadius: 10,
+        padding: "10px 12px",
+        minHeight: 96,
+        opacity: 0.8,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, color: C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
+          {slotLabel(slot.slotIndex + 1)}
+        </span>
+        <span style={{ fontSize: 10, color: C.fgDim, fontFamily: C.mono }}>remote</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
+        <span style={{ fontSize: 10, color: C.fgDim, background: C.s3, borderRadius: 4, padding: "2px 5px", fontFamily: C.mono }}>{slot.host}</span>
+        <span style={{ fontFamily: C.mono, fontSize: 13, fontWeight: 600, color: C.blue }}>{slot.ticket}</span>
+      </div>
+    </div>
+  );
+}
+
 export function SlotDeck({
   workers,
   tickets,
   config,
   onOpenTicket,
+  clusterSignal = null,
+  selectedNode = "all",
 }: {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   config: BoardConfig;
   onOpenTicket?: (key: string) => void;
+  clusterSignal?: ClusterSignal | null;
+  selectedNode?: string | "all";
 }) {
   const infoById = new Map(tickets.map((t) => [t.id, t]));
+
+  // Cluster-mode path: use aggregateClusterCapacity + assignClusterSlots
+  if (clusterSignal && clusterSignal.nodes.length > 1) {
+    const localHost = clusterSignal.nodes.find((n) => n.status === "live")?.host ?? "";
+    const allSlots = assignClusterSlots({
+      nodes: clusterSignal.nodes as any,
+      localHost,
+      localWorkers: workers,
+    });
+    const displaySlots = selectedNode === "all" ? allSlots : filterSlotsByNode(allSlots, selectedNode);
+    const cap = selectedNode === "all"
+      ? aggregateClusterCapacity(clusterSignal.nodes as any)
+      : nodeCapacity(clusterSignal.nodes as any, selectedNode);
+
+    return (
+      <section>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 14 }}>
+          <span style={{ display: "inline-flex", alignItems: "baseline" }}>
+            <span style={{ fontFamily: C.mono, fontSize: 26, fontWeight: 700, fontVariantNumeric: "tabular-nums", color: C.fg }}>
+              <TickerNumber value={cap.inFlight} />
+            </span>
+            <span style={{ fontFamily: C.mono, fontSize: 18, fontWeight: 500, color: C.fgDim }}>
+              {" / "}{cap.maxParallel}
+            </span>
+          </span>
+          <span style={{ fontSize: 12, color: C.fgMuted }}>
+            slots in use ·{" "}
+            <span style={{ color: cap.freeSlots === 0 ? C.yellow : C.fgMuted, display: "inline-flex", alignItems: "baseline" }}>
+              <TickerNumber value={cap.freeSlots} />
+              <span style={{ marginLeft: 4 }}>open</span>
+            </span>
+          </span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(264px, 1fr))", gap: 10 }}>
+          <AnimatePresence initial={false}>
+            {displaySlots.map((slot, i) => {
+              if (!slot.occupied) {
+                return <EmptyCard key={`empty-${slot.host}-${slot.slotIndex}`} slotLabel={slotLabel(slot.slotIndex + 1)} first={i === 0} />;
+              }
+              if (slot.worker) {
+                return (
+                  <OccupiedCard
+                    key={`slot-${slot.worker.name}`}
+                    w={slot.worker}
+                    ticket={infoById.get(slot.worker.tickets?.[0] ?? "")}
+                    slotLabel={slotLabel(slot.slotIndex + 1)}
+                    onOpenTicket={onOpenTicket}
+                  />
+                );
+              }
+              // Remote slot with ticket label
+              return <RemoteSlotCard key={`remote-${slot.host}-${slot.slotIndex}`} slot={slot} />;
+            })}
+          </AnimatePresence>
+        </div>
+      </section>
+    );
+  }
+
+  // Single-host / legacy path — unchanged
   const { occupied, emptyCount, overCapacity } = assignSlots(workers, config.maxParallel);
   const dead = config.dead ?? 0;
   const over = Math.max(0, config.inFlight - config.maxParallel);
@@ -207,7 +309,7 @@ export function SlotDeck({
             <OccupiedCard
               key={`slot-${w.name}`}
               w={w}
-              ticket={infoById.get(w.ticket)}
+              ticket={infoById.get(w.tickets?.[0] ?? w.ticket)}
               slotLabel={slotLabel(i + 1)}
               onOpenTicket={onOpenTicket}
             />
@@ -223,7 +325,7 @@ export function SlotDeck({
             <OccupiedCard
               key={`slot-${w.name}`}
               w={w}
-              ticket={infoById.get(w.ticket)}
+              ticket={infoById.get(w.tickets?.[0] ?? w.ticket)}
               slotLabel="OVER"
               onOpenTicket={onOpenTicket}
             />
