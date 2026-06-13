@@ -724,6 +724,36 @@ export function deriveHumanQuestion(phaseSigs) {
   return null;
 }
 
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a
+ *  cohesive nested object so the detail pane can render a CTA-led card. Distinct
+ *  from deriveHumanQuestion (the canonical human_question sub-label). */
+const EXPLANATION_RENDER_FIELDS = [
+  "call_to_action", "outcome", "problem", "why_you", "why_not_auto", "what_to_do",
+];
+
+/** CTL-1110: extract the six extended explanation fields from the most-recent
+ *  phase signal whose explanation carries at least one of them (scanned
+ *  newest-first, same as deriveHumanQuestion). Absent sub-fields are projected to
+ *  null (the pane renders them absent, never fabricated). Returns null when no
+ *  signal carries any extended field. */
+export function deriveExplanation(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const expl = sig.explanation;
+    if (!expl || typeof expl !== "object") continue;
+    const out = {};
+    let any = false;
+    for (const k of EXPLANATION_RENDER_FIELDS) {
+      const v = expl[k];
+      if (typeof v === "string" && v !== "") { out[k] = v; any = true; }
+      else { out[k] = null; }
+    }
+    if (any) return out;
+  }
+  return null;
+}
+
 // CTL-1041: the TITLE is the outcome line and must lead on every surface (slot
 // cards, inbox detail, holding rows). The triage `summary` is the DESCRIPTION
 // (e.g. "Live probe confirmed the unified event log…") and must NEVER stand in
@@ -1253,6 +1283,9 @@ export async function assembleBoard() {
       // CTL-1065: human_question from the most-recent phase signal's explanation,
       // surfaced as the inbox sub-label for needs-human rows.
       humanQuestion: deriveHumanQuestion(phaseSigs),
+      // CTL-1110: the six extended explanation fields surfaced for the detail
+      // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
+      explanation: deriveExplanation(phaseSigs),
       // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
       // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
       // ISO attentionSince anchor (or null, never fabricated). Drives the ONE

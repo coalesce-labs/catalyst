@@ -54,6 +54,7 @@ import {
   accentFor,
   askFor,
   blockerFor,
+  escalationExplanationFor,
   heroKindFor,
   optionsFor,
   viewInClaudeFor,
@@ -229,6 +230,57 @@ function WhatsNeededNow({
   if (kind == null) return null; // neutral (running/done) sets carry no hero.
 
   const accent = accentFor(row);
+  const escalation = escalationExplanationFor(row);
+
+  // CTL-1110: needs-human rows with a structured explanation use the CTA-led card.
+  if (escalation != null) {
+    return (
+      <section
+        data-pane-hero="escalation"
+        data-pane-accent="amber"
+        data-pane-escalation
+        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses("amber"))}
+      >
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
+          What's needed now
+        </p>
+
+        {/* CTA row: imperative call-to-action + the Respond control. */}
+        <div className="mt-1.5 flex flex-wrap items-start gap-3">
+          {escalation.callToAction != null && (
+            <p
+              data-escalation-cta
+              className="flex-1 text-[14px] font-medium leading-snug text-fg"
+            >
+              {escalation.callToAction}
+            </p>
+          )}
+          <PaneVerb row={row} onAct={onAct} respondStatus={respondStatus} />
+        </div>
+
+        {/* Labelled explanation sections — each rendered only when non-null. */}
+        {(
+          [
+            ["What this delivers", escalation.outcome, "outcome"],
+            ["The problem", escalation.problem, "problem"],
+            ["Why this needs you", escalation.whyYou, "why_you"],
+            ["Why it couldn't self-heal", escalation.whyNotAuto, "why_not_auto"],
+            ["What to do", escalation.whatToDo, "what_to_do"],
+          ] as const
+        )
+          .filter(([, value]) => value != null)
+          .map(([label, value, field]) => (
+            <div key={field} className="mt-3" data-escalation-field={field}>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                {label}
+              </p>
+              <p className="mt-0.5 text-[13px] leading-relaxed text-fg/90">{value}</p>
+            </div>
+          ))}
+      </section>
+    );
+  }
+
   const ask = askFor(row);
   const options = optionsFor(row);
   const blocker = blockerFor(row);

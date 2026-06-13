@@ -158,6 +158,10 @@ export interface BoardTicket {
   /** CTL-1066: reason a stalled/failed phase gave up; drives the "Stalled — gave
    *  up" holding bucket copy. null/absent unless status is stalled/failed. */
   failureReason?: string | null;
+  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
+   *  card. null/absent unless attention is needs-human and a signal carried the
+   *  extended fields. */
+  explanation?: BoardEscalationExplanation | null;
   // ── CTL-902 (HOME4): the reading-pane CONTENT fields ─────────────────────
   // The "What's needed now" hero + the About block read these. They are NOT in
   // the board payload today — they derive from the ticket's AI summary + the
@@ -187,6 +191,19 @@ export interface DecisionOption {
   label: string;
   /** The one-line trade-off for choosing this option. */
   detail: string;
+}
+
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
+ *  object for the detail pane's CTA-led card. Each field is null when the payload
+ *  omitted it (rendered absent, never fabricated). Field names stay snake_case to
+ *  match the wire payload exactly (no transform). */
+export interface BoardEscalationExplanation {
+  call_to_action: string | null;
+  outcome: string | null;
+  problem: string | null;
+  why_you: string | null;
+  why_not_auto: string | null;
+  what_to_do: string | null;
 }
 
 export interface WorkflowSubStep {

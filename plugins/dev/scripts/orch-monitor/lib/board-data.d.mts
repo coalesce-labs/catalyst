@@ -157,6 +157,22 @@ export interface BoardTicket {
   /** CTL-1066: reason a stalled/failed phase gave up, from the surfaced phase
    *  signal's stalledReason/failureReason. null unless status is stalled/failed. */
   failureReason?: string | null;
+  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
+   *  card. null/absent unless attention is needs-human and a signal carried the
+   *  extended fields. */
+  explanation?: BoardEscalationExplanation | null;
+}
+
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
+ *  object for the detail pane's CTA-led card. Each field is null when the signal
+ *  omitted it (rendered absent, never fabricated). */
+export interface BoardEscalationExplanation {
+  call_to_action: string | null;
+  outcome: string | null;
+  problem: string | null;
+  why_you: string | null;
+  why_not_auto: string | null;
+  what_to_do: string | null;
 }
 
 export interface BoardQueueItem {

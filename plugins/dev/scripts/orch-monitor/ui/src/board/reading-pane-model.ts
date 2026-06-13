@@ -17,7 +17,7 @@
 // yield an empty list, and a missing session id HIDES View-in-Claude rather than
 // emitting a dead link.
 
-import type { BoardWorker } from "./types";
+import type { BoardEscalationExplanation, BoardWorker } from "./types";
 import { isNeedsYouSection, type InboxRow } from "./home-inbox";
 
 /** The kind of hero "What's needed now" block a needs-you item shows:
@@ -134,6 +134,43 @@ export function accentFor(row: InboxRow): PaneAccent {
   if (kind === "blocked") return "red";
   if (kind === "decision") return "amber";
   return "none";
+}
+
+/** CTL-1110: the needs-human escalation card view-model — a highlighted CTA plus
+ *  the labelled explanation sections, top to bottom. Each field is null when the
+ *  payload omitted it (rendered absent, never fabricated). */
+export interface EscalationExplanationView {
+  callToAction: string | null;
+  outcome: string | null;
+  problem: string | null;
+  whyYou: string | null;
+  whyNotAuto: string | null;
+  whatToDo: string | null;
+}
+
+const nz = (s: string | null | undefined): string | null =>
+  s != null && s !== "" ? s : null;
+
+/**
+ * The needs-human escalation explanation for the hero card, or null when the row
+ * is not escalated, carries no explanation, or every field is empty (the pane
+ * then falls back to the bare hero). Keyed on `attention === "needs-human"` so
+ * waiting-on-you decision rows are untouched.
+ */
+export function escalationExplanationFor(row: InboxRow): EscalationExplanationView | null {
+  if (row.ticket.attention !== "needs-human") return null;
+  const e = row.ticket.explanation as BoardEscalationExplanation | null | undefined;
+  if (e == null) return null;
+  const view: EscalationExplanationView = {
+    callToAction: nz(e.call_to_action),
+    outcome: nz(e.outcome),
+    problem: nz(e.problem),
+    whyYou: nz(e.why_you),
+    whyNotAuto: nz(e.why_not_auto),
+    whatToDo: nz(e.what_to_do),
+  };
+  if (Object.values(view).every((v) => v == null)) return null;
+  return view;
 }
 
 /**
