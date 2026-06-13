@@ -1,0 +1,44 @@
+{
+  "*->revive": {
+    "guardText": "reviveCount < REVIVE_BUDGET (1); 2nd failure escalates to stalled",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:189-192",
+    "classification": "crash-revive"
+  },
+  "*->stalled": {
+    "guardText": "reviveCount >= REVIVE_BUDGET — escalation to terminal failure sink",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:192",
+    "classification": "escalation"
+  },
+  "*->needs-input": {
+    "guardText": "event.type === 'park' — operator-initiated pause",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:198-199",
+    "classification": "park"
+  },
+  "needs-input->resume": {
+    "guardText": "event.type === 'resume' from needs-input state",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:167-168",
+    "classification": "resume"
+  },
+  "verify->remediate": {
+    "guardText": "deriveAdvancement: verify verdict == 'fail' (regression_risk >= 5 OR any severity:high finding) and remediateCycleCount < REMEDIATE_CYCLE_CAP (3)",
+    "datalog": "advance_to('remediate', T) :- phase_done('verify', T), verify_fail(T), cycle_count(T, C), C < 3.  verify_fail(T) :- regression_risk(T, R), R >= 5.  verify_fail(T) :- high_finding(T).",
+    "sourceRef": "plugins/dev/scripts/execution-core/scheduler.mjs:1207-1210; plugins/dev/scripts/execution-core/work-done-probes.mjs:137",
+    "classification": "remediate-cycle"
+  },
+  "remediate->verify": {
+    "guardText": "deriveAdvancement: after remediate completes, advance back to verify (verify⇄remediate cycle, cap 3)",
+    "datalog": "advance_to('verify', T) :- phase_done('remediate', T).",
+    "sourceRef": "plugins/dev/scripts/execution-core/scheduler.mjs:901-904",
+    "classification": "remediate-cycle"
+  },
+  "*->turn-cap": {
+    "guardText": "event.type === 'turn-cap-exhausted' — continuation self-loop, revive budget untouched",
+    "datalog": null,
+    "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:194-196",
+    "classification": "turn-cap"
+  }
+}

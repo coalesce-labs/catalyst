@@ -36,6 +36,19 @@ import {
   assembleTicketRuns,
   readPhaseSignalVerbatim,
 } from "./lib/ticket-runs.mjs";
+// CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
+// specifier needed — plain static import is safe for Vite/esbuild graph).
+import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
+// CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
+// has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
+import {
+  beliefSummary,
+  beliefRates,
+  beliefRecent,
+  beliefCfg,
+} from "./lib/belief-store-queries.mjs";
+// CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
+import { assembleJourney } from "./lib/journey.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -355,6 +368,12 @@ export interface CreateServerOptions {
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
+  /**
+   * CTL-1100: override for beliefs.db used by governance read endpoints.
+   * Production resolves via defaultBeliefsDbPath(process.env); tests inject
+   * a seeded temp path so routes don't read the live beliefs store.
+   */
+  beliefStoreDbPath?: string;
   /**
    * Override for the broker's durable filter-state.db (ticket_state cache) used
    * by the cache-backed Linear detail/search routes (CTL-889, P8/P12). Defaults
@@ -772,6 +791,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
     filterStateDbPath,
+    beliefStoreDbPath,
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
@@ -797,6 +817,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
       { cause: err },
     );
   }
+
+  // CTL-1100: in-process LRU cache for /api/beliefs/rates (keyed by max tick_id,
+  // cap RATES_LRU_CAP=64; beliefs are insert-only so the cached value per max tick
+  // is invariant). One cache per server lifetime.
+  const beliefRatesCache = new Map<number | null, unknown>();
+
+  // CTL-1100: resolve the beliefs.db path for governance read endpoints.
+  // Per-request resolution inside handlers — never at module top level — so a
+  // server started before beliefs.db exists picks it up later without restart.
+  const govDbPath = (): string => {
+    if (beliefStoreDbPath) return beliefStoreDbPath;
+    const govDeps = governanceDepsPromise; // best-effort sync peek (may be null)
+    void govDeps; // suppress unused warning — govDbPath resolves via env below
+    // Inline the same precedence as defaultBeliefsDbPath to avoid a dependency cycle.
+    if (process.env.CATALYST_BELIEFS_DB) return process.env.CATALYST_BELIEFS_DB;
+    const cDir = catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+    return `${cDir}/beliefs.db`;
+  };
 
   // Forward reference: the webhook handler is constructed below but
   // the prFetcher's freshness filter needs to call into it. We hold a mutable
@@ -1164,6 +1202,74 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
     return daemonDepsPromise;
   };
+
+  // loadGovernanceDeps — memoized loader for governance read endpoints.
+  // Imports lib/governance-reader.mjs + execution-core/beliefs/why.mjs +
+  // execution-core/beliefs/rules.mjs via computed specifiers so bun:sqlite
+  // never reaches the Vite/esbuild browser bundle (CTL-883 VITE-GRAPH GUARD).
+  // Returns null on any import failure — all callers degrade gracefully.
+  // DO NOT inline the specifiers to string literals (see governance-reader.mjs header).
+  let governanceDepsPromise: Promise<{
+    openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+    withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+    defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+    isGovernanceEvent: (name: string) => boolean;
+    traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+    latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+    RULE_MANIFEST: unknown;
+    RULES_SHA: string;
+  } | null> | null = null;
+  const loadGovernanceDeps = () => {
+    if (!governanceDepsPromise) {
+      governanceDepsPromise = (async () => {
+        try {
+          const readerMod = ["./lib/governance-reader.mjs"].join("");
+          const whyMod = ["../execution-core/beliefs/why.mjs"].join("");
+          const rulesMod = ["../execution-core/beliefs/rules.mjs"].join("");
+          // Structural casts (not `typeof import(specifier)`) keep the computed
+          // specifiers erased at build — preserving the VITE-GRAPH GUARD — while
+          // typing the destructure so the no-unsafe-* lint rules pass without
+          // authoring .d.mts for the execution-core modules. Mirrors loadDaemonDeps
+          // (server.ts ~1188). CTL-1100 phase-review remediation.
+          const [reader, why, rules] = await Promise.all([
+            import(readerMod) as Promise<{
+              openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+              withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+              defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+              isGovernanceEvent: (name: string) => boolean;
+            }>,
+            import(whyMod) as Promise<{
+              traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+              latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+            }>,
+            import(rulesMod) as Promise<{
+              RULE_MANIFEST: unknown;
+              RULES_SHA: string;
+            }>,
+          ]);
+          return {
+            openBeliefsDbRO: reader.openBeliefsDbRO,
+            withBeliefsDbRO: reader.withBeliefsDbRO,
+            defaultBeliefsDbPath: reader.defaultBeliefsDbPath,
+            isGovernanceEvent: reader.isGovernanceEvent,
+            traceTicket: why.traceTicket,
+            latestTickForTicket: why.latestTickForTicket,
+            RULE_MANIFEST: rules.RULE_MANIFEST,
+            RULES_SHA: rules.RULES_SHA,
+          };
+        } catch {
+          return null; // execution-core unavailable → degrade
+        }
+      })();
+    }
+    return governanceDepsPromise;
+  };
+
+  // Route-insertion anchor for CTL-1100 governance read endpoints.
+  // New /api/fsm/*, /api/beliefs/*, /api/governance, /api/journey/:ticket
+  // routes insert between the /api/beliefs/stream branch and the 404 fallthrough.
+  // Re-locate this anchor by grep after each insertion — cited line numbers shift.
+
   const productionDaemonHealth = async (): Promise<DaemonHealth> => {
     try {
       const deps = await loadDaemonDeps();
@@ -2814,6 +2920,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        // CTL-1100: GET /api/journey/:ticket — chronological hop timeline + gates + verdict.
+        // bun:sqlite-free (assembleJourney uses sqlite3 binary via ticket-runs.mjs).
+        // Mirrors ticketRunsMatch guard for input validation.
+        const journeyMatch = url.pathname.match(/^\/api\/journey\/([^/]+)$/);
+        if (journeyMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(journeyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          return Response.json(await assembleJourney(ticket, {
+            orchDir: wtDir,
+            workersDir: `${wtDir}/workers`,
+            dbPath: dbPath ?? undefined,
+          }));
+        }
+
         // CTL-886 (BFF4) keystone P2: a ticket's full run history. One run entity
         // per phase-*.json signal under ~/catalyst/execution-core/workers/<id>/
         // (model, bg_job_id, attempt, generation, status, timestamps, host{},
@@ -3635,6 +3762,119 @@ export function createServer(opts: CreateServerOptions): BunServer {
               "Access-Control-Allow-Origin": "*",
             },
           });
+        }
+
+        // ── CTL-1100 governance read endpoints ──────────────────────────────
+        // Inserted between the /api/beliefs/stream block and the 404 fallthrough.
+        // Re-locate by grep after each insertion — line numbers shift.
+
+        // GET /api/governance — current daemon governance config snapshot.
+        // DO NOT inline the specifier (computed import, VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/governance") {
+          const configSpecifier = ["../execution-core/config.mjs"].join("");
+          try {
+            const { readGovernanceConfig } = await import(configSpecifier) as {
+              readGovernanceConfig: (env?: NodeJS.ProcessEnv) => Record<string, unknown>;
+            };
+            return Response.json({ available: true, ...readGovernanceConfig() });
+          } catch {
+            return Response.json({ available: false });
+          }
+        }
+
+        if (url.pathname === "/api/fsm/descriptor") {
+          return Response.json(await buildFsmDescriptor());
+        }
+
+        // GET /api/beliefs/rules — served from frozen RULE_MANIFEST; no db required.
+        if (url.pathname === "/api/beliefs/rules") {
+          const govDeps = await loadGovernanceDeps();
+          const manifest = govDeps?.RULE_MANIFEST ?? null;
+          if (!manifest) return Response.json({ rules: [], strata: [] });
+          return Response.json(manifest);
+        }
+
+        // GET /api/beliefs/summary — latest-tick aggregate per belief name.
+        if (url.pathname === "/api/beliefs/summary") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ tickId: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefSummary(db), { tickId: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/rates — full belief counts per rule_id per tick (LRU cached).
+        if (url.pathname === "/api/beliefs/rates") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ maxTick: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRates(db, beliefRatesCache), { maxTick: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/recent — newest-first belief rows, limit param.
+        if (url.pathname === "/api/beliefs/recent") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          const limitParam = url.searchParams.get("limit");
+          const limit = limitParam ? Math.max(1, parseInt(limitParam, 10) || 50) : undefined;
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRecent(db, { limit }), { rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/cfg — static config rows from the beliefs store.
+        if (url.pathname === "/api/beliefs/cfg") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefCfg(db), { rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/why?ticket=<ticket>[&tick=<tickId>]
+        // HTTP wrapper over traceTicket() — same resolver as `catalyst why`.
+        // Input validation (ticket required, /^[A-Za-z]+-\d+$/, tick must be
+        // integer) happens BEFORE any db touch so traversal attempts are
+        // rejected before reaching the db. Degrades to 200+empty trace when
+        // beliefs.db absent or unreadable (no 500).
+        // NOTE: DO NOT inline the specifier — computed import required (CTL-883).
+        if (url.pathname === "/api/beliefs/why") {
+          const rawTicket = url.searchParams.get("ticket");
+          if (!rawTicket) return new Response("ticket required", { status: 400 });
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(rawTicket);
+          } catch {
+            return new Response("invalid ticket encoding", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("invalid ticket format", { status: 400 });
+          }
+          const rawTick = url.searchParams.get("tick");
+          let tickId: number | undefined;
+          if (rawTick != null) {
+            const parsed = parseInt(rawTick, 10);
+            if (!Number.isInteger(parsed) || String(parsed) !== rawTick.trim()) {
+              return new Response("tick must be an integer", { status: 400 });
+            }
+            tickId = parsed;
+          }
+          // DO NOT inline this specifier (VITE-GRAPH GUARD, CTL-883).
+          const whyMod = ["./lib/belief-why.mjs"].join("");
+          try {
+            const { traceTicketJson } = await import(whyMod) as {
+              traceTicketJson: (opts: { ticket: string; tickId?: number; dbPath: string }) => Promise<unknown>;
+            };
+            const trace = await traceTicketJson({ ticket, tickId, dbPath: govDbPath() });
+            return Response.json(trace);
+          } catch {
+            return Response.json({ ticket, tickId: null, beliefs: [] });
+          }
         }
 
         return new Response("Not Found", { status: 404 });
