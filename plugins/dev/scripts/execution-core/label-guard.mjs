@@ -49,8 +49,9 @@ function labelMarkerBase(orchDir, ticket, label) {
 // UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
 // daemon lifetime (CTL-834); labelOnce writes its .skipped marker for these to
 // stop the per-tick retry storm. "missing-label": the workspace lacks the label;
-// "exclusive-conflict": the label's exclusive-group sibling is already present.
-const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
+// "exclusive-conflict": the label's exclusive-group sibling is already present;
+// "team-mismatch": name resolution used the wrong team's UUID context (CTL-1085).
+const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict", "team-mismatch"]);
 
 // CTL-936: labelOnce now accepts an optional `appendEvent` seam. When provided
 // AND CATALYST_INTENTS_ENFORCE=1, an unrecoverable label-write failure emits an
@@ -78,7 +79,7 @@ export function labelOnce(orchDir, ticket, label, writeStatus, { appendEvent = n
       const reason = res.reason;
       log.warn(
         { ticket, label, reason },
-        "scheduler: label unrecoverable (missing / exclusive-conflict) — skipping retries for this run"
+        "scheduler: label unrecoverable (missing / exclusive-conflict / team-mismatch) — skipping retries for this run"
       );
       // CTL-936: emit operator-visible event when enforce mode is on.
       if ((env.CATALYST_INTENTS_ENFORCE ?? "0") === "1" && typeof appendEvent === "function") {

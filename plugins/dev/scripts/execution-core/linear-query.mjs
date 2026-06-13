@@ -409,6 +409,24 @@ export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
   return readTicketLabels(identifier, { exec }).labels;
 }
 
+// readTicketLabelNodes — like readTicketLabels but preserves the { id, name }
+// node shape so callers (removeLabel, CTL-1085) can build a write payload from
+// ticket-native label UUIDs. Using UUIDs read off the ticket itself avoids the
+// cross-team name-resolution ambiguity that makes name-based overwrites fail on
+// ADV tickets whose label names collide with CTL-team label names.
+export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return { ok: false, nodes: null, code, stderr: stderr ?? "" };
+  try {
+    const node = JSON.parse(stdout);
+    const nodes =
+      node?.labels?.nodes?.map((n) => ({ id: n.id, name: n.name })) ?? [];
+    return { ok: true, nodes };
+  } catch {
+    return { ok: false, nodes: null, code, stderr: stderr ?? "" };
+  }
+}
+
 // classifyTicketResolution — CTL-671 3-valued phantom probe. Distinguishes a
 // DEFINITIVELY non-existent ticket (clean exit 0, empty/null node) from a
 // TRANSIENT failure (nonzero exit: auth/network/rate-limit/not-found — all

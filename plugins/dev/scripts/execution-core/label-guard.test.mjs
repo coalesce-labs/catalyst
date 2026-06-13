@@ -111,6 +111,20 @@ describe("labelOnce", () => {
     );
   });
 
+  test("CTL-1085: team-mismatch reason → writes .skipped marker (storm-break preserved)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "team-mismatch" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      true
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
   test("transient reason → NO marker (retries next tick)", () => {
     const ws = { applyLabel: recorder({ applied: false, reason: "transient" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });

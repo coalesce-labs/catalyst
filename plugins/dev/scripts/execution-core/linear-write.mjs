@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
-import { fetchTicketLabels, readTicketLabels, fetchTicketState } from "./linear-query.mjs";
+import { fetchTicketLabels, readTicketLabels, readTicketLabelNodes, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
 import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
@@ -265,7 +265,7 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 export async function removeLabel(
   ticket,
   label,
-  { exec = defaultExec, fetchLabels = null, readLabels = null } = {}
+  { exec = defaultExec, fetchLabels = null, readLabels = null, readLabelNodes = readTicketLabelNodes } = {}
 ) {
   // Resolve the reader: prefer readLabels (richer), wrap legacy fetchLabels,
   // or default to readTicketLabels.
@@ -291,17 +291,29 @@ export async function removeLabel(
       return { removed: true };
     }
     const remaining = current.filter((l) => l !== label);
-    const res = remaining.length
-      ? exec("linearis", [
-          "issues",
-          "update",
-          ticket,
-          "--labels",
-          remaining.join(","),
-          "--label-mode",
-          "overwrite",
-        ])
-      : exec("linearis", ["issues", "update", ticket, "--clear-labels"]);
+    let res;
+    if (remaining.length) {
+      // CTL-1085: prefer ticket-native UUIDs to avoid cross-team name resolution.
+      // Fall back to names when the node read is unavailable or any remaining
+      // name has no matching node (preserves prior behavior + back-compat).
+      let labelArg = remaining.join(",");
+      try {
+        const nodeRead = readLabelNodes(ticket, { exec });
+        if (nodeRead?.ok && Array.isArray(nodeRead.nodes)) {
+          const ids = remaining.map(
+            (name) => nodeRead.nodes.find((n) => n.name === name)?.id
+          );
+          if (ids.length && ids.every((id) => typeof id === "string" && id.length)) {
+            labelArg = ids.join(",");
+          }
+        }
+      } catch {
+        // node read threw → keep the name-based labelArg
+      }
+      res = exec("linearis", ["issues", "update", ticket, "--labels", labelArg, "--label-mode", "overwrite"]);
+    } else {
+      res = exec("linearis", ["issues", "update", ticket, "--clear-labels"]);
+    }
     if ((res.code ?? res.status ?? 0) !== 0) {
       const reason = classifyLabelFailure(res.stderr ?? "");
       log.warn({ ticket, label, reason, stderr: res.stderr }, "removeLabel: write failed");
@@ -520,12 +532,12 @@ export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }
 //   - "Rate limit": linearis CLI surfaced an HTTP 429 (CTL-679 trigger).
 //   - "incorrect team": Linear's labels are team-scoped (different UUIDs per
 //     team for the same name). linearis resolved the label name in the wrong
-//     team's workspace context and sent the cross-team UUID, which Linear
-//     rejects. Permanent within one daemon lifetime (the resolver is global) —
-//     classified as missing-label so labelOnce writes the .skipped marker and
-//     stops the per-tick retry storm. (Observed on ADV tickets when the daemon
-//     orchestrates a team whose labels share names with the resolver's default
-//     team but have different UUIDs.)
+//     team's workspace context and sent the cross-team UUID. CTL-1085: now its
+//     own "team-mismatch" reason (previously "missing-label") — both are in
+//     UNRECOVERABLE_LABEL_REASONS so the applyLabel storm-break is preserved,
+//     while operators can distinguish "label absent" from "name resolved to
+//     wrong team". (Observed on ADV tickets whose label names share strings with
+//     CTL-team label names.)
 //   - "not exclusive child" (CTL-834): the label belongs to an EXCLUSIVE Linear
 //     label group and a SIBLING from that group is already on the ticket, so the
 //     add can never land while the sibling is present. Its own unrecoverable
@@ -535,7 +547,7 @@ export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }
 export function classifyLabelFailure(stderr) {
   const s = String(stderr ?? "");
   if (s.includes("not found")) return "missing-label";
-  if (s.includes("incorrect team")) return "missing-label";
+  if (s.includes("incorrect team")) return "team-mismatch"; // CTL-1085 (was missing-label)
   if (s.includes("not exclusive")) return "exclusive-conflict";
   if (s.includes("Rate limit")) return "rate-limited";
   if (isAuthError(s)) return "auth-error";

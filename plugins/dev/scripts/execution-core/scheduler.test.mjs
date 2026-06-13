@@ -3972,7 +3972,7 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
     mkdirSync(join(orchDir, "workers", TICKET), { recursive: true });
   });
 
-  test("CTL-1079: cache hit → retraction does ZERO live label reads, mutation still fires", async () => {
+  test("CTL-1079: cache hit → idempotency read suppressed by cache; CTL-1085 write-path node read fires once", async () => {
     writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
     const exec = makeExecSpy();
     const gateway = {
@@ -3984,8 +3984,9 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
       writeStatus: makeWriteStatus(exec),
       gateway,
     });
-    // The cache hit avoids the live read entirely.
-    expect(exec.calls.filter(isLiveRead)).toHaveLength(0);
+    // Cache hit suppresses the idempotency read. The write-path node read (CTL-1085
+    // UUID resolution) is the only live read — it fires exactly once on the write path.
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(1);
     // The mutation (overwrite without needs-human) still fires.
     const writes = exec.calls.filter(isOverwrite);
     expect(writes).toHaveLength(1);
@@ -3994,7 +3995,7 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
     expect(writes[0].args.join(" ")).not.toContain("needs-human");
   });
 
-  test("CTL-1079: cache miss (gateway returns null) → falls back to ONE live read", async () => {
+  test("CTL-1079: cache miss → idempotency live read + CTL-1085 node read = TWO live reads total", async () => {
     writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
     const exec = makeExecSpy();
     const gateway = { getDescriptor: () => null };
@@ -4004,7 +4005,8 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
       writeStatus: makeWriteStatus(exec),
       gateway,
     });
-    expect(exec.calls.filter(isLiveRead)).toHaveLength(1);
+    // Cache miss → idempotency live read; CTL-1085 UUID write-path node read adds one more.
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(2);
   });
 
   test("CTL-1079: cache hit, label already absent → idempotent no-op, no read AND no write", async () => {
@@ -4024,7 +4026,7 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
     expect(exec.calls.filter(isOverwrite)).toHaveLength(0);
   });
 
-  test("CTL-1079: no gateway injected → unchanged behavior (live read fires)", async () => {
+  test("CTL-1079: no gateway → idempotency live read + CTL-1085 node read = TWO live reads total", async () => {
     writeFileSync(join(orchDir, "workers", TICKET, ".linear-label-needs-human.applied"), "");
     const exec = makeExecSpy();
     schedulerTick(orchDir, {
@@ -4033,7 +4035,8 @@ describe("schedulerTick — retraction sweep uses gateway cache (CTL-1079)", () 
       writeStatus: makeWriteStatus(exec),
       // gateway intentionally omitted
     });
-    expect(exec.calls.filter(isLiveRead)).toHaveLength(1);
+    // No gateway → idempotency live read fires. CTL-1085 write-path node read adds one more.
+    expect(exec.calls.filter(isLiveRead)).toHaveLength(2);
   });
 });
 
