@@ -30,7 +30,7 @@ async function seedBeliefDb(dbPath: string): Promise<{ tickId: number }> {
 }
 
 function jsonNorm<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v));
+  return JSON.parse(JSON.stringify(v)) as T;
 }
 
 // ─── Seeded server ───────────────────────────────────────────────────────────

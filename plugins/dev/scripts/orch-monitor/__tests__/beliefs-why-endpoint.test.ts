@@ -10,28 +10,6 @@ import { createServer } from "../server";
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
-function makeDb(): Database {
-  const db = new Database(":memory:");
-  db.run(`CREATE TABLE tick (
-    tick_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    now_ms  INTEGER NOT NULL,
-    host    TEXT    NOT NULL,
-    rules_sha TEXT
-  )`);
-  db.run(`CREATE TABLE belief (
-    belief_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tick_id   INTEGER NOT NULL,
-    stratum   INTEGER NOT NULL,
-    name      TEXT NOT NULL,
-    subject   TEXT NOT NULL,
-    value     TEXT,
-    rule_id   TEXT NOT NULL,
-    source_fact_ids TEXT NOT NULL,
-    UNIQUE (tick_id, name, subject)
-  )`);
-  return db;
-}
-
 async function seedBeliefDbAsync(dbPath: string): Promise<{ tickId: number }> {
   const schemaSpecifier = ["../../execution-core/beliefs/schema.mjs"].join("");
   const { openBeliefsDb } = await import(schemaSpecifier) as {

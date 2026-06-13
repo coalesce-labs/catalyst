@@ -15,9 +15,9 @@ import {
   isGovernanceEvent,
   GOVERNANCE_EVENT_PREFIXES,
 } from "../lib/governance-reader.mjs";
-// @ts-ignore — execution-core mjs modules have no .d.mts; runtime types are correct
+// @ts-expect-error — execution-core mjs modules have no .d.mts; runtime types are correct
 import { JANITOR_EVENT_TYPES } from "../../execution-core/janitor-event-types.mjs";
-// @ts-ignore
+// @ts-expect-error — execution-core mjs modules have no .d.mts; runtime types are correct
 import { REAP_INTENT_TYPES } from "../../execution-core/reap-intent.mjs";
 
 // ─── Build the full reap vocabulary ──────────────────────────────────────────

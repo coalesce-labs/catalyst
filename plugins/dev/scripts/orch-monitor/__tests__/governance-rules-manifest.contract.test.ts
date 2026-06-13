@@ -10,7 +10,7 @@ import { createServer } from "../server";
 
 // Contract: import the exact same module the endpoint serves from.
 // Computed specifier: rules.mjs transitively imports bun:sqlite via schema.mjs.
-// @ts-ignore — execution-core mjs module has no .d.mts; runtime types are correct
+// @ts-expect-error — execution-core mjs module has no .d.mts; runtime types are correct
 const rulesMod = await import("../../execution-core/beliefs/rules.mjs");
 const { RULE_MANIFEST } = rulesMod as {
   RULE_MANIFEST: {
@@ -20,7 +20,7 @@ const { RULE_MANIFEST } = rulesMod as {
 };
 
 function jsonNorm<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v));
+  return JSON.parse(JSON.stringify(v)) as T;
 }
 
 let server: ReturnType<typeof createServer>;

@@ -8,10 +8,24 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
-// @ts-ignore — execution-core mjs modules have no .d.mts; runtime types are correct
-import { readPhaseSignals, deriveAdvancement } from "../../execution-core/scheduler.mjs";
-// @ts-ignore
-import { readVerifyVerdict } from "../../execution-core/work-done-probes.mjs";
+// @ts-expect-error — execution-core mjs modules have no .d.mts; runtime types are correct
+import * as schedulerMod from "../../execution-core/scheduler.mjs";
+// @ts-expect-error — execution-core mjs modules have no .d.mts; runtime types are correct
+import * as workDoneProbesMod from "../../execution-core/work-done-probes.mjs";
+
+// Re-type the untyped .mjs exports at the boundary so call sites stay type-safe.
+const readPhaseSignals = (schedulerMod as {
+  readPhaseSignals: (orchDir: string, ticket: string) => unknown;
+}).readPhaseSignals;
+const deriveAdvancement = (schedulerMod as {
+  deriveAdvancement: (
+    signals: unknown,
+    opts: { verifyVerdict?: unknown; remediateCycleCount?: number },
+  ) => unknown;
+}).deriveAdvancement;
+const readVerifyVerdict = (workDoneProbesMod as {
+  readVerifyVerdict: (opts: { ticket: string; orchDir: string }) => unknown;
+}).readVerifyVerdict;
 
 // ─── Setup: seed a temp orch dir with phase signals + verify artifact ─────────
 
@@ -69,7 +83,7 @@ afterAll(() => {
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 function jsonNorm<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v));
+  return JSON.parse(JSON.stringify(v)) as T;
 }
 
 // ─── 1. gates deep-equals deriveAdvancement() on same data ──────────────────

@@ -103,7 +103,7 @@ describe("scanHops + dedupeHops", () => {
     const launched = hops.filter((h) => h.phase === "dispatch" && h.eventType === "launched");
     expect(launched.length).toBe(1);
     // advance.held carries blockers
-    const held = hops.find((h) => h.phase === "advance" && h.eventType === "held") as typeof raw[0] | undefined;
+    const held = hops.find((h) => h.phase === "advance" && h.eventType === "held");
     expect(held?.blockers).toEqual(["x"]);
     expect(held?.reason).toBe("capacity");
     // hops sorted ts asc

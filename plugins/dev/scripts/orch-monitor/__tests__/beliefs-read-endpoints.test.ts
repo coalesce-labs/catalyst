@@ -27,7 +27,7 @@ const {
 };
 
 // Load RULE_MANIFEST via computed specifier (no static bun:sqlite chain).
-// @ts-ignore — execution-core mjs module has no .d.mts; runtime types are correct
+// @ts-expect-error — execution-core mjs module has no .d.mts; runtime types are correct
 const rulesMod = await import("../../execution-core/beliefs/rules.mjs");
 const { RULE_MANIFEST } = rulesMod as { RULE_MANIFEST: { strata: unknown[]; rules: Array<{ rule_id: string; name: string }> } };
 

@@ -50,7 +50,7 @@ async function fetchDescriptor(): Promise<Record<string, unknown>> {
 }
 
 function jsonNorm<T>(v: T): T {
-  return JSON.parse(JSON.stringify(v));
+  return JSON.parse(JSON.stringify(v)) as T;
 }
 
 // ─── 1. descriptorSha matches sha256(bytes of DESCRIPTOR_PATH) ──────────────
