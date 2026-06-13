@@ -770,6 +770,39 @@ else
 	fail "gate base-unknown: warning" "stderr:$(printf '\n%s' "$(cat "$CASE_G/stderr.log" 2>/dev/null)")"
 fi
 
+# Case H (CTL-1105): stranded on a transient worktree branch with REAL commits
+# ahead of origin/main. The CTL-608 commits-ahead arm would pass; the new
+# branch/worktree-mismatch arm must FAIL.
+build_git_fixture_transient() {
+	local dir="$1"
+	mkdir -p "$dir"
+	(
+		cd "$dir" || exit 1
+		git init --quiet --initial-branch=main
+		git config user.email "test@example.com"
+		git config user.name "Test"
+		git commit --quiet --allow-empty -m "base"
+		git update-ref refs/remotes/origin/main HEAD
+		# Simulate bgIsolation migration: a worktree-* branch with commits ahead.
+		git checkout --quiet -b worktree-transient-spinning-cherny
+		git commit --quiet --allow-empty -m "stranded work 1"
+		git commit --quiet --allow-empty -m "stranded work 2"
+	)
+}
+
+CASE_H="$(run_empty_branch_gate transient build_git_fixture_transient)"
+assert_eq "1" "$(cat "$CASE_H/exit-code")" "gate transient-branch: exit 1"
+if grep -q -- '--status failed' "$CASE_H/emit-capture.log" 2>/dev/null; then
+	pass "gate transient-branch: emits --status failed"
+else
+	fail "gate transient-branch: --status failed" "capture:$(printf '\n%s' "$(cat "$CASE_H/emit-capture.log" 2>/dev/null)")"
+fi
+if grep -qE 'stranded_transient_worktree|wrong_branch' "$CASE_H/emit-capture.log" 2>/dev/null; then
+	pass "gate transient-branch: reason names the stranding"
+else
+	fail "gate transient-branch: reason" "capture:$(printf '\n%s' "$(cat "$CASE_H/emit-capture.log" 2>/dev/null)")"
+fi
+
 # ─── Test 15 (CTL-632): phase-pr + phase-monitor-merge mirror blocks present ──
 echo ""
 echo "Test 15 (CTL-632): phase-pr + phase-monitor-merge contract — mirror blocks present"
