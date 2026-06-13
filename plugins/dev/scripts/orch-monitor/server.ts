@@ -1164,6 +1164,58 @@ export function createServer(opts: CreateServerOptions): BunServer {
     }
     return daemonDepsPromise;
   };
+
+  // loadGovernanceDeps — memoized loader for governance read endpoints.
+  // Imports lib/governance-reader.mjs + execution-core/beliefs/why.mjs +
+  // execution-core/beliefs/rules.mjs via computed specifiers so bun:sqlite
+  // never reaches the Vite/esbuild browser bundle (CTL-883 VITE-GRAPH GUARD).
+  // Returns null on any import failure — all callers degrade gracefully.
+  // DO NOT inline the specifiers to string literals (see governance-reader.mjs header).
+  let governanceDepsPromise: Promise<{
+    openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+    withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+    defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+    isGovernanceEvent: (name: string) => boolean;
+    traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+    latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+    RULE_MANIFEST: unknown;
+    RULES_SHA: string;
+  } | null> | null = null;
+  const loadGovernanceDeps = () => {
+    if (!governanceDepsPromise) {
+      governanceDepsPromise = (async () => {
+        try {
+          const readerMod = ["./lib/governance-reader.mjs"].join("");
+          const whyMod = ["../execution-core/beliefs/why.mjs"].join("");
+          const rulesMod = ["../execution-core/beliefs/rules.mjs"].join("");
+          const [reader, why, rules] = await Promise.all([
+            import(readerMod),
+            import(whyMod),
+            import(rulesMod),
+          ]);
+          return {
+            openBeliefsDbRO: reader.openBeliefsDbRO,
+            withBeliefsDbRO: reader.withBeliefsDbRO,
+            defaultBeliefsDbPath: reader.defaultBeliefsDbPath,
+            isGovernanceEvent: reader.isGovernanceEvent,
+            traceTicket: why.traceTicket,
+            latestTickForTicket: why.latestTickForTicket,
+            RULE_MANIFEST: rules.RULE_MANIFEST,
+            RULES_SHA: rules.RULES_SHA,
+          };
+        } catch {
+          return null; // execution-core unavailable → degrade
+        }
+      })();
+    }
+    return governanceDepsPromise;
+  };
+
+  // Route-insertion anchor for CTL-1100 governance read endpoints.
+  // New /api/fsm/*, /api/beliefs/*, /api/governance, /api/journey/:ticket
+  // routes insert between the /api/beliefs/stream branch and the 404 fallthrough.
+  // Re-locate this anchor by grep after each insertion — cited line numbers shift.
+
   const productionDaemonHealth = async (): Promise<DaemonHealth> => {
     try {
       const deps = await loadDaemonDeps();
