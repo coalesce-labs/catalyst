@@ -162,6 +162,8 @@ export {
   handlePluginRefreshEvent,
   PLUGIN_REFRESH_THROTTLE_MS,
   __clearThrottleForTest,
+  CHECKOUT_LAG_FAILURE_THRESHOLD, // CTL-1106
+  __clearLagStateForTest, // CTL-1106
 } from "./plugin-refresh.mjs";
 // CTL-1077: automatic hot-reload of the running stack on checkout advance.
 // router.mjs calls handleStackReloadEvent after handlePluginRefreshEvent;

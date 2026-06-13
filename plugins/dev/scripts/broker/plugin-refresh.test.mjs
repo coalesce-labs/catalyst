@@ -27,6 +27,8 @@ import {
   handlePluginRefreshEvent,
   PLUGIN_REFRESH_THROTTLE_MS,
   __clearThrottleForTest,
+  CHECKOUT_LAG_FAILURE_THRESHOLD,
+  __clearLagStateForTest,
 } from "./plugin-refresh.mjs";
 
 // ─── resolvePluginCheckoutRoots ──────────────────────────────────────────────
@@ -335,10 +337,8 @@ describe("isThisRepoMergeEvent", () => {
 
 // ─── refreshPluginCheckout ───────────────────────────────────────────────────
 
-describe("refreshPluginCheckout", () => {
-  beforeEach(() => __clearThrottleForTest());
-
-  function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false } = {}) {
+// makeGitFn — module-level so it can be shared across describe blocks.
+function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false } = {}) {
     const calls = [];
     const gitFn = (root, args) => {
       calls.push({ root, args });
@@ -362,7 +362,10 @@ describe("refreshPluginCheckout", () => {
     };
     gitFn.calls = calls;
     return gitFn;
-  }
+}
+
+describe("refreshPluginCheckout", () => {
+  beforeEach(() => __clearThrottleForTest());
 
   test("runs fetch + reset --hard and emits plugin.checkout.updated with old+new sha", () => {
     const emitted = [];
@@ -751,6 +754,120 @@ describe("handlePluginRefreshEvent — returns per-root results array (CTL-1077)
       emitFn: () => {},
     });
     expect(results).toBeNull();
+  });
+});
+
+// ─── checkout-lag alarm (CTL-1106 Phase 2) ──────────────────────────────────
+//
+// When genuine refresh failures (network/auth) persist across more than one
+// merge cycle, emit a one-shot `plugin.checkout.lag` event so Fleet Ops /
+// health surfaces the stall instead of silence. Reset on recovery.
+
+describe("checkout-lag alarm", () => {
+  beforeEach(() => {
+    __clearThrottleForTest();
+    __clearLagStateForTest();
+  });
+
+  // Helper: advance `now` past the throttle window to allow each call to execute.
+  function advanceNow(base, step) {
+    return base + step * (PLUGIN_REFRESH_THROTTLE_MS + 1);
+  }
+
+  test("a single failure does not emit plugin.checkout.lag", () => {
+    const emitted = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: advanceNow(0, 0),
+      gitFn: makeGitFn({ fetchThrows: true }),
+      emitFn: (e) => emitted.push(e),
+    });
+    expect(emitted.some((e) => e.event === "plugin.checkout.lag")).toBe(false);
+    expect(emitted.some((e) => e.event === "plugin.checkout.refresh_failed")).toBe(true);
+  });
+
+  test("N consecutive failures emit exactly one plugin.checkout.lag", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    const lagEvents = emitted.filter((e) => e.event === "plugin.checkout.lag");
+    expect(lagEvents).toHaveLength(1);
+    expect(lagEvents[0].detail.checkout).toBe("/co");
+    expect(lagEvents[0].detail.consecutive_failures).toBeGreaterThanOrEqual(CHECKOUT_LAG_FAILURE_THRESHOLD);
+    expect(typeof lagEvents[0].detail.behind_since).toBe("number");
+    expect(lagEvents[0].severity).toBe("ERROR");
+  });
+
+  test("lag is one-shot — further failures after emit do not re-emit", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD + 3; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    const lagEvents = emitted.filter((e) => e.event === "plugin.checkout.lag");
+    expect(lagEvents).toHaveLength(1);
+  });
+
+  test("a success resets the failure counter — lag not emitted until threshold reached anew", () => {
+    const emitted = [];
+    // Fail threshold-1 times
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD - 1; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    // One success — advances HEAD, resets counter
+    refreshPluginCheckout({
+      root: "/co",
+      now: advanceNow(0, CHECKOUT_LAG_FAILURE_THRESHOLD - 1),
+      gitFn: makeGitFn({ before: "a", after: "b" }),
+      emitFn: (e) => emitted.push(e),
+    });
+    // Fail threshold-1 more times — should NOT emit lag (counter was reset)
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD - 1; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, CHECKOUT_LAG_FAILURE_THRESHOLD + i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    expect(emitted.some((e) => e.event === "plugin.checkout.lag")).toBe(false);
+  });
+
+  test("lag counter is per-root — failures on /a do not push /b toward its threshold", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD; i++) {
+      refreshPluginCheckout({
+        root: "/a",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    // /b has had zero failures — should emit nothing
+    const lagForB = emitted.filter(
+      (e) => e.event === "plugin.checkout.lag" && e.detail.checkout === "/b"
+    );
+    expect(lagForB).toHaveLength(0);
+    // /a should have one lag event
+    const lagForA = emitted.filter(
+      (e) => e.event === "plugin.checkout.lag" && e.detail.checkout === "/a"
+    );
+    expect(lagForA).toHaveLength(1);
   });
 });
 

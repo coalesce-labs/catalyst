@@ -55,6 +55,25 @@ export function __clearThrottleForTest() {
   _lastPullByRoot.clear();
 }
 
+// CTL-1106: consecutive genuine-failure count per root + one-shot lag guard.
+// A dirty tree is no longer a failure (Phase 1); these count only fetch/reset
+// failures (network/auth) that leave the checkout behind origin/main.
+export const CHECKOUT_LAG_FAILURE_THRESHOLD =
+  Number(process.env.CATALYST_CHECKOUT_LAG_FAILURE_THRESHOLD) || 2;
+
+const _failuresByRoot = new Map(); // root → { count, since }
+const _lagEmittedByRoot = new Set(); // root → already emitted this stall episode
+
+export function __clearLagStateForTest() {
+  _failuresByRoot.clear();
+  _lagEmittedByRoot.clear();
+}
+
+function _clearLagState(root) {
+  _failuresByRoot.delete(root);
+  _lagEmittedByRoot.delete(root);
+}
+
 // --- default seams (production wiring) ---------------------------------------
 
 // GIT_TIMEOUT_MS — hard ceiling on every synchronous git call. The broker's
@@ -301,6 +320,25 @@ export function refreshPluginCheckout({
         error: err?.message ?? String(err),
       },
     });
+    const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
+    const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
+    _failuresByRoot.set(root, next);
+    if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
+      _lagEmittedByRoot.add(root);
+      emitFn({
+        event: "plugin.checkout.lag",
+        orchestrator: null,
+        worker: null,
+        severity: "ERROR",
+        detail: {
+          checkout: root,
+          old_sha: oldSha,
+          consecutive_failures: next.count,
+          behind_since: next.since,
+          error: err?.message ?? String(err),
+        },
+      });
+    }
     return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
   }
 
@@ -313,6 +351,7 @@ export function refreshPluginCheckout({
 
   // HEAD did not advance — nothing changed, stay quiet (no event noise).
   if (oldSha && newSha && oldSha === newSha) {
+    _clearLagState(root);
     return { pulled: true, throttled: false, changed: false, failed: false, root, oldSha, newSha, restartNeeded: false };
   }
 
@@ -330,6 +369,7 @@ export function refreshPluginCheckout({
     loadedCommit !== newSha &&
     (loadedCommitRoot == null || loadedCommitRoot === root);
 
+  _clearLagState(root);
   emitFn({
     event: "plugin.checkout.updated",
     orchestrator: null,
