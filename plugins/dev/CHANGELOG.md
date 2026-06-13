@@ -1,5 +1,33 @@
 # Changelog
 
+## [12.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.6.0...catalyst-dev-v12.7.0) (2026-06-13)
+
+
+### Features
+
+* **dev:** CTL-1051 — push-verify HEAD before announce/merge to prevent stale-ref PRs ([#1891](https://github.com/coalesce-labs/catalyst/issues/1891)) ([882f032](https://github.com/coalesce-labs/catalyst/commit/882f032c0f5f7ad858db56c00669d006edaaf436))
+* **dev:** CTL-1062 — surface governance modes in heartbeat + CLI ([#1908](https://github.com/coalesce-labs/catalyst/issues/1908)) ([b92085f](https://github.com/coalesce-labs/catalyst/commit/b92085fdeb62d28abd0c92175d9fb39ea5432768))
+* **dev:** CTL-1063 — dev-time Datalog compiler for belief engine rules ([#1884](https://github.com/coalesce-labs/catalyst/issues/1884)) ([ffa7c16](https://github.com/coalesce-labs/catalyst/commit/ffa7c1640693ac0f1cf2133fad12a0de7b722616))
+* **dev:** CTL-1077 — hot-reload full stack on merge to main ([#1893](https://github.com/coalesce-labs/catalyst/issues/1893)) ([c0c5c64](https://github.com/coalesce-labs/catalyst/commit/c0c5c64e0a5369901c5842c284d55f5a20bca368))
+* **dev:** CTL-1081 — phase artifacts land where the gate looks for them ([#1904](https://github.com/coalesce-labs/catalyst/issues/1904)) ([ceea9f7](https://github.com/coalesce-labs/catalyst/commit/ceea9f7474a7ad9e44af861f36a3354ddd0c0f35))
+* **dev:** CTL-1095 — node drain mode: refuse new-work admission, CLI toggle, HUD display ([#1928](https://github.com/coalesce-labs/catalyst/issues/1928)) ([66cbb44](https://github.com/coalesce-labs/catalyst/commit/66cbb44063c9f25a1d79a23d86cdd60e4643c404))
+* **dev:** CTL-1098 — Workers surface: Dispatch/Board split screens ([#1934](https://github.com/coalesce-labs/catalyst/issues/1934)) ([478e224](https://github.com/coalesce-labs/catalyst/commit/478e224e363f5feab5e38eb63d2484c5aa41f0d6))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1060 — otel-forward reliability: DLQ drain fix, stack lifecycle, lag metric ([#1909](https://github.com/coalesce-labs/catalyst/issues/1909)) ([a308ae2](https://github.com/coalesce-labs/catalyst/commit/a308ae292a99f056cdba39d47f743b62f2635965))
+* **dev:** CTL-1078 — classify retraction-sweep auth/scope failures correctly and break per-tick storm ([#1894](https://github.com/coalesce-labs/catalyst/issues/1894)) ([f27f2b7](https://github.com/coalesce-labs/catalyst/commit/f27f2b74bb0cd9d59fa0cf735cc12687f3037454))
+* **dev:** CTL-1079 — retraction sweep reads label state from broker cache ([#1898](https://github.com/coalesce-labs/catalyst/issues/1898)) ([74e4cfc](https://github.com/coalesce-labs/catalyst/commit/74e4cfca40cf7f95303f31a52f8f00acfd53ac02))
+* **dev:** CTL-1082 — restore vertical scroll to the Workers surface ([#1902](https://github.com/coalesce-labs/catalyst/issues/1902)) ([3ba1e7e](https://github.com/coalesce-labs/catalyst/commit/3ba1e7e72761581f1e0d1386eb74c1299ad6ac4a))
+* **dev:** CTL-1083 — The Workers grouping switcher and dep-graph navigation should work ([#1905](https://github.com/coalesce-labs/catalyst/issues/1905)) ([f628bf9](https://github.com/coalesce-labs/catalyst/commit/f628bf927a8dae1a7fe8acf30d2b96bf3c42fb93))
+* **dev:** CTL-1085 — removeLabel UUID overwrite fixes cross-team label collision ([#1930](https://github.com/coalesce-labs/catalyst/issues/1930)) ([7c6410b](https://github.com/coalesce-labs/catalyst/commit/7c6410bfe11d4bef9f3c69067f96102d31598c2a))
+* **dev:** CTL-1086 — keep synthetic test events out of the live fleet event log ([#1929](https://github.com/coalesce-labs/catalyst/issues/1929)) ([a8e667a](https://github.com/coalesce-labs/catalyst/commit/a8e667a662e69b309eca29daefc67876d443adcb))
+* **dev:** CTL-1087 — Service Health reads catalyst.* recency + infers collector from Loki state ([#1912](https://github.com/coalesce-labs/catalyst/issues/1912)) ([2b1eae5](https://github.com/coalesce-labs/catalyst/commit/2b1eae58d0b4ac01ff97666bc627c1834ddd737e))
+* **dev:** CTL-1088 — restarting monitor must not dirty the pristine plugin clone ([#1914](https://github.com/coalesce-labs/catalyst/issues/1914)) ([31deaba](https://github.com/coalesce-labs/catalyst/commit/31deaba528bd72a3e1d11b2bb92573deb7103200))
+* **dev:** CTL-1097 — resolve artifact gate dir against signal.worktreePath ([#1932](https://github.com/coalesce-labs/catalyst/issues/1932)) ([62cb760](https://github.com/coalesce-labs/catalyst/commit/62cb7607cbacf4f5f2c0b9f13d30ec6fdb8ff406))
+* **dev:** CTL-1105 — stop phase workers stranding commits on transient bgIsolation branches ([#1945](https://github.com/coalesce-labs/catalyst/issues/1945)) ([c308f99](https://github.com/coalesce-labs/catalyst/commit/c308f993d8bbb95025e3301e61598347412f6a8b))
+
 ## [12.6.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.5.0...catalyst-dev-v12.6.0) (2026-06-12)
 
 
