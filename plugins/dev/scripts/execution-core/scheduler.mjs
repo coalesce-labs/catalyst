@@ -1475,7 +1475,10 @@ export function convergeHeldLabel(
 // UNRECOVERABLE_LABEL_REASONS — applyLabel reasons that can never land this
 // daemon lifetime, so convergeHeldLabel arms a cool-down instead of re-issuing
 // the write every tick (CTL-834). Mirrors label-guard.labelOnce's .skipped set.
-const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict"]);
+// "team-mismatch": CTL-1085 split it out of "missing-label" in classifyLabelFailure;
+// it MUST stay in this set or convergeHeldLabel loses its cool-down on cross-team
+// (ADV) label failures and re-introduces the CTL-834 per-tick retry storm.
+const UNRECOVERABLE_LABEL_REASONS = new Set(["missing-label", "exclusive-conflict", "team-mismatch"]);
 
 // CTL-1068 — convergeStartedHeldLabels: retract orphaned held labels for a STARTED
 // (already-admitted) ticket. The admission A.7 loop only converges the pre-pickup

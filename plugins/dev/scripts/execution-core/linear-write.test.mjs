@@ -440,12 +440,13 @@ describe("applyLabel", () => {
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "rate-limited" });
   });
-  test("classifies a cross-team label-UUID stderr as reason:'missing-label' (no per-tick retry storm)", () => {
+  test("CTL-1085: classifies a cross-team label-UUID stderr as reason:'team-mismatch' (unrecoverable, storm-break preserved)", () => {
     // Linear's labels are team-scoped: same name, different UUID per team. When
     // linearis resolves the label in the wrong team's workspace context and
     // sends the cross-team UUID, Linear returns this exact error. It is
     // permanently unrecoverable inside one daemon lifetime (the resolver is
-    // global), so it must classify as missing-label to short-circuit retries.
+    // global), so it classifies as team-mismatch (added to UNRECOVERABLE_LABEL_REASONS)
+    // to short-circuit retries while giving operators a legible distinct reason.
     const exec = () => ({
       code: 1,
       stdout: "",
@@ -453,7 +454,7 @@ describe("applyLabel", () => {
         'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
     });
     const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
-    expect(r).toEqual({ applied: false, reason: "missing-label" });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
   });
   test("CTL-585: any other non-zero exit is reason:'transient'", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
@@ -494,9 +495,9 @@ describe("classifyLabelFailure (CTL-834)", () => {
     expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
     expect(classifyLabelFailure("... not exclusive ...")).toBe("exclusive-conflict");
   });
-  test("existing mappings are unchanged", () => {
+  test("existing mappings are unchanged (CTL-1085: incorrect team now team-mismatch)", () => {
     expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
-    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("team-mismatch");
     expect(classifyLabelFailure("Rate limit exceeded")).toBe("rate-limited");
     expect(classifyLabelFailure("anything else")).toBe("transient");
     expect(classifyLabelFailure(undefined)).toBe("transient");
@@ -511,6 +512,17 @@ describe("classifyLabelFailure (CTL-834)", () => {
   test("auth-error does not steal 'not found' (ordering guard)", () => {
     expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
     expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+  });
+  test("CTL-1085: 'incorrect team' → 'team-mismatch' (distinct from missing-label)", () => {
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("team-mismatch");
+  });
+  test("CTL-1085: applyLabel cross-team → reason 'team-mismatch' (still unrecoverable)", () => {
+    const exec = () => ({
+      code: 1, stdout: "",
+      stderr: 'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
+    });
+    const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
   });
 });
 
@@ -599,11 +611,11 @@ describe("removeLabel (CTL-549)", () => {
     const cmds = [];
     const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
     // ticket has ['blocked','orchestrator']; remove 'blocked' → overwrite with 'orchestrator'
+    // exec stub returns empty stdout so the node read falls back to names (CTL-1085).
     const fetchLabels = () => ["blocked", "orchestrator"];
     const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
     expect(result.removed).toBe(true);
-    expect(cmds).toHaveLength(1);
-    const args = cmds[0].args;
+    const args = cmds.find((c) => c.args[1] === "update").args;
     expect(args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
     expect(args).toContain("--labels");
     expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator");
@@ -619,7 +631,7 @@ describe("removeLabel (CTL-549)", () => {
     const fetchLabels = () => ["needs-human/question", "orchestrator", "bug"];
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(true);
-    const args = cmds[0].args;
+    const args = cmds.find((c) => c.args[1] === "update").args;
     expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator,bug");
     expect(args[args.indexOf("--label-mode") + 1]).toBe("overwrite");
   });
@@ -689,6 +701,97 @@ describe("removeLabel (CTL-549)", () => {
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(false);
     expect(result.reason).toBe("transient");
+  });
+});
+
+// CTL-1085: removeLabel UUID-based overwrite — avoids cross-team name collision.
+describe("removeLabel UUID path (CTL-1085)", () => {
+  test("builds --labels from ticket-native UUIDs when node read succeeds", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => {
+      cmds.push({ cmd, args });
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-frontend", name: "frontend" },
+          { id: "uuid-orch", name: "orchestrator" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    const write = cmds.find((c) => c.args[1] === "update");
+    expect(write.args[write.args.indexOf("--labels") + 1]).toBe("uuid-orch");
+    expect(write.args[write.args.indexOf("--label-mode") + 1]).toBe("overwrite");
+  });
+
+  test("maps multiple remaining names to their UUIDs", async () => {
+    const exec = (cmd, args) => {
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-nh", name: "needs-human" },
+          { id: "uuid-orch", name: "orchestrator" },
+          { id: "uuid-bug", name: "bug" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    let writeArgs;
+    const wrapExec = (cmd, args) => { const r = exec(cmd, args); if (args[1] === "update") writeArgs = args; return r; };
+    const readLabels = () => ({ ok: true, labels: ["needs-human", "orchestrator", "bug"] });
+    const result = await removeLabel("ADV-1", "needs-human", { exec: wrapExec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("uuid-orch,uuid-bug");
+  });
+
+  test("falls back to names when node read returns unparseable stdout", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    const write = cmds.find((c) => c.args[1] === "update");
+    expect(write.args[write.args.indexOf("--labels") + 1]).toBe("orchestrator");
+  });
+
+  test("falls back to names when a remaining name has no matching node", async () => {
+    const exec = (cmd, args) => {
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-frontend", name: "frontend" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    let writeArgs;
+    const wrapExec = (cmd, args) => { const r = exec(cmd, args); if (args[1] === "update") writeArgs = args; return r; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec: wrapExec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("orchestrator");
+  });
+
+  test("empty remaining still uses --clear-labels (no node read needed)", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["needs-human"] });
+    const result = await removeLabel("ADV-1", "needs-human", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(cmds.find((c) => c.args[1] === "update").args).toEqual(["issues", "update", "ADV-1", "--clear-labels"]);
+  });
+
+  test("injectable readLabelNodes seam overrides default node reader", async () => {
+    let writeArgs;
+    const exec = (cmd, args) => { if (args[1] === "update") writeArgs = args; return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const readLabelNodes = () => ({ ok: true, nodes: [
+      { id: "uuid-frontend", name: "frontend" },
+      { id: "uuid-orch", name: "orchestrator" },
+    ] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels, readLabelNodes });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("uuid-orch");
   });
 });
 
