@@ -1029,6 +1029,12 @@ describe("defaultIsRunningFn / pidFilePathForComponent (CTL-1089)", () => {
     origMonitorPidFile = process.env.MONITOR_PID_FILE;
     origExecCorePidFile = process.env.EXECUTION_CORE_PID_FILE;
     origCatalystDir = process.env.CATALYST_DIR;
+    // CTL-1086: the broker suite's [test].preload pins CATALYST_DIR to a
+    // hermetic temp dir (catalyst-broker-hermetic-*). The default-path
+    // assertions below assert the real ~/catalyst layout, so clear the pin
+    // here; afterEach restores it. Tests that exercise relocation set
+    // CATALYST_DIR explicitly in their own body.
+    delete process.env.CATALYST_DIR;
     tmpFile = `${tmpdir()}/ctl1089-pid-test-${process.pid}.tmp`;
   });
 

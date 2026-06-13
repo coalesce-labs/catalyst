@@ -355,6 +355,25 @@ build_canonical_line() {
     }'
 }
 
+# _canonical_is_sentinel_leak BASE_DIR LINE
+# Returns 0 (true) if LINE is a sentinel-stamped event aimed at the default
+# production events dir (BASE_DIR resolves to $HOME/catalyst/events). Parity
+# with JS isSentinelLeak in broker/config.mjs (CTL-1086).
+_canonical_is_sentinel_leak() {
+  local base_dir="$1" line="$2"
+  local orch sentinels default_dir
+  # Parity with JS isSentinelLeak: canonical `.resource["catalyst.orchestration"]`
+  # first, then the legacy top-level `.orchestrator` field.
+  orch="$(printf '%s' "$line" | jq -r '.resource["catalyst.orchestration"] // .orchestrator // empty' 2>/dev/null)"
+  [[ -n "$orch" ]] || return 1
+  sentinels="orch-test ${CATALYST_SENTINEL_ORCHIDS:-}"
+  case " $sentinels " in *" $orch "*) ;; *) return 1 ;; esac
+  default_dir="${HOME}/catalyst/events"
+  # Compare resolved real paths so symlinks/trailing slashes don't fool the check.
+  [[ "$(cd "$base_dir" 2>/dev/null && pwd -P || echo "$base_dir")" == \
+     "$(cd "$default_dir" 2>/dev/null && pwd -P || echo "$default_dir")" ]]
+}
+
 # canonical_jsonl_append BASE_DIR LINE
 # Append a JSONL line to ${BASE_DIR}/YYYY-MM.jsonl. Rotates the existing file
 # to *.legacy on first canonical write if the first existing line lacks an
@@ -363,6 +382,11 @@ build_canonical_line() {
 canonical_jsonl_append() {
   local base_dir="$1" line="$2"
   [[ -n "$base_dir" ]] || return 0
+  # CTL-1086: drop sentinel(orch-test) events aimed at the default prod log.
+  if _canonical_is_sentinel_leak "$base_dir" "$line"; then
+    printf '[catalyst] dropped sentinel(orch-test) event from default prod log\n' >&2
+    return 0
+  fi
   mkdir -p "$base_dir" 2>/dev/null || return 0
   local month_file
   month_file="${base_dir}/$(date -u +%Y-%m).jsonl"

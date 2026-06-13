@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import pino from "pino";
 import { resolveApiKey, deriveGroqEndpoint } from "../lib/api-key-health.mjs";
 
@@ -76,11 +76,35 @@ export const ORCH_STATUS_REPLAY_STALE_MS = parseInt(
 // --- Event log ---
 export function getEventLogPath() {
   const now = new Date();
-  const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  // CTL-1086: use UTC month (parity with execution-core/config.mjs) so
+  // fleet hosts never disagree at the midnight-UTC month boundary.
+  const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
   // Re-read CATALYST_DIR per call so tests can redirect by setting the env
   // var. Production deployments still pin a stable value via daemon launch.
-  const catalystDir = process.env.CATALYST_DIR ?? `${homedir()}/catalyst`;
+  const home = process.env.HOME ?? homedir();
+  const catalystDir = process.env.CATALYST_DIR ?? `${home}/catalyst`;
   return resolve(catalystDir, "events", `${ym}.jsonl`);
+}
+
+// CTL-1086: sentinel guard — drop synthetic test events aimed at the default
+// production log. Parity with shell layer in canonical-event.sh.
+export const SENTINEL_ORCHIDS = new Set(["orch-test"]);
+
+export function defaultProductionEventsDir() {
+  // Prefer process.env.HOME so tests can override the "default production"
+  // path without depending on the platform homedir() syscall (macOS ignores HOME).
+  const home = process.env.HOME ?? homedir();
+  return resolve(`${home}/catalyst`, "events");
+}
+
+// A leak = sentinel-stamped event whose resolved write path is the default
+// production events dir. Tests writing to their own CATALYST_DIR are unaffected.
+export function isSentinelLeak(event, logPath) {
+  const orch = event?.resource?.["catalyst.orchestration"] ?? event?.orchestrator;
+  if (!SENTINEL_ORCHIDS.has(orch)) return false;
+  const prodDir = defaultProductionEventsDir();
+  const resolvedLog = resolve(logPath);
+  return resolvedLog.startsWith(prodDir + sep) || dirname(resolvedLog) === prodDir;
 }
 
 // CTL-357: the interest types that route deterministically (no Groq prose

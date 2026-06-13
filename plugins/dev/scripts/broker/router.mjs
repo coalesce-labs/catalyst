@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import {
   log,
   getEventLogPath,
+  isSentinelLeak,
   GROQ_API_KEY,
   GROQ_ENDPOINT,
   GROQ_EXTRA_HEADERS,
@@ -272,6 +273,12 @@ export function buildCanonicalEnvelope(legacy) {
 
 export function appendEvent(event) {
   const logPath = getEventLogPath();
+  if (isSentinelLeak(event, logPath)) {
+    process.stderr.write(
+      `[catalyst] dropped sentinel(orch-test) event from default prod log: ${getEventName(event)}\n`
+    );
+    return;
+  }
   mkdirSync(dirname(logPath), { recursive: true });
   const canonical = buildCanonicalEnvelope(event);
   appendFileSync(logPath, JSON.stringify(canonical) + "\n");

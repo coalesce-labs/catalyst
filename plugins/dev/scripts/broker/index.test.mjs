@@ -66,7 +66,14 @@ beforeEach(() => {
 afterEach(() => {
   closeBrokerStateDb();
   rmSync(tmpDir, { recursive: true, force: true });
-  delete process.env.CATALYST_DIR;
+  // CTL-1086: restore to hermetic preload value rather than deleting; deletion
+  // opened a window where the default ~/catalyst fallback could be reached.
+  const hermetic = process.env.CATALYST_HERMETIC_DIR;
+  if (hermetic) {
+    process.env.CATALYST_DIR = hermetic;
+  } else {
+    delete process.env.CATALYST_DIR;
+  }
 });
 
 // ─── ticket_lifecycle interest registration ───────────────────────────────────
