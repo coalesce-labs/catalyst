@@ -25,6 +25,7 @@ import {
   blockerFor,
   accentFor,
   aboutBlockFor,
+  escalationExplanationFor,
 } from "../ui/src/board/reading-pane-model";
 import { deriveInbox, type InboxRow } from "../ui/src/board/home-inbox";
 import type { BoardPayload, BoardTicket, BoardWorker, DecisionOption } from "../ui/src/board/types";
@@ -291,5 +292,63 @@ describe("honesty contract — omitted read-model fields render absent (CTL-902)
   it("an empty-string ask/blocker is treated as absent (null)", () => {
     expect(askFor(rowFor(mkTicket("CTL-642", { held: "waiting", ask: "" })))).toBeNull();
     expect(blockerFor(rowFor(mkTicket("CTL-867", { held: "blocked", blocker: "" })))).toBeNull();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// CTL-1110: escalationExplanationFor — CTA-led card view-model
+// ════════════════════════════════════════════════════════════════════════════
+const FULL_EXPL = {
+  call_to_action: "Decide: finish the fix on this branch, or descope it.",
+  outcome: "Operators see real-time cluster capacity.",
+  problem: "capacityReader is not passed to assembleClusterView().",
+  why_you: "The fixes need human judgment after automation gave up.",
+  why_not_auto: "3 fix attempts failed; tests lock in the broken behavior.",
+  what_to_do: "Review why the 2 wiring fixes failed; resolve or shrink scope.",
+};
+
+describe("CTL-1110: escalationExplanationFor", () => {
+  it("returns the camelCase view for a needs-human row with a full explanation", () => {
+    const row = rowFor(mkTicket("CTL-1092", { attention: "needs-human", explanation: FULL_EXPL }));
+    expect(escalationExplanationFor(row)).toEqual({
+      callToAction: FULL_EXPL.call_to_action,
+      outcome: FULL_EXPL.outcome,
+      problem: FULL_EXPL.problem,
+      whyYou: FULL_EXPL.why_you,
+      whyNotAuto: FULL_EXPL.why_not_auto,
+      whatToDo: FULL_EXPL.what_to_do,
+    });
+  });
+
+  it("projects absent sub-fields to null (graceful partial)", () => {
+    const row = rowFor(mkTicket("CTL-1", {
+      attention: "needs-human",
+      explanation: { call_to_action: "Decide.", outcome: null, problem: "X.",
+                     why_you: null, why_not_auto: null, what_to_do: null },
+    }));
+    const v = escalationExplanationFor(row)!;
+    expect(v.callToAction).toBe("Decide.");
+    expect(v.problem).toBe("X.");
+    expect(v.outcome).toBeNull();
+    expect(v.whatToDo).toBeNull();
+  });
+
+  it("returns null for a needs-human row with no explanation (graceful absent → bare hero)", () => {
+    const row = rowFor(mkTicket("CTL-2", { attention: "needs-human" }));
+    expect(escalationExplanationFor(row)).toBeNull();
+  });
+
+  it("returns null when every explanation field is null/empty", () => {
+    const row = rowFor(mkTicket("CTL-3", {
+      attention: "needs-human",
+      explanation: { call_to_action: "", outcome: null, problem: null,
+                     why_you: null, why_not_auto: null, what_to_do: null },
+    }));
+    expect(escalationExplanationFor(row)).toBeNull();
+  });
+
+  it("returns null for a waiting-on-you (non-escalated) row even if explanation is present", () => {
+    const row = rowFor(mkTicket("CTL-4", { attention: "waiting-on-you", explanation: FULL_EXPL }));
+    expect(escalationExplanationFor(row)).toBeNull();
   });
 });
