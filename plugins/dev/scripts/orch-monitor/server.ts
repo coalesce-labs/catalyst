@@ -1226,10 +1226,26 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const readerMod = ["./lib/governance-reader.mjs"].join("");
           const whyMod = ["../execution-core/beliefs/why.mjs"].join("");
           const rulesMod = ["../execution-core/beliefs/rules.mjs"].join("");
+          // Structural casts (not `typeof import(specifier)`) keep the computed
+          // specifiers erased at build — preserving the VITE-GRAPH GUARD — while
+          // typing the destructure so the no-unsafe-* lint rules pass without
+          // authoring .d.mts for the execution-core modules. Mirrors loadDaemonDeps
+          // (server.ts ~1188). CTL-1100 phase-review remediation.
           const [reader, why, rules] = await Promise.all([
-            import(readerMod),
-            import(whyMod),
-            import(rulesMod),
+            import(readerMod) as Promise<{
+              openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+              withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+              defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+              isGovernanceEvent: (name: string) => boolean;
+            }>,
+            import(whyMod) as Promise<{
+              traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+              latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+            }>,
+            import(rulesMod) as Promise<{
+              RULE_MANIFEST: unknown;
+              RULES_SHA: string;
+            }>,
           ]);
           return {
             openBeliefsDbRO: reader.openBeliefsDbRO,
