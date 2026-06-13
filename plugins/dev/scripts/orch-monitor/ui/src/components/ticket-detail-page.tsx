@@ -955,6 +955,21 @@ export function TicketDetailPage({
               <ActivitySection ticketId={ticket?.id ?? id} />
             </div>
           </TabsContent>
+
+          {/* Execution: the record of what happened — NOW card, narrative, Gantt,
+              artifacts, exceptions & decisions, hop log (CTL-1102). */}
+          <TabsContent value="execution">
+            <div data-ticket-execution style={{ paddingTop: 16 }}>
+              {ticket ? (
+                <SectionLabel>Execution</SectionLabel>
+              ) : (
+                <EmptyState
+                  icon={Radio}
+                  message="No resident telemetry — this ticket is not in the live board payload"
+                />
+              )}
+            </div>
+          </TabsContent>
         </PillTabs>
       </div>
     </div>
@@ -968,10 +983,11 @@ function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
   return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
 }
 
-/** The visible tab set (Spec default · Lifecycle · Cost · Activity). */
+/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Execution). */
 const TAB_DEFS: PillTab[] = [
   { value: "spec", label: "Spec" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },
   { value: "activity", label: "Activity" },
+  { value: "execution", label: "Execution" },
 ];
