@@ -1,11 +1,12 @@
 import { readFileSync } from "fs";
 
-export type ProviderName = "anthropic" | "openai" | "grok";
+export type ProviderName = "anthropic" | "openai" | "grok" | "claude-cli";
 
 export const KNOWN_PROVIDERS: readonly ProviderName[] = [
   "anthropic",
   "openai",
   "grok",
+  "claude-cli",
 ];
 
 export function isKnownProvider(x: unknown): x is ProviderName {
@@ -80,6 +81,10 @@ export function loadSummarizeConfig(
   const providers: Partial<Record<ProviderName, ProviderConfig>> = {};
   for (const [name, cfg] of Object.entries(providersRaw)) {
     if (!isKnownProvider(name)) continue;
+    if (name === "claude-cli") {
+      providers["claude-cli"] = { apiKeyEnv: "" };
+      continue;
+    }
     if (!isRecord(cfg)) continue;
     const apiKeyEnv = typeof cfg.apiKeyEnv === "string" ? cfg.apiKeyEnv : "";
     if (!apiKeyEnv) continue;
@@ -87,10 +92,10 @@ export function loadSummarizeConfig(
     providers[name] = { apiKeyEnv, apiKey: apiKey || undefined };
   }
 
-  const hasAnyKey = Object.values(providers).some(
-    (p) => p?.apiKey && p.apiKey.length > 0,
-  );
-  if (!hasAnyKey) return DISABLED;
+  const hasUsableProvider =
+    Boolean(providers["claude-cli"]) ||
+    Object.values(providers).some((p) => p?.apiKey && p.apiKey.length > 0);
+  if (!hasUsableProvider) return DISABLED;
 
   const defaultProvider = isKnownProvider(ai.defaultProvider)
     ? ai.defaultProvider

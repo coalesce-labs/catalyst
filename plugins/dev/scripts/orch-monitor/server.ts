@@ -4099,6 +4099,7 @@ if (import.meta.main) {
       anthropic: getProvider("anthropic"),
       openai: getProvider("openai"),
       grok: getProvider("grok"),
+      "claude-cli": getProvider("claude-cli"),
     };
     summarizeHandler = createSummarizeHandler({
       config: summarizeCfg,

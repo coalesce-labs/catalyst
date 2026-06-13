@@ -1,6 +1,8 @@
+import type { spawnSync } from "node:child_process";
 import type { AiConfig } from "./ai-config";
 import type { MonitorSnapshot, WorkerState } from "./state-reader";
 import type { LinearTicket } from "./linear";
+import { runClaudeCli } from "./claude-cli";
 
 export interface BriefingResult {
   briefing: string;
@@ -133,19 +135,9 @@ function extractTextFromOpenAIResponse(parsed: unknown): string | null {
   return typeof message.content === "string" ? message.content : null;
 }
 
-export function parseBriefingResponse(raw: string): BriefingResult | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
-
-  const text =
-    extractTextFromAnthropicResponse(parsed) ??
-    extractTextFromOpenAIResponse(parsed);
-  if (!text) return null;
-
+/** Parse raw model text (not an API envelope) into a BriefingResult.
+ *  Used by the claude-cli path where stdout IS the model text directly. */
+export function parseBriefingText(text: string): BriefingResult | null {
   let briefingData: unknown;
   try {
     briefingData = JSON.parse(text) as unknown;
@@ -177,6 +169,22 @@ export function parseBriefingResponse(raw: string): BriefingResult | null {
     suggestedLabels: labels,
     generatedAt: new Date().toISOString(),
   };
+}
+
+export function parseBriefingResponse(raw: string): BriefingResult | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+
+  const text =
+    extractTextFromAnthropicResponse(parsed) ??
+    extractTextFromOpenAIResponse(parsed);
+  if (!text) return null;
+
+  return parseBriefingText(text);
 }
 
 function buildGatewayUrl(config: AiConfig): string {
@@ -231,12 +239,15 @@ const defaultFetcher: AiFetcher = async (url, init) => {
   };
 };
 
+const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+
 export function createBriefingProvider(
   config: AiConfig,
-  opts: { fetcher?: AiFetcher; cacheTtlMs?: number } = {},
+  opts: { fetcher?: AiFetcher; cacheTtlMs?: number; spawn?: typeof spawnSync } = {},
 ): BriefingProvider {
   const fetcher = opts.fetcher ?? defaultFetcher;
   const cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  const isCli = config.provider === "claude-cli";
   let cache: CacheEntry | null = null;
 
   return {
@@ -248,6 +259,18 @@ export function createBriefingProvider(
       }
 
       const prompt = buildPrompt(snapshot, linearTickets);
+
+      if (isCli) {
+        const { text } = runClaudeCli(
+          { model: config.model ?? DEFAULT_MODEL, systemPrompt: "", userPrompt: prompt },
+          opts.spawn ? { spawn: opts.spawn } : {},
+        );
+        if (text === null) return null;
+        const result = parseBriefingText(text);
+        if (result) cache = { result, fetchedAt: Date.now() };
+        return result;
+      }
+
       const url = buildGatewayUrl(config);
       const headers = buildHeaders(config);
       const body = buildRequestBody(config, prompt);

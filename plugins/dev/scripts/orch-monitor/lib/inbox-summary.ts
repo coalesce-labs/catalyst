@@ -3,9 +3,11 @@
 // buildInboxSummaryPrompt / parseInboxSummaryResponse, a provider closure with
 // a (ticket, phase, questionHash) cache. No network in tests.
 
+import type { spawnSync } from "node:child_process";
 import type { AiConfig } from "./ai-config";
 import type { InboxItemState } from "./inbox-state";
 import { computeQuestionHash } from "./inbox-state";
+import { runClaudeCli } from "./claude-cli";
 
 // ── public interfaces ─────────────────────────────────────────────────────────
 
@@ -125,29 +127,14 @@ export function buildInboxSummaryPrompt(state: InboxItemState): string {
   return parts.join("\n");
 }
 
-/** Parse the model's raw API response body into an InboxSummary.
- *  Handles Anthropic + OpenAI response shapes. If the model text is not valid
- *  JSON, degrades to summary-only (the raw prose becomes the summary). */
-export function parseInboxSummaryResponse(raw: string): InboxSummary | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw) as unknown;
-  } catch {
-    return null;
-  }
-
-  const text =
-    extractTextFromAnthropicResponse(parsed) ??
-    extractTextFromOpenAIResponse(parsed);
-  if (!text) return null;
-
+/** Parse raw model text (not an API envelope) into an InboxSummary.
+ *  Used by the claude-cli path where stdout IS the model text directly. */
+export function parseInboxSummaryText(text: string): InboxSummary | null {
   const generatedAt = new Date().toISOString();
-
   let data: unknown;
   try {
     data = JSON.parse(text) as unknown;
   } catch {
-    // Prose fallback — wrap the raw text as the summary.
     return { summary: text, ask: null, options: null, blocker: null, generatedAt };
   }
 
@@ -174,6 +161,25 @@ export function parseInboxSummaryResponse(raw: string): InboxSummary | null {
   return { summary, ask, options, blocker, generatedAt };
 }
 
+/** Parse the model's raw API response body into an InboxSummary.
+ *  Handles Anthropic + OpenAI response shapes. If the model text is not valid
+ *  JSON, degrades to summary-only (the raw prose becomes the summary). */
+export function parseInboxSummaryResponse(raw: string): InboxSummary | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+
+  const text =
+    extractTextFromAnthropicResponse(parsed) ??
+    extractTextFromOpenAIResponse(parsed);
+  if (!text) return null;
+
+  return parseInboxSummaryText(text);
+}
+
 // ── provider factory ──────────────────────────────────────────────────────────
 
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
@@ -183,20 +189,24 @@ interface CacheEntry {
   fetchedAt: number;
 }
 
+const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+
 /** Create an InboxSummaryProvider: generates summaries via the Cloudflare AI
- *  Gateway, caches per `${ticket}:${phase}:${questionHash}`, degrades to null
- *  on any error (Scenario 3). The AiFetcher and collectState are injectable. */
+ *  Gateway or local claude-cli, caches per `${ticket}:${phase}:${questionHash}`,
+ *  degrades to null on any error. The AiFetcher, collectState, and spawn are injectable. */
 export function createInboxSummaryProvider(
   config: AiConfig,
   opts: {
     fetcher?: AiFetcher;
     cacheTtlMs?: number;
+    spawn?: typeof spawnSync;
     collectState: (ticket: string, phase?: string) => Promise<InboxItemState | null>;
   },
 ): InboxSummaryProvider {
   const fetcher = opts.fetcher ?? defaultFetcher;
   const cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   const cache = new Map<string, CacheEntry>();
+  const isCli = config.provider === "claude-cli";
 
   return {
     async generate(ticket, phase) {
@@ -214,6 +224,18 @@ export function createInboxSummaryProvider(
       }
 
       const prompt = buildInboxSummaryPrompt(state);
+
+      if (isCli) {
+        const { text } = runClaudeCli(
+          { model: config.model ?? DEFAULT_MODEL, systemPrompt: "", userPrompt: prompt },
+          opts.spawn ? { spawn: opts.spawn } : {},
+        );
+        if (text === null) return null;
+        const result = parseInboxSummaryText(text);
+        if (result) cache.set(cacheKey, { result, fetchedAt: Date.now() });
+        return result;
+      }
+
       const url = buildGatewayUrl(config);
       const headers = buildHeaders(config);
       const body = buildRequestBody(config, prompt);

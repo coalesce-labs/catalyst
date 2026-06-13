@@ -250,6 +250,63 @@ describe("createInboxSummaryProvider", () => {
     expect(r!.generatedAt).toBeTruthy();
   });
 
+  describe("claude-cli spawn path", () => {
+    const CLI_CONFIG: AiConfig = {
+      enabled: true,
+      provider: "claude-cli",
+      model: "claude-haiku-4-5-20251001",
+    };
+
+    const CLI_JSON_OUTPUT = JSON.stringify({
+      summary: "S",
+      ask: "A",
+      options: null,
+      blocker: null,
+    });
+
+    type FakeSpawnResult = { status: number; stdout: string; stderr: string };
+    function fakeSpawn(result: FakeSpawnResult) {
+      return (..._args: unknown[]) =>
+        result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
+    }
+
+    test("uses claude-cli spawn path (never fetches) when provider is claude-cli", async () => {
+      let fetched = false;
+      const provider = createInboxSummaryProvider(CLI_CONFIG, {
+        fetcher: () => { fetched = true; throw new Error("should not fetch"); },
+        collectState: () => Promise.resolve(STATE_FIXTURE),
+        spawn: fakeSpawn({ status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" }),
+      });
+      const res = await provider.generate("CTL-1");
+      expect(fetched).toBe(false);
+      expect(res?.summary).toBe("S");
+      expect(res?.ask).toBe("A");
+    });
+
+    test("degrades to null when claude-cli produces no output", async () => {
+      const provider = createInboxSummaryProvider(CLI_CONFIG, {
+        collectState: () => Promise.resolve(STATE_FIXTURE),
+        spawn: fakeSpawn({ status: 1, stdout: "", stderr: "x" }),
+      });
+      expect(await provider.generate("CTL-1")).toBeNull();
+    });
+
+    test("caches claude-cli result on second call", async () => {
+      let callCount = 0;
+      const provider = createInboxSummaryProvider(CLI_CONFIG, {
+        collectState: () => Promise.resolve(STATE_FIXTURE),
+        spawn: (..._args: unknown[]) => {
+          callCount++;
+          return { status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" } as unknown as
+            ReturnType<typeof import("node:child_process").spawnSync>;
+        },
+      });
+      await provider.generate("CTL-1");
+      await provider.generate("CTL-1");
+      expect(callCount).toBe(1);
+    });
+  });
+
   test("phase parameter is forwarded to collectState", async () => {
     let capturedPhase: string | undefined;
     const provider = createInboxSummaryProvider(CONFIG, {

@@ -133,7 +133,8 @@ export function createSummarizeHandler(
       const provider = parsed.provider ?? deps.config.defaultProvider;
       const model = parsed.model ?? deps.config.defaultModel;
       const providerCfg = deps.config.providers[provider];
-      if (!providerCfg?.apiKey) {
+      const needsKey = provider !== "claude-cli";
+      if (!providerCfg || (needsKey && !providerCfg.apiKey)) {
         return Response.json(
           { error: `provider ${provider} is not configured` },
           { status: 503 },

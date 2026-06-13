@@ -324,3 +324,42 @@ describe("createBriefingProvider", () => {
     expect(() => provider.stop()).not.toThrow();
   });
 });
+
+type FakeSpawnResult = { status: number; stdout: string; stderr: string };
+function fakeSpawn(result: FakeSpawnResult) {
+  // Cast to spawnSync-compatible type via unknown to satisfy strict generics
+  return (..._args: unknown[]) => result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
+}
+
+describe("createBriefingProvider — claude-cli spawn path", () => {
+  const CLI_CONFIG: AiConfig = {
+    enabled: true,
+    provider: "claude-cli",
+    model: "claude-haiku-4-5-20251001",
+  };
+
+  const CLI_JSON_OUTPUT = JSON.stringify({
+    briefing: "All good.",
+    suggestedLabels: { "CTL-10": ["feature"] },
+  });
+
+  it("uses claude-cli spawn path (never fetches) when provider is claude-cli", async () => {
+    let fetched = false;
+    const provider = createBriefingProvider(CLI_CONFIG, {
+      fetcher: () => { fetched = true; throw new Error("should not fetch"); },
+      spawn: fakeSpawn({ status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" }) as never,
+    });
+    const res = await provider.generate(makeSnapshot(), makeLinearTickets());
+    expect(fetched).toBe(false);
+    expect(res?.briefing).toBe("All good.");
+    expect(res?.suggestedLabels["CTL-10"]).toContain("feature");
+  });
+
+  it("degrades to null when claude-cli produces no output", async () => {
+    const provider = createBriefingProvider(CLI_CONFIG, {
+      spawn: fakeSpawn({ status: 1, stdout: "", stderr: "x" }) as never,
+    });
+    const res = await provider.generate(makeSnapshot(), makeLinearTickets());
+    expect(res).toBeNull();
+  });
+});

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { getProvider, calculateCost } from "../lib/summarize/providers";
+import { claudeCliProvider } from "../lib/summarize/providers/claude-cli";
 import type { AiFetcher } from "../lib/ai-briefing";
 
 interface RequestRecord {
@@ -155,6 +156,41 @@ describe("anthropicProvider", () => {
       caught = err as Error;
     }
     expect(caught).not.toBeNull();
+  });
+});
+
+type FakeSpawnResult = { status: number; stdout: string; stderr: string };
+function fakeCliSpawn(result: FakeSpawnResult) {
+  return (..._args: unknown[]) => result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
+}
+
+describe("claudeCliProvider", () => {
+  it("returns stdout as summary with zero cost", async () => {
+    const res = await claudeCliProvider.summarize({
+      systemPrompt: "SYS", userPrompt: "USR", model: "claude-haiku-4-5-20251001",
+      apiKey: "",
+      spawn: fakeCliSpawn({ status: 0, stdout: "A concise summary.\n", stderr: "" }),
+    } as never);
+    expect(res.summary).toBe("A concise summary.");
+    expect(res.cost).toBe(0);
+    expect(res.tokens).toBe(0);
+  });
+
+  it("rejects (maps to 502) on CLI failure", async () => {
+    let caught: Error | null = null;
+    try {
+      await claudeCliProvider.summarize({
+        systemPrompt: "", userPrompt: "x", model: "m", apiKey: "",
+        spawn: fakeCliSpawn({ status: 1, stdout: "", stderr: "boom" }),
+      } as never);
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).not.toBeNull();
+  });
+
+  it("has name 'claude-cli'", () => {
+    expect(claudeCliProvider.name).toBe("claude-cli");
   });
 });
 
