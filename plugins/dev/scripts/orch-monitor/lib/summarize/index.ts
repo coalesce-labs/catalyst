@@ -178,7 +178,10 @@ export function createSummarizeHandler(
           systemPrompt,
           userPrompt,
           model,
-          apiKey: providerCfg.apiKey,
+          // claude-cli runs on the subscription and ignores apiKey; coalesce so
+          // the gate's `needsKey === false` branch (apiKey may be undefined)
+          // still satisfies SummarizeArgs.apiKey: string (CTL-1109 remediate).
+          apiKey: providerCfg.apiKey ?? "",
           fetcher: deps.fetcher,
         });
         const generatedAt = new Date().toISOString();

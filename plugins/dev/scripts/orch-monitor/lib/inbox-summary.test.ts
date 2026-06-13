@@ -250,7 +250,7 @@ describe("createInboxSummaryProvider", () => {
     expect(r!.generatedAt).toBeTruthy();
   });
 
-  describe("claude-cli spawn path", () => {
+  describe("claude-cli (--bg subscription) path", () => {
     const CLI_CONFIG: AiConfig = {
       enabled: true,
       provider: "claude-cli",
@@ -264,18 +264,12 @@ describe("createInboxSummaryProvider", () => {
       blocker: null,
     });
 
-    type FakeSpawnResult = { status: number; stdout: string; stderr: string };
-    function fakeSpawn(result: FakeSpawnResult) {
-      return (..._args: unknown[]) =>
-        result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
-    }
-
-    test("uses claude-cli spawn path (never fetches) when provider is claude-cli", async () => {
+    test("uses claude-cli path (never fetches) when provider is claude-cli", async () => {
       let fetched = false;
       const provider = createInboxSummaryProvider(CLI_CONFIG, {
         fetcher: () => { fetched = true; throw new Error("should not fetch"); },
         collectState: () => Promise.resolve(STATE_FIXTURE),
-        spawn: fakeSpawn({ status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" }),
+        runClaudeCli: () => Promise.resolve({ text: CLI_JSON_OUTPUT, tokens: 0 }),
       });
       const res = await provider.generate("CTL-1");
       expect(fetched).toBe(false);
@@ -286,7 +280,7 @@ describe("createInboxSummaryProvider", () => {
     test("degrades to null when claude-cli produces no output", async () => {
       const provider = createInboxSummaryProvider(CLI_CONFIG, {
         collectState: () => Promise.resolve(STATE_FIXTURE),
-        spawn: fakeSpawn({ status: 1, stdout: "", stderr: "x" }),
+        runClaudeCli: () => Promise.resolve({ text: null, tokens: 0 }),
       });
       expect(await provider.generate("CTL-1")).toBeNull();
     });
@@ -295,10 +289,9 @@ describe("createInboxSummaryProvider", () => {
       let callCount = 0;
       const provider = createInboxSummaryProvider(CLI_CONFIG, {
         collectState: () => Promise.resolve(STATE_FIXTURE),
-        spawn: (..._args: unknown[]) => {
+        runClaudeCli: () => {
           callCount++;
-          return { status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" } as unknown as
-            ReturnType<typeof import("node:child_process").spawnSync>;
+          return Promise.resolve({ text: CLI_JSON_OUTPUT, tokens: 0 });
         },
       });
       await provider.generate("CTL-1");

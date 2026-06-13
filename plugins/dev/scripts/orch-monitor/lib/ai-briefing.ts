@@ -1,8 +1,7 @@
-import type { spawnSync } from "node:child_process";
 import type { AiConfig } from "./ai-config";
 import type { MonitorSnapshot, WorkerState } from "./state-reader";
 import type { LinearTicket } from "./linear";
-import { runClaudeCli } from "./claude-cli";
+import { type RunClaudeCli, runClaudeCli } from "./claude-cli";
 
 export interface BriefingResult {
   briefing: string;
@@ -243,7 +242,7 @@ const DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
 export function createBriefingProvider(
   config: AiConfig,
-  opts: { fetcher?: AiFetcher; cacheTtlMs?: number; spawn?: typeof spawnSync } = {},
+  opts: { fetcher?: AiFetcher; cacheTtlMs?: number; runClaudeCli?: RunClaudeCli } = {},
 ): BriefingProvider {
   const fetcher = opts.fetcher ?? defaultFetcher;
   const cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
@@ -261,10 +260,12 @@ export function createBriefingProvider(
       const prompt = buildPrompt(snapshot, linearTickets);
 
       if (isCli) {
-        const { text } = runClaudeCli(
-          { model: config.model ?? DEFAULT_MODEL, systemPrompt: "", userPrompt: prompt },
-          opts.spawn ? { spawn: opts.spawn } : {},
-        );
+        const run = opts.runClaudeCli ?? runClaudeCli;
+        const { text } = await run({
+          model: config.model ?? DEFAULT_MODEL,
+          systemPrompt: "",
+          userPrompt: prompt,
+        });
         if (text === null) return null;
         const result = parseBriefingText(text);
         if (result) cache = { result, fetchedAt: Date.now() };

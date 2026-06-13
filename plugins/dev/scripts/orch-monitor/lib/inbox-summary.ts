@@ -3,11 +3,10 @@
 // buildInboxSummaryPrompt / parseInboxSummaryResponse, a provider closure with
 // a (ticket, phase, questionHash) cache. No network in tests.
 
-import type { spawnSync } from "node:child_process";
 import type { AiConfig } from "./ai-config";
 import type { InboxItemState } from "./inbox-state";
 import { computeQuestionHash } from "./inbox-state";
-import { runClaudeCli } from "./claude-cli";
+import { type RunClaudeCli, runClaudeCli } from "./claude-cli";
 
 // ── public interfaces ─────────────────────────────────────────────────────────
 
@@ -199,7 +198,7 @@ export function createInboxSummaryProvider(
   opts: {
     fetcher?: AiFetcher;
     cacheTtlMs?: number;
-    spawn?: typeof spawnSync;
+    runClaudeCli?: RunClaudeCli;
     collectState: (ticket: string, phase?: string) => Promise<InboxItemState | null>;
   },
 ): InboxSummaryProvider {
@@ -226,10 +225,12 @@ export function createInboxSummaryProvider(
       const prompt = buildInboxSummaryPrompt(state);
 
       if (isCli) {
-        const { text } = runClaudeCli(
-          { model: config.model ?? DEFAULT_MODEL, systemPrompt: "", userPrompt: prompt },
-          opts.spawn ? { spawn: opts.spawn } : {},
-        );
+        const run = opts.runClaudeCli ?? runClaudeCli;
+        const { text } = await run({
+          model: config.model ?? DEFAULT_MODEL,
+          systemPrompt: "",
+          userPrompt: prompt,
+        });
         if (text === null) return null;
         const result = parseInboxSummaryText(text);
         if (result) cache.set(cacheKey, { result, fetchedAt: Date.now() });

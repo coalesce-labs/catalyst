@@ -325,13 +325,7 @@ describe("createBriefingProvider", () => {
   });
 });
 
-type FakeSpawnResult = { status: number; stdout: string; stderr: string };
-function fakeSpawn(result: FakeSpawnResult) {
-  // Cast to spawnSync-compatible type via unknown to satisfy strict generics
-  return (..._args: unknown[]) => result as unknown as ReturnType<typeof import("node:child_process").spawnSync>;
-}
-
-describe("createBriefingProvider — claude-cli spawn path", () => {
+describe("createBriefingProvider — claude-cli (--bg subscription) path", () => {
   const CLI_CONFIG: AiConfig = {
     enabled: true,
     provider: "claude-cli",
@@ -343,11 +337,11 @@ describe("createBriefingProvider — claude-cli spawn path", () => {
     suggestedLabels: { "CTL-10": ["feature"] },
   });
 
-  it("uses claude-cli spawn path (never fetches) when provider is claude-cli", async () => {
+  it("uses claude-cli path (never fetches) when provider is claude-cli", async () => {
     let fetched = false;
     const provider = createBriefingProvider(CLI_CONFIG, {
       fetcher: () => { fetched = true; throw new Error("should not fetch"); },
-      spawn: fakeSpawn({ status: 0, stdout: CLI_JSON_OUTPUT, stderr: "" }) as never,
+      runClaudeCli: () => Promise.resolve({ text: CLI_JSON_OUTPUT, tokens: 0 }),
     });
     const res = await provider.generate(makeSnapshot(), makeLinearTickets());
     expect(fetched).toBe(false);
@@ -357,7 +351,7 @@ describe("createBriefingProvider — claude-cli spawn path", () => {
 
   it("degrades to null when claude-cli produces no output", async () => {
     const provider = createBriefingProvider(CLI_CONFIG, {
-      spawn: fakeSpawn({ status: 1, stdout: "", stderr: "x" }) as never,
+      runClaudeCli: () => Promise.resolve({ text: null, tokens: 0 }),
     });
     const res = await provider.generate(makeSnapshot(), makeLinearTickets());
     expect(res).toBeNull();
