@@ -8531,6 +8531,29 @@ describe("CTL-834 — convergeHeldLabel apply cool-down", () => {
     expect(cd("CTL-1", "blocked")).toBe(true);
   });
 
+  // CTL-1085 regression guard: classifyLabelFailure now returns "team-mismatch"
+  // for the cross-team (ADV) failure that previously surfaced as "missing-label".
+  // It MUST stay in UNRECOVERABLE_LABEL_REASONS here or convergeHeldLabel loses
+  // its cool-down on that path and re-opens the CTL-834 per-tick retry storm.
+  test("unrecoverable apply (team-mismatch, CTL-1085) → arms the cool-down marker", () => {
+    const ws = makeWs({ applied: false, reason: "team-mismatch" });
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 });
+    expect(writes).toBe(1);
+    expect(ws.applyLabel.calls).toHaveLength(1);
+    expect(cd("CTL-1", "blocked")).toBe(true);
+  });
+
+  test("team-mismatch WITHIN the window: apply is SUPPRESSED (storm-break holds)", () => {
+    const ws = makeWs({ applied: false, reason: "team-mismatch" });
+    convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
+    const writes = convergeHeldLabel("CTL-1", [], "blocked", ws, {
+      orchDir,
+      now: () => 1000 + 30_000,
+    });
+    expect(writes).toBe(0);
+    expect(ws.applyLabel.calls).toHaveLength(1); // NOT re-attempted this tick
+  });
+
   test("WITHIN the window: apply is SUPPRESSED (0 writes, applyLabel not re-called)", () => {
     const ws = makeWs({ applied: false, reason: "exclusive-conflict" });
     convergeHeldLabel("CTL-1", [], "blocked", ws, { orchDir, now: () => 1000 }); // arms cooldown
