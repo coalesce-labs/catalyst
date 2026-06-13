@@ -41,6 +41,7 @@ import type { ClusterView } from "./lib/cluster-view.mjs";
 import { mergeHeartbeatsNewestWins } from "./lib/node-liveness.mjs";
 import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
 import type { ClusterSignal } from "./lib/cluster-signal.mjs";
+import { readCapacityHistory } from "./lib/capacity-history.mjs";
 // CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
 // queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
 // (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
@@ -3933,6 +3934,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(
             await assembleClusterSignal(await boardSnapshot.getLatest()),
           );
+        }
+
+        // CTL-1092 (Phase 5): per-node capacity change history from the event log.
+        // Read-only; no writes. Scans the current-month JSONL for capacity events.
+        if (url.pathname === "/api/capacity-history") {
+          const month = new Date().toISOString().slice(0, 7); // YYYY-MM
+          const capLogPath = join(CATALYST_DIR, "events", `${month}.jsonl`);
+          const data = readCapacityHistory({ logPath: capLogPath });
+          return Response.json({ data });
         }
 
         // CTL-898 (SHELL8): SSE push of the cluster signal. The footer opens ONE
