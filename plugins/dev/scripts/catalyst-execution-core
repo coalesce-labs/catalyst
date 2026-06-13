@@ -233,19 +233,30 @@ cmd_status() {
 	for arg in "$@"; do
 		[ "$arg" = "--json" ] && want_json=1
 	done
+	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
+	local drain_json draining in_flight_count
+	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
+	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
+	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
 	local pid
 	if pid=$(read_pid); then
 		if [ "$want_json" -eq 1 ]; then
-			printf '{"running":true,"pid":%s}\n' "$pid"
+			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s}\n' "$pid" "$draining" "$in_flight_count"
 		else
 			echo "running (pid $pid)"
+			if [ "$draining" = "true" ]; then
+				echo "draining — ${in_flight_count} tickets to land"
+			fi
 		fi
 		return 0
 	fi
 	if [ "$want_json" -eq 1 ]; then
-		printf '{"running":false,"pid":null}\n'
+		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s}\n' "$draining" "$in_flight_count"
 	else
 		echo "stopped"
+		if [ "$draining" = "true" ]; then
+			echo "draining — ${in_flight_count} tickets to land"
+		fi
 	fi
 }
 
@@ -355,6 +366,10 @@ Commands:
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
   governance  show which governance modes the daemon is actually running (--json)
+  drain       toggle node drain mode: refuse new-work admission while draining
+              Usage: catalyst-execution-core drain [--off] [--json]
+              drain         set drain flag — no new tickets admitted; in-flight pipelines finish
+              drain --off   lift drain flag — normal admission resumes
 
 Backcompat: start|stop|restart|probe|status work as top-level aliases for the daemon verbs.
 
@@ -404,6 +419,11 @@ if ! (return 0 2>/dev/null); then
 		module="$1"
 		shift
 		exec_runtime_module "$module" "$@"
+		;;
+	# CTL-1095: drain mode toggle.
+	drain)
+		shift
+		exec_runtime_module "drain" "$@"
 		;;
 	# CTL-1084: governance-env-exports emits eval-safe export lines for the four
 	# beliefs flags resolved from durable Layer-2 config. The file is named

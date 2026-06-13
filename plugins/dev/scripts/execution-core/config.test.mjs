@@ -26,6 +26,8 @@ import {
   getClusterHosts,
   HEARTBEAT_INTERVAL_MS,
   hostMembershipWarning,
+  getDrainFlagPath,
+  isDraining,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -459,5 +461,38 @@ describe("hostMembershipWarning (CTL-1057)", () => {
   test("no warning for non-array roster", () => {
     expect(hostMembershipWarning(null, "laptop")).toBeNull();
     expect(hostMembershipWarning(undefined, "laptop")).toBeNull();
+  });
+});
+
+describe("getDrainFlagPath + isDraining (CTL-1095)", () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "drain-cfg-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("getDrainFlagPath joins orchDir/drain", () => {
+    expect(getDrainFlagPath("/tmp/ec")).toBe(join("/tmp/ec", "drain"));
+  });
+
+  test("isDraining is false when no flag file", () => {
+    expect(isDraining(tmp)).toBe(false);
+  });
+
+  test("isDraining is true when flag file is present", () => {
+    writeFileSync(join(tmp, "drain"), "");
+    expect(isDraining(tmp)).toBe(true);
+  });
+
+  test("isDraining returns false again after flag is removed", () => {
+    const flag = join(tmp, "drain");
+    writeFileSync(flag, "");
+    expect(isDraining(tmp)).toBe(true);
+    rmSync(flag);
+    expect(isDraining(tmp)).toBe(false);
   });
 });

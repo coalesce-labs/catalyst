@@ -3,7 +3,7 @@
 //
 // Phase 3 adds the selection-core blocks; Phases 4-5 extend this same file.
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -9453,5 +9453,153 @@ describe("CTL-1068: marker-hygiene and re-arm (Phase 3 regression)", () => {
     // The onRetract callback clears lastHeldEmitState for this ticket — no further assertion
     // needed here beyond confirming the retraction fired (the internal Map reset is exercised
     // by the unit test in Phase 1).
+  });
+});
+
+describe("drain gate (CTL-1095)", () => {
+  const eligibleOne = (id) => [
+    {
+      identifier: id,
+      priority: 1,
+      createdAt: "x",
+      state: "Todo",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+    },
+  ];
+
+  test("draining node zeroes freeSlots — no new dispatch", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-drain-1"),
+      dispatch,
+      isDraining: () => true,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+
+  test("not draining — dispatch happens as before (regression guard)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-drain-2"),
+      dispatch,
+      isDraining: () => false,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      verifyDispatched: verifyOk,
+    });
+    expect(dispatch.calls).toHaveLength(1);
+  });
+
+  test("draining with in-flight work — still zero new dispatch", () => {
+    writeSignal("CTL-existing", "implement", "running");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const dispatch = fakeDispatch({ code: 0 });
+    schedulerTick(orchDir, {
+      readEligible: () => eligibleOne("CTL-drain-3"),
+      dispatch,
+      isDraining: () => true,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 1,
+    });
+    expect(dispatch.calls).toHaveLength(0);
+  });
+});
+
+describe("drained-sentinel emission (CTL-1095)", () => {
+  test("emits node.drain.drained once when draining && inFlight empty", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainedMock = mock(() => true);
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => true,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    });
+    expect(emitDrainedMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("does NOT emit drained a second time (marker dedup)", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainedMock = mock(() => true);
+    const opts = {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => true,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    };
+    schedulerTick(orchDir, opts); // first tick
+    schedulerTick(orchDir, opts); // second tick — marker exists, no re-emit
+    expect(emitDrainedMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("does NOT emit drained while in-flight tickets remain", () => {
+    writeSignal("CTL-inflight", "implement", "running");
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainedMock = mock(() => true);
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => true,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 1,
+      emitDrained: emitDrainedMock,
+    });
+    expect(emitDrainedMock).not.toHaveBeenCalled();
+  });
+
+  test("does NOT emit drained when not draining", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainedMock = mock(() => true);
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => false,
+      livenessIsFresh: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    });
+    expect(emitDrainedMock).not.toHaveBeenCalled();
+  });
+
+  test("marker clears when drain turns off so next episode re-arms", () => {
+    writeFileSync(join(orchDir, "state.json"), JSON.stringify({ maxParallel: 2 }));
+    const emitDrainedMock = mock(() => true);
+    // First drain episode: emit fires, marker written
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    });
+    expect(emitDrainedMock).toHaveBeenCalledTimes(1);
+
+    // Drain off: marker should be cleared
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => false,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    });
+
+    // Second drain episode: re-arms
+    schedulerTick(orchDir, {
+      readEligible: () => [],
+      dispatch: fakeDispatch(),
+      isDraining: () => true,
+      liveBackgroundCount: () => 0,
+      emitDrained: emitDrainedMock,
+    });
+    expect(emitDrainedMock).toHaveBeenCalledTimes(2);
   });
 });

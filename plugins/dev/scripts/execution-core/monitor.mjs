@@ -36,6 +36,7 @@ import {
   getHostName, // CTL-862
   getClusterHosts, // CTL-862
   hostMembershipWarning, // CTL-1057
+  isDraining as isDrainingDefault, // CTL-1095: drain gate
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
@@ -368,6 +369,8 @@ export function handleStateChangedEvent(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1095: drain gate seam — thread through to dispatchTriage.
+    isDraining = (dir) => isDrainingDefault(dir),
   } = {}
 ) {
   const parsed = parseStateChangedEvent(event);
@@ -411,6 +414,7 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           claimDispatch, // CTL-862
+          isDraining, // CTL-1095
         });
       }
     } else if (!parsed.toState || parsed.toState === query.status) {
@@ -465,6 +469,7 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           claimDispatch, // CTL-862
+          isDraining, // CTL-1095
         });
       } else {
         log.debug(
@@ -547,10 +552,17 @@ function dispatchTriage(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1095: drain gate — node-level refusal of new-triage admission.
+    isDraining = (dir) => isDrainingDefault(dir),
   }
 ) {
   if (!orchDir) {
     log.warn({ identifier }, "→Triage seen but monitor has no orchDir — skipping dispatch");
+    return false;
+  }
+  // CTL-1095: drain gate — refuse new triage dispatch before HRW filter.
+  if (isDraining(orchDir)) {
+    log.debug({ identifier }, "drain: skipping triage dispatch — node draining (CTL-1095)");
     return false;
   }
   // CTL-862/CTL-1057: HRW ownership filter. Resolve roster/self lazily per call

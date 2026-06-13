@@ -7,8 +7,8 @@
 // daemons pin a stable value at launch.
 
 import { homedir, hostname } from "node:os";
-import { resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
@@ -66,6 +66,15 @@ function catalystDir() {
 
 export function getExecutionCoreDir() {
   return resolve(catalystDir(), "execution-core");
+}
+
+// CTL-1095: drain-flag file. Presence = node is draining (refuse new work).
+export function getDrainFlagPath(orchDir) {
+  return join(orchDir, "drain");
+}
+
+export function isDraining(orchDir) {
+  return existsSync(getDrainFlagPath(orchDir));
 }
 
 export function getEligibleDir() {

@@ -194,7 +194,8 @@ import { isLinearTerminal } from "./terminal-state.mjs";
 import { labelOnce, clearStalledLabel } from "./label-guard.mjs";
 import { processApprovedResumes } from "./boot-resume.mjs"; // CTL-644: per-tick approval poll
 import { countReapOutcomes } from "./reaper-metrics.mjs";
-import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts, hostMembershipWarning } from "./config.mjs";
+import { log, getEligibleDir, getEventLogPath, getHostName, getClusterHosts, hostMembershipWarning, isDraining as isDrainingDefault } from "./config.mjs";
+import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs"; // CTL-1095: drained sentinel
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
@@ -2537,6 +2538,11 @@ export function schedulerTick(
       postComment: _unstuckPostComment = undefined,
       nowMs: _unstuckNowMs = undefined,
     } = {},
+    // CTL-1095: drain gate — node-level refusal of new-work admission. Default
+    // reads the drain flag file from orchDir; tests inject a stub.
+    isDraining = () => isDrainingDefault(orchDir),
+    // CTL-1095: drained-sentinel emitter — fires once when draining && empty.
+    emitDrained = () => defaultEmitDrainedEvent(),
     // CTL-936: closed-loop intent layer. When an open beliefs.db handle is
     // provided, kill actions in reclaimDeadWork are recorded as intents and
     // suppressed once ineffective. Default null → legacy behavior (all existing
@@ -4133,6 +4139,8 @@ export function schedulerTick(
   // independent of freeSlots and already ran, so the pipeline keeps moving; only
   // NEW admissions pause until the read recovers. Fresh (the default) → no change.
   const livenessFresh = livenessIsFresh();
+  // CTL-1095: drain gate — refuse all new-work admission while draining.
+  const draining = isDraining();
   // CTL-755: also subtract promotedCount — the triage→research promotions STEP B
   // dispatched this tick took slots that liveCount (read before STEP B) does not
   // yet reflect, so without this term sweep 2 over-admits into them (the same
@@ -4145,7 +4153,7 @@ export function schedulerTick(
   // subtracting heldStopCount removed that slot a SECOND time, over-suppressing
   // genuinely-free capacity at maxParallel>=2 (a transient single-tick throughput
   // loss; the slot frees naturally next tick via getAgentsCached deregistration).
-  const freeSlots = livenessFresh
+  const freeSlots = (livenessFresh && !draining)
     ? Math.max(0, computeFreeSlots(maxParallel, inFlightCount) - resumedCount - promotedCount)
     : 0;
   if (!livenessFresh) {
@@ -4153,6 +4161,22 @@ export function schedulerTick(
       { maxParallel, inFlightCount, resumedCount, promotedCount, heldStopCount },
       "scheduler: liveness snapshot stale/cold — holding new-work dispatch (CTL-731)"
     );
+  }
+  if (draining) {
+    log.info({ inFlightCount }, "scheduler: node draining — holding new-work dispatch (CTL-1095)");
+  }
+  // CTL-1095: drained sentinel. Once draining and nothing in flight, emit
+  // node.drain.drained exactly once per episode via a marker file. Clears
+  // the marker when drain turns off so a subsequent episode re-arms.
+  const drainedMarker = join(orchDir, "drain.drained");
+  if (draining) {
+    if (listInFlightTickets(orchDir).size === 0 && !existsSync(drainedMarker)) {
+      emitDrained();
+      try { writeFileSync(drainedMarker, ""); } catch { /* best-effort */ }
+      log.info({}, "scheduler: node drained — all in-flight work landed (CTL-1095)");
+    }
+  } else if (existsSync(drainedMarker)) {
+    try { rmSync(drainedMarker, { force: true }); } catch { /* best-effort */ }
   }
   // CTL-706: per-project caps + reserves gate selection AFTER ranking. With
   // no perProject config this is byte-for-byte selectDispatchable.
