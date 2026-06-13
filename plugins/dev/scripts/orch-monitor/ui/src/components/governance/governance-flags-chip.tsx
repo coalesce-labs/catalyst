@@ -77,10 +77,10 @@ export function GovernanceFlagsChip({ snapshot, reportedAtLabel, stale }: Govern
       .then((body) => {
         if (cancelled) return;
         if (isGovernanceSnapshot(body)) setFetchedSnapshot(body);
-        else setRetries((r) => r + 1);
+        else setRetries((prev) => prev + 1);
       })
       .catch(() => {
-        if (!cancelled) setRetries((r) => r + 1);
+        if (!cancelled) setRetries((prev) => prev + 1);
       });
     return () => { cancelled = true; };
   }, [retries, isPropDriven]);
