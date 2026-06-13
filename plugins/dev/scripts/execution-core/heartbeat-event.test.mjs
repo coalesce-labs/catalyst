@@ -6,8 +6,9 @@
 // Run: cd plugins/dev/scripts/execution-core && bun test heartbeat-event.test.mjs
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, appendFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   buildHeartbeatEnvelope,
@@ -200,6 +201,44 @@ describe("readClusterHeartbeats (CTL-859)", () => {
     const seen = readClusterHeartbeats({ logPath });
     expect(Object.keys(seen)).toEqual(["mini"]);
     expect(typeof seen.mini).toBe("string");
+  });
+});
+
+describe("Phase 2 rename stability: resource/body convergence (CTL-1093)", () => {
+  let tmp;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "ctl1093-hb-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("resource and body host.name agree when Layer-2 pinned and env unset", () => {
+    const layer2Path = join(tmp, "config.json");
+    writeFileSync(layer2Path, JSON.stringify({ catalyst: { host: { name: "mini" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = layer2Path;
+    // env CATALYST_HOST_NAME is NOT set (cleared by beforeEach)
+    const env = buildHeartbeatEnvelope();
+    expect(env.resource["host.name"]).toBe(env.body.payload["host.name"]);
+    expect(env.resource["host.name"]).toBe("mini");
+  });
+
+  test("resource host.id matches sha256(converged name)[:16]", () => {
+    const layer2Path = join(tmp, "config.json");
+    writeFileSync(layer2Path, JSON.stringify({ catalyst: { host: { name: "mini" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = layer2Path;
+    const env = buildHeartbeatEnvelope();
+    const expected = createHash("sha256").update("mini").digest("hex").slice(0, 16);
+    expect(env.resource["host.id"]).toBe(expected);
+  });
+
+  test("resource and body still agree when only env is set (no regression)", () => {
+    process.env.CATALYST_HOST_NAME = "laptop";
+    const env = buildHeartbeatEnvelope();
+    expect(env.resource["host.name"]).toBe("laptop");
+    expect(env.body.payload["host.name"]).toBe("laptop");
   });
 });
 
