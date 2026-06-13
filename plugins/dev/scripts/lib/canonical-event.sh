@@ -362,11 +362,13 @@ build_canonical_line() {
 _canonical_is_sentinel_leak() {
   local base_dir="$1" line="$2"
   local orch sentinels default_dir
-  orch="$(printf '%s' "$line" | jq -r '.resource["catalyst.orchestration"] // empty' 2>/dev/null)"
+  # Parity with JS isSentinelLeak: canonical `.resource["catalyst.orchestration"]`
+  # first, then the legacy top-level `.orchestrator` field.
+  orch="$(printf '%s' "$line" | jq -r '.resource["catalyst.orchestration"] // .orchestrator // empty' 2>/dev/null)"
   [[ -n "$orch" ]] || return 1
   sentinels="orch-test ${CATALYST_SENTINEL_ORCHIDS:-}"
   case " $sentinels " in *" $orch "*) ;; *) return 1 ;; esac
-  default_dir="${HOME:-$HOME}/catalyst/events"
+  default_dir="${HOME}/catalyst/events"
   # Compare resolved real paths so symlinks/trailing slashes don't fool the check.
   [[ "$(cd "$base_dir" 2>/dev/null && pwd -P || echo "$base_dir")" == \
      "$(cd "$default_dir" 2>/dev/null && pwd -P || echo "$default_dir")" ]]

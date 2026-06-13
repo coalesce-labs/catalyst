@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, basename } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SENTINEL_ORCHIDS = new Set(["orch-test"]);
 
@@ -69,7 +70,7 @@ export async function scrubFile(filePath, { apply = false } = {}) {
 }
 
 // CLI entrypoint
-if (import.meta.url === new URL(import.meta.url).href && process.argv[1] === new URL(import.meta.url).pathname) {
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
   const apply = args.includes("--apply");
   const pathArg = args.find((a) => !a.startsWith("--"));
