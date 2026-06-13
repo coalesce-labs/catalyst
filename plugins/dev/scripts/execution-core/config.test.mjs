@@ -28,6 +28,8 @@ import {
   hostMembershipWarning,
   getDrainFlagPath,
   isDraining,
+  getLivenessAnchorIssue,
+  LIVENESS_PUBLISH_INTERVAL_MS,
 } from "./config.mjs";
 
 const PREV = process.env.CATALYST_WAIT_WATCHER;
@@ -494,5 +496,69 @@ describe("getDrainFlagPath + isDraining (CTL-1095)", () => {
     expect(isDraining(tmp)).toBe(true);
     rmSync(flag);
     expect(isDraining(tmp)).toBe(false);
+  });
+});
+
+// CTL-1090: getLivenessAnchorIssue + LIVENESS_PUBLISH_INTERVAL_MS
+describe("getLivenessAnchorIssue (CTL-1090)", () => {
+  const LIVENESS_ENVS = ["CATALYST_LIVENESS_ANCHOR_ISSUE", "CATALYST_LAYER2_CONFIG_FILE"];
+  let saved = {};
+  let tmp2;
+
+  beforeEach(() => {
+    for (const k of LIVENESS_ENVS) {
+      saved[k] = process.env[k];
+      delete process.env[k];
+    }
+    tmp2 = mkdtempSync(join(tmpdir(), "ctl1090-anchor-"));
+  });
+
+  afterEach(() => {
+    for (const k of LIVENESS_ENVS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    saved = {};
+    rmSync(tmp2, { recursive: true, force: true });
+  });
+
+  test("CATALYST_LIVENESS_ANCHOR_ISSUE env wins", () => {
+    const cfg = join(tmp2, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { livenessAnchorIssue: "CTL-1" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    process.env.CATALYST_LIVENESS_ANCHOR_ISSUE = "CTL-ENV-999";
+    expect(getLivenessAnchorIssue()).toBe("CTL-ENV-999");
+  });
+
+  test("falls back to Layer-2 catalyst.cluster.livenessAnchorIssue", () => {
+    const cfg = join(tmp2, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { livenessAnchorIssue: "CTL-ANCHOR" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(getLivenessAnchorIssue()).toBe("CTL-ANCHOR");
+  });
+
+  test("returns null when unset and no Layer-2 file", () => {
+    process.env.CATALYST_LAYER2_CONFIG_FILE = join(tmp2, "absent.json");
+    expect(getLivenessAnchorIssue()).toBeNull();
+  });
+
+  test("returns null when Layer-2 file is malformed (never throws)", () => {
+    const cfg = join(tmp2, "config.json");
+    writeFileSync(cfg, "{ not valid json");
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(getLivenessAnchorIssue()).toBeNull();
+  });
+
+  test("returns null when livenessAnchorIssue is empty string", () => {
+    const cfg = join(tmp2, "config.json");
+    writeFileSync(cfg, JSON.stringify({ catalyst: { cluster: { livenessAnchorIssue: "" } } }));
+    process.env.CATALYST_LAYER2_CONFIG_FILE = cfg;
+    expect(getLivenessAnchorIssue()).toBeNull();
+  });
+});
+
+describe("LIVENESS_PUBLISH_INTERVAL_MS (CTL-1090)", () => {
+  test("defaults to 120000ms (2 minutes)", () => {
+    expect(LIVENESS_PUBLISH_INTERVAL_MS).toBe(120_000);
   });
 });

@@ -218,6 +218,32 @@ export function hostMembershipWarning(roster, self) {
   );
 }
 
+// getLivenessAnchorIssue — the Linear ticket identifier the cross-host liveness
+// channel attaches per-host heartbeat records to (CTL-1090). Resolution order:
+//   1. CATALYST_LIVENESS_ANCHOR_ISSUE env (test/override)
+//   2. catalyst.cluster.livenessAnchorIssue in the Layer-2 machine-local config
+//      (~/.config/catalyst/config.json) — kept out of the committed repo per
+//      CLAUDE.md ("do NOT commit Linear team/project IDs").
+//   3. null — multi-host caller logs a one-time warning + no-ops; single-host: silent no-op.
+// Never throws. NOT committed (Linear id ⇒ machine-local per CLAUDE.md).
+export function getLivenessAnchorIssue() {
+  const env = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  if (typeof env === "string" && env.length > 0) return env;
+  try {
+    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
+      ?.catalyst?.cluster?.livenessAnchorIssue;
+    if (typeof a === "string" && a.length > 0) return a;
+  } catch { /* missing/malformed → null */ }
+  return null;
+}
+
+// LIVENESS_PUBLISH_INTERVAL_MS — cross-host liveness publish cadence (CTL-1090).
+// Coarser than the local heartbeat (30s) because the takeover grace is 10 min;
+// ~2 min keeps Linear quota bounded while giving 5 intervals of resolution inside
+// the grace window. Env-overridable.
+export const LIVENESS_PUBLISH_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS) || 120_000;
+
 // CTL-859 — node-heartbeat cadence. The daemon appends one node.heartbeat event
 // to the unified event log every interval so a future liveness reader can decide
 // "dead" = no heartbeat for a generous grace window (see the design doc: 5–10 min

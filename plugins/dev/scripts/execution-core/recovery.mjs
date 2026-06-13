@@ -31,6 +31,7 @@ import {
   getEventLogPath,
   getClusterHosts,
   getHostName,
+  getLivenessAnchorIssue,
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
@@ -39,6 +40,7 @@ import {
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
 } from "./config.mjs";
+import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
 import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
@@ -2724,32 +2726,68 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
 // missing log, unreadable file, and malformed lines are skipped, never thrown.
 // `logPath` is injectable for tests; defaults to the same getEventLogPath()
 // every emitter uses.
-export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
+export function readClusterHeartbeats({
+  logPath = getEventLogPath(),
+  roster = getClusterHosts(),
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
   const lastSeen = {};
   let raw;
   try {
     raw = readFileSync(logPath, "utf8");
   } catch {
-    return lastSeen; // no event log yet
+    // no event log yet — continue to peer merge below if multi-host
   }
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-    let evt;
-    try {
-      evt = JSON.parse(line);
-    } catch {
-      continue; // partial/garbage line
+  if (raw) {
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue; // partial/garbage line
+      }
+      if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
+      const host =
+        evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+      const ts = evt?.ts;
+      if (typeof host !== "string" || host.length === 0) continue;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // Keep the latest ts per host (ISO-8601 sorts lexicographically).
+      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
     }
-    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-    const host =
-      evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-    const ts = evt?.ts;
-    if (typeof host !== "string" || host.length === 0) continue;
-    if (typeof ts !== "string" || ts.length === 0) continue;
-    // Keep the latest ts per host (ISO-8601 sorts lexicographically).
-    if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
   }
+
+  // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
+  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
+    let peers = {};
+    try {
+      peers = readPeers(anchorIssue) ?? {};
+    } catch {
+      peers = {}; // fail-open: a Linear hiccup must never break liveness
+    }
+    for (const [host, rec] of Object.entries(peers)) {
+      const ts = rec?.last_seen;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+      // would sort ABOVE real ISO strings lexicographically and then make the host
+      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+      // false) — can never poison the merge.
+      const peerMs = Date.parse(ts);
+      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+      // lexicographically: the local event log carries second-precision ts
+      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+      // lexicographic compare would discard a genuinely newer peer ts.
+      const cur = lastSeen[host];
+      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+    }
+  }
+
   return lastSeen;
 }
 
@@ -2825,10 +2863,27 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
   return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
 }
 
-// defaultOwnedTicketsForHost — scan the local worker signal directory for non-terminal
-// signals dispatched from the given dead host. Local-only (no network). Returns ticket
-// IDs whose most-recent signal has host.name === deadHost and a non-terminal status.
-function defaultOwnedTicketsForHost(deadHost, { orchDir }) {
+// defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
+// Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
+// from the cross-host liveness channel (one Linear read = liveness + tickets).
+// Fallback: scan the local worker signal directory for non-terminal signals
+// dispatched from the dead host (the original local-only behavior, unchanged).
+// `anchorIssue`/`readPeers` are injectable for unit tests.
+function defaultOwnedTicketsForHost(deadHost, {
+  orchDir,
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
+  if (anchorIssue) {
+    try {
+      const peerMap = readPeers(anchorIssue);
+      const rec = peerMap?.[deadHost];
+      if (Array.isArray(rec?.in_flight_tickets) && rec.in_flight_tickets.length > 0) {
+        return [...new Set(rec.in_flight_tickets)];
+      }
+    } catch { /* fail-open → local scan */ }
+  }
+  // Fallback: local signal scan (original behavior; also runs when anchor unset).
   const signals = readWorkerSignals(orchDir);
   const tickets = new Set();
   for (const sig of signals) {

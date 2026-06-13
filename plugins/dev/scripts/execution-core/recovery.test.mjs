@@ -4181,6 +4181,211 @@ Final polish, documentation, and code cleanup.
   });
 });
 
+// ─── CTL-1090: readClusterHeartbeats cross-host merge ────────────────────────
+
+import { readClusterHeartbeats } from "./recovery.mjs";
+
+const makeHbLine = (host, ts) =>
+  JSON.stringify({
+    ts,
+    attributes: { "event.name": "node.heartbeat" },
+    body: { payload: { "host.name": host } },
+  });
+
+describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
+  let tmpDir;
+  let logPath;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1090-hb-"));
+    logPath = join(tmpDir, "events.jsonl");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("multi-host: merges injected peer timestamps over the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+  });
+
+  test("peer entry never clobbers a FRESHER local timestamp for the same host", () => {
+    const localTs = "2026-06-13T01:05:00Z";
+    const peerTs = "2026-06-13T00:50:00Z";
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(localTs); // local fresher wins
+  });
+
+  test("single-host (roster<=1): peer reader is NEVER called — exact no-op", () => {
+    const readPeers = () => { throw new Error("must not be called single-host"); };
+    expect(() =>
+      readClusterHeartbeats({
+        logPath: join(tmpDir, "absent.jsonl"),
+        roster: ["mini"],
+        anchorIssue: "CTL-9999",
+        readPeers,
+      }),
+    ).not.toThrow();
+  });
+
+  test("peer-read failure is swallowed — returns the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => { throw new Error("Linear down"); };
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
+  test("no anchorIssue → no peer read, local map only", () => {
+    const readPeers = () => { throw new Error("must not be called"); };
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: null,
+      readPeers,
+    });
+    expect(result).toEqual({});
+  });
+
+  test("missing log file with multi-host + anchor → returns peers only", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+    expect(result.mini).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: a peer's last_seen is untrusted. An unparseable
+  // value must never enter the merged map — otherwise it sorts above real ISO
+  // strings and (via deadHosts' Date.parse → NaN) makes the host look
+  // forever-alive, silently defeating takeover.
+  test("garbage peer last_seen is dropped, never poisons the merge", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "zzz-not-a-date", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: local ts is second-precision (millis stripped),
+  // peers publish millisecond ISO. A genuinely newer peer ts within the same
+  // second must win — a lexicographic compare would wrongly discard it because
+  // "…00.500Z" < "…00Z".
+  test("mixed-precision: a newer millisecond peer ts beats a second-precision local ts", () => {
+    const localTs = "2026-06-13T01:00:00Z";        // second precision (from event log)
+    const peerTs = "2026-06-13T01:00:00.500Z";     // 500ms later, same second
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(peerTs); // newer peer wins under numeric compare
+  });
+});
+
+// ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─
+
+describe("deadHosts — flags a stale peer in merged lastSeen (CTL-1090)", () => {
+  test("a peer with an aged last_seen is flagged dead", () => {
+    const now = Date.parse("2026-06-13T02:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-13T01:59:30Z",   // 30s ago — alive
+      laptop: "2026-06-13T01:40:00Z", // 20m ago — dead (past 10m grace)
+    };
+    // deadHosts is imported below; use the already-imported version
+    const { deadHosts: dh } = { deadHosts };
+    expect(dh({ lastSeen, roster: ["mini", "laptop"], graceMs: 600_000, nowMs: now }))
+      .toEqual(["laptop"]);
+  });
+});
+
+// ─── CTL-1090: reclaimDeadHostWork respects injected ownedTicketsForHost ──────
+// defaultOwnedTicketsForHost is internal; its peer-ticket logic is covered by the
+// reclaimDeadHostWork seam (ownedTicketsForHost option). The injectable seam is the
+// correct test surface (same pattern used for all other collaborators).
+
+describe("reclaimDeadHostWork — peer in_flight_tickets seam (CTL-1090)", () => {
+  const nowISO1090 = () => new Date().toISOString();
+  const oldISO1090 = () => new Date(Date.now() - 20 * 60_000).toISOString();
+
+  test("ownedTicketsForHost returning peer tickets results in dispatch", async () => {
+    const dispatched = [];
+    await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        readHeartbeats: () => ({ mini: nowISO1090(), laptop: oldISO1090() }),
+        roster: ["mini", "laptop"],
+        self: "mini",
+        graceMs: 600_000,
+        nowMs: Date.now(),
+        ownedTicketsForHost: () => ["CTL-7", "CTL-8"],
+        ownerForTicket: () => "mini",
+        claim: () => ({ won: true, generation: 1 }),
+        inferResume: async () => "implement",
+        alreadyComplete: () => false,
+        rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-7" }),
+        thoughtsPull: () => ({ ok: true }),
+        dispatch: (od, ticket) => { dispatched.push(ticket); return { code: 0 }; },
+      },
+    );
+    expect(dispatched.sort()).toEqual(["CTL-7", "CTL-8"]);
+  });
+
+  test("single-host roster: exact no-op regardless of injected seams", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        roster: ["mini"],
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      },
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+});
+
 // ─── CTL-863: deadHosts, survivingRoster, inferResumePhase ───────────────────
 
 import { deadHosts, survivingRoster, inferResumePhase } from "./recovery.mjs";
