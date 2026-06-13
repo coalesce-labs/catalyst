@@ -94,6 +94,7 @@ describe("POST /api/summarize", () => {
       anthropic: stubProvider({ count: callCount }),
       openai: stubProvider(),
       grok: stubProvider(),
+      "claude-cli": stubProvider(),
     };
 
     const handler = createSummarizeHandler({
@@ -316,6 +317,7 @@ describe("POST /api/summarize — rate limited", () => {
       anthropic: stubProvider(),
       openai: stubProvider(),
       grok: stubProvider(),
+      "claude-cli": stubProvider(),
     };
 
     const handler = createSummarizeHandler({
@@ -350,5 +352,99 @@ describe("POST /api/summarize — rate limited", () => {
       body: JSON.stringify({ orchId: "orch-test" }),
     });
     expect(res.status).toBe(429);
+  });
+});
+
+describe("POST /api/summarize — claude-cli keyless provider", () => {
+  let tmp: string;
+  let wtDir: string;
+  let server: Server;
+  let baseUrl: string;
+  let cliProviderCallCount: { n: number };
+
+  beforeAll(() => {
+    tmp = mkdtempSync(join(tmpdir(), "summarize-cli-endpoint-"));
+    wtDir = join(tmp, "wt");
+    mkdirSync(join(wtDir, "orch-cli", "workers"), { recursive: true });
+    writeFileSync(
+      join(wtDir, "orch-cli", "state.json"),
+      JSON.stringify({
+        orchestrator: "orch-cli",
+        startedAt: "2026-04-22T12:00:00Z",
+        waves: [{ wave: 1, status: "in_progress", tickets: ["CTL-1"] }],
+        currentWave: 1,
+        totalWaves: 1,
+      }),
+    );
+    writeFileSync(
+      join(wtDir, "orch-cli", "workers", "CTL-1.json"),
+      JSON.stringify({
+        ticket: "CTL-1",
+        orchestrator: "orch-cli",
+        status: "researching",
+        phase: 1,
+        startedAt: "2026-04-22T12:01:00Z",
+        updatedAt: "2026-04-22T12:01:00Z",
+      }),
+    );
+
+    cliProviderCallCount = { n: 0 };
+
+    const cliConfig: SummarizeConfig = {
+      enabled: true,
+      defaultProvider: "claude-cli",
+      defaultModel: "claude-haiku-4-5-20251001",
+      providers: { "claude-cli": { apiKeyEnv: "" } },
+    };
+
+    const providers: Record<ProviderName, SummarizeProvider> = {
+      anthropic: stubProvider(),
+      openai: stubProvider(),
+      grok: stubProvider(),
+      "claude-cli": {
+        name: "claude-cli",
+        summarize: () => {
+          cliProviderCallCount.n += 1;
+          return Promise.resolve({ summary: "cli summary", cost: 0, tokens: 0 });
+        },
+      },
+    };
+
+    const handler = createSummarizeHandler({
+      config: cliConfig,
+      buildSnapshot: (orchId) => buildSummarizeSnapshot(wtDir, orchId),
+      providers,
+      cache: createCache(60_000),
+      rateLimiter: createRateLimiter({ maxConcurrent: 10, minIntervalMs: 0 }),
+    });
+
+    server = createServer({
+      port: 0,
+      wtDir,
+      startWatcher: false,
+      prStatusFetcher: null,
+      linearFetcher: null,
+      annotationsDbPath: join(tmp, "ann2.db"),
+      summarizeHandler: handler,
+    });
+    baseUrl = `http://localhost:${String(server.port)}`;
+  });
+
+  afterAll(() => {
+    void server.stop(true);
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it("returns 200 with claude-cli provider (no apiKey required)", async () => {
+    const res = await fetch(`${baseUrl}/api/summarize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ orchId: "orch-cli" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { provider?: string; summary?: string };
+    expect(body.provider).toBe("claude-cli");
+    expect(body.summary).toBe("cli summary");
+    expect(cliProviderCallCount.n).toBe(1);
   });
 });

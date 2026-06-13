@@ -165,4 +165,28 @@ describe("loadSummarizeConfig", () => {
     expect(cfg.enabled).toBe(true);
     expect(Object.keys(cfg.providers)).toEqual(["anthropic"]);
   });
+
+  it("enables claude-cli provider without an apiKeyEnv/apiKey", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { ai: { enabled: true, defaultProvider: "claude-cli", providers: { "claude-cli": {} } } },
+      }),
+    );
+    const cfg = loadSummarizeConfig(configPath, {});
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.defaultProvider).toBe("claude-cli");
+    expect(cfg.providers["claude-cli"]).toBeDefined();
+  });
+
+  it("still ignores genuinely unknown provider names", () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        catalyst: { ai: { enabled: true, providers: { "made-up": { apiKeyEnv: "X" } } } },
+      }),
+    );
+    const cfg = loadSummarizeConfig(configPath, { X: "key" });
+    expect(cfg.providers["made-up" as never]).toBeUndefined();
+  });
 });
