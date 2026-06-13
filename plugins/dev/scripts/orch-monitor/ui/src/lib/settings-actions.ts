@@ -6,6 +6,8 @@ export type Layout = "board" | "list";
 
 export interface SettingsActionHandlers {
   toggleTheme: () => void;
+  /** CTL-1099: cycle the brand axis (Warm ⇄ Slate). */
+  cycleBrand: () => void;
   toggleSidebar: () => void;
   setGroupBy: (g: GroupBy) => void;
   setOrder: (o: Ordering) => void;
@@ -36,6 +38,13 @@ export function buildSettingsActions(h: SettingsActionHandlers): ActionEntry[] {
       keywords: ["dark", "light", "appearance"],
       scope: "global",
       handler: h.toggleTheme,
+    },
+    {
+      id: "settings.brand.cycle",
+      title: "Switch theme (Warm / Slate)",
+      keywords: ["theme", "brand", "appearance"],
+      scope: "global",
+      handler: h.cycleBrand,
     },
     {
       id: "settings.sidebar.toggle",

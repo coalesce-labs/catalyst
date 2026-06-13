@@ -5,6 +5,7 @@ import { visibleActions } from "./action-registry";
 function handlers() {
   return {
     toggleTheme: mock(() => {}),
+    cycleBrand: mock(() => {}),
     toggleSidebar: mock(() => {}),
     setGroupBy: mock((_g: "linear" | "phase") => {}),
     setOrder: mock((_o: "priority" | "recent" | "live") => {}),
@@ -25,6 +26,18 @@ describe("buildSettingsActions", () => {
     const h = handlers();
     buildSettingsActions(h).find((a) => a.id === "settings.theme.toggle")!.handler();
     expect(h.toggleTheme).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes brand cycle as global-scoped (CTL-1099)", () => {
+    const actions = buildSettingsActions(handlers());
+    const brand = actions.find((a) => a.id === "settings.brand.cycle");
+    expect(brand?.scope).toBe("global");
+  });
+
+  it("brand command fires cycleBrand (CTL-1099)", () => {
+    const h = handlers();
+    buildSettingsActions(h).find((a) => a.id === "settings.brand.cycle")!.handler();
+    expect(h.cycleBrand).toHaveBeenCalledTimes(1);
   });
 
   it("board-display commands are board-scoped and hidden off-board", () => {

@@ -133,16 +133,93 @@ describe("Theme routes through the ONE theme system, @/lib/theme (CTL-911)", () 
     expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
-  it("NO parallel data-theme system exists (the SURF3⇄SHELL3 clash resolution)", () => {
-    // The `.dark`-class mechanism is the one theme model: no data-theme
-    // attribute plumbing in the surface, the shell, or the stylesheet.
-    expect(settingsSrc).not.toContain("data-theme");
-    expect(shellSrc).not.toContain("data-theme");
-    expect(cssSrc).not.toContain("data-theme");
-    expect(settingsSrc).not.toContain("calm-dark"); // the dead union values
-    expect(settingsSrc).not.toContain("warm-light");
-    // The `.dark` token block (SHELL3) is still what the theme flips.
+  it("data-theme is the brand axis; .dark is the sole MODE axis (CTL-1099 reverses the SURF3⇄SHELL3 single-axis decision)", () => {
+    // CTL-1099 REVERSES the prior CTL-911 invariant ("NO parallel data-theme
+    // system exists"). There are now TWO orthogonal axes:
+    //   - MODE  → the `.dark` class on <html> (catalyst:theme). dark ⇄ light.
+    //   - BRAND → the `data-theme` attribute on <html> (catalyst:brand). warm ⇄ slate.
+    // So `data-theme` is no longer a forbidden parallel theme system — it is the
+    // LEGITIMATE brand mechanism. The two are independent: a single .dark MODE
+    // block, plus data-theme="slate" override blocks that ONLY fork the accent
+    // (slate-light) / the full surface ramp (slate-dark).
+    // The `.dark` MODE mechanism is still present (the one mode flip)…
     expect(cssSrc).toContain(".dark");
+    // …and data-theme="slate" is the legitimate brand mechanism in CSS.
+    expect(cssSrc).toContain('data-theme="slate"');
+    // The surface + the shell both wire the brand hook (useBrand).
+    expect(settingsSrc).toContain("useBrand");
+    expect(shellSrc).toContain("useBrand");
+    // The dead kebab union-strings stay banned (they were never real values).
+    expect(settingsSrc).not.toContain("calm-dark");
+    expect(settingsSrc).not.toContain("warm-light");
+  });
+});
+
+// ── CTL-1099: the brand axis must preserve the semantic palette ────────────────
+describe("CTL-1099 brand axis preserves the semantic palette", () => {
+  const boardTokensSrc = read("board/board-tokens.ts");
+
+  /** Slice every [data-theme="slate"] rule body (balanced braces) out of css. */
+  function slateBlocks(): string[] {
+    const blocks: string[] = [];
+    const re = /\[data-theme="slate"\]\s*\{/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(cssSrc)) !== null) {
+      const open = cssSrc.indexOf("{", m.index);
+      let depth = 0;
+      for (let i = open; i < cssSrc.length; i++) {
+        if (cssSrc[i] === "{") depth++;
+        else if (cssSrc[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            blocks.push(cssSrc.slice(open, i + 1));
+            break;
+          }
+        }
+      }
+    }
+    return blocks;
+  }
+
+  /** Strip CSS comments so a token MENTIONED in prose (e.g. "--chart-* inherit")
+   *  never trips the literal declaration scan. */
+  const stripCss = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  it("no [data-theme=\"slate\"] block redefines a semantic --color-* or chart slot", () => {
+    const blocks = slateBlocks().map(stripCss);
+    // Both the slate-light (:root[...]) and slate-dark (.dark[...]) blocks exist.
+    expect(blocks.length).toBe(2);
+    // A slate block may CONSUME a semantic token (e.g. `--destructive:
+    // var(--color-red)` — the base .dark does the same), but must never REDEFINE
+    // one. A redefinition is the token immediately followed by `:` at declaration
+    // position; a `var(--color-red)` reference never matches `--color-red\s*:`.
+    const REDEFINES = (b: string, token: string) =>
+      new RegExp(`${token}\\s*:`).test(b);
+    for (const b of blocks) {
+      expect(REDEFINES(b, "--color-green")).toBe(false);
+      expect(REDEFINES(b, "--color-red")).toBe(false);
+      expect(REDEFINES(b, "--color-yellow")).toBe(false);
+      expect(REDEFINES(b, "--color-live")).toBe(false);
+      expect(REDEFINES(b, "--chart-[0-9]")).toBe(false);
+    }
+  });
+
+  it("the 9 canonical PHASE hexes in board-tokens.ts are untouched by the warm-dark C change", () => {
+    const PINNED: Record<string, string> = {
+      todo: "#97a3b4",
+      triage: "#8492a4",
+      research: "#5e9ee8",
+      plan: "#a98ee3",
+      implement: "#45c08a",
+      verify: "#dba14f",
+      review: "#cdb84e",
+      pr: "#45bcab",
+      done: "#788596",
+    };
+    for (const [phase, hex] of Object.entries(PINNED)) {
+      // The phase key's literal hex still appears verbatim in board-tokens.ts.
+      expect(boardTokensSrc).toContain(`${phase}: "${hex}"`);
+    }
   });
 });
 

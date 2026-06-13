@@ -7,26 +7,28 @@
 // and the "N active" header). Decorative chrome must never reach for it.
 
 export const C = {
-  // CTL-1033 elevation ladder (dark): surfaces stack UPWARD, darkest → lightest,
-  // with PERCEPTIBLE +0.04–0.06 L steps so cards float (not emboss). These hexes
-  // are kept byte-identical to the .dark semantic vars in app.css (the contract
-  // test surface-contract.test.ts asserts the two stay in sync — kills drift).
-  // s0 = chrome (anchor, sidebar GOOD — UNCHANGED). s1 = content canvas. subtle =
+  // CTL-1033 elevation ladder (dark): surfaces stack UPWARD, darkest → lightest.
+  // CTL-1099: the base `.dark` theme is now WARM-DARK (the textbook charcoal ramp),
+  // so this ladder carries the warm-charcoal hexes — byte-identical to the base
+  // `.dark` semantic vars in app.css (surface-contract.test.ts asserts the two
+  // stay in sync — kills drift). Monotonic ascending luminance verified:
+  //   s0 0.00521 < s1 0.00754 < subtle 0.01034 < s2 0.01229 < s3 0.01623 < s4 0.02529.
+  // s0 = chrome (anchor, textbook --sidebar-bg). s1 = content canvas. subtle =
   // lane bands/zebra/column-header chips. s2 = cards. s3 = elevated (popovers/
   // palette). s4 = hover/tracks (interaction, top — NOT an elevation level).
-  s0: "#0e1116", // chrome (anchor, unchanged)
-  s1: "#181d24", // content canvas (was #151a21)
-  subtle: "#20262f", // lane bands / zebra / column-header chips / inset wells (NEW)
-  s2: "#2b333d", // cards (was #1b212a)
-  s3: "#39424f", // elevated: popover / palette / dropdowns (was #242c37)
-  s4: "#434d5b", // hover / tracks (was #2e3845)
+  s0: "#11100e", // chrome (anchor) — textbook --sidebar-bg (was #0e1116)
+  s1: "#161513", // content canvas — textbook --canvas (was #181d24)
+  subtle: "#1b1a17", // lane bands / zebra / inset wells — textbook --panel (was #20262f)
+  s2: "#1e1d1a", // cards — textbook --surface (was #2b333d)
+  s3: "#242220", // elevated: popover / palette — textbook --surface-2 (was #39424f)
+  s4: "#2e2c27", // hover / tracks — textbook --border (was #434d5b)
   // CTL-1033: alpha-white borders, scaled inversely with surface lightness (the
   // embossing cure's garnish). Drop straight into `1px solid ${C.border}` templates.
-  borderSubtle: "rgba(255,255,255,0.07)", // card edges, in-card hairlines
-  border: "rgba(255,255,255,0.11)", // inputs, interactive outlines, strong separators
-  fg: "#edf1f7",
-  fgMuted: "#9ba6b5",
-  fgDim: "#6e7a8a",
+  borderSubtle: "rgba(255,255,255,0.07)", // card edges, in-card hairlines — UNCHANGED
+  border: "rgba(255,255,255,0.11)", // inputs, interactive outlines, strong separators — UNCHANGED
+  fg: "#e9e5dc", // textbook --ink (was #edf1f7)
+  fgMuted: "#a39d91", // textbook --ink-dim (was #9ba6b5)
+  fgDim: "#6f6a5f", // textbook --ink-faint (was #6e7a8a)
   green: "#41bd7d",
   blue: "#5e9ee8",
   red: "#e36b6b",
