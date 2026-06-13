@@ -101,6 +101,9 @@ const REQUIRED_EXPORTS = [
   "handlePluginRefreshEvent",
   "PLUGIN_REFRESH_THROTTLE_MS",
   "__clearThrottleForTest",
+  // CTL-1106: checkout-lag alarm (plugin-refresh.mjs)
+  "CHECKOUT_LAG_FAILURE_THRESHOLD",
+  "__clearLagStateForTest",
   // CTL-1077: automatic hot-reload of the running stack (stack-reload.mjs + index.mjs)
   "decideStackReload",
   "handleStackReloadEvent",
@@ -114,11 +117,11 @@ const REQUIRED_EXPORTS = [
 ];
 
 describe("CTL-529 barrel contract", () => {
-  test("all 83 public symbols re-export from ./index.mjs", () => {
+  test("all 85 public symbols re-export from ./index.mjs", () => {
     for (const name of REQUIRED_EXPORTS) {
       expect(typeof barrel[name], `missing export: ${name}`).not.toBe("undefined");
     }
-    expect(REQUIRED_EXPORTS.length).toBe(83);
+    expect(REQUIRED_EXPORTS.length).toBe(85);
   });
 
   test("singleton getters return identity-stable live references", () => {

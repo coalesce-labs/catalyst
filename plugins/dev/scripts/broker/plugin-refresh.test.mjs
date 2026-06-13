@@ -27,6 +27,8 @@ import {
   handlePluginRefreshEvent,
   PLUGIN_REFRESH_THROTTLE_MS,
   __clearThrottleForTest,
+  CHECKOUT_LAG_FAILURE_THRESHOLD,
+  __clearLagStateForTest,
 } from "./plugin-refresh.mjs";
 
 // ─── resolvePluginCheckoutRoots ──────────────────────────────────────────────
@@ -335,33 +337,37 @@ describe("isThisRepoMergeEvent", () => {
 
 // ─── refreshPluginCheckout ───────────────────────────────────────────────────
 
-describe("refreshPluginCheckout", () => {
-  beforeEach(() => __clearThrottleForTest());
-
-  function makeGitFn({ before = "aaaa", after = "bbbb", pullThrows = false } = {}) {
+// makeGitFn — module-level so it can be shared across describe blocks.
+function makeGitFn({ before = "aaaa", after = "bbbb", fetchThrows = false } = {}) {
     const calls = [];
     const gitFn = (root, args) => {
       calls.push({ root, args });
       const sub = args[0];
       if (sub === "rev-parse") {
-        // first rev-parse → before, subsequent → after (the pull advanced HEAD)
+        // first rev-parse → before, subsequent → after (reset advanced HEAD)
         const seen = calls.filter((c) => c.args[0] === "rev-parse").length;
         return seen === 1 ? before : after;
       }
-      if (sub === "pull") {
-        if (pullThrows) {
-          const e = new Error("not fast-forwardable");
+      if (sub === "fetch") {
+        if (fetchThrows) {
+          const e = new Error("Connection refused");
           throw e;
         }
+        return "";
+      }
+      if (sub === "reset") {
         return "";
       }
       return "";
     };
     gitFn.calls = calls;
     return gitFn;
-  }
+}
 
-  test("runs ff-only pull and emits plugin.checkout.updated with old+new sha", () => {
+describe("refreshPluginCheckout", () => {
+  beforeEach(() => __clearThrottleForTest());
+
+  test("runs fetch + reset --hard and emits plugin.checkout.updated with old+new sha", () => {
     const emitted = [];
     const gitFn = makeGitFn({ before: "old111", after: "new222" });
     const res = refreshPluginCheckout({
@@ -372,16 +378,37 @@ describe("refreshPluginCheckout", () => {
     });
 
     expect(res.pulled).toBe(true);
-    // an ff-only pull was issued against the right checkout
-    const pull = gitFn.calls.find((c) => c.args[0] === "pull");
-    expect(pull.root).toBe("/co");
-    expect(pull.args).toContain("--ff-only");
+    const fetchCall = gitFn.calls.find((c) => c.args[0] === "fetch");
+    expect(fetchCall.root).toBe("/co");
+    expect(fetchCall.args).toEqual(expect.arrayContaining(["fetch", "--no-tags", "origin", "main"]));
+    const resetCall = gitFn.calls.find((c) => c.args[0] === "reset");
+    expect(resetCall.args).toEqual(expect.arrayContaining(["reset", "--hard", "origin/main"]));
+    // no `pull` subcommand is ever issued
+    expect(gitFn.calls.some((c) => c.args[0] === "pull")).toBe(false);
 
     expect(emitted).toHaveLength(1);
     expect(emitted[0].event).toBe("plugin.checkout.updated");
     expect(emitted[0].detail.checkout).toBe("/co");
     expect(emitted[0].detail.old_sha).toBe("old111");
     expect(emitted[0].detail.new_sha).toBe("new222");
+  });
+
+  test("dirty working tree no longer fails — reset --hard advances HEAD and emits updated", () => {
+    // CTL-1106 regression: git pull --ff-only threw on a dirty tree, causing a
+    // refresh_failed event and silent no-reload. fetch + reset --hard is immune
+    // to working-tree dirt; the fake simply returns success.
+    const emitted = [];
+    const gitFn = makeGitFn({ before: "dirty-old", after: "clean-new" });
+    const res = refreshPluginCheckout({
+      root: "/co",
+      now: 0,
+      gitFn,
+      emitFn: (e) => emitted.push(e),
+    });
+    expect(res.failed).toBe(false);
+    expect(res.changed).toBe(true);
+    expect(emitted).toHaveLength(1);
+    expect(emitted[0].event).toBe("plugin.checkout.updated");
   });
 
   test("throttles to at most one pull per N seconds for the same root", () => {
@@ -401,8 +428,8 @@ describe("refreshPluginCheckout", () => {
     const third = refreshPluginCheckout({ ...args, now: PLUGIN_REFRESH_THROTTLE_MS + 1 });
     expect(third.pulled).toBe(true);
 
-    const pulls = gitFn.calls.filter((c) => c.args[0] === "pull");
-    expect(pulls).toHaveLength(2);
+    const fetchCalls = gitFn.calls.filter((c) => c.args[0] === "fetch");
+    expect(fetchCalls).toHaveLength(2);
   });
 
   test("throttle is per-root — a different checkout is not blocked", () => {
@@ -415,9 +442,9 @@ describe("refreshPluginCheckout", () => {
     expect(b.pulled).toBe(true);
   });
 
-  test("ff-only pull failure surfaces as a refresh_failed event (not silent)", () => {
+  test("genuine fetch failure (network/auth) surfaces refresh_failed (not silent)", () => {
     const emitted = [];
-    const gitFn = makeGitFn({ pullThrows: true });
+    const gitFn = makeGitFn({ fetchThrows: true });
     const res = refreshPluginCheckout({
       root: "/co",
       now: 0,
@@ -541,10 +568,11 @@ describe("handlePluginRefreshEvent", () => {
       repoConfigPath: join(tmpDir, "nope", ".catalyst", "config.json"),
       gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
       gitFn: (root, args) => {
-        if (args[0] === "pull") {
+        if (args[0] === "fetch") {
           pulled = true;
           return "";
         }
+        if (args[0] === "reset") return "";
         if (args[0] === "rev-parse") return pulled ? "new" : "old";
         return "";
       },
@@ -622,7 +650,8 @@ describe("refreshPluginCheckout — enriched result shape (CTL-1077)", () => {
       now: 1,
       gitFn: (root, args) => {
         if (args[0] === "rev-parse") return head;
-        if (args[0] === "pull") { head = "new"; return ""; }
+        if (args[0] === "fetch") return "";
+        if (args[0] === "reset") { head = "new"; return ""; }
         return "";
       },
       emitFn: () => {},
@@ -699,7 +728,8 @@ describe("handlePluginRefreshEvent — returns per-root results array (CTL-1077)
       },
       gitToplevelFn: (pd) => pd.replace(/\/plugins\/dev$/, ""),
       gitFn: (root, args) => {
-        if (args[0] === "pull") { pulled = true; return ""; }
+        if (args[0] === "fetch") { pulled = true; return ""; }
+        if (args[0] === "reset") return "";
         if (args[0] === "rev-parse") return pulled ? "new" : "old";
         return "";
       },
@@ -724,6 +754,120 @@ describe("handlePluginRefreshEvent — returns per-root results array (CTL-1077)
       emitFn: () => {},
     });
     expect(results).toBeNull();
+  });
+});
+
+// ─── checkout-lag alarm (CTL-1106 Phase 2) ──────────────────────────────────
+//
+// When genuine refresh failures (network/auth) persist across more than one
+// merge cycle, emit a one-shot `plugin.checkout.lag` event so Fleet Ops /
+// health surfaces the stall instead of silence. Reset on recovery.
+
+describe("checkout-lag alarm", () => {
+  beforeEach(() => {
+    __clearThrottleForTest();
+    __clearLagStateForTest();
+  });
+
+  // Helper: advance `now` past the throttle window to allow each call to execute.
+  function advanceNow(base, step) {
+    return base + step * (PLUGIN_REFRESH_THROTTLE_MS + 1);
+  }
+
+  test("a single failure does not emit plugin.checkout.lag", () => {
+    const emitted = [];
+    refreshPluginCheckout({
+      root: "/co",
+      now: advanceNow(0, 0),
+      gitFn: makeGitFn({ fetchThrows: true }),
+      emitFn: (e) => emitted.push(e),
+    });
+    expect(emitted.some((e) => e.event === "plugin.checkout.lag")).toBe(false);
+    expect(emitted.some((e) => e.event === "plugin.checkout.refresh_failed")).toBe(true);
+  });
+
+  test("N consecutive failures emit exactly one plugin.checkout.lag", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    const lagEvents = emitted.filter((e) => e.event === "plugin.checkout.lag");
+    expect(lagEvents).toHaveLength(1);
+    expect(lagEvents[0].detail.checkout).toBe("/co");
+    expect(lagEvents[0].detail.consecutive_failures).toBeGreaterThanOrEqual(CHECKOUT_LAG_FAILURE_THRESHOLD);
+    expect(typeof lagEvents[0].detail.behind_since).toBe("number");
+    expect(lagEvents[0].severity).toBe("ERROR");
+  });
+
+  test("lag is one-shot — further failures after emit do not re-emit", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD + 3; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    const lagEvents = emitted.filter((e) => e.event === "plugin.checkout.lag");
+    expect(lagEvents).toHaveLength(1);
+  });
+
+  test("a success resets the failure counter — lag not emitted until threshold reached anew", () => {
+    const emitted = [];
+    // Fail threshold-1 times
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD - 1; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    // One success — advances HEAD, resets counter
+    refreshPluginCheckout({
+      root: "/co",
+      now: advanceNow(0, CHECKOUT_LAG_FAILURE_THRESHOLD - 1),
+      gitFn: makeGitFn({ before: "a", after: "b" }),
+      emitFn: (e) => emitted.push(e),
+    });
+    // Fail threshold-1 more times — should NOT emit lag (counter was reset)
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD - 1; i++) {
+      refreshPluginCheckout({
+        root: "/co",
+        now: advanceNow(0, CHECKOUT_LAG_FAILURE_THRESHOLD + i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    expect(emitted.some((e) => e.event === "plugin.checkout.lag")).toBe(false);
+  });
+
+  test("lag counter is per-root — failures on /a do not push /b toward its threshold", () => {
+    const emitted = [];
+    for (let i = 0; i < CHECKOUT_LAG_FAILURE_THRESHOLD; i++) {
+      refreshPluginCheckout({
+        root: "/a",
+        now: advanceNow(0, i),
+        gitFn: makeGitFn({ fetchThrows: true }),
+        emitFn: (e) => emitted.push(e),
+      });
+    }
+    // /b has had zero failures — should emit nothing
+    const lagForB = emitted.filter(
+      (e) => e.event === "plugin.checkout.lag" && e.detail.checkout === "/b"
+    );
+    expect(lagForB).toHaveLength(0);
+    // /a should have one lag event
+    const lagForA = emitted.filter(
+      (e) => e.event === "plugin.checkout.lag" && e.detail.checkout === "/a"
+    );
+    expect(lagForA).toHaveLength(1);
   });
 });
 
