@@ -206,6 +206,10 @@ import {
   scaleForMethod,
   mapScopeToEstimate,
 } from "./linear-estimation-method.mjs";
+import {
+  buildRemediateCapExplanation,
+  coerceExplanation,
+} from "./escalation-explanation.mjs"; // CTL-1108
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1318,12 +1322,24 @@ export function maybeEscalateRemediateExhausted(
     if (typeof summarizeHistory === "function") {
       try { remediateSummary = summarizeHistory(ticket); } catch { /* best-effort */ }
     }
+    // CTL-1108: source the operator-facing explanation from the verify.json that
+    // still exists on disk at cap-exhaustion time (HIGH findings + regression_risk).
+    let verifyJson = null;
+    try {
+      verifyJson = JSON.parse(
+        readFile(join(orchDir, "workers", ticket, "verify.json"), "utf8")
+      );
+    } catch {
+      // verify.json absent/unreadable → mapper degrades to a valid generic explanation
+    }
+    const explanation = buildRemediateCapExplanation(verifyJson, { ticket, cycleCount });
     writeFile(
       p,
       JSON.stringify({
         ...cur,
         status: "stalled",
         stalledReason: "remediate-cycle-cap-exhausted",
+        explanation,
         updatedAt: new Date().toISOString(),
         ...(remediateSummary !== undefined ? { remediateSummary } : {}),
       })
@@ -1767,6 +1783,15 @@ export function escalateDispatchExhausted(
     // absent / malformed → create fresh
   }
   if (existing.status === "stalled") return true; // idempotent
+  // CTL-1108: attach a coerced explanation so the inbox shows a meaningful
+  // human_question for prior-artifact-retry-exhausted escalations.
+  const explanation = coerceExplanation(
+    {
+      what_failed: `${phase} dispatch retries exhausted (${cause ?? code})`,
+      why_gave_up: "prior-artifact-retry-exhausted",
+    },
+    { ticket, phase }
+  );
   try {
     mkdirSync(dir, { recursive: true });
     writeFile(
@@ -1779,6 +1804,7 @@ export function escalateDispatchExhausted(
         stalledReason: "prior-artifact-retry-exhausted",
         dispatchFailureCode: code,   // CTL-1045 Bug 2: exit code that exhausted retries (2 = prior_artifact_missing)
         dispatchFailureCause: cause, // CTL-1045 Bug 2: human-readable reason (observability)
+        explanation,
         updatedAt: new Date().toISOString(),
       })
     );
@@ -1817,6 +1843,13 @@ function writeTerminalStalled(
     return false; // no signal to stall
   }
   if (cur.status === "stalled") return true; // idempotent
+  // CTL-1108: every terminal stall carries an explanation so the inbox shows a
+  // meaningful human_question instead of "escalated — needs human". Callers may
+  // pass a richer one via extra.explanation; fall back to a coerced generic.
+  const explanation = extra.explanation ?? coerceExplanation(
+    { what_failed: `${phase} phase stalled: ${reason}`, why_gave_up: reason },
+    { ticket, phase }
+  );
   try {
     writeFile(
       p,
@@ -1825,6 +1858,7 @@ function writeTerminalStalled(
         ...extra,
         status: "stalled",
         stalledReason: reason,
+        explanation,
         updatedAt: new Date().toISOString(),
       })
     );

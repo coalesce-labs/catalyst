@@ -4,6 +4,7 @@ import {
   validateExplanation,
   buildExplanation,
   coerceExplanation,
+  buildRemediateCapExplanation,
 } from "./escalation-explanation.mjs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -114,6 +115,60 @@ describe("coerceExplanation", () => {
     const e = coerceExplanation({}, { ticket: "CTL-99" });
     expect(validateExplanation(e).valid).toBe(true);
     expect(e.degraded).toBe(true);
+  });
+});
+
+// CTL-1108: buildRemediateCapExplanation unit tests
+describe("buildRemediateCapExplanation", () => {
+  const verify = {
+    regression_risk: 6,
+    findings: [
+      {
+        severity: "high",
+        kind: "review",
+        file: "broker/router.mjs",
+        line: 352,
+        message: "getEventScope reads retired attr vcs.revision",
+        recommendation: "read vcs.ref.revision",
+      },
+      { severity: "low", kind: "lint", file: "x.mjs", line: 1, message: "nit" },
+    ],
+  };
+
+  test("names the blocking HIGH finding in what_failed", () => {
+    const e = buildRemediateCapExplanation(verify, { ticket: "CTL-1047", cycleCount: 3 });
+    expect(e.what_failed).toContain("broker/router.mjs:352");
+    expect(e.what_failed).toContain("getEventScope reads retired attr vcs.revision");
+  });
+
+  test("surfaces the exhausted cycle count in why_gave_up", () => {
+    const e = buildRemediateCapExplanation(verify, { ticket: "CTL-1047", cycleCount: 3 });
+    expect(e.why_gave_up).toContain("3");
+  });
+
+  test("human_question names the decision fork and is non-tautological", () => {
+    const e = buildRemediateCapExplanation(verify, { ticket: "CTL-1047", cycleCount: 3 });
+    expect(validateExplanation(e).valid).toBe(true);
+    expect(e.human_question.toLowerCase()).toContain("fix");
+    expect(e.human_question.toLowerCase()).toMatch(/abandon|re-?scope/);
+  });
+
+  test("observed carries regression_risk and high-finding count", () => {
+    const e = buildRemediateCapExplanation(verify, { ticket: "CTL-1047", cycleCount: 3 });
+    expect(e.observed.regression_risk).toBe(6);
+    expect(e.observed.highFindingCount).toBe(1);
+  });
+
+  test("no HIGH findings but risk>=5 → still produces a valid, non-empty explanation", () => {
+    const riskOnly = { regression_risk: 5, findings: [] };
+    const e = buildRemediateCapExplanation(riskOnly, { ticket: "CTL-9", cycleCount: 3 });
+    expect(validateExplanation(e).valid).toBe(true);
+    expect(e.what_failed.trim()).not.toBe("");
+  });
+
+  test("malformed/empty verify.json → valid explanation via safe defaults", () => {
+    const e = buildRemediateCapExplanation(null, { ticket: "CTL-9", cycleCount: 3 });
+    expect(validateExplanation(e).valid).toBe(true);
   });
 });
 
