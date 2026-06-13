@@ -3752,6 +3752,20 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // Inserted between the /api/beliefs/stream block and the 404 fallthrough.
         // Re-locate by grep after each insertion — line numbers shift.
 
+        // GET /api/governance — current daemon governance config snapshot.
+        // DO NOT inline the specifier (computed import, VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/governance") {
+          const configSpecifier = ["../execution-core/config.mjs"].join("");
+          try {
+            const { readGovernanceConfig } = await import(configSpecifier) as {
+              readGovernanceConfig: (env?: NodeJS.ProcessEnv) => Record<string, unknown>;
+            };
+            return Response.json({ available: true, ...readGovernanceConfig() });
+          } catch {
+            return Response.json({ available: false });
+          }
+        }
+
         if (url.pathname === "/api/fsm/descriptor") {
           return Response.json(await buildFsmDescriptor());
         }

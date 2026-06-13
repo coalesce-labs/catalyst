@@ -37,6 +37,8 @@ import { ALL_NODES, NodeScopeContext, type NodeScope } from "@/lib/node-scope";
 // one EventSource each instead of opening independent duplicate connections.
 import { useNavSignal, NavSignalContext } from "@/hooks/use-nav-signal";
 import { useClusterSignal, ClusterSignalContext } from "@/hooks/use-cluster-signal";
+// CTL-1100: lift useBeliefs into AppShell so no surface opens a second EventSource.
+import { useBeliefs, BeliefsContext } from "@/hooks/use-beliefs";
 import {
   readSidebarOpen,
   writeSidebarOpen,
@@ -152,6 +154,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // these hooks independently, reducing persistent EventSources from 6 → 4.
   const navSignal = useNavSignal();
   const clusterSignal = useClusterSignal();
+  // CTL-1100: single belief stream subscription — surfaces use useBeliefsContext().
+  const beliefsState = useBeliefs();
 
   // Persist collapse state across reloads (the controlled provider replaces the
   // primitive's cookie path; localStorage is the source of truth here). Logic +
@@ -350,6 +354,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const crumbs = detailId != null ? [...baseCrumbs, detailId] : baseCrumbs;
 
   return (
+    <BeliefsContext.Provider value={beliefsState}>
     <NavSignalContext.Provider value={navSignal}>
     <ClusterSignalContext.Provider value={clusterSignal}>
       <NodeScopeContext.Provider value={nodeScopeCtx}>
@@ -533,5 +538,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </NodeScopeContext.Provider>
     </ClusterSignalContext.Provider>
     </NavSignalContext.Provider>
+    </BeliefsContext.Provider>
   );
 }
