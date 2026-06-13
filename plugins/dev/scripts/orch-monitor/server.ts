@@ -39,6 +39,14 @@ import {
 // CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
 // specifier needed — plain static import is safe for Vite/esbuild graph).
 import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
+// CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
+// has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
+import {
+  beliefSummary,
+  beliefRates,
+  beliefRecent,
+  beliefCfg,
+} from "./lib/belief-store-queries.mjs";
 // CTL-887 (BFF5): the live transcript tail for execution-core workers. The
 // legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
 // is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
@@ -358,6 +366,12 @@ export interface CreateServerOptions {
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
+  /**
+   * CTL-1100: override for beliefs.db used by governance read endpoints.
+   * Production resolves via defaultBeliefsDbPath(process.env); tests inject
+   * a seeded temp path so routes don't read the live beliefs store.
+   */
+  beliefStoreDbPath?: string;
   /**
    * Override for the broker's durable filter-state.db (ticket_state cache) used
    * by the cache-backed Linear detail/search routes (CTL-889, P8/P12). Defaults
@@ -775,6 +789,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
     filterStateDbPath,
+    beliefStoreDbPath,
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
@@ -800,6 +815,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
       { cause: err },
     );
   }
+
+  // CTL-1100: in-process LRU cache for /api/beliefs/rates (keyed by max tick_id,
+  // cap RATES_LRU_CAP=64; beliefs are insert-only so the cached value per max tick
+  // is invariant). One cache per server lifetime.
+  const beliefRatesCache = new Map<number | null, unknown>();
+
+  // CTL-1100: resolve the beliefs.db path for governance read endpoints.
+  // Per-request resolution inside handlers — never at module top level — so a
+  // server started before beliefs.db exists picks it up later without restart.
+  const govDbPath = (): string => {
+    if (beliefStoreDbPath) return beliefStoreDbPath;
+    const govDeps = governanceDepsPromise; // best-effort sync peek (may be null)
+    void govDeps; // suppress unused warning — govDbPath resolves via env below
+    // Inline the same precedence as defaultBeliefsDbPath to avoid a dependency cycle.
+    if (process.env.CATALYST_BELIEFS_DB) return process.env.CATALYST_BELIEFS_DB;
+    const cDir = catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+    return `${cDir}/beliefs.db`;
+  };
 
   // Forward reference: the webhook handler is constructed below but
   // the prFetcher's freshness filter needs to call into it. We hold a mutable
@@ -3698,6 +3731,56 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
         if (url.pathname === "/api/fsm/descriptor") {
           return Response.json(await buildFsmDescriptor());
+        }
+
+        // GET /api/beliefs/rules — served from frozen RULE_MANIFEST; no db required.
+        if (url.pathname === "/api/beliefs/rules") {
+          const govDeps = await loadGovernanceDeps();
+          const manifest = govDeps?.RULE_MANIFEST ?? null;
+          if (!manifest) return Response.json({ rules: [], strata: [] });
+          return Response.json(manifest);
+        }
+
+        // GET /api/beliefs/summary — latest-tick aggregate per belief name.
+        if (url.pathname === "/api/beliefs/summary") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ tickId: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefSummary(db), { tickId: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/rates — full belief counts per rule_id per tick (LRU cached).
+        if (url.pathname === "/api/beliefs/rates") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ maxTick: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRates(db, beliefRatesCache), { maxTick: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/recent — newest-first belief rows, limit param.
+        if (url.pathname === "/api/beliefs/recent") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          const limitParam = url.searchParams.get("limit");
+          const limit = limitParam ? Math.max(1, parseInt(limitParam, 10) || 50) : undefined;
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRecent(db, { limit }), { rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/cfg — static config rows from the beliefs store.
+        if (url.pathname === "/api/beliefs/cfg") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefCfg(db), { rows: [] })
+          );
         }
 
         return new Response("Not Found", { status: 404 });
