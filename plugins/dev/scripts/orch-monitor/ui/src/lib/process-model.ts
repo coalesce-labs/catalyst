@@ -160,7 +160,7 @@ export function buildProcessModel(d: FsmDescriptor): ProcessModel {
     type: "queued",
     lane: "entry",
     position: { x: xForRank(minRank) - STEP_X, y: PIPELINE_Y },
-    data: { label: "queued", phase: "(queued)", phaseColor: C.fgDim },
+    data: { label: "queued", phase: "queued", phaseColor: C.fgDim },
   });
 
   // Pipeline phases (derived from descriptor order)
@@ -203,7 +203,7 @@ export function buildProcessModel(d: FsmDescriptor): ProcessModel {
     type: "siding",
     lane: "siding",
     position: { x: xForRank(midRank), y: SIDING_Y },
-    data: { label: "needs-input", phase: "needs-input", phaseColor: C.fgMuted },
+    data: { label: "needs-input", phase: "needs-input", phaseColor: C.fgMuted },  // "needs-input" is the bare phase id
   });
 
   // Terminal sinks — far right of the pipeline
@@ -214,14 +214,14 @@ export function buildProcessModel(d: FsmDescriptor): ProcessModel {
     type: "terminal",
     lane: "terminal",
     position: { x: terminalX, y: TERMINAL_Y_DONE },
-    data: { label: "done", phase: "(done)", phaseColor: C.green },
+    data: { label: "done", phase: "done", phaseColor: C.green },
   });
   nodes.push({
     id: "(stalled)",
     type: "terminal",
     lane: "terminal",
     position: { x: terminalX, y: TERMINAL_Y_STALLED },
-    data: { label: "stalled", phase: "(stalled)", phaseColor: C.red },
+    data: { label: "stalled", phase: "stalled", phaseColor: C.red },
   });
 
   // ── Edges + Glyphs ────────────────────────────────────────────────────────

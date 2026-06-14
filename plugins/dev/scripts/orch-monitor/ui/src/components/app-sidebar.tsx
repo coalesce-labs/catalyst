@@ -665,7 +665,7 @@ export function AppSidebar() {
           );
         })}
 
-        {/* ── REASON — collapsible, defaults open — Process + Rulebook ─────── */}
+        {/* ── REASON — collapsible, defaults open — "Process" + "Rulebook" ─── */}
         {/* CTL-1101: the REASON tier groups the two analytical/governance surfaces
             (Process FSM map + Rulebook) below the per-project OPERATE groups and
             above the OBSERVE analytics tier. Force-opens when a REASON surface is
