@@ -57,6 +57,9 @@ export const CARD_LIFT =
   "inset 0 1px 0 rgba(255,255,255,0.07), 0 1px 4px rgba(0,0,0,0.35)";
 export const ELEVATED_LIFT =
   "inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.45)";
+/** CTL-1132: softer tray shadow — trays float off the canvas but sit clearly
+ *  BELOW cards (CARD_LIFT). Halved ambient opacity, no inset highlight. */
+export const TRAY_LIFT = "0 1px 3px rgba(0,0,0,0.28)";
 
 
 /** Canonical PHASE color map — the SINGLE definition; board-display.ts, formatters.ts,
@@ -105,7 +108,7 @@ export const NODE_ACCENTS = [
 
 /** CTL-1027: the barely-there per-project lane tint strength (%). Tuned to keep
  *  lanes distinguishable without breaking the Linear-calm aesthetic. */
-export const LANE_TINT_PCT = 5;
+export const LANE_TINT_PCT = 6;
 
 /**
  * Compose a project hue over a base surface as a perceptually-even oklab tint.

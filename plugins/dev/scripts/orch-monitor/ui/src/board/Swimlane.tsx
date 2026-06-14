@@ -65,7 +65,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence } from "motion/react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { C, LIVE } from "./board-tokens";
+import { C, LIVE, TRAY_LIFT } from "./board-tokens";
 import { laneSurfaceBg } from "./lane-surface";
 import {
   buildLanes,
@@ -145,9 +145,9 @@ const PAD_X = 16;
 // (header content + its vertical padding + the 1px rule ≈ 44px).
 const HEADER_H = 44;
 // CTL-1010: vertical chrome a LaneCardsRow adds around its cells — the row's
-// `padding: 2px top + 16px bottom`. Subtracted per lane when computing the
+// `padding: 6px top + 16px bottom`. Subtracted per lane when computing the
 // available cell-area height so the water-fill budget is exact (no magic fudge).
-export const ROW_PAD_V = 18;
+export const ROW_PAD_V = 22;
 // CTL-958: CSS variable name for the per-cell max-height knob.
 // CTL-1010: this var/default is now ONLY the PRE-MEASUREMENT fallback applied on
 // the very first frame before useLaneCellHeights has measured the lanes; the real
@@ -187,7 +187,7 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
       data-board-colheader="true"
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${columns.length}, ${COL_W}px)`,
+        gridTemplateColumns: `repeat(${columns.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
         padding: `8px ${PAD_X}px 10px`,
         position: "sticky",
@@ -197,7 +197,7 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
         // ABOVE the canvas and clearly above the chrome (was C.s0 == sidebar dark).
         background: C.subtle,
         borderBottom: `1px solid ${C.borderSubtle}`,
-        width: "max-content",
+        width: "100%",
       }}
     >
       {columns.map((col) => (
@@ -236,6 +236,7 @@ function GroupLabelRow({
   hint,
   iconSrc,
   laneBg,
+  isFirst,
 }: {
   label: string;
   count: number;
@@ -243,6 +244,7 @@ function GroupLabelRow({
   hint: string | null;
   iconSrc?: string | null;
   laneBg?: string;
+  isFirst?: boolean;
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
@@ -264,6 +266,9 @@ function GroupLabelRow({
         background: bg,
         width: "max-content",
         minWidth: "100%",
+        // CTL-1132: hairline between consecutive project bands (skip first to
+        // avoid doubling the sticky column-header's bottom border).
+        ...(!isFirst ? { borderTop: `1px solid ${C.borderSubtle}` } : {}),
       }}
     >
       {/* Inner chip: ALSO sticky-LEFT:0 — pins the label to the board's left edge
@@ -354,11 +359,11 @@ function LaneCardsRow({
       data-lane-key={laneKey}
       style={{
         display: "grid",
-        gridTemplateColumns: `repeat(${cells.length}, ${COL_W}px)`,
+        gridTemplateColumns: `repeat(${cells.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
-        padding: `2px ${PAD_X}px 16px`,
+        padding: `6px ${PAD_X}px 16px`,
         alignItems: "start",
-        width: "max-content",
+        width: "100%",
       }}
     >
       {cells.map((cell, i) => (
@@ -381,6 +386,7 @@ function LaneCardsRow({
             background: laneBg ?? C.subtle,
             borderRadius: 10,
             border: `1px solid ${C.borderSubtle}`,
+            boxShadow: TRAY_LIFT,
             padding: 8,
             // CTL-958 / CTL-1010: per-cell constrained height with overscroll
             // chaining. Only applied when multiple groups are present
@@ -755,7 +761,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             lane, no group label. Real axis → a sticky group-label divider per lane,
             its cards laid into the SAME shared column grid below it. */}
         {chrome ? (
-          lanes.map((lane) => {
+          lanes.map((lane, laneIdx) => {
             const cells = deriveLane(lane.items);
             // CTL-1027: resolve the per-lane tint from the project's hue bg hex.
             const laneBg = laneSurfaceBg(lane.repo, laneColors);
@@ -771,6 +777,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
                   hint={lanes.length === 1 ? singleLaneHint(groupBy, lane, entityNoun) : null}
                   iconSrc={laneIconSrc(groupBy, lane.repo, icons)}
                   laneBg={laneBg}
+                  isFirst={laneIdx === 0}
                 />
                 {/* CTL-1010: cellMax = this lane's measured water-fill share
                     (allocs is null on the first frame → undefined → var() fallback). */}
