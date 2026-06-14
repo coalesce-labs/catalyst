@@ -20,7 +20,7 @@
  * parseAnnotations(ruleBlock) — parse annotation tags from a rule/extern block string.
  *
  * @param {string} ruleBlock — text of a single rule or extern block
- * @returns {{ feeds:string[], cfg:string[], severity:string, since:string, ticket:string, examples:Array }}
+ * @returns {{ feeds:string[], cfg:string[], severity:string, since:string, ticket:string, description:string, examples:Array }}
  */
 export function parseAnnotations(ruleBlock) {
   const feeds = [];
@@ -28,6 +28,7 @@ export function parseAnnotations(ruleBlock) {
   let severity = "";
   let since = "";
   let ticket = "";
+  let description = "";
   const examples = [];
 
   // Split into lines for easier processing
@@ -52,6 +53,9 @@ export function parseAnnotations(ruleBlock) {
     } else if (line.startsWith("@ticket ")) {
       ticket = line.slice("@ticket ".length).trim();
       i++;
+    } else if (line.startsWith("@description ")) {
+      description = line.slice("@description ".length).trim();
+      i++;
     } else if (line === "@example") {
       // Collect all lines until the next @-tag at the start of a trimmed line
       i++;
@@ -69,7 +73,7 @@ export function parseAnnotations(ruleBlock) {
     }
   }
 
-  return { feeds, cfg, severity, since, ticket, examples };
+  return { feeds, cfg, severity, since, ticket, description, examples };
 }
 
 /**

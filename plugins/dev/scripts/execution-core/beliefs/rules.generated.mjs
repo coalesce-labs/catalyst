@@ -446,7 +446,7 @@ SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
    AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
                   WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= 3`;
 
-export const RULES_SHA = '9b408c424db45681';
+export const RULES_SHA = '68a5a8dbeb2f54da';
 
 
 // Deep-freeze helper for RULE_MANIFEST (CTL-1063 Phase 5).
@@ -458,6 +458,10 @@ function _deepFreeze(o) {
 }
 
 export const RULE_MANIFEST = _deepFreeze({
+  "preface": {
+    "problem": "The daemon must decide — continuously, automatically, and auditably — which workers are alive, which are wedged, which should be retried, and which require human attention. A simple 'is the process running?' check is insufficient: a process can be running but making no progress (stalled-alive), or registered but never started a turn (never-started wedge), or producing output but on a board state that disagrees with Linear (board drift). The belief engine encodes these distinctions as a stratified rule set — 17 rules across 6 strata — where each rule derives a named belief from observed facts. Every conclusion is inspectable: the derivation tree traces exactly which facts triggered which rule, making the system's reasoning legible to the operators who must trust it.",
+    "datalog_primer": "Datalog is a logic programming language where rules derive new facts from existing ones. A rule has the form: conclusion :- premise1, premise2, ... (read: conclusion holds if all premises hold). The belief engine organises its rules into strata — layers where each stratum's rules may only read beliefs produced by earlier strata. This stratification makes negation safe: a rule can say 'not lease_valid' only after all lease_valid beliefs have been fully computed (stratum 2 reads stratum 1). Each rule compiles to one or more SQL INSERT statements that are executed in stratum order; the belief table accumulates conclusions. Extern rules embed hand-authored SQL (for aggregates and WITH RECURSIVE queries that the compiler cannot generate); rule blocks use a higher-level Datalog syntax that the compiler translates to SQL automatically."
+  },
   "strata": [
     {
       "id": 1,
@@ -496,6 +500,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "session_registered",
       "stratum": 1,
       "extern": false,
+      "description": "The signal's background job shows up in the live agents listing — the session is registered.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -505,7 +510,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 43
+        "line": 44
       },
       "arms": [
         {
@@ -550,6 +555,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "turn_started",
       "stratum": 1,
       "extern": false,
+      "description": "The session has produced a transcript, so its prompt actually became a running turn.",
       "feeds": [
         "R4"
       ],
@@ -561,7 +567,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 62
+        "line": 64
       },
       "arms": [
         {
@@ -577,6 +583,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "wedged_never_started",
       "stratum": 2,
       "extern": false,
+      "description": "A running phase whose session registered but never started a turn within never_started_ms — a never-started wedge.",
       "feeds": [
         "R10"
       ],
@@ -597,7 +604,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 105
+        "line": 109
       },
       "arms": [
         {
@@ -649,6 +656,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "progress_evidence",
       "stratum": 1,
       "extern": true,
+      "description": "The most recent positive evidence of work, taken as the max over heartbeat, transcript, and signal timestamps.",
       "feeds": [
         "R5",
         "R6"
@@ -677,6 +685,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "worker_dead",
       "stratum": 1,
       "extern": true,
+      "description": "Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.",
       "feeds": [
         "R4",
         "R5",
@@ -690,7 +699,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 77
+        "line": 80
       },
       "arms": [
         {
@@ -706,6 +715,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "lease_valid",
       "stratum": 2,
       "extern": true,
+      "description": "The phase has progress evidence inside its freshness window, so its lease is still valid.",
       "feeds": [
         "R6"
       ],
@@ -725,7 +735,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 131
+        "line": 136
       },
       "arms": [
         {
@@ -741,6 +751,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "lease_expired",
       "stratum": 2,
       "extern": true,
+      "description": "A running phase with no valid lease and not dead — its lease has expired (stalled-alive).",
       "feeds": [
         "R10"
       ],
@@ -758,7 +769,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 157
+        "line": 163
       },
       "arms": [
         {
@@ -774,6 +785,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "board_drift",
       "stratum": 2,
       "extern": true,
+      "description": "The Linear board state disagrees with what the running phase is actually doing — board drift.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -783,7 +795,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 175
+        "line": 182
       },
       "arms": [
         {
@@ -799,6 +811,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "free_slots",
       "stratum": 3,
       "extern": true,
+      "description": "Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -811,7 +824,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 205
+        "line": 213
       },
       "arms": [
         {
@@ -827,6 +840,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "wake_diagnostician",
       "stratum": 4,
       "extern": true,
+      "description": "Wake the diagnostician for a never-started wedge (no cooldown intent in the window).",
       "feeds": [
         "R11",
         "R12"
@@ -847,7 +861,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 240
+        "line": 249
       },
       "arms": [
         {
@@ -868,6 +882,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "action_ineffective",
       "stratum": 4,
       "extern": true,
+      "description": "An intent has exhausted its max_attempts with no outcome — the action proved ineffective.",
       "feeds": [
         "R12"
       ],
@@ -881,7 +896,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 289
+        "line": 300
       },
       "arms": [
         {
@@ -897,6 +912,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "escalate_human",
       "stratum": 4,
       "extern": true,
+      "description": "The diagnostician was woken and the action was ineffective, so the work escalates to a human.",
       "feeds": [],
       "reads": [
         "wake_diagnostician",
@@ -909,7 +925,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-933",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 306
+        "line": 318
       },
       "arms": [
         {
@@ -925,6 +941,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "blocker_rank",
       "stratum": 5,
       "extern": true,
+      "description": "A ticket's transitive blocker count, computed over the full dependency closure.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -934,7 +951,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 324
+        "line": 337
       },
       "arms": [
         {
@@ -950,6 +967,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "cycle_detected",
       "stratum": 5,
       "extern": true,
+      "description": "A dependency cycle exists (A blocks B blocks A) in the relations graph.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -959,7 +977,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 360
+        "line": 374
       },
       "arms": [
         {
@@ -975,6 +993,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "ready",
       "stratum": 5,
       "extern": true,
+      "description": "A ticket is in an eligible state with every blocker done — it is ready to start.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -986,7 +1005,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-965",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 402
+        "line": 417
       },
       "arms": [
         {
@@ -1002,6 +1021,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "advance_to",
       "stratum": 6,
       "extern": true,
+      "description": "The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1011,7 +1031,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 442
+        "line": 458
       },
       "arms": [
         {
@@ -1027,6 +1047,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "name": "cycle_exhausted",
       "stratum": 6,
       "extern": true,
+      "description": "The remediate count has reached its cap — no more retries; the cycle is exhausted.",
       "feeds": [],
       "reads": [],
       "negates": [],
@@ -1036,7 +1057,7 @@ export const RULE_MANIFEST = _deepFreeze({
       "ticket": "CTL-966",
       "src": {
         "file": "beliefs/rules.dl",
-        "line": 519
+        "line": 536
       },
       "arms": [
         {

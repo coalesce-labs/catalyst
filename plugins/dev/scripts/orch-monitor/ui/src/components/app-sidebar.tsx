@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useAtom } from "jotai";
 import {
   ActivityIcon,
+  BookOpenIcon,
   ChevronRightIcon,
   CodeIcon,
   GaugeIcon,
@@ -48,6 +49,7 @@ import {
   navGroupsOpenAtom,
   navOverallOpenAtom,
   navObserveOpenAtom,
+  navReasonOpenAtom,
 } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
@@ -191,6 +193,11 @@ const OBSERVE_SOON = [
   { label: "DevOps", icon: CodeIcon },
 ] as const;
 
+// ── REASON items (CTL-1103) ──────────────────────────────────────────────────
+const REASON_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
+  { surface: "rulebook", label: "Rulebook", icon: BookOpenIcon },
+];
+
 // ── OPERATE items per scope ───────────────────────────────────────────────────
 const OPERATE_ITEMS: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
   { surface: "home", label: "Inbox", icon: InboxIcon },
@@ -247,6 +254,7 @@ export function AppSidebar() {
   // open; a section force-renders open when it contains the active surface.
   const [overallOpen, setOverallOpen] = useAtom(navOverallOpenAtom);
   const [observeOpen, setObserveOpen] = useAtom(navObserveOpenAtom);
+  const [reasonOpen, setReasonOpen] = useAtom(navReasonOpenAtom);
   // CTL-945: consume from AppShell's shared contexts — no new EventSources opened.
   // CTL-896 / SHELL6 — the live nav signal off the read-model SSE projection.
   const nav = useNavSignalContext();
@@ -304,6 +312,9 @@ export function AppSidebar() {
 
   // OBS-5: force the OBSERVE group open while a live OBSERVE surface is active.
   const observeContainsActive = OBSERVE_LIVE.some(
+    (item) => item.surface === surface,
+  );
+  const reasonContainsActive = REASON_LIVE.some(
     (item) => item.surface === surface,
   );
 
@@ -717,6 +728,52 @@ export function AppSidebar() {
                       </SidebarMenuBadge>
                     </SidebarMenuItem>
                   ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
+
+        {/* ── REASON group (CTL-1103): Rulebook ──────────────────────────── */}
+        <Collapsible
+          open={reasonOpen || reasonContainsActive}
+          onOpenChange={(open) => {
+            if (!reasonContainsActive) setReasonOpen(open);
+          }}
+          className="group/reason"
+        >
+          <SidebarGroup className="px-1 pt-0">
+            <CollapsibleTrigger className={cn(GROUP_TRIGGER_BASE, "gap-1")}>
+              Reason
+              <ChevronRightIcon className="size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/reason:rotate-90" />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {REASON_LIVE.map((item) => {
+                    const active = surface === item.surface;
+                    const reasonKb = surfaceKeybinding(item.surface);
+                    return (
+                      <SidebarMenuItem key={item.surface}>
+                        <SidebarMenuButton
+                          isActive={active}
+                          tooltip={reasonKb ? `${item.label} · ${reasonKb}` : item.label}
+                          onClick={() => go(item.surface)}
+                          data-keybinding={reasonKb || undefined}
+                          className={cn(
+                            active
+                              ? "text-sidebar-primary"
+                              : "font-medium text-sidebar-foreground/72 hover:text-sidebar-foreground",
+                          )}
+                        >
+                          <span className="relative flex shrink-0 items-center justify-center">
+                            <item.icon className="size-4 shrink-0" />
+                          </span>
+                          <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
                 </SidebarMenu>
               </SidebarGroupContent>
             </CollapsibleContent>

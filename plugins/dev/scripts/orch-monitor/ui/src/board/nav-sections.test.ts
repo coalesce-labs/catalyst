@@ -7,7 +7,7 @@
 // Run from the ui package:  `cd ui && bun test src/board/nav-sections.test.ts`.
 import { describe, it, expect, beforeEach } from "bun:test";
 import { createStore } from "jotai";
-import { navOverallOpenAtom, navObserveOpenAtom } from "./nav-store";
+import { navOverallOpenAtom, navObserveOpenAtom, navReasonOpenAtom } from "./nav-store";
 
 // Minimal in-memory localStorage so atomWithStorage's default storage (which
 // reads `window.localStorage`) has a backing store under bun (no `window` in
@@ -106,5 +106,21 @@ describe("CTL-1034 — section collapse persists across reloads", () => {
     const unsub2 = store2.sub(navObserveOpenAtom, () => {});
     expect(store2.get(navObserveOpenAtom)).toBe(true);
     unsub2();
+  });
+});
+
+// ── CTL-1103: Reason sidebar group ──────────────────────────────────────────
+describe("CTL-1103 — Reason section open-state", () => {
+  it("the Reason section defaults OPEN (true)", () => {
+    const store = createStore();
+    expect(store.get(navReasonOpenAtom)).toBe(true);
+  });
+
+  it("collapsing Reason persists to localStorage", () => {
+    const store = createStore();
+    const unsub = store.sub(navReasonOpenAtom, () => {});
+    store.set(navReasonOpenAtom, false);
+    expect(readLs("catalyst-nav-reason-v1")).toBe(JSON.stringify(false));
+    unsub();
   });
 });

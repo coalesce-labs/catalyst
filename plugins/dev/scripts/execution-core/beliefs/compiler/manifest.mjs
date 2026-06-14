@@ -3,12 +3,14 @@
 //
 // RULE_MANIFEST shape:
 // {
+//   preface: {problem: string, datalog_primer: string},
 //   strata: [{id:1, label:'S1 ground correlations', prose:'...'},...],  // 6 entries
 //   rules: [{
 //     rule_id: string,       // 'R1', 'R10' (merged R10a+R10b)
 //     name: string,
 //     stratum: number,
 //     extern: boolean,       // true for R3/R8/R13/R14/R15/R16/R17
+//     description: string,   // plain-English explanation (@description annotation)
 //     feeds: string[],       // @feeds annotation
 //     reads: string[],       // derived from SQL: belief table names
 //     negates: string[],     // derived: belief names under NOT EXISTS
@@ -42,6 +44,31 @@ const STRATA_META = [
   { id: 5, label: "S5 recursive dependency beliefs",  prose: "Transitive blocker closure (WITH RECURSIVE); derive blocker_rank, cycle_detected, and ready." },
   { id: 6, label: "S6 FSM advancement prediction",    prose: "Derive advance_to and cycle_exhausted from obs_signal/obs_verdict/obs_cycle; no negation over beliefs." },
 ];
+
+const PREFACE = Object.freeze({
+  problem:
+    "The daemon must decide — continuously, automatically, and auditably — which workers are " +
+    "alive, which are wedged, which should be retried, and which require human attention. " +
+    "A simple 'is the process running?' check is insufficient: a process can be running but " +
+    "making no progress (stalled-alive), or registered but never started a turn (never-started " +
+    "wedge), or producing output but on a board state that disagrees with Linear (board drift). " +
+    "The belief engine encodes these distinctions as a stratified rule set — 17 rules across " +
+    "6 strata — where each rule derives a named belief from observed facts. Every conclusion is " +
+    "inspectable: the derivation tree traces exactly which facts triggered which rule, making " +
+    "the system's reasoning legible to the operators who must trust it.",
+  datalog_primer:
+    "Datalog is a logic programming language where rules derive new facts from existing ones. " +
+    "A rule has the form: conclusion :- premise1, premise2, ... (read: conclusion holds if all " +
+    "premises hold). The belief engine organises its rules into strata — layers where each " +
+    "stratum's rules may only read beliefs produced by earlier strata. This stratification " +
+    "makes negation safe: a rule can say 'not lease_valid' only after all lease_valid beliefs " +
+    "have been fully computed (stratum 2 reads stratum 1). Each rule compiles to one or more " +
+    "SQL INSERT statements that are executed in stratum order; the belief table accumulates " +
+    "conclusions. Extern rules embed hand-authored SQL (for aggregates and WITH RECURSIVE " +
+    "queries that the compiler cannot generate); rule blocks use a higher-level Datalog syntax " +
+    "that the compiler translates to SQL automatically.",
+});
+
 
 /**
  * Extract belief names read (joined) in the SQL.
@@ -118,7 +145,7 @@ function extractAnnotations(source, ruleId) {
   // Find the block for this rule (up to the next rule/extern keyword)
   const startPattern = new RegExp(`\\b(?:rule|extern)\\s+${ruleId}\\b`);
   const startMatch = startPattern.exec(source);
-  if (!startMatch) return { feeds: [], cfg: [], severity: "", since: "", ticket: "", examples: [] };
+  if (!startMatch) return { feeds: [], cfg: [], severity: "", since: "", ticket: "", description: "", examples: [] };
 
   const startIdx = startMatch.index;
   // Find end: next rule/extern declaration
@@ -184,6 +211,7 @@ export function buildManifest(ir, dlSource) {
         if (!annot.severity && extraAnnot.severity) annot.severity = extraAnnot.severity;
         if (!annot.since && extraAnnot.since) annot.since = extraAnnot.since;
         if (!annot.ticket && extraAnnot.ticket) annot.ticket = extraAnnot.ticket;
+        if (!annot.description && extraAnnot.description) annot.description = extraAnnot.description;
         annot.examples.push(...extraAnnot.examples);
       }
     }
@@ -206,6 +234,7 @@ export function buildManifest(ir, dlSource) {
       name: firstIr.name,
       stratum: firstIr.stratum,
       extern: isExtern,
+      description: annot.description ?? "",
       feeds: Object.freeze(annot.feeds),
       reads: Object.freeze(reads),
       negates: Object.freeze(negates),
@@ -220,6 +249,7 @@ export function buildManifest(ir, dlSource) {
   }
 
   const manifest = Object.freeze({
+    preface: PREFACE,
     strata: Object.freeze(STRATA_META.map(s => Object.freeze({ ...s }))),
     rules: Object.freeze(rules),
   });

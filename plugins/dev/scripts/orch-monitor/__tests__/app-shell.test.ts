@@ -52,6 +52,7 @@ describe("surface contract (CTL-891)", () => {
   it("declares the OPERATE surfaces then the OBSERVE surfaces in nav order", () => {
     // OBS-5: the five OBSERVE analytics surfaces follow the three OPERATE surfaces.
     // CTL-1016: the queue surface is retired — its control tower folded into Workers.
+    // CTL-1103: rulebook is the first REASON surface, appended last.
     expect([...SURFACES]).toEqual([
       "home",
       "board",
@@ -61,12 +62,14 @@ describe("surface contract (CTL-891)", () => {
       "finops",
       "fleetops",
       "devops",
+      "rulebook",
     ]);
   });
 
-  it("maps a g-chord key to every surface (OPERATE h/b/w + OBSERVE t/u/f/o/d)", () => {
+  it("maps a g-chord key to every surface (OPERATE h/b/w + OBSERVE t/u/f/o/d + REASON r)", () => {
     // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w —
     // t(elemetry) / u(tilization) / f(inops) / o(=fleetOps) / d(evops).
+    // CTL-1103: r(ulebook) is the first REASON chord.
     expect(SURFACE_CHORD).toEqual({
       h: "home",
       b: "board",
@@ -76,6 +79,7 @@ describe("surface contract (CTL-891)", () => {
       f: "finops",
       o: "fleetops",
       d: "devops",
+      r: "rulebook",
     });
     // Every surface is reachable by some chord, and every chord targets a real surface.
     const chordTargets = new Set(Object.values(SURFACE_CHORD));
@@ -303,6 +307,7 @@ test("SURFACES round-trips the Surface union", () => {
     finops: false,
     fleetops: false,
     devops: false,
+    rulebook: false,
   };
   for (const s of SURFACES) seen[s] = true;
   expect(Object.values(seen).every(Boolean)).toBe(true);

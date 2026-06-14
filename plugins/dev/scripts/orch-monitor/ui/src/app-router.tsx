@@ -90,6 +90,11 @@ const DashboardSurface = lazy(() =>
     default: m.DashboardSurface,
   })),
 );
+const RulebookSurface = lazy(() =>
+  import("./components/rulebook/rulebook-surface").then((m) => ({
+    default: m.RulebookSurface,
+  })),
+);
 
 // ── detail routes (code-split — the entry-split that forced board.html to ship
 //    them eagerly is gone, so split them now to keep the main bundle lean) ─────
@@ -248,6 +253,16 @@ const devopsRoute = createRoute({
   ),
 });
 
+const rulebookRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/rules",
+  component: () => (
+    <S>
+      <RulebookSurface />
+    </S>
+  ),
+});
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings",
@@ -310,6 +325,7 @@ const routeTree = rootRoute.addChildren([
   finopsRoute,
   fleetopsRoute,
   devopsRoute,
+  rulebookRoute,
   settingsRoute,
   ticketRoute,
   workerRoute,
