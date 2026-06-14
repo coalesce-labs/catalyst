@@ -2,38 +2,173 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
-    <script type="module" src="/main.js" defer></script>
+    <title>Catalyst</title>
+    <style>
+      :root {
+        --bg: #0a0b0d;
+        --panel: #15161a;
+        --line: #26272e;
+        --text: #e7e7ea;
+        --muted: #9a9aa3;
+        --accent: #e8a33d;
+        --ok: #6fcf76;
+        --bad: #e5704b;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        display: grid;
+        place-items: center;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .view { width: 420px; max-width: 88vw; text-align: center; }
+      .hidden { display: none; }
+      .brand {
+        font-weight: 700; letter-spacing: 0.5px; color: var(--text);
+        margin-bottom: 22px; font-size: 15px;
+      }
+      .brand b { color: var(--accent); }
+      h1 { font-size: 20px; font-weight: 650; margin: 0 0 18px; }
+      label { display: block; text-align: left; color: var(--muted); font-size: 12px; margin: 0 0 6px; }
+      input {
+        width: 100%; padding: 11px 13px; border-radius: 9px;
+        background: var(--panel); border: 1px solid var(--line); color: var(--text);
+        font-size: 14px; outline: none; -webkit-user-select: text; user-select: text;
+      }
+      input:focus { border-color: var(--accent); }
+      .hint { text-align: left; font-size: 12px; min-height: 18px; margin: 7px 2px 0; color: var(--muted); }
+      .hint.ok { color: #6fcf76; }
+      .hint.bad { color: var(--bad); }
+      .actions { display: flex; gap: 10px; margin-top: 16px; justify-content: center; }
+      button {
+        padding: 10px 16px; border-radius: 9px; font-size: 14px; font-weight: 550;
+        border: 1px solid var(--line); cursor: pointer; transition: 0.12s;
+      }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #1a1206; }
+      button.primary:hover { filter: brightness(1.07); }
+      button.ghost { background: transparent; color: var(--text); }
+      button.ghost:hover { border-color: var(--muted); }
+      button:disabled, button.disabled { opacity: 0.4; cursor: not-allowed; }
+      .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); margin: 24px 0 18px; font-size: 12px; }
+      .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+      .cloud { background: var(--panel); border: 1px solid var(--line); border-radius: 11px; padding: 16px; }
+      .cloud-row { display: flex; align-items: center; justify-content: center; gap: 9px; margin-bottom: 12px; }
+      .soon {
+        font-size: 11px; color: var(--accent); border: 1px solid var(--accent);
+        border-radius: 999px; padding: 1px 8px; opacity: 0.85;
+      }
+      .muted { color: var(--muted); word-break: break-all; }
+      .spinner {
+        width: 26px; height: 26px; border-radius: 50%; margin: 0 auto 14px;
+        border: 2.5px solid var(--line); border-top-color: var(--accent);
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
   </head>
-
   <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <!-- LOADING -->
+    <section id="view-loading" class="view">
+      <div class="spinner"></div>
+      <p class="muted">Connecting…</p>
+    </section>
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a
-          href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
-          target="_blank"
-        >
-          <img
-            src="/assets/javascript.svg"
-            class="logo vanilla"
-            alt="JavaScript logo"
-          />
-        </a>
+    <!-- SETUP (first run / change server) -->
+    <section id="view-setup" class="view hidden">
+      <div class="brand">⌃⌃ <b>Catalyst</b></div>
+      <h1>Connect to Catalyst</h1>
+      <label for="url">Catalyst server URL</label>
+      <input id="url" type="url" placeholder="https://your-host.tailnet.ts.net:8443"
+             autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+      <div id="test-result" class="hint"></div>
+      <div class="actions">
+        <button id="btn-test" class="ghost">Test connection</button>
+        <button id="btn-connect" class="primary">Connect →</button>
       </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+      <div class="divider"><span>or</span></div>
+      <div class="cloud">
+        <div class="cloud-row">☁ Catalyst Cloud <span class="soon">Coming soon</span></div>
+        <button class="disabled" disabled>Log in to Catalyst Cloud</button>
+      </div>
+    </section>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
+    <!-- ERROR (configured but unreachable) -->
+    <section id="view-error" class="view hidden">
+      <div class="brand">⌃⌃ <b>Catalyst</b></div>
+      <h1>Couldn't reach your server</h1>
+      <p class="muted" id="error-url"></p>
+      <div class="actions">
+        <button id="btn-retry" class="primary">Retry</button>
+        <button id="btn-change" class="ghost">Change server</button>
+      </div>
+    </section>
+
+    <script>
+      const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+      function show(id) {
+        for (const v of document.querySelectorAll(".view")) v.classList.add("hidden");
+        document.getElementById(id).classList.remove("hidden");
+      }
+
+      async function start() {
+        show("view-loading");
+        const url = await invoke("get_server_url");
+        if (url) {
+          const ok = await invoke("test_connection", { url });
+          if (ok) {
+            window.location.replace(url);
+            return;
+          }
+          document.getElementById("error-url").textContent = url;
+          show("view-error");
+        } else {
+          show("view-setup");
+        }
+      }
+
+      function wire() {
+        const input = document.getElementById("url");
+        const result = document.getElementById("test-result");
+        const setResult = (msg, cls) => { result.textContent = msg; result.className = "hint " + (cls || ""); };
+
+        document.getElementById("btn-test").onclick = async () => {
+          const u = input.value.trim();
+          if (!u) return;
+          setResult("Testing…");
+          const ok = await invoke("test_connection", { url: u });
+          setResult(ok ? "✓ Reachable" : "✕ Could not reach that URL", ok ? "ok" : "bad");
+        };
+
+        document.getElementById("btn-connect").onclick = async () => {
+          const u = input.value.trim();
+          if (!u) return;
+          setResult("Connecting…");
+          const ok = await invoke("test_connection", { url: u });
+          if (!ok) { setResult("✕ Could not reach that URL", "bad"); return; }
+          await invoke("set_server_url", { url: u });
+          const eff = (await invoke("get_server_url")) || u;
+          window.location.replace(eff);
+        };
+
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") document.getElementById("btn-connect").click();
+        });
+
+        document.getElementById("btn-retry").onclick = start;
+        document.getElementById("btn-change").onclick = () => {
+          const cur = document.getElementById("error-url").textContent;
+          if (cur) input.value = cur;
+          setResult("");
+          show("view-setup");
+        };
+      }
+
+      window.addEventListener("DOMContentLoaded", () => { wire(); start(); });
+    </script>
   </body>
 </html>
