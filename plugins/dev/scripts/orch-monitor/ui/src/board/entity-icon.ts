@@ -33,6 +33,14 @@ export function groupIconSrc(
   return resolveEntityIcon(key, icons);
 }
 
+/** The favicon data URL for a row's repo, or null (fail-open → StatusIcon fallback). */
+export function rowFaviconSrc(
+  repo: string | null | undefined,
+  icons: RepoIconMap,
+): string | null {
+  return resolveEntityIcon(repo, icons);
+}
+
 /** Lane-header icon (CTL-1012): the project mark for a team/repo/project lane,
  *  resolved from the lane's representative repo short-name (the team→repo bridge).
  *  The HOST axis returns null — its dot encodes live/degraded/offline and must NOT

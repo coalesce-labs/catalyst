@@ -54,6 +54,7 @@ import {
   accentFor,
   askFor,
   blockerFor,
+  escalationAccentFor,
   escalationExplanationFor,
   heroKindFor,
   optionsFor,
@@ -234,12 +235,13 @@ function WhatsNeededNow({
 
   // CTL-1110: needs-human rows with a structured explanation use the CTA-led card.
   if (escalation != null) {
+    const escAccent = escalationAccentFor(row);
     return (
       <section
         data-pane-hero="escalation"
-        data-pane-accent="amber"
+        data-pane-accent={escAccent}
         data-pane-escalation
-        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses("amber"))}
+        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses(escAccent))}
       >
         <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
           What's needed now
