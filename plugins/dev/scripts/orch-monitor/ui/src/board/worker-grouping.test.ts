@@ -18,7 +18,9 @@ import {
   isMultiHost,
   HOST_FILTER_ALL,
   UNATTRIBUTED_HOST,
+  HISTORICAL_ALIAS_HOST,
 } from "./worker-grouping";
+import type { NodeContext } from "./worker-grouping";
 
 // Minimal worker factory — only the fields the grouping reads matter; the rest
 // are filled with inert defaults so the BoardWorker shape is satisfied.
@@ -178,6 +180,77 @@ describe("nodeColumns — one column (lane) per host.name", () => {
     expect(cols[0]!.workers.map((x) => x.name)).toEqual(
       sortWorkers(workers).map((x) => x.name),
     );
+  });
+});
+
+describe("historical alias fold — non-roster, non-live hosts collapse (CTL-1093 Phase 3)", () => {
+  const ctx: NodeContext = { roster: ["mini"], liveHosts: new Set(["mini"]) };
+
+  it("roster host keeps its own column", () => {
+    const cols = nodeColumns([w({ name: "CTL-1:1", host: host("mini") })], ctx);
+    expect(cols.map((c) => c.host)).toEqual(["mini"]);
+  });
+
+  it("non-roster, non-live host folds into historical alias", () => {
+    const cols = nodeColumns(
+      [
+        w({ name: "CTL-1:1", host: host("mini") }),
+        w({ name: "CTL-2:1", host: host("Ryans-Mac-mini-250233") }),
+      ],
+      ctx,
+    );
+    const hosts = cols.map((c) => c.host);
+    expect(hosts).toContain("mini");
+    expect(hosts).toContain(HISTORICAL_ALIAS_HOST);
+    expect(hosts).not.toContain("Ryans-Mac-mini-250233");
+  });
+
+  it("multiple stale names collapse into ONE historical column", () => {
+    const cols = nodeColumns(
+      [
+        w({ name: "CTL-1:1", host: host("mini") }),
+        w({ name: "CTL-2:1", host: host("Ryans-Mac-mini-250233") }),
+        w({ name: "CTL-3:1", host: host("RyansMini250233.rozich") }),
+      ],
+      ctx,
+    );
+    expect(cols.filter((c) => c.host === HISTORICAL_ALIAS_HOST)).toHaveLength(1);
+  });
+
+  it("historical column holds all workers from stale names", () => {
+    const cols = nodeColumns(
+      [
+        w({ name: "CTL-2:1", host: host("Ryans-Mac-mini-250233") }),
+        w({ name: "CTL-3:1", host: host("RyansMini250233.rozich") }),
+      ],
+      ctx,
+    );
+    const hist = cols.find((c) => c.host === HISTORICAL_ALIAS_HOST);
+    expect(hist?.workers.map((wk) => wk.name).sort()).toEqual(["CTL-2:1", "CTL-3:1"]);
+  });
+
+  it("non-roster but currently-LIVE host keeps its own column (don't hide a live node)", () => {
+    const ctxLive: NodeContext = { roster: ["mini"], liveHosts: new Set(["laptop"]) };
+    const cols = nodeColumns([w({ name: "CTL-1:1", host: host("laptop") })], ctxLive);
+    expect(cols.map((c) => c.host)).toContain("laptop");
+    expect(cols.map((c) => c.host)).not.toContain(HISTORICAL_ALIAS_HOST);
+  });
+
+  it("BACKWARD COMPAT: no context arg → unchanged single-host no-op", () => {
+    const cols = nodeColumns([w({ name: "CTL-1:1", host: host("mini") })]);
+    expect(cols.map((c) => c.host)).toEqual(["mini"]);
+  });
+
+  it("BACKWARD COMPAT: no context arg → multi-host unchanged", () => {
+    const cols = nodeColumns([
+      w({ name: "CTL-1:1", host: host("mini") }),
+      w({ name: "CTL-2:1", host: host("Ryans-Mac-mini-250233") }),
+    ]);
+    // Without context, no folding — both appear as their own columns
+    const hosts = cols.map((c) => c.host);
+    expect(hosts).toContain("mini");
+    expect(hosts).toContain("Ryans-Mac-mini-250233");
+    expect(hosts).not.toContain(HISTORICAL_ALIAS_HOST);
   });
 });
 

@@ -184,6 +184,20 @@ export function getHostName() {
   return hostname().replace(/\.local$/, "");
 }
 
+// isHostNamePinnedFromConfig — returns true when this host's coordination name
+// comes from an explicit pin (CATALYST_HOST_NAME env or Layer-2 catalyst.host.name)
+// rather than os.hostname(). Reads the same sources getHostName() uses so the
+// boot guard and getHostName() never disagree. CTL-1093.
+export function isHostNamePinnedFromConfig() {
+  const env = process.env.CATALYST_HOST_NAME;
+  if (typeof env === "string" && env.length > 0) return true;
+  try {
+    const parsed = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"));
+    return typeof parsed?.catalyst?.host?.name === "string" &&
+           parsed.catalyst.host.name.length > 0;
+  } catch { return false; }
+}
+
 // getClusterHosts — read the committed cluster roster from
 // <repoRoot>/.catalyst/hosts.json (a JSON array of host names). When the file
 // is absent, unreadable, malformed, or not a non-empty array of strings, fall

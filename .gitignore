@@ -45,6 +45,9 @@ research/
 # Session state (per-session, not committed)
 .catalyst/.session-id
 
+# Machine-local sticky host identity (CTL-1093)
+.catalyst/.host-identity.json
+
 # Catalyst workflow state (per-session, not committed)
 # NOTE: .catalyst/config.json is SAFE to commit (only has projectKey, no secrets)
 # Secrets are stored in ~/.config/catalyst/config-*.json (never in repo)

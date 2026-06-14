@@ -39,9 +39,13 @@ import {
   readWaitWatcherConfig,
   readMemorySamplerConfig,
   readRatelimitPollerConfig,
-  getHostName,      // CTL-862
-  getClusterHosts,  // CTL-862
+  getHostName,              // CTL-862
+  getClusterHosts,          // CTL-862
+  isHostNamePinnedFromConfig, // CTL-1093
+  getCatalystRepoDir,       // CTL-1093 sticky dir
 } from "./config.mjs";
+import { resolveBootIdentity } from "./host-boot-identity.mjs"; // CTL-1093
+import { readStickyIdentity, writeStickyIdentity } from "./host-sticky.mjs"; // CTL-1093
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { startWaitWatcher as realStartWaitWatcher } from "./wait-watcher.mjs";
 import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.mjs";
@@ -677,7 +681,28 @@ export function startDaemon({
 
   // CTL-862: report HRW ownership at boot for multi-host observability.
   const bootRoster = bootHosts ?? getClusterHosts();
-  const bootSelf = bootHostName ?? getHostName();
+  // CTL-1093: resolve sticky/pinned identity before computing bootSelf so
+  // every downstream emitter and child sees the converged coordination name.
+  const _bootMultiHost = bootRoster.length > 1;
+  const _stickyDir = getCatalystRepoDir();
+  const _ident = resolveBootIdentity({
+    pinned: isHostNamePinnedFromConfig(),
+    resolvedName: bootHostName ?? getHostName(),
+    sticky: readStickyIdentity({ dir: _stickyDir }),
+    multiHost: _bootMultiHost,
+  });
+  if (_ident.warning) log.warn({ host: _ident.name, roster: bootRoster }, _ident.warning);
+  if (_ident.action === "record" || _ident.action === "restore") {
+    writeStickyIdentity({ dir: _stickyDir, name: _ident.name });
+  }
+  // Inject into env so phase-agent-dispatch (child process) inherits the pinned name
+  // via CATALYST_HOST_NAME → catalyst_host_name (host-identity.sh). Only set when
+  // not already env-pinned so an explicit operator override always wins and the
+  // intentional per-tick getHostName() Layer-2 re-read is preserved. CTL-1093.
+  if (_ident.action !== "noop" && !process.env.CATALYST_HOST_NAME) {
+    process.env.CATALYST_HOST_NAME = _ident.name;
+  }
+  const bootSelf = _ident.action === "noop" ? (bootHostName ?? getHostName()) : _ident.name;
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
   // CTL-1084: emit a structured node.boot event so catalyst-stack status can
