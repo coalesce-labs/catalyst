@@ -172,6 +172,28 @@ describe("buildRemediateCapExplanation", () => {
   });
 });
 
+// CTL-1119: workflow-scope human_question passes the tautology gate
+describe("workflow-scope escalation (CTL-1119)", () => {
+  test("workflow-scope human_question is accepted (not degraded)", () => {
+    const e = coerceExplanation(
+      {
+        what_failed: "push rejected: missing workflow scope",
+        observed: { branch: "CTL-1119", scope_missing: "workflow" },
+        attempts: ["git push", "git push --force-with-lease"],
+        why_gave_up: "No workflow-scoped credential is configured on this host (CATALYST_WORKFLOW_GITHUB_TOKEN unset)",
+        human_question:
+          "Grant the daemon token 'workflow' scope (gh auth refresh -s workflow) or set CATALYST_WORKFLOW_GITHUB_TOKEN, then re-run phase-pr — or push branch CTL-1119 manually. Which?",
+      },
+      { ticket: "CTL-1119", phase: "pr" },
+    );
+    expect(e.degraded ?? false).toBe(false);
+    expect(e.human_question).toMatch(/workflow/);
+    const { valid, errors } = validateExplanation(e);
+    expect(valid).toBe(true);
+    expect(errors).toEqual([]);
+  });
+});
+
 describe("CLI shim (escalation-explain.mjs)", () => {
   test("emits validated JSON on stdout, exit 0", () => {
     const r = spawnSync("node", [

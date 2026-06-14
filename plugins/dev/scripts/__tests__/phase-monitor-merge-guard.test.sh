@@ -33,6 +33,19 @@ else
 fi
 
 echo ""
+echo "CTL-1119: merge path uses gh pr merge (REST), not git push"
+
+if [[ -f "$SKILL" ]]; then
+  if grep -q 'gh pr merge .*--squash' "$SKILL"; then
+    pass "merge path uses gh pr merge (REST) — 'workflow' OAuth scope not required for merge"
+  else
+    fail "merge path should use 'gh pr merge --squash' (REST API, no workflow scope needed)"
+  fi
+else
+  fail "SKILL.md missing for REST-path check: $SKILL"
+fi
+
+echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-monitor-merge-guard: ${PASSES} passed, ${FAILURES} failed"
 echo "─────────────────────────────────────────────"
