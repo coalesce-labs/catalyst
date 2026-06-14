@@ -52,7 +52,7 @@
 
 import { labelOnce } from "../label-guard.mjs";
 import { log } from "../config.mjs";
-import { coerceExplanation } from "../escalation-explanation.mjs";
+import { buildExplanation, coerceExplanation, tierProducer } from "../escalation-explanation.mjs";
 
 function firstLine(s) {
   return String(s ?? "").split(/\r?\n/)[0].slice(0, 200);
@@ -155,20 +155,63 @@ export function executeEscalations(
           try {
             const ev = evidenceBySubject[subject] ?? {};
             const phaseName = subject.split("/")[1] ?? null;
-            const explanation = coerceExplanation(
-              {
-                what_failed: ev.logsOutput
-                  ? `${phaseName ?? "phase"} failed: ${firstLine(ev.logsOutput)}`
-                  : `${phaseName ?? "phase"} escalated (${why ?? "no diagnosis"})`,
-                observed: ev.jobState ?? {},
-                attempts: ev.attempts ?? [],
-                why_gave_up: why
-                  ? `diagnostician reason: ${why}`
-                  : "diagnostician produced no actionable verdict",
-                human_question: ev.humanQuestion ?? "",
-              },
-              { ticket, phase: phaseName },
-            );
+            // D8: consume escalation_type/canExecute/blockedCapability from evidence when present.
+            // captureEvidence does not emit these today → production defaults AUTHORIZATION.
+            const evType = typeof ev.escalation_type === "string" ? ev.escalation_type : null;
+            const evCanExecute = typeof ev.canExecute === "boolean" ? ev.canExecute : undefined;
+            const evBlocked = typeof ev.blockedCapability === "string" ? ev.blockedCapability : undefined;
+            const evProblem = ev.logsOutput
+              ? `${phaseName ?? "phase"} failed: ${firstLine(ev.logsOutput)}`
+              : `${phaseName ?? "phase"} escalated (${why ?? "no diagnosis"})`;
+
+            let explanationFields;
+            if (evType === "decision") {
+              explanationFields = {
+                escalation_type: "decision",
+                problem: evProblem,
+                call_to_action: ev.humanQuestion ?? `decide next action for ${ticket} ${phaseName ?? "phase"}`,
+                options: Array.isArray(ev.options) && ev.options.length >= 2 ? ev.options : [
+                  { label: "retry", tradeoff: "may hit the same failure" },
+                  { label: "abandon / re-scope", tradeoff: "loses partial progress" },
+                ],
+                why_you: ev.why_you ?? `priority call for ${ticket} ${phaseName ?? "phase"}`,
+              };
+            } else if (evCanExecute === false || evBlocked) {
+              // GATE 1: blocked capability confirmed by evidence → MANUAL
+              explanationFields = {
+                escalation_type: "manual",
+                problem: evProblem,
+                call_to_action: ev.humanQuestion ?? `restore ${evBlocked ?? "required capability"} and re-run phase`,
+                blocked_capability: evBlocked ?? "required capability unavailable",
+                instructions: Array.isArray(ev.instructions) && ev.instructions.length > 0
+                  ? ev.instructions
+                  : ["check the required credential or scope"],
+                remediation_then_retry: `re-run ${ticket} ${phaseName ?? "phase"} after restoring access`,
+                why_not_auto: `capability boundary: ${evBlocked ?? "required capability unavailable"}`,
+              };
+            } else {
+              // Default GATE 2 → AUTHORIZATION (agent can retry; risk stops it)
+              explanationFields = {
+                escalation_type: "authorization",
+                problem: evProblem,
+                call_to_action: ev.humanQuestion ?? `authorize ${ticket}/${phaseName ?? "phase"} to continue — review and decide?`,
+                recommendation: `re-run ${phaseName ?? "phase"} for ${ticket} with diagnostician output`,
+                risk: why ? `unresolved diagnostician signal: ${why}` : `${phaseName ?? "phase"} escalated with no specific diagnostics`,
+                why_asking: "risk-authority gate, not a capability gap",
+                could_higher_tier_resolve: tierProducer(ev.jobState?.model),
+                authorize_label: `retry ${ticket}/${phaseName ?? "phase"}`,
+              };
+            }
+            // Passthrough observed/attempts (D1)
+            if (ev.jobState && typeof ev.jobState === "object") explanationFields.observed = ev.jobState;
+            if (Array.isArray(ev.attempts)) explanationFields.attempts = ev.attempts;
+
+            let explanation;
+            try {
+              explanation = buildExplanation(explanationFields);
+            } catch {
+              explanation = coerceExplanation(explanationFields, { ticket, phase: phaseName, canExecute: evCanExecute });
+            }
             appendEvent({
               "event.name": "escalate.human",
               payload: { subject, ticket, why, explanation },
