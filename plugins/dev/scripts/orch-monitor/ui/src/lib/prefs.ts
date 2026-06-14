@@ -28,7 +28,8 @@ export const LANDING_SURFACES: readonly Surface[] = SURFACES.filter(
     s !== "utilization" &&
     s !== "finops" &&
     s !== "fleetops" &&
-    s !== "devops",
+    s !== "devops" &&
+    s !== "rulebook",
 );
 
 /** localStorage key the landing-surface preference persists under. Named in the
