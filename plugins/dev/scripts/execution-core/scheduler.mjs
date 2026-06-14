@@ -207,9 +207,10 @@ import {
   mapScopeToEstimate,
 } from "./linear-estimation-method.mjs";
 import {
+  buildExplanation,
   buildRemediateCapExplanation,
   coerceExplanation,
-} from "./escalation-explanation.mjs"; // CTL-1108
+} from "./escalation-explanation.mjs"; // CTL-1130
 
 // The last pipeline phase — its `done` signal means the whole pipeline
 // finished. `done` is otherwise phase-dependent: a `triage: done` signal still
@@ -1783,15 +1784,33 @@ export function escalateDispatchExhausted(
     // absent / malformed → create fresh
   }
   if (existing.status === "stalled") return true; // idempotent
-  // CTL-1108: attach a coerced explanation so the inbox shows a meaningful
-  // human_question for prior-artifact-retry-exhausted escalations.
-  const explanation = coerceExplanation(
-    {
-      what_failed: `${phase} dispatch retries exhausted (${cause ?? code})`,
-      why_gave_up: "prior-artifact-retry-exhausted",
-    },
-    { ticket, phase }
-  );
+  // CTL-1130: DECISION — dispatch retries exhausted; re-dispatch vs abandon is a
+  // priority call the scheduler cannot compute (D7). GATE 1 passes (re-dispatch
+  // is possible), no single dominant option → tie-break is human preference.
+  let explanation;
+  const explanationFields = {
+    escalation_type: "decision",
+    problem: `${phase} dispatch retries exhausted (${cause ?? code})`,
+    call_to_action: `${ticket}/${phase} dispatch has exhausted retries. Re-dispatch or abandon / re-scope?`,
+    options: [
+      {
+        label: `re-dispatch ${ticket}/${phase}`,
+        tradeoff: "may re-hit the same failure if root cause is unresolved",
+      },
+      {
+        label: "abandon / re-scope",
+        tradeoff: "loses partial progress toward current phase goals",
+      },
+    ],
+    why_you: `after ${cause ?? code ?? "exhausted retries"}, re-dispatch vs abandon is a priority call the scheduler cannot compute`,
+  };
+  try {
+    explanation = buildExplanation(explanationFields);
+  } catch {
+    // CTL-1130: degrade with the full assembled fields (not just { problem })
+    // so the operator keeps the options/why_you decision context on the page.
+    explanation = coerceExplanation(explanationFields, { ticket, phase });
+  }
   try {
     mkdirSync(dir, { recursive: true });
     writeFile(
@@ -1843,11 +1862,11 @@ function writeTerminalStalled(
     return false; // no signal to stall
   }
   if (cur.status === "stalled") return true; // idempotent
-  // CTL-1108: every terminal stall carries an explanation so the inbox shows a
-  // meaningful human_question instead of "escalated — needs human". Callers may
-  // pass a richer one via extra.explanation; fall back to a coerced generic.
+  // CTL-1130: every terminal stall carries a typed-union explanation so the inbox
+  // shows a meaningful call_to_action. Callers may pass a richer typed explanation
+  // via extra.explanation; fall back to a coerced decision generic.
   const explanation = extra.explanation ?? coerceExplanation(
-    { what_failed: `${phase} phase stalled: ${reason}`, why_gave_up: reason },
+    { problem: `${phase} phase stalled: ${reason}` },
     { ticket, phase }
   );
   try {

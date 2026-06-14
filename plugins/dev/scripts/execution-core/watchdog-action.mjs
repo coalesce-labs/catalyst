@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { log } from "./config.mjs";
 import { emitReapIntent } from "./reap-intent.mjs";
 import { labelOnce, recordEscalation } from "./label-guard.mjs";
-import { coerceExplanation } from "./escalation-explanation.mjs";
+import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 const SETTLED = new Set(["done", "failed", "stalled", "aborted", "skipped", "complete"]);
 
@@ -101,17 +101,27 @@ export async function killHungWorker(
   try {
     const cur = JSON.parse(readFileSync(sigPath, "utf8"));
     if (SETTLED.has(cur.status)) return { outcome: "already-terminal" };
-    // CTL-1065: build structured explanation alongside failureReason.
-    const explanation = coerceExplanation(
-      {
-        what_failed: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes`,
-        observed: { elapsedMin: Math.floor(elapsedMin), commitCount, bgJobId },
-        attempts: [],
-        why_gave_up: `watchdog killed the worker — no progress within the hung-worker threshold`,
-        human_question: `restart ${ticket} ${phase} from scratch, or is this a known slow/flaky step (extend the threshold)?`,
-      },
-      { ticket, phase },
-    );
+    // CTL-1130: AUTHORIZATION — agent can retry (revive budget); only risk stops it.
+    let explanation;
+    const explanationFields = {
+      escalation_type: "authorization",
+      problem: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes`,
+      call_to_action: `restart ${ticket} ${phase} from scratch, or is this a known slow/flaky step (extend the threshold)?`,
+      recommendation: `restart ${ticket} ${phase} with a clean checkout`,
+      risk: `restarting discards ${Math.floor(elapsedMin)} minutes of elapsed work; ${commitCount} commits made`,
+      why_asking: "risk-authority gate, not a capability gap",
+      could_higher_tier_resolve: tierProducer(signal?.raw?.model),
+      authorize_label: `restart ${ticket} ${phase}`,
+      observed: { elapsedMin: Math.floor(elapsedMin), commitCount, bgJobId },
+      attempts: [],
+    };
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so the operator keeps observed/recommendation/risk evidence on the page.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: true });
+    }
     const updated = {
       ...cur,
       status: "failed",

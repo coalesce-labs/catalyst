@@ -92,7 +92,7 @@ const EMIT_COMPLETE_BIN = fileURLToPath(
 // heavy dependency graph. Imported for local use + re-exported for callers.
 import { resolvePhaseSessionId } from "./session-resolve.mjs";
 export { resolvePhaseSessionId };
-import { coerceExplanation } from "./escalation-explanation.mjs";
+import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
@@ -1911,20 +1911,37 @@ export function reclaimDeadWorkIfPossible(
   // CTL-932: `extras` (optional) rides evidence into the escalated event
   // payload (e.g. the wedge screen captures). Cool-down/breaker behaviour is
   // untouched.
-  // reasonToWhyGaveUp — central map so per-reason phrasing is testable.
-  function reasonToWhyGaveUp(r, n) {
-    switch (r) {
-      case "busy-ceiling-exceeded":
-        return "worker was alive past the busy ceiling with no committed work";
-      case "no-progress":
-        return `no forward progress after ${n} attempt(s) — stop-and-escalate`;
-      case "no-probe-for-phase":
-        return "no probe available for this phase — cannot verify work is done";
-      case "wedged-never-started-exhausted":
-        return `wedged-never-started replacement budget exhausted after ${n} attempt(s)`;
-      default:
-        return `escalation reason: ${r} (after ${n} attempt(s))`;
+  // reasonToType — GATE 1: push_rejected_no_workflow_scope is a capability
+  // boundary (MANUAL); all other production reasons → AUTHORIZATION (never MANUAL
+  // for a non-capability reason — D-recovery).
+  function reasonToType(r) {
+    return r === "push_rejected_no_workflow_scope" ? "manual" : "authorization";
+  }
+
+  // reasonToWhyField — maps reason to the correct type-specific "why" field name
+  // and value for the union (why_not_auto for MANUAL, why_asking for AUTHORIZATION).
+  function reasonToWhyField(r, n) {
+    if (r === "push_rejected_no_workflow_scope") {
+      return {
+        field: "why_not_auto",
+        value: "the daemon cannot grant itself an OAuth scope (capability boundary)",
+      };
     }
+    const text = (() => {
+      switch (r) {
+        case "busy-ceiling-exceeded":
+          return "worker was alive past the busy ceiling with no committed work";
+        case "no-progress":
+          return `no forward progress after ${n} attempt(s) — stop-and-escalate`;
+        case "no-probe-for-phase":
+          return "no probe available for this phase — cannot verify work is done";
+        case "wedged-never-started-exhausted":
+          return `wedged-never-started replacement budget exhausted after ${n} attempt(s)`;
+        default:
+          return `escalation reason: ${r} (after ${n} attempt(s))`;
+      }
+    })();
+    return { field: "why_asking", value: text };
   }
 
   function escalateOnce(reason, finalAttemptCount, extras) {
@@ -1943,18 +1960,43 @@ export function reclaimDeadWorkIfPossible(
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }
-    // CTL-1065: build a coerced explanation and attach it to extras so the
-    // escalated event payload carries structured, decision-shaped context.
-    const explanation = coerceExplanation(
-      {
-        what_failed: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
-        observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
-        attempts: extras?.attempts ?? [],
-        why_gave_up: reasonToWhyGaveUp(reason, finalAttemptCount),
-        human_question: extras?.human_question ?? "",
-      },
-      { ticket, phase },
-    );
+    // CTL-1130: build a typed-union explanation classified by the three gates.
+    // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
+    // all other reasons → AUTHORIZATION (agent can retry with authority).
+    const escType = reasonToType(reason);
+    const whyField = reasonToWhyField(reason, finalAttemptCount);
+    let explanation;
+    const explanationFields = escType === "manual"
+      ? {
+          escalation_type: "manual",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
+          blocked_capability: extras?.blockedCapability ?? "required OAuth scope or credential unavailable",
+          instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
+          remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
+          why_not_auto: whyField.value,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        }
+      : {
+          escalation_type: "authorization",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
+          recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
+          risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+          why_asking: whyField.value,
+          could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
+          authorize_label: `retry ${ticket} ${phase}`,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        };
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so observed/recommendation/risk (or the manual capability fields) survive.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: escType !== "manual" });
+    }
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,

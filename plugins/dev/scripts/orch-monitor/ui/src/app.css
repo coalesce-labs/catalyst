@@ -157,6 +157,10 @@
   --surface-3: #ece7dd; /* raised-inset (code blocks, pills) — tinted chips, EXEMPT */
   --surface-4: #d8d1c2; /* hover / tracks (literal, EXEMPT) */
   --border-strong: #ddd5c7;
+  /* CTL-1148: selected toggle-chip fill — light themes use the paper "tinted
+     chips" surface, NOT the full-chroma accent (which reads as a dark blob). */
+  --toggle-selected-bg: var(--surface-3);
+  --toggle-selected-fg: var(--fg);
   --border-subtle: #e7e1d4; /* hairline card edge on paper */
   --fg: #2b2722;
   --fg-muted: #76705f;
@@ -233,6 +237,10 @@
   --fg-muted: #a39d91; /* textbook --ink-dim */
   /* warm-dark accent — terracotta (NOT amber). Drives --primary/--ring/--sidebar-primary. */
   --accent: #d28e63;
+  /* CTL-1148: dark themes keep the accent fill (was data-[state=on]:bg-accent).
+     Slate-dark inherits this and resolves --accent to its own blue. */
+  --toggle-selected-bg: var(--accent);
+  --toggle-selected-fg: var(--accent-foreground);
 
   /* CTL-1033: dark card lift — soft ambient outer shadow + inset top-edge highlight
      (the standard Stripe/Linear/Vercel combo, the single best embossing cure). Card

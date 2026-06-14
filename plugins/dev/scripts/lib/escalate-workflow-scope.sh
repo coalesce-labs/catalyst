@@ -2,7 +2,7 @@
 # escalate-workflow-scope.sh — CTL-1119: shared helper sourced by phase agents
 # that hit draft_pr_push_verify rc=3 (workflow-scope OAuth rejection).
 #
-# Writes a structured explanation.human_question to the signal file via jq,
+# Writes a structured MANUAL explanation (call_to_action) to the signal file via jq,
 # then calls phase-agent-emit-complete with status=failed. Callers must have
 # already set: PLUGIN_ROOT, SIGNAL_FILE, TICKET, PHASE, ORCH_ID, COMMS (may
 # be empty). After this script runs, callers should `exit 1`.
@@ -14,11 +14,15 @@ _escalate_workflow_scope_push() {
   local expl_json
   expl_json="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
     --ticket "$TICKET" --phase "$PHASE" \
-    --what-failed "git push was rejected: the branch modifies .github/workflows/ but the host token lacks the 'workflow' OAuth scope" \
+    --type manual \
+    --problem "git push was rejected: the branch modifies .github/workflows/ but the host token lacks the 'workflow' OAuth scope" \
+    --call-to-action "Grant the daemon token 'workflow' scope (gh auth refresh -s workflow) or set CATALYST_WORKFLOW_GITHUB_TOKEN, then re-run phase-pr — or push branch ${TICKET} manually. Which?" \
+    --blocked-capability "the host git token lacks the workflow OAuth scope" \
+    --instructions "$(jq -nc '["gh auth refresh -s workflow","or set CATALYST_WORKFLOW_GITHUB_TOKEN"]' 2>/dev/null || echo '[]')" \
+    --remediation-then-retry "re-run /catalyst-dev:phase-pr after the scope is granted" \
+    --why-not-auto "the daemon cannot grant itself an OAuth scope (capability boundary)" \
+    --can-execute false \
     --observed "$(jq -nc --arg b "$branch" '{branch:$b, scope_missing:"workflow"}' 2>/dev/null || echo '{}')" \
-    --attempts "$(jq -nc '["git push","-u origin HEAD","git push --force-with-lease"]' 2>/dev/null || echo '[]')" \
-    --why-gave-up "No workflow-scoped credential is configured on this host (CATALYST_WORKFLOW_GITHUB_TOKEN unset)" \
-    --human-question "Grant the daemon token 'workflow' scope (gh auth refresh -s workflow) or set CATALYST_WORKFLOW_GITHUB_TOKEN, then re-run phase-pr — or push branch ${TICKET} manually. Which?" \
     2>/dev/null || echo '{}')"
   [ -n "$expl_json" ] || expl_json='{}'
   local ts; ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

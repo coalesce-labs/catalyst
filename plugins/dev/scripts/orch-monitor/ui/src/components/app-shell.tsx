@@ -428,7 +428,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               the routed surface (a Board root with flex:1/height:100%) can fill
               the full height of the inset content area (the board-height fix
               chain — completed in Pass B). */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden pl-3">
             <RepoIconProvider repos={repos}>
               {children}
             </RepoIconProvider>
