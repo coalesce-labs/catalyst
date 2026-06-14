@@ -199,6 +199,7 @@ import { emitDrainedEvent as defaultEmitDrainedEvent } from "./drain-event.mjs";
 import { defaultCheckSequencing } from "./sequencing.mjs"; // CTL-537
 import { ownedBy } from "./hrw.mjs"; // CTL-850: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-850: cross-host claim soft-CAS
+import { effectiveLiveRoster } from "./liveness-roster.mjs"; // CTL-1091: liveness-filtered roster
 // CTL-954: team estimation method — lazy-cached from Linear, used to expand
 // the allowed estimate point set beyond the hard-coded Fibonacci values.
 import {
@@ -2526,6 +2527,10 @@ export function schedulerTick(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1091: liveness-filtered roster resolver. Default reads the cross-host
+    // heartbeat feed; tests inject a stub returning a fixed liveHosts to drive
+    // shed/restore deterministically. multiHost-gated at the call site.
+    resolveLiveRoster = effectiveLiveRoster,
     // CTL-729: progress-watchdog seams. Defaults keep every existing bare unit
     // tick inert (null silence probe → predicate no-ops via "no-transcript").
     watchdog: {
@@ -2596,6 +2601,9 @@ export function schedulerTick(
   const roster = hosts ?? getClusterHosts();
   const self = hostName ?? getHostName();
   const multiHost = roster.length > 1;
+  // CTL-1091: shed offline hosts before ownership. Single-host → identity (the
+  // helper returns roster unchanged WITHOUT reading heartbeats).
+  const liveHosts = multiHost ? resolveLiveRoster({ roster, self, log }) : roster;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _smw = hostMembershipWarning(roster, self);
   if (_smw && !globalThis.__ctl1057_scheduler_warned) {
@@ -4155,7 +4163,7 @@ export function schedulerTick(
   // hostName (stale/aliased hosts.json). HRW filtering engages only when a 2nd
   // host actually joins (roster.length > 1).
   const ready = computeReadyTickets(eligible, { blockerStates }).filter(
-    (t) => !multiHost || ownedBy(t.identifier, roster, self)
+    (t) => !multiHost || ownedBy(t.identifier, liveHosts, self)
   );
   // CTL-657: the in-flight count is the live `background` claude-agents count,
   // not listInFlightTickets(orchDir).size. A worker that leaked (signal terminal

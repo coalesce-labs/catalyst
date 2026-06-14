@@ -40,6 +40,7 @@ import {
 } from "./config.mjs";
 import { ownedBy } from "./hrw.mjs"; // CTL-862: HRW ownership filter
 import { claimDispatchSync } from "./cluster-claim-sync.mjs"; // CTL-862: cross-host claim soft-CAS
+import { effectiveLiveRoster } from "./liveness-roster.mjs"; // CTL-1091: liveness-filtered roster
 import { listProjects, getProjectConfig, resolveEligibleQuery } from "./registry.mjs";
 import { runEligibleQuery, fetchTicketAssignee, isAssigneeClaimable } from "./linear-query.mjs";
 import {
@@ -369,6 +370,8 @@ export function handleStateChangedEvent(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1091: liveness-filtered roster resolver — threaded to dispatchTriage.
+    resolveLiveRoster = effectiveLiveRoster,
     // CTL-1095: drain gate seam — thread through to dispatchTriage.
     isDraining = (dir) => isDrainingDefault(dir),
   } = {}
@@ -414,6 +417,7 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           claimDispatch, // CTL-862
+          resolveLiveRoster, // CTL-1091
           isDraining, // CTL-1095
         });
       }
@@ -469,6 +473,7 @@ export function handleStateChangedEvent(
           hosts,
           hostName,
           claimDispatch, // CTL-862
+          resolveLiveRoster, // CTL-1091
           isDraining, // CTL-1095
         });
       } else {
@@ -552,6 +557,8 @@ function dispatchTriage(
     hosts = undefined,
     hostName = undefined,
     claimDispatch = claimDispatchSync,
+    // CTL-1091: liveness-filtered roster resolver. Injectable for tests.
+    resolveLiveRoster = effectiveLiveRoster,
     // CTL-1095: drain gate — node-level refusal of new-triage admission.
     isDraining = (dir) => isDrainingDefault(dir),
   }
@@ -573,15 +580,17 @@ function dispatchTriage(
   const roster = hosts ?? getClusterHosts();
   const self = hostName ?? getHostName();
   const multiHost = roster.length > 1;
+  // CTL-1091: shed offline hosts before ownership. Single-host → identity (no heartbeat read).
+  const liveHosts = multiHost ? resolveLiveRoster({ roster, self, log }) : roster;
   // CTL-1057: loud one-time warning when this host is absent from a multi-host roster.
   const _mw = hostMembershipWarning(roster, self);
   if (_mw && !globalThis.__ctl1057_monitor_warned) {
     globalThis.__ctl1057_monitor_warned = true;
     log.warn({ roster, self }, _mw);
   }
-  if (multiHost && !ownedBy(identifier, roster, self)) {
+  if (multiHost && !ownedBy(identifier, liveHosts, self)) {
     log.debug(
-      { identifier, self, roster },
+      { identifier, self, roster: liveHosts },
       "ctl-862: ticket not owned by this host under HRW — skipping triage dispatch"
     );
     return false;
@@ -702,6 +711,8 @@ export function sweepMissingTriage({
   hosts = undefined,
   hostName = undefined,
   claimDispatch = claimDispatchSync,
+  // CTL-1091: liveness-filtered roster resolver — threaded to dispatchTriage.
+  resolveLiveRoster = effectiveLiveRoster,
 } = {}) {
   if (!orchDir) {
     log.debug("sweepMissingTriage: no orchDir wired — skipping triage sweep");
@@ -733,6 +744,7 @@ export function sweepMissingTriage({
         hosts,
         hostName,
         claimDispatch, // CTL-862
+        resolveLiveRoster, // CTL-1091
       });
     }
   }
