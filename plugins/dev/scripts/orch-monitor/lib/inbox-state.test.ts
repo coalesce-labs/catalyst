@@ -230,34 +230,60 @@ describe("computeQuestionHash — stable cache key", () => {
   });
 });
 
-// ── CTL-1065: humanQuestion surfaced from signal.explanation ──────────────────
+// ── CTL-1130: humanQuestion surfaced from signal.explanation.call_to_action ───
 
-describe("CTL-1065: humanQuestion threaded from signal.explanation.human_question", () => {
-  test("humanQuestion is read from signal.explanation.human_question", async () => {
-    const opts = makeWorkerFixture("CTL-1065", {
+describe("CTL-1130: humanQuestion threaded from signal.explanation.call_to_action", () => {
+  test("humanQuestion is read from signal.explanation.call_to_action", async () => {
+    const opts = makeWorkerFixture("CTL-1130a", {
       "phase-implement.json": {
         status: "stalled",
         phase: "implement",
         stalledReason: "busy-ceiling-max-escalations",
         explanation: {
-          what_failed: "implement phase hit busy-ceiling escalation limit",
+          escalation_type: "authorization",
+          problem: "implement phase hit busy-ceiling escalation limit",
+          call_to_action: "restart CTL-1130a implement from scratch, or extend the threshold?",
+          recommendation: "restart with a clean checkout",
+          risk: "restarting discards 90 minutes of elapsed work on CTL-1130a implement",
+          why_asking: "risk-authority gate, not a capability gap",
+          could_higher_tier_resolve: false,
+          authorize_label: "restart CTL-1130a implement",
           observed: { elapsedMin: 90, commitCount: 0, bgJobId: "ab12ef34" },
-          attempts: [],
-          why_gave_up: "exceeded the busy-ceiling escalation budget",
-          human_question: "restart CTL-1065 implement from scratch, or extend the threshold?",
         },
       },
     });
 
-    const state = await collectInboxItemState("CTL-1065", opts);
+    const state = await collectInboxItemState("CTL-1130a", opts);
     expect(state).not.toBeNull();
     expect(state!.humanQuestion).toBe(
-      "restart CTL-1065 implement from scratch, or extend the threshold?",
+      "restart CTL-1130a implement from scratch, or extend the threshold?",
     );
   });
 
+  test("projects explanation.call_to_action onto the humanQuestion board field", async () => {
+    const opts = makeWorkerFixture("CTL-1130b", {
+      "phase-pr.json": {
+        status: "stalled",
+        phase: "pr",
+        stalledReason: "push_rejected_no_workflow_scope",
+        explanation: {
+          escalation_type: "manual",
+          problem: "push rejected: host token lacks workflow OAuth scope",
+          call_to_action: "grant workflow scope or push manually — which?",
+          blocked_capability: "workflow OAuth scope",
+          instructions: ["gh auth refresh -s workflow"],
+          remediation_then_retry: "re-run phase-pr after granting scope",
+          why_not_auto: "daemon cannot grant itself an OAuth scope (capability boundary)",
+        },
+      },
+    });
+    const state = await collectInboxItemState("CTL-1130b", opts);
+    expect(state).not.toBeNull();
+    expect(state!.humanQuestion).toBe("grant workflow scope or push manually — which?");
+  });
+
   test("humanQuestion is null when no explanation present (back-compat)", async () => {
-    const opts = makeWorkerFixture("CTL-1065", {
+    const opts = makeWorkerFixture("CTL-1130c", {
       "phase-implement.json": {
         status: "stalled",
         phase: "implement",
@@ -265,21 +291,21 @@ describe("CTL-1065: humanQuestion threaded from signal.explanation.human_questio
       },
     });
 
-    const state = await collectInboxItemState("CTL-1065", opts);
+    const state = await collectInboxItemState("CTL-1130c", opts);
     expect(state).not.toBeNull();
     expect(state!.humanQuestion).toBeNull();
   });
 
-  test("humanQuestion is null when explanation.human_question is absent", async () => {
-    const opts = makeWorkerFixture("CTL-1065", {
+  test("humanQuestion is null when explanation.call_to_action is absent", async () => {
+    const opts = makeWorkerFixture("CTL-1130d", {
       "phase-implement.json": {
         status: "stalled",
         phase: "implement",
-        explanation: { what_failed: "x", observed: {}, attempts: [], why_gave_up: "y" },
+        explanation: { escalation_type: "decision", problem: "x", options: [], why_you: "y" },
       },
     });
 
-    const state = await collectInboxItemState("CTL-1065", opts);
+    const state = await collectInboxItemState("CTL-1130d", opts);
     expect(state).not.toBeNull();
     expect(state!.humanQuestion).toBeNull();
   });

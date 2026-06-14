@@ -709,7 +709,7 @@ function ticketUpdatedAt(phaseSigs) {
   return max;
 }
 
-/** CTL-1065: extract human_question from the most-recent phase signal that
+/** CTL-1130: extract call_to_action from the most-recent phase signal that
  *  carries a structured explanation. Scanned newest-phase-first so the most
  *  actionable question surfaces. Returns null when no signal has one. */
 export function deriveHumanQuestion(phaseSigs) {
@@ -717,8 +717,8 @@ export function deriveHumanQuestion(phaseSigs) {
     const sig = phaseSigs[i];
     if (!sig || typeof sig !== "object") continue;
     const expl = sig.explanation;
-    if (expl && typeof expl === "object" && typeof expl.human_question === "string") {
-      return expl.human_question;
+    if (expl && typeof expl === "object" && typeof expl.call_to_action === "string") {
+      return expl.call_to_action;
     }
   }
   return null;
@@ -726,7 +726,7 @@ export function deriveHumanQuestion(phaseSigs) {
 
 /** CTL-1110: the six extended escalation-explanation fields, surfaced as a
  *  cohesive nested object so the detail pane can render a CTA-led card. Distinct
- *  from deriveHumanQuestion (the canonical human_question sub-label). */
+ *  from deriveHumanQuestion (the canonical call_to_action sub-label). */
 const EXPLANATION_RENDER_FIELDS = [
   "call_to_action", "outcome", "problem", "why_you", "why_not_auto", "what_to_do",
 ];
@@ -1280,7 +1280,7 @@ export async function assembleBoard() {
       // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
       // signal) → again rendered unavailable, never now-anchored to a guess.
       currentPhaseSince: cur.startedAt ?? null,
-      // CTL-1065: human_question from the most-recent phase signal's explanation,
+      // CTL-1130: call_to_action from the most-recent phase signal's explanation,
       // surfaced as the inbox sub-label for needs-human rows.
       humanQuestion: deriveHumanQuestion(phaseSigs),
       // CTL-1110: the six extended explanation fields surfaced for the detail
