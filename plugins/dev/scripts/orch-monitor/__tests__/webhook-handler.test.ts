@@ -733,10 +733,10 @@ describe("buildEventLogEnvelope (canonical)", () => {
     expect(env!.attributes["event.name"]).toBe("github.pr.merged");
     expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
     expect(env!.attributes["vcs.pr.number"]).toBe(1);
-    expect(env!.attributes["event.entity"]).toBe("pr");
-    expect(env!.attributes["event.action"]).toBe("merged");
-    expect(env!.attributes["event.label"]).toBe("PR #1");
-    expect(env!.attributes["event.channel"]).toBe("webhook");
+    expect(env!.attributes["catalyst.event.entity"]).toBe("pr");
+    expect(env!.attributes["catalyst.event.action"]).toBe("merged");
+    expect(env!.attributes["catalyst.event.label"]).toBe("PR #1");
+    expect(env!.attributes["catalyst.event.channel"]).toBe("webhook");
     expect(env!.resource["service.name"]).toBe("catalyst.github");
   });
 
@@ -837,7 +837,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.release.published");
     expect(env!.attributes["vcs.repository.name"]).toBe("o/r");
-    expect(env!.attributes["event.label"]).toBe("catalyst-dev-v8.0.0");
+    expect(env!.attributes["catalyst.event.label"]).toBe("catalyst-dev-v8.0.0");
   });
 
   it("maps workflow_run.completed → github.workflow_run.completed with cicd attrs", () => {
@@ -860,11 +860,11 @@ describe("buildEventLogEnvelope (canonical)", () => {
       TS,
     );
     expect(env!.attributes["event.name"]).toBe("github.workflow_run.completed");
-    expect(env!.attributes["vcs.revision"]).toBe("abc123");
+    expect(env!.attributes["vcs.ref.revision"]).toBe("abc123");
     expect(env!.attributes["vcs.pr.number"]).toBe(326);
     expect(env!.attributes["cicd.pipeline.run.id"]).toBe(555);
     expect(env!.attributes["cicd.pipeline.run.status"]).toBe("completed");
-    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("success");
+    expect(env!.attributes["cicd.pipeline.run.result"]).toBe("success");
     expect(env!.attributes["cicd.pipeline.name"]).toBe("CI");
     const payload = env!.body.payload as { prNumbers: number[] };
     expect(payload.prNumbers).toEqual([326]);
@@ -891,7 +891,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.workflow_run.in_progress");
     expect(env!.attributes["cicd.pipeline.run.status"]).toBe("in_progress");
-    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBeUndefined();
+    expect(env!.attributes["cicd.pipeline.run.result"]).toBeUndefined();
   });
 
   it("workflow_run with multiple PRs uses the first PR number (first-match policy)", () => {
@@ -933,7 +933,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.check_suite.completed");
     expect(env!.attributes["cicd.pipeline.run.status"]).toBe("completed");
-    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBe("failure");
+    expect(env!.attributes["cicd.pipeline.run.result"]).toBe("failure");
     expect(env!.attributes["vcs.pr.number"]).toBe(1);
     expect(env!.severityText).toBe("WARN");
     expect(env!.severityNumber).toBe(13);
@@ -954,7 +954,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.check_suite.in_progress");
     expect(env!.attributes["cicd.pipeline.run.status"]).toBe("in_progress");
-    expect(env!.attributes["cicd.pipeline.run.conclusion"]).toBeUndefined();
+    expect(env!.attributes["cicd.pipeline.run.result"]).toBeUndefined();
   });
 
   it("maps deployment_status.success → github.deployment_status.success", () => {
@@ -971,7 +971,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
       TS,
     );
     expect(env!.attributes["event.name"]).toBe("github.deployment_status.success");
-    expect(env!.attributes["deployment.environment"]).toBe("preview");
+    expect(env!.attributes["deployment.environment.name"]).toBe("preview");
     expect(env!.attributes["deployment.id"]).toBe(100);
   });
 
@@ -1070,7 +1070,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
       TS,
     );
     expect(env!.attributes["event.name"]).toBe("github.status.failure");
-    expect(env!.attributes["event.label"]).toBe("abcdef0");
+    expect(env!.attributes["catalyst.event.label"]).toBe("abcdef0");
     expect(env!.severityText).toBe("ERROR");
   });
 
@@ -1088,7 +1088,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
     );
     expect(env!.attributes["event.name"]).toBe("github.push");
     expect(env!.attributes["vcs.ref.name"]).toBe("refs/heads/main");
-    expect(env!.attributes["vcs.revision"]).toBe("bbb");
+    expect(env!.attributes["vcs.ref.revision"]).toBe("bbb");
   });
 
   // CTL-396: check_suite with multiple PRs uses first match
@@ -1122,7 +1122,7 @@ describe("buildEventLogEnvelope (canonical)", () => {
       },
       TS,
     );
-    expect(env!.attributes["vcs.revision"]).toBe("deadbeef1234");
+    expect(env!.attributes["vcs.ref.revision"]).toBe("deadbeef1234");
   });
 
   // CTL-396: workflow_run with no PR but headBranch → vcs.ref.name

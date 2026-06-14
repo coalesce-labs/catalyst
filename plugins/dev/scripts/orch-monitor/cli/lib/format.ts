@@ -23,7 +23,7 @@ export function shouldSkipEvent(event: CanonicalEvent): boolean {
   if (!name) return true; // skip legacy/malformed events missing the canonical envelope
   if (SKIP_EVENTS.has(name)) return true;
   if (name === "github.check_run.completed") {
-    const c = event.attributes["cicd.pipeline.run.conclusion"];
+    const c = event.attributes["cicd.pipeline.run.result"];
     if (c === "success" || c === "neutral" || c === "skipped") return true;
   }
   if (name.startsWith("filter.wake")) {
@@ -71,7 +71,7 @@ function classifySource(event: CanonicalEvent): string {
   if (name.startsWith("github.")) return "github";
   if (name.startsWith("linear.")) return "linear";
   if (name === "comms.message.posted") {
-    const label = event.attributes["event.label"];
+    const label = event.attributes["catalyst.event.label"];
     if (label) return label;
     const worker = event.attributes["catalyst.worker.ticket"];
     if (worker) return worker;
@@ -148,7 +148,7 @@ export function formatIcon(event: CanonicalEvent): string {
 // disagree on its East Asian width.
 export function formatStatus(event: CanonicalEvent): string {
   const attrs = event.attributes ?? ({} as CanonicalEvent["attributes"]);
-  const conclusion = attrs["cicd.pipeline.run.conclusion"];
+  const conclusion = attrs["cicd.pipeline.run.result"];
   if (conclusion === "success") return "✓ ";
   if (conclusion === "failure" || conclusion === "cancelled") return "✗ ";
   const name = attrs["event.name"];
@@ -469,7 +469,7 @@ export function formatDetails(event: CanonicalEvent): string {
   if (name?.startsWith("github.check_suite.")) {
     const p = payload as Record<string, unknown> | undefined;
     const conclusion =
-      event.attributes?.["cicd.pipeline.run.conclusion"] ?? p?.["conclusion"];
+      event.attributes?.["cicd.pipeline.run.result"] ?? p?.["conclusion"];
     if (typeof conclusion === "string" && conclusion.length > 0) {
       const out = sanitize(`CI: ${conclusion}`, "oneline");
       detailsCache.set(event, out);
@@ -482,7 +482,7 @@ export function formatDetails(event: CanonicalEvent): string {
       event.attributes?.["cicd.pipeline.name"] ??
       (typeof p?.["name"] === "string" ? p["name"] : undefined);
     const conclusion =
-      event.attributes?.["cicd.pipeline.run.conclusion"] ??
+      event.attributes?.["cicd.pipeline.run.result"] ??
       (typeof p?.["conclusion"] === "string" ? p["conclusion"] : undefined);
     if (typeof wfName === "string" && wfName.length > 0) {
       const suffix =
@@ -570,7 +570,7 @@ export function formatDetails(event: CanonicalEvent): string {
   // the natural place — DETAILS already carries the message body for comms
   // events, and the prefix reads cleanly with the body.
   if (name === "comms.message.posted") {
-    const sender = event.attributes?.["event.label"]
+    const sender = event.attributes?.["catalyst.event.label"]
       ?? event.attributes?.["catalyst.worker.ticket"];
     const p = payload as Record<string, unknown> | undefined;
     const rawType = p?.["type"];

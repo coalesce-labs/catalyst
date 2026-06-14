@@ -40,8 +40,8 @@ function sampleEvent(overrides: Partial<CanonicalEvent> = {}): CanonicalEvent {
     },
     attributes: {
       "event.name": "github.pr.merged",
-      "event.entity": "pr",
-      "event.action": "merged",
+      "catalyst.event.entity": "pr",
+      "catalyst.event.action": "merged",
     },
     body: { message: "test" },
     ...overrides,

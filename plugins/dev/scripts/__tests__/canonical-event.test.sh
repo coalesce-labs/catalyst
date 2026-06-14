@@ -235,10 +235,10 @@ OVR_OUT="$(echo "$LINE_OVR" | jq -r '.resource."linear.key"')"
 expect_eq "build_canonical_line --linear-key overrides promotion" "CTL-999" "$OVR_OUT"
 
 # project sourced from OTEL_RESOURCE_ATTRIBUTES
-LINE_PROJ="$(OTEL_RESOURCE_ATTRIBUTES='project=catalyst-workspace,linear.key=CTL-636' \
+LINE_PROJ="$(OTEL_RESOURCE_ATTRIBUTES='catalyst.project=catalyst-workspace,linear.key=CTL-636' \
   build_canonical_line --ts "2026-05-25T18:00:00Z" --severity INFO \
   --service "catalyst.session" --event-name "x")"
-PROJ_OUT="$(echo "$LINE_PROJ" | jq -r '.resource."project" // ""')"
+PROJ_OUT="$(echo "$LINE_PROJ" | jq -r '.resource."catalyst.project" // ""')"
 expect_eq "build_canonical_line sources project from OTEL_RESOURCE_ATTRIBUTES" "catalyst-workspace" "$PROJ_OUT"
 
 SEV_NUM="$(echo "$LINE" | jq -r '.severityNumber')"

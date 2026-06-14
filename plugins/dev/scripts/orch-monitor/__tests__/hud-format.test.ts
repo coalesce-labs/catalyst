@@ -123,7 +123,7 @@ describe("formatSource", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
     } as unknown as CanonicalEvent;
@@ -267,7 +267,7 @@ describe("formatEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_suite.completed",
-        "cicd.pipeline.run.conclusion": "failure",
+        "cicd.pipeline.run.result": "failure",
       },
     } as unknown as CanonicalEvent;
     expect(formatEvent(e)).toBe("github.check_suite.completed");
@@ -883,7 +883,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
       body: { message: "stalled: CI failed", payload: { type: "attention", channel: "orch-demo", to: "all" } },
@@ -917,7 +917,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
       },
       body: { message: "msg", payload: {} },
     } as unknown as CanonicalEvent;
@@ -929,7 +929,7 @@ describe("formatDetails (comms.message.posted, CTL-391)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
       },
       body: { payload: { type: "attention" } },
     } as unknown as CanonicalEvent;
@@ -1023,7 +1023,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "success",
+        "cicd.pipeline.run.result": "success",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(true);
@@ -1034,7 +1034,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "neutral",
+        "cicd.pipeline.run.result": "neutral",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(true);
@@ -1045,7 +1045,7 @@ describe("shouldSkipEvent", () => {
       ...baseEvent,
       attributes: {
         "event.name": "github.check_run.completed",
-        "cicd.pipeline.run.conclusion": "failure",
+        "cicd.pipeline.run.result": "failure",
       },
     } as unknown as CanonicalEvent;
     expect(shouldSkipEvent(e)).toBe(false);
@@ -1229,7 +1229,7 @@ describe("formatIcon (CTL-391, Nerd Font enabled)", () => {
       ...baseEvent,
       attributes: {
         "event.name": "comms.message.posted",
-        "event.label": "CTL-330",
+        "catalyst.event.label": "CTL-330",
         "catalyst.worker.ticket": "CTL-330",
       },
       body: { payload: { type: "attention" } },

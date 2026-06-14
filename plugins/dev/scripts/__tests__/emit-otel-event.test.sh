@@ -115,12 +115,12 @@ assert_eq "claude_code.session.outcome" \
   "body.stringValue is event name"
 
 assert_eq "success" \
-  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="outcome") | .value.stringValue')" \
-  "outcome attribute"
+  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="catalyst.outcome") | .value.stringValue')" \
+  "catalyst.outcome attribute"
 
 assert_eq "sess_abc" \
-  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="session_id") | .value.stringValue')" \
-  "session_id attribute"
+  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="claude.session.id") | .value.stringValue')" \
+  "claude.session.id attribute"
 
 # ─── Test 2: linear.key resource attribute ──────────────────────────────────
 echo ""
@@ -161,8 +161,8 @@ export CURL_STUB_BODY="$SCRATCH/body3"
 
 BODY=$(cat "$SCRATCH/body3")
 assert_eq "quality gates failed" \
-  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="reason") | .value.stringValue')" \
-  "reason attribute"
+  "$(echo "$BODY" | jq -r '.resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]? | select(.key=="catalyst.reason") | .value.stringValue')" \
+  "catalyst.reason attribute"
 
 # ─── Test 4: silent no-op when OTEL_EXPORTER_OTLP_ENDPOINT unset ────────────
 echo ""
@@ -308,8 +308,8 @@ export CURL_STUB_BODY="$SCRATCH/body11"
 BODY_11=$(cat "$SCRATCH/body11" 2>/dev/null || echo "{}")
 PHASE_ATTR=$(echo "$BODY_11" | jq -r '
   .resourceLogs[0].scopeLogs[0].logRecords[0].attributes[]
-  | select(.key == "phase") | .value.stringValue // ""')
-assert_eq "research" "$PHASE_ATTR" "--phase adds phase attribute to log record"
+  | select(.key == "catalyst.phase") | .value.stringValue // ""')
+assert_eq "research" "$PHASE_ATTR" "--phase adds catalyst.phase attribute to log record"
 
 # ─── Test 12: --resource-attr string lands in resource attrs ────────────────
 echo ""

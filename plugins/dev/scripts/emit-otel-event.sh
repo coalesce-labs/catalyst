@@ -127,17 +127,17 @@ LOG_ATTRS_JSON=$(jq -nc \
   --arg outcome "$OUTCOME" \
   --arg sid "$SESSION_ID" \
   '[{key:"event.name",value:{stringValue:$event}},
-    {key:"outcome",value:{stringValue:$outcome}},
-    {key:"session_id",value:{stringValue:$sid}}]')
+    {key:"catalyst.outcome",value:{stringValue:$outcome}},
+    {key:"claude.session.id",value:{stringValue:$sid}}]')
 
 if [[ -n "$REASON" ]]; then
   LOG_ATTRS_JSON=$(echo "$LOG_ATTRS_JSON" \
-    | jq -c --arg r "$REASON" '. + [{key:"reason",value:{stringValue:$r}}]')
+    | jq -c --arg r "$REASON" '. + [{key:"catalyst.reason",value:{stringValue:$r}}]')
 fi
 
 if [[ -n "$PHASE" ]]; then
   LOG_ATTRS_JSON=$(echo "$LOG_ATTRS_JSON" \
-    | jq -c --arg p "$PHASE" '. + [{key:"phase",value:{stringValue:$p}}]')
+    | jq -c --arg p "$PHASE" '. + [{key:"catalyst.phase",value:{stringValue:$p}}]')
 fi
 
 for kv in "${EXTRA_ATTRS[@]:-}"; do

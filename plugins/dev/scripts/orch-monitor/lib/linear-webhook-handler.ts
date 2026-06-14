@@ -70,12 +70,12 @@ function canonical(args: LinearCanonicalArgs): CanonicalEvent {
   const attributes: Attributes = {
     ...args.attrs,
     "event.name": args.eventName,
-    "event.entity": args.entity,
-    "event.action": args.action,
-    "event.channel": "webhook",
+    "catalyst.event.entity": args.entity,
+    "catalyst.event.action": args.action,
+    "catalyst.event.channel": "webhook",
   };
   if (args.label !== undefined) {
-    attributes["event.label"] = args.label;
+    attributes["catalyst.event.label"] = args.label;
   }
   return buildCanonicalEvent({
     ts: args.ts,

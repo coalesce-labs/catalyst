@@ -47,8 +47,8 @@ const REACTIVE_FILTER = `
   (.attributes."event.name" == "github.pr.closed" and .attributes."vcs.pr.number" == ${PR}) or
   (.attributes."event.name" == "github.check_suite.completed"
      and (.body.payload.prNumbers // [] | index(${PR}) != null)
-     and (.attributes."cicd.pipeline.run.conclusion" == "failure"
-          or .attributes."cicd.pipeline.run.conclusion" == "timed_out")) or
+     and (.attributes."cicd.pipeline.run.result" == "failure"
+          or .attributes."cicd.pipeline.run.result" == "timed_out")) or
   (.attributes."event.name" == "github.pr_review.submitted"
      and .attributes."vcs.pr.number" == ${PR}
      and .body.payload.state == "changes_requested") or

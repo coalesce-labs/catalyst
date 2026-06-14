@@ -78,14 +78,14 @@ describe("formatDetails — github.pr.* (CTL-418)", () => {
 describe("formatDetails — github.check_suite.* (CTL-418)", () => {
   test("success from attributes", () => {
     const ev = makeEvent("github.check_suite.completed", {
-      "cicd.pipeline.run.conclusion": "success",
+      "cicd.pipeline.run.result": "success",
     });
     expect(formatDetails(ev)).toBe("CI: success");
   });
 
   test("failure from attributes", () => {
     const ev = makeEvent("github.check_suite.completed", {
-      "cicd.pipeline.run.conclusion": "failure",
+      "cicd.pipeline.run.result": "failure",
     });
     expect(formatDetails(ev)).toBe("CI: failure");
   });
@@ -105,7 +105,7 @@ describe("formatDetails — github.workflow_run.* (CTL-418)", () => {
   test("workflow name + conclusion", () => {
     const ev = makeEvent("github.workflow_run.completed", {
       "cicd.pipeline.name": "Deploy Website",
-      "cicd.pipeline.run.conclusion": "success",
+      "cicd.pipeline.run.result": "success",
     });
     expect(formatDetails(ev)).toBe("Deploy Website: success");
   });

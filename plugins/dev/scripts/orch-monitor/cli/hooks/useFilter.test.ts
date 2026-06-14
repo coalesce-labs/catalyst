@@ -56,7 +56,7 @@ const fixture: CanonicalEvent[] = [
       "vcs.pr.number": 343,
       "vcs.repository.name": "coalesce-labs/catalyst",
       "catalyst.orchestrator.id": "orch-A",
-      "cicd.pipeline.run.conclusion": "failure",
+      "cicd.pipeline.run.result": "failure",
     },
     body: { message: "CI failed", payload: {} },
   },

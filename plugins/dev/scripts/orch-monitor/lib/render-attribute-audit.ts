@@ -105,7 +105,7 @@ export function renderAuditMarkdown(entries: AttributeAuditEntry[]): string {
   lines.push(
     "Each cluster below is a unit of work for CTL-1008. Emit-side files are",
     "derived from the manifest. Per the operator decision (Ryan, 2026-06-11),",
-    "every rename uses a **hard cutover** — no dual-emit period, no deprecated-name",
+    "every rename uses a **hard-cutover** — no dual-emit period, no deprecated-name",
     "emission. Each cluster ships emit-side rename + all consumer updates in ONE PR,",
     "validated against live Loki.",
     "",

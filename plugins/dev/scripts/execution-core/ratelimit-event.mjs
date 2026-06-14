@@ -52,22 +52,22 @@ export function buildRatelimitEnvelope(name, payload = {}, { now } = {}) {
   // collector never promotes an empty label.
   const attributes = {
     "event.name": name,
-    "event.entity": "account",
-    "event.action": action,
-    "event.label": email ?? "unknown",
+    "catalyst.event.entity": "account",
+    "catalyst.event.action": action,
+    "catalyst.event.label": email ?? "unknown",
   };
   const put = (key, value) => {
     if (value !== null && value !== undefined) attributes[key] = value;
   };
-  put("account.email", email);
-  put("ratelimit.five_hour_pct", fiveHourPct);
-  put("ratelimit.seven_day_pct", sevenDayPct);
-  put("ratelimit.five_hour_resets_at", fiveHourResetsAt);
-  put("ratelimit.seven_day_resets_at", sevenDayResetsAt);
-  put("ratelimit.seven_day_opus_pct", opusPct);
-  put("ratelimit.seven_day_sonnet_pct", sonnetPct);
-  put("subscription.type", subscriptionType);
-  put("rate_limit.tier", rateLimitTier);
+  put("catalyst.account.email", email);
+  put("catalyst.ratelimit.five_hour_pct", fiveHourPct);
+  put("catalyst.ratelimit.seven_day_pct", sevenDayPct);
+  put("catalyst.ratelimit.five_hour_resets_at", fiveHourResetsAt);
+  put("catalyst.ratelimit.seven_day_resets_at", sevenDayResetsAt);
+  put("catalyst.ratelimit.seven_day_opus_pct", opusPct);
+  put("catalyst.ratelimit.seven_day_sonnet_pct", sonnetPct);
+  put("catalyst.subscription.type", subscriptionType);
+  put("catalyst.ratelimit.tier", rateLimitTier);
 
   return {
     ts,
