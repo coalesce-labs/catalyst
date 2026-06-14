@@ -4,6 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   buildNavGroups,
+  buildNavGroupsFromProjects,
   breadcrumbFor,
   paletteEntries,
   projectWorkerCount,
@@ -15,8 +16,22 @@ import {
   displayCaseName,
   laneDisplayName,
   type NavGroup,
+  type NavProjectDescriptor,
 } from "./nav-model";
 import type { BoardPayload, BoardWorker, BoardTicket } from "../board/types";
+
+// CTL-1152: a minimal descriptor factory mirroring the server's ProjectDescriptor
+// contract (GET /api/projects). The nav only reads repo / name / defaultColor.
+const desc = (p: Partial<NavProjectDescriptor> & { repo: string }): NavProjectDescriptor => ({
+  key: p.repo.toUpperCase(),
+  name: p.repo,
+  vcsRepo: null,
+  defaultColor: null,
+  iconUrl: `/api/repo-icon/${p.repo}`,
+  repoRoot: null,
+  hasWork: false,
+  ...p,
+});
 
 const payload = (over: Partial<BoardPayload>): BoardPayload => ({
   generatedAt: "",
@@ -168,6 +183,62 @@ describe("nav-model — buildNavGroups", () => {
     const observe = groups.find((g) => g.scope === "observe")!;
     expect(overall.iconDataUrl).toBeUndefined();
     expect(observe.iconDataUrl).toBeUndefined();
+  });
+});
+
+describe("nav-model — buildNavGroupsFromProjects (CTL-1152)", () => {
+  it("descriptors → Overall first, one group per descriptor, Observe last", () => {
+    const groups = buildNavGroupsFromProjects([
+      desc({ repo: "catalyst", name: "Catalyst" }),
+      desc({ repo: "adva", name: "Adva" }),
+    ]);
+    expect(groups[0]?.scope).toBe("all");
+    expect(groups[0]?.label).toBe("Overall");
+    expect(groups.at(-1)?.scope).toBe("observe");
+    const repoGroups = groups.filter((g) => g.scope !== "all" && g.scope !== "observe");
+    // group scope = descriptor.repo (short name); label = descriptor.name.
+    expect(repoGroups.map((g) => g.scope)).toEqual(["catalyst", "adva"]);
+    expect(repoGroups.map((g) => g.label)).toEqual(["Catalyst", "Adva"]);
+  });
+
+  it("wires descriptor.defaultColor through NAMED_COLORS to a DEFINED group.dotColor (regression guard for the always-undefined repoColors={} bug)", () => {
+    const groups = buildNavGroupsFromProjects([
+      desc({ repo: "catalyst", name: "Catalyst", defaultColor: "green" }),
+    ]);
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    // "green" → NAMED_COLORS.green.text ("#b5d67a") — defined, NOT undefined.
+    expect(grp.dotColor).toBe("#b5d67a");
+    expect(grp.dotColor).toBeDefined();
+  });
+
+  it("a descriptor with no defaultColor resolves to an undefined dotColor (neutral)", () => {
+    const groups = buildNavGroupsFromProjects([
+      desc({ repo: "mystery", name: "Mystery", defaultColor: null }),
+    ]);
+    const grp = groups.find((g) => g.scope === "mystery")!;
+    expect(grp.dotColor).toBeUndefined();
+  });
+
+  it("passes iconDataUrl through from the repoIcons arg, keyed by descriptor.repo", () => {
+    const icons: Record<string, string | null> = { catalyst: "data:image/png;base64,abc" };
+    const groups = buildNavGroupsFromProjects(
+      [desc({ repo: "catalyst", name: "Catalyst" })],
+      icons,
+    );
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    expect(grp.iconDataUrl).toBe("data:image/png;base64,abc");
+  });
+
+  it("with an empty descriptor list → just Overall + Observe (the empty-state shape the sidebar special-cases)", () => {
+    const groups = buildNavGroupsFromProjects([]);
+    expect(groups.map((g) => g.scope)).toEqual(["all", "observe"]);
+  });
+
+  it("per-descriptor group has the same 3 OPERATE items scoped to that repo", () => {
+    const groups = buildNavGroupsFromProjects([desc({ repo: "catalyst", name: "Catalyst" })]);
+    const grp = groups.find((g) => g.scope === "catalyst")!;
+    expect(grp.items.every((i) => i.target.scope === "catalyst")).toBe(true);
+    expect(grp.items.map((i) => i.target.surface)).toEqual(["home", "board", "workers"]);
   });
 });
 

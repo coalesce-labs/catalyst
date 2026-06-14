@@ -24,6 +24,7 @@ import type { Surface } from "./surface";
 import type { BoardPayload, BoardWorker } from "../board/types";
 import { filterPayloadByScope, REPO_SCOPE_ALL } from "./repo-scope";
 import { deriveInbox } from "../board/home-inbox";
+import { NAMED_COLORS } from "./color-palette";
 
 // ── Nav IA types ──────────────────────────────────────────────────────────────
 
@@ -117,6 +118,87 @@ export function buildNavGroups(
     items: OBSERVE_DEFS.map((def) => ({
       // Observe items don't navigate to a real surface; use "home" as placeholder
       // but mark disabled so the caller can render them as "soon" items.
+      target: { surface: "home" as Surface, scope: "observe" },
+      label: def.label,
+      icon: def.icon,
+      disabled: true,
+    })),
+  };
+
+  return [overall, ...repoGroups, observe];
+}
+
+// ── buildNavGroupsFromProjects (CTL-1152) ─────────────────────────────────────
+// The config-driven roster path: the sidebar now builds its nav from the server's
+// GET /api/projects ProjectDescriptor[] (one descriptor per CONFIGURED team, plus a
+// self-identifying lane for each observed-work repo with no config) instead of the
+// raw BoardPayload.repos string list. The win: every CONFIGURED project renders even
+// with zero observed work (hasWork=false), and the per-project dot color finally
+// RESOLVES — defaultColor is pre-resolved server-side and keyed by the SHORT repo
+// name (descriptor.repo), so the long-standing dead `repoColors={}` nav bug is fixed.
+
+/**
+ * The slice of the server's ProjectDescriptor (GET /api/projects) the nav reads.
+ * Mirrors the contract exported from lib/project-roster.ts so the server and the
+ * nav can't drift; the hook re-exports the full ProjectDescriptor.
+ */
+export interface NavProjectDescriptor {
+  /** Linear team key, UPPERCASE (or the repo short-name uppercased for an
+   *  unconfigured observed-work lane). */
+  key: string;
+  /** Display-cased short repo name ("catalyst" → "Catalyst"). The nav label. */
+  name: string;
+  /** Short repo name, LOWERCASED — the nav/repo-scope key (BoardPayload.repos value). */
+  repo: string;
+  /** Full owner/repo; null for an unconfigured lane. */
+  vcsRepo: string | null;
+  /** Hue NAME (e.g. "green"), pre-resolved server-side and keyed by the SHORT repo
+   *  name — so the nav looks it up in NAMED_COLORS WITHOUT any owner/repo re-derivation. */
+  defaultColor: string | null;
+  /** The per-repo favicon endpoint "/api/repo-icon/<repo>". */
+  iconUrl: string;
+  /** Optional registry.json repoRoot enrichment; null when absent. */
+  repoRoot: string | null;
+  /** True when this repo has observed work (BoardPayload.repos); false for a
+   *  configured-but-idle team. */
+  hasWork: boolean;
+}
+
+/**
+ * Build the nav group list from the config-driven roster (CTL-1152): Overall first,
+ * one group per descriptor (in roster order), then Observe last. `dotColor` resolves
+ * descriptor.defaultColor (a hue NAME, short-name-keyed by the server) through
+ * NAMED_COLORS to the legible `.text` swatch — so a configured color finally RENDERS
+ * (the prior `buildNavGroups(repos, {})` path always passed an empty color map →
+ * undefined dot). `repoIcons` optionally maps repo short-name → favicon data URL.
+ *
+ * An empty descriptor list yields just [Overall, Observe] — the empty-state shape
+ * the sidebar special-cases as "No projects configured".
+ */
+export function buildNavGroupsFromProjects(
+  projects: readonly NavProjectDescriptor[],
+  repoIcons?: Readonly<Record<string, string | null>>,
+): NavGroup[] {
+  const overall: NavGroup = {
+    scope: "all",
+    label: "Overall",
+    items: makeOperateItems("all"),
+  };
+
+  const repoGroups: NavGroup[] = projects.map((p) => ({
+    scope: p.repo,
+    label: p.name,
+    // defaultColor is a hue NAME keyed by the SHORT repo name server-side, so the
+    // lookup is a direct NAMED_COLORS hit — no owner/repo reconciliation needed.
+    dotColor: p.defaultColor ? NAMED_COLORS[p.defaultColor]?.text : undefined,
+    iconDataUrl: repoIcons ? (repoIcons[p.repo] ?? null) : undefined,
+    items: makeOperateItems(p.repo),
+  }));
+
+  const observe: NavGroup = {
+    scope: "observe",
+    label: "Observe",
+    items: OBSERVE_DEFS.map((def) => ({
       target: { surface: "home" as Surface, scope: "observe" },
       label: def.label,
       icon: def.icon,
