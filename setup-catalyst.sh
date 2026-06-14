@@ -2391,6 +2391,38 @@ init_session_database() {
 	echo ""
 }
 
+# Write catalyst.sweep defaults into .catalyst/config.json and, on macOS,
+# invoke the launchd installer (CTL-1030).
+setup_sweep_config() {
+	# Resolve REPO_ROOT and SCRIPT_DIR for this function. setup-catalyst.sh
+	# sits at the repo root; PROJECT_DIR is set by detect_git_repo() for
+	# interactive runs, but may be empty if sourced in lib-only mode.
+	local REPO_ROOT="${PROJECT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")}"
+	local SCRIPT_DIR
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "$PWD")/plugins/dev/scripts"
+	local config_file="${REPO_ROOT}/.catalyst/config.json"
+	[[ -f "$config_file" ]] || return 0
+	local patch tmp
+	patch='{"idleHours":48,"intervalHours":1,"salvagePush":false,"maxRemovalsPerRun":10}'
+	tmp="${config_file}.tmp.$$"
+	# patch first so user overrides win
+	if jq --argjson p "$patch" '.catalyst.sweep = ($p + (.catalyst.sweep // {}))' "$config_file" > "$tmp" && mv "$tmp" "$config_file"; then
+		print_success "wrote catalyst.sweep defaults" 2>/dev/null || echo "setup: wrote catalyst.sweep defaults"
+	else
+		rm -f "$tmp"
+		echo "setup: warning: could not write catalyst.sweep defaults" >&2
+	fi
+	local _os="${CATALYST_FORCE_OS:-$(uname -s 2>/dev/null || echo unknown)}"
+	if [[ "$_os" == "Darwin" ]]; then
+		local installer="${SCRIPT_DIR}/install-orphan-sweep.sh"
+		if [[ -x "$installer" ]]; then
+			"$installer" >/dev/null 2>&1 || echo "setup: warning: launchd installer failed (non-fatal)" >&2
+		fi
+	else
+		echo "setup: note: Linux scheduling is a follow-up (CTL-1030). Config written." >&2
+	fi
+}
+
 #
 # Main execution
 #
@@ -2428,6 +2460,7 @@ main() {
 	update_config_with_linear_states
 	setup_execution_core_states
 	init_session_database
+	setup_sweep_config
 	init_humanlayer_thoughts
 	sync_thoughts
 

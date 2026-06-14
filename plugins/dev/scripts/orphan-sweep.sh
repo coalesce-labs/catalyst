@@ -4,22 +4,29 @@
 #
 # Vectors:
 #   1. Stale bun/node/turbo procs whose backing worktree is gone
-#   2. Done-ticket worktrees not cleaned by /teardown
+#   2. Orphaned/idle worktrees (multi-signal classifier, CTL-1030)
 #   3. Stale phase signals: status=running + dead bg_job_id >30 min
 #   4. Trunk repo cache dirs, mtime >30 days
 #
 # Usage:
-#   orphan-sweep.sh [--dry-run] [--help]
+#   orphan-sweep.sh [--dry-run] [--print-config] [--count-dirty]
+#                   [--classify <path> [--trunk <ref>]] [--help]
 #
 # Env overrides (all have production defaults):
-#   SWEEP_TRUNK_CACHE_DIR     — default: $HOME/.cache/trunk/repos
-#   SWEEP_WORKERS_GLOB_ROOT   — default: $HOME/catalyst  (scans */workers/*/phase-*.json)
-#   SWEEP_WT_ROOT             — default: $HOME/catalyst/wt
-#   SWEEP_STALE_SECS          — default: 1800 (30 min)
-#   SWEEP_CACHE_MTIME_DAYS    — default: 30
-#   SWEEP_LINEAR_TEAMS        — default: "CTL ADV"
-#   SWEEP_DRY_RUN             — set to 1 or use --dry-run flag
-#   SWEEP_RUN_ID              — default: timestamp-based (set in tests for determinism)
+#   SWEEP_TRUNK_CACHE_DIR       — default: $HOME/.cache/trunk/repos
+#   SWEEP_WORKERS_GLOB_ROOT     — default: $HOME/catalyst  (scans */workers/*/phase-*.json)
+#   SWEEP_WT_ROOT               — default: $HOME/catalyst/wt
+#   SWEEP_STALE_SECS            — default: 1800 (30 min)
+#   SWEEP_CACHE_MTIME_DAYS      — default: 30
+#   SWEEP_IDLE_HOURS            — idle window before a worktree qualifies (default from config / 48)
+#   SWEEP_MAX_REMOVALS          — per-run deletion cap (default from config / 20)
+#   SWEEP_SALVAGE_PUSH          — 1 to push salvage branch before remove (default from config / 0)
+#   SWEEP_INTERVAL_HOURS        — launchd schedule token (1|2|3h, default from config / 2)
+#   SWEEP_INCLUDE_GLOBAL_CLAUDE_WT — scan ~/.claude/worktrees (default 1)
+#   SWEEP_PROJECT_CLAUDE_WT     — project .claude/worktrees path
+#   SWEEP_DRY_RUN               — set to 1 or use --dry-run flag
+#   SWEEP_RUN_ID                — default: timestamp-based (set in tests for determinism)
+#   SWEEP_FORCE_POWER           — 1 to force sweep even on battery
 
 set -uo pipefail
 
@@ -33,10 +40,19 @@ export PATH="${PATH}:${SCRIPT_DIR}"
 # ─── arg parsing ────────────────────────────────────────────────────────────
 
 DRY_RUN="${SWEEP_DRY_RUN:-0}"
+_PRINT_CONFIG=0
+_COUNT_DIRTY=0
+_CLASSIFY=0
+_CLASSIFY_PATH=""
+_CLASSIFY_TRUNK=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
+    --print-config) _PRINT_CONFIG=1; shift ;;
+    --count-dirty) _COUNT_DIRTY=1; shift ;;
+    --classify) _CLASSIFY=1; _CLASSIFY_PATH="${2:-}"; [[ -n "$_CLASSIFY_PATH" ]] && shift; shift ;;
+    --trunk)    _CLASSIFY_TRUNK="${2:-}"; shift 2 ;;
     --help|-h)
       grep '^#' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -49,6 +65,80 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# --- config + noise classification (CTL-1030) ---
+# Segment-anchored noise (intentionally stricter than worktree-safety.mjs substring match)
+SWEEP_NOISE_PATHS=( node_modules .cache .trunk dist build .DS_Store bun.lock .session-id )
+
+_resolve_sweep_config_path() {
+  local dir="$PWD"
+  while [[ "$dir" != "/" && -n "$dir" ]]; do
+    [[ -f "${dir}/.catalyst/config.json" ]] && { printf '%s' "${dir}/.catalyst/config.json"; return 0; }
+    dir="$(dirname "$dir")"
+  done
+  local repo_cfg="${SCRIPT_DIR}/../../../.catalyst/config.json"
+  [[ -f "$repo_cfg" ]] && { printf '%s' "$repo_cfg"; return 0; }
+  printf ''
+}
+
+_cfg_str() {
+  [[ -f "${SWEEP_CONFIG_PATH:-}" ]] && command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+  jq -r "$1 // empty" "$SWEEP_CONFIG_PATH" 2>/dev/null || printf ''
+}
+
+_load_sweep_config() {
+  local v
+  if [[ -z "${SWEEP_IDLE_HOURS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.idleHours')"; SWEEP_IDLE_HOURS="${v:-48}"
+  fi
+  if [[ -z "${SWEEP_INTERVAL_HOURS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.intervalHours')"; SWEEP_INTERVAL_HOURS="${v:-2}"
+  fi
+  case "$SWEEP_INTERVAL_HOURS" in
+    1|2|3) ;;
+    *) log "sweep config: intervalHours='${SWEEP_INTERVAL_HOURS}' invalid (allowed 1|2|3); falling back to default 2" >&2
+       SWEEP_INTERVAL_HOURS=2 ;;
+  esac
+  # salvagePush: do NOT use jq // default (false is jq-falsy; see draft-pr.sh:146-147)
+  if [[ -z "${SWEEP_SALVAGE_PUSH:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.salvagePush')"
+    [[ "$v" == "true" ]] && SWEEP_SALVAGE_PUSH=1 || SWEEP_SALVAGE_PUSH=0
+  else
+    [[ "$SWEEP_SALVAGE_PUSH" == "true" || "$SWEEP_SALVAGE_PUSH" == "1" ]] && SWEEP_SALVAGE_PUSH=1 || SWEEP_SALVAGE_PUSH=0
+  fi
+  if [[ -z "${SWEEP_MAX_REMOVALS:-}" ]]; then
+    v="$(_cfg_str '.catalyst.sweep.maxRemovalsPerRun')"; SWEEP_MAX_REMOVALS="${v:-20}"
+  fi
+}
+
+_porcelain_path() {
+  local body="${1:3}"
+  [[ "$body" == *" -> "* ]] && body="${body##* -> }"
+  body="${body#\"}" body="${body%\"}"
+  printf '%s' "$body"
+}
+
+_is_noise_path() {
+  local p="$1" n
+  [[ "$p" == *.log ]] && return 0
+  [[ "$p" == .catalyst/config.json ]] && return 0
+  for n in "${SWEEP_NOISE_PATHS[@]}"; do
+    [[ "$p" == "$n" || "$p" == "$n/"* || "$p" == *"/$n" || "$p" == *"/$n/"* ]] && return 0
+  done
+  return 1
+}
+
+_real_dirty_count_stdin() {
+  local line p count=0
+  while IFS= read -r line; do
+    [[ -z "${line// }" ]] && continue
+    p="$(_porcelain_path "$line")"
+    _is_noise_path "$p" || count=$((count+1))
+  done
+  printf '%s\n' "$count"
+}
+
+_real_dirty_count() { git -C "$1" status --porcelain 2>/dev/null | _real_dirty_count_stdin; }
+
 # ─── roots (overridable via env) ────────────────────────────────────────────
 
 _init_roots() {
@@ -59,9 +149,19 @@ _init_roots() {
   SWEEP_CACHE_MTIME_DAYS="${SWEEP_CACHE_MTIME_DAYS:-30}"
   SWEEP_LINEAR_TEAMS="${SWEEP_LINEAR_TEAMS:-CTL ADV}"
   SWEEP_RUN_ID="${SWEEP_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+  SWEEP_INCLUDE_GLOBAL_CLAUDE_WT="${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}"
+  SWEEP_PROJECT_CLAUDE_WT="${SWEEP_PROJECT_CLAUDE_WT:-${SCRIPT_DIR%/plugins/dev/scripts}/.claude/worktrees}"
+  SWEEP_CONFIG_PATH="${SWEEP_CONFIG_PATH:-$(_resolve_sweep_config_path)}"
+  _load_sweep_config
 }
 
-_init_roots
+# OTel sweep counters
+_SWEEP_REMOVED=0
+_SWEEP_SALVAGE_SKIPPED=0
+_SWEEP_ACTIVE_SKIPPED=0
+_SWEEP_KEEP=0
+_SWEEP_RECLAIMED_KB=0
+_SWEEP_START_EPOCH=0
 
 # global cache for live bg_job_ids (populated once per run by _live_bg_ids)
 _LIVE_BG_IDS=""
@@ -83,6 +183,38 @@ emit_reclaim() {
     --attr "vector=${vector}" \
     --attr "resource=${resource}" >/dev/null 2>&1 || true
 }
+
+emit_sweep_completed() {
+  command -v emit-otel-event.sh >/dev/null 2>&1 || return 0
+  local now dur bytes host
+  now="$(date -u +%s)"
+  dur=$(( (now - _SWEEP_START_EPOCH) * 1000 ))
+  [[ $dur -lt 0 ]] && dur=0
+  bytes=$(( _SWEEP_RECLAIMED_KB * 1024 ))
+  host="$(hostname 2>/dev/null || echo unknown)"
+  emit-otel-event.sh \
+    --event "worktree.sweep.completed" --outcome success \
+    --session-id "$SWEEP_RUN_ID" \
+    --attr "reclaimedBytes=${bytes}" --attr "removed=${_SWEEP_REMOVED}" \
+    --attr "salvageSkipped=${_SWEEP_SALVAGE_SKIPPED}" \
+    --attr "activeSkipped=${_SWEEP_ACTIVE_SKIPPED}" \
+    --attr "durationMs=${dur}" --attr "host=${host}" >/dev/null 2>&1 || true
+}
+
+_sweep_count() {
+  case "$1" in
+    removed)        _SWEEP_REMOVED=$((_SWEEP_REMOVED+1)) ;;
+    salvageSkipped) _SWEEP_SALVAGE_SKIPPED=$((_SWEEP_SALVAGE_SKIPPED+1)) ;;
+    activeSkipped)  _SWEEP_ACTIVE_SKIPPED=$((_SWEEP_ACTIVE_SKIPPED+1)) ;;
+    keep)           _SWEEP_KEEP=$((_SWEEP_KEEP+1)) ;;
+  esac
+}
+
+_du_kb() { du -sk "$1" 2>/dev/null | awk '{print $1+0}' || echo 0; }
+
+_sweep_add_kb() { _SWEEP_RECLAIMED_KB=$((_SWEEP_RECLAIMED_KB+${1:-0})); }
+
+_init_roots
 
 # ─── vector 4: trunk cache GC ───────────────────────────────────────────────
 
@@ -131,6 +263,88 @@ _age_secs() {
     || echo 0)"
   epoch_now="$(date -u +%s)"
   echo $(( epoch_now - epoch_then ))
+}
+
+# --- vector 2 classifier (CTL-1030) ---
+
+_LIVE_AGENTS_JSON=""
+_LIVE_AGENTS_LOADED=0
+_live_agents_json() {
+  if [[ "$_LIVE_AGENTS_LOADED" -eq 0 ]]; then
+    _LIVE_AGENTS_JSON="$(claude agents --json 2>/dev/null || echo '[]')"
+    _LIVE_AGENTS_LOADED=1
+  fi
+  printf '%s' "$_LIVE_AGENTS_JSON"
+}
+
+_wt_active_session() {
+  local wt="${1%/}" json
+  json="$(_live_agents_json)"
+  printf '%s' "$json" | jq -e --arg wt "$wt" \
+    '[.[]? | select(.cwd != null and (.cwd == $wt or (.cwd | startswith($wt + "/"))))] | length > 0' \
+    >/dev/null 2>&1
+}
+
+_is_orphan_gitfile_dir() {
+  local gitfile="${1}/.git" gitdir
+  [[ -f "$gitfile" ]] || return 1
+  gitdir="$(sed -n 's/^gitdir: //p' "$gitfile" 2>/dev/null)"
+  [[ -n "$gitdir" ]] || return 1
+  [[ "$gitdir" == /* ]] || gitdir="${1}/${gitdir}"
+  [[ ! -d "$gitdir" ]]
+}
+
+_wt_ancestry_ok() {
+  git -C "$1" merge-base --is-ancestor HEAD "$2" >/dev/null 2>&1 && return 0
+  [[ -n "$(git -C "$1" branch -r --contains HEAD 2>/dev/null)" ]] && return 0
+  return 1
+}
+
+_wt_unpushed_count() {
+  local ref
+  local refs=()
+  while IFS= read -r ref; do
+    [[ -n "$ref" ]] && refs+=( "$ref" )
+  done < <(git -C "$1" for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null)
+  [[ ${#refs[@]} -eq 0 ]] && { printf '0'; return 0; }
+  git -C "$1" rev-list --count HEAD --not "${refs[@]}" 2>/dev/null || printf '0'
+}
+
+_wt_newest_mtime() {
+  find "$1" -type f \
+    -not -path '*/node_modules/*' -not -path '*/.cache/*' \
+    -not -path '*/.trunk/*' -not -path '*/dist/*' -not -path '*/build/*' \
+    2>/dev/null \
+  | while IFS= read -r f; do
+      stat -f '%m' "$f" 2>/dev/null || stat -c '%Y' "$f" 2>/dev/null || echo 0
+    done \
+  | sort -nr | head -1
+}
+
+_wt_is_idle() {
+  local newest now
+  newest="$(_wt_newest_mtime "$1")"
+  [[ -z "$newest" || "$newest" == "0" ]] && return 0
+  now="$(date -u +%s)"
+  [[ $(( now - newest )) -ge $(( SWEEP_IDLE_HOURS * 3600 )) ]]
+}
+
+classify_worktree() {
+  local wt="$1" trunk="${2:-origin/main}" dirty unpushed
+  [[ -d "$wt" ]] || { printf 'KEEP'; return 0; }
+  _wt_active_session "$wt" 2>/dev/null && { printf 'KEEP'; return 0; }
+  if _is_orphan_gitfile_dir "$wt" 2>/dev/null; then
+    _wt_is_idle "$wt" && { printf 'ORPHAN_GITFILE'; return 0; }
+    printf 'KEEP'; return 0
+  fi
+  dirty="$(_real_dirty_count "$wt" 2>/dev/null || echo 0)"
+  [[ "$dirty" -gt 0 ]] && { printf 'SALVAGE_DIRTY'; return 0; }
+  unpushed="$(_wt_unpushed_count "$wt" 2>/dev/null || echo 0)"
+  [[ "$unpushed" -gt 0 ]] && { printf 'SALVAGE_UNPUSHED'; return 0; }
+  if _wt_ancestry_ok "$wt" "$trunk" 2>/dev/null && _wt_is_idle "$wt"; then
+    printf 'SAFE'; return 0
+  fi
+  printf 'KEEP'
 }
 
 # Artifact files to exclude from signal sweeping (by basename)
@@ -238,59 +452,190 @@ sweep_procs() {
   done < <(_candidate_pids)
 }
 
-# ─── vector 2: Done-ticket worktree removal ─────────────────────────────────
+# ─── vector 2: multi-signal worktree reclamation (CTL-1030) ─────────────────
+
+should_run_on_power() {
+  local override="${SWEEP_FORCE_POWER:-}"
+  case "$override" in ac|AC) return 0 ;; battery|BATTERY) return 1 ;; esac
+  if command -v pmset >/dev/null 2>&1; then
+    pmset -g batt 2>/dev/null | grep -q "AC Power" && return 0
+    pmset -g batt 2>/dev/null | grep -q "Battery Power" && return 1
+    return 0
+  fi
+  local f
+  for f in /sys/class/power_supply/*/online; do
+    [[ -e "$f" ]] && [[ "$(cat "$f" 2>/dev/null)" == "1" ]] && return 0
+  done
+  return 0
+}
+
+resolve_trunk_ref() {
+  git -C "$1" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
+    || printf 'origin/main'
+}
+
+discover_worktree_roots() {
+  printf '%s\n' "$SWEEP_WT_ROOT"
+  if [[ "${SWEEP_INCLUDE_GLOBAL_CLAUDE_WT:-1}" == "1" ]]; then
+    local global_wt="${HOME}/.claude/worktrees"
+    [[ -d "$global_wt" ]] && printf '%s\n' "$global_wt"
+  fi
+  local proj_wt="${SWEEP_PROJECT_CLAUDE_WT:-}"
+  [[ -n "$proj_wt" && -d "$proj_wt" && "$proj_wt" != "${HOME}/.claude/worktrees" ]] \
+    && printf '%s\n' "$proj_wt"
+}
+
+enumerate_worktree_dirs() {
+  local root="$1"
+  [[ -d "$root" ]] || return 0
+  find "$root" -mindepth 1 -maxdepth 2 -type d -print0 2>/dev/null \
+  | while IFS= read -r -d '' d; do
+      [[ -e "${d}/.git" ]] && printf '%s\0' "$d"
+    done
+}
+
+_is_primary_checkout() {
+  local wt="$1"
+  local primary
+  primary="$(git -C "$wt" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
+  [[ -z "$primary" ]] && return 1
+  local wt_real primary_real
+  wt_real="$(cd "$wt" 2>/dev/null && pwd -P)"
+  primary_real="$(cd "$primary" 2>/dev/null && pwd -P)"
+  [[ "$wt_real" == "$primary_real" ]]
+}
+
+salvage_push_then_remove() {
+  local wt="$1" ticket="$2" sha branch
+  sha="$(git -C "$wt" rev-parse --short HEAD 2>/dev/null)"
+  branch="salvage/${ticket}-${sha}"
+  if is_dry; then log "[dry-run] would push ${branch} then remove: $wt"; return 1; fi
+  if git -C "$wt" push -u origin "HEAD:refs/heads/${branch}" 2>/dev/null; then
+    log "salvage pushed ${branch} from $wt"; return 0
+  fi
+  log "salvage push failed for $wt (${branch}) — keeping"; return 1
+}
 
 sweep_worktrees() {
-  local team id wt
-  for team in $SWEEP_LINEAR_TEAMS; do
-    while IFS= read -r id; do
-      [[ -n "$id" ]] || continue
+  if ! should_run_on_power; then
+    log "on battery — deferring worktree sweep (cheap vectors already ran)"
+    return 0
+  fi
 
-      # locate worktree: $SWEEP_WT_ROOT/*/$id
-      wt=""
-      local candidate
-      for candidate in "${SWEEP_WT_ROOT}"/*/"$id"; do
-        [[ -d "$candidate" ]] && { wt="$candidate"; break; }
-      done
-      [[ -n "$wt" ]] || continue
+  local root wt trunk verdict wt_id kb
+  local removed_count=0 deferred=0
 
-      # clean check first (cheap)
-      if [[ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]]; then
-        log "skip dirty worktree: $wt"
+  while IFS= read -r root; do
+    while IFS= read -r -d '' wt; do
+      wt_id="$(basename "$wt")"
+
+      # never remove the primary checkout of any git repo
+      if _is_primary_checkout "$wt" 2>/dev/null; then
+        log "skip primary checkout: $wt"
         continue
       fi
 
-      if is_dry; then
-        log "[dry-run] would remove worktree: $wt"
-        continue
-      fi
+      trunk="$(resolve_trunk_ref "$wt")"
+      verdict="$(classify_worktree "$wt" "$trunk")"
 
-      # presweep: stop sessions (gate before irreversible remove)
-      if command -v worktree-presweep.sh >/dev/null 2>&1; then
-        worktree-presweep.sh "$wt" 2>/dev/null || { log "skip (sessions remain): $wt"; continue; }
-      fi
+      case "$verdict" in
+        SAFE)
+          if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
+            deferred=$((deferred+1)); continue
+          fi
+          if is_dry; then
+            log "[dry-run] would remove worktree (SAFE): $wt"
+            _sweep_count removed; removed_count=$((removed_count+1))
+            continue
+          fi
+          if command -v worktree-presweep.sh >/dev/null 2>&1; then
+            worktree-presweep.sh "$wt" 2>/dev/null || {
+              log "skip (sessions remain): $wt"; _sweep_count activeSkipped; continue
+            }
+          fi
+          kb="$(_du_kb "$wt")"
+          git worktree remove --force "$wt" 2>/dev/null && {
+            log "removed worktree (SAFE): $wt"
+            _sweep_count removed; removed_count=$((removed_count+1))
+            _sweep_add_kb "$kb"
+            emit_reclaim worktree "$wt"
+          }
+          ;;
+        ORPHAN_GITFILE)
+          if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
+            deferred=$((deferred+1)); continue
+          fi
+          if is_dry; then
+            log "[dry-run] would remove orphan gitfile dir: $wt"
+            _sweep_count removed; removed_count=$((removed_count+1))
+            continue
+          fi
+          kb="$(_du_kb "$wt")"
+          rm -rf "$wt" && {
+            log "removed orphan gitfile dir: $wt"
+            _sweep_count removed; removed_count=$((removed_count+1))
+            _sweep_add_kb "$kb"
+            emit_reclaim orphan_gitfile "$wt"
+          }
+          ;;
+        SALVAGE_UNPUSHED)
+          wt_id="$(basename "$wt")"
+          if [[ "$SWEEP_SALVAGE_PUSH" == "1" ]]; then
+            if salvage_push_then_remove "$wt" "$wt_id"; then
+              if [[ -n "${SWEEP_MAX_REMOVALS:-}" && "$removed_count" -ge "$SWEEP_MAX_REMOVALS" ]]; then
+                deferred=$((deferred+1)); continue
+              fi
+              git worktree remove --force "$wt" 2>/dev/null \
+                && { log "removed (salvage) worktree: $wt"; emit_reclaim worktree "$wt"; removed_count=$((removed_count+1)); }
+            fi
+          else
+            log "salvage (unpushed commits, skip+report): $wt"
+            _sweep_count salvageSkipped
+          fi
+          ;;
+        SALVAGE_DIRTY)
+          log "skip SALVAGE_DIRTY (has real uncommitted changes): $wt"
+          _sweep_count salvageSkipped
+          ;;
+        KEEP)
+          _sweep_count keep
+          ;;
+      esac
+    done < <(enumerate_worktree_dirs "$root")
+  done < <(discover_worktree_roots)
 
-      git worktree remove "$wt" 2>/dev/null \
-        && { log "removed worktree: $wt"; emit_reclaim worktree "$wt"; }
-
-    done < <(linearis issues list --team "$team" --status "Done" --limit 200 2>/dev/null \
-               | jq -r '.[].identifier' 2>/dev/null || true)
-  done
+  [[ "$deferred" -gt 0 ]] && log "cap reached (${SWEEP_MAX_REMOVALS}), ${deferred} deferred"
+  # SWEEP_LINEAR_TEAMS deprecated — Linear Done query removed (CTL-1030)
 }
 
 # ─── main ───────────────────────────────────────────────────────────────────
 
 main() {
+  if [[ "$_PRINT_CONFIG" == "1" ]]; then
+    printf 'SWEEP_IDLE_HOURS=%s\nSWEEP_INTERVAL_HOURS=%s\nSWEEP_SALVAGE_PUSH=%s\nSWEEP_MAX_REMOVALS=%s\n' \
+      "$SWEEP_IDLE_HOURS" "$SWEEP_INTERVAL_HOURS" "$SWEEP_SALVAGE_PUSH" "$SWEEP_MAX_REMOVALS"
+    exit 0
+  fi
+  [[ "$_COUNT_DIRTY" == "1" ]] && { _real_dirty_count_stdin; exit 0; }
+
+  if [[ "$_CLASSIFY" == "1" ]]; then
+    classify_worktree "$_CLASSIFY_PATH" "${_CLASSIFY_TRUNK:-origin/main}"
+    echo
+    exit 0
+  fi
+
   if is_dry; then
     log "=== DRY RUN — no changes will be made ==="
   fi
 
   log "starting sweep (vectors: trunk_cache, signals, procs, worktrees)"
 
+  _SWEEP_START_EPOCH="$(date -u +%s)"
   sweep_trunk_cache
   sweep_procs
   sweep_signals
   sweep_worktrees
+  emit_sweep_completed
 
   log "sweep complete"
   exit 0
