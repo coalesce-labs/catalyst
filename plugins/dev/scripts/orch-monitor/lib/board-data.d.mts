@@ -377,6 +377,18 @@ export function synthesizeQueuedTicket(
   eligible: unknown,
   linfo: Record<string, unknown>,
 ): BoardTicket;
+/** CTL-1152: PURE prefix→short-repo-name map from catalyst.monitor.linear.teams[].
+ *  Maps each {key,vcsRepo} to UPPERCASE-key → lowercased basename; skips entries
+ *  whose vcsRepo lacks a '/'. Fail-open to {} for a non-array input. */
+export function buildTeamRepoMap(
+  teams: Array<{ key: string; vcsRepo: string }> | null | undefined,
+): Record<string, string>;
+/** CTL-1152: resolve a ticket's repo swim-lane short name from the config-driven
+ *  TEAM_REPO map; an UNCONFIGURED prefix falls back to its raw lowercased team key
+ *  (self-identifying), NEVER "other". */
+export function repoFor(ticket: string): string;
+/** CTL-1152: a ticket's team prefix, verbatim (e.g. "CTL-1152" → "CTL"). */
+export function teamFor(ticket: string): string;
 /** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
  *  surface). Priority: explicit triage.title → the authoritative Linear title
  *  (linfo, then the eligible projection) → triage.summary (last-ditch) → the

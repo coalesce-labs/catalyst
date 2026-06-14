@@ -170,6 +170,30 @@ describe("SSE server", () => {
     expect(data.orchestrators[0]?.id).toBe("orch-test");
   });
 
+  // CTL-1152: GET /api/projects returns the config-driven project roster as
+  // { projects: ProjectDescriptor[] }. It NEVER 4xx/5xx — fail-open to
+  // { projects: [] } (the test cwd has no .catalyst/config.json and the board has
+  // no observed repos in CI, so the roster is empty but well-formed).
+  it("should serve the project roster at /api/projects (200, {projects:[...]}, fail-open)", async () => {
+    const res = await fetch(`${baseUrl}/api/projects`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const data = (await res.json()) as { projects: Array<Record<string, unknown>> };
+    expect(Array.isArray(data.projects)).toBe(true);
+    // every descriptor (if any) carries the full contract shape
+    for (const p of data.projects) {
+      expect(typeof p.key).toBe("string");
+      expect(typeof p.name).toBe("string");
+      expect(typeof p.repo).toBe("string");
+      expect(typeof p.iconUrl).toBe("string");
+      expect(typeof p.hasWork).toBe("boolean");
+      // vcsRepo / defaultColor / repoRoot are string|null
+      expect(p.vcsRepo === null || typeof p.vcsRepo === "string").toBe(true);
+      expect(p.defaultColor === null || typeof p.defaultColor === "string").toBe(true);
+      expect(p.repoRoot === null || typeof p.repoRoot === "string").toBe(true);
+    }
+  }, 30_000);
+
   it("should serve SSE stream at /events", async () => {
     const controller = new AbortController();
     const res = await fetch(`${baseUrl}/events`, { signal: controller.signal });

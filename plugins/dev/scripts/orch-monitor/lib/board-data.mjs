@@ -17,9 +17,10 @@
 
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
@@ -278,10 +279,53 @@ export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map())
   };
 }
 
-// team/prefix → repo swim-lane label
-const TEAM_REPO = { CTL: "catalyst", ADV: "adva" };
-const repoFor = (ticket) => TEAM_REPO[String(ticket).split("-")[0]] || "other";
-const teamFor = (ticket) => String(ticket).split("-")[0];
+// team/prefix → repo swim-lane label.
+//
+// CTL-1152: the prefix→short-repo-name map is now CONFIG-DRIVEN from
+// catalyst.monitor.linear.teams[] (the single source of truth all 5 teams are
+// already declared in), replacing the hardcoded `{ CTL: "catalyst", ADV: "adva" }`.
+// buildTeamRepoMap is PURE so the project-roster builder and the unit test can
+// drive it directly; loadTeamRepoMap performs the sync two-location config read
+// (mirroring maxParallel()'s L2-then-L1 lookup) once at import — preserving the
+// const-loaded-once semantics of the old literal and keeping repoFor/teamFor
+// synchronous (they're called from the sync synthesizeQueuedTicket, line ~219).
+
+// buildTeamRepoMap(teams) → { [KEY.toUpperCase()]: basename(vcsRepo).toLowerCase() }.
+// Skips entries whose vcsRepo lacks a '/' (malformed). Fail-open to {}.
+export function buildTeamRepoMap(teams) {
+  const map = {};
+  if (!Array.isArray(teams)) return map;
+  for (const t of teams) {
+    if (!t || typeof t.key !== "string" || typeof t.vcsRepo !== "string") continue;
+    if (!t.vcsRepo.includes("/")) continue;
+    map[t.key.toUpperCase()] = basename(t.vcsRepo).toLowerCase();
+  }
+  return map;
+}
+
+// loadTeamRepoMap() — sync L2-then-L1 config read, fail-open to {}. Same two
+// locations and precedence direction maxParallel() uses (L2 = ~/.config/catalyst,
+// L1 = cwd/.catalyst), preferring the L2 teams[] then L1.
+function readJSONSync(path) {
+  try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+}
+function loadTeamRepoMap() {
+  const l2 = readJSONSync(join(HOME, ".config", "catalyst", "config.json"));
+  const l1 = readJSONSync(join(process.cwd(), ".catalyst", "config.json"));
+  const pickTeams = (c) => c?.catalyst?.monitor?.linear?.teams ?? c?.monitor?.linear?.teams;
+  const teams = pickTeams(l2) ?? pickTeams(l1) ?? [];
+  return buildTeamRepoMap(teams);
+}
+
+const TEAM_REPO = loadTeamRepoMap();
+// CTL-1152: an UNCONFIGURED prefix resolves to its OWN raw lowercased team key
+// (self-identifying), NEVER the opaque "other" bucket — so the union rule in
+// project-roster.ts can surface observed-but-unconfigured work as its own lane.
+export const repoFor = (ticket) => {
+  const prefix = String(ticket).split("-")[0];
+  return TEAM_REPO[prefix] || prefix.toLowerCase();
+};
+export const teamFor = (ticket) => String(ticket).split("-")[0];
 
 async function readJSON(path, fallback = null) {
   try { return JSON.parse(await readFile(path, "utf8")); } catch { return fallback; }
