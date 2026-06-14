@@ -50,6 +50,8 @@
 //     needs-human label once via labelOnce, and flip the matching capped
 //     wake-diagnostician intent(s) to 'escalated'.
 
+import { readFileSync, writeFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 import { labelOnce } from "../label-guard.mjs";
 import { log } from "../config.mjs";
 import { coerceExplanation } from "../escalation-explanation.mjs";
@@ -173,6 +175,26 @@ export function executeEscalations(
               "event.name": "escalate.human",
               payload: { subject, ticket, why, explanation },
             });
+            // CTL-1131: the board reads the SIGNAL, not the event log — persist the
+            // explanation + a durable needsHumanSince so the detail-pane card renders
+            // and the waiting-age anchor is real. Best-effort; a write failure is
+            // recorded but never aborts the escalation (label/page already landed).
+            if (orchDir && phaseName) {
+              try {
+                const sigPath = join(orchDir, "workers", ticket, `phase-${phaseName}.json`);
+                const cur = JSON.parse(readFileSync(sigPath, "utf8"));
+                const updated = {
+                  ...cur,
+                  explanation,
+                  needsHumanSince: cur.needsHumanSince ?? new Date().toISOString(),
+                };
+                const tmp = `${sigPath}.tmp.${process.pid}`;
+                writeFileSync(tmp, `${JSON.stringify(updated, null, 2)}\n`);
+                renameSync(tmp, sigPath);
+              } catch (sigErr) {
+                errors.push({ subject, phase: "signalWrite", err: String(sigErr?.message ?? sigErr) });
+              }
+            }
           } catch (evtErr) {
             errors.push({ subject, phase: "appendEvent", err: String(evtErr?.message ?? evtErr) });
           }

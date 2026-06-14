@@ -403,7 +403,9 @@ if [[ -n $ORCH_DIR && $NO_SIGNAL_UPDATE -eq 0 ]]; then
               elif \$reason == \"\" then .
               else .failureReason = \$reason end)
            | (if \$handoff == \"\" then . else .handoffPath    = \$handoff end)
-           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase else . end)
+           | (if \$status  == \"needs-input\" then .parkedFrom = \$phase
+                | (if (.needsHumanSince == null) then .needsHumanSince = \$ts else . end)
+              else . end)
            | (if .host == null and \$host_name != \"\" then .host = {name: \$host_name, id: \$host_id} else . end)" \
 			"$SIGNAL_FILE" >"$TMP" 2>/dev/null; then
 			mv "$TMP" "$SIGNAL_FILE"
