@@ -10,7 +10,7 @@ description: |
   a `claude --bg` job by `phase-agent-dispatch`, which invokes it via slash
   command — hence `user-invocable: true`.
 user-invocable: true
-disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
+disable-model-invocation: false # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
@@ -20,19 +20,20 @@ allowed-tools:
 
 # phase-monitor-merge
 
-The reactive half of the worker lifecycle. The PR exists (opened by
-[[phase-pr]]); this phase agent drives it to MERGED. Linear Done transition
-and worktree teardown are owned by [[phase-teardown]] (CTL-703). Implementation
-lifts the loop from `plugins/dev/skills/oneshot/SKILL.md`
-§"Step 2: Active PR Listen Loop" — same event names, same `mergeable_state`
-state machine, same inline fix-up cap — wrapped in the phase-agent envelope
-(signal file, comms channel, terminal event emission).
+The reactive half of the worker lifecycle. The PR exists (opened by [[phase-pr]]); this phase agent
+drives it to MERGED. Linear Done transition and worktree teardown are owned by [[phase-teardown]]
+(CTL-703). Implementation lifts the loop from `plugins/dev/skills/oneshot/SKILL.md` §"Step 2: Active
+PR Listen Loop" — same event names, same `mergeable_state` state machine, same inline fix-up cap —
+wrapped in the phase-agent envelope (signal file, comms channel, terminal event emission).
 
 ## Prerequisites
 
-- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=monitor-merge`, `CATALYST_TICKET` set by [[phase-agent-dispatch]].
-- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-pr.json` exists with `status=done` AND `.pr.number` populated by [[phase-pr]].
-- `gh` CLI authenticated; broker daemon optionally running (the loop falls back to direct `catalyst-events wait-for` filtering when it is not — see [[wait-for-github]]).
+- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=monitor-merge`,
+  `CATALYST_TICKET` set by [[phase-agent-dispatch]].
+- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-pr.json` exists with
+  `status=done` AND `.pr.number` populated by [[phase-pr]].
+- `gh` CLI authenticated; broker daemon optionally running (the loop falls back to direct
+  `catalyst-events wait-for` filtering when it is not — see [[wait-for-github]]).
 
 ## Prelude
 
@@ -110,47 +111,41 @@ Wall-clock cap is 24h (per plan §Failure handling).
 
 ## Phase-specific work — active listen loop
 
-Reuse the reactive listen loop from [[oneshot]] § Phase 5 Step 2. The full
-control flow lives there; this skill copies the body verbatim, substituting
-`phase-monitor-merge` framing in place of `oneshot`'s session-id machinery.
-Key elements that MUST be preserved:
+Reuse the reactive listen loop from [[oneshot]] § Phase 5 Step 2. The full control flow lives there;
+this skill copies the body verbatim, substituting `phase-monitor-merge` framing in place of
+`oneshot`'s session-id machinery. Key elements that MUST be preserved:
 
-1. **Event-driven, not polling.** `catalyst-events wait-for` blocks until a
-   PR-lifecycle event fires. Filter clause matches the canonical event names
-   `github.pr.merged`, `github.check_suite.completed`, `github.pr_review*`,
-   and `github.push` keyed by `attributes."vcs.pr.number"` (PR/review events)
-   or `body.payload.prNumbers` (check_suite/workflow_run — see
-   [[event-schema]]). When the broker daemon is up, register a
+1. **Event-driven, not polling.** `catalyst-events wait-for` blocks until a PR-lifecycle event
+   fires. Filter clause matches the canonical event names `github.pr.merged`,
+   `github.check_suite.completed`, `github.pr_review*`, and `github.push` keyed by
+   `attributes."vcs.pr.number"` (PR/review events) or `body.payload.prNumbers`
+   (check_suite/workflow_run — see [[event-schema]]). When the broker daemon is up, register a
    `pr_lifecycle` interest via `agent.checkin.claimed_pr` and wait on
-   `filter.wake.${CATALYST_SESSION_ID}` instead (the single-wake path — see
-   [[monitor-events]] Pattern 3).
+   `filter.wake.${CATALYST_SESSION_ID}` instead (the single-wake path — see [[monitor-events]]
+   Pattern 3).
 
-2. **REST is authoritative.** Every loop iteration calls
-   `gh api repos/${REPO}/pulls/${PR_NUMBER}` and reads `.merged` +
-   `.mergeable_state`. Never use `gh pr view --json mergeable` (GraphQL is
+2. **REST is authoritative.** Every loop iteration calls `gh api repos/${REPO}/pulls/${PR_NUMBER}`
+   and reads `.merged` + `.mergeable_state`. Never use `gh pr view --json mergeable` (GraphQL is
    eventually consistent for the merge-state fields and frequently lies).
 
 3. **State machine.** Branch on `mergeable_state`:
 
-   | state    | action |
-   |----------|--------|
-   | clean    | proceed to merge step |
-   | blocked  | resolve via `/catalyst-dev:review-comments` (bot threads) or run an inline CI fix-up commit (up to 3 attempts); 4th attempt → `stalled` |
-   | behind   | `git fetch && git rebase origin/<base> && git -c core.hooksPath=/dev/null push --force-with-lease` |
-   | dirty    | merge conflicts — emit `failed` with reason "merge conflicts (DIRTY)" |
-   | unknown/unstable | continue waiting for the next event |
+   | state            | action                                                                                                                                  |
+   | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+   | clean            | proceed to merge step                                                                                                                   |
+   | blocked          | resolve via `/catalyst-dev:review-comments` (bot threads) or run an inline CI fix-up commit (up to 3 attempts); 4th attempt → `stalled` |
+   | behind           | `git fetch && git rebase origin/<base> && git -c core.hooksPath=/dev/null push --force-with-lease`                                      |
+   | dirty            | merge conflicts — emit `failed` with reason "merge conflicts (DIRTY)"                                                                   |
+   | unknown/unstable | continue waiting for the next event                                                                                                     |
 
-4. **Human reviewer changes-requested.** After every wake, query
-   `gh pr view --json reviews` for the most recent `CHANGES_REQUESTED` from
-   a human reviewer (filter on `.author.login` not matching known bots). If
-   present, emit `failed` with reason "human reviewer ${LOGIN} requested
-   changes — operator action required". Do NOT attempt to address human
-   review comments programmatically.
+4. **Human reviewer changes-requested.** After every wake, query `gh pr view --json reviews` for the
+   most recent `CHANGES_REQUESTED` from a human reviewer (filter on `.author.login` not matching
+   known bots). If present, emit `failed` with reason "human reviewer ${LOGIN} requested changes —
+   operator action required". Do NOT attempt to address human review comments programmatically.
 
-5. **Wake narration.** Every iteration produces one short line of assistant
-   text before re-entering the wait (defeats the assistant `end_turn`
-   rendering bleed described in [[monitor-events]] § Narration). Shape:
-   `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
+5. **Wake narration.** Every iteration produces one short line of assistant text before re-entering
+   the wait (defeats the assistant `end_turn` rendering bleed described in [[monitor-events]] §
+   Narration). Shape: `wake: <event.name> #<PR_NUMBER> — <action being taken>`.
 
 ## Merge
 
@@ -159,6 +154,20 @@ Once `mergeable_state == "clean"` (and the PR isn't already merged):
 ```bash
 # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
 "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
+# CTL-1051: never merge a stale ref. Compare the PR head to the worktree HEAD;
+# on mismatch, re-push with lease and re-verify before merging.
+if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  PR_HEAD_OID="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha' 2>/dev/null || true)"
+  LOCAL_HEAD="$(git rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$PR_HEAD_OID" && -n "$LOCAL_HEAD" && "$PR_HEAD_OID" != "$LOCAL_HEAD" ]]; then
+    echo "phase-monitor-merge: PR head ${PR_HEAD_OID} != worktree HEAD ${LOCAL_HEAD}; re-pushing" >&2
+    if ! draft_pr_push_verify >/dev/null; then
+      echo "phase-monitor-merge: could not reconcile stale ref before merge" >&2
+      exit 1
+    fi
+  fi
+fi
 gh pr merge "$PR_NUMBER" --squash --delete-branch
 # REST is authoritative — confirm via REST, never GraphQL
 MERGED_OK=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.merged' 2>/dev/null || echo "false")
@@ -181,23 +190,20 @@ echo "phase-monitor-merge: pr#${PR_NUMBER} merged at ${MERGED_AT}"
 # CTL-703: worktree + branch removal moved to phase-teardown.
 ```
 
-Deployment verification (`skipDeployVerification=false`) is **not** in this
-phase's scope — that is `phase-monitor-deploy` (plan §Initiative 1 Phase 5).
-This skill exits cleanly the moment the merge lands and the End-block mirror is
-posted (CTL-703: Linear Done and worktree teardown happen in phase-teardown; the
-compound-log entry below is best-effort and never extends the phase on failure).
+Deployment verification (`skipDeployVerification=false`) is **not** in this phase's scope — that is
+`phase-monitor-deploy` (plan §Initiative 1 Phase 5). This skill exits cleanly the moment the merge
+lands and the End-block mirror is posted (CTL-703: Linear Done and worktree teardown happen in
+phase-teardown; the compound-log entry below is best-effort and never extends the phase on failure).
 
 ## Compound-log closing entry (CTL-813 — off the critical path)
 
-After the merge lands, write the ticket's compound-log entry
-so the estimation loop's sink fills autonomously (the unbuilt CTL-189 — in
-`merge-pr` a human answers these prompts; here YOU author them). **Best-effort:
-on ANY failure log one line and continue to the End block — never fail or
+After the merge lands, write the ticket's compound-log entry so the estimation loop's sink fills
+autonomously (the unbuilt CTL-189 — in `merge-pr` a human answers these prompts; here YOU author
+them). **Best-effort: on ANY failure log one line and continue to the End block — never fail or
 block the phase on this.**
 
-1. **Re-score from the merged diff** (CTL-746 structural bands → points
-   XS=1 S=3 M=5 L=8 XL=13; LOC = additions+deletions: `<50→1, <200→3, <800→5,
-   <2000→8, else 13`):
+1. **Re-score from the merged diff** (CTL-746 structural bands → points XS=1 S=3 M=5 L=8 XL=13; LOC
+   = additions+deletions: `<50→1, <200→3, <800→5, <2000→8, else 13`):
 
 ```bash
 LOC=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.additions + .deletions' 2>/dev/null || echo "")
@@ -209,18 +215,16 @@ elif [[ "$LOC" -lt 2000 ]]; then POINTS=8
 else POINTS=13; fi
 ```
 
-   Adjust ±1 step with judgment (e.g. heavy rework you personally resolved —
-   CI fix-up loops, rebases — justifies a bump). Skip the whole section when
-   `POINTS` is empty.
+Adjust ±1 step with judgment (e.g. heavy rework you personally resolved — CI fix-up loops, rebases —
+justifies a bump). Skip the whole section when `POINTS` is empty.
 
-2. **Author the two reflections yourself** — you just walked this PR through
-   merge, so you have the ground truth: `what_worked` (1-2 sentences) and
-   `what_surprised_me` (1-2 sentences; the BEHIND-rebase treadmill, bot review
-   threads, or flaky CI you resolved are exactly this signal).
+2. **Author the two reflections yourself** — you just walked this PR through merge, so you have the
+   ground truth: `what_worked` (1-2 sentences) and `what_surprised_me` (1-2 sentences; the
+   BEHIND-rebase treadmill, bot review threads, or flaky CI you resolved are exactly this signal).
 
-3. **Write the entry.** The helper resolves `estimate_at_start`/cost/wall from
-   its defaults; on a missing default, retry once with explicit overrides; on a
-   duplicate (re-walked phase), the "already exists" failure IS the skip path:
+3. **Write the entry.** The helper resolves `estimate_at_start`/cost/wall from its defaults; on a
+   missing default, retry once with explicit overrides; on a duplicate (re-walked phase), the
+   "already exists" failure IS the skip path:
 
 ```bash
 CL="${PLUGIN_ROOT}/scripts/compound-log.sh"
@@ -232,33 +236,28 @@ CL="${PLUGIN_ROOT}/scripts/compound-log.sh"
 || echo "phase-monitor-merge: compound-log entry skipped (non-fatal)" >&2
 ```
 
-Do NOT run the corpus refresh here (that is `compound-estimate` step 6 /
-operator cadence — a background phase worker must not mutate the committed
-corpus).
+Do NOT run the corpus refresh here (that is `compound-estimate` step 6 / operator cadence — a
+background phase worker must not mutate the committed corpus).
 
-4. **Run the cross-ticket retro (CTL-831 — the per-ticket learning step).** After
-   the compound-log entry (success OR skip), invoke `/catalyst-dev:ticket-retro`
-   with no arguments. It regenerates `thoughts/shared/retros/ticket/<today>.md`
-   over the since-last-retro window (same-day re-runs are cumulative by design)
-   and refreshes the watch-items the morning briefing surfaces — this is how the
-   system learns from every ticket it ships. Same contract as the entry above:
-   **best-effort, never blocks the End block** — on any retro failure, log one
-   line and continue.
+4. **Run the cross-ticket retro (CTL-831 — the per-ticket learning step).** After the compound-log
+   entry (success OR skip), invoke `/catalyst-dev:ticket-retro` with no arguments. It regenerates
+   `thoughts/shared/retros/ticket/<today>.md` over the since-last-retro window (same-day re-runs are
+   cumulative by design) and refreshes the watch-items the morning briefing surfaces — this is how
+   the system learns from every ticket it ships. Same contract as the entry above: **best-effort,
+   never blocks the End block** — on any retro failure, log one line and continue.
 
 ## End block
 
-Mirror the merge outcome to Linear as a single comment (CTL-632). Best-effort
-end-of-loop summary (per the design decision — per-finding detail like
-individual CI fix-up commits or bot review threads stays on the PR itself):
-merge commit + base branch, the final CI check rollup (passed/total), and a
-count of bot reviews handled (e.g. Codex) whose threads were resolved before
-the merge. Merge metadata is re-read from the signal file (`.pr.mergeCommitSha`
-/ `.pr.mergedAt`, written in the merge step above); CI + reviews are pulled once
-from `gh pr view`. Runs inside the ticket worktree (CTL-703: no auto-teardown
-`cd` here; the skill stays in the ticket worktree and relies on absolute
-signal paths and the PR number). Body hard-truncated to 30,000 bytes. Fail-open and
-idempotent via the per-phase marker file. Uniquely-named fence so the e2e test
-can extract just this block.
+Mirror the merge outcome to Linear as a single comment (CTL-632). Best-effort end-of-loop summary
+(per the design decision — per-finding detail like individual CI fix-up commits or bot review
+threads stays on the PR itself): merge commit + base branch, the final CI check rollup
+(passed/total), and a count of bot reviews handled (e.g. Codex) whose threads were resolved before
+the merge. Merge metadata is re-read from the signal file (`.pr.mergeCommitSha` / `.pr.mergedAt`,
+written in the merge step above); CI + reviews are pulled once from `gh pr view`. Runs inside the
+ticket worktree (CTL-703: no auto-teardown `cd` here; the skill stays in the ticket worktree and
+relies on absolute signal paths and the PR number). Body hard-truncated to 30,000 bytes. Fail-open
+and idempotent via the per-phase marker file. Uniquely-named fence so the e2e test can extract just
+this block.
 
 ```bash phase-monitor-merge-mirror
 LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
@@ -327,7 +326,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-monitor-merge: linear-comment-post failed (continuing)" >&2
@@ -359,25 +358,24 @@ Failure modes that emit `phase.monitor-merge.failed.${TICKET}`:
 - `dirty` (merge conflicts) — operator must rebase manually.
 - Human reviewer `CHANGES_REQUESTED` — operator must address comments.
 - CI blocked after 3 auto-fix attempts.
-- `gh pr merge` succeeded but REST confirms `.merged == false` (rare; usually
-  a branch-protection rule mismatch).
+- `gh pr merge` succeeded but REST confirms `.merged == false` (rare; usually a branch-protection
+  rule mismatch).
 - 24-hour wall-clock cap — orchestrator dispatches a fix-up or escalates.
 
 ## Comms discipline
 
 Inherits the contract from [[_phase-agent-template]]:
 
-| Type        | When                                                              |
-|-------------|------------------------------------------------------------------|
-| `info`      | At start with PR number; after each successful inline fix-up.     |
-| `attention` | DIRTY, human changes-requested, CI blocked after 3 attempts.      |
+| Type        | When                                                                   |
+| ----------- | ---------------------------------------------------------------------- |
+| `info`      | At start with PR number; after each successful inline fix-up.          |
+| `attention` | DIRTY, human changes-requested, CI blocked after 3 attempts.           |
 | `question`  | Reserved — this phase rarely needs to ask, since the work is reactive. |
-| `done`      | Emitted by `phase-agent-emit-complete` on merge confirmed.        |
+| `done`      | Emitted by `phase-agent-emit-complete` on merge confirmed.             |
 
 ## Why this is a thin wrapper
 
-Plan architectural commitment #3. The listen loop logic lives in [[oneshot]]
-SKILL.md and is exercised every day. Lifting it into a phase-agent skill
-without duplicating the body keeps both paths in lockstep — when the legacy
-oneshot path retires (plan §Initiative 1 Phase 6), this skill becomes the
-sole owner.
+Plan architectural commitment #3. The listen loop logic lives in [[oneshot]] SKILL.md and is
+exercised every day. Lifting it into a phase-agent skill without duplicating the body keeps both
+paths in lockstep — when the legacy oneshot path retires (plan §Initiative 1 Phase 6), this skill
+becomes the sole owner.

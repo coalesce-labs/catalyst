@@ -568,6 +568,137 @@ SIGNAL_REASON=$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)
 assert_eq "turn cap hit (75)" "$PAYLOAD_REASON" "turn-cap path still carries failure_reason in event"
 assert_eq "turn cap hit (75)" "$SIGNAL_REASON" "turn-cap path still carries failureReason in signal"
 
+# CTL-1023: the work-type dimension (catalyst.ticket.type) rides on every phase
+# terminal event, resolved from workers/<ticket>/triage.json .classification.
+echo ""
+echo "Test 36 (CTL-1023): catalyst.ticket.type reads triage.json .classification"
+fresh_env t36
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"classification":"bug","estimated_scope":"small"}' >"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/triage.json"
+"$EMIT_SCRIPT" --phase implement --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+assert_eq "bug" "$TTYPE" "catalyst.ticket.type = classification from triage.json"
+
+echo ""
+echo "Test 37 (CTL-1023): catalyst.ticket.type defaults to 'unknown' with no triage.json"
+fresh_env t37
+"$EMIT_SCRIPT" --phase triage --ticket CTL-100 --status complete >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+HAS_TTYPE=$(echo "$LINE" | jq -r '.attributes | has("catalyst.ticket.type")')
+assert_eq "true" "$HAS_TTYPE" "catalyst.ticket.type is present even with no classification"
+assert_eq "unknown" "$TTYPE" "catalyst.ticket.type defaults to 'unknown' (never inconsistently missing)"
+
+echo ""
+echo "Test 38 (CTL-1023): catalyst.ticket.type rides the .failed event too"
+fresh_env t38
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100"
+echo '{"classification":"feature"}' >"${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-100/triage.json"
+"$EMIT_SCRIPT" --phase verify --ticket CTL-100 --status failed --reason "tests red" >/dev/null 2>&1
+LINE=$(read_event_line)
+TTYPE=$(echo "$LINE" | jq -r '.attributes."catalyst.ticket.type"')
+assert_eq "feature" "$TTYPE" "catalyst.ticket.type present on failed event"
+
+# ─── CTL-1081 Phase 2: artifact self-check in emit-complete ──────────────────
+# For thoughts-producing phases (research, plan), --status complete is downgraded
+# to failed with reason=artifact_not_gate_visible when the own artifact is absent.
+# Non-thoughts phases and non-complete statuses are unaffected.
+
+echo ""
+echo "Test 39 (CTL-1081 P2): research + doc present → complete emits phase.research.complete"
+fresh_env t39
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+touch "${PROJ_DIR}/thoughts/shared/research/2026-06-12-ctl-1081-x.md"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.research.complete.CTL-1081" "$EVENT_NAME" "doc present → complete event emitted"
+
+echo ""
+echo "Test 40 (CTL-1081 P2): research + doc absent → complete downgraded to failed with artifact_not_gate_visible"
+fresh_env t40
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.research.failed.CTL-1081" "$EVENT_NAME" "doc absent → failed event emitted"
+assert_eq "artifact_not_gate_visible" "$REASON" "failure_reason=artifact_not_gate_visible"
+
+echo ""
+echo "Test 41 (CTL-1081 P2): verify (non-thoughts phase) → complete unaffected"
+fresh_env t41
+(cd "${TEST_DIR}" && "$EMIT_SCRIPT" --phase verify --ticket CTL-1081 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.verify.complete.CTL-1081" "$EVENT_NAME" "non-thoughts phase: complete unaffected by self-check"
+
+echo ""
+echo "Test 42 (CTL-1081 P2): research + status failed → NOT altered by self-check"
+fresh_env t42
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/research"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase research --ticket CTL-1081 --status failed --reason "tests red" >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.research.failed.CTL-1081" "$EVENT_NAME" "non-complete status: event name unchanged"
+assert_eq "tests red" "$REASON" "non-complete status: caller reason preserved"
+
+
+# ─── CTL-1097: artifact self-check resolves against signal.worktreePath ──────
+# A revived worker may re-emit from a cwd that is NOT the ticket worktree. The
+# gate must resolve the relative thoughts dir against signal.worktreePath
+# (CTL-615) rather than the emit process's cwd.
+
+echo ""
+echo "Test 43 (CTL-1097): revived worker — artifact in worktreePath, emit from a different cwd → complete stands"
+fresh_env t43
+WT_DIR="${TEST_DIR}/worktree"
+OTHER_CWD="${TEST_DIR}/elsewhere"
+mkdir -p "${WT_DIR}/thoughts/shared/plans" "${OTHER_CWD}"
+touch "${WT_DIR}/thoughts/shared/plans/2026-06-13-ctl-1097-x.md"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+jq -nc --arg wt "$WT_DIR" '{ticket:"CTL-1097",phase:"plan",worktreePath:$wt,generation:1,attempt:1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$OTHER_CWD" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.plan.complete.CTL-1097" "$EVENT_NAME" "worktreePath resolution: complete stands from foreign cwd"
+
+echo ""
+echo "Test 44 (CTL-1097): no worktreePath in signal (pre-CTL-615) → fail-open to cwd-relative"
+fresh_env t44
+PROJ_DIR="${TEST_DIR}/proj"
+mkdir -p "${PROJ_DIR}/thoughts/shared/plans"
+touch "${PROJ_DIR}/thoughts/shared/plans/2026-06-13-ctl-1097-x.md"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+echo '{"ticket":"CTL-1097","phase":"plan","generation":1,"attempt":1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$PROJ_DIR" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+assert_eq "phase.plan.complete.CTL-1097" "$EVENT_NAME" "no worktreePath: cwd-relative fallback still passes"
+
+echo ""
+echo "Test 45 (CTL-1097): worktreePath set but artifact genuinely absent there → downgraded to failed"
+fresh_env t45
+WT_DIR="${TEST_DIR}/worktree"
+OTHER_CWD="${TEST_DIR}/elsewhere"
+mkdir -p "${WT_DIR}/thoughts/shared/plans" "${OTHER_CWD}"
+mkdir -p "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097"
+jq -nc --arg wt "$WT_DIR" '{ticket:"CTL-1097",phase:"plan",worktreePath:$wt,generation:1,attempt:1}' \
+	> "${CATALYST_ORCHESTRATOR_DIR}/workers/CTL-1097/phase-plan.json"
+(cd "$OTHER_CWD" && "$EMIT_SCRIPT" --phase plan --ticket CTL-1097 --status complete >/dev/null 2>&1)
+LINE=$(read_event_line)
+EVENT_NAME=$(echo "$LINE" | jq -r '.attributes."event.name"' 2>/dev/null || echo "")
+REASON=$(echo "$LINE" | jq -r '.body.payload.failure_reason' 2>/dev/null || echo "")
+assert_eq "phase.plan.failed.CTL-1097" "$EVENT_NAME" "genuine miss in worktreePath → failed"
+assert_eq "artifact_not_gate_visible" "$REASON" "genuine miss preserves artifact_not_gate_visible reason"
+
 echo ""
 echo "─────────────────────────────────────────────"
 echo "phase-agent-emit-complete: ${PASSES} passed, ${FAILURES} failed"

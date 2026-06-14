@@ -141,27 +141,23 @@ is performed.
    `title — path — one-line guidance`. Write `None found.` when the store is empty
    or nothing matches. The store may not exist yet — the `-d` guard above makes this
    best-effort; NEVER block research on an empty store.
-4. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
+4. Assert the `thoughts/` root belongs to this project before writing (CTL-1081):
+   ```bash
+   bash "${PLUGIN_ROOT}/scripts/lib/assert-thoughts-project.sh" || {
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "wrong_project_thoughts_root"
+     exit 1
+   }
+   ```
+5. Invoke `/catalyst-dev:research-codebase` against the ticket's research question.
    That skill spawns parallel sub-agents, synthesizes findings, and writes the
    document. Do not duplicate its logic.
-5. Confirm the artifact exists at the expected path before continuing.
-   Two-step match (CTL-494) — try lowercase-tail first, then the wider
-   `*${TICKET}*.md` pattern with `nocaseglob` fallback so canonical
-   create-plan filenames (uppercase ticket + descriptive suffix) are
-   accepted alongside the phase-research prose convention:
+6. Confirm the artifact exists at the expected path before continuing.
+   Use the shared slug-tolerant matcher from lib/phase-artifact-gate.sh (CTL-1081):
    ```bash
-   shopt -s nullglob
-   RESEARCH_MATCHES=( thoughts/shared/research/*-${TICKET,,}.md )
-   if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
-     RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
-     if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
-       shopt -s nocaseglob
-       RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
-       shopt -u nocaseglob
-     fi
-   fi
-   shopt -u nullglob
-   RESEARCH_DOC="${RESEARCH_MATCHES[-1]:-}"
+   source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"
+   RESEARCH_DOC="$(match_thoughts_artifact thoughts/shared/research "$TICKET" | tail -1 || true)"
    [[ -n "$RESEARCH_DOC" && -f "$RESEARCH_DOC" ]] || {
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
        --phase "$PHASE" --ticket "$TICKET" --status failed \
@@ -240,7 +236,7 @@ EOF
 ${MIRROR_FOOTER}"
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-research: linear-comment-post failed (continuing)" >&2
@@ -279,6 +275,11 @@ label differs here). The `$(date +%Y-%m-%dT%H:%M:%S%z)` stamp carries DATE+TIME+
 daily review sorts "friction since last review" by this per-record timestamp.
 
 ```bash
+# CTL-866: multi-host thoughts-sync gate. Single-host → exact no-op. Multi-host
+# → commit+push the research artifact before any other host can read the
+# completion event; on sync failure the gate emits `failed` and we stop here.
+"${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
+
 # Emit phase-complete event, close signal file, end catalyst-session.
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete

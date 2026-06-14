@@ -28,7 +28,9 @@ export const LANDING_SURFACES: readonly Surface[] = SURFACES.filter(
     s !== "utilization" &&
     s !== "finops" &&
     s !== "fleetops" &&
-    s !== "devops",
+    s !== "devops" &&
+    s !== "process" &&     // CTL-1101: REASON surfaces are not landing defaults
+    s !== "rulebook",
 );
 
 /** localStorage key the landing-surface preference persists under. Named in the
@@ -75,6 +77,20 @@ interface BrowserGlobals {
 
 function browser(): BrowserGlobals {
   return globalThis as unknown as BrowserGlobals;
+}
+
+/**
+ * CTL-1059: a landing-preference redirect is only valid for a genuine fresh `/`
+ * load. If the app was hard-loaded at a deep-link path, any `/` visit during that
+ * session (e.g. a stray navigate) must NOT bounce the operator to their landing
+ * surface — they explicitly asked for the deep link.
+ */
+export function shouldApplyLandingRedirect(args: {
+  initialPathname: string;
+  pref: Surface;
+}): boolean {
+  if (args.pref === "home") return false;
+  return args.initialPathname === "/";
 }
 
 /** Browser-bound read — what the shell seeds its initial surface from. */

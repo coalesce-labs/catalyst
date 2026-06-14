@@ -136,3 +136,41 @@ export async function readTicketArtifacts(
     reader: reader ?? ((p) => readFile(p, "utf8")),
   });
 }
+
+// readTicketArtifactContent — serve a SINGLE artifact's full CONTENT by kind for
+// the reading-pane deep-dive pills (CTL-1042). The list route above returns
+// metadata only; the pills open the actual markdown through this. Resolves the
+// ticket's artifacts via buildArtifactList, picks the FIRST of the requested
+// kind (the deterministic sort makes "first" stable), and returns its full file
+// text. Returns null when no artifact of that kind exists OR the file cannot be
+// read — the route maps that to a 404.
+//
+// SECURITY: the served `path` is produced by our own glob over the LOCAL thoughts
+// tree (never attacker-supplied), so there is no traversal surface beyond the
+// ticket/kind the route already validates. Tolerant of an absent tree, never
+// throws.
+//
+// Returns: { kind, path, content } | null
+export async function readTicketArtifactContent(
+  ticket,
+  kind,
+  { cwd = process.cwd(), lister, reader } = {},
+) {
+  const thoughtsRel = join("thoughts", "shared");
+  const read = reader ?? ((p) => readFile(p, "utf8"));
+  const { artifacts } = await buildArtifactList(ticket, {
+    thoughtsRel,
+    thoughtsDir: join(cwd, thoughtsRel),
+    lister: lister ?? ((d) => readdir(d)),
+    reader: read,
+  });
+  const match = artifacts.find((a) => a.kind === kind);
+  if (!match) return null;
+  try {
+    const content = await read(join(cwd, match.path));
+    if (typeof content !== "string") return null;
+    return { kind: match.kind, path: match.path, content };
+  } catch {
+    return null;
+  }
+}

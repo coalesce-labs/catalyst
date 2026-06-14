@@ -1,6 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { getProvider, calculateCost } from "../lib/summarize/providers";
+import { claudeCliProvider } from "../lib/summarize/providers/claude-cli";
 import type { AiFetcher } from "../lib/ai-briefing";
+import type { ClaudeCliResult, RunClaudeCli } from "../lib/claude-cli";
 
 interface RequestRecord {
   url: string;
@@ -155,6 +157,45 @@ describe("anthropicProvider", () => {
       caught = err as Error;
     }
     expect(caught).not.toBeNull();
+  });
+});
+
+// CTL-1109: the provider was remediated to drive `claude --bg` via the
+// injectable `runClaudeCli` seam (lib/claude-cli.ts). Tests inject a fake
+// `runClaudeCli` so they touch no real CLI/fs/clock — the old `spawn` double
+// no longer matches the provider's injection point and fell through to the
+// real CLI (5s --bg timeout).
+function fakeRunClaudeCli(result: ClaudeCliResult): RunClaudeCli {
+  return () => Promise.resolve(result);
+}
+
+describe("claudeCliProvider", () => {
+  it("returns CLI text as summary with zero cost", async () => {
+    const res = await claudeCliProvider.summarize({
+      systemPrompt: "SYS", userPrompt: "USR", model: "claude-haiku-4-5-20251001",
+      apiKey: "",
+      runClaudeCli: fakeRunClaudeCli({ text: "A concise summary.", tokens: 0 }),
+    } as never);
+    expect(res.summary).toBe("A concise summary.");
+    expect(res.cost).toBe(0);
+    expect(res.tokens).toBe(0);
+  });
+
+  it("rejects when the CLI produces no output", async () => {
+    let caught: Error | null = null;
+    try {
+      await claudeCliProvider.summarize({
+        systemPrompt: "", userPrompt: "x", model: "m", apiKey: "",
+        runClaudeCli: fakeRunClaudeCli({ text: null, tokens: 0 }),
+      } as never);
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).not.toBeNull();
+  });
+
+  it("has name 'claude-cli'", () => {
+    expect(claudeCliProvider.name).toBe("claude-cli");
   });
 });
 

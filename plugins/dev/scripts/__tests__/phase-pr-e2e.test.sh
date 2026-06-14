@@ -372,6 +372,21 @@ STUB
   fi
 fi
 
+# ─── CTL-1051 Suite C: push-verify wiring ────────────────────────────────────
+echo ""
+echo "CTL-1051 Suite C: phase-pr push-verify wiring"
+
+if [[ -f "$SKILL" ]]; then
+  BODY="$(cat "$SKILL")"
+
+  assert_contains "$BODY" "draft_pr_push_verify" \
+    "CTL-1051 C1: phase-pr calls draft_pr_push_verify"
+  assert_contains "$BODY" "draft_pr_head_oid" \
+    "CTL-1051 C2: phase-pr compares PR.headRefOid"
+  assert_contains "$BODY" "stale_ref_push_verify_failed" \
+    "CTL-1051 C3: phase-pr fails loudly on stale ref"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

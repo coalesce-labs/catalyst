@@ -27,10 +27,12 @@ export type Theme = "dark" | "light";
 /** Every theme — the single source the toggle + tests iterate. */
 export const THEMES: readonly Theme[] = ["dark", "light"] as const;
 
-/** Human label per theme (toggle aria-label / tooltip). */
+/** Human label per theme — the MODE axis (CTL-1099 relabel: was "Calm dark" /
+ *  "Warm light", now plain "Dark" / "Light" so it reads as a pure mode control,
+ *  distinct from the BRAND axis Warm/Slate. The "dark"|"light" union is unchanged. */
 export const THEME_LABEL: Record<Theme, string> = {
-  dark: "Calm dark",
-  light: "Warm light",
+  dark: "Dark",
+  light: "Light",
 };
 
 /** localStorage key the resolved preference persists under (survives reloads). */

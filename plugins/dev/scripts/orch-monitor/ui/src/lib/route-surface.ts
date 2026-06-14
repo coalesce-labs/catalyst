@@ -26,12 +26,13 @@ export const SURFACE_PATH: Record<Surface, string> = {
   home: "/",
   board: "/board",
   workers: "/workers",
-  queue: "/queue",
   telemetry: "/telemetry",
   utilization: "/utilization",
   finops: "/finops",
   fleetops: "/fleetops",
   devops: "/devops",
+  process: "/process",
+  rulebook: "/rules",
 };
 
 /** The Settings path — Settings is a footer destination, NOT one of the surface

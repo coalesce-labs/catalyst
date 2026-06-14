@@ -48,6 +48,8 @@ import { startMemorySampler as realStartMemorySampler } from "./memory-sampler.m
 import { startRatelimitPoller as realStartRatelimitPoller } from "./ratelimit-poller.mjs";
 import { listProjects as realListProjects } from "./registry.mjs"; // CTL-854: boot health check
 import { startHeartbeat as realStartHeartbeat } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat emitter
+import { startLivenessPublisher as realStartLivenessPublisher } from "./cluster-heartbeat-publisher.mjs"; // CTL-1090: cross-host liveness
+import { emitBootEvent } from "./boot-event.mjs"; // CTL-1084: node.boot self-report
 import {
   recoverStartup,
   startMonitor,
@@ -82,11 +84,13 @@ import {
   mergeExecutionCoreConcurrency,
   readAllEligibleTickets, // CTL-862: boot-log ownership count
   clearHoldStopCooldown, // CTL-768
+  defaultClearStall, // CTL-1067: J3 stall-clear seam
 } from "./scheduler.mjs";
-import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume
+import * as linearWrite from "./linear-write.mjs"; // CTL-1067: writeStatus for defaultClearStall
+import { writeBootMarker, clearProgressMarks, resolvePhaseSessionId, defaultAppendOperatorEvent } from "./recovery.mjs"; // CTL-655: window the revive budget to this run; CTL-736: reset progress high-water; CTL-768: --resume; CTL-1044: operator-event appender for the scheduler's appendIntentEvent seam
 import { startAutoTuner } from "./autotune.mjs"; // CTL-684: side-car maxParallel auto-tuner
 import { dispatchTicket } from "./dispatch.mjs"; // CTL-549: comment-wake re-dispatch
-import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human/question on resume
+import { removeLabel as defaultRemoveLabel } from "./linear-write.mjs"; // CTL-549: clear needs-human on resume
 // CTL-671: the real phantom-sweep seams. startScheduler defaults them to safe
 // no-ops (hermetic for direct-call unit tests); the REAL daemon arms them here
 // so the phantom worker-dir validity sweep is operative in production.
@@ -116,6 +120,8 @@ let _memorySampler = null;
 let _ratelimitPoller = null;
 // CTL-859: node-heartbeat emitter handle (distributed-coordination foundation).
 let _heartbeat = null;
+// CTL-1090: cross-host liveness publisher handle (multi-host only; single-host no-op).
+let _livenessPublisher = null;
 // CTL-684: auto-tuner stop handle.
 let _stopAutoTuner = null;
 let _eventWatcher = null;
@@ -260,13 +266,18 @@ function ensureState(orchDir) {
 // handleCommentWake — CTL-549 re-dispatch hook. Called on each
 // `linear.comment.created` event by the daemon's `onComment` callback wired
 // into startMonitor. Scans all phase signals for the comment's ticket; for
-// each signal with status === "needs-input", removes the needs-human/question
-// label and re-dispatches via dispatchTicket with the parked handoffPath.
-// Fail-open throughout — a bad signal file or removeLabel failure is logged
+// each signal with status === "needs-input", removes the needs-human label
+// and re-dispatches via dispatchTicket with the parked handoffPath. For
+// status === "stalled", clears the stall via the J3 seam (CTL-1067).
+// Fail-open throughout — a bad signal file or clearStall failure is logged
 // and skipped, never fatal.
 export async function handleCommentWake(
   parsed,
-  { orchDir, dispatch, removeLabel, botUserId, resolveSession = resolvePhaseSessionId },
+  {
+    orchDir, dispatch, removeLabel, botUserId,
+    resolveSession = resolvePhaseSessionId,
+    clearStall = () => false, // CTL-1067: J3 stall-clear seam; default no-op
+  },
 ) {
   const { ticket } = parsed ?? {};
   if (!ticket) return;
@@ -291,6 +302,19 @@ export async function handleCommentWake(
     try {
       sig = JSON.parse(readFileSync(join(workerDir, fname), "utf8"));
     } catch {
+      continue;
+    }
+
+    // CTL-1067: an operator answered a STALLED escalation row. Clear the stall via
+    // the J3 seam (delete the synthetic stalled signal + remove the needs-human
+    // label & markers + .orphan-detected). The scheduler re-derives advancement
+    // from the preserved prior-done signal and re-dispatches the phase fresh.
+    if (sig.status === "stalled") {
+      const phase = fname.slice("phase-".length, -".json".length);
+      try { clearStall({ ticket, phase }); }
+      catch (err) {
+        log.warn({ ticket, phase, err: err?.message }, "handleCommentWake: clearStall threw — skipping");
+      }
       continue;
     }
 
@@ -327,7 +351,7 @@ export async function handleCommentWake(
     }
 
     try {
-      await removeLabel(ticket, "needs-human/question");
+      await removeLabel(ticket, "needs-human"); // CTL-1067 Bug 3: was "needs-human/question"
     } catch {
       /* fail-open */
     }
@@ -385,6 +409,9 @@ export function startDaemon({
   // in dispatch/claim consumes them in PR1.
   startHeartbeat = realStartHeartbeat,
   enableHeartbeat = process.env.CATALYST_HEARTBEAT !== "0",
+  // CTL-1090: cross-host liveness publisher. Injectable for tests. Single-host
+  // installs get an inert no-op handle from startLivenessPublisher itself.
+  startLivenessPublisher = realStartLivenessPublisher,
   // CTL-665: committed executionCore concurrency knobs resolved in main() from
   // .catalyst/config.json. Threaded into both the scheduler new-work pull and the
   // boot-resume ceiling. Empty {} (the test default) keeps the legacy state.json path.
@@ -468,18 +495,24 @@ export function startDaemon({
   // A throw from any composed boot step must not leave a stale PID file —
   // stopDaemon removes _pidFile via unlinkSync. Rethrow so the main()-level
   // try/catch logs and process.exit(1)s as before.
+  // CTL-1084: hoisted so emitBootEvent at the boot-log site can reference them
+  // after the try block completes without a throw.
+  let _bootReport;
+  let _bootResume;
   try {
     // CTL-539 — rebuild routing + worker state on boot. CTL-654: capture the
     // RecoveryReport (previously discarded) so the boot-resume pass can consume
     // its `coldStart` verdict + worker buckets.
     const report = recover({ orchDir });
+    _bootReport = report;
     // CTL-654: boot-resume — on a cold start, re-dispatch in-flight tickets whose
     // worktree has no live --bg worker, BEFORE the monitor/scheduler start. This
     // bypasses the per-tick reclaim sweep's revive budget (a clean reboot is not
     // a chronic-failure storm) and is bounded by maxParallel so a reboot never
     // spawns a worker storm. Synchronous and inside the same try/catch so a throw
     // still triggers PID-file cleanup. A non-cold-start restart is a no-op.
-    reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    const bootResume = reconcileBoot({ orchDir, report, concurrency }); // CTL-665: config-first boot-resume ceiling
+    _bootResume = bootResume;
     // CTL-644: dispatch any gated tickets that already have an approval sentinel on disk
     // (operator may have dropped the sentinel while the daemon was down).
     processApprovedResumes({ orchDir });
@@ -510,7 +543,7 @@ export function startDaemon({
       gateway: gatewayReader, // CTL-781: gateway-first assignee reads
       onComment: (parsed) => {
         commentInboxWriter(parsed); // CTL-749: write to inbox.jsonl for in-flight workers
-        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo
+        handleCommentWake(parsed, { orchDir, dispatch: dispatchTicket, removeLabel: defaultRemoveLabel, botUserId: linearBotUserIds, clearStall: defaultClearStall(orchDir, linearWrite) }); // CTL-549 + CTL-756: re-dispatch parked tickets; botUserId suppresses self-echo; CTL-1067: J3 stall-clear
       },
       onUpdate: createUpdateInboxWriter(orchDir, linearBotUserIds), // CTL-749
     }); // CTL-535 + CTL-565 + CTL-634 + CTL-549 + CTL-749 + CTL-716 + CTL-781
@@ -541,7 +574,19 @@ export function startDaemon({
       // live in production, not just in unit tests.
       gateway: gatewayReader,
       isBgJobAlive,
-    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read)
+      // CTL-1044: provide the production operator-event appender for the
+      // scheduler's `appendIntentEvent` seam (scheduler.mjs:4300). Without this
+      // the seam is null and the advance-shadow comparator's disagree/tick
+      // events (beliefs/advance-shadow.mjs:177-198), CTL-936 intent.ineffective,
+      // and executeEscalations emissions all silently no-op — the bug this fixes
+      // (zero beliefs.* events ever reached the log despite the shadow window
+      // running live on mini). The seam contract is a raw
+      // { "event.name": string, payload: object } object, which does NOT fit
+      // buildEventEnvelope's phase/action schema — hence the dedicated
+      // operator-event envelope builder in recovery.mjs. startScheduler keeps
+      // its null default (CTL-936 chose silence for legacy/tests).
+      appendIntentEvent: defaultAppendOperatorEvent,
+    }); // CTL-536 + CTL-634 + CTL-665 + CTL-671 + CTL-676 + CTL-678 + CTL-1044 — pull-loop scheduler (configPath + layer2Path enable per-tick Layer-1+Layer-2 re-read; appendIntentEvent wires operator telemetry to the event log)
     // CTL-684: start the side-car auto-tuner AFTER the scheduler so the
     // scheduler's first tick runs with the operator's current Layer-2 value
     // before any auto-tune adjustments. configPath + layer2Path are threaded
@@ -605,6 +650,9 @@ export function startDaemon({
     // yet. Inside the same try/catch so a throw triggers PID-file cleanup.
     if (enableHeartbeat) {
       _heartbeat = startHeartbeat();
+      // CTL-1090: cross-host liveness publisher (multi-host only; single-host no-op).
+      // startLivenessPublisher self-gates on roster.length > 1, so this is always safe.
+      _livenessPublisher = startLivenessPublisher({ orchDir });
     }
   } catch (err) {
     stopDaemon();
@@ -632,6 +680,17 @@ export function startDaemon({
   const bootSelf = bootHostName ?? getHostName();
   const bootEligible = readAllEligible();
   const bootOwns = bootEligible.filter((t) => ownedBy(t.identifier, bootRoster, bootSelf)).length;
+  // CTL-1084: emit a structured node.boot event so catalyst-stack status can
+  // prove what the restart did (version, effective flags, adopted/cleared/rewalk counts).
+  // Fail-open — emitBootEvent never throws. Kept alongside the pino log (not replacing it).
+  emitBootEvent({
+    summary: {
+      adoptedWorkers:   _bootReport?.workers?.running?.length ?? 0,
+      zombiesCleared:   (_bootReport?.workers?.dead?.length ?? 0) + (_bootReport?.workers?.unknown?.length ?? 0),
+      rewalkPlanned:    _bootResume?.planned    ?? _bootResume?.dispatched ?? 0,
+      rewalkDispatched: _bootResume?.dispatched ?? 0,
+    },
+  });
   log.info(
     { orchDir, host: bootSelf, owns: bootOwns, eligible: bootEligible.length, roster: bootRoster },
     "execution-core daemon started"
@@ -949,6 +1008,15 @@ export function stopDaemon() {
       log.warn({ err: err?.message }, "stopDaemon: heartbeat stop failed");
     }
     _heartbeat = null;
+  }
+  // CTL-1090: stop the cross-host liveness publisher.
+  if (_livenessPublisher) {
+    try {
+      _livenessPublisher.stop();
+    } catch (err) {
+      log.warn({ err: err?.message }, "stopDaemon: liveness-publisher stop failed");
+    }
+    _livenessPublisher = null;
   }
   // CTL-684: stop the auto-tuner.
   if (_stopAutoTuner) {

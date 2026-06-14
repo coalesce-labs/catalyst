@@ -7,6 +7,8 @@ import {
   runEligibleQuery,
   fetchTicketState,
   fetchTicketLabels,
+  readTicketLabels,
+  readTicketLabelNodes,
   fetchTicketRelations,
   fetchTicketsBatch,
   authHeader,
@@ -296,6 +298,101 @@ describe("fetchTicketLabels", () => {
     fetchTicketLabels("CTL-9", { exec });
     expect(calls[0].cmd).toBe("linearis");
     expect(calls[0].args).toEqual(["issues", "read", "CTL-9"]);
+  });
+});
+
+// CTL-1078 — readTicketLabels: richer shape { ok, labels, code, stderr }
+describe("readTicketLabels", () => {
+  test("success → { ok: true, labels: [...] }", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-9",
+        labels: { nodes: [{ name: "triaged" }, { name: "needs-human" }] },
+      }),
+      stderr: "",
+    });
+    expect(readTicketLabels("CTL-9", { exec })).toEqual({ ok: true, labels: ["triaged", "needs-human"] });
+  });
+
+  test("non-zero exit → { ok: false, labels: null, code, stderr }", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "400 invalid_scope" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("400 invalid_scope");
+  });
+
+  test("non-JSON stdout → { ok: false, labels: null }", () => {
+    const exec = () => ({ code: 0, stdout: "not-json", stderr: "" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+  });
+
+  test("fetchTicketLabels back-compat: returns array on success", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ labels: { nodes: [{ name: "blocked" }] } }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual(["blocked"]);
+  });
+
+  test("fetchTicketLabels back-compat: returns null on failure", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    expect(fetchTicketLabels("CTL-9", { exec })).toBeNull();
+  });
+});
+
+// CTL-1085 — readTicketLabelNodes: returns { id, name } nodes (not just names)
+// so removeLabel can build a UUID-based overwrite payload that avoids cross-team
+// name-resolution ambiguity.
+describe("readTicketLabelNodes (CTL-1085)", () => {
+  test("returns { ok: true, nodes: [{id,name}] } on success", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        labels: { nodes: [
+          { id: "b4a67f92-cfce-444d-97b5-61f5575ccbd9", name: "bug" },
+          { id: "62139cba-ed7b-4372-a588-5af63f6c090b", name: "orchestrator" },
+        ] },
+      }),
+      stderr: "",
+    });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(true);
+    expect(r.nodes).toEqual([
+      { id: "b4a67f92-cfce-444d-97b5-61f5575ccbd9", name: "bug" },
+      { id: "62139cba-ed7b-4372-a588-5af63f6c090b", name: "orchestrator" },
+    ]);
+  });
+
+  test("returns { ok: false, nodes: null, stderr } on non-zero exit", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "400 invalid_scope" });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(false);
+    expect(r.nodes).toBeNull();
+    expect(r.stderr).toBe("400 invalid_scope");
+  });
+
+  test("returns { ok: false, nodes: null } on unparseable stdout", () => {
+    const exec = () => ({ code: 0, stdout: "", stderr: "" });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(false);
+    expect(r.nodes).toBeNull();
+  });
+
+  test("returns { ok: true, nodes: [] } when ticket has no labels", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ labels: { nodes: [] } }),
+      stderr: "",
+    });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(true);
+    expect(r.nodes).toEqual([]);
   });
 });
 

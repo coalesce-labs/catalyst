@@ -20,12 +20,13 @@ describe("surfaceToPath", () => {
   it("maps each non-home surface to its clean typed segment", () => {
     expect(surfaceToPath("board")).toBe("/board");
     expect(surfaceToPath("workers")).toBe("/workers");
-    expect(surfaceToPath("queue")).toBe("/queue");
     expect(surfaceToPath("telemetry")).toBe("/telemetry");
     expect(surfaceToPath("utilization")).toBe("/utilization");
     expect(surfaceToPath("finops")).toBe("/finops");
     expect(surfaceToPath("fleetops")).toBe("/fleetops");
     expect(surfaceToPath("devops")).toBe("/devops");
+    expect(surfaceToPath("process")).toBe("/process");
+    expect(surfaceToPath("rulebook")).toBe("/rules");
   });
 
   it("has a path for EVERY declared surface (totality)", () => {
@@ -99,5 +100,16 @@ describe("detailPathSurface", () => {
     expect(detailPathSurface("board")).toBe("board");
     expect(detailPathSurface(undefined)).toBe("board");
     expect(detailPathSurface("recent")).toBe("board");
+  });
+});
+
+// ── CTL-1103: rulebook surface ───────────────────────────────────────────────
+describe("CTL-1103 — rulebook surface path", () => {
+  it("surfaceToPath maps rulebook to /rules", () => {
+    expect(surfaceToPath("rulebook" as Surface)).toBe("/rules");
+  });
+
+  it("pathnameToSurface maps /rules to rulebook", () => {
+    expect(pathnameToSurface("/rules")).toBe("rulebook");
   });
 });

@@ -22,13 +22,6 @@ describe("surfaceContentKind", () => {
     expect(surfaceContentKind("workers")).toBe("workers");
   });
 
-  it("routes the queue surface to its own dedicated queue content (SURF2 / CTL-910)", () => {
-    // Gherkin: "the operator clicks the Queue nav item → the Queue surface
-    // renders edge-to-edge and wide in the SidebarInset" — the queue is its OWN
-    // route now, no longer the SHELL2 dashboard fall-through.
-    expect(surfaceContentKind("queue")).toBe("queue");
-  });
-
   it("routes the Telemetry surface to its own OBSERVE content shell (OBS-5)", () => {
     // Gherkin (OBS-5): "the operator clicks the Telemetry nav item → the
     // Telemetry OBSERVE shell renders in the SidebarInset" — the first OBSERVE
@@ -61,18 +54,18 @@ describe("surfaceContentKind", () => {
 
   it("keeps Home on the dashboard (no regression)", () => {
     // Home must stay exactly what SHELL1/SHELL2 rendered — only board (SHELL2),
-    // workers (SURF1), queue (SURF2), telemetry (OBS-5), finops (OBS-10),
-    // utilization (OBS-16), and fleetops (OBS-18) are special-cased. The remaining
-    // OBSERVE surface (devops) keeps the dashboard fall-through until its own OBS ticket ships.
+    // workers (SURF1), telemetry (OBS-5), finops (OBS-10), utilization (OBS-16),
+    // and fleetops (OBS-18) are special-cased. The remaining OBSERVE surface
+    // (devops) keeps the dashboard fall-through until its own OBS ticket ships.
     const stillDashboard = SURFACES.filter(
       (s) =>
         s !== "board" &&
         s !== "workers" &&
-        s !== "queue" &&
         s !== "telemetry" &&
         s !== "finops" &&
         s !== "utilization" &&
-        s !== "fleetops",
+        s !== "fleetops" &&
+        s !== "rulebook",
     );
     for (const s of stillDashboard) {
       expect(surfaceContentKind(s)).toBe("dashboard");
@@ -84,14 +77,18 @@ describe("surfaceContentKind", () => {
       expect([
         "board",
         "workers",
-        "queue",
         "telemetry",
         "finops",
         "utilization",
         "fleetops",
+        "rulebook",
         "dashboard",
       ]).toContain(surfaceContentKind(s));
     }
+  });
+
+  it("routes the Rulebook surface to its own content kind (CTL-1103)", () => {
+    expect(surfaceContentKind("rulebook" as Surface)).toBe("rulebook");
   });
 });
 

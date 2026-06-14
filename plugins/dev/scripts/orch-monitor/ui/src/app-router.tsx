@@ -35,7 +35,13 @@ import { SkeletonDashboard } from "./components/ui/skeleton";
 import { validateDetailSearch } from "./board/route-search";
 import { validateRootSearch } from "./lib/root-search";
 import { surfaceToPath } from "./lib/route-surface";
-import { readLandingSurface } from "./lib/prefs";
+import { readLandingSurface, shouldApplyLandingRedirect } from "./lib/prefs";
+
+// CTL-1059: capture the URL the operator actually hard-loaded, evaluated once
+// at module import time (before the router processes any route). This reflects
+// the true cold-load path, not a later in-session `/` visit.
+const INITIAL_PATHNAME =
+  typeof window !== "undefined" ? window.location.pathname : "/";
 
 // ── surface components (the existing surfaces, code-split as before) ──────────
 // Home / Queue / the OBSERVE surfaces stay lazy (HomeSurface pulls its
@@ -49,11 +55,6 @@ import { Board } from "./board/Board";
 const HomeSurface = lazy(() =>
   import("./components/home/home-surface").then((m) => ({
     default: m.HomeSurface,
-  })),
-);
-const QueueSurface = lazy(() =>
-  import("./components/queue/queue-surface").then((m) => ({
-    default: m.QueueSurface,
   })),
 );
 const TelemetrySurface = lazy(() =>
@@ -87,6 +88,17 @@ const SettingsSurface = lazy(() =>
 const DashboardSurface = lazy(() =>
   import("./components/dashboard-surface").then((m) => ({
     default: m.DashboardSurface,
+  })),
+);
+const RulebookSurface = lazy(() =>
+  import("./components/rulebook/rulebook-surface").then((m) => ({
+    default: m.RulebookSurface,
+  })),
+);
+
+const ProcessRoute = lazy(() =>
+  import("./components/reason/process-route").then((m) => ({
+    default: m.ProcessRoute,
   })),
 );
 
@@ -141,9 +153,12 @@ const homeRoute = createRoute({
   // beforeLoad redirect lands them there. A real "/" navigation with a preference
   // of "home" (the default) is a no-op, so this never traps the operator on a
   // surface they explicitly navigated to via the URL.
+  // CTL-1059: guard against deep-link initial loads — the redirect only fires
+  // when the app was genuinely hard-loaded at `/`, not when a `/` visit happens
+  // during a deep-link session (e.g. via a stray history.back()).
   beforeLoad: () => {
     const pref = readLandingSurface();
-    if (pref !== "home") {
+    if (shouldApplyLandingRedirect({ initialPathname: INITIAL_PATHNAME, pref })) {
       throw redirect({ to: surfaceToPath(pref), search: (prev) => prev });
     }
   },
@@ -178,14 +193,18 @@ const workersRoute = createRoute({
   ),
 });
 
-const queueRoute = createRoute({
+// CTL-1016: /dispatch and /queue redirect to /workers. Bookmarks and shared
+// links keep working; the Dispatch surface is retired and folded into Workers.
+const dispatchRedirectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/dispatch",
+  beforeLoad: () => { throw redirect({ to: "/workers", search: (prev) => prev }); },
+});
+
+const queueAliasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/queue",
-  component: () => (
-    <S>
-      <QueueSurface />
-    </S>
-  ),
+  beforeLoad: () => { throw redirect({ to: "/workers", search: (prev) => prev }); },
 });
 
 const telemetryRoute = createRoute({
@@ -236,6 +255,27 @@ const devopsRoute = createRoute({
   component: () => (
     <S>
       <DashboardSurface />
+    </S>
+  ),
+});
+
+// CTL-1101: REASON surface — Process (FSM machine map)
+const processRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/process",
+  component: () => (
+    <S>
+      <ProcessRoute />
+    </S>
+  ),
+});
+
+const rulebookRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/rules",
+  component: () => (
+    <S>
+      <RulebookSurface />
     </S>
   ),
 });
@@ -295,12 +335,15 @@ const routeTree = rootRoute.addChildren([
   homeRoute,
   boardRoute,
   workersRoute,
-  queueRoute,
+  dispatchRedirectRoute,
+  queueAliasRoute,
   telemetryRoute,
   utilizationRoute,
   finopsRoute,
   fleetopsRoute,
   devopsRoute,
+  processRoute,
+  rulebookRoute,
   settingsRoute,
   ticketRoute,
   workerRoute,

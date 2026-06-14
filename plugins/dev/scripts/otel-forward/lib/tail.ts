@@ -30,26 +30,39 @@ export function createTailer(opts: TailerOpts): Tailer {
   let currentPath = opts.filePath ?? monthFn();
   let offset = opts.offset;
 
-  function isCanonical(line: string): boolean {
+  // Accept canonical OTel envelopes (have `attributes`) AND flat reap-intent
+  // records (have `event` but no `attributes`). processLine normalizes flat
+  // records into canonical form before forwarding.
+  function shouldForward(line: string): boolean {
     try {
       const obj = JSON.parse(line);
-      return typeof obj === "object" && obj !== null && "attributes" in obj;
-    } catch { return false; }
+      if (typeof obj !== "object" || obj === null) return false;
+      return "attributes" in obj || typeof (obj as Record<string, unknown>).event === "string";
+    } catch {
+      return false;
+    }
   }
 
   function readNewLines(): void {
     if (!existsSync(currentPath)) return;
     const size = statSync(currentPath).size;
-    if (size < offset) { offset = 0; return; }
+    if (size < offset) {
+      offset = 0;
+      return;
+    }
     if (size === offset) return;
     const len = size - offset;
     const fd = openSync(currentPath, "r");
     const buf = Buffer.alloc(len);
-    try { readSync(fd, buf, 0, len, offset); } finally { closeSync(fd); }
+    try {
+      readSync(fd, buf, 0, len, offset);
+    } finally {
+      closeSync(fd);
+    }
     offset = size;
     const text = buf.toString("utf8");
     for (const line of text.split("\n")) {
-      if (line.length > 0 && isCanonical(line)) opts.onLine(line);
+      if (line.length > 0 && shouldForward(line)) opts.onLine(line);
     }
   }
 
@@ -60,11 +73,21 @@ export function createTailer(opts: TailerOpts): Tailer {
   async function run(): Promise<void> {
     while (!opts.signal.aborted) {
       const expected = monthFn();
-      if (expected !== currentPath) { currentPath = expected; offset = 0; }
+      if (expected !== currentPath) {
+        currentPath = expected;
+        offset = 0;
+      }
       readNewLines();
       await new Promise<void>((resolve) => {
         const t = setTimeout(resolve, pollMs);
-        opts.signal.addEventListener("abort", () => { clearTimeout(t); resolve(); }, { once: true });
+        opts.signal.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t);
+            resolve();
+          },
+          { once: true }
+        );
       });
     }
   }

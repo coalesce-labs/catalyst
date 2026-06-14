@@ -21,17 +21,29 @@
 // payload and NEVER reaches for Linear — exactly the CTL-899 "Inbox data comes
 // from the read-model, never a live Linear call" Gherkin.
 
-import type { BoardPayload, BoardTicket } from "./types";
+import type { BoardPayload, BoardServiceOutage, BoardTicket } from "./types";
 
-/** The kind of inbox section a row belongs to. */
-export type InboxSectionKind = "blocked" | "waiting" | "running" | "done";
+/** The kind of inbox section a row belongs to. CTL-729: 'attention' is the single
+ *  needs-attention bucket (waiting-on-you ∪ needs-human), at the HEAD of the order.
+ *  CTL-1050: 'awareness' is the running-degraded service-outage bucket — between
+ *  'running' and 'done', NOT a needs-you section (no action required). */
+export type InboxSectionKind =
+  | "attention"
+  | "blocked"
+  | "waiting"
+  | "running"
+  | "awareness"
+  | "done";
 
 /**
  * Whether a section's rows carry a status accent (the only colored rows on the
  * calm page — the needs-you set) or render fully neutral (the reassurance +
  * done sets). Mirrors Direction A's "color reserved for meaning" non-negotiable.
+ * CTL-729: 'attention' is a needs-you section so counts.needsYou, the all-clear
+ * gate, and the calm header sentence absorb it automatically.
  */
 export const NEEDS_YOU_SECTIONS: readonly InboxSectionKind[] = [
+  "attention",
   "blocked",
   "waiting",
 ] as const;
@@ -61,8 +73,13 @@ export interface InboxRow {
   verb: string | null;
   /** The blocker ids a `blocked` row is waiting on (empty otherwise). */
   blockers: string[];
-  /** The underlying ticket, for the reading pane (HOME4). */
+  /** The underlying ticket, for the reading pane (HOME4). For an `awareness`
+   *  (service-outage) row this is a SYNTHETIC stub so existing ticket-reading
+   *  consumers never NPE — the real outage payload is on `outage`. */
   ticket: BoardTicket;
+  /** CTL-1050: the service outage backing an `awareness` row (absent on every
+   *  ticket-backed row). Row click navigates to /?surface=fleetops. */
+  outage?: BoardServiceOutage;
 }
 
 /** A grouped, titled section of the inbox (rendered as a bare list with a
@@ -91,22 +108,38 @@ export interface InboxModel {
 
 /** Per-section counts the calm header + section chips read. */
 export interface InboxCounts {
+  /** CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human). */
+  attention: number;
   blocked: number;
   waiting: number;
   running: number;
+  /** CTL-1050: current service outages (the awareness section) — NOT a needs-you
+   *  count and NOT folded into needsYou / the all-clear gate. */
+  awareness: number;
   done: number;
-  /** blocked + waiting — the single "N need you" figure in the header. */
+  /** attention + blocked + waiting — the single "N need you" figure in the header. */
   needsYou: number;
 }
 
 /** Fixed render order of the sections — needs-you first (bright), reassurance
- *  + done last (neutral, collapsed by default in the UI). */
-const SECTION_ORDER: readonly InboxSectionKind[] = ["blocked", "waiting", "running", "done"] as const;
+ *  + done last (neutral, collapsed by default in the UI). CTL-729: 'attention'
+ *  (the single needs-attention bucket) leads. */
+const SECTION_ORDER: readonly InboxSectionKind[] = [
+  "attention",
+  "blocked",
+  "waiting",
+  "running",
+  // CTL-1050: awareness (service outages) sits AFTER running, BEFORE done.
+  "awareness",
+  "done",
+] as const;
 
 const SECTION_LABEL: Record<InboxSectionKind, string> = {
+  attention: "Needs you",
   blocked: "What's blocked",
   waiting: "What's waiting",
   running: "Running on its own",
+  awareness: "Awareness",
   done: "Done while you were away",
 };
 
@@ -122,27 +155,50 @@ function isDone(t: BoardTicket): boolean {
 }
 
 /**
- * Classify ONE ticket into its inbox section. Order matters: a done ticket is
- * done even if it still carries a stale held label; otherwise blocked/waiting
- * (the needs-you cases) take precedence over the running reassurance set.
+ * Classify ONE ticket into its inbox section. Order matters (CTL-729):
+ *   done → attention → blocked → waiting → running.
+ * A done ticket is done even if it still carries a stale attention/held flag;
+ * otherwise the single needs-attention bucket (waiting-on-you ∪ needs-human) is
+ * the MOST urgent operator-action case — it outranks the admission-gate held
+ * (blocked/waiting) pair, which in turn outranks the running reassurance set.
  */
 export function classifyTicket(t: BoardTicket): InboxSectionKind {
   if (isDone(t)) return "done";
+  if (t.attention === "waiting-on-you" || t.attention === "needs-human") return "attention";
   if (t.held === HELD_BLOCKED) return "blocked";
   if (t.held === HELD_WAITING) return "waiting";
   return "running";
 }
 
+/** CTL-729/CTL-1130: the muted human sub-label for an attention row, in plain
+ *  language — naming WHY it needs you. For needs-human rows, uses the structured
+ *  explanation's call_to_action when present; falls back to the generic phrase. */
+function attentionSubLabel(t: BoardTicket): string {
+  if (t.attention === "needs-human") {
+    return t.humanQuestion && t.humanQuestion.trim() !== ""
+      ? t.humanQuestion
+      : "escalated — needs human";
+  }
+  return "waiting on your answer";
+}
+
 /** The muted human sub-label per section — plain language, never jargon
- *  (Direction A: "waiting on your answer", not "phase-blocked needs-human"). */
+ *  (Direction A: "waiting on your answer", not "phase-blocked needs-human").
+ *  CTL-729: the 'attention' sub-label is reason-specific (see attentionSubLabel),
+ *  so it is resolved in toRow from the ticket, not from the kind alone. */
 function subLabelFor(kind: InboxSectionKind): string {
   switch (kind) {
+    case "attention":
+      // Overridden per-ticket in toRow; this is the neutral fallback.
+      return "needs you";
     case "blocked":
       return "blocked on you";
     case "waiting":
       return "waiting on you";
     case "running":
       return "running on its own";
+    case "awareness":
+      return "running degraded — no action needed";
     case "done":
       return "shipped";
   }
@@ -151,14 +207,72 @@ function subLabelFor(kind: InboxSectionKind): string {
 /** The single primary verb per section — null for the neutral sets (no action). */
 function verbFor(kind: InboxSectionKind): string | null {
   switch (kind) {
+    case "attention":
+      return "Respond";
     case "blocked":
       return "Unblock";
     case "waiting":
       return "Answer";
     case "running":
+    case "awareness":
     case "done":
       return null;
   }
+}
+
+/** CTL-1050: the one-line copy for an awareness (service-outage) row — the body
+ *  the outage event carries, e.g. "Loki is unreachable since 14:32 — telemetry
+ *  views degraded". Falls back to the detail / a bare label when absent. */
+function outageTitle(o: BoardServiceOutage): string {
+  if (o.detail && o.detail.length > 0) return o.detail;
+  return `${o.label} is unreachable`;
+}
+
+/** A minimal synthetic BoardTicket for an awareness row, so the existing
+ *  ticket-reading consumers (reading pane, inbox-row) never NPE. Keyed by the
+ *  service id; carries only the safe display fields. */
+function syntheticOutageTicket(o: BoardServiceOutage): BoardTicket {
+  return {
+    id: o.id,
+    title: outageTitle(o),
+    type: "service",
+    repo: "",
+    team: "",
+    phase: "monitor-deploy",
+    status: "running",
+    model: null,
+    linearState: "",
+    workerStatus: null,
+    activeState: null,
+    working: false,
+    lastActiveMs: null,
+    priority: 0,
+    estimate: null,
+    scope: null,
+    project: null,
+    costUSD: null,
+    tokens: null,
+    turns: null,
+    phaseCosts: null,
+    phaseSummary: [],
+    pr: null,
+    updatedAt: new Date(o.downSince ?? Date.now()).toISOString(),
+  };
+}
+
+/** Build an awareness row from a current service outage. One row per service,
+ *  keyed by serviceId — updated in place across snapshots, dropped on recovery. */
+function outageRow(o: BoardServiceOutage): InboxRow {
+  return {
+    id: o.id,
+    title: outageTitle(o),
+    section: "awareness",
+    subLabel: subLabelFor("awareness"),
+    verb: null,
+    blockers: [],
+    ticket: syntheticOutageTicket(o),
+    outage: o,
+  };
 }
 
 /** Build the row view-model for one ticket in a given section. */
@@ -167,7 +281,8 @@ function toRow(t: BoardTicket, kind: InboxSectionKind): InboxRow {
     id: t.id,
     title: t.title,
     section: kind,
-    subLabel: subLabelFor(kind),
+    // CTL-729: an attention row's sub-label names the specific reason.
+    subLabel: kind === "attention" ? attentionSubLabel(t) : subLabelFor(kind),
     verb: verbFor(kind),
     blockers: kind === "blocked" ? (t.blockers ?? []).filter(Boolean) : [],
     ticket: t,
@@ -187,9 +302,11 @@ function toRow(t: BoardTicket, kind: InboxSectionKind): InboxRow {
  */
 export function deriveInbox(payload: BoardPayload): InboxModel {
   const buckets: Record<InboxSectionKind, InboxRow[]> = {
+    attention: [],
     blocked: [],
     waiting: [],
     running: [],
+    awareness: [],
     done: [],
   };
 
@@ -200,6 +317,14 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
     buckets[kind].push(toRow(t, kind));
   }
 
+  // CTL-1050 §3.2: the awareness section is STATE-DERIVED from the server-decorated
+  // current outages — one row per `down` service, structurally flap-proof (a
+  // recovered service simply drops out of the next snapshot). NEVER read from the
+  // event log here; the inbox renders live state, the event log records history.
+  for (const o of payload.serviceHealth?.outages ?? []) {
+    buckets.awareness.push(outageRow(o));
+  }
+
   const sections: InboxSection[] = SECTION_ORDER.filter(
     (kind) => buckets[kind].length > 0,
   ).map((kind) => ({ kind, label: SECTION_LABEL[kind], rows: buckets[kind] }));
@@ -207,11 +332,16 @@ export function deriveInbox(payload: BoardPayload): InboxModel {
   const order: InboxRow[] = sections.flatMap((s) => s.rows);
 
   const counts: InboxCounts = {
+    attention: buckets.attention.length,
     blocked: buckets.blocked.length,
     waiting: buckets.waiting.length,
     running: buckets.running.length,
+    awareness: buckets.awareness.length,
     done: buckets.done.length,
-    needsYou: buckets.blocked.length + buckets.waiting.length,
+    // CTL-729: the single "N need you" figure absorbs the attention bucket.
+    // CTL-1050: awareness is DELIBERATELY excluded — a service outage is "no
+    // action needed", so it never inflates the needs-you figure or the all-clear gate.
+    needsYou: buckets.attention.length + buckets.blocked.length + buckets.waiting.length,
   };
 
   return {
@@ -345,11 +475,20 @@ export function rowById(model: InboxModel, id: string | null): InboxRow | null {
  *  null when this section has no live duration OR the anchor was never stamped. */
 export function rowDurationAnchor(row: InboxRow): string | null {
   switch (row.section) {
+    case "attention":
+      // CTL-729: how long it has needed you — the attention start (the worker's
+      // current-phase start for waiting-on-you), falling back to the held applied-at.
+      return row.ticket.attentionSince ?? row.ticket.heldSince ?? null;
     case "blocked":
     case "waiting":
       return row.ticket.heldSince ?? null;
     case "running":
       return row.ticket.currentPhaseSince ?? null;
+    case "awareness":
+      // An awareness row's "duration" is how long the outage has been down.
+      return row.outage?.downSince != null
+        ? new Date(row.outage.downSince).toISOString()
+        : null;
     case "done":
       return null;
   }

@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Catalyst · Typography Specimen (CTL-1071)</title>
+<style>
+  /* ── CTL-1071 typography specimen — three-voice split ───────────────────
+   * serif (read): ticket titles, section headings, body prose
+   * sans  (chrome): labels, metadata, navigation, chips
+   * mono  (data): ticket refs, IDs, timestamps, code
+   *
+   * Token blocks inlined from app.css (both themes) for standalone use.
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  :root {
+    /* warm-light surfaces */
+    --surface-chrome: #ece7dd;
+    --surface-canvas: #faf7f2;
+    --surface-card: #fffdf9;
+    --surface-elevated: #ffffff;
+    --border-strong: #ddd5c7;
+    --border-subtle: #e7e1d4;
+    --fg: #2b2722;
+    --fg-muted: #76705f;
+    --color-accent: #a9512f;
+    --color-green: #41bd7d;
+    --color-blue: #5e9ee8;
+    --color-yellow: #d9a843;
+    --color-red: #e36b6b;
+    --color-purple: #a98ee3;
+    --color-live: #53cde2;
+
+    /* typography tokens */
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    --canvas-bg: var(--surface-canvas);
+    --card-bg: var(--surface-card);
+    --chrome-bg: var(--surface-chrome);
+  }
+
+  .dark {
+    --surface-chrome: #0e1116;
+    --surface-canvas: #181d24;
+    --surface-card: #2b333d;
+    --surface-elevated: #39424f;
+    --border-strong: rgba(255,255,255,0.11);
+    --border-subtle: rgba(255,255,255,0.07);
+    --fg: #edf1f7;
+    --fg-muted: #9ba6b5;
+    --color-accent: #5e9ee8;
+    --canvas-bg: var(--surface-canvas);
+    --card-bg: var(--surface-card);
+    --chrome-bg: var(--surface-chrome);
+  }
+
+  * { box-sizing: border-box; margin: 0; }
+  html, body { min-height: 100%; }
+
+  body {
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── Theme sections ─────────────────────────────────────────────────────── */
+  .theme-section {
+    padding: 48px;
+    background: var(--canvas-bg);
+    color: var(--fg);
+    border-bottom: 2px solid #00000022;
+    min-height: 600px;
+  }
+  .theme-section + .theme-section { border-top: 4px solid #00000040; }
+
+  .theme-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    margin-bottom: 40px;
+    padding: 6px 10px;
+    background: var(--chrome-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 4px;
+    display: inline-block;
+  }
+
+  /* ── Three-column specimen layout ──────────────────────────────────────── */
+  .specimen-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 32px;
+    align-items: start;
+  }
+
+  .voice-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  /* ── SERIF voice — reading surfaces ────────────────────────────────────── */
+  .voice-serif .ticket-title {
+    font-family: var(--font-serif);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--fg);
+    line-height: 1.25;
+    margin-bottom: 12px;
+  }
+
+  .voice-serif .ticket-lede {
+    font-family: var(--font-serif);
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--fg);
+    margin-bottom: 16px;
+  }
+
+  .voice-serif .section-h1 {
+    font-family: var(--font-serif);
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 20px 0 8px;
+    line-height: 1.3;
+  }
+
+  .voice-serif .section-h2 {
+    font-family: var(--font-serif);
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--fg);
+    margin: 16px 0 6px;
+    line-height: 1.3;
+  }
+
+  .voice-serif .body-prose {
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--fg);
+  }
+
+  /* ── SANS voice — chrome / UI chrome ────────────────────────────────────── */
+  .voice-sans .chrome-nav {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--fg-muted);
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .chrome-nav .nav-item {
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--chrome-bg);
+    border: 1px solid var(--border-strong);
+    cursor: pointer;
+  }
+  .chrome-nav .nav-item.active {
+    color: var(--fg);
+    background: var(--card-bg);
+  }
+
+  .chrome-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--fg-muted);
+    margin: 16px 0 6px;
+  }
+
+  .chrome-chip {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 9999px;
+    margin: 2px;
+  }
+  .chip-implement { background: rgba(69,192,138,0.18); color: #45c08a; }
+  .chip-verify    { background: rgba(219,161,79,0.18); color: #dba14f; }
+  .chip-review    { background: rgba(205,184,78,0.18); color: #cdb84e; }
+  .chip-pr        { background: rgba(69,188,171,0.18); color: #45bcab; }
+
+  .chrome-meta {
+    font-size: 12px;
+    color: var(--fg-muted);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 12px;
+  }
+  .chrome-meta span { display: flex; justify-content: space-between; }
+  .chrome-meta .value { color: var(--fg); font-weight: 500; }
+
+  /* ── MONO voice — data / code ───────────────────────────────────────────── */
+  .voice-mono .ticket-ref {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-accent);
+    background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    display: inline-block;
+    text-decoration: none;
+    margin: 3px 2px;
+  }
+
+  .voice-mono .data-row {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--fg-muted);
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 8px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .data-row .data-val { color: var(--fg); }
+
+  .voice-mono .code-block {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    background: var(--chrome-bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 6px;
+    padding: 10px 12px;
+    margin-top: 12px;
+    color: var(--fg);
+    overflow-x: auto;
+  }
+
+  .live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--color-live);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-live) 30%, transparent);
+    vertical-align: middle;
+    margin-right: 4px;
+  }
+</style>
+</head>
+<body>
+
+<!-- WARM-LIGHT THEME -->
+<div class="theme-section">
+  <div class="theme-label">⬜ warm-light theme · CTL-1071 · three-voice typography specimen</div>
+
+  <div class="specimen-grid">
+
+    <!-- SERIF voice -->
+    <div class="voice-serif">
+      <div class="voice-label">serif — reading surfaces</div>
+
+      <div class="ticket-title">Catalyst Warm-Textbook Identity Spike</div>
+      <p class="ticket-lede">
+        Replace the Linear-derived blue-graphite palette with a warm-textbook system
+        across the orch-monitor app and the Starlight website, emitting prototypes,
+        decision records, and a scoped epic.
+      </p>
+
+      <div class="section-h1">Overview</div>
+      <p class="body-prose">
+        The spike lands the low-risk, test-guarded token changes now — warm-light
+        terracotta accent fork, chart-palette LIVE-collision fix, a serif token with
+        a narrow reading-surface application, and the website accent swap.
+      </p>
+
+      <div class="section-h2">Migration Notes</div>
+      <p class="body-prose">
+        The warm-light accent fork is isolated to <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">--color-light-accent</code> — dark theme
+        and all <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">text-accent</code> utilities are untouched.
+      </p>
+    </div>
+
+    <!-- SANS voice -->
+    <div class="voice-sans">
+      <div class="voice-label">sans — chrome / ui labels</div>
+
+      <div class="chrome-nav">
+        <span class="nav-item active">Board</span>
+        <span class="nav-item">Queue</span>
+        <span class="nav-item">OBSERVE</span>
+        <span class="nav-item">Settings</span>
+      </div>
+
+      <div class="chrome-label">phase</div>
+      <div>
+        <span class="chrome-chip chip-implement">implement</span>
+        <span class="chrome-chip chip-verify">verify</span>
+        <span class="chrome-chip chip-review">review</span>
+        <span class="chrome-chip chip-pr">pr</span>
+      </div>
+
+      <div class="chrome-label">worker metadata</div>
+      <div class="chrome-meta">
+        <span><span>model</span><span class="value">sonnet</span></span>
+        <span><span>turn cap</span><span class="value">75</span></span>
+        <span><span>cost</span><span class="value">$0.84</span></span>
+        <span><span>tokens</span><span class="value">142k</span></span>
+        <span><span>duration</span><span class="value">4m 12s</span></span>
+      </div>
+    </div>
+
+    <!-- MONO voice -->
+    <div class="voice-mono">
+      <div class="voice-label">mono — data / refs / code</div>
+
+      <div>
+        <a class="ticket-ref">CTL-1071</a>
+        <a class="ticket-ref">CTL-1033</a>
+        <a class="ticket-ref">CTL-893</a>
+        <a class="ticket-ref">CTL-449</a>
+      </div>
+
+      <div style="margin-top:14px">
+        <div class="data-row"><span>job id</span><span class="data-val">aa145297</span></div>
+        <div class="data-row"><span>started</span><span class="data-val">05:37:42Z</span></div>
+        <div class="data-row"><span>commit</span><span class="data-val">e5e99f9b</span></div>
+        <div class="data-row"><span>branch</span><span class="data-val">CTL-1071</span></div>
+      </div>
+
+      <div class="code-block">const LIVE = "#53cde2";
+export const C = {
+  s0: "#0e1116",
+  s2: "#2b333d",
+};</div>
+    </div>
+
+  </div><!-- /specimen-grid -->
+</div><!-- /warm-light -->
+
+<!-- CALM-DARK THEME -->
+<div class="theme-section dark">
+  <div class="theme-label">⬛ calm-dark theme · three-voice typography specimen</div>
+
+  <div class="specimen-grid">
+
+    <!-- SERIF voice -->
+    <div class="voice-serif">
+      <div class="voice-label">serif — reading surfaces</div>
+
+      <div class="ticket-title">Catalyst Warm-Textbook Identity Spike</div>
+      <p class="ticket-lede">
+        Replace the Linear-derived blue-graphite palette with a warm-textbook system
+        across the orch-monitor app and the Starlight website, emitting prototypes,
+        decision records, and a scoped epic.
+      </p>
+
+      <div class="section-h1">Overview</div>
+      <p class="body-prose">
+        The migration lever throughout is CTL-1033's contract test pair —
+        <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">elevation-ladder.test.ts</code> and
+        <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">surface-contract.test.ts</code> — which stay green by
+        construction so every route shell picks up the warm tokens.
+      </p>
+
+      <div class="section-h2">Decisions</div>
+      <p class="body-prose">
+        Fork warm-light <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">--color-light-accent</code> to terracotta
+        <code style="font-family:var(--font-mono);font-size:.88em;padding:1px 5px;background:var(--chrome-bg);border-radius:3px">#a9512f</code>; leave global accent and dark primary on
+        blue. Minimal blast radius.
+      </p>
+    </div>
+
+    <!-- SANS voice -->
+    <div class="voice-sans">
+      <div class="voice-label">sans — chrome / ui labels</div>
+
+      <div class="chrome-nav">
+        <span class="nav-item active">Board</span>
+        <span class="nav-item">Queue</span>
+        <span class="nav-item">OBSERVE</span>
+        <span class="nav-item">Settings</span>
+      </div>
+
+      <div class="chrome-label">phase</div>
+      <div>
+        <span class="chrome-chip chip-implement">implement</span>
+        <span class="chrome-chip chip-verify">verify</span>
+        <span class="chrome-chip chip-review">review</span>
+        <span class="chrome-chip chip-pr">pr</span>
+      </div>
+
+      <div class="chrome-label">worker metadata</div>
+      <div class="chrome-meta">
+        <span><span>model</span><span class="value">sonnet</span></span>
+        <span><span>turn cap</span><span class="value">75</span></span>
+        <span><span>cost</span><span class="value">$0.84</span></span>
+        <span><span>tokens</span><span class="value">142k</span></span>
+        <span><span>duration</span><span class="value">4m 12s</span></span>
+      </div>
+    </div>
+
+    <!-- MONO voice -->
+    <div class="voice-mono">
+      <div class="voice-label">mono — data / refs / code</div>
+
+      <div>
+        <a class="ticket-ref">CTL-1071</a>
+        <a class="ticket-ref">CTL-1033</a>
+        <a class="ticket-ref">CTL-893</a>
+        <a class="ticket-ref">CTL-449</a>
+      </div>
+
+      <div style="margin-top:14px">
+        <div class="data-row"><span>job id</span><span class="data-val">aa145297</span></div>
+        <div class="data-row"><span>started</span><span class="data-val">05:37:42Z</span></div>
+        <div class="data-row"><span>commit</span><span class="data-val">e5e99f9b</span></div>
+        <div class="data-row"><span>branch</span><span class="data-val">CTL-1071</span></div>
+      </div>
+
+      <div class="code-block">const LIVE = "#53cde2";
+export const C = {
+  s0: "#0e1116",
+  s2: "#2b333d",
+};</div>
+    </div>
+
+  </div><!-- /specimen-grid -->
+</div><!-- /calm-dark -->
+
+</body>
+</html>

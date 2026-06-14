@@ -34,6 +34,7 @@ import {
   workerHistoryLogQL,
   parseHistoryLine,
   isValidCcSessionId,
+  throughputByWorkType,
 } from "../lib/otel-queries";
 import type { PrometheusFetcher, PrometheusQueryResult } from "../lib/prometheus";
 import type { LokiFetcher, LokiQueryResult } from "../lib/loki";
@@ -842,12 +843,12 @@ describe("modelLatency", () => {
     const rows = await modelLatency(loki, "1h");
     expect(rows).not.toBeNull();
     // sorted slowest-p95 first
-    expect(rows![0]!.model).toBe("fable-5");
-    expect(rows![0]!.p50Ms).toBe(3100);
-    expect(rows![0]!.p95Ms).toBe(22000);
-    expect(rows![0]!.requests).toBe(300);
-    expect(rows![0]!.errors).toBe(3);
-    expect(rows![0]!.errorRate).toBeCloseTo(0.01);
+    expect(rows![0].model).toBe("fable-5");
+    expect(rows![0].p50Ms).toBe(3100);
+    expect(rows![0].p95Ms).toBe(22000);
+    expect(rows![0].requests).toBe(300);
+    expect(rows![0].errors).toBe(3);
+    expect(rows![0].errorRate).toBeCloseTo(0.01);
     // haiku has no errors → errorRate 0 (it HAS requests, so not null)
     const haiku = rows!.find((r) => r.model === "haiku-4.5")!;
     expect(haiku.errors).toBe(0);
@@ -1373,8 +1374,8 @@ describe("recentTail", () => {
     expect(res).not.toBeNull();
     expect(res!.rows).toHaveLength(2);
     // newest-first — and the fields came from the LABELS, not the (non-JSON) body.
-    expect(res!.rows[0]!.eventName).toBe("api_request");
-    expect(res!.rows[0]!.model).toBe("fable");
+    expect(res!.rows[0].eventName).toBe("api_request");
+    expect(res!.rows[0].model).toBe("fable");
     // freshness ≈ 4s (allow a little slack for the now() taken inside recentTail)
     expect(res!.freshnessMs).not.toBeNull();
     expect(res!.freshnessMs!).toBeGreaterThanOrEqual(3_000);
@@ -1398,7 +1399,7 @@ describe("recentTail", () => {
       ),
     );
     const res = await recentTail(loki, "15m");
-    const row = res!.rows[0]!;
+    const row = res!.rows[0];
     expect(row.eventName).toBe("tool_result");
     expect(row.toolName).toBe("Bash");
     expect(row.durationMs).toBe(296);
@@ -1421,8 +1422,8 @@ describe("recentTail", () => {
       ]),
     );
     const res = await recentTail(loki, "15m");
-    expect(res!.rows[0]!.sessionId).toBe("abc-123");
-    expect(res!.rows[0]!.linearKey).toBe("CTL-928");
+    expect(res!.rows[0].sessionId).toBe("abc-123");
+    expect(res!.rows[0].linearKey).toBe("CTL-928");
   });
 
   it("an empty stream is an HONEST result with freshnessMs null (QUIET), NOT null", async () => {
@@ -1445,8 +1446,8 @@ describe("recentTail", () => {
     );
     const res = await recentTail(loki, "15m");
     expect(res!.rows).toHaveLength(1);
-    expect(res!.rows[0]!.eventName).toBeNull();
-    expect(res!.rows[0]!.sessionId).toBeNull();
+    expect(res!.rows[0].eventName).toBeNull();
+    expect(res!.rows[0].sessionId).toBeNull();
   });
 });
 
@@ -1569,5 +1570,55 @@ describe("activeTimeRatio", () => {
 
   it("returns null ONLY when Prometheus is unavailable (query failed)", async () => {
     expect(await activeTimeRatio(mockProm(null), "1h")).toBeNull();
+  });
+});
+
+// CTL-1040: throughput-by-work-type — counts phase.teardown.complete.* events
+// per catalyst_ticket_type over the window. Loki-backed matrix parse that takes
+// the LAST value of each series (count_over_time is monotone within the range).
+// Added by phase-verify (test-only) — the pure rankCountMap sibling is already
+// covered in utilization-kit.test.ts; this pins the untested Loki parse path.
+describe("throughputByWorkType", () => {
+  it("maps catalyst_ticket_type → count, taking the last value of each series", async () => {
+    const loki = mockLoki({
+      data: {
+        resultType: "matrix",
+        result: [
+          {
+            metric: { catalyst_ticket_type: "feature" },
+            values: [
+              [1713100000, "2"],
+              [1713100600, "5"],
+            ],
+          },
+          { metric: { catalyst_ticket_type: "bug" }, values: [[1713100600, "3"]] },
+        ],
+      },
+    });
+    const result = await throughputByWorkType(loki, "24h");
+    expect(result).toEqual({ feature: 5, bug: 3 });
+  });
+
+  it("returns null when Loki is unavailable", async () => {
+    expect(await throughputByWorkType(mockLoki(null), "24h")).toBeNull();
+  });
+
+  it("returns an empty map for an empty result set (honest zero state)", async () => {
+    const loki = mockLoki({ data: { resultType: "matrix", result: [] } });
+    expect(await throughputByWorkType(loki, "24h")).toEqual({});
+  });
+
+  it("skips series with a missing type label or no values (no fabricated rows)", async () => {
+    const loki = mockLoki({
+      data: {
+        resultType: "matrix",
+        result: [
+          { metric: { catalyst_ticket_type: "feature" }, values: [[1713100600, "4"]] },
+          { metric: {}, values: [[1713100600, "9"]] },
+          { metric: { catalyst_ticket_type: "docs" }, values: [] },
+        ],
+      },
+    });
+    expect(await throughputByWorkType(loki, "24h")).toEqual({ feature: 4 });
   });
 });

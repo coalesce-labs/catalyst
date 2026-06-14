@@ -12,7 +12,10 @@
 // share ONE liveness / termination / concurrency primitive.
 
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { getJobsRoot } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
@@ -363,6 +366,56 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
   return agent.status === "idle" ? "idle" : "busy";
 }
 
+// CTL-1055: dead-session liveness filter for the admission-gate count. A
+// `claude agents --json` background session whose ~/.claude/jobs/<shortId>/
+// state.json has reached a terminal lifecycle is registered-but-idle — it holds
+// no real slot and must NOT count against maxParallel, or terminal "ghost"
+// sessions starve dispatch (observed 2026-06-11: 3 live + 5 ghosts = 8 ≥
+// maxParallel 7; five queue heads deferred for hours).
+//
+// TERMINAL_JOB_STATES is kept in LOCK-STEP with the copies in
+// execution-core/recovery.mjs and orch-monitor/lib/board-data.mjs. We cannot
+// import recovery.mjs here — it imports this module (circular dep, CTL-1055
+// research §4) — so the set is duplicated locally, exactly as board-data.mjs does.
+// `blocked` is terminal-for-counting (CTL-768: parked sessions are excluded from
+// capacity) but this path NEVER kills — only the count changes.
+const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+
+// isBgJobDead — PURE verdict over a job-state shape ({ state, firstTerminalAt }),
+// mirroring recovery.jobLifecycle / board-data.bgJobLifecycle:
+//   null            → the job dir is gone → dead.
+//   firstTerminalAt → Claude marked the job terminal → dead.
+//   state ∈ TERMINAL_JOB_STATES → dead.
+//   anything else (incl. unreadable-but-present state.json → null state) → alive.
+export function isBgJobDead(jobState) {
+  if (!jobState) return true;
+  if (jobState.firstTerminalAt || TERMINAL_JOB_STATES.has(jobState.state)) return true;
+  return false;
+}
+
+// defaultStatJobState — synchronous read of ~/.claude/jobs/<shortId>/state.json,
+// returning the { state, firstTerminalAt } slice isBgJobDead needs, or null when
+// the file is missing (dir gone). Sync is intentional and hot-path safe: it is the
+// same statSync/readFileSync read recovery.defaultStatJob already does per worker
+// per tick. An existing-but-unreadable state.json yields { state: null,
+// firstTerminalAt: null } → classified alive (fail-alive: never drop a live worker
+// from the count over a transient mid-write read).
+export function defaultStatJobState(shortId) {
+  const file = join(getJobsRoot(), shortId, "state.json");
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return null; // file/dir missing → worker gone
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return { state: parsed?.state ?? null, firstTerminalAt: parsed?.firstTerminalAt ?? null };
+  } catch {
+    return { state: null, firstTerminalAt: null }; // present but unreadable → alive
+  }
+}
+
 // countBackgroundAgents — number of live sessions with kind === "background".
 // The scheduler's concurrency gate: interactive (human) sessions are unlimited
 // and MUST NOT count against maxParallel, so only `background` agents are
@@ -374,9 +427,24 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
 // snapshot (getAgentsCached) instead of a synchronous execFileSync. This is the
 // scheduler/autotune hot path — it must NOT spawn a subprocess on the event loop.
 // Tests inject `agents` directly (pure logic) and are unaffected.
-export function countBackgroundAgents({ agents, now } = {}) {
+//
+// CTL-1055: a registered background session counts only if its bg job is alive.
+// Terminal ghost sessions (state ∈ TERMINAL_JOB_STATES or firstTerminalAt set)
+// and dir-gone sessions are excluded so they cannot starve the admission gate.
+// The `statJob` seam (defaulting to defaultStatJobState) is injectable for tests.
+export function countBackgroundAgents({ agents, now, statJob = defaultStatJobState } = {}) {
   const list = agents ?? getAgentsCached(now ? { now } : {}).agents;
-  return list.filter((a) => a?.kind === "background").length;
+  return list.filter((a) => {
+    if (a?.kind !== "background") return false; // unchanged: interactive/unknown excluded
+    // CTL-1055: count only if the bg job is alive.
+    let shortId;
+    try {
+      shortId = shortIdFromSessionId(a.sessionId);
+    } catch {
+      return false; // malformed/absent sessionId → un-probeable → fail-low (don't count)
+    }
+    return !isBgJobDead(statJob(shortId));
+  }).length;
 }
 
 // --- CTL-932: screen capture for wedge escalations -------------------------

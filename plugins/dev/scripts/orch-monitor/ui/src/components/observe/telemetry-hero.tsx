@@ -16,6 +16,7 @@ import {
   type HeroState,
   type HeroTone,
   HERO_TONE,
+  errorChipCopy,
   errorRateLabel,
   freshnessLabel,
 } from "./hero-state";
@@ -58,9 +59,26 @@ export interface TelemetryHeroProps {
   errorCount: number;
   /** errors / requests over 15m (for the "(<rate>%)" copy). */
   errorRate: number | null;
+  /** CTL-1039: api_error count since local midnight — the NOTED "N errors today"
+   *  neutral chip (every count states its window). */
+  errorCountToday?: number;
+  /** CTL-1039: api_error count in the last 15m — pairs with today in the chip. */
+  errorCount15m?: number;
+  /** CTL-1039: a degraded source shows a muted "reconnecting…" hint (never DARK).
+   *  The hero keeps its last data-driven state. */
+  reconnecting?: boolean;
   /** Last-good timestamp (epoch ms) shown only in DARK so the operator sees how
    *  stale the surface is. null when unknown. */
   lastGoodMs?: number | null;
+  /** CTL-1039: epoch ms Loki entered DARK (≥3 consecutive failures) — drives the
+   *  "Loki unreachable since HH:MM" copy. null when unknown. */
+  darkSinceMs?: number | null;
+}
+
+/** Local HH:MM for the DARK "since" copy. */
+function hhmm(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
 const STATE_COPY: Record<HeroState, string> = {
@@ -75,10 +93,21 @@ export function TelemetryHero({
   freshnessMs,
   errorCount,
   errorRate,
+  errorCountToday,
+  errorCount15m,
+  reconnecting = false,
   lastGoodMs,
+  darkSinceMs,
 }: TelemetryHeroProps) {
   const tone = HERO_TONE[state];
   const color = TONE_VAR[tone];
+
+  // CTL-1039: the error clause. ERRORING (red) keeps the rate-bearing "N errors
+  // in last 15m (X%)" copy. Every other state shows the NEUTRAL, muted NOTED chip
+  // with EXPLICIT windows ("today" / "last 15m") — no red anywhere. Falls back to
+  // the legacy 15m count when the windowed counts aren't supplied.
+  const today = errorCountToday ?? errorCount;
+  const last15m = errorCount15m ?? errorCount;
 
   return (
     <div className="flex w-full items-center gap-3 rounded-lg border border-border bg-surface-1 px-4 py-3">
@@ -102,6 +131,7 @@ export function TelemetryHero({
           </span>
           <span>
             Loki unreachable
+            {typeof darkSinceMs === "number" && <> since {hhmm(darkSinceMs)}</>}
             {typeof lastGoodMs === "number" && (
               <> · last good {freshnessLabel(Date.now() - lastGoodMs)}</>
             )}
@@ -112,10 +142,28 @@ export function TelemetryHero({
           <span className="text-muted/60">·</span>
           <span>last event {freshnessLabel(freshnessMs)}</span>
           <span className="text-muted/60">·</span>
-          <span className={cn(state === "ERRORING" && "text-red")}>
-            {errorCount} API {errorCount === 1 ? "error" : "errors"} /15m (
-            {errorRateLabel(errorRate)})
-          </span>
+          {state === "ERRORING" ? (
+            // ERRORING (red, both gates met): the systemic-failure copy with the
+            // window + rate stated explicitly.
+            <span className="text-red">
+              {last15m} {last15m === 1 ? "error" : "errors"} in last 15m (
+              {errorRateLabel(errorRate)})
+            </span>
+          ) : (
+            // NOTED (neutral): the muted error chip with explicit windows — NO red
+            // anywhere even when errors exist (the proportional fix).
+            <span className="text-muted-foreground">
+              {errorChipCopy(today, last15m)}
+            </span>
+          )}
+          {/* CTL-1039: a degraded source → a muted, italic reconnecting hint next
+              to the source line (never a banner / DARK). */}
+          {reconnecting && (
+            <>
+              <span className="text-muted/60">·</span>
+              <span className="italic text-muted-foreground">reconnecting…</span>
+            </>
+          )}
         </span>
       )}
 

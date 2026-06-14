@@ -170,7 +170,7 @@ function InboxList({
   statusFor: (id: string) => RespondRowStatus;
 }) {
   return (
-    <div className="flex h-full flex-col bg-surface-0">
+    <div className="flex h-full flex-col bg-surface-1">
       {/* The calm "state of things" header — ONE sentence, never a KPI grid.
           In the all-clear state it reads as everything-handled (no alarm count). */}
       <header className="shrink-0 border-b border-border px-4 py-4">
@@ -185,7 +185,7 @@ function InboxList({
       {/* Flat bare-row list — sections are hairline-divided groups, NOT cards.
           When nothing needs the operator, the calm all-clear list replaces the
           sections entirely (the relief payoff). */}
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div className="cat-overlay-scroll min-h-0 flex-1 overflow-y-auto">
         {isAllClear(counts) ? (
           <AllClearList counts={counts} />
         ) : (
@@ -310,7 +310,7 @@ export function HomeSurface() {
   const selectedRow = rowById(model, selectedId);
 
   return (
-    <div className="h-full min-h-0 w-full min-w-0 bg-surface-0 text-fg">
+    <div className="h-full min-h-0 w-full min-w-0 bg-surface-1 text-fg">
       <ResizableSplit
         list={
           <InboxList

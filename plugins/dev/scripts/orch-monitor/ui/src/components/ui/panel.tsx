@@ -10,7 +10,8 @@ export function Panel({ children, className }: PanelProps) {
   return (
     <div
       className={cn(
-        "overflow-hidden rounded-lg border border-border bg-surface-2",
+        // CTL-1033: the canonical card surface + lift — panels FLOAT off the canvas.
+        "overflow-hidden rounded-lg border border-border bg-surface-2 shadow-card",
         className,
       )}
     >
@@ -66,7 +67,7 @@ interface MetricCardProps {
 
 export function MetricCard({ label, value, sub, icon, color }: MetricCardProps) {
   return (
-    <div className="group flex items-start gap-3 rounded-lg border border-border bg-surface-2 px-4 py-3 transition-colors hover:border-border hover:bg-surface-3/50">
+    <div className="group flex items-start gap-3 rounded-lg border border-border bg-surface-2 shadow-card px-4 py-3 transition-colors hover:border-border hover:bg-surface-3/50">
       <div
         className={cn(
           "mt-0.5 transition-transform duration-200 group-hover:scale-110",

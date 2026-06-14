@@ -17,9 +17,8 @@ import type { Surface } from "./surface";
  *  - "board"     → the dense, full-bleed <Board /> grid (CTL-892).
  *  - "workers"   → the dense Workers grid: the SAME <Board /> opened on its
  *                  Workers view, with the node group-by + node filter (CTL-909).
- *  - "queue"     → the dedicated wide ranked-depth Queue surface (CTL-910 / SURF2):
- *                  capacity strip + on-the-plate table + waiting ranked table with
- *                  the optional per-node column.
+ *                  The control tower (SlotDeck → DispatchQueue → HoldingBuckets →
+ *                  DeadStrip) is folded above the worker grid (CTL-1016).
  *  - "dashboard" → the existing monitor dashboard / orchestrator / comms / etc.
  *
  * Home is the calm dashboard inbox; every other surface falls through to it.
@@ -39,24 +38,23 @@ import type { Surface } from "./surface";
 export type SurfaceContentKind =
   | "board"
   | "workers"
-  | "queue"
   | "telemetry"
   | "finops"
   | "utilization"
   | "fleetops"
+  | "rulebook"
   | "dashboard";
 
 /**
  * Resolve which content kind the inset should render for the active surface.
- * "board" was special-cased in SHELL2; SURF1 (CTL-909) adds "workers" and
- * SURF2 (CTL-910) adds "queue" — each is now its own dense, edge-to-edge
- * surface instead of the placeholder dashboard. Every other surface keeps the
- * dashboard content so this stays behavior-preserving for Home (no regression).
+ * "board" was special-cased in SHELL2; SURF1 (CTL-909) adds "workers". The
+ * former "queue" content kind is retired (CTL-1016): the control tower is
+ * folded into the workers surface. Every other surface keeps the dashboard
+ * content so this stays behavior-preserving for Home (no regression).
  */
 export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   if (surface === "board") return "board";
   if (surface === "workers") return "workers";
-  if (surface === "queue") return "queue";
   // OBS-5: Telemetry is the first OBSERVE surface to ship its own content shell.
   if (surface === "telemetry") return "telemetry";
   // OBS-10: FinOps is the second OBSERVE surface to ship its own content shell.
@@ -70,6 +68,8 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   // remaining surface (devops) stays on the dashboard fall-through (nav-disabled
   // "soon") until its own OBS ticket lands.
   if (surface === "fleetops") return "fleetops";
+  // CTL-1103: Rulebook is the first REASON surface.
+  if (surface === "rulebook") return "rulebook";
   return "dashboard";
 }
 

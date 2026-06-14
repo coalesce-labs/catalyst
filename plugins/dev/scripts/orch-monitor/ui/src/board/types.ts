@@ -17,6 +17,13 @@ import type { ReadModelPayload } from "../../../lib/read-model-client";
 // the board renders it as a distinct dead/zombie state, not "active".
 export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
+// CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
+// the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
+// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
+// watchdog/phase escalation via a needs-human/needs-input label or the host-local
+// marker) | null. needs-human wins. DISTINCT from `held` (admission-gate pair).
+export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
  *  queue node column) can attribute/group by host. Mirrors the server's
@@ -127,6 +134,20 @@ export interface BoardTicket {
    *  has it been running / in its current state" anchor for the running set.
    *  null when the surfaced phase carried no startedAt. */
   currentPhaseSince?: string | null;
+  /** CTL-1130: typed-union call_to_action from the most-recent stalled/failed
+   *  signal's explanation.call_to_action. Used by home-inbox attentionSubLabel as
+   *  the sub-label for needs-human rows. null when absent (back-compat). */
+  humanQuestion?: string | null;
+  /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
+   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
+   *  escalation via a needs-human/needs-input label or the host-local marker) |
+   *  null. needs-human wins. Drives the ONE yellow board accent + the Inbox
+   *  "Needs you" section. DISTINCT from `held` (the admission-gate pair). */
+  attention?: BoardAttention;
+  /** CTL-729: ISO timestamp the attention started — the worker's current-phase
+   *  start for waiting-on-you; null for needs-human. The Inbox row anchors its
+   *  duration to attentionSince ?? heldSince; null is rendered unavailable. */
+  attentionSince?: string | null;
   /** CTL-922 (BFF10): the node owning this ticket (BOARD3 host swimlanes), from
    *  the phase signals host:{name,id} (CTL-852) or the durable fence projection
    *  owner_host (BFF11). null when no host is named. */
@@ -134,6 +155,13 @@ export interface BoardTicket {
   /** CTL-922 (BFF10): the fence generation (HOME5 unblock passes it to the
    *  fence-check). null when no fence. */
   generation?: number | null;
+  /** CTL-1066: reason a stalled/failed phase gave up; drives the "Stalled — gave
+   *  up" holding bucket copy. null/absent unless status is stalled/failed. */
+  failureReason?: string | null;
+  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
+   *  card. null/absent unless attention is needs-human and a signal carried the
+   *  extended fields. */
+  explanation?: BoardEscalationExplanation | null;
   // ── CTL-902 (HOME4): the reading-pane CONTENT fields ─────────────────────
   // The "What's needed now" hero + the About block read these. They are NOT in
   // the board payload today — they derive from the ticket's AI summary + the
@@ -165,6 +193,19 @@ export interface DecisionOption {
   detail: string;
 }
 
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
+ *  object for the detail pane's CTA-led card. Each field is null when the payload
+ *  omitted it (rendered absent, never fabricated). Field names stay snake_case to
+ *  match the wire payload exactly (no transform). */
+export interface BoardEscalationExplanation {
+  call_to_action: string | null;
+  outcome: string | null;
+  problem: string | null;
+  why_you: string | null;
+  why_not_auto: string | null;
+  what_to_do: string | null;
+}
+
 export interface WorkflowSubStep {
   ts: string;
   workflowName: string;
@@ -192,6 +233,9 @@ export interface BoardQueueItem {
    *  column), from the durable fence projection owner_host (BFF11). null when
    *  no fence attachment has been observed. */
   host?: BoardHostRef | null;
+  /** CTL-1066: active dispatch retry cool-down; drives the "retrying in …" chip.
+   *  null when not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
+  dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
 }
 
 export interface BoardConfig {
@@ -206,6 +250,20 @@ export interface BoardConfig {
   dead?: number;
 }
 
+/** CTL-1050 §3.2: one current service outage decorated onto the board payload —
+ *  the inbox awareness item renders from these (state-derived, `down` only). */
+export interface BoardServiceOutage {
+  id: string;
+  label: string;
+  downSince: number | null;
+  detail: string | null;
+}
+
+export interface BoardServiceHealth {
+  generatedAt: number;
+  outages: BoardServiceOutage[];
+}
+
 export interface BoardPayload {
   generatedAt: string;
   config: BoardConfig;
@@ -213,6 +271,8 @@ export interface BoardPayload {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   queue: BoardQueueItem[];
+  /** CTL-1050: server-decorated current service outages (down only). */
+  serviceHealth?: BoardServiceHealth;
 }
 
 // ── SharedWorker ⇄ client message protocol (CTL-733 PR-2b) ──────────────────

@@ -122,6 +122,14 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1084: resolve durable governance flags (Layer-2 + any explicit env override)
+	# and export them so the daemon — and every per-tick gate that reads process.env —
+	# inherits the durable value with no manual re-export ritual. Best-effort: a failure
+	# here must never block launch (flags then fall back to whatever env already holds).
+	local _gov_exports
+	if _gov_exports="$("$runtime" "$SCRIPT_DIR/execution-core/cli/governance-env.mjs" 2>/dev/null)"; then
+		eval "$_gov_exports"
+	fi
 	# CTL-846: if proxy vars were sourced (here or via catalyst-stack --proxy's inline prefix —
 	# both converge on this process) but the proxy endpoint is not listening, strip them and warn
 	# so the daemon starts in direct mode instead of failing every API call with connection refused.
@@ -225,19 +233,30 @@ cmd_status() {
 	for arg in "$@"; do
 		[ "$arg" = "--json" ] && want_json=1
 	done
+	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
+	local drain_json draining in_flight_count
+	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
+	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
+	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
 	local pid
 	if pid=$(read_pid); then
 		if [ "$want_json" -eq 1 ]; then
-			printf '{"running":true,"pid":%s}\n' "$pid"
+			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s}\n' "$pid" "$draining" "$in_flight_count"
 		else
 			echo "running (pid $pid)"
+			if [ "$draining" = "true" ]; then
+				echo "draining — ${in_flight_count} tickets to land"
+			fi
 		fi
 		return 0
 	fi
 	if [ "$want_json" -eq 1 ]; then
-		printf '{"running":false,"pid":null}\n'
+		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s}\n' "$draining" "$in_flight_count"
 	else
 		echo "stopped"
+		if [ "$draining" = "true" ]; then
+			echo "draining — ${in_flight_count} tickets to land"
+		fi
 	fi
 }
 
@@ -346,6 +365,11 @@ Commands:
   worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
+  governance  show which governance modes the daemon is actually running (--json)
+  drain       toggle node drain mode: refuse new-work admission while draining
+              Usage: catalyst-execution-core drain [--off] [--json]
+              drain         set drain flag — no new tickets admitted; in-flight pipelines finish
+              drain --off   lift drain flag — normal admission resumes
 
 Backcompat: start|stop|restart|probe|status work as top-level aliases for the daemon verbs.
 
@@ -391,10 +415,22 @@ if ! (return 0 2>/dev/null); then
 		cmd_register "$@"
 		;;
 	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
-	sessions | worktrees | branches | tidy)
+	sessions | worktrees | branches | tidy | governance)
 		module="$1"
 		shift
 		exec_runtime_module "$module" "$@"
+		;;
+	# CTL-1095: drain mode toggle.
+	drain)
+		shift
+		exec_runtime_module "drain" "$@"
+		;;
+	# CTL-1084: governance-env-exports emits eval-safe export lines for the four
+	# beliefs flags resolved from durable Layer-2 config. The file is named
+	# governance-env.mjs so the noun→file routing is explicit here.
+	governance-env-exports)
+		shift
+		exec_runtime_module "governance-env" "$@"
 		;;
 	"")
 		# CTL-649 finding #4: no-arg prints help to stderr, exit 1.

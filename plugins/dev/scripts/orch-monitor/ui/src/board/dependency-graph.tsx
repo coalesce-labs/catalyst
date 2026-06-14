@@ -30,6 +30,8 @@ import {
   Background,
   BackgroundVariant,
   Controls,
+  Handle,
+  MarkerType,
   type Node,
   type Edge,
   type NodeTypes,
@@ -41,6 +43,7 @@ import {
 type NodeClickHandler = (event: MouseEvent, node: Node) => void;
 import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
+import { buildBacklogEdges } from "./dep-graph-edges";
 import { C, PHASE } from "./board-tokens";
 import { Badge } from "@/components/ui/badge";
 import type { BoardTicket } from "./types";
@@ -142,6 +145,25 @@ function TicketNode({ data }: { data: TicketNodeData }) {
         userSelect: "none",
       }}
     >
+      {/* CTL-1020: React Flow v12 needs mounted Handles to measure handleBounds —
+          without them isNodeInitialized stays false and EVERY edge is silently
+          dropped. Target (incoming, from blocker) on the left; source (outgoing,
+          toward the blocked dependent) on the right — matches the dagre LR
+          sourcePosition:Right / targetPosition:Left routing. Visually hidden
+          (opacity:0, no border/bg) but present + measurable; this is a read-only
+          graph so the handles are never interactive. */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        isConnectable={false}
+        style={{ opacity: 0, border: "none", background: "transparent", width: 1, height: 1 }}
+      />
+      <Handle
+        type="source"
+        position={Position.Right}
+        isConnectable={false}
+        style={{ opacity: 0, border: "none", background: "transparent", width: 1, height: 1 }}
+      />
       <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "space-between" }}>
         <span
           style={{
@@ -189,9 +211,17 @@ function makeEdge(source: string, target: string, label?: string): Edge {
     source,
     target,
     // source is the blocker, target is the blocked ticket — LR so the arrow
-    // points toward the dependent (execution order).
+    // points toward the dependent (execution order). The ArrowClosed markerEnd
+    // sits at the TARGET end, so the arrowhead reads blocker → blocked (CTL-1020).
+    type: "smoothstep",
     animated: false,
     style: { stroke: C.fgDim, strokeWidth: 1.5, opacity: 0.7 },
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 14,
+      height: 14,
+      color: C.fgDim, // muted semantic token (no new hex — surface-contract enforced)
+    },
     labelStyle: { fontSize: 10, fill: C.fgDim },
     label,
   };
@@ -238,7 +268,6 @@ export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
 
   const { nodes: rawNodes, edges: rawEdges } = useMemo(() => {
     const nodes: Node[] = [];
-    const edges: Edge[] = [];
     const addedNodeIds = new Set<string>();
 
     // Helper: add a node (idempotent by addedNodeIds)
@@ -261,22 +290,15 @@ export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
       });
     }
 
-    for (const id of participating) {
-      addNode(id, false);
-      const t = ticketById.get(id);
+    // Pure relation→edge derivation (shared with the unit tests). Returns the
+    // directed edge descriptors plus the terminal (Done/excluded) blocker ids
+    // that need dimmed anchor nodes so every edge has both endpoints.
+    const { edges: depEdges, terminals } = buildBacklogEdges(participating, ticketById);
 
-      // Edge from each blocker → this ticket (blocker must execute first → left of target)
-      for (const blockerId of t?.blockers ?? []) {
-        if (!addedNodeIds.has(blockerId)) {
-          // Blocker is not in participating set (Done/excluded) — add as terminal node
-          // so the edge has both endpoints and actually renders.
-          if (!participating.has(blockerId)) {
-            addNode(blockerId, true);
-          }
-        }
-        edges.push(makeEdge(blockerId, id));
-      }
-    }
+    for (const id of participating) addNode(id, false);
+    for (const id of terminals) addNode(id, true);
+
+    const edges: Edge[] = depEdges.map((e) => makeEdge(e.source, e.target));
 
     const laid = applyDagreLayout(nodes, edges, NODE_HEIGHT);
     return { nodes: laid, edges };

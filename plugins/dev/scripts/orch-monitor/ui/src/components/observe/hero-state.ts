@@ -27,6 +27,10 @@
 
 export type HeroState = "FLOWING" | "QUIET" | "ERRORING" | "DARK";
 
+/** CTL-1039: the SHARED severity the registry tracker carries for Loki, replacing
+ *  the binary lokiReachable semantic. `null` = not yet probed → optimistic. */
+export type ServiceSeverity = "up" | "degraded" | "down" | "unknown";
+
 /** Freshness threshold (ms) under which the stream is "live". The design says
  *  "~60s"; a worker emits at least one line per turn, so a 60s gap with workers
  *  idle is QUIET, not a stall. */
@@ -36,10 +40,18 @@ export const FRESHNESS_FLOWING_MS = 60_000;
  *  §3.1 "rate >2%"). */
 export const ERROR_RATE_ERRORING = 0.02;
 
+/** CTL-1039: the proportional fix — ERRORING requires BOTH a >2% rate AND at
+ *  least this many errors in the last 15m. 1 error / 50 requests (2%) → NOTED,
+ *  not ERRORING. Red is reserved for ongoing/systemic failure. */
+export const MIN_ERRORS_FOR_RED = 3;
+
 export interface HeroStateArgs {
-  /** Loki reachability from /api/health/otel. null = not yet probed → optimistic
-   *  (we don't flash DARK on first paint before the probe resolves). */
-  lokiReachable: boolean | null;
+  /** CTL-1039: the SHARED Loki severity from the service-health registry (the
+   *  single severity model), replacing the binary lokiReachable. `null` = not yet
+   *  probed → optimistic (we don't flash DARK on first paint). `down` (≥3
+   *  consecutive failures) → DARK; `degraded` (1-2 failures / slow) → quiet
+   *  reconnecting hint, NEVER DARK; `up`/`unknown` → no fault. */
+  lokiSeverity: ServiceSeverity | null;
   /** Whether the OTEL stack is configured at all (health.configured). When false
    *  the surface collapses to the unconfigured ladder card — the hero is DARK so
    *  it never claims FLOWING on a no-stack install. */
@@ -49,37 +61,70 @@ export interface HeroStateArgs {
   /** errors / requests over 15m, in [0,1]. null when the request count is unknown
    *  (treated as 0 — we never fabricate an error rate to escalate). */
   errorRate: number | null;
+  /** CTL-1039: count of api_error events in the LAST 15m — the second ERRORING
+   *  gate (rate alone can't make 1 error red). */
+  errorCount15m?: number;
 }
 
 /**
  * The single source of truth for the hero state. Decision order (most-degraded
  * first), so a reachability fault always wins over a stale/error read:
- *   1. Not configured OR Loki explicitly unreachable → DARK.
- *   2. error-rate > 2% → ERRORING.
+ *   1. Not configured OR lokiSeverity "down" → DARK (≥3 consecutive failures).
+ *   2. ERRORING — rate > 2% AND ≥ MIN_ERRORS_FOR_RED errors in last 15m.
  *   3. fresh (≤60s) → FLOWING.
- *   4. otherwise (reachable, no/old events, low error) → QUIET (honest idle).
+ *   4. otherwise (reachable, no/old events, sub-threshold errors) → QUIET.
  *
- * `lokiReachable === null` (probe not yet resolved) is treated as reachable so we
- * don't flash DARK on first paint; the real state lands on the next 10s probe.
+ * CTL-1039 — `lokiSeverity === "degraded"` does NOT make the hero DARK: a 1-2
+ * failure / slow probe is a quiet "reconnecting…" hint, so the hero keeps its
+ * last data-driven state (FLOWING/QUIET) — only a sustained `down` escalates.
+ * `lokiSeverity === null` (probe not yet resolved) is treated as reachable so we
+ * don't flash DARK on first paint.
  */
 export function heroState({
-  lokiReachable,
+  lokiSeverity,
   configured = true,
   freshnessMs,
   errorRate,
+  errorCount15m = 0,
 }: HeroStateArgs): HeroState {
-  // Unconfigured or a confirmed reachability fault → DARK (amber/STALE).
+  // Unconfigured or a SUSTAINED reachability fault (down) → DARK (amber/STALE).
+  // A `degraded` severity is intentionally NOT DARK (the proportional fix).
   if (!configured) return "DARK";
-  if (lokiReachable === false) return "DARK";
+  if (lokiSeverity === "down") return "DARK";
 
+  // ERRORING needs BOTH gates: a >2% rate is not enough on its own (1 error / 50
+  // requests is 2% but only ONE error → NOTED, never red).
   const rate = errorRate ?? 0;
-  if (rate > ERROR_RATE_ERRORING) return "ERRORING";
+  if (rate > ERROR_RATE_ERRORING && errorCount15m >= MIN_ERRORS_FOR_RED) {
+    return "ERRORING";
+  }
 
   // Fresh events flowing → FLOWING. A null freshness (no lines in window) falls
   // through to QUIET — honest idle, not an error.
   if (freshnessMs !== null && freshnessMs <= FRESHNESS_FLOWING_MS) return "FLOWING";
 
   return "QUIET";
+}
+
+/** CTL-1039: whether the muted "reconnecting…" hint shows — a quiet degraded
+ *  severity (1-2 consecutive failures or a slow probe), NEVER a banner/DARK. */
+export function isReconnecting(lokiSeverity: ServiceSeverity | null): boolean {
+  return lokiSeverity === "degraded";
+}
+
+/** CTL-1039: the NOTED neutral error chip copy — every count states its window.
+ *   • 0 today                  → "0 errors today"
+ *   • N today, none in 15m      → "N error(s) today"
+ *   • N today, M in last 15m    → "N errors today · M in last 15m"
+ *  NEVER red — this is the muted neutral tier (errors happened but red criteria
+ *  unmet). Pure so the copy is unit-testable against the Gherkin window strings. */
+export function errorChipCopy(errorCountToday: number, errorCount15m: number): string {
+  if (errorCountToday <= 0) return "0 errors today";
+  const todayClause = `${errorCountToday} ${errorCountToday === 1 ? "error" : "errors"} today`;
+  if (errorCount15m > 0) {
+    return `${todayClause} · ${errorCount15m} in last 15m`;
+  }
+  return todayClause;
 }
 
 /** The tone each hero state maps to. `ok` = green (--chart-2), `neutral` = muted

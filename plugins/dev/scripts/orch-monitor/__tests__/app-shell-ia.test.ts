@@ -19,6 +19,11 @@ import {
   readStoredTheme,
   applyTheme,
 } from "../ui/src/lib/theme";
+import {
+  BRANDS,
+  DEFAULT_BRAND,
+  BRAND_STORAGE_KEY,
+} from "../ui/src/lib/brand";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -45,13 +50,16 @@ const sidebarCode = stripComments(sidebarSrc);
 
 // ── Scenario: OPERATE is the always-visible primary tier ─────────────────────
 describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
-  it("the OPERATE group lists Inbox, Tickets, Workers, Queue in nav order", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers in nav order", () => {
     // CTL-930: labels renamed Home→Inbox, Board→Tickets; array renamed OPERATE_ITEMS.
+    // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
+    // CTL-1016: the Dispatch (queue) surface is retired — its control tower folded
+    // into Workers — so OPERATE is now the three surfaces Inbox / Tickets / Workers.
     // OBSERVE is declared before OPERATE_ITEMS in source (observe first, items after).
     const operateBlock = sidebarSrc.slice(
       sidebarSrc.indexOf("const OPERATE_ITEMS"),
     );
-    const order = ["Inbox", "Tickets", "Workers", "Queue"].map((l) =>
+    const order = ["Inbox", "Tickets", "Workers"].map((l) =>
       operateBlock.indexOf(`"${l}"`),
     );
     for (const i of order) expect(i).toBeGreaterThan(-1);
@@ -60,16 +68,25 @@ describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
     expect(sidebarCode).toMatch(/Operate/);
   });
 
-  it("OPERATE is a plain (always-expanded) SidebarGroup, NOT wrapped in a Collapsible", () => {
-    // The OPERATE group must render outside any Collapsible — only per-project and
-    // OBSERVE groups collapse. CTL-960: the label was renamed "Overall" (from "Operate").
-    // Check for "Overall" — the current label — to verify it's the non-collapsible group.
-    const operateGroupIdx = sidebarSrc.indexOf("Overall</SidebarGroupLabel>");
-    const firstCollapsibleIdx = sidebarSrc.indexOf("<Collapsible");
-    expect(operateGroupIdx).toBeGreaterThan(-1);
-    expect(firstCollapsibleIdx).toBeGreaterThan(-1);
-    // OPERATE's label appears BEFORE the first <Collapsible> in source.
-    expect(operateGroupIdx).toBeLessThan(firstCollapsibleIdx);
+  it("Overall is the FIRST section and is itself collapsible (CTL-1034)", () => {
+    // CTL-1034 §1: EVERY top-level section now collapses — including Overall, which
+    // was previously a plain always-expanded SidebarGroup. Overall keeps its
+    // SidebarGroupLabel heading ("Overall") but the label is now `asChild` over a
+    // CollapsibleTrigger, and the whole group is wrapped in a Collapsible. The
+    // ">Overall<" heading text node must still be the FIRST section in source —
+    // before the per-project groups and Observe.
+    // The "Overall" heading text node sits inside the CollapsibleTrigger (tolerant
+    // of the JSX newline between the trigger open-tag and the text).
+    const overallMatch = /<CollapsibleTrigger[^>]*>\s*Overall\b/.exec(sidebarSrc);
+    expect(overallMatch).not.toBeNull();
+    const overallHeadingIdx = overallMatch ? overallMatch.index : -1;
+    // Overall opens before the Projects heading and the Observe block.
+    const projectsHeadingIdx = sidebarSrc.indexOf(">Projects<");
+    const observeBlockIdx = sidebarSrc.indexOf("OBSERVE — collapsible");
+    expect(overallHeadingIdx).toBeLessThan(projectsHeadingIdx);
+    expect(overallHeadingIdx).toBeLessThan(observeBlockIdx);
+    // Overall persists its open-state via the dedicated nav-store atom.
+    expect(sidebarSrc).toContain("navOverallOpenAtom");
   });
 
   it("Tickets is a first-class top-tier OPERATE item, not buried under OBSERVE", () => {
@@ -121,12 +138,16 @@ describe("OBSERVE is a recessed collapsible go-deeper tier (CTL-893)", () => {
     expect(liveDecl).toContain('"Telemetry"');
   });
 
-  it("OBSERVE defaults collapsed (the toggle state initialises closed)", () => {
-    // useState(false) → collapsed by default; open is bound to the Collapsible.
-    // OBS-5: the Collapsible force-opens when a live OBSERVE surface is active
-    // (open={observeOpen || observeContainsActive}), so the selected item is never
-    // hidden inside a collapsed group — but observeOpen still drives the default.
-    expect(sidebarSrc).toMatch(/useState\(\s*false\s*\)/);
+  it("OBSERVE is collapsible with a persisted, default-open state (CTL-1034)", () => {
+    // CTL-1034 §1: every section (incl. Observe) collapses and PERSISTS its
+    // open-state across reloads via an atomWithStorage atom — the ephemeral
+    // useState(false) that defaulted Observe collapsed is gone. All sections now
+    // default OPEN; collapsing is an explicit operator gesture.
+    // OBS-5: the Collapsible still force-opens when a live OBSERVE surface is active
+    // (open={observeOpen || observeContainsActive}) so the selected item is never
+    // hidden inside a collapsed group.
+    expect(sidebarSrc).toContain("navObserveOpenAtom");
+    expect(sidebarSrc).not.toMatch(/useState\(\s*false\s*\)/);
     expect(sidebarSrc).toMatch(/open=\{observeOpen/);
   });
 });
@@ -162,22 +183,33 @@ describe("brand header collapses gracefully (CTL-893)", () => {
     expect(header).toContain("group-data-[collapsible=icon]:hidden");
   });
 
-  it("the footer keeps Settings AND a theme toggle reachable", () => {
-    const footerBlock = sidebarSrc.slice(sidebarSrc.indexOf("SidebarFooter"));
+  it("the footer's bottom item is Settings; the theme toggle moved into Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the footer keeps ONLY Settings as its bottom item — the Warm-light
+    // toggle is relocated into the Settings surface (Theme → Appearance). So the footer
+    // block still references Settings, but no longer wires a theme toggle (toggleTheme).
+    const footerBlock = sidebarSrc.slice(sidebarSrc.indexOf("<SidebarFooter"));
     expect(footerBlock).toContain("Settings");
-    expect(footerBlock).toContain("useTheme");
+    expect(footerBlock).not.toContain("toggleTheme");
+    // The toggle still exists as a control — in the Settings surface, not the sidebar.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("Appearance");
   });
 });
 
 // ── Scenario: Theme toggle flips calm-dark and warm-light ────────────────────
 describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
-  it("the footer toggle is wired to the real theme system (useTheme), not re-implemented", () => {
-    expect(sidebarSrc).toContain("useTheme");
-    expect(sidebarSrc).toContain("@/lib/theme");
-    // The hook's toggle is destructured and bound to the footer button's onClick
-    // (renamed `toggle: toggleTheme` to disambiguate from the rail toggle).
-    expect(sidebarSrc).toMatch(/toggle:\s*toggleTheme/);
-    expect(sidebarSrc).toMatch(/onClick=\{toggleTheme\}/);
+  it("the theme control is wired to the real theme system (useTheme) in Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the theme control moved from the sidebar footer into the Settings
+    // surface (Theme → Appearance). It must still bind the REAL theme system (useTheme
+    // from @/lib/theme), not a re-implementation — now in settings-surface.tsx.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    // The Appearance field reads `theme` and writes via the hook's setTheme.
+    expect(settingsSrc).toMatch(/onChange=\{\(v\)\s*=>\s*setTheme\(v\)\}/);
+    // The sidebar no longer owns the toggle.
+    expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
   it("declares exactly the two themes calm-dark + warm-light", () => {
@@ -234,6 +266,52 @@ describe("theme metadata is exhaustive (CTL-893)", () => {
   });
 });
 
+// ── CTL-1099: the orthogonal BRAND axis (Warm / Slate) ───────────────────────
+describe("brand axis is the second, orthogonal theme dimension (CTL-1099)", () => {
+  it("declares exactly the two brands warm + slate, default warm, pinned key", () => {
+    expect([...BRANDS]).toEqual(["warm", "slate"]);
+    expect(DEFAULT_BRAND).toBe("warm");
+    expect(BRAND_STORAGE_KEY).toBe("catalyst:brand");
+  });
+
+  it("the Settings surface + the shell both wire the brand hook (useBrand)", () => {
+    const settingsSrc = read("components/settings-surface.tsx");
+    const shellSrc = read("components/app-shell.tsx");
+    expect(settingsSrc).toContain("useBrand");
+    expect(shellSrc).toContain("useBrand");
+  });
+});
+
+// ── CTL-1101: REASON is a third collapsible section (Process + Rulebook) ──────
+describe("REASON is a third collapsible tier in the sidebar (CTL-1101)", () => {
+  it("sidebar source contains the REASON collapsible marker", () => {
+    expect(sidebarSrc).toContain("REASON — collapsible");
+  });
+
+  it("REASON lists Process and Rulebook items", () => {
+    const reasonIdx = sidebarSrc.indexOf("REASON — collapsible");
+    expect(reasonIdx).toBeGreaterThan(-1);
+    const reasonBlock = sidebarSrc.slice(reasonIdx);
+    const observeIdx = reasonBlock.indexOf("OBSERVE — collapsible");
+    const reasonSection = observeIdx > -1 ? reasonBlock.slice(0, observeIdx) : reasonBlock;
+    expect(reasonSection).toContain('"Process"');
+    expect(reasonSection).toContain('"Rulebook"');
+  });
+
+  it("REASON open-state is persisted via navReasonOpenAtom, not useState (CTL-1101)", () => {
+    expect(sidebarSrc).toContain("navReasonOpenAtom");
+    expect(sidebarSrc).not.toMatch(/useState\(\s*false\s*\)/);
+  });
+
+  it("REASON sits between the per-project repos block and the OBSERVE block", () => {
+    const reposMapIdx = sidebarSrc.indexOf("repos.map");
+    const reasonIdx = sidebarSrc.indexOf("REASON — collapsible");
+    const observeIdx = sidebarSrc.indexOf("OBSERVE — collapsible");
+    expect(reposMapIdx).toBeLessThan(reasonIdx);
+    expect(reasonIdx).toBeLessThan(observeIdx);
+  });
+});
+
 // ── CTL-977: left-nav restyle v2 ─────────────────────────────────────────────
 describe("left-nav restyle v2 (CTL-977)", () => {
   /** Strip JS/JSX comments so class/token assertions cannot be tripped by prose. */
@@ -256,18 +334,15 @@ describe("left-nav restyle v2 (CTL-977)", () => {
     expect(triggerBase).not.toMatch(/\buppercase\b/);
   });
 
-  it("collapsible group chevron is right-aligned (ml-auto), not left (mr-*) (CTL-977)", () => {
-    // The twistie ChevronRightIcon inside collapsible triggers must use ml-auto
-    // (right-edge placement), not mr-1.5 or similar left-side gap.
-    // We check that ml-auto appears in the chevron className in the rendered groups.
-    expect(code).toContain("ml-auto");
-    // The old left-side pattern (mr-1.5 on the chevron) must be absent from the
-    // trigger rows. The favicon img may legitimately use mr-1.5 so we check the
-    // ChevronRightIcon className only.
+  it("collapsible group chevron sits ADJACENT to the label, not floated to the far edge (CTL-1052)", () => {
+    // CTL-1052 §3 OVERRIDES the CTL-977 → CTL-1034 ml-auto right-align convention:
+    // the twistie now sits immediately after the label text (spaced by the trigger's
+    // gap-*), NOT pinned to the right edge. So NO ChevronRightIcon className may carry
+    // ml-auto (the right-edge claim) any more — and none may use a left-margin mr-*
+    // either. The collapsed-section signal dot keeps the right edge (ml-auto lives in
+    // SectionSignalDot), but the chevron itself is label-adjacent.
     const chevronIdx = code.indexOf("ChevronRightIcon");
     expect(chevronIdx).toBeGreaterThan(-1);
-    // All ChevronRightIcon usages must NOT pair the icon with mr-* for left positioning
-    // (ml-auto is the right-edge pattern). Walk each occurrence.
     let idx = 0;
     while (true) {
       const pos = code.indexOf("ChevronRightIcon", idx);
@@ -277,10 +352,13 @@ describe("left-nav restyle v2 (CTL-977)", () => {
       if (classStart === -1) break;
       const classEnd = code.indexOf('"', classStart + 1);
       const classStr = code.slice(classStart + 1, classEnd);
-      // If this class string belongs to a ChevronRightIcon, it should use ml-auto.
+      // Chevron is label-adjacent: neither right-floated (ml-auto) nor left-margined.
+      expect(classStr).not.toContain("ml-auto");
       expect(classStr).not.toMatch(/^mr-[0-9]/);
       idx = pos + 1;
     }
+    // The right-edge ml-auto now belongs to the trailing section signal dot only.
+    expect(sidebarCode).toContain("ml-auto");
   });
 
   it("active item gets sidebar-primary accent color class (CTL-977)", () => {

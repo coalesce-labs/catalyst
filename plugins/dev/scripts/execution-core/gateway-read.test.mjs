@@ -15,7 +15,7 @@ import {
   upsertTicketDescriptor,
   markTicketRemovedByUuid,
 } from "../broker/broker-state.mjs";
-import { createGatewayReader, descriptorAgeMs } from "./gateway-read.mjs";
+import { createGatewayReader, descriptorAgeMs, gatewayLabelsHit } from "./gateway-read.mjs";
 
 let tmpDir;
 let dbPath;
@@ -131,5 +131,47 @@ describe("handle recovery (dropHandle on query failure)", () => {
     expect(reader.getDescriptor("CTL-1")).toBeNull();
     seed(); // broker migrates the SAME file in place (ALTER/CREATE IF NOT EXISTS)
     expect(reader.getDescriptor("CTL-1")?.state).toBe("Todo");
+  });
+});
+
+describe("gatewayLabelsHit (CTL-1079)", () => {
+  const gwWith = (descriptor) => ({ getDescriptor: () => descriptor });
+
+  test("cache hit: returns { ok: true, labels } when row has a labels array", () => {
+    const gw = gwWith({ ticket: "CTL-1", removed: false, labels: ["needs-human", "feature"] });
+    expect(gatewayLabelsHit(gw, "CTL-1")).toEqual({ ok: true, labels: ["needs-human", "feature"] });
+  });
+
+  test("empty labels array is still a hit (explicit empty set)", () => {
+    const gw = gwWith({ ticket: "CTL-1", removed: false, labels: [] });
+    expect(gatewayLabelsHit(gw, "CTL-1")).toEqual({ ok: true, labels: [] });
+  });
+
+  test("miss: null gateway → null", () => {
+    expect(gatewayLabelsHit(null, "CTL-1")).toBeNull();
+    expect(gatewayLabelsHit(undefined, "CTL-1")).toBeNull();
+  });
+
+  test("miss: gateway without getDescriptor → null", () => {
+    expect(gatewayLabelsHit({}, "CTL-1")).toBeNull();
+  });
+
+  test("miss: absent row (getDescriptor returns null) → null", () => {
+    expect(gatewayLabelsHit(gwWith(null), "CTL-1")).toBeNull();
+  });
+
+  test("miss: tombstoned row (removed: true) → null", () => {
+    const gw = gwWith({ ticket: "CTL-1", removed: true, labels: ["needs-human"] });
+    expect(gatewayLabelsHit(gw, "CTL-1")).toBeNull();
+  });
+
+  test("miss: labels column null/not-an-array → null", () => {
+    expect(gatewayLabelsHit(gwWith({ removed: false, labels: null }), "CTL-1")).toBeNull();
+    expect(gatewayLabelsHit(gwWith({ removed: false, labels: "needs-human" }), "CTL-1")).toBeNull();
+  });
+
+  test("never throws: getDescriptor that throws → null", () => {
+    const gw = { getDescriptor: () => { throw new Error("db gone"); } };
+    expect(gatewayLabelsHit(gw, "CTL-1")).toBeNull();
   });
 });

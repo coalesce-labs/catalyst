@@ -460,6 +460,68 @@ export async function apiErrors(
   return entries;
 }
 
+// ── CTL-1039 (TELEMETRY HEALTH): proportional error counts with explicit windows
+// The hero must say "1 error today" (NOTED, neutral) vs ERRORING only on ongoing
+// failure. The headline reads BOTH windows explicitly ("today" / "last 15m"), so
+// the route returns counts per window rather than a single bag of rows. We count
+// the api_error LOG entries directly (the panel already streams them) over two
+// windows: the last 15m and since local midnight ("today").
+
+/** The error-count payload the hero reads — every count carries its window. */
+export interface ApiErrorCounts {
+  /** api_error events in the last 15 minutes (the ERRORING gate). */
+  count15m: number;
+  /** api_error events since local midnight (the NOTED "N errors today" chip). */
+  countToday: number;
+}
+
+/** Count the api_error entries over a window ending now. Returns null only when
+ *  Loki is unavailable (probe failed) — an empty stream is an honest 0. */
+async function countErrorsSince(
+  loki: LokiFetcher,
+  start: Date,
+  now: Date,
+  cap = 5000,
+): Promise<number | null> {
+  const result = await loki.queryRange(
+    apiErrorsLogQL(),
+    start.toISOString(),
+    now.toISOString(),
+    cap,
+  );
+  if (!result) return null;
+  let count = 0;
+  for (const stream of result.data.result) {
+    const s = stream as LokiStreamValue;
+    if (!s.values) continue;
+    count += s.values.length;
+  }
+  return count;
+}
+
+/** Local midnight (the start of "today") for a given instant. */
+export function startOfLocalDay(now: Date): Date {
+  const d = new Date(now.getTime());
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+/** The proportional error counts (15m + today) the CTL-1039 hero reads. Returns
+ *  null when Loki is unavailable; both counts honest-0 on an empty stream. */
+export async function apiErrorCounts(
+  loki: LokiFetcher,
+  now: Date = new Date(),
+): Promise<ApiErrorCounts | null> {
+  const fifteen = new Date(now.getTime() - 15 * 60_000);
+  const midnight = startOfLocalDay(now);
+  const [count15m, countToday] = await Promise.all([
+    countErrorsSince(loki, fifteen, now),
+    countErrorsSince(loki, midnight, now),
+  ]);
+  if (count15m === null || countToday === null) return null;
+  return { count15m, countToday };
+}
+
 // ── OBS-6 (TELEMETRY): the grouped live tail + Loki freshness ────────────────
 // The Telemetry surface's P1 panel is a live tail of the WHOLE fleet's
 // claude-code activity, grouped by worker — not one session at a time (that's
@@ -547,7 +609,7 @@ export async function recentTail(
     }
   }
   rows.sort((a, b) => b.ts - a.ts);
-  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0]!.ts) : null;
+  const freshnessMs = rows.length > 0 ? Math.max(0, now.getTime() - rows[0].ts) : null;
   return { rows, freshnessMs };
 }
 
@@ -1385,6 +1447,54 @@ export async function activeTimeRatio(
   );
   if (result === null) return null;
   return { activeSecondsPerSecond: extractScalar(result) };
+}
+
+// ── CTL-1040: cost / throughput grouped by work type ─────────────────────────
+
+/** Sum signal-file cost (BoardTicket.costUSD) by work type. Null/empty/"task"
+ *  types fold into "unknown" so the bucket is HONEST, never dropped (CTL-1040).
+ *  Returns a type→USD map; feed through rankCostMap() for the mandatory zero-filter
+ *  + descending order. PURE. */
+export function costByWorkType(
+  tickets: ReadonlyArray<{ type: string | null | undefined; costUSD: number | null | undefined }>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const t of tickets) {
+    const raw = (t.type ?? "").toLowerCase();
+    const key = raw === "" || raw === "task" ? "unknown" : raw;
+    const usd = Number.isFinite(t.costUSD as number) ? (t.costUSD as number) : 0;
+    out[key] = (out[key] ?? 0) + Math.max(0, usd);
+  }
+  return out;
+}
+
+/** Count completed tickets by work type from Loki `phase.teardown.complete.*`
+ *  events keyed by `catalyst_ticket_type`. Returns a type→count map, or null
+ *  when Loki is unreachable. PURE side of the throughput panel (CTL-1040). */
+export async function throughputByWorkType(
+  loki: LokiFetcher,
+  range: string,
+): Promise<Record<string, number> | null> {
+  const r = safeDuration(range, "24h");
+  const now = new Date();
+  const start = new Date(now.getTime() - parseDuration(r));
+  const result = await loki.queryRange(
+    `sum by (catalyst_ticket_type) (count_over_time(` +
+      `{service_name=~"catalyst.*"} | event_name=~"phase\\.teardown\\.complete\\..+" ` +
+      `| catalyst_ticket_type=~".+" [${r}]))`,
+    start.toISOString(),
+    now.toISOString(),
+  );
+  if (!result) return null;
+  const map: Record<string, number> = {};
+  for (const entry of result.data.result) {
+    const m = entry as { metric?: Record<string, string>; values?: Array<[number, string]> };
+    const name = m.metric?.["catalyst_ticket_type"];
+    if (!name || !m.values?.length) continue;
+    const last = m.values[m.values.length - 1];
+    if (last) map[name] = parseInt(last[1], 10) || 0;
+  }
+  return map;
 }
 
 function parseDuration(s: string): number {

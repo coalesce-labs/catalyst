@@ -17,6 +17,7 @@
 // NOT this PR — we drop the corrupted screen rather than ship it.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { C, CARD_LIFT } from "./board-tokens";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import type { StreamEvent } from "@/lib/types";
 import {
@@ -32,19 +33,6 @@ import {
 import { deriveLiveness, type LivenessLevel } from "./worker-detail-data";
 import { LIVE_CYAN } from "./detail-chrome";
 
-const C = {
-  s1: "#111318",
-  s2: "#161a21",
-  s3: "#1c222b",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  yellow: "#e0b341",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 const LIVENESS_COLOR: Record<LivenessLevel, string> = {
   green: C.green,
@@ -409,7 +397,7 @@ export function NowPanel({
     <div
       data-now-panel
       data-active-tab={value}
-      style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px" }}
+      style={{ background: C.s2, border: `1px solid ${C.border}`, borderRadius: 8, padding: "10px 12px", boxShadow: CARD_LIFT }}
     >
       <Tabs value={value} onValueChange={(v) => setPicked(v === "history" ? "history" : "now")}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>

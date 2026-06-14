@@ -6,13 +6,13 @@
 // said "no separate Workers item in the left nav" (Workers rides a lens toggle in
 // the display popover). The operator's 2026-06-09 brief overrides this: Workers
 // stays a FIRST-CLASS nav destination in every group so the user makes the
-// Tickets vs Workers choice upfront at the nav level. Queue is not folded.
+// Tickets vs Workers choice upfront at the nav level.
+// CTL-1016: Queue/Dispatch surface retired; control tower folded into Workers.
 
 import {
   InboxIcon,
   LayoutGridIcon,
   UsersIcon,
-  ListOrderedIcon,
   ActivityIcon,
   GaugeIcon,
   WalletIcon,
@@ -21,7 +21,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Surface } from "./surface";
-import type { BoardPayload } from "../board/types";
+import type { BoardPayload, BoardWorker } from "../board/types";
+import { filterPayloadByScope, REPO_SCOPE_ALL } from "./repo-scope";
+import { deriveInbox } from "../board/home-inbox";
 
 // ── Nav IA types ──────────────────────────────────────────────────────────────
 
@@ -62,7 +64,6 @@ const OPERATE_DEFS: Array<{ surface: Surface; label: string; icon: LucideIcon }>
   { surface: "home", label: "Inbox", icon: InboxIcon },
   { surface: "board", label: "Tickets", icon: LayoutGridIcon },
   { surface: "workers", label: "Workers", icon: UsersIcon },
-  { surface: "queue", label: "Queue", icon: ListOrderedIcon },
 ];
 
 const OBSERVE_DEFS: Array<{ label: string; icon: LucideIcon }> = [
@@ -199,7 +200,6 @@ const SURFACE_LABEL: Partial<Record<Surface, string>> = {
   home: "Inbox",
   board: "Tickets",
   workers: "Workers",
-  queue: "Queue",
 };
 
 /**
@@ -256,20 +256,62 @@ export function paletteEntries(groups: NavGroup[]): PaletteEntry[] {
     }));
 }
 
-// ── projectWorkerCount / projectQueueDepth ────────────────────────────────────
+// ── nav row counts (CTL-1037) ─────────────────────────────────────────────────
+// One source of truth for the nav-row count semantics. ALL nav worker counts —
+// overall AND per-project — mean GENUINELY-ACTIVE workers (activeState ===
+// "active"), the SAME honest classification CTL-1032's live-status strip uses:
+// dead/stale background jobs are NEVER counted. This is what drives both the green
+// presence dot (count > 0) and the count pill. Deriving every count from the
+// resident board snapshot keeps the per-project numbers truthful without a new BFF
+// projection (the server's nav-signal workerCount is workers.length — total, not
+// honest — so the nav rows read from the snapshot instead).
 
-/**
- * Count workers in a given repo that are actively running (activeState === "active").
- */
-export function projectWorkerCount(payload: BoardPayload, repo: string): number {
-  return payload.workers.filter(
-    (w) => w.repo === repo && w.activeState === "active",
-  ).length;
+/** A worker is presence-active when its bg job is genuinely running (NOT dead,
+ *  NOT stale/null, NOT merely stuck). The green dot + count both key off this. */
+export function isActiveWorker(w: BoardWorker): boolean {
+  return w.activeState === "active";
 }
 
 /**
- * Count queue items for the given repo.
+ * Count genuinely-active workers in a given repo (activeState === "active").
+ * Dead/stale workers are excluded — the same honest rule as the CTL-1032 strip.
+ */
+export function projectWorkerCount(payload: BoardPayload, repo: string): number {
+  return payload.workers.filter((w) => w.repo === repo && isActiveWorker(w)).length;
+}
+
+/**
+ * Count queue items for the given repo (tickets waiting for a slot).
  */
 export function projectQueueDepth(payload: BoardPayload, repo: string): number {
   return payload.queue.filter((q) => q.repo === repo).length;
+}
+
+/**
+ * Count genuinely-active workers across the whole fleet (activeState === "active").
+ * CTL-1037 §B: the overall Workers nav count means ACTIVE only — same as a
+ * per-project count, just unscoped — so it can never disagree with the strip or
+ * lump dead/stale jobs into the badge the way the server's workers.length did.
+ */
+export function overallWorkerCount(payload: BoardPayload): number {
+  return payload.workers.filter(isActiveWorker).length;
+}
+
+/** Total queue depth across the fleet (tickets waiting for a slot). */
+export function overallQueueDepth(payload: BoardPayload): number {
+  return payload.queue.length;
+}
+
+/**
+ * The "needs you" attention count for a scope (CTL-1037 inbox-badge addendum).
+ * This is the SAME number the inbox header reports ("N needs you") — the union of
+ * the attention + blocked + waiting buckets (deriveInbox(...).counts.needsYou) —
+ * NOT total inbox items. `scope === "all"` counts the whole fleet; a repo scope
+ * filters the payload to that repo first (filterPayloadByScope), so each project's
+ * Inbox badge reflects only its own waiting work.
+ */
+export function inboxAttentionCount(payload: BoardPayload, scope: string): number {
+  const scoped =
+    scope === REPO_SCOPE_ALL ? payload : filterPayloadByScope(payload, scope);
+  return deriveInbox(scoped).counts.needsYou;
 }

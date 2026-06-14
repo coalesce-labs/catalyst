@@ -30,41 +30,31 @@ import {
 } from "./palette-actions";
 import { KEYMAP } from "./keymap";
 import type { BoardPayload } from "./types";
-
-// ── tokens (mirror Board.tsx's inline-`C` palette + the reserved cyan + accent) ─
-const C = {
-  s0: "#0b0d10",
-  s1: "#111318",
-  s2: "#16191f",
-  s3: "#1c2028",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  accent: "#4ea1ff", // chrome accent-blue — caret + selection bar (NEVER cyan)
-  live: "#5be0ff", // the reserved in-loop cyan — live rows ONLY
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
+// CTL-1033: canonical palette. The command palette is an ELEVATED surface (popover
+// tier): panel bg → C.s3 + ELEVATED_LIFT; selected row floats one step to C.s4.
+import { C, LIVE, ELEVATED_LIFT } from "./board-tokens";
 
 // One stylesheet for the cmdk re-skin: cmdk renders bare DOM (it has NO default
-// CSS), so the visual layer is entirely ours. Selected row → C.s3 (the board's
-// selected-row surface) with a 2px accent-blue left bar; disabled `soon` rows →
-// dimmed + non-interactive; the live glyph is the only cyan.
+// CSS), so the visual layer is entirely ours. The panel is the elevated surface
+// (C.s3 + inset-highlight lift); the selected row lifts to C.s4 with a 2px
+// accent-blue left bar; disabled `soon` rows → dimmed + non-interactive; the live
+// glyph is the only cyan (LIVE).
 const PALETTE_CSS = `
 .cat-cmd-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
-.cat-cmd { width: min(640px, 92vw); background: ${C.s1}; border: 1px solid ${C.border}; border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,.5); overflow: hidden; color: ${C.fg}; font-family: ${C.mono}; }
-.cat-cmd [cmdk-input-wrapper] { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid ${C.border}; border-left: 2px solid ${C.accent}; }
+.cat-cmd { width: min(640px, 92vw); background: ${C.s3}; border: 1px solid ${C.border}; border-radius: 10px; box-shadow: ${ELEVATED_LIFT}; overflow: hidden; color: ${C.fg}; font-family: ${C.mono}; }
+.cat-cmd [cmdk-input-wrapper] { display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid ${C.border}; border-left: 2px solid ${C.blue}; }
 .cat-cmd input { width: 100%; height: 44px; background: transparent; border: 0; outline: none; color: ${C.fg}; font: 13px ${C.mono}; }
 .cat-cmd input::placeholder { color: ${C.fgDim}; }
 .cat-cmd [cmdk-list] { max-height: 340px; overflow-y: auto; padding: 6px; }
 .cat-cmd [cmdk-group-heading] { font: 10px ${C.mono}; letter-spacing: .08em; text-transform: uppercase; color: ${C.fgDim}; padding: 8px 8px 4px; }
 .cat-cmd [cmdk-item] { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 6px; font: 12px ${C.mono}; color: ${C.fg}; cursor: pointer; border-left: 2px solid transparent; }
-.cat-cmd [cmdk-item][data-selected="true"] { background: ${C.s3}; border-left-color: ${C.accent}; }
+.cat-cmd [cmdk-item][data-selected="true"] { background: ${C.s4}; border-left-color: ${C.blue}; }
 .cat-cmd [cmdk-item][data-disabled="true"] { color: ${C.fgDim}; cursor: not-allowed; opacity: .6; }
 .cat-cmd [cmdk-empty] { padding: 18px; text-align: center; color: ${C.fgDim}; font: 12px ${C.mono}; }
 .cat-cmd-meta { margin-left: auto; color: ${C.fgMuted}; font: 11px ${C.mono}; }
+.cat-cmd-kbd { margin-left: auto; color: ${C.fgDim}; font: 11px ${C.mono}; border: 1px solid ${C.border}; border-radius: 4px; padding: 1px 6px; letter-spacing: 0.05em; }
 .cat-cmd-soon { margin-left: auto; color: ${C.fgDim}; font: 10px ${C.mono}; border: 1px solid ${C.border}; border-radius: 4px; padding: 1px 5px; }
-.cat-cmd-live { width: 7px; height: 7px; border-radius: 50%; background: ${C.live}; flex: 0 0 auto; }
+.cat-cmd-live { width: 7px; height: 7px; border-radius: 50%; background: ${LIVE}; flex: 0 0 auto; }
 .cat-cmd-sep { height: 1px; margin: 6px 4px; background: ${C.border}; }
 `;
 
@@ -107,6 +97,8 @@ function Row({ row, onRun }: { row: PaletteItem; onRun: (r: PaletteItem) => void
         <span className="cat-cmd-soon" data-palette-soon>
           soon
         </span>
+      ) : row.keybinding ? (
+        <kbd className="cat-cmd-kbd" data-palette-keybinding={row.keybinding}>{row.keybinding}</kbd>
       ) : (
         row.meta && <span className="cat-cmd-meta">{row.meta}</span>
       )}
@@ -226,12 +218,12 @@ const EMPTY_PAYLOAD: BoardPayload = {
 // ── the `?` keyboard cheatsheet ──────────────────────────────────────────────
 const CHEATSHEET_CSS = `
 .cat-keys-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 60; display: flex; align-items: center; justify-content: center; }
-.cat-keys { width: min(520px, 92vw); background: ${C.s1}; border: 1px solid ${C.border}; border-radius: 10px; box-shadow: 0 18px 60px rgba(0,0,0,.5); color: ${C.fg}; font-family: ${C.mono}; padding: 16px 18px; }
+.cat-keys { width: min(520px, 92vw); background: ${C.s3}; border: 1px solid ${C.border}; border-radius: 10px; box-shadow: ${ELEVATED_LIFT}; color: ${C.fg}; font-family: ${C.mono}; padding: 16px 18px; }
 .cat-keys h2 { font: 12px ${C.mono}; letter-spacing: .08em; text-transform: uppercase; color: ${C.fgMuted}; margin: 0 0 12px; }
 .cat-keys section { margin-bottom: 14px; }
 .cat-keys section h3 { font: 10px ${C.mono}; letter-spacing: .08em; text-transform: uppercase; color: ${C.fgDim}; margin: 0 0 6px; }
 .cat-keys-row { display: flex; align-items: baseline; gap: 12px; padding: 3px 0; }
-.cat-keys-kbd { flex: 0 0 64px; color: ${C.accent}; font: 12px ${C.mono}; }
+.cat-keys-kbd { flex: 0 0 64px; color: ${C.blue}; font: 12px ${C.mono}; }
 .cat-keys-desc { color: ${C.fg}; font: 12px ${C.mono}; }
 .cat-keys-hint { color: ${C.fgDim}; font: 10px ${C.mono}; margin-top: 8px; }
 `;

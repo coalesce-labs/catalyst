@@ -80,6 +80,9 @@ import {
 // in-column order) lives in board-display.ts so the Gherkin is DOM-free testable.
 import { boardPrefsAtom, type Density } from "./prefs-store";
 import { DisplayOptionsPopover } from "./display-options-popover";
+// CTL-1018: portal the board's controls into the SINGLE app-shell header row
+// (the breadcrumb bar) so the board has no second toolbar bar below it.
+import { HeaderActions } from "@/components/header-actions";
 // CTL-950: shared-header column derivation. `visibleColumnDefs` picks the single
 // column SET the shared header shows (over EVERY lane combined); `laneColumns`
 // distributes ONE lane's tickets across that fixed set (empty cells kept, aligned).
@@ -91,9 +94,11 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 // cards laid into the SAME shared column grid under ONE horizontal scroll axis.
 // axis="none" collapses to the single shared-header column board (one synthetic
 // lane, no group label). The shared `C` / `LIVE` tokens are in board-tokens.ts.
-import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS } from "./board-tokens";
+import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
 import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
+import { formatIssueCount } from "./board-counts";
+import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
 // dense BoardList table instead of the column kanban — the SAME resolved entities,
@@ -101,6 +106,7 @@ import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
 // its own swimlane sectioning (groupListRows), so it is NOT wrapped in SwimlaneBoard.
 import { BoardList } from "./BoardList";
 import { EntityMarker } from "./entity-marker";
+import { ControlTower } from "../components/queue/control-tower";
 import type { GroupBy } from "./board-grouping";
 import type { Ordering } from "./list-order";
 import type {
@@ -206,11 +212,11 @@ export const fmtMsAgo = (ms: number) => {
 // (cubic-bezier jolt) is the visual analog of the iOS rubber-band that the CSS
 // contain alone can't provide in Safari. Gated on prefers-reduced-motion: under
 // reduce, the translateX is 0 (no motion) and only the edge shadow remains.
+// CTL-1036: the board-local always-visible 9px .cat-scroll bar is retired — every
+// board/lane scroller now uses the shared .cat-overlay-scroll utility (app.css),
+// hidden at rest and revealed transiently while scrolling. PULSE_CSS keeps only
+// the rubber-band bump classes.
 const PULSE_CSS = `
-.cat-scroll::-webkit-scrollbar { width:9px; height:9px; }
-.cat-scroll::-webkit-scrollbar-thumb { background:${C.s4}; border-radius:6px; }
-.cat-scroll::-webkit-scrollbar-track { background:transparent; }
-
 @media (prefers-reduced-motion: no-preference) {
   .cat-board-bump-left  { transform: translateX(4px);  transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
   .cat-board-bump-right { transform: translateX(-4px); transition: transform 150ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
@@ -336,7 +342,7 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
   const ids = (blockers ?? []).filter(Boolean);
   const label = isBlocked
     ? `⏸ blocked${ids.length ? `: ${ids.join(", ")}` : ""}`
-    : "⏸ waiting";
+    : "⏸ held";
   const tip = isBlocked
     ? ids.length
       ? `Held — blocked on open dependency: ${ids.join(", ")}`
@@ -345,6 +351,26 @@ export function HeldBadge({ held, blockers }: { held: "blocked" | "waiting" | nu
   return (
     <Tooltip><TooltipTrigger asChild>
       <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: fg, background: bg, whiteSpace: "nowrap", maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
+    </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
+  );
+}
+// CTL-729: the single "needs attention" badge (operator-approved 2026-06-11). ONE
+// yellow accent merges the live "waiting on you" (a blocked bg job) and the
+// watchdog/needs-human escalation into one operator-action signal, with small
+// sub-text saying WHY: "waiting on your answer" vs "escalated — needs human". This
+// is DISTINCT from HeldBadge (the admission-gate blocked/waiting pair). The ONLY
+// new color is the single yellow accent (Linear-calm: color reserved for meaning).
+export function AttentionBadge({ attention }: { attention?: "waiting-on-you" | "needs-human" | null }) {
+  if (attention !== "waiting-on-you" && attention !== "needs-human") return null;
+  const label =
+    attention === "needs-human" ? "⚑ escalated — needs human" : "⏸ waiting on your answer";
+  const tip =
+    attention === "needs-human"
+      ? "Escalated to you — a human must act (watchdog / needs-human)"
+      : "Paused waiting for your answer (a permission grant or prompt)";
+  return (
+    <Tooltip><TooltipTrigger asChild>
+      <span style={{ fontFamily: C.mono, fontSize: 10, padding: "1.5px 7px", borderRadius: 6, color: C.yellowSoft, background: `${C.yellow}24`, whiteSpace: "nowrap", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", display: "inline-block" }}>{label}</span>
     </TooltipTrigger><TooltipContent style={{ fontFamily: C.mono, fontSize: 11 }}>{tip}</TooltipContent></Tooltip>
   );
 }
@@ -448,6 +474,10 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
   const live = t.activeState === "active";
   const stuck = t.activeState === "stuck";
   const dim = t.activeState == null;
+  // CTL-729: the single needs-attention signal — ONE yellow accent for either
+  // 'waiting-on-you' or 'needs-human'. A left inset rule tints the card like the
+  // existing waitingOnUser yellow; stuck (red) still wins the border treatment.
+  const attention = t.attention === "waiting-on-you" || t.attention === "needs-human";
   const compact = density === "compact";
   const reduced = useReducedMotion();
   const variants = reduced ? enterVariantsReduced : enterVariants;
@@ -474,7 +504,18 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       tabIndex={onOpen ? 0 : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: compact ? "7px 10px" : "11px 13px",
-        border: `1px solid ${stuck ? `${C.red}80` : dim ? C.borderSubtle : C.border}`,
+        border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : dim ? C.borderSubtle : C.border}`,
+        // CTL-729: a quiet yellow left rule when the ticket needs the operator —
+        // the same single accent the Inbox "Needs you" row carries. Stuck (red)
+        // takes precedence so a dead/zombie signal is never masked by attention.
+        // CTL-1033: compose that attention rule WITH the card lift (inset top-
+        // highlight + soft ambient shadow) so cards FLOAT off the canvas. Live cards
+        // keep the animated `.catalyst-live` ring (no static shadow).
+        boxShadow: live
+          ? undefined
+          : !stuck && attention
+            ? `inset 2px 0 0 0 ${C.yellow}, ${CARD_LIFT}`
+            : CARD_LIFT,
         transition: "background .25s",
         cursor: onOpen ? "pointer" : undefined,
       }}
@@ -509,6 +550,8 @@ function TicketCard({ t, colorBy, density = "comfortable", colIds, lens, col, on
       <div style={{ display: "flex", alignItems: "center", gap: compact ? 5 : 7, flexWrap: "wrap" }}>
         <PriorityIcon p={t.priority} />
         <PhasePill phase={t.phase} />
+        {/* CTL-729: the single needs-attention badge — yellow, with WHY sub-text. */}
+        <AttentionBadge attention={t.attention} />
         <HeldBadge held={t.held} blockers={t.blockers} />
         <StatusBadge status={t.status} />
         {!compact && <ScopeChip scope={t.scope} estimate={t.estimate} estimateDisplay={t.estimateDisplay} />}
@@ -563,6 +606,17 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
   const accent = PHASE_C[w.phase] || C.blue;
   const live = w.activeState === "active";
   const stuck = w.activeState === "stuck";
+  // CTL-729: the worker's needs-attention signal — the ONE yellow treatment,
+  // keyed off the SAME concept as the ticket card. A worker's own bg-job
+  // waitingOnUser flag and its ticket's needs-human escalation fold into one
+  // attention value (needs-human wins). The card mirrors the ticket's yellow rule.
+  const attentionState: "waiting-on-you" | "needs-human" | null =
+    info?.attention === "needs-human" || info?.attention === "waiting-on-you"
+      ? info.attention
+      : w.waitingOnUser
+        ? "waiting-on-you"
+        : null;
+  const attention = attentionState != null;
   const attempt = Number(/:(\d+)$/.exec(w.name)?.[1] ?? 1);
   const seen = w.lastActiveMs != null ? fmtMsAgo(w.lastActiveMs) : null;
   const reduced = useReducedMotion();
@@ -611,8 +665,19 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       onKeyDown={onOpen ? (e) => { if (e.key === "Enter" || e.key === " " || e.key === "o") { e.preventDefault(); open(false); } } : undefined}
       style={{
         background: live ? C.s3 : C.s2, borderRadius: 10, padding: "11px 13px",
-        border: `1px solid ${stuck ? `${C.red}80` : C.border}`,
-        boxShadow: stuck ? `inset 2px 0 0 0 ${C.red}` : undefined,
+        border: `1px solid ${stuck ? `${C.red}80` : attention ? `${C.yellow}80` : C.border}`,
+        // CTL-729: the ONE yellow rule when this worker needs the operator —
+        // identical accent to the ticket card. Stuck (red) takes precedence.
+        // CTL-1033: compose the stuck/attention inset rule WITH the card lift so
+        // worker cards float; live keeps the `.catalyst-live` animated ring (no
+        // static shadow).
+        boxShadow: stuck
+          ? `inset 2px 0 0 0 ${C.red}, ${CARD_LIFT}`
+          : attention
+            ? `inset 2px 0 0 0 ${C.yellow}, ${CARD_LIFT}`
+            : live
+              ? undefined
+              : CARD_LIFT,
         cursor: onOpen ? "pointer" : undefined,
       }}
     >
@@ -633,6 +698,8 @@ function WorkerCard({ w, info, colIds, onOpen }: { w: Worker; info?: Ticket; col
       <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginTop: info?.title ? 0 : 9 }}>
         {info && <PriorityIcon p={info.priority} />}
         <PhasePill phase={w.phase} />
+        {/* CTL-729: the single needs-attention badge, same yellow as the ticket. */}
+        <AttentionBadge attention={attentionState} />
         {/* CTL-909 / SURF1: owning host.name on every worker card. */}
         <HostChip host={w.host} />
         <Badge variant="outline" style={{ fontFamily: C.mono, fontSize: 10, color: C.fgDim }}>{w.repo}</Badge>
@@ -693,10 +760,11 @@ function buildBlockedByIndex(tickets: Ticket[]): Record<string, string[]> {
 // lane's cards come from `laneColumns(laneItems, defs)` (empty cells kept). The
 // card render + the column order are byte-identical to the legacy TicketBoard.
 function TicketSwimlaneBoard({
-  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen,
+  tickets, groupBy, swimlane, colorBy, density, order, showEmpty, fill, embedded = false, onOpen, laneColors,
 }: {
   tickets: Ticket[]; groupBy: "linear" | "phase"; swimlane: GroupBy; colorBy: ColorBy;
   density: Density; order: Ordering; showEmpty: boolean; fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
+  laneColors?: Record<string, string>;
 }) {
   const defs = visibleColumnDefs(tickets, { groupBy, showEmptyColumns: showEmpty });
   const blockedByIdx = buildBlockedByIndex(tickets);
@@ -728,6 +796,7 @@ function TicketSwimlaneBoard({
       // CTL-1010: density drives the per-lane MINIMUM in the water-fill (real
       // heights are measured); the card render already receives density above.
       density={density}
+      laneColors={laneColors}
     />
   );
 }
@@ -739,10 +808,11 @@ function TicketSwimlaneBoard({
 // swimlane is active the caller already falls the lens back to status/phase so
 // host is not double-encoded (rows AND columns).
 function WorkerSwimlaneBoard({
-  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen,
+  workers, tickets, swimlane, grouping, fill, embedded = false, onOpen, laneColors,
 }: {
   workers: Worker[]; tickets: Ticket[]; swimlane: GroupBy; grouping: WorkerGrouping;
   fill: boolean; embedded?: boolean; onOpen?: OpenDetailFn;
+  laneColors?: Record<string, string>;
 }) {
   const infoById: Record<string, Ticket> = Object.fromEntries(tickets.map((t) => [t.id, t]));
   // CTL-951: the worker detail pager walks the WHOLE rank-sorted worker queue
@@ -787,6 +857,7 @@ function WorkerSwimlaneBoard({
       entityNoun="worker"
       columns={columns}
       deriveLane={deriveLane}
+      laneColors={laneColors}
     />
   );
 }
@@ -795,8 +866,7 @@ function WorkerSwimlaneBoard({
 // engine over the full none|repo|team|project|host axis.
 
 // ── shell (ToggleGroup, TooltipProvider) ──────────────────────────────────────
-// CTL-930: View narrows from "tickets"|"workers"|"queue" to "tickets"|"workers".
-// Queue is now its own left-nav destination (QueueSurface), never a board view.
+// CTL-930/CTL-1016: Board view is narrowed to "tickets"|"workers".
 // CTL-948: "graph" is not a Board view — it navigates to the /dep-graph route;
 // the Board exposes `onDepGraph` so BoardRoot (router.tsx) can inject the
 // navigate() callback without leaking router coupling into the component.
@@ -831,7 +901,12 @@ export function Board({
   const navigate = useNavigate();
   const [data, setData] = useState<BoardPayload | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("status");
+  const [workerGrouping, setWorkerGrouping] = useState<WorkerGrouping>("phase");
+  // CTL-1098: the Workers surface is two one-at-a-time screens — the dispatch
+  // panel (ControlTower) and the pipeline board (WorkerSwimlaneBoard). A header
+  // Seg switches between them so the swimlane's sticky column header can never
+  // float over dispatch content (they are never co-mounted). Defaults to dispatch.
+  const [workerSurface, setWorkerSurface] = useState<"dispatch" | "board">("dispatch");
   // CTL-909 / SURF1: the Workers node FILTER — "all" (no filter, single-host
   // identity no-op) or a specific host.name to scope the grid to one node.
   const [hostFilter, setHostFilter] = useState<string>(HOST_FILTER_ALL);
@@ -898,6 +973,13 @@ export function Board({
   // ONE labeled repo lane (+ hint) rather than silently flattening to "none".
   const swimlane: GroupBy = prefs.swimlane;
 
+  // CTL-1027: per-project swimlane tint — local picks layered over server defaults.
+  const resolvedColors = useResolvedRepoColors();
+  const laneColors = useMemo(
+    () => Object.fromEntries(Object.entries(resolvedColors).map(([k, v]) => [k, v.bg])),
+    [resolvedColors],
+  );
+
   // CTL-989: the single card-open seam — a CLIENT-SIDE router navigation to the
   // detail page (no full-document reload; the left nav stays). The list-origin
   // (from/lens/col/cursor) rides in the typed search params so the detail Shell
@@ -937,11 +1019,24 @@ export function Board({
             carries the status cluster. The subhead carries only the view label,
             description, display popover, and worker-grouping controls. */}
 
-        {/* subhead */}
-        <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "10px 16px", flex: "0 0 auto", flexWrap: "wrap" }}>
-          <h1 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{view === "tickets" ? "Tickets" : "Workers"}</h1>
-          {/* CTL-972: lens-aware tagline + quiet active-lens indicator */}
-          <span style={{ color: C.fgMuted, fontSize: 12 }}>
+        {/* CTL-1018: the board's second toolbar bar is GONE. The surface subtitle
+            (lens-aware tagline + quiet lens chip) and ALL controls (Display popover
+            / worker group-by + node filter / Dep Graph) are portaled into the
+            SINGLE app-shell header row (the breadcrumb bar already names the
+            surface). One header per surface; behavior + persistence unchanged. */}
+        <HeaderActions>
+          {/* CTL-1144: combined board total — quiet, mono, no accent color. */}
+          {view === "tickets" && data && (
+            <span style={{
+              fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 12,
+              fontWeight: 600, color: C.fg, whiteSpace: "nowrap",
+            }}>
+              {formatIssueCount(fTickets.length)}
+            </span>
+          )}
+          {/* CTL-972: lens-aware tagline + quiet active-lens indicator. Muted, and
+              hidden on narrow widths so the header stays calm. */}
+          <span className="hidden text-[12px] text-muted-foreground lg:inline">
             {view === "tickets"
               ? lens === "phase"
                 ? "Which phase-agent is working each ticket · cyan = live worker"
@@ -953,48 +1048,46 @@ export function Board({
               {lens === "phase" ? "Pipeline phase" : "Linear stage"}
             </span>
           )}
-          <span style={{ flex: 1 }} />
-          {/* BOARD2 / CTL-906: the three scattered Tickets subhead toggles (lens /
-              colorBy / repo-lanes) are folded into ONE Display-options popover —
-              "density is a knob". The popover lives in Board's own subhead and
-              reads/writes the persisted boardPrefsAtom. */}
+          {/* BOARD2 / CTL-906: the lens / colorBy / repo-lanes toggles folded into
+              ONE Display-options popover, reading/writing the persisted prefs. */}
           {view === "tickets" && <DisplayOptionsPopover repos={repos} />}
           {view === "workers" && <>
-            {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node. */}
-            <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
-            {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
-                only for a multi-node fleet — with a single node the filter is
-                inert, so the single-host case stays chrome-free (identity no-op). */}
-            {showNodeFilter && (
-              <Seg
-                value={activeHostFilter}
-                onChange={setHostFilter}
-                options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
-              />
-            )}
+            {/* CTL-1098: Dispatch vs Board surface switch — labeled "Board" (not
+                "Pipeline") to avoid colliding with the grouping toggle's Pipeline option. */}
+            <Seg value={workerSurface} onChange={setWorkerSurface} options={[{ k: "dispatch", label: "Dispatch" }, { k: "board", label: "Board" }]} />
+            {workerSurface === "board" && <>
+              {/* CTL-909 / SURF1: group-by Status · Pipeline phase · Node — board screen only. */}
+              <Seg value={workerGrouping} onChange={setWorkerGrouping} options={[{ k: "status", label: "Status" }, { k: "phase", label: "Pipeline" }, { k: "node", label: "Node" }]} />
+              {/* CTL-909 / SURF1: the node FILTER scopes the grid to one host. Shown
+                  only for a multi-node fleet — with a single node the filter is
+                  inert, so the single-host case stays chrome-free (identity no-op). */}
+              {showNodeFilter && (
+                <Seg
+                  value={activeHostFilter}
+                  onChange={setHostFilter}
+                  options={[{ k: HOST_FILTER_ALL, label: "All nodes" }, ...workerHosts.map((h) => ({ k: h, label: h === UNATTRIBUTED_HOST ? "Unattributed" : h }))]}
+                />
+              )}
+            </>}
           </>}
-          {/* CTL-948 / CTL-989: dep-graph link. The Board is always inside the
-              unified router now, so the jump is a client-side navigate to
-              /dep-graph (an `onDepGraph` prop, if supplied, still wins for back-
-              compat callers). */}
-          {(
-            <button
-              onClick={() =>
-                onDepGraph
-                  ? onDepGraph()
-                  : void navigate({ to: "/dep-graph", search: (prev) => prev })
-              }
-              style={{
-                fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
-                background: "transparent", border: `1px solid ${C.border}`,
-                color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
-              }}
-              title="Open backlog dependency graph"
-            >
-              Dep Graph
-            </button>
-          )}
-        </div>
+          {/* CTL-948 / CTL-989: dep-graph link — a client-side navigate to
+              /dep-graph (an `onDepGraph` prop still wins for back-compat callers). */}
+          <button
+            onClick={() =>
+              onDepGraph
+                ? onDepGraph()
+                : void navigate({ to: "/dep-graph", search: (prev) => prev })
+            }
+            style={{
+              fontFamily: C.mono, fontSize: 11, padding: "3px 10px", borderRadius: 6,
+              background: "transparent", border: `1px solid ${C.border}`,
+              color: C.fgMuted, cursor: "pointer", whiteSpace: "nowrap",
+            }}
+            title="Open backlog dependency graph"
+          >
+            Dep Graph
+          </button>
+        </HeaderActions>
 
         {/* body — CTL-989 board-height fix: a flex COLUMN so the scroller child can
             `flex:1; minHeight:0` and FILL the remaining space below the subhead
@@ -1026,6 +1119,7 @@ export function Board({
                 swimlane={swimlane}
                 onOpen={onOpen}
                 embedded={embedded}
+                laneColors={laneColors}
               />
             ) : (
               // CTL-950: ONE sticky shared column-header row + ONE horizontal
@@ -1042,10 +1136,29 @@ export function Board({
                 fill
                 embedded={embedded}
                 onOpen={onOpen}
+                laneColors={laneColors}
               />
             )
           )}
-          {data && view === "workers" && (
+          {data && view === "workers" && workerSurface === "dispatch" && (
+            // CTL-1098: Dispatch screen — ControlTower owns its own scroll container.
+            // The pipeline board is NOT mounted here, so the swimlane's sticky header
+            // cannot escape into this scroller.
+            <div
+              className="cat-overlay-scroll cat-board-scroll"
+              data-scroll-restoration-id="dispatch-scroll"
+              style={{ flex: 1, minHeight: 0, overflowY: "auto" }}
+            >
+              <ControlTower
+                payload={data}
+                onOpenTicket={(key) => openDetail(navigate, "ticket", key, { ids: [] })}
+              />
+            </div>
+          )}
+          {data && view === "workers" && workerSurface === "board" && (
+            // CTL-1098: Board screen — WorkerSwimlaneBoard owns its own scroll
+            // (fill embedded → SwimlaneBoard root is flex:1/minHeight:0, Swimlane.tsx:722),
+            // so the sticky ColumnHeaderRow pins inside the board's own scroller.
             // CTL-909 / SURF1: the node FILTER scopes the grid to one host
             // (`nodeWorkers`; "all" is the identity no-op). Swimlanes (rows) and the
             // node filter (scope) are orthogonal: filter first, then group. R3b: when
@@ -1057,13 +1170,12 @@ export function Board({
               tickets={data.tickets}
               swimlane={swimlane}
               grouping={swimlane === "host" && workerGrouping === "node" ? "status" : workerGrouping}
-              fill
-              embedded={embedded}
+              fill={true}
+              embedded={true}
               onOpen={onOpen}
+              laneColors={laneColors}
             />
           )}
-          {/* CTL-930: queue view branch removed — Queue is now its own left-nav
-              destination (QueueSurface). Board view is narrowed to tickets|workers. */}
         </div>
         {/* CTL-951: the TicketDetailDrawer is removed — a plain card click now
             navigates STRAIGHT to /ticket/$id (the full detail page). */}

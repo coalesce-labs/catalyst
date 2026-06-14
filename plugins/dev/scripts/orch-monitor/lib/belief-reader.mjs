@@ -20,10 +20,6 @@ import { join } from "node:path";
 const HOME = homedir();
 const DEFAULT_BELIEFS_DB_PATH = join(HOME, "catalyst", "beliefs.db");
 
-// The computed specifier prevents esbuild from following the import into
-// bun:sqlite when evaluating ui/vite.config.ts. DO NOT inline to a literal.
-const SCHEMA_MODULE = [".", ".", ".", "execution-core", "beliefs", "schema.mjs"].join("/");
-
 // openBeliefsDbRO — lazily open beliefs.db READ-ONLY. Returns the db handle
 // or null if the file is absent / import fails. Callers should treat null as
 // "shadow disabled — degrade to empty".
@@ -47,8 +43,8 @@ async function openBeliefsDbRO(dbPath) {
  * Shape of each emitted row (matches the FiringFeed / FiringEvent interface
  * the Rules Explorer UI expects from /api/beliefs/stream):
  *   { belief_id, tick_id, rule_id, name, subject, value,
- *     source_fact_ids, stratum, ts_ms, host }
- * ts_ms and host are JOIN'd from the tick table for the same tick_id.
+ *     source_fact_ids, stratum, ts_ms, host, rules_sha }
+ * ts_ms, host, and rules_sha are JOIN'd from the tick table for the same tick_id.
  */
 export class BeliefTail {
   /**
@@ -64,6 +60,58 @@ export class BeliefTail {
     /** lazy-opened DB handle; null while absent/unreadable. */
     this._db = null;
     this._dbLoaded = false;
+    /** tri-state cache: does the tick table carry rules_sha? undefined = unprobed. */
+    this._tickHasRulesSha = undefined;
+    /** one-shot guard so a swallowed poll() error is logged at most once. */
+    this._warned = false;
+  }
+
+  /**
+   * Detect whether the `tick` table carries the rules_sha column. That column
+   * is added only by the WRITER's migration (schema.mjs ALTER TABLE tick); a
+   * read-only reader opened against a legacy / not-yet-migrated beliefs.db
+   * (daemon mid-deploy, or the first poll racing the first new-writer tick)
+   * would otherwise throw 'no such column: t.rules_sha'. Probed once via
+   * PRAGMA and cached for the life of the handle (CTL-1063).
+   *
+   * The cache LATCHES once per handle (positive or negative): a reader that
+   * probes BEFORE the writer's migration sees the column absent and emits
+   * rules_sha:null for the rest of this connection's life. This prevents the
+   * crash, not a mid-deploy upgrade — picking up a freshly-migrated column
+   * requires a reader reconnect (bounded by per-SSE-stream reconnect). rules_sha
+   * is metadata, so the firing stream itself is unaffected meanwhile.
+   *
+   * @param {import("bun:sqlite").Database} db
+   * @returns {boolean}
+   */
+  _tickColumnsHaveRulesSha(db) {
+    if (this._tickHasRulesSha !== undefined) return this._tickHasRulesSha;
+    let has; // assigned in every branch below — no useless initializer (eslint)
+    try {
+      const cols = db.query("PRAGMA table_info(tick)").all();
+      has = cols.some((c) => c.name === "rules_sha");
+    } catch {
+      has = false;
+    }
+    this._tickHasRulesSha = has;
+    return has;
+  }
+
+  /**
+   * Log a swallowed poll() error exactly once so a silent zero-firing state is
+   * observable rather than indistinguishable from 'no new rows' (CTL-1063).
+   * @param {unknown} err
+   */
+  _warnPollSuppressed(err) {
+    if (this._warned) return;
+    this._warned = true;
+    try {
+      console.warn(
+        `[belief-reader] poll() suppressed an error (further occurrences silenced): ${err?.message ?? err}`,
+      );
+    } catch {
+      /* never let logging failures escape poll() */
+    }
   }
 
   /** Lazy-load the DB handle (read-only). */
@@ -91,12 +139,12 @@ export class BeliefTail {
 
   /**
    * poll() — return new belief rows since the cursor, advancing the cursor.
-   * Each row is enriched with ts_ms + host from the tick table.
+   * Each row is enriched with ts_ms + host + rules_sha from the tick table.
    * Returns [] if the db is absent, empty, or an error occurs.
    *
    * @returns {Promise<Array<{belief_id:number,tick_id:number,rule_id:string,
    *   name:string,subject:string,value:string|null,source_fact_ids:string,
-   *   stratum:number,ts_ms:number|null,host:string|null}>>}
+   *   stratum:number,ts_ms:number|null,host:string|null,rules_sha:string|null}>>}
    */
   async poll() {
     const db = await this._ensureDb();
@@ -106,12 +154,19 @@ export class BeliefTail {
     if (this.lastBeliefId === -1) {
       await this.prime();
     }
+    // CTL-1063: select rules_sha only when the tick table actually has it.
+    // A read-only reader against an unmigrated DB (legacy file, daemon mid-
+    // deploy, first poll racing the first new-writer tick) must keep streaming
+    // firings — emit rules_sha:null rather than throwing on a missing column.
+    const tickCols = this._tickColumnsHaveRulesSha(db)
+      ? "t.now_ms AS ts_ms, t.host, t.rules_sha"
+      : "t.now_ms AS ts_ms, t.host, NULL AS rules_sha";
     try {
       const rows = db
         .query(
           `SELECT b.belief_id, b.tick_id, b.rule_id, b.name, b.subject,
                   b.value, b.source_fact_ids, b.stratum,
-                  t.now_ms AS ts_ms, t.host
+                  ${tickCols}
              FROM belief b
              LEFT JOIN tick t ON t.tick_id = b.tick_id
             WHERE b.belief_id > ?
@@ -123,7 +178,8 @@ export class BeliefTail {
         this.lastBeliefId = rows[rows.length - 1].belief_id;
       }
       return rows;
-    } catch {
+    } catch (err) {
+      this._warnPollSuppressed(err);
       return [];
     }
   }

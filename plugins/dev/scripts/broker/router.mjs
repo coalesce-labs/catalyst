@@ -16,6 +16,7 @@ import { execFileSync } from "node:child_process";
 import {
   log,
   getEventLogPath,
+  isSentinelLeak,
   GROQ_API_KEY,
   GROQ_ENDPOINT,
   GROQ_EXTRA_HEADERS,
@@ -68,6 +69,8 @@ import {
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
 import { handlePluginRefreshEvent, resolveRepoFullName } from "./plugin-refresh.mjs";
+import { handleStackReloadEvent } from "./stack-reload.mjs";
+import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
   deriveTraceId,
@@ -270,6 +273,12 @@ export function buildCanonicalEnvelope(legacy) {
 
 export function appendEvent(event) {
   const logPath = getEventLogPath();
+  if (isSentinelLeak(event, logPath)) {
+    process.stderr.write(
+      `[catalyst] dropped sentinel(orch-test) event from default prod log: ${getEventName(event)}\n`
+    );
+    return;
+  }
   mkdirSync(dirname(logPath), { recursive: true });
   const canonical = buildCanonicalEnvelope(event);
   appendFileSync(logPath, JSON.stringify(canonical) + "\n");
@@ -1788,7 +1797,7 @@ export function processEvent(event) {
   // orchestration is active. handlePluginRefreshEvent never throws and the
   // events it emits carry resource["service.name"]=catalyst.broker, which
   // shouldSkipEvent drops on re-ingest (no self-wake loop).
-  handlePluginRefreshEvent({
+  const __refreshResults = handlePluginRefreshEvent({
     event,
     repoFullName: __repoFullName(),
     machineConfigPath: __machineConfigPath(),
@@ -1796,6 +1805,26 @@ export function processEvent(event) {
     emitFn: appendEvent,
     loadedCommit: __loadedCommit(),
     loadedCommitRoot: __loadedCommitRoot(),
+  });
+  // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
+  // logPath MUST be threaded through: the broker self-reload handoff records it so the
+  // successor's resolveBootByteOffset can confirm it resumes the same month file. Omitting
+  // it writes logPath:"" into the handoff, which never matches the real path on boot, so the
+  // successor silently reseeds to EOF and drops events appended during the restart gap —
+  // defeating the gap-free handoff entirely.
+  //
+  // CTL-1077 remediate (M5): pass getByteOffsetFn (the live accessor), not an
+  // eagerly-evaluated currentByteOffset. The handoff is written ~30 s later when
+  // the debounce fires; capturing the offset HERE at processEvent time would make
+  // the successor resume from a low-water mark and re-process ~30 s of events
+  // (double-firing non-idempotent handlers). The accessor is evaluated at
+  // handoff-write time so the successor resumes from the true tail position.
+  handleStackReloadEvent({
+    results: __refreshResults,
+    loadedCommitRoot: __loadedCommitRoot(),
+    emitFn: appendEvent,
+    getByteOffsetFn: getLastByteOffset,
+    logPath: getEventLogPath(),
   });
 
   if (name === "filter.register") {

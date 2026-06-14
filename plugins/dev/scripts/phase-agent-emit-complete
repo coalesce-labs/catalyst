@@ -62,6 +62,8 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 # shellcheck source=lib/canonical-event.sh
 source "${SCRIPT_DIR}/lib/canonical-event.sh"
+# shellcheck source=lib/phase-artifact-gate.sh
+source "${SCRIPT_DIR}/lib/phase-artifact-gate.sh"
 
 CATALYST_DIR="${CATALYST_DIR:-$HOME/catalyst}"
 EVENTS_DIR="${CATALYST_DIR}/events"
@@ -173,6 +175,24 @@ resolve_project_key() {
 }
 PROJECT_KEY="$(resolve_project_key)"
 
+# ─── CTL-1023: resolve the work-type dimension (catalyst.ticket.type) ─────────
+#
+# Source of truth is triage.json `.classification` (bug|feature|chore|refactor|
+# docs|test) in the worker dir — written by phase-triage. Every phase terminal
+# event (complete / failed / turn-cap-exhausted / skipped / park) carries it so
+# DevOps/FinOps can group cost, effort, and throughput by work type. Fail-open
+# to empty; build_canonical_line then defaults the attribute to "unknown" — so a
+# pre-triage / unclassified ticket carries "unknown" rather than omitting the
+# attribute inconsistently (the gherkin contract).
+resolve_ticket_type() {
+	command -v jq >/dev/null 2>&1 || return 0
+	[[ -n $ORCH_DIR ]] || return 0
+	local triage="${ORCH_DIR}/workers/${TICKET}/triage.json"
+	[[ -f $triage ]] || return 0
+	jq -r '.classification // empty' "$triage" 2>/dev/null || true
+}
+TICKET_TYPE="$(resolve_ticket_type)"
+
 # ─── 0. CTL-736 Phase 1: fencing check (stale generation bows out) ───────────
 #
 # A worker carries its dispatch generation in CATALYST_GENERATION. If the phase
@@ -198,6 +218,44 @@ if [[ -n ${CATALYST_GENERATION:-} && -n $ORCH_DIR ]]; then
 				echo "phase-agent-emit-complete: stale-generation-bow-out — mine=${CATALYST_GENERATION} < signal=${_SIG_GEN} for ${TICKET}/${PHASE}; not emitting" >&2
 				exit 0
 			fi
+		fi
+	fi
+fi
+
+# ─── CTL-1081 Phase 2: artifact self-check (thoughts-producing phases only) ──
+#
+# If this phase is supposed to have written a thoughts artifact (research, plan)
+# and we're about to report 'complete', verify the artifact is actually gate-visible
+# from cwd before allowing the complete. On miss, downgrade to failed with reason
+# artifact_not_gate_visible so the revive loop can re-dispatch.
+# Fail-open: any matcher error allows the original complete (a matcher bug must not
+# permanently stall the pipeline).
+if [[ $STATUS == complete ]]; then
+	_OWN_DIR=""
+	_OWN_DIR="$(own_thoughts_artifact_dir_for_phase "$PHASE" 2>/dev/null || true)"
+	if [[ -n $_OWN_DIR ]]; then
+		# CTL-1097: a revived worker can re-emit from outside the ticket worktree
+		# (repo root, ~, another worktree). The artifact lives under the worktree
+		# captured at dispatch (signal.worktreePath, CTL-615), so resolve the
+		# relative artifact dir against it before globbing — otherwise the gate
+		# inspects the wrong tree and downgrades a valid complete on a false miss.
+		# Fail-open: when worktreePath is absent/empty/non-dir (pre-CTL-615 signal,
+		# or no ORCH_DIR) or _OWN_DIR is already absolute, keep cwd-relative.
+		_GATE_DIR="$_OWN_DIR"
+		if [[ $_OWN_DIR != /* && -n $ORCH_DIR ]]; then
+			_WT_SIGNAL="${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json"
+			if [[ -f $_WT_SIGNAL ]] && command -v jq >/dev/null 2>&1; then
+				_WT_FROM_SIGNAL=$(jq -r '.worktreePath // empty' "$_WT_SIGNAL" 2>/dev/null || echo "")
+				if [[ -n $_WT_FROM_SIGNAL && -d $_WT_FROM_SIGNAL ]]; then
+					_GATE_DIR="${_WT_FROM_SIGNAL%/}/${_OWN_DIR}"
+				fi
+			fi
+		fi
+		if ! match_thoughts_artifact "$_GATE_DIR" "$TICKET" >/dev/null 2>&1; then
+			echo "phase-agent-emit-complete: refusing 'complete' for ${TICKET}/${PHASE}: own artifact not gate-visible" >&2
+			echo "  expected: ${_GATE_DIR}/*-${TICKET}*.md   cwd: $(pwd)" >&2
+			STATUS="failed"
+			REASON="artifact_not_gate_visible"
 		fi
 	fi
 fi
@@ -290,6 +348,7 @@ LINE=$(build_canonical_line \
 	--payload-json "$PAYLOAD" \
 	--phase-attempt "$PHASE_ATTEMPT" \
 	--phase-revive-count "$PHASE_REVIVE_COUNT" \
+	--ticket-type "$TICKET_TYPE" \
 	2>/dev/null) || warn "failed to build canonical event line"
 
 if [[ -n $LINE ]]; then

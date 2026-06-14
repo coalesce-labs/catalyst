@@ -19,6 +19,7 @@ import {
   LANDING_SURFACES,
   normalizeLandingSurface,
   readStoredLandingSurface,
+  shouldApplyLandingRedirect,
 } from "../ui/src/lib/prefs";
 import { SURFACES } from "../ui/src/lib/surface";
 
@@ -35,16 +36,15 @@ describe("landing-surface pref — documented defaults (CTL-911)", () => {
 
   it("the eligible landing surfaces are the OPERATE surfaces plus shipped OBSERVE surfaces", () => {
     // Settings is a footer destination, never a landing.
-    // OBS-5: LANDING_SURFACES is the four OPERATE surfaces plus any OBSERVE surface
+    // OBS-5: LANDING_SURFACES is the three OPERATE surfaces plus any OBSERVE surface
     // that ships live content. Telemetry is the first OBSERVE surface to qualify;
     // the not-yet-shipped OBSERVE surfaces (utilization/finops/fleetops/devops) are
     // deliberately NOT offered as a landing default — so LANDING is a strict subset
-    // of SURFACES, never the full nav array.
+    // of SURFACES, never the full nav array. CTL-1016 retired the queue surface.
     expect([...LANDING_SURFACES]).toEqual([
       "home",
       "board",
       "workers",
-      "queue",
       "telemetry",
     ]);
     // The not-yet-shipped OBSERVE surfaces are excluded.
@@ -96,5 +96,19 @@ describe("landing-surface pref — survives a (simulated) reload (CTL-911)", () 
       getItem: (k) => store.get(k) ?? null,
     });
     expect(rehydrated).toBe("board");
+  });
+});
+
+describe("shouldApplyLandingRedirect — deep-link guard (CTL-1059)", () => {
+  it("redirects when hard-loaded at / with a non-home preference", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/", pref: "board" })).toBe(true);
+  });
+  it("never redirects when the preference is home (default)", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/", pref: "home" })).toBe(false);
+  });
+  it("does NOT redirect when the app was hard-loaded at a deep-link path", () => {
+    expect(shouldApplyLandingRedirect({ initialPathname: "/ticket/CTL-1", pref: "board" })).toBe(false);
+    expect(shouldApplyLandingRedirect({ initialPathname: "/worker/CTL-1:1", pref: "board" })).toBe(false);
+    expect(shouldApplyLandingRedirect({ initialPathname: "/dep-graph", pref: "fleetops" })).toBe(false);
   });
 });

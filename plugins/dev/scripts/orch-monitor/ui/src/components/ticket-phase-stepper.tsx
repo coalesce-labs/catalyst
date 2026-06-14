@@ -10,6 +10,7 @@
 // "here now" dot (resolvePipelineRail's `current` placement); cyan stays reserved.
 
 import { useMemo } from "react";
+import { C, LIVE } from "../board/board-tokens";
 import {
   resolvePipelineRail,
   PIPELINE_PHASES,
@@ -17,14 +18,6 @@ import {
 import { phaseColor } from "@/lib/formatters";
 import type { BoardTicket } from "@/board/types";
 
-const C = {
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  cyan: "#5be0ff",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 /** One-line description per canonical phase (verbatim copy, §B4). */
 const PHASE_DESCRIPTION: Record<string, string> = {
@@ -50,7 +43,7 @@ export function TicketPhaseStepper({ ticket }: { ticket: BoardTicket }) {
       {PIPELINE_PHASES.map((phase) => {
         const seg = segments.find((s) => s.phase === phase);
         const isCurrent = seg?.placement === "current";
-        const dotColor = isCurrent ? C.cyan : phaseColor(phase);
+        const dotColor = isCurrent ? LIVE : phaseColor(phase);
         const status = seg?.status ?? null;
         return (
           <div
@@ -72,7 +65,7 @@ export function TicketPhaseStepper({ ticket }: { ticket: BoardTicket }) {
                 background: dotColor,
                 marginTop: 5,
                 flex: "0 0 auto",
-                boxShadow: isCurrent ? `0 0 0 2px ${C.cyan}44` : "none",
+                boxShadow: isCurrent ? `0 0 0 2px ${LIVE}44` : "none",
               }}
             />
             <div style={{ minWidth: 0, flex: 1 }}>

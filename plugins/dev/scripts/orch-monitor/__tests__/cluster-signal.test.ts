@@ -47,6 +47,8 @@ function ticket(id: string, overrides: Partial<BoardTicket> = {}): BoardTicket {
     blockers: [],
     heldSince: null,
     currentPhaseSince: null,
+    attention: null,
+    attentionSince: null,
     host: null,
     generation: null,
     ...overrides,

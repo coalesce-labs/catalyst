@@ -12,11 +12,13 @@
 // configured repo@main arrives, the router calls handlePluginRefreshEvent,
 // which:
 //   1. resolves the pluginDirs checkout root(s)  (parity with lib/plugin-dirs.sh)
-//   2. throttles to at most one pull per N seconds per root
-//   3. runs `git pull --ff-only origin main` in each root
+//   2. throttles to at most one fetch+reset per N seconds per root
+//   3. runs `git fetch --no-tags origin main && git reset --hard origin/main`
+//      in each root (self-healing: the clone is disposable per CTL-992, so
+//      reset --hard is always safe regardless of working-tree dirt — CTL-1106)
 //   4. emits plugin.checkout.updated (new HEAD sha + daemon-skew restart_needed)
-//      on success, or plugin.checkout.refresh_failed (WARN) on a diverged/dirty
-//      checkout — never failing silently.
+//      on success, or plugin.checkout.refresh_failed (WARN) on a genuine
+//      network/auth failure — never failing silently.
 //
 // RESOLUTION-PARITY CONTRACT — keep in sync with the other two resolvers:
 //   - lib/plugin-dirs.sh:56            resolve_plugin_dirs (catalyst-stack / setup)
@@ -44,20 +46,40 @@ import { getEventName } from "./router.mjs";
 // expectation while still delivering "within seconds" freshness.
 export const PLUGIN_REFRESH_THROTTLE_MS = 60_000;
 
-// root → last-pull epoch ms. Module-level so the throttle survives across
+// root → last-fetch epoch ms. Module-level so the throttle survives across
 // events within one daemon lifetime. Cleared between tests via the seam below.
+// Name kept as _lastPullByRoot to avoid barrel-contract churn (CTL-1106).
 const _lastPullByRoot = new Map();
 
 export function __clearThrottleForTest() {
   _lastPullByRoot.clear();
 }
 
+// CTL-1106: consecutive genuine-failure count per root + one-shot lag guard.
+// A dirty tree is no longer a failure (Phase 1); these count only fetch/reset
+// failures (network/auth) that leave the checkout behind origin/main.
+export const CHECKOUT_LAG_FAILURE_THRESHOLD =
+  Number(process.env.CATALYST_CHECKOUT_LAG_FAILURE_THRESHOLD) || 2;
+
+const _failuresByRoot = new Map(); // root → { count, since }
+const _lagEmittedByRoot = new Set(); // root → already emitted this stall episode
+
+export function __clearLagStateForTest() {
+  _failuresByRoot.clear();
+  _lagEmittedByRoot.clear();
+}
+
+function _clearLagState(root) {
+  _failuresByRoot.delete(root);
+  _lagEmittedByRoot.delete(root);
+}
+
 // --- default seams (production wiring) ---------------------------------------
 
 // GIT_TIMEOUT_MS — hard ceiling on every synchronous git call. The broker's
-// event loop runs these inline (execFileSync); a network-stalled `pull` with
+// event loop runs these inline (execFileSync); a network-stalled `fetch` with
 // no timeout would freeze the ENTIRE broker — the same daemon-wedging class
-// CTL-990 fixed in dispatch.mjs. A killed pull throws and surfaces as
+// CTL-990 fixed in dispatch.mjs. A killed fetch throws and surfaces as
 // refresh_failed; the next merge event retries after the throttle window.
 const GIT_TIMEOUT_MS = Number(process.env.CATALYST_PLUGIN_REFRESH_GIT_TIMEOUT_MS) || 20_000;
 
@@ -247,13 +269,14 @@ export function isThisRepoMergeEvent(event, { repoFullName } = {}) {
 // --- refresh ----------------------------------------------------------------
 
 /**
- * refreshPluginCheckout — throttle-gated ff-only pull of a single checkout root.
+ * refreshPluginCheckout — throttle-gated fetch+reset of a single checkout root.
  *
- * On a pull that advances HEAD, emits plugin.checkout.updated with old/new sha
- * and a restart_needed flag (true when the daemon's loadedCommit is known and
- * the checkout advanced past it — daemon skew is VISIBLE, not auto-restarted).
- * On an ff-only failure (diverged/dirty), emits plugin.checkout.refresh_failed
- * at WARN — surfacing the failure instead of failing silently.
+ * Runs `git fetch --no-tags origin main` then `git reset --hard origin/main`
+ * (self-healing: clone is disposable per CTL-992; reset --hard is always safe
+ * regardless of working-tree dirt — CTL-1106). On success, emits
+ * plugin.checkout.updated with old/new sha and a restart_needed flag (daemon
+ * skew is VISIBLE, not auto-restarted). On a genuine fetch/reset failure
+ * (network/auth), emits plugin.checkout.refresh_failed at WARN.
  *
  * Returns a result descriptor: { pulled, throttled, changed, failed }.
  */
@@ -265,11 +288,11 @@ export function refreshPluginCheckout({
   loadedCommit = null,
   loadedCommitRoot = null,
 }) {
-  if (!root) return { pulled: false, throttled: false, changed: false, failed: false };
+  if (!root) return { pulled: false, throttled: false, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
 
   const last = _lastPullByRoot.get(root);
   if (last !== undefined && now - last < PLUGIN_REFRESH_THROTTLE_MS) {
-    return { pulled: false, throttled: true, changed: false, failed: false };
+    return { pulled: false, throttled: true, changed: false, failed: false, root, oldSha: null, newSha: null, restartNeeded: false };
   }
   // Reserve the slot BEFORE the (possibly slow) pull so a duplicate event that
   // arrives mid-pull is throttled rather than launching a second git process.
@@ -283,7 +306,8 @@ export function refreshPluginCheckout({
   }
 
   try {
-    gitFn(root, ["pull", "--ff-only", "origin", "main"]);
+    gitFn(root, ["fetch", "--no-tags", "origin", "main"]);
+    gitFn(root, ["reset", "--hard", "origin/main"]);
   } catch (err) {
     emitFn({
       event: "plugin.checkout.refresh_failed",
@@ -296,7 +320,26 @@ export function refreshPluginCheckout({
         error: err?.message ?? String(err),
       },
     });
-    return { pulled: false, throttled: false, changed: false, failed: true };
+    const prior = _failuresByRoot.get(root) ?? { count: 0, since: now };
+    const next = { count: prior.count + 1, since: prior.count === 0 ? now : prior.since };
+    _failuresByRoot.set(root, next);
+    if (next.count >= CHECKOUT_LAG_FAILURE_THRESHOLD && !_lagEmittedByRoot.has(root)) {
+      _lagEmittedByRoot.add(root);
+      emitFn({
+        event: "plugin.checkout.lag",
+        orchestrator: null,
+        worker: null,
+        severity: "ERROR",
+        detail: {
+          checkout: root,
+          old_sha: oldSha,
+          consecutive_failures: next.count,
+          behind_since: next.since,
+          error: err?.message ?? String(err),
+        },
+      });
+    }
+    return { pulled: false, throttled: false, changed: false, failed: true, root, oldSha, newSha: null, restartNeeded: false };
   }
 
   let newSha = null;
@@ -308,7 +351,8 @@ export function refreshPluginCheckout({
 
   // HEAD did not advance — nothing changed, stay quiet (no event noise).
   if (oldSha && newSha && oldSha === newSha) {
-    return { pulled: true, throttled: false, changed: false, failed: false };
+    _clearLagState(root);
+    return { pulled: true, throttled: false, changed: false, failed: false, root, oldSha, newSha, restartNeeded: false };
   }
 
   // Daemon skew: the checkout advanced, but the long-lived daemon still runs the
@@ -325,6 +369,7 @@ export function refreshPluginCheckout({
     loadedCommit !== newSha &&
     (loadedCommitRoot == null || loadedCommitRoot === root);
 
+  _clearLagState(root);
   emitFn({
     event: "plugin.checkout.updated",
     orchestrator: null,
@@ -337,7 +382,7 @@ export function refreshPluginCheckout({
       restart_needed: restartNeeded,
     },
   });
-  return { pulled: true, throttled: false, changed: true, failed: false };
+  return { pulled: true, throttled: false, changed: true, failed: false, root, oldSha, newSha, restartNeeded };
 }
 
 /**
@@ -362,7 +407,7 @@ export function handlePluginRefreshEvent({
   loadedCommitRoot = null,
 }) {
   try {
-    if (!isThisRepoMergeEvent(event, { repoFullName })) return;
+    if (!isThisRepoMergeEvent(event, { repoFullName })) return null;
     const roots = resolvePluginCheckoutRoots({
       env,
       machineConfigPath,
@@ -370,11 +415,14 @@ export function handlePluginRefreshEvent({
       readFileFn,
       gitToplevelFn,
     });
+    const results = [];
     for (const root of roots) {
-      refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot });
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot }));
     }
+    return results;
   } catch {
     // Best-effort — a refresh failure must never break event routing. Genuine
     // pull failures are already surfaced as refresh_failed events above.
+    return null;
   }
 }

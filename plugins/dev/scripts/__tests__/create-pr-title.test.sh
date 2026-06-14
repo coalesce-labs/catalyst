@@ -66,6 +66,14 @@ echo "F: docs/architecture.md contains draft-PR-early / work record section"
 assert_grep 'draft.*PR.*work record|work record.*draft PR|implement-plan-draft-pr-early|draft_pr_promote|draft.*implementing|ready.*in review' "$ARCH_DOC" \
   "F: architecture.md documents the PR-as-work-record convention"
 
+# ─── G. CTL-1051: create-pr push step uses force-with-lease + post-push verify
+echo ""
+echo "G: CTL-1051 — create-pr push uses --force-with-lease and verifies push"
+assert_grep '\-\-force-with-lease' "$SKILL_CREATE_PR" \
+  "G1: create-pr push retries with --force-with-lease"
+assert_grep 'git fetch' "$SKILL_CREATE_PR" \
+  "G2: create-pr verifies push via git fetch"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

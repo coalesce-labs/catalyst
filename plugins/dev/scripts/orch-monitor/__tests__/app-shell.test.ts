@@ -50,33 +50,38 @@ const shellCode = stripComments(shellSrc);
 // ── Pure surface contract (lib/surface.ts) ───────────────────────────────────
 describe("surface contract (CTL-891)", () => {
   it("declares the OPERATE surfaces then the OBSERVE surfaces in nav order", () => {
-    // OBS-5: the five OBSERVE analytics surfaces follow the four OPERATE surfaces.
+    // OBS-5: the five OBSERVE analytics surfaces follow the three OPERATE surfaces.
+    // CTL-1016: the queue surface is retired — its control tower folded into Workers.
+    // CTL-1103: rulebook is the first REASON surface, appended last.
     expect([...SURFACES]).toEqual([
       "home",
       "board",
       "workers",
-      "queue",
       "telemetry",
       "utilization",
       "finops",
       "fleetops",
       "devops",
+      "process",
+      "rulebook",
     ]);
   });
 
-  it("maps a g-chord key to every surface (OPERATE h/b/w/q + OBSERVE t/u/f/o/d)", () => {
-    // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w/q —
+  it("maps a g-chord key to every surface (OPERATE h/b/w + OBSERVE t/u/f/o/d + REASON r)", () => {
+    // OBS-5: OBSERVE chords pick keys that don't collide with h/b/w —
     // t(elemetry) / u(tilization) / f(inops) / o(=fleetOps) / d(evops).
+    // CTL-1103: r(ulebook) is the first REASON chord.
     expect(SURFACE_CHORD).toEqual({
       h: "home",
       b: "board",
       w: "workers",
-      q: "queue",
       t: "telemetry",
       u: "utilization",
       f: "finops",
       o: "fleetops",
       d: "devops",
+      j: "process",
+      r: "rulebook",
     });
     // Every surface is reachable by some chord, and every chord targets a real surface.
     const chordTargets = new Set(Object.values(SURFACE_CHORD));
@@ -138,9 +143,12 @@ describe("shadcn Sidebar primitive is the foundation (CTL-891)", () => {
     }
   });
 
-  it("the OPERATE group lists Inbox, Tickets, Workers, Queue", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers", () => {
     // CTL-930: surface labels renamed Home→Inbox, Board→Tickets.
-    for (const label of ["Inbox", "Tickets", "Workers", "Queue"]) {
+    // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
+    // CTL-1016: the Dispatch (queue) surface is retired — its control tower folded
+    // into Workers — so OPERATE is now just Inbox / Tickets / Workers.
+    for (const label of ["Inbox", "Tickets", "Workers"]) {
       expect(sidebarComponentSrc).toContain(label);
     }
     expect(sidebarComponentSrc).toMatch(/Operate/i);
@@ -180,7 +188,13 @@ describe("one edge-to-edge shell hosts every surface (CTL-891)", () => {
     // The shell wires the predicate instead of inlining the key literal.
     expect(shellSrc).toContain("shouldToggleSidebar");
     expect(shellSrc).toContain("isTypingTarget");
-    expect(shellSrc).toContain("SURFACE_CHORD");
+    // CTL-1025: the `g`-chord surface jumps now route through the action registry —
+    // buildSurfaceActions (keyed off SURFACE_CHORD in surface-actions.ts) resolved by
+    // matchAction — instead of an inline SURFACE_CHORD lookup in the shell. The chord
+    // still yields t/w/a to the detail Shell on detail routes.
+    expect(shellSrc).toContain("buildSurfaceActions");
+    expect(shellSrc).toContain("matchAction");
+    expect(shellSrc).toContain("surfaceChordYieldsToDetail");
   });
 
   it("App.tsx renders the active surface INSIDE the shell (edge-to-edge inset)", () => {
@@ -210,6 +224,50 @@ describe("one header: no search box, no SidebarTrigger collapse icon (CTL-1003)"
   it("the header renders the single right-aligned HeaderActionsSlot", () => {
     expect(shellSrc).toContain("HeaderActionsSlot");
     expect(shellSrc).toContain("@/components/header-actions");
+  });
+});
+
+// ── CTL-1018: ONE header per surface — no second toolbar bar below the shell ──
+// The board and the four OBSERVE surfaces each used to stack a SECOND header bar
+// (a "Tickets"/"Telemetry" toolbar) below the app-shell breadcrumb row. CTL-1018
+// folds each one's controls into the SINGLE header row via the HeaderActions
+// portal. Static source analysis (no DOM): each surface must portal through
+// HeaderActions and must NOT render its own stacked header. Detail pages are
+// intentionally excluded (already single-header via the CTL-1003 chrome="bare"
+// path). CTL-1016 retired the queue control tower surface (folded into Workers).
+describe("one header per surface — secondary toolbar bars folded up (CTL-1018)", () => {
+  const boardSrc = read("board/Board.tsx");
+  const observe = [
+    "components/observe/telemetry-surface.tsx",
+    "components/observe/finops-surface.tsx",
+    "components/observe/utilization-surface.tsx",
+    "components/observe/fleetops-surface.tsx",
+  ].map((p) => [p, read(p)] as const);
+
+  it("the board portals its controls into the shell header (no second subhead bar)", () => {
+    // Controls now reach the single header via the portal…
+    expect(boardSrc).toContain("HeaderActions");
+    expect(boardSrc).toContain("@/components/header-actions");
+    // …and the old standalone subhead <h1>{view === "tickets" ? "Tickets"…} bar is gone.
+    expect(stripComments(boardSrc)).not.toContain(
+      'view === "tickets" ? "Tickets" : "Workers"',
+    );
+  });
+
+  it("every OBSERVE surface portals its controls (no stacked <header> title bar)", () => {
+    for (const [path, src] of observe) {
+      expect(src, `${path} must import HeaderActions`).toContain(
+        "@/components/header-actions",
+      );
+      expect(src, `${path} must portal via HeaderActions`).toContain(
+        "<HeaderActions>",
+      );
+      // The old `<header …><h1>…</h1></header>` surface title bar is gone.
+      expect(
+        stripComments(src),
+        `${path} must not render its own <header> title bar`,
+      ).not.toMatch(/<header\b/);
+    }
   });
 });
 
@@ -246,12 +304,13 @@ test("SURFACES round-trips the Surface union", () => {
     home: false,
     board: false,
     workers: false,
-    queue: false,
     telemetry: false,
     utilization: false,
     finops: false,
     fleetops: false,
     devops: false,
+    process: false,
+    rulebook: false,
   };
   for (const s of SURFACES) seen[s] = true;
   expect(Object.values(seen).every(Boolean)).toBe(true);

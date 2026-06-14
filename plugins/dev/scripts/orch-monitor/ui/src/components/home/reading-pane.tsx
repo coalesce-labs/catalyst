@@ -22,7 +22,31 @@
 // StatusIcon glyph are the HOME2 Catalyst hand-rolls. Emphasis is a whisper of
 // background TINT + a left accent BAR (the attention-bar pattern) — NEVER a
 // bordered sub-card, never cyan (cyan is reserved for the live signal).
+import { useEffect, useState } from "react";
 import { CheckCircle2, ExternalLink as ExternalLinkIcon } from "lucide-react";
+
+// CTL-1041: a small, restrained Claude logomark for the View-in-Claude pill — the
+// Anthropic "spark" burst rendered as a single inline SVG (no asset, no network,
+// inherits currentColor). Tasteful, not branded-loud: it sits as the leading mark
+// on the pill, the external-link chevron stays as the trailing affordance.
+function ClaudeMark({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      className={className}
+      fill="currentColor"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {/* A 12-spoke radial burst (the Claude spark): four cardinal long spokes
+          plus eight shorter diagonals, all from the center. */}
+      <g stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+        <path d="M12 3.5V9M12 15v5.5M3.5 12H9M15 12h5.5" />
+        <path d="M6 6l3 3M15 15l3 3M18 6l-3 3M9 15l-3 3" opacity="0.85" />
+      </g>
+    </svg>
+  );
+}
 import { isNeedsYouSection, type InboxRow } from "@/board/home-inbox";
 import { isDoneStatus, isPhase, phaseIndexOf, PHASE_LABEL } from "@/board/phase-model";
 import {
@@ -30,12 +54,19 @@ import {
   accentFor,
   askFor,
   blockerFor,
+  escalationExplanationFor,
   heroKindFor,
   optionsFor,
   viewInClaudeFor,
   type PaneAccent,
 } from "@/board/reading-pane-model";
 import { verbActionFor } from "@/board/respond-client";
+import {
+  artifactHref,
+  fetchArtifacts,
+  fetchInboxSummary,
+  type TicketArtifact,
+} from "@/board/inbox-read-client";
 import type { RespondRowStatus } from "@/hooks/use-respond";
 import type { BoardWorker } from "@/board/types";
 import { Badge } from "@/components/ui/badge";
@@ -45,6 +76,66 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import { StatusIcon } from "./status-icon";
 import { PhaseStrip } from "./phase-strip";
+import {
+  mergeSummaryIntoTicket,
+  type InboxSummaryResponse,
+} from "./inbox-summary-data";
+
+// ── inbox summary fetch-on-select (CTL-1042) ──────────────────────────────────
+type InboxSummaryState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "loaded"; response: InboxSummaryResponse }
+  | { kind: "error" };
+
+function useInboxSummary(
+  ticket: string | undefined,
+  phase: string | undefined,
+  enabled: boolean,
+): InboxSummaryState {
+  const [state, setState] = useState<InboxSummaryState>({ kind: "idle" });
+  useEffect(() => {
+    if (!enabled || !ticket) {
+      setState({ kind: "idle" });
+      return;
+    }
+    let alive = true;
+    setState({ kind: "loading" });
+    // The literal fetch is isolated in inbox-read-client.ts (the read-path
+    // mirror of respond-client.ts); the home tree's no-fetch invariant keeps
+    // this component fetch-free, reaching the network only through that client.
+    void (async () => {
+      const result = await fetchInboxSummary(ticket, phase);
+      if (!alive) return;
+      setState(result.ok ? { kind: "loaded", response: result.response } : { kind: "error" });
+    })();
+    return () => { alive = false; };
+  }, [ticket, phase, enabled]);
+  return state;
+}
+
+// ── artifact deep-dive links (CTL-1042 Scenario 4) ───────────────────────────
+type ArtifactsState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "loaded"; artifacts: TicketArtifact[] }
+  | { kind: "error" };
+
+function useArtifacts(ticket: string | undefined, enabled: boolean): ArtifactsState {
+  const [state, setState] = useState<ArtifactsState>({ kind: "idle" });
+  useEffect(() => {
+    if (!enabled || !ticket) { setState({ kind: "idle" }); return; }
+    let alive = true;
+    setState({ kind: "loading" });
+    void (async () => {
+      const result = await fetchArtifacts(ticket);
+      if (!alive) return;
+      setState(result.ok ? { kind: "loaded", artifacts: result.artifacts } : { kind: "error" });
+    })();
+    return () => { alive = false; };
+  }, [ticket, enabled]);
+  return state;
+}
 
 /** Empty-pane state — shown when nothing is selected (a wholly empty inbox).
  *  The relief payoff: calm, not an error. */
@@ -139,6 +230,57 @@ function WhatsNeededNow({
   if (kind == null) return null; // neutral (running/done) sets carry no hero.
 
   const accent = accentFor(row);
+  const escalation = escalationExplanationFor(row);
+
+  // CTL-1110: needs-human rows with a structured explanation use the CTA-led card.
+  if (escalation != null) {
+    return (
+      <section
+        data-pane-hero="escalation"
+        data-pane-accent="amber"
+        data-pane-escalation
+        className={cn("mt-4 rounded-sm py-3 pr-4 pl-4", accentClasses("amber"))}
+      >
+        <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
+          What's needed now
+        </p>
+
+        {/* CTA row: imperative call-to-action + the Respond control. */}
+        <div className="mt-1.5 flex flex-wrap items-start gap-3">
+          {escalation.callToAction != null && (
+            <p
+              data-escalation-cta
+              className="flex-1 text-[14px] font-medium leading-snug text-fg"
+            >
+              {escalation.callToAction}
+            </p>
+          )}
+          <PaneVerb row={row} onAct={onAct} respondStatus={respondStatus} />
+        </div>
+
+        {/* Labelled explanation sections — each rendered only when non-null. */}
+        {(
+          [
+            ["What this delivers", escalation.outcome, "outcome"],
+            ["The problem", escalation.problem, "problem"],
+            ["Why this needs you", escalation.whyYou, "why_you"],
+            ["Why it couldn't self-heal", escalation.whyNotAuto, "why_not_auto"],
+            ["What to do", escalation.whatToDo, "what_to_do"],
+          ] as const
+        )
+          .filter(([, value]) => value != null)
+          .map(([label, value, field]) => (
+            <div key={field} className="mt-3" data-escalation-field={field}>
+              <p className="text-[11px] font-medium uppercase tracking-wide text-muted">
+                {label}
+              </p>
+              <p className="mt-0.5 text-[13px] leading-relaxed text-fg/90">{value}</p>
+            </div>
+          ))}
+      </section>
+    );
+  }
+
   const ask = askFor(row);
   const options = optionsFor(row);
   const blocker = blockerFor(row);
@@ -254,6 +396,23 @@ export function ReadingPane({
   const needsYou = isNeedsYouSection(row.section);
   const viewInClaude = viewInClaudeFor(row, workers ?? []);
 
+  // CTL-1042: lazy AI summary fetch — triggered only for needs-you items on select.
+  const summaryState = useInboxSummary(row.id, row.ticket.phase, needsYou);
+  // CTL-1042 Scenario 4: research/plan deep-dive links fetched alongside summary.
+  const artifactsState = useArtifacts(row.id, needsYou);
+
+  // Merge the AI summary into a shallow copy of the row's ticket when loaded.
+  // Absent/null fields degrade to today's raw content (identity merge).
+  const effectiveRow: InboxRow =
+    summaryState.kind === "loaded"
+      ? { ...row, ticket: mergeSummaryIntoTicket(row.ticket, summaryState.response) }
+      : row;
+
+  const docArtifacts =
+    artifactsState.kind === "loaded"
+      ? artifactsState.artifacts.filter((a) => a.kind === "research" || a.kind === "plan")
+      : [];
+
   return (
     <ScrollArea className="h-full">
       <div data-reading-pane-id={row.id} className="flex flex-col px-6 py-5">
@@ -276,36 +435,61 @@ export function ReadingPane({
             <h1 className="mt-1 text-[18px] leading-snug text-fg">{row.title}</h1>
           </div>
 
-          {viewInClaude && (
-            <Button
-              asChild
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              data-view-in-claude={viewInClaude.sessionId}
-            >
-              <a
-                href={viewInClaude.href}
-                target="_blank"
-                rel="noopener noreferrer"
-                title="Open this agent's Claude Code session in a new tab"
+          {/* Action pills: View-in-Claude (CTL-1041) + research/plan artifact links (CTL-1042). */}
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            {viewInClaude && (
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                data-view-in-claude={viewInClaude.sessionId}
               >
-                View in Claude
-                <ExternalLinkIcon className="size-3.5" />
-              </a>
-            </Button>
-          )}
+                <a
+                  href={viewInClaude.href}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Open this agent's Claude Code session in a new tab"
+                >
+                  <ClaudeMark className="size-3.5" />
+                  View in Claude
+                  <ExternalLinkIcon className="size-3.5" />
+                </a>
+              </Button>
+            )}
+            {docArtifacts.map((a) => (
+              <Button key={a.kind} asChild variant="outline" size="sm">
+                <a
+                  href={artifactHref(row.id, a.kind)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={`Open ${a.kind} doc`}
+                  data-artifact-link={a.kind}
+                >
+                  {a.kind === "research" ? "Research" : "Plan"}
+                  <ExternalLinkIcon className="size-3.5" />
+                </a>
+              </Button>
+            ))}
+          </div>
         </div>
 
         {/* What's needed now — the hero ask + decision options OR blocker detail
             + the ONE prominent primary verb (CTL-903). Only present for needs-you
-            items (running/done carry no hero). */}
-        {needsYou && <WhatsNeededNow row={row} onAct={onAct} respondStatus={respondStatus} />}
+            items (running/done carry no hero). While the AI summary is loading,
+            a subtle indicator appears; on load the merged content replaces raw. */}
+        {needsYou && summaryState.kind === "loading" && (
+          <p className="mt-3 text-[11px] text-muted/70" data-summarizing>
+            Summarizing…
+          </p>
+        )}
+        {needsYou && (
+          <WhatsNeededNow row={effectiveRow} onAct={onAct} respondStatus={respondStatus} />
+        )}
 
         <Separator className="mt-6" />
 
         {/* About — summary, goal, and the where-it's-at phase strip (for ANY item). */}
-        <About row={row} />
+        <About row={effectiveRow} />
       </div>
     </ScrollArea>
   );

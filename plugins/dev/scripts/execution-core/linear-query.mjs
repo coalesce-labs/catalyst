@@ -385,21 +385,45 @@ export function fetchTicketsBatch(identifiers, { exec = defaultBatchExec, cache 
   return result;
 }
 
-// fetchTicketLabels — current label-name list for one ticket, or null on any
-// failure. CTL-587: used by linear-write.mjs::applyLabel for the
-// verify-write-landed step that closes the silent-success gap in linearis
-// label writes (memory project_linear_transition_silent_success). The shape
-// `labels.nodes[].name` is the Linear API contract — confirmed by
-// orch-monitor/lib/linear.ts and pre-assign-migrations.sh. null is the
-// "did not land — retry next tick" signal callers interpret as verify-failed.
-export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
-  const { code, stdout } = exec("linearis", ["issues", "read", identifier]);
-  if (code !== 0) return null;
+// readTicketLabels — richer label reader returning { ok, labels, code, stderr }.
+// CTL-1078: allows callers (removeLabel) to classify auth vs transient failures
+// from the read-step stderr rather than collapsing all failures to null.
+// The shape `labels.nodes[].name` is the Linear API contract.
+export function readTicketLabels(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return { ok: false, labels: null, code, stderr: stderr ?? "" };
   try {
     const node = JSON.parse(stdout);
-    return node?.labels?.nodes?.map((n) => n.name) ?? [];
+    const labels = node?.labels?.nodes?.map((n) => n.name) ?? [];
+    return { ok: true, labels };
   } catch {
-    return null;
+    return { ok: false, labels: null, code, stderr: stderr ?? "" };
+  }
+}
+
+// fetchTicketLabels — back-compat wrapper around readTicketLabels. Returns the
+// label array on success or null on any failure. Existing callers unchanged.
+// CTL-587: used by linear-write.mjs::applyLabel for the verify-write-landed
+// step. null is the "did not land — retry next tick" signal.
+export function fetchTicketLabels(identifier, { exec = defaultExec } = {}) {
+  return readTicketLabels(identifier, { exec }).labels;
+}
+
+// readTicketLabelNodes — like readTicketLabels but preserves the { id, name }
+// node shape so callers (removeLabel, CTL-1085) can build a write payload from
+// ticket-native label UUIDs. Using UUIDs read off the ticket itself avoids the
+// cross-team name-resolution ambiguity that makes name-based overwrites fail on
+// ADV tickets whose label names collide with CTL-team label names.
+export function readTicketLabelNodes(identifier, { exec = defaultExec } = {}) {
+  const { code, stdout, stderr } = exec("linearis", ["issues", "read", identifier]);
+  if (code !== 0) return { ok: false, nodes: null, code, stderr: stderr ?? "" };
+  try {
+    const node = JSON.parse(stdout);
+    const nodes =
+      node?.labels?.nodes?.map((n) => ({ id: n.id, name: n.name })) ?? [];
+    return { ok: true, nodes };
+  } catch {
+    return { ok: false, nodes: null, code, stderr: stderr ?? "" };
   }
 }
 

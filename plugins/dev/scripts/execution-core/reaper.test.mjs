@@ -646,6 +646,79 @@ describe("Reaper.scanOrphans", () => {
   });
 });
 
+// CTL-1004: the stall-janitor's J1 reap is a TARGETED orphans.reap-requested —
+// it names a specific worktree_path + ticket so the reaper acts on THAT tree (the
+// targeted removal + CTL-791 evidence path), not a blanket session sweep. An
+// untargeted orphans.reap-requested (the legacy 600s timer, payload {}) still
+// runs the blanket scanOrphans. This locks the consumption contract the janitor
+// depends on.
+describe("Reaper.handle orphans.reap-requested routing (CTL-1004)", () => {
+  it("UNTARGETED (no worktree_path) → blanket scanOrphans, NOT a targeted removal", async () => {
+    let scanned = false;
+    let removed = false;
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      gitWorktreeRemove: () => { removed = true; return Promise.resolve({ ok: true }); },
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    r.scanOrphans = async () => { scanned = true; };
+    await r.handle({ event: "orphans.reap-requested" });
+    expect(scanned).toBe(true);
+    expect(removed).toBe(false);
+  });
+
+  it("TARGETED (worktree_path present) → targeted removal path (presweep+CTL-791+remove), NOT a blanket scan", async () => {
+    let scanned = false;
+    const trace = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791 gate satisfied
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
+      emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    r.scanOrphans = async () => { scanned = true; };
+    await r.handle({
+      event: "orphans.reap-requested",
+      ticket: "CTL-100",
+      worktree_path: "/wt/CTL-100",
+      branch: "CTL-100",
+    });
+    // Blanket scan is NOT used for a targeted event.
+    expect(scanned).toBe(false);
+    // The named worktree is removed via the evidence-gated path.
+    expect(trace).toContainEqual(["wt", "/wt/CTL-100"]);
+    expect(trace.some((t) => t[0] === "emit" && t[1] === "pr.merged.cleanup-complete")).toBe(true);
+  });
+
+  it("TARGETED reap honors the CTL-791 evidence gate — unsafe tree is deferred, NOT removed", async () => {
+    let removed = false;
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: false, reasons: ["dirty-worktree"] }),
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: () => { removed = true; return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "orphans.reap-requested",
+      ticket: "CTL-100",
+      worktree_path: "/wt/CTL-100",
+      branch: "CTL-100",
+    });
+    expect(removed).toBe(false);
+    expect(emitted.some((e) => e.evt === "pr.merged.cleanup-failed")).toBe(true);
+  });
+});
+
 describe("Reaper.bootReplay", () => {
   it("replays outstanding requests, skips already-completed", async () => {
     const tmpdir = (await import("node:os")).tmpdir();

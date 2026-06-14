@@ -43,7 +43,7 @@ import { join } from "node:path";
 import { homedir, hostname } from "node:os";
 
 import { openBeliefsDb } from "./schema.mjs";
-import { evaluateBeliefs } from "./rules.mjs";
+import { evaluateBeliefs, RULES_SHA } from "./rules.mjs";
 import { reconcileIntents, getMaxAttempts } from "./intent.mjs";
 import { shortIdFromSessionId } from "../claude-ids.mjs";
 import { getAgentsCached } from "../claude-agents.mjs";
@@ -67,9 +67,14 @@ const PRUNE_EVERY_TICKS = 120;
 // cadence counter. Reset hook below keeps tests hermetic.
 let _moduleDb = null;
 let _tickCount = 0;
+// CTL-1063 Phase 4: rules.version.changed fires AT MOST ONCE per process (per
+// module load). The flag is reset by __resetBeliefsCollectorForTests so tests
+// can observe the event from a fresh process state.
+let _rulesVersionChecked = false;
 
 export function __resetBeliefsCollectorForTests() {
   _tickCount = 0;
+  _rulesVersionChecked = false;
   if (_moduleDb) {
     try {
       _moduleDb.close();
@@ -317,6 +322,8 @@ export function collectTickFacts({
   linearCache,
   // CTL-936: intent reconciliation
   appendIntentEvent = null,
+  // CTL-1063 Phase 4: operator-event seam for rules.version.changed boot event.
+  appendEvent = null,
 } = {}) {
   // Shadow gate FIRST — disabled must cost nothing (no db open, no clock read).
   if ((env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
@@ -340,8 +347,45 @@ export function collectTickFacts({
 
     db.run("BEGIN");
     try {
-      db.run("INSERT INTO tick (now_ms, host) VALUES (?, ?)", [now, host]);
+      // CTL-1063 Phase 4: stamp rules_sha on every tick row so disagreements can
+      // be correlated to the rules version that was active when the tick ran.
+      db.run("INSERT INTO tick (now_ms, host, rules_sha) VALUES (?, ?, ?)", [now, host, RULES_SHA]);
       const tickId = db.query("SELECT last_insert_rowid() AS id").get().id;
+
+      // CTL-1063 Phase 4: emit rules.version.changed once per process when the
+      // rules sha differs from the last-seen value persisted in cfg.
+      if (!_rulesVersionChecked) {
+        _rulesVersionChecked = true;
+        try {
+          const lastSha =
+            db.query("SELECT value_text FROM cfg WHERE key = 'rules_sha_last_seen'").get()
+              ?.value_text ?? null;
+          // CTL-1063 remediate (verify silent-failure collector.mjs:374):
+          // couple the last-seen cursor advance to a WIRED appender. When
+          // appendEvent is null (pre-wiring boot path, or a unit test that
+          // omits it) the cursor must NOT advance — otherwise the one-shot
+          // rules.version.changed signal is silently consumed before any
+          // observer exists and never fires again. Only once the appender is
+          // threaded (collectBeliefsTick → scheduler) does the event emit AND
+          // the cursor advance, together.
+          if (lastSha !== RULES_SHA && typeof appendEvent === "function") {
+            try {
+              appendEvent({
+                "event.name": "rules.version.changed",
+                payload: { old_sha: lastSha, new_sha: RULES_SHA },
+              });
+            } catch {
+              /* operator-event append is best-effort */
+            }
+            db.run(
+              "INSERT OR REPLACE INTO cfg (key, value_text) VALUES ('rules_sha_last_seen', ?)",
+              [RULES_SHA],
+            );
+          }
+        } catch {
+          /* best-effort — version check must never break the tick */
+        }
+      }
 
       // ── obs_agent — the agents listing, ALL fields ──────────────────────
       let agents = [];
@@ -660,9 +704,22 @@ export function collectTickFacts({
           return m;
         })();
 
+        // signalStatusBySubject: "ticket/phase" → status string, for the
+        // unstuck-sweep postcondition (CTL-1064). Built from the SAME signals
+        // already in scope — zero extra I/O. Key: only stalled/failed entries
+        // matter; everything else returns null → intent retries next tick.
+        const signalStatusBySubject = (() => {
+          const m = new Map();
+          for (const s of signals) {
+            if (!s?.ticket || s.phase == null) continue;
+            m.set(`${s.ticket}/${s.phase}`, s.status ?? null);
+          }
+          return m;
+        })();
+
         const maxAttempts = getMaxAttempts(db);
         const intentsEnforce = (env.CATALYST_INTENTS_ENFORCE ?? "0") === "1";
-        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket }, {
+        intentResult = reconcileIntents(db, tickId, { agentsBySubject, linearStateByTicket, signalStatusBySubject }, {
           maxAttempts,
           enforce: intentsEnforce,
           appendEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
@@ -693,7 +750,12 @@ export function collectTickFacts({
 // scheduler already touches and logs (never throws). This is the only call
 // site in scheduler.mjs (kept to ~2 lines there to avoid conflicting with
 // parallel work on the tick loop).
-export function collectBeliefsTick({ orchDir, linearCache, appendIntentEvent = null } = {}) {
+export function collectBeliefsTick({
+  orchDir,
+  linearCache,
+  appendIntentEvent = null,
+  appendEvent = null,
+} = {}) {
   if ((process.env.CATALYST_BELIEFS_SHADOW ?? "0") !== "1") {
     return { ok: false, skipped: "disabled" }; // cheap pre-gate: no wiring work at all
   }
@@ -714,6 +776,12 @@ export function collectBeliefsTick({ orchDir, linearCache, appendIntentEvent = n
       // CTL-936: operator-event seam for intent.ineffective — threaded from
       // runTick when CATALYST_INTENTS_ENFORCE=1. Null → legacy shadow-only.
       appendIntentEvent: typeof appendIntentEvent === "function" ? appendIntentEvent : null,
+      // CTL-1063 remediate (verify high review collector.mjs:734): thread the
+      // operator-event appender so the one-shot rules.version.changed signal
+      // can actually fire in the live daemon. Mirrors appendIntentEvent —
+      // without this the emit (gated on `typeof appendEvent === 'function'`)
+      // was dead in production because the wrapper never forwarded it.
+      appendEvent: typeof appendEvent === "function" ? appendEvent : null,
     });
     if (!res.ok && !res.skipped) {
       log.warn({ err: res.error }, "beliefs: collector tick failed (shadow — tick unaffected)");

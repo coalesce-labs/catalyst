@@ -482,6 +482,23 @@ LINE_BARE="$(build_canonical_line \
 HAS=$(echo "$LINE_BARE" | jq -r '.attributes | has("phase.attempt")')
 expect_eq "phase.attempt omitted when flag absent" "false" "$HAS"
 
+# CTL-1023: catalyst.ticket.type — work-type dimension, ALWAYS present.
+LINE_TT="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-1023" \
+  --ticket-type bug)"
+TT=$(echo "$LINE_TT" | jq -r '.attributes["catalyst.ticket.type"]')
+expect_eq "build_canonical_line catalyst.ticket.type from --ticket-type" "bug" "$TT"
+
+# Default: omitted/empty --ticket-type → "unknown" (never inconsistently missing).
+LINE_TT_BARE="$(build_canonical_line \
+  --ts "2026-06-05T00:00:00Z" --severity INFO \
+  --service catalyst.phase-agent --event-name "phase.implement.complete.CTL-1023")"
+TT_HAS=$(echo "$LINE_TT_BARE" | jq -r '.attributes | has("catalyst.ticket.type")')
+TT_DEF=$(echo "$LINE_TT_BARE" | jq -r '.attributes["catalyst.ticket.type"]')
+expect_eq "catalyst.ticket.type present even when flag absent" "true" "$TT_HAS"
+expect_eq "catalyst.ticket.type defaults to 'unknown'" "unknown" "$TT_DEF"
+
 echo ""
 echo "Total: $((PASSES + FAILURES)), Passed: $PASSES, Failed: $FAILURES"
 exit "$FAILURES"

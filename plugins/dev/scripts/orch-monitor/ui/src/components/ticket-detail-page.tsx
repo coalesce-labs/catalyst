@@ -15,7 +15,8 @@
 // tested without a DOM; this file is the thin React skin over them.
 
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { C, LIVE } from "../board/board-tokens";
+import { useDetailEntryState } from "@/hooks/use-detail-entry-state";
 import {
   resolveHeldBanner,
   resolvePipelineRail,
@@ -42,7 +43,7 @@ import {
 } from "@/board/live-tail-data";
 import type { BoardTicket, BoardWorker } from "@/board/types";
 import type { LinearTicketState } from "./use-linear-ticket";
-import type { DetailSearch, DetailTab } from "@/board/route-search";
+import { TAB_VALUES, type DetailSearch, type DetailTab } from "@/board/route-search";
 import type { StreamEvent } from "@/lib/types";
 import { phaseColor, fmtCost, fmtTokens, statusSemantic, type StatusSemantic } from "@/lib/formatters";
 import { Sparkline } from "./sparkline";
@@ -59,6 +60,7 @@ import { TicketPhaseStepper } from "./ticket-phase-stepper";
 import { PriorityIcon, ScopeChip } from "@/board/Board";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
+import { ExecutionTab } from "./execution-tab";
 
 // CTL-974: the markdown DESCRIPTION renderer is lazy-loaded so its heavy engine
 // (marked-highlight + highlight.js) code-splits OUT of the board entry chunk
@@ -82,21 +84,6 @@ function DescriptionSkeleton() {
     </div>
   );
 }
-
-// ── tokens (mirror Shell.tsx / Board.tsx inline-`C` palette; cyan reserved) ──
-const C = {
-  s1: "#111318",
-  s2: "#171a21",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  cyan: "#5be0ff", // the reserved live signal — current phase / active node only
-  green: "#39d07a", // shipped/merged success tone (NOT cyan — cyan stays "live now")
-  red: "#ef5d5d",
-  yellow: "#eab308",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
 
 /** A NEEDS-PLUMBING cell marker — dimmed "↯" + label. Never an invented value. */
 function Needs({ label }: { label: string }) {
@@ -433,14 +420,14 @@ function ActiveNodeTailView({ tail }: { tail: ActiveNodeTail }) {
         marginTop: 4,
         marginLeft: 22,
         paddingLeft: 10,
-        borderLeft: `1px solid ${C.cyan}55`,
+        borderLeft: `1px solid ${LIVE}55`,
         display: "flex",
         flexDirection: "column",
         gap: 2,
       }}
     >
       {/* now: <current tool> · turn N · ctx% — the live "here right now" line. */}
-      <div data-active-node-now style={{ font: `11px ${C.mono}`, color: C.cyan }}>
+      <div data-active-node-now style={{ font: `11px ${C.mono}`, color: LIVE }}>
         now: <span style={{ color: C.fg }}>{tail.currentTool ?? "…"}</span>
         <span style={{ color: C.fgDim }}> · turn {tail.turn ?? "—"} · ctx </span>
         <span data-active-node-ctx style={{ color: tail.contextPct != null ? C.fg : C.fgDim }}>{ctx}</span>
@@ -540,7 +527,7 @@ function ActivitySection({ ticketId }: { ticketId: string }) {
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <SectionLabel>Activity</SectionLabel>
         <span style={{ flex: 1 }} />
-        <span style={{ font: `10px ${C.mono}`, color: live ? C.cyan : C.fgDim }}>
+        <span style={{ font: `10px ${C.mono}`, color: live ? LIVE : C.fgDim }}>
           {events.length} event{events.length === 1 ? "" : "s"}
           {live ? " · live" : ""}
         </span>
@@ -641,7 +628,7 @@ function TelemetryTileCell({ tile }: { tile: TelemetryTile }) {
           {fmtTelemetryValue(tile)}
         </span>
         {live && tile.points.length > 0 ? (
-          <Sparkline points={tile.points} color={C.cyan} ariaLabel={`${tile.label} sparkline`} />
+          <Sparkline points={tile.points} color={LIVE} ariaLabel={`${tile.label} sparkline`} />
         ) : tile.source === "needs-plumbing" ? (
           <span title="git-sourced, not telemetry" style={{ font: `9px ${C.mono}`, color: C.fgDim }}>
             ↯ git
@@ -802,24 +789,24 @@ export function TicketDetailPage({
     return map;
   }, [artifacts]);
 
-  // CTL-996: URL-DRIVEN tab state (URL = source of truth, CTL-989). The active
-  // tab is `search.tab` (absent = the `spec` default — `spec` is dropped from the
-  // URL to keep it clean, same idiom as scope:"all"). Writes via TanStack
-  // navigate with replace:true so tab switches don't pollute the back stack.
-  const navigate = useNavigate();
-  const value: "spec" | DetailTab = search.tab ?? "spec";
+  // CTL-1049: ENTRY-STATE-DRIVEN tab (back-stack entry state, NOT the URL). The
+  // active tab is keyed by the TanStack per-history-entry key via the shared
+  // back-stack scaffolding (useDetailEntryState) — so a FRESH navigation into any
+  // ticket lands on the `spec` default (the last tab choice can never leak across
+  // tickets, the CTL-1049 Gherkin), while a back/forward traverse restores the tab
+  // the operator left this entry on. This REPLACES the prior CTL-996 URL `?tab=`
+  // persistence (the relation-row `search={(prev)=>prev}` Links carried it forward,
+  // which WAS the sticky-tab leak). The PillTabs control is fully controlled, so
+  // sourcing `value`/`onValueChange` from the entry atom is a drop-in swap.
+  const { state: entryState, setState: setEntryState } = useDetailEntryState();
+  const value: "spec" | DetailTab = TAB_IS_VALID(entryState.activeTab)
+    ? (entryState.activeTab as "spec" | DetailTab)
+    : "spec";
   const setTab = useCallback(
     (next: string) => {
-      void navigate({
-        to: ".",
-        search: (prev) => ({
-          ...prev,
-          tab: next === "spec" ? undefined : (next as DetailTab),
-        }),
-        replace: true,
-      });
+      setEntryState((prev) => (prev.activeTab === next ? prev : { ...prev, activeTab: next }));
     },
-    [navigate],
+    [setEntryState],
   );
   const openLifecycle = useCallback(() => setTab("lifecycle"), [setTab]);
 
@@ -969,16 +956,30 @@ export function TicketDetailPage({
               <ActivitySection ticketId={ticket?.id ?? id} />
             </div>
           </TabsContent>
+
+          {/* Execution: the record of what happened — NOW card, narrative, Gantt,
+              artifacts, exceptions & decisions, hop log (CTL-1102). */}
+          <TabsContent value="execution">
+            <ExecutionTab ticket={ticket} id={id} artifacts={artifacts} />
+          </TabsContent>
         </PillTabs>
       </div>
     </div>
   );
 }
 
-/** The visible tab set (Spec default · Lifecycle · Cost · Activity). */
+/** Whether an entry-state `activeTab` string is a known tab value. An unknown
+ *  value (e.g. a stale atom from before a tab was renamed) falls back to `spec`,
+ *  keeping the read total — the same fail-safe idiom as validateDetailSearch. */
+function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
+  return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
+}
+
+/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Execution). */
 const TAB_DEFS: PillTab[] = [
   { value: "spec", label: "Spec" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },
   { value: "activity", label: "Activity" },
+  { value: "execution", label: "Execution" },
 ];

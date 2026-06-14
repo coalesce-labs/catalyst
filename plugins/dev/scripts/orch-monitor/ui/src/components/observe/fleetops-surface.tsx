@@ -21,6 +21,7 @@
 // disk/load/version cell render the dashed "needs event-log reader · OBS-15"
 // locked state — never blank, never fabricated.
 import { useEffect, useMemo, useState } from "react";
+import { HeaderActions } from "@/components/header-actions";
 import type { BoardConfig, BoardWorker } from "@/board/types";
 import type { ClusterSignal } from "@/lib/cluster-signal";
 import { ChartCard } from "@/components/observe/chart-card";
@@ -28,6 +29,16 @@ import { FleetOpsHero } from "@/components/observe/fleetops-hero";
 import { HostMatrix } from "@/components/observe/host-matrix";
 import { StuckDeadReap } from "@/components/observe/stuck-dead-reap";
 import { fleetHero, reapList } from "@/components/observe/fleetops-kit";
+import { ServiceHealthStrip } from "@/components/observe/service-health-strip";
+import { GovernanceModesStrip } from "@/components/observe/governance-modes-strip";
+import type {
+  ServiceHealthSnapshotView,
+  ServiceStatusView,
+} from "@/components/observe/service-health-kit";
+import {
+  isClusterGovernanceSignal,
+  type ClusterGovernanceNode,
+} from "@/lib/governance-model";
 
 /** A zero-capacity board config stand-in for first paint (before /api/board lands)
  *  — renders an honest 0/0 rather than NaN. */
@@ -52,6 +63,16 @@ export function FleetOpsSurface() {
   const [config, setConfig] = useState<BoardConfig>(EMPTY_CONFIG);
   const [workers, setWorkers] = useState<BoardWorker[]>([]);
   const [boardGeneratedAt, setBoardGeneratedAt] = useState<string | null>(null);
+  // CTL-1050: the service-health registry snapshot for the SERVICES strip. null
+  // until the first /api/health/services lands; `servicesUnavailable` flips on a
+  // fetch failure so the strip renders the honest grey line (never green).
+  const [services, setServices] = useState<ServiceStatusView[] | null>(null);
+  const [servicesUnavailable, setServicesUnavailable] = useState<boolean>(false);
+  // CTL-1104: per-host governance snapshot for the GOVERNANCE strip. null until
+  // the first /api/cluster/governance lands; `governanceUnavailable` flips on
+  // failure so the strip renders the honest grey line (never fabricates green).
+  const [governanceNodes, setGovernanceNodes] = useState<ClusterGovernanceNode[] | null>(null);
+  const [governanceUnavailable, setGovernanceUnavailable] = useState<boolean>(false);
   // Ticks every refresh so the board-freshness (broker) cell + reap idle ages
   // recompute against a current `now` without a per-cell timer.
   const [now, setNow] = useState<number>(() => Date.now());
@@ -94,12 +115,53 @@ export function FleetOpsSurface() {
       }
     }
 
+    // CTL-1050: the SERVICES strip reads ONLY the monitor's own registry endpoint
+    // (Fleet Ops stays Prometheus/Loki-FREE — the strip never probes the patient).
+    async function loadServices() {
+      try {
+        const resp = await fetch("/api/health/services");
+        if (!resp.ok || !alive) {
+          if (alive) setServicesUnavailable(true);
+          return;
+        }
+        const body = (await resp.json()) as ServiceHealthSnapshotView;
+        setServices(body.services ?? []);
+        setServicesUnavailable(false);
+      } catch {
+        if (alive) setServicesUnavailable(true);
+      }
+    }
+
+    // CTL-1104: per-host governance snapshot from the heartbeat event log.
+    async function loadGovernance() {
+      try {
+        const resp = await fetch("/api/cluster/governance");
+        if (!resp.ok || !alive) {
+          if (alive) setGovernanceUnavailable(true);
+          return;
+        }
+        const body = await resp.json();
+        if (alive && isClusterGovernanceSignal(body)) {
+          setGovernanceNodes(body.nodes);
+          setGovernanceUnavailable(false);
+        } else if (alive) {
+          setGovernanceUnavailable(true);
+        }
+      } catch {
+        if (alive) setGovernanceUnavailable(true);
+      }
+    }
+
     void loadCluster();
     void loadBoard();
+    void loadServices();
+    void loadGovernance();
     const id = setInterval(() => {
       setNow(Date.now());
       void loadCluster();
       void loadBoard();
+      void loadServices();
+      void loadGovernance();
     }, REFRESH_MS);
     return () => {
       alive = false;
@@ -126,24 +188,41 @@ export function FleetOpsSurface() {
   }, [boardGeneratedAt, now]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-0 p-5 text-fg">
-      <header className="flex items-center justify-between gap-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Fleet Ops</h1>
-          <p className="text-[12px] text-muted">
-            Is my hardware healthy and do I need to intervene?
-          </p>
-        </div>
+    <div className="cat-overlay-scroll flex h-full min-h-0 flex-col gap-4 overflow-y-auto bg-surface-1 p-5 text-fg">
+      {/* CTL-1018: surface header folded into the SINGLE breadcrumb row (OBSERVE
+          › Fleet Ops). Subtitle + the pinned-NOW chip move up. One per surface. */}
+      <HeaderActions>
+        <span className="hidden text-[12px] text-muted-foreground lg:inline">
+          Is my hardware healthy and do I need to intervene?
+        </span>
         {/* Time is pinned NOW (a stateful matrix, not a time series) — a static
             chip, NOT a ToggleGroup. */}
         <span className="rounded-md border border-border bg-surface-1 px-2.5 py-1 font-mono text-[11px] tracking-wide text-muted">
           📌 NOW
         </span>
-      </header>
+      </HeaderActions>
 
       {/* HERO — full-width shrink-0, the ONE answer, before any scroll. Live =
           the calm green ALL SYSTEMS GO line (the success case, not empty). */}
       <FleetOpsHero hero={hero} />
+
+      {/* CTL-1050 SERVICES STRIP — full-width shrink-0 block BETWEEN the hero and
+          the host matrix (respects the ChartCard flex-collapse rule — never a
+          shrinkable flex child). One quiet dot row of the eight stack services. */}
+      <ServiceHealthStrip
+        services={services}
+        unavailable={servicesUnavailable}
+        now={now}
+      />
+
+      {/* CTL-1104 GOVERNANCE STRIP — full-width shrink-0 block (not inside the
+          grid wrapper — ChartCard flex-collapse rule). One row per roster host:
+          host name + mode chips + age label + stale marker. */}
+      <GovernanceModesStrip
+        nodes={governanceNodes}
+        unavailable={governanceUnavailable}
+        now={now}
+      />
 
       {/* P1 HOST MATRIX — full-width shrink-0 sibling ABOVE the grid wrapper (the
           collapse-bug rule). Rows = hosts; LIVE columns left, deferred dimmed right. */}

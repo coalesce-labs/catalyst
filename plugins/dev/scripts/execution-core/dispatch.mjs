@@ -19,9 +19,7 @@ import { getProjectConfig } from "./registry.mjs";
 import { createWorktree as defaultCreateWorktree } from "./worktree.mjs";
 
 // phase-agent-dispatch sits one directory up from execution-core/.
-const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(
-  new URL("../phase-agent-dispatch", import.meta.url),
-);
+const PHASE_AGENT_DISPATCH_BIN = fileURLToPath(new URL("../phase-agent-dispatch", import.meta.url));
 
 // teamOf — "CTL-123" → "CTL". Null for anything not <prefix>-<n>. The team
 // prefix is the registry key that resolves a ticket to its repo.
@@ -63,7 +61,7 @@ const getDispatchTimeoutMs = () =>
 
 export function defaultRunPhaseAgent(
   { orchDir, ticket, phase, worktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
-  { spawn = spawnSync } = {},
+  { spawn = spawnSync } = {}
 ) {
   const args = ["--phase", phase, "--ticket", ticket, "--orch-dir", orchDir, "--orch-id", ticket];
   if (resumeSession) args.push("--resume-session", resumeSession);
@@ -93,8 +91,28 @@ export function defaultRunPhaseAgent(
     killSignal: "SIGKILL", // CTL-990: a wedged dispatch may ignore SIGTERM mid-exec-loop
     env,
   });
-  if (res.error) return { code: 127, stdout: "", stderr: res.error.message };
-  return { code: res.status ?? 0, stdout: res.stdout ?? "", stderr: res.stderr ?? "" };
+  // CTL-1004/CTL-1056 Bug 2: thread the spawn error code (res.error?.code, e.g.
+  // ETIMEDOUT from the CTL-990 timeout) and the kill signal (res.signal, e.g.
+  // SIGKILL) up so the scheduler's "dispatch failed" log is diagnosable. On a
+  // spawn error preserve any stderr captured before the kill, falling back to
+  // the error message when the child wrote nothing. `signal` is carried on every
+  // result (null on a clean exit) so the scheduler reads one consistent shape.
+  if (res.error) {
+    const stderr = res.stderr && res.stderr.length ? res.stderr : res.error.message;
+    return {
+      code: 127,
+      stdout: res.stdout ?? "",
+      stderr,
+      spawnError: res.error.code ?? res.error.message,
+      signal: res.signal ?? null,
+    };
+  }
+  return {
+    code: res.status ?? 0,
+    stdout: res.stdout ?? "",
+    stderr: res.stderr ?? "",
+    signal: res.signal ?? null,
+  };
 }
 
 // defaultDispatch — execution-core worker dispatch. Resolve the project, create
@@ -114,12 +132,21 @@ export function defaultRunPhaseAgent(
 // verbatim to runPhaseAgent so the spawned phase-agent-dispatch carries
 // `--resume-session`. Absent on every cold dispatch — only the revive path sets it.
 export function defaultDispatch(
-  { orchDir, ticket, phase, expectedWorktreePath, resumeSession, handoffPath, attempt, clusterGeneration },
+  {
+    orchDir,
+    ticket,
+    phase,
+    expectedWorktreePath,
+    resumeSession,
+    handoffPath,
+    attempt,
+    clusterGeneration,
+  },
   {
     resolveProject = defaultResolveProject,
     createWorktree = defaultCreateWorktree,
     runPhaseAgent = defaultRunPhaseAgent,
-  } = {},
+  } = {}
 ) {
   const project = resolveProject(ticket);
   if (!project) {
@@ -148,7 +175,16 @@ export function defaultDispatch(
       worktreePath: wt.worktreePath,
     };
   }
-  const res = runPhaseAgent({ orchDir, ticket, phase, worktreePath: wt.worktreePath, resumeSession, handoffPath, attempt, clusterGeneration }); // CTL-761, CTL-864
+  const res = runPhaseAgent({
+    orchDir,
+    ticket,
+    phase,
+    worktreePath: wt.worktreePath,
+    resumeSession,
+    handoffPath,
+    attempt,
+    clusterGeneration,
+  }); // CTL-761, CTL-864
   return { ...res, worktreePath: wt.worktreePath };
 }
 
@@ -157,8 +193,10 @@ export function defaultDispatch(
 // pass a resume UUID. Omitted when absent — the legacy toEqual assertions stay
 // green because the key is not added when the value is falsy.
 export function dispatchTicket(
-  orchDir, ticket, phase,
-  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {},
+  orchDir,
+  ticket,
+  phase,
+  { dispatch = defaultDispatch, resumeSession, handoffPath, attempt, clusterGeneration } = {}
 ) {
   const args = { orchDir, ticket, phase };
   if (resumeSession) args.resumeSession = resumeSession;

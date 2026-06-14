@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import { classifyKey, CHORD_WINDOW_MS } from "./key-nav";
+import type { TypingTargetLike } from "../lib/typing-target";
 
 interface KeyboardNavOptions {
   // ── pre-existing callbacks (unchanged) ──────────────────────────────────────
@@ -59,9 +60,9 @@ export function useKeyboardNav(options: KeyboardNavOptions): void {
     };
 
     function handleKeyDown(e: KeyboardEvent) {
-      const focusedTag = document.activeElement?.tagName;
+      const focused = document.activeElement as TypingTargetLike | null;
       const wasChordPending = chordPending;
-      const action = classifyKey(e, focusedTag, wasChordPending);
+      const action = classifyKey(e, focused, wasChordPending);
 
       // Any resolved keystroke (the second key of a chord, or a non-`g` key)
       // clears a pending chord before we dispatch. `chord-start` re-arms below.

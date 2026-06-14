@@ -159,6 +159,28 @@ run "restart exits 0" bash -c "
   PATH='${STUBDIR}:${REAL_PATH}' '${STACK}' restart >/dev/null 2>&1
 "
 
+# CTL-1107: restart with no args must not crash on empty-array expansion under
+# bash 3.2 (macOS system shell). The plain "restart exits 0" test above passes
+# on bash 5.x regardless, so pin the system bash explicitly to guard the fix.
+if [[ -x /bin/bash ]]; then
+  run "restart exits 0 under system bash (3.2)" /bin/bash -c "
+    set +e
+    PATH='${STUBDIR}:${REAL_PATH}' /bin/bash '${STACK}' restart >'${SCRATCH}/sysbash.out' 2>&1
+    rc=\$?
+    set -e
+    if [[ \$rc -ne 0 ]]; then
+      echo 'restart crashed under system bash:'; cat '${SCRATCH}/sysbash.out'
+      exit 1
+    fi
+    if grep -q 'unbound variable' '${SCRATCH}/sysbash.out'; then
+      echo 'restart emitted unbound-variable error:'; cat '${SCRATCH}/sysbash.out'
+      exit 1
+    fi
+  "
+else
+  echo "  SKIP: /bin/bash not present — cannot pin bash 3.2 regression"
+fi
+
 # ── CTL-946: proxy env-injection assertions ───────────────────────────────────
 # A stub that records its env to a file, so we can assert what the daemon sees.
 

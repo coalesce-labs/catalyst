@@ -3,11 +3,13 @@
 // constant, documenting j/k, g-chords, Esc layering, /, and ⌘K" — and the §3.4
 // contract that the cheatsheet documents the SAME keys the DETAIL1 classifier
 // binds (key-nav.ts), so the two can never drift.
+// CTL-1025: also cross-checks the new "Go to" surface chords against the registry.
 //
 // Pure imports only (no DOM, no jotai) — runs under `cd ui && bun test`.
 import { describe, it, expect } from "bun:test";
 import { KEYMAP, KEYMAP_BOUND_KEYS, type KeymapSection } from "./keymap";
 import { classifyKey, type KeyAction } from "../hooks/key-nav";
+import { buildSurfaceActions } from "../lib/surface-actions";
 
 function allEntries() {
   return KEYMAP.flatMap((s: KeymapSection) => s.entries);
@@ -80,4 +82,33 @@ describe("keymap — stays in sync with the live DETAIL1 classifier (key-nav.ts)
       expect(c.run().type).toBe(c.action);
     });
   }
+});
+
+// CTL-1025: surface chords + create key documented in the cheatsheet AND bound in registry.
+describe("keymap — documents the surface g-chords + create (CTL-1025)", () => {
+  for (const k of ["g h", "g b", "g w", "g t", "g u", "g f", "g o", "g d", "c"]) {
+    it(`documents "${k}"`, () => {
+      expect(KEYMAP_BOUND_KEYS.has(k)).toBe(true);
+    });
+  }
+});
+
+describe("keymap — surface chords cross-check the REGISTRY (not classifyKey)", () => {
+  const actions = buildSurfaceActions({ jumpToSurface: () => {}, create: () => {} });
+  const bound = new Set(actions.map((a) => a.keybinding));
+  for (const k of ["g h", "g b", "g u", "g f", "g o", "g d", "c"]) {
+    it(`"${k}" is documented AND a registry action binds it`, () => {
+      expect(KEYMAP_BOUND_KEYS.has(k)).toBe(true);
+      expect(bound.has(k)).toBe(true);
+    });
+  }
+  // g t and g w are bound by BOTH the classifier (detail) and the registry (surface).
+  it('"g t" is in KEYMAP and bound by the registry', () => {
+    expect(KEYMAP_BOUND_KEYS.has("g t")).toBe(true);
+    expect(bound.has("g t")).toBe(true);
+  });
+  it('"g w" is in KEYMAP and bound by the registry', () => {
+    expect(KEYMAP_BOUND_KEYS.has("g w")).toBe(true);
+    expect(bound.has("g w")).toBe(true);
+  });
 });

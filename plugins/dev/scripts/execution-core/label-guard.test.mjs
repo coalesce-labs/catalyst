@@ -13,6 +13,9 @@ import {
   recordEscalation,
   escalationCooldownPath,
   ESCALATION_COOLDOWN_MS,
+  recordRemovalFailure,
+  clearRemovalFailures,
+  inRemovalBackoff,
 } from "./label-guard.mjs";
 
 let orchDir;
@@ -96,6 +99,20 @@ describe("labelOnce", () => {
 
   test("CTL-834: exclusive-conflict reason → writes .skipped marker (no retry storm)", () => {
     const ws = { applyLabel: recorder({ applied: false, reason: "exclusive-conflict" }) };
+    mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
+
+    labelOnce(orchDir, "CTL-1", "needs-human", ws);
+
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.skipped"))).toBe(
+      true
+    );
+    expect(existsSync(join(orchDir, "workers", "CTL-1", ".linear-label-needs-human.applied"))).toBe(
+      false
+    );
+  });
+
+  test("CTL-1085: team-mismatch reason → writes .skipped marker (storm-break preserved)", () => {
+    const ws = { applyLabel: recorder({ applied: false, reason: "team-mismatch" }) };
     mkdirSync(join(orchDir, "workers", "CTL-1"), { recursive: true });
 
     labelOnce(orchDir, "CTL-1", "needs-human", ws);
@@ -386,6 +403,62 @@ describe("clearStalledLabel", () => {
   });
 });
 
+// ─── CTL-1045 Bug 4: clearStalledLabel onRemoved callback ───────────────────
+
+describe("CTL-1045 Bug 4 — clearStalledLabel onRemoved callback", () => {
+  test("onRemoved is invoked only when removal is confirmed (removed: true)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: true }) }, { onRemoved: () => { called++; } });
+    expect(called).toBe(1);
+  });
+
+  test("onRemoved is withheld when removal is NOT confirmed (removed: false)", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(orchDir, "CTL-1", "needs-human", { removeLabel: () => ({ removed: false }) }, { onRemoved: () => { called++; } });
+    expect(called).toBe(0);
+  });
+
+  test("onRemoved fires after an async removeLabel resolving removed:true", async () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let called = 0;
+
+    clearStalledLabel(
+      orchDir, "CTL-1", "needs-human",
+      { removeLabel: () => Promise.resolve({ removed: true }) },
+      { onRemoved: () => { called++; } },
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    expect(called).toBe(1);
+  });
+
+  test("a throwing onRemoved does not propagate — clearStalledLabel stays best-effort", () => {
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+
+    // onRemoved throws — clearStalledLabel must not re-throw.
+    expect(() =>
+      clearStalledLabel(
+        orchDir, "CTL-1", "needs-human",
+        { removeLabel: () => ({ removed: true }) },
+        { onRemoved: () => { throw new Error("disk full"); } },
+      )
+    ).not.toThrow();
+    // The marker deletion still completed before onRemoved was called.
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+});
+
 // ─── CTL-936: labelOnce — operator-visible event on unrecoverable failure ────
 
 describe("labelOnce CTL-936 operator-visible event", () => {
@@ -453,5 +526,156 @@ describe("labelOnce CTL-936 operator-visible event", () => {
     expect(
       existsSync(join(orchDir, "workers", "CTL-936-D", ".linear-label-needs-human.skipped"))
     ).toBe(false);
+  });
+});
+
+// ─── CTL-1078: remove-path failure counter + storm-break ─────────────────────
+
+describe("recordRemovalFailure / clearRemovalFailures / inRemovalBackoff", () => {
+  test("inRemovalBackoff is false when no marker exists", () => {
+    expect(inRemovalBackoff(orchDir, "CTL-1", "needs-human", Date.now())).toBe(false);
+  });
+
+  test("recordRemovalFailure increments count and persists state", () => {
+    mkdirSync(join(orchDir, ".removal-failures"), { recursive: true });
+    const r1 = recordRemovalFailure(orchDir, "CTL-1", "needs-human", "transient", Date.now());
+    expect(r1.count).toBe(1);
+    const r2 = recordRemovalFailure(orchDir, "CTL-1", "needs-human", "transient", Date.now());
+    expect(r2.count).toBe(2);
+  });
+
+  test("clearRemovalFailures resets counter and disarms backoff", () => {
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "transient", Date.now());
+    clearRemovalFailures(orchDir, "CTL-1", "needs-human");
+    expect(inRemovalBackoff(orchDir, "CTL-1", "needs-human", Date.now())).toBe(false);
+    // recordRemovalFailure after clear starts from 1 again
+    const r = recordRemovalFailure(orchDir, "CTL-1", "needs-human", "transient", Date.now());
+    expect(r.count).toBe(1);
+  });
+
+  test("inRemovalBackoff is true within cooldown window after threshold reached", () => {
+    const now = 1_000_000;
+    // Simulate threshold failures having been recorded and backoff marker written
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    // Within the cooldown window → still in backoff
+    expect(inRemovalBackoff(orchDir, "CTL-1", "needs-human", now + 1000)).toBe(true);
+  });
+
+  test("inRemovalBackoff is false after cooldown window expires", () => {
+    const now = 1_000_000;
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    recordRemovalFailure(orchDir, "CTL-1", "needs-human", "auth-error", now);
+    // After the cooldown window expires → no longer in backoff
+    expect(inRemovalBackoff(orchDir, "CTL-1", "needs-human", now + ESCALATION_COOLDOWN_MS + 1)).toBe(false);
+  });
+
+  test("recordRemovalFailure swallows write errors (warn-only, no throw)", () => {
+    // Pass a non-writable orchDir path — should not throw
+    expect(() => recordRemovalFailure("/nonexistent/orchdir", "CTL-X", "lbl", "transient", Date.now())).not.toThrow();
+  });
+});
+
+describe("clearStalledLabel — CTL-1078 storm-break", () => {
+  function makeWorkerDir(ticket) {
+    const dir = join(orchDir, "workers", ticket);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  test("storm-break: removeLabel not called after threshold consecutive failures within cooldown", () => {
+    makeWorkerDir("CTL-S1");
+    let calls = 0;
+    const ws = {
+      removeLabel: () => { calls++; return { removed: false, reason: "auth-error" }; },
+    };
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    const now = () => Date.now();
+    // Drive to threshold
+    for (let i = 0; i < THRESHOLD; i++) {
+      clearStalledLabel(orchDir, "CTL-S1", "needs-human", ws, { now });
+    }
+    const callsAtThreshold = calls;
+    // Additional ticks within cooldown — removeLabel should NOT be called again
+    clearStalledLabel(orchDir, "CTL-S1", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S1", "needs-human", ws, { now });
+    expect(calls).toBe(callsAtThreshold); // storm stopped
+  });
+
+  test("self-heal: two failures then success resets counter, no escalation", () => {
+    makeWorkerDir("CTL-S2");
+    let callCount = 0;
+    const responses = [
+      { removed: false, reason: "transient" },
+      { removed: false, reason: "transient" },
+      { removed: true },
+    ];
+    const ws = { removeLabel: () => { return responses[callCount++] ?? { removed: true }; } };
+    const now = () => Date.now();
+    clearStalledLabel(orchDir, "CTL-S2", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S2", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S2", "needs-human", ws, { now }); // success → counter reset
+    // After clear, new failures start from zero
+    const ws2 = { removeLabel: () => { calls2++; return { removed: false, reason: "transient" }; } };
+    let calls2 = 0;
+    clearStalledLabel(orchDir, "CTL-S2", "needs-human", ws2, { now });
+    expect(calls2).toBe(1); // fresh start — not immediately backed off
+  });
+
+  test("counter resets after success, subsequent failures start fresh", () => {
+    makeWorkerDir("CTL-S3");
+    const THRESHOLD = Number(process.env.REMOVAL_ESCALATION_THRESHOLD) || 3;
+    let phase = "fail";
+    let failCalls = 0;
+    const ws = {
+      removeLabel: () => {
+        if (phase === "fail") { failCalls++; return { removed: false, reason: "transient" }; }
+        return { removed: true };
+      },
+    };
+    const now = () => Date.now();
+    // Two failures then success
+    clearStalledLabel(orchDir, "CTL-S3", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S3", "needs-human", ws, { now });
+    phase = "succeed";
+    clearStalledLabel(orchDir, "CTL-S3", "needs-human", ws, { now });
+    // Now re-fail — count starts at 1 not 2 (the prior two were reset)
+    phase = "fail";
+    failCalls = 0;
+    for (let i = 0; i < THRESHOLD - 1; i++) {
+      clearStalledLabel(orchDir, "CTL-S3", "needs-human", ws, { now });
+    }
+    // Haven't reached threshold yet — still calling removeLabel
+    expect(failCalls).toBe(THRESHOLD - 1);
+  });
+
+  test("transient tolerated under threshold: two failures then success → no storm-break", () => {
+    makeWorkerDir("CTL-S4");
+    const workerDir = join(orchDir, "workers", "CTL-S4");
+    writeFileSync(join(workerDir, ".linear-label-needs-human.applied"), "");
+    let calls = 0;
+    const responses = [
+      { removed: false, reason: "transient" },
+      { removed: false, reason: "transient" },
+      { removed: true },
+    ];
+    const ws = { removeLabel: () => responses[calls++] ?? { removed: true } };
+    const now = () => Date.now();
+    clearStalledLabel(orchDir, "CTL-S4", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S4", "needs-human", ws, { now });
+    clearStalledLabel(orchDir, "CTL-S4", "needs-human", ws, { now });
+    expect(calls).toBe(3); // all three calls went through — marker cleared on 3rd
+    expect(existsSync(join(workerDir, ".linear-label-needs-human.applied"))).toBe(false);
+  });
+
+  test("never throws even if counter-file write errors (fail-open)", () => {
+    makeWorkerDir("CTL-S5");
+    // orchDir points to a file, not dir — writing .removal-failures/ inside it fails
+    const badOrchDir = join(orchDir, "workers", "CTL-S5", ".linear-label-needs-human.applied");
+    writeFileSync(badOrchDir, ""); // this is a FILE, not a dir
+    const ws = { removeLabel: () => ({ removed: false, reason: "transient" }) };
+    expect(() => clearStalledLabel(badOrchDir, "CTL-S5", "needs-human", ws, { now: () => Date.now() })).not.toThrow();
   });
 });

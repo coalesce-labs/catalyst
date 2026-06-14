@@ -1,0 +1,94 @@
+// rulebook-theme.test.ts — CTL-1103 Phase 5: verifies the three visual channels
+// (strata, severity, live indicator) are mutually distinct. Pure; no DOM.
+// Run: cd ui && bun test src/lib/rulebook-theme.test.ts
+import { describe, it, expect } from "bun:test";
+import {
+  strataTone,
+  severityTone,
+  liveIndicatorTone,
+} from "./rulebook-theme";
+
+describe("strataTone", () => {
+  it("returns a non-empty string for each of the 6 strata", () => {
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(typeof strataTone(id)).toBe("string");
+      expect(strataTone(id).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("all 6 strata tones are pairwise distinct", () => {
+    const tones = [1, 2, 3, 4, 5, 6].map(strataTone);
+    expect(new Set(tones).size).toBe(6);
+  });
+
+  // CTL-1103 remediate (coverage): pin the modulo-wrap branch — tests previously
+  // only exercised ids 1–6 (the non-wrapping range), leaving the (id - 1) % 6
+  // wraparound for id > 6 and the defensive id <= 0 path unasserted.
+  it("wraps id 7 back to id 1 (modulo over the 6 strata)", () => {
+    expect(strataTone(7)).toBe(strataTone(1));
+    expect(strataTone(8)).toBe(strataTone(2));
+    expect(strataTone(12)).toBe(strataTone(6));
+  });
+
+  it("still returns a valid token for out-of-range ids", () => {
+    // The non-negative modulo keeps strataTone total: a bare `(id - 1) % 6`
+    // yields a negative index (→ undefined) for id <= 0. The contract is that
+    // strataTone always returns a token string, never undefined.
+    expect(typeof strataTone(0)).toBe("string");
+    expect(strataTone(0).length).toBeGreaterThan(0);
+    expect(typeof strataTone(-5)).toBe("string");
+  });
+});
+
+describe("severityTone", () => {
+  it("returns distinct tokens for info, warn, error", () => {
+    expect(severityTone("info")).not.toBe(severityTone("warn"));
+    expect(severityTone("warn")).not.toBe(severityTone("error"));
+    expect(severityTone("info")).not.toBe(severityTone("error"));
+  });
+});
+
+describe("liveIndicatorTone", () => {
+  it("returns a non-empty string for both firing and not-firing", () => {
+    expect(typeof liveIndicatorTone(true)).toBe("string");
+    expect(typeof liveIndicatorTone(false)).toBe("string");
+    expect(liveIndicatorTone(true).length).toBeGreaterThan(0);
+  });
+
+  it("firing and not-firing tokens are distinct", () => {
+    expect(liveIndicatorTone(true)).not.toBe(liveIndicatorTone(false));
+  });
+
+  it("not-firing token does not alias any stratum or severity token", () => {
+    const notFiring = liveIndicatorTone(false);
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(strataTone(id)).not.toBe(notFiring);
+    }
+    for (const sev of ["info", "warn", "error"]) {
+      expect(severityTone(sev)).not.toBe(notFiring);
+    }
+  });
+});
+
+describe("three visual channels are mutually distinct", () => {
+  it("strata, severity, and live indicator each produce a distinct token", () => {
+    const strata = strataTone(1);
+    const sev = severityTone("info");
+    const live = liveIndicatorTone(true);
+    expect(new Set([strata, sev, live]).size).toBe(3);
+  });
+
+  it("strata tone for every id differs from severity(info)", () => {
+    const sevToken = severityTone("info");
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(strataTone(id)).not.toBe(sevToken);
+    }
+  });
+
+  it("strata tone for every id differs from liveIndicatorTone(true)", () => {
+    const liveToken = liveIndicatorTone(true);
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(strataTone(id)).not.toBe(liveToken);
+    }
+  });
+});

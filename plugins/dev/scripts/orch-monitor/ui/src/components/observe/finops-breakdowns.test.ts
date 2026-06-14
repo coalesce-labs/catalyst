@@ -22,6 +22,7 @@ import {
   concentration,
   worstDrift,
   TOKEN_BUCKETS,
+  costByWorkType,
 } from "./finops-breakdowns";
 
 describe("rankCostMap — the mandatory zero-series filter", () => {
@@ -178,6 +179,50 @@ describe("concentration — footer A4 'top 3 = N% of spend'", () => {
   it("empty rows → 0 share / 0 count (footer shows '—')", () => {
     const c = concentration([], 3);
     expect(c).toEqual({ count: 0, share: 0, totalUsd: 0 });
+  });
+});
+
+describe("costByWorkType — CTL-1040 honest cost-by-type aggregation", () => {
+  it("sums costUSD per type", () => {
+    const tickets = [
+      { type: "feature", costUSD: 2 },
+      { type: "feature", costUSD: 3 },
+      { type: "bug", costUSD: 1 },
+    ];
+    expect(costByWorkType(tickets)).toEqual({ feature: 5, bug: 1 });
+  });
+
+  it("keeps 'unknown' as an honest bucket, never dropped or renamed", () => {
+    const tickets = [
+      { type: "unknown", costUSD: 4 },
+      { type: "feature", costUSD: 1 },
+    ];
+    expect(costByWorkType(tickets).unknown).toBe(4);
+  });
+
+  it("folds null/absent type into 'unknown' (board uses 'task' fallback)", () => {
+    const tickets = [
+      { type: "task", costUSD: 2 },
+      { type: "", costUSD: 1 },
+      { type: null as unknown as string, costUSD: 1 },
+    ];
+    expect(costByWorkType(tickets).unknown).toBe(4);
+  });
+
+  it("treats null/0 costUSD as 0 (no NaN, no negative)", () => {
+    const tickets = [
+      { type: "docs", costUSD: null },
+      { type: "docs", costUSD: 0 },
+    ];
+    expect(rankCostMap(costByWorkType(tickets))).toEqual([]);
+  });
+
+  it("flows through rankCostMap zero-filter (zero-spend types dropped)", () => {
+    const map = costByWorkType([
+      { type: "feature", costUSD: 5 },
+      { type: "chore", costUSD: 0 },
+    ]);
+    expect(rankCostMap(map)).toEqual([{ label: "feature", usd: 5 }]);
   });
 });
 

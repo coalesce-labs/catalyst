@@ -166,6 +166,8 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS idx_obs_cycle_tick ON obs_cycle (tick_id)`,
   `CREATE INDEX IF NOT EXISTS idx_obs_heartbeat_ts ON obs_heartbeat (ts_ms)`,
   `CREATE INDEX IF NOT EXISTS idx_intent_tick ON intent (tick_id)`,
+  // CTL-1063 Phase 4: rule_id lookup index (query path: belief.rule_id filter)
+  `CREATE INDEX IF NOT EXISTS idx_belief_rule_id ON belief (rule_id)`,
 ];
 
 // openBeliefsDb — open (creating parent dirs) + migrate idempotently + seed
@@ -186,6 +188,11 @@ export function openBeliefsDb({ path, env = process.env } = {}) {
     /* WAL is an optimization, not a requirement */
   }
   for (const stmt of DDL) db.run(stmt);
+  // CTL-1063 Phase 4: add rules_sha column if absent (SQLite has no ADD COLUMN IF NOT EXISTS)
+  const tickCols = db.query("PRAGMA table_info(tick)").all().map((r) => r.name);
+  if (!tickCols.includes("rules_sha")) {
+    db.run("ALTER TABLE tick ADD COLUMN rules_sha TEXT");
+  }
   const seed = db.prepare("INSERT OR IGNORE INTO cfg (key, value_int) VALUES (?, ?)");
   for (const [key, valueInt] of CFG_SEED) seed.run(key, valueInt);
   return db;

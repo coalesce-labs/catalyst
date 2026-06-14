@@ -17,7 +17,7 @@ import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { SETTINGS_BREADCRUMB } from "../ui/src/lib/surface";
+import { SETTINGS_BREADCRUMB, SURFACES, SURFACE_CHORD } from "../ui/src/lib/surface";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const UI_SRC = join(HERE, "..", "ui", "src");
@@ -64,13 +64,21 @@ describe("Settings nav item opens the preferences surface (CTL-911)", () => {
 
   it("Settings is a FOOTER destination, not an OPERATE landing surface", () => {
     // It must NOT be added to the Surface union / SURFACES / SURFACE_CHORD
-    // (those are the four landing surfaces). It has its own breadcrumb instead.
+    // (the nav/palette landing surfaces). It has its own breadcrumb instead.
+    // OBS-5 widened the union to the OBSERVE surfaces, so assert settings'
+    // EXCLUSION rather than pinning the exact member list.
     expect(SETTINGS_BREADCRUMB).toEqual(["Settings"]);
     expect(surfaceSrc).toContain("SETTINGS_BREADCRUMB");
-    // The Surface type stays exactly the four OPERATE surfaces.
-    expect(surfaceSrc).toMatch(
-      /export type Surface =\s*"home"\s*\|\s*"board"\s*\|\s*"workers"\s*\|\s*"queue";/,
-    );
+    expect(SURFACES.map(String)).not.toContain("settings");
+    expect(Object.values(SURFACE_CHORD).map(String)).not.toContain("settings");
+    // CTL-1025: the `Surface` union + SURFACE_CHORD were extracted into
+    // surface-constants.ts (React-/router-free so surface-actions.ts can import
+    // them without pulling in @tanstack/react-router); surface.ts re-exports them.
+    // Read the union from its new home.
+    const constantsSrc = read("lib/surface-constants.ts");
+    const unionSrc = constantsSrc.match(/export type Surface =([^;]*);/)?.[1] ?? "";
+    expect(unionSrc).toContain('"home"');
+    expect(unionSrc).not.toContain('"settings"');
     // The shell shows the Settings breadcrumb when settingsOpen.
     expect(shellSrc).toMatch(/settingsOpen\s*\?\s*SETTINGS_BREADCRUMB/);
   });
@@ -114,22 +122,104 @@ describe("Theme routes through the ONE theme system, @/lib/theme (CTL-911)", () 
     expect(settingsSrc).toContain("setTheme");
   });
 
-  it("the footer toggle still drives the SAME hook (SHELL3 wiring intact)", () => {
-    expect(sidebarSrc).toContain("useTheme");
-    expect(sidebarSrc).toContain("@/lib/theme");
-    expect(sidebarSrc).toMatch(/toggle:\s*toggleTheme/);
+  it("the theme control lives in Settings, not the sidebar footer (CTL-1052)", () => {
+    // CTL-1052 §5: the calm-dark ⇄ warm-light toggle moved OUT of the sidebar footer
+    // INTO the Settings surface (Theme → Appearance) so the footer keeps ONLY Settings.
+    // The Settings surface owns the wiring to the SAME @/lib/theme hook (SHELL3 intact);
+    // the sidebar no longer references the theme system at all.
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    expect(sidebarSrc).not.toContain("useTheme");
+    expect(sidebarSrc).not.toContain("toggleTheme");
   });
 
-  it("NO parallel data-theme system exists (the SURF3⇄SHELL3 clash resolution)", () => {
-    // The `.dark`-class mechanism is the one theme model: no data-theme
-    // attribute plumbing in the surface, the shell, or the stylesheet.
-    expect(settingsSrc).not.toContain("data-theme");
-    expect(shellSrc).not.toContain("data-theme");
-    expect(cssSrc).not.toContain("data-theme");
-    expect(settingsSrc).not.toContain("calm-dark"); // the dead union values
-    expect(settingsSrc).not.toContain("warm-light");
-    // The `.dark` token block (SHELL3) is still what the theme flips.
+  it("data-theme is the brand axis; .dark is the sole MODE axis (CTL-1099 reverses the SURF3⇄SHELL3 single-axis decision)", () => {
+    // CTL-1099 REVERSES the prior CTL-911 invariant ("NO parallel data-theme
+    // system exists"). There are now TWO orthogonal axes:
+    //   - MODE  → the `.dark` class on <html> (catalyst:theme). dark ⇄ light.
+    //   - BRAND → the `data-theme` attribute on <html> (catalyst:brand). warm ⇄ slate.
+    // So `data-theme` is no longer a forbidden parallel theme system — it is the
+    // LEGITIMATE brand mechanism. The two are independent: a single .dark MODE
+    // block, plus data-theme="slate" override blocks that ONLY fork the accent
+    // (slate-light) / the full surface ramp (slate-dark).
+    // The `.dark` MODE mechanism is still present (the one mode flip)…
     expect(cssSrc).toContain(".dark");
+    // …and data-theme="slate" is the legitimate brand mechanism in CSS.
+    expect(cssSrc).toContain('data-theme="slate"');
+    // The surface + the shell both wire the brand hook (useBrand).
+    expect(settingsSrc).toContain("useBrand");
+    expect(shellSrc).toContain("useBrand");
+    // The dead kebab union-strings stay banned (they were never real values).
+    expect(settingsSrc).not.toContain("calm-dark");
+    expect(settingsSrc).not.toContain("warm-light");
+  });
+});
+
+// ── CTL-1099: the brand axis must preserve the semantic palette ────────────────
+describe("CTL-1099 brand axis preserves the semantic palette", () => {
+  const boardTokensSrc = read("board/board-tokens.ts");
+
+  /** Slice every [data-theme="slate"] rule body (balanced braces) out of css. */
+  function slateBlocks(): string[] {
+    const blocks: string[] = [];
+    const re = /\[data-theme="slate"\]\s*\{/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(cssSrc)) !== null) {
+      const open = cssSrc.indexOf("{", m.index);
+      let depth = 0;
+      for (let i = open; i < cssSrc.length; i++) {
+        if (cssSrc[i] === "{") depth++;
+        else if (cssSrc[i] === "}") {
+          depth--;
+          if (depth === 0) {
+            blocks.push(cssSrc.slice(open, i + 1));
+            break;
+          }
+        }
+      }
+    }
+    return blocks;
+  }
+
+  /** Strip CSS comments so a token MENTIONED in prose (e.g. "--chart-* inherit")
+   *  never trips the literal declaration scan. */
+  const stripCss = (s: string) => s.replace(/\/\*[\s\S]*?\*\//g, "");
+
+  it("no [data-theme=\"slate\"] block redefines a semantic --color-* or chart slot", () => {
+    const blocks = slateBlocks().map(stripCss);
+    // Both the slate-light (:root[...]) and slate-dark (.dark[...]) blocks exist.
+    expect(blocks.length).toBe(2);
+    // A slate block may CONSUME a semantic token (e.g. `--destructive:
+    // var(--color-red)` — the base .dark does the same), but must never REDEFINE
+    // one. A redefinition is the token immediately followed by `:` at declaration
+    // position; a `var(--color-red)` reference never matches `--color-red\s*:`.
+    const REDEFINES = (b: string, token: string) =>
+      new RegExp(`${token}\\s*:`).test(b);
+    for (const b of blocks) {
+      expect(REDEFINES(b, "--color-green")).toBe(false);
+      expect(REDEFINES(b, "--color-red")).toBe(false);
+      expect(REDEFINES(b, "--color-yellow")).toBe(false);
+      expect(REDEFINES(b, "--color-live")).toBe(false);
+      expect(REDEFINES(b, "--chart-[0-9]")).toBe(false);
+    }
+  });
+
+  it("the 9 canonical PHASE hexes in board-tokens.ts are untouched by the warm-dark C change", () => {
+    const PINNED: Record<string, string> = {
+      todo: "#97a3b4",
+      triage: "#8492a4",
+      research: "#5e9ee8",
+      plan: "#a98ee3",
+      implement: "#45c08a",
+      verify: "#dba14f",
+      review: "#cdb84e",
+      pr: "#45bcab",
+      done: "#788596",
+    };
+    for (const [phase, hex] of Object.entries(PINNED)) {
+      // The phase key's literal hex still appears verbatim in board-tokens.ts.
+      expect(boardTokensSrc).toContain(`${phase}: "${hex}"`);
+    }
   });
 });
 
@@ -153,6 +243,12 @@ describe("Shell preferences persist (CTL-911)", () => {
     expect(routerSrc).toContain("readLandingSurface");
     expect(routerSrc).toMatch(/beforeLoad/);
     expect(routerSrc).toMatch(/redirect\(\{\s*to:\s*surfaceToPath\(pref\)/);
+  });
+
+  it("the home-route redirect is guarded against deep-link initial loads (CTL-1059)", () => {
+    // The beforeLoad must consult the captured initial pathname so a cold deep-link
+    // never bounces a non-home-preference operator to their landing surface.
+    expect(routerSrc).toContain("shouldApplyLandingRedirect");
   });
 
   it("Settings exposes the landing-surface control and writes it through lib/prefs", () => {

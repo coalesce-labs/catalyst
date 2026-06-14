@@ -153,10 +153,12 @@ stop_mitmproxy() {
   fi
 }
 
-start_broker()  { catalyst-broker start 2>&1 | sed 's/^/  /'; }
-stop_broker()   { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
-start_monitor() { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
-stop_monitor()  { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
+stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
+stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
+stop_forward()   { catalyst-monitor forward-stop  2>&1 | sed 's/^/  /'; }
 
 start_daemon() {
   local use_proxy="$1"
@@ -430,9 +432,12 @@ cmd_start() {
     ensure_proxy_deps || fail "proxy preflight failed"
     start_mitmproxy || warn "continuing without mitmproxy (Linear traffic won't be logged)"
   fi
-  start_broker
+  # CTL-1084: known-good start order is monitor → broker → execution-core
+  # (encoded here instead of operator memory; daemon always last).
   start_monitor
+  start_broker
   start_daemon "$use_proxy"
+  start_forward
 
   log ""
   log "stack up — current state:"
@@ -441,6 +446,7 @@ cmd_start() {
 
 cmd_stop() {
   stop_daemon
+  stop_forward
   stop_monitor
   stop_broker
   stop_mitmproxy
@@ -457,7 +463,18 @@ cmd_restart() {
   # Pass through all flags except --hotpatch (already applied above)
   local start_args=()
   for a in "$@"; do [[ "$a" != "--hotpatch" ]] && start_args+=("$a"); done
-  cmd_start "${start_args[@]}"
+  cmd_start "${start_args[@]+"${start_args[@]}"}"
+}
+
+# CTL-1084: read the latest node.boot payload from the unified event log.
+# Returns the JSON payload object on stdout (compact), empty on failure.
+latest_boot_event() {
+  local ym
+  ym="$(date +%Y-%m)"
+  local log_path="${CATALYST_DIR:-$HOME/catalyst}/events/${ym}.jsonl"
+  [[ -f "$log_path" ]] || return 0
+  grep '"event\.name":"node\.boot"' "$log_path" 2>/dev/null | tail -1 \
+    | jq -c '.body.payload // empty' 2>/dev/null || true
 }
 
 cmd_status() {
@@ -466,6 +483,21 @@ cmd_status() {
   echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
   echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
   echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
+  echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
+
+  # CTL-1084: governance section from the last node.boot event.
+  local boot_json
+  boot_json="$(latest_boot_event 2>/dev/null || true)"
+  if [[ -n "$boot_json" ]]; then
+    echo ""
+    echo "  governance (effective, last boot):"
+    echo "$boot_json" | jq -r '
+      "    plugin_version  \(.plugin_version)",
+      "    adopted_workers \(.adopted_workers)  zombies_cleared \(.zombies_cleared)  rewalk \(.rewalk_dispatched)/\(.rewalk_planned)",
+      (.effective_flags | to_entries[] | "    \(.key)  \(.value | if type=="object" then .mode else . end)"),
+      (.flag_sources | to_entries[] | select(.value=="env-override") | "    ⚠ \(.key) is an ENV OVERRIDE (durable config differs)")
+    ' 2>/dev/null || true
+  fi
 }
 
 # ─── Dispatch ───────────────────────────────────────────────────────────────

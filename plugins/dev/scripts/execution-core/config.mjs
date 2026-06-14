@@ -7,8 +7,8 @@
 // daemons pin a stable value at launch.
 
 import { homedir, hostname } from "node:os";
-import { resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
 
 // --- Logger (CTL-578) ---
 // Pino is the daemon's runtime logger. A worktree checkout that hasn't run
@@ -66,6 +66,15 @@ function catalystDir() {
 
 export function getExecutionCoreDir() {
   return resolve(catalystDir(), "execution-core");
+}
+
+// CTL-1095: drain-flag file. Presence = node is draining (refuse new work).
+export function getDrainFlagPath(orchDir) {
+  return join(orchDir, "drain");
+}
+
+export function isDraining(orchDir) {
+  return existsSync(getDrainFlagPath(orchDir));
 }
 
 export function getEligibleDir() {
@@ -193,6 +202,47 @@ export function getClusterHosts() {
   }
   return [getHostName()];
 }
+
+// CTL-1057: a multi-host roster that does NOT include this host means every
+// ticket HRW-routes to some OTHER host and this daemon silently owns nothing.
+// Returns a human warning string in that case, null otherwise. Single-host
+// (roster.length <= 1) → null — Phase 1 makes that a deliberate no-op and
+// a name mismatch there is not an error worth surfacing.
+export function hostMembershipWarning(roster, self) {
+  if (!Array.isArray(roster) || roster.length <= 1) return null;
+  if (roster.includes(self)) return null;
+  return (
+    `host "${self}" is not in the cluster roster [${roster.join(", ")}] — ` +
+    `this daemon will own zero tickets under HRW. Set catalyst.host.name ` +
+    `(Layer-2 config) to a roster entry or fix .catalyst/hosts.json.`
+  );
+}
+
+// getLivenessAnchorIssue — the Linear ticket identifier the cross-host liveness
+// channel attaches per-host heartbeat records to (CTL-1090). Resolution order:
+//   1. CATALYST_LIVENESS_ANCHOR_ISSUE env (test/override)
+//   2. catalyst.cluster.livenessAnchorIssue in the Layer-2 machine-local config
+//      (~/.config/catalyst/config.json) — kept out of the committed repo per
+//      CLAUDE.md ("do NOT commit Linear team/project IDs").
+//   3. null — multi-host caller logs a one-time warning + no-ops; single-host: silent no-op.
+// Never throws. NOT committed (Linear id ⇒ machine-local per CLAUDE.md).
+export function getLivenessAnchorIssue() {
+  const env = process.env.CATALYST_LIVENESS_ANCHOR_ISSUE;
+  if (typeof env === "string" && env.length > 0) return env;
+  try {
+    const a = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))
+      ?.catalyst?.cluster?.livenessAnchorIssue;
+    if (typeof a === "string" && a.length > 0) return a;
+  } catch { /* missing/malformed → null */ }
+  return null;
+}
+
+// LIVENESS_PUBLISH_INTERVAL_MS — cross-host liveness publish cadence (CTL-1090).
+// Coarser than the local heartbeat (30s) because the takeover grace is 10 min;
+// ~2 min keeps Linear quota bounded while giving 5 intervals of resolution inside
+// the grace window. Env-overridable.
+export const LIVENESS_PUBLISH_INTERVAL_MS =
+  Number(process.env.EXECUTION_CORE_LIVENESS_PUBLISH_INTERVAL_MS) || 120_000;
 
 // CTL-859 — node-heartbeat cadence. The daemon appends one node.heartbeat event
 // to the unified event log every interval so a future liveness reader can decide
@@ -416,3 +466,214 @@ export const AUTOTUNE_DRIFT_DOWN_STEP =
 // high-water (reuses the legacy ×0.75 trend-up shed factor).
 export const AUTOTUNE_CLAUDE_SHED_FACTOR =
   Number(process.env.EXECUTION_CORE_AUTOTUNE_CLAUDE_SHED_FACTOR) || 0.75;
+
+// --- Progress watchdog for hung phase workers (CTL-729) ---
+// Three-layer precedence per knob (mirrors getHostName): env > Layer-2
+// (catalyst.watchdog.* in ~/.config/catalyst/config.json) > code default.
+// Re-reads on every call (mirrors readMemorySamplerConfig) so tests mutate env
+// freely. Never throws — missing/malformed Layer-2 falls through to defaults.
+
+export const WATCHDOG_MINUTES_PER_TURN =
+  Number(process.env.EXECUTION_CORE_WATCHDOG_MINUTES_PER_TURN) || 2;
+const WATCHDOG_MIN_PHASE_BUDGET_MS = 20 * 60_000;   // absolute floor
+const WATCHDOG_FALLBACK_BUDGET_MS = 90 * 60_000;    // when turnCap unparseable
+const WATCHDOG_MODES = new Set(["off", "shadow", "enforce"]);
+
+function readLayer2Watchdog() {
+  try {
+    const w = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.watchdog;
+    return w && typeof w === "object" ? w : {};
+  } catch { return {}; }
+}
+function resolveMode(envVal, l2Val) {
+  for (const v of [envVal, l2Val]) {
+    if (typeof v === "string" && WATCHDOG_MODES.has(v)) return v;
+  }
+  return "shadow"; // conservative default: detect+log, do not kill, until flipped to enforce
+}
+function resolveCount(envVal, l2Val, def) {
+  for (const v of [envVal, l2Val]) {
+    if (v === undefined || v === null || v === "") continue;
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 0) return n;
+  }
+  return def;
+}
+
+export function readWatchdogConfig() {
+  const l2 = readLayer2Watchdog();
+  // CATALYST_WATCHDOG=0 is the kill-switch → mode:off (back-compat).
+  const mode = process.env.CATALYST_WATCHDOG === "0"
+    ? "off"
+    : resolveMode(process.env.EXECUTION_CORE_WATCHDOG_MODE, l2.mode);
+  const silenceThresholdMs =
+    Number(process.env.EXECUTION_CORE_WATCHDOG_SILENCE_MS) ||
+    (Number(l2.silenceThresholdMinutes) || 0) * 60_000 ||
+    30 * 60_000;
+  const phaseBudgetMultiplier =
+    Number(process.env.EXECUTION_CORE_WATCHDOG_BUDGET_MULTIPLIER) ||
+    Number(l2.phaseBudgetMultiplier) || 1.5;
+  const reviveBudget = resolveCount(
+    process.env.EXECUTION_CORE_WATCHDOG_REVIVE_BUDGET, l2.reviveBudget, 0);
+  return { mode, silenceThresholdMs, phaseBudgetMultiplier, reviveBudget };
+}
+
+// phaseBudgetMs — expected wall-clock ceiling (ms) from the dispatch-time turnCap.
+// Pure (no clock/fs) so the predicate gate is cheaply unit-testable.
+export function phaseBudgetMs(phase, turnCap, cfg = readWatchdogConfig()) {
+  const cap = Number(turnCap);
+  if (!Number.isFinite(cap) || cap <= 0) return WATCHDOG_FALLBACK_BUDGET_MS;
+  const mult = Number(cfg?.phaseBudgetMultiplier) || 1.5;
+  return Math.max(cap * WATCHDOG_MINUTES_PER_TURN * mult * 60_000, WATCHDOG_MIN_PHASE_BUDGET_MS);
+}
+
+// --- Stall-janitor for terminal-state leftovers (CTL-1004) ---
+// SHADOW-FIRST. Same three-layer precedence as the CTL-729 watchdog (env >
+// Layer-2 catalyst.stallJanitor.* > code default), and the SAME conservative
+// default — "shadow": detect + log janitor.would.* events, mutate nothing, until
+// an operator flips it to "enforce". The janitor only collapses already-terminal,
+// unambiguous leftovers (orphan worktrees + idle ghost sessions); it never infers
+// liveness or advancement (that is belief-rule territory).
+const STALL_JANITOR_MODES = new Set(["off", "shadow", "enforce"]);
+// terminalIdleMs — how long a terminal phase signal must have been present before
+// an idle background session for the same subject is treated as a ghost (J2). The
+// Gherkin pins this at >=600s; matches the orphan-reaper's 600s timer cadence.
+const STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS = 600_000;
+
+function readLayer2StallJanitor() {
+  try {
+    const sj = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.stallJanitor;
+    return sj && typeof sj === "object" ? sj : {};
+  } catch { return {}; }
+}
+
+export function readStallJanitorConfig() {
+  const l2 = readLayer2StallJanitor();
+  // CATALYST_STALL_JANITOR is the single operator knob (mirrors CATALYST_WATCHDOG):
+  //   "0" → off (kill-switch / back-compat with the ticket's default 0),
+  //   off|shadow|enforce → that mode, anything else → shadow.
+  const env = process.env.CATALYST_STALL_JANITOR ?? process.env.EXECUTION_CORE_STALL_JANITOR_MODE;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && STALL_JANITOR_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && STALL_JANITOR_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "shadow"; // conservative default: shadow-first, never act until flipped
+  }
+  const terminalIdleMs =
+    Number(process.env.EXECUTION_CORE_STALL_JANITOR_TERMINAL_IDLE_MS) ||
+    (Number(l2.terminalIdleSeconds) || 0) * 1000 ||
+    STALL_JANITOR_DEFAULT_TERMINAL_IDLE_MS;
+  return { mode, terminalIdleMs };
+}
+
+// --- Unstuck sweep (CTL-1064) ---
+// OFF by default — operators opt in via shadow then enforce. Same three-layer
+// precedence as CTL-1004/CTL-1029 (env > Layer-2 catalyst.unstuckSweep.* >
+// code default). Runs as a low-frequency throttled Pass 0u (default 15 min).
+const UNSTUCK_SWEEP_MODES = new Set(["off", "shadow", "enforce"]);
+export const UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS = 900_000; // 15 minutes
+
+function readLayer2UnstuckSweep() {
+  try {
+    const us = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.unstuckSweep;
+    return us && typeof us === "object" ? us : {};
+  } catch { return {}; }
+}
+
+export function readUnstuckSweepConfig() {
+  const l2 = readLayer2UnstuckSweep();
+  // CATALYST_UNSTUCK_SWEEP is the single operator knob:
+  //   "0" → off (kill-switch), off|shadow|enforce → that mode, anything else → off.
+  const env = process.env.CATALYST_UNSTUCK_SWEEP ?? process.env.EXECUTION_CORE_UNSTUCK_SWEEP_MODE;
+  let mode;
+  if (env === "0") {
+    mode = "off";
+  } else if (typeof env === "string" && UNSTUCK_SWEEP_MODES.has(env)) {
+    mode = env;
+  } else if (typeof l2.mode === "string" && UNSTUCK_SWEEP_MODES.has(l2.mode)) {
+    mode = l2.mode;
+  } else {
+    mode = "off"; // safe default: off — operators opt into shadow then enforce
+  }
+  const intervalMs =
+    Number(process.env.CATALYST_UNSTUCK_SWEEP_INTERVAL_MS) ||
+    (Number(l2.intervalSeconds) || 0) * 1000 ||
+    UNSTUCK_SWEEP_DEFAULT_INTERVAL_MS;
+  return { mode, intervalMs };
+}
+
+// isThrottled — returns true when (nowMs - lastRunMs) < intervalMs.
+// Extracted as a standalone export so tests can assert the throttle guard
+// and future low-frequency passes can reuse the same helper.
+export function isThrottled(lastRunMs, intervalMs, nowMs) {
+  return (nowMs - lastRunMs) < intervalMs;
+}
+
+// --- Governance snapshot for operator visibility (CTL-1062/CTL-1084) ---
+// READ-ONLY, NEVER load-bearing. Recomputes each governance value the same way
+// its per-tick gate site does so the heartbeat payload and the
+// `catalyst-execution-core governance` CLI can show what the daemon is actually
+// running with — without grepping `ps eww`. Does NOT replace the gate reads
+// (see audit-proxy-must-not-be-load-bearing): the gates keep their own inline
+// reads; this is a parallel, side-effect-free view.
+//
+// CTL-1084: beliefs-family flags are now THREE-LAYER (env override > Layer-2
+// catalyst.governance.<flag> boolean > default false) so a restart with an
+// empty launching shell preserves the operator's intent. Per-tick gate sites
+// (scheduler.mjs/collector.mjs/diagnostician.mjs) keep reading process.env
+// unchanged — the launcher (catalyst-execution-core cmd_start) evals the
+// resolved exports so the daemon process inherits the durable value.
+
+function readLayer2Governance() {
+  try {
+    const g = JSON.parse(readFileSync(getLayer2ConfigPath(), "utf8"))?.catalyst?.governance;
+    return g && typeof g === "object" ? g : {};
+  } catch { return {}; }
+}
+
+// Three-layer beliefs flag: explicit env ("1"/"0") > Layer-2 boolean > default false.
+// Returns both the effective boolean and its source so the boot self-report can flag overrides.
+function resolveBeliefsFlag(envVal, l2Val) {
+  if (envVal === "1") return { value: true,  source: "env-override" };
+  if (envVal === "0") return { value: false, source: "env-override" };
+  if (typeof l2Val === "boolean") return { value: l2Val, source: "config" };
+  return { value: false, source: "default" };
+}
+
+const BELIEFS_FLAGS = {
+  beliefsShadow:        "CATALYST_BELIEFS_SHADOW",
+  diagnostician:        "CATALYST_DIAGNOSTICIAN",
+  intentsEnforce:       "CATALYST_INTENTS_ENFORCE",
+  advanceShadowSummary: "CATALYST_ADVANCE_SHADOW_SUMMARY",
+};
+
+export function readGovernanceConfig(env = process.env) {
+  const l2 = readLayer2Governance();
+  const beliefs = {};
+  for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
+    beliefs[key] = resolveBeliefsFlag(env[envName], l2[key]).value;
+  }
+  return {
+    ...beliefs,
+    // mode subsystems — reuse existing three-layer readers so Layer-2 flows through
+    stallJanitor: { mode: readStallJanitorConfig().mode },
+    watchdog: { mode: readWatchdogConfig().mode },
+    unstuckSweep: { mode: readUnstuckSweepConfig().mode },
+  };
+}
+
+// readGovernanceSources — parallel view of where each beliefs flag's effective
+// value came from: "env-override" | "config" | "default". Used by the boot
+// self-report (boot-event.mjs) and catalyst-stack status to surface env overrides.
+export function readGovernanceSources(env = process.env) {
+  const l2 = readLayer2Governance();
+  const out = {};
+  for (const [key, envName] of Object.entries(BELIEFS_FLAGS)) {
+    out[key] = resolveBeliefsFlag(env[envName], l2[key]).source;
+  }
+  return out;
+}

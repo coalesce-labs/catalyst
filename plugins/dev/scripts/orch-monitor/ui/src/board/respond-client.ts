@@ -23,8 +23,10 @@
 
 import { isNeedsYouSection, type InboxRow } from "./home-inbox";
 
-/** The kind of needs-you item a verb acts on — drives the verb word + accent. */
-export type VerbKind = "decision" | "blocked";
+/** The kind of needs-you item a verb acts on — drives the verb word + accent.
+ *  CTL-729: 'attention' is the single needs-attention bucket (waiting-on-you ∪
+ *  needs-human) whose ONE bright verb is "Respond". */
+export type VerbKind = "decision" | "blocked" | "attention";
 
 /** The ONE bright primary verb a needs-you row carries (Direction A
  *  non-negotiable #3: "one primary verb per item"). Everything else
@@ -32,9 +34,11 @@ export type VerbKind = "decision" | "blocked";
 export interface VerbAction {
   /** The ticket the verb acts on (e.g. "CTL-642"). */
   ticket: string;
-  /** The bright verb word — "Answer" for a decision, "Unblock" for a blocker. */
-  verb: "Answer" | "Unblock";
-  /** Which needs-you kind this is (decision vs blocked) — drives the accent. */
+  /** The bright verb word — "Respond" for an attention item, "Answer" for a
+   *  decision, "Unblock" for a blocker. */
+  verb: "Respond" | "Answer" | "Unblock";
+  /** Which needs-you kind this is — drives the accent (attention/decision = yellow,
+   *  blocked = red). */
   kind: VerbKind;
 }
 
@@ -54,6 +58,11 @@ type OverflowAction = (typeof OVERFLOW_ACTIONS)[number];
  */
 export function verbActionFor(row: InboxRow): VerbAction | null {
   if (!isNeedsYouSection(row.section)) return null;
+  // CTL-729: the single needs-attention bucket — its ONE bright verb is "Respond"
+  // (it covers both waiting-on-you and needs-human escalations).
+  if (row.section === "attention") {
+    return { ticket: row.id, verb: "Respond", kind: "attention" };
+  }
   if (row.section === "blocked") {
     return { ticket: row.id, verb: "Unblock", kind: "blocked" };
   }

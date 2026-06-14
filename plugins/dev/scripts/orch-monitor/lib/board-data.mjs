@@ -23,6 +23,19 @@ import { join, dirname } from "node:path";
 import { promisify } from "node:util";
 import { readLinearCache } from "./linear-cache-reader.mjs";
 import { fillEstimateFallback, getEstimationMethodAsync } from "./linear-estimate-fallback.mjs";
+// CTL-1046: supplemental Linear-title fallback for cross-team (e.g. ADV) records.
+// CTL records carry their title via the eligible projection (eligible/CTL.json),
+// but ADV records reach the payload only through ticket_state (no title column)
+// and have NO eligible entry → linfo[id].title === null → ticketTitle() falls
+// through to triage.summary (the DESCRIPTION), which is the CTL-1046 bug. This
+// batched, TTL-cached, fail-open fetcher (already cross-team aware) fills title
+// for ALL teams at the DATA layer so the CTL-1041 title-preferred component logic
+// renders correctly without another component fallback.
+import { fillTitleDescriptionFallback } from "./linear-title-description-fallback.mjs";
+// CTL-1020: project Linear blocked-by/blocks relations into per-ticket blockers[]
+// so the dependency graph draws edges for tickets WITHOUT a triage.json (queued /
+// relation-only). Additive — triage-derived blockers stay authoritative.
+import { buildBlockerMapFromRelations, mergeBlockers } from "./relation-blockers.mjs";
 // CTL-1015: the ONE canonical dispatch-order comparator (mirrors
 // execution-core/scheduler-rank.mjs compareTickets, parity-tested). The queue's
 // global rank is exactly the order the scheduler dispatches in.
@@ -34,6 +47,7 @@ const HOME = homedir();
 const EC = join(HOME, "catalyst", "execution-core");
 const WORKERS_DIR = join(EC, "workers");
 const ELIGIBLE_DIR = join(EC, "eligible");
+const COOLDOWNS_DIR = join(EC, ".dispatch-cooldowns"); // CTL-1066
 const DB = join(HOME, "catalyst", "catalyst.db");
 // CTL-928: the durable per-`claude --bg`-job state directory. A worker's
 // liveness is proven by its job's state.json HERE, NOT by a phase signal that
@@ -142,6 +156,53 @@ export function heldFor(labels) {
   return null;
 }
 
+// ── CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) ─
+// ONE yellow board accent + ONE Inbox "Needs you" section merge the two ways a
+// ticket can need the OPERATOR's hand:
+//   • 'waiting-on-you' — a LIVE worker's durable bg job is "blocked" (Claude Code
+//     paused for a permission grant / interactive prompt) → isBgJobWaitingOnUser.
+//   • 'needs-human'    — the progress watchdog / a phase escalated the ticket: a
+//     `needs-human` or `needs-input` Linear label (the broker's webhook fold,
+//     CTL-1031), OR the host-local workers/<T>/.linear-label-needs-human.applied
+//     marker (the daemon's labelOnce guard writes this before the Linear label
+//     lands — a host-local fallback so the board lights up immediately).
+// This is DISTINCT from `held` (the admission-gate blocked/waiting pair): held is
+// the scheduler holding a ticket BEFORE pickup; attention is an in-flight ticket
+// asking the operator to act. They never collapse into one another.
+//
+// The escalation labels the watchdog / phase agents apply. `needs-human` is the
+// flat label cleared by respond-ticket.mjs (NEEDS_HUMAN_LABEL); `needs-input` is
+// the worker-paused variant (CTL-768). Either means "a human must act".
+export const ATTENTION_LABEL_NEEDS_HUMAN = "needs-human";
+export const ATTENTION_LABEL_NEEDS_INPUT = "needs-input";
+
+// deriveAttention — PURE classifier for the single needs-attention bucket. Takes
+// the three already-read signals + the candidate anchor timestamps and returns
+// { attention: 'waiting-on-you' | 'needs-human' | null, attentionSince: ISO|null }.
+//   needs-human WINS over waiting-on-you when both fire (the operator decision):
+//   an escalation is the more urgent ask. The anchor follows the WINNING reason —
+//   needsHumanSince for needs-human, waitingSince for waiting-on-you — and is null
+//   (honest, never fabricated) when that reason carries no durable stamp.
+// Exported so the derivation is unit-testable without shelling out / reading fs.
+export function deriveAttention({
+  waitingOnUser = false,
+  labels,
+  needsHumanMarker = false,
+  waitingSince = null,
+  needsHumanSince = null,
+} = {}) {
+  const set = new Set(Array.isArray(labels) ? labels : []);
+  const labelNeedsHuman = set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
+  const needsHuman = labelNeedsHuman || needsHumanMarker === true;
+  if (needsHuman) {
+    return { attention: "needs-human", attentionSince: needsHumanSince ?? null };
+  }
+  if (waitingOnUser === true) {
+    return { attention: "waiting-on-you", attentionSince: waitingSince ?? null };
+  }
+  return { attention: null, attentionSince: null };
+}
+
 // phase → Linear workflow state (board columns for the Tickets/Linear lens).
 // CTL-972: remediate maps to "Validate" (the Linear stage it cycles within,
 // alongside verify — both are part of the validate gate loop).
@@ -155,7 +216,7 @@ export const PHASE_TO_LINEAR = {
 // synthesizeQueuedTicket — build a thin BoardTicket from an eligible queue entry
 // so it renders in the "Todo" Kanban column (CTL-767). All agent/cost/phase-summary
 // fields default to null / empty since there is no worker dir for these tickets.
-export function synthesizeQueuedTicket(e, linfo) {
+export function synthesizeQueuedTicket(e, linfo, relationBlockerMap = new Map()) {
   const li = linfo[e.id] ?? {};
   return {
     id: e.id,
@@ -188,7 +249,14 @@ export function synthesizeQueuedTicket(e, linfo) {
     pr: null,
     updatedAt: e.createdAt || new Date(0).toISOString(),
     held: heldFor(li.labels),
-    blockers: [],
+    // CTL-729: a queued (Todo) ticket has no live worker, so waiting-on-you is
+    // impossible — but it CAN carry a needs-human/needs-input escalation label.
+    // attentionSince has no durable label-applied stamp here → null (honest).
+    ...deriveAttention({ waitingOnUser: false, labels: li.labels, needsHumanMarker: false }),
+    // CTL-1020: a queued ticket has no triage.json, but its Linear blocked-by/blocks
+    // relations (carried on the eligible projection) ARE projected here so the dep
+    // graph can draw its edges. Empty when the ticket has no relation in the cache.
+    blockers: mergeBlockers([], relationBlockerMap.get(e.id)),
     // CTL-901 (HOME3): a queued ticket has no worker dir / phase signal, so it
     // has no current-phase start (null). Its held duration, when held, comes from
     // the durable ticket_state heldSince the broker projected (BFF11) — honest
@@ -429,14 +497,14 @@ export function deriveCurrentPhase(phaseSigs) {
     const phase = PHASE_ORDER[i];
     const status = sig.status || "unknown";
     if (!TERMINAL.has(status)) {
-      return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+      return { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
     }
-    lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt };
+    lastTerminal = { phase, status, model: sig.model || null, startedAt: sig.startedAt, updatedAt: sig.updatedAt, failureReason: sig.failureReason ?? sig.stalledReason ?? null };
     lastTerminalIndex = i;
   }
   // No phase has written a signal file yet → pre-pipeline. Surface the first
   // column (Research), never Done (CTL-745).
-  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null };
+  if (!lastTerminal) return { phase: PHASE_ORDER[0], status: "unknown", model: null, failureReason: null };
   // A failed/stalled phase always surfaces at its own column, wherever it sits.
   if (lastTerminal.status === "failed" || lastTerminal.status === "stalled") return lastTerminal;
   // CTL-745: the pipeline is genuinely "done" ONLY when its FINAL phase
@@ -477,6 +545,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remediateSig.updatedAt ?? null,
+      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
     };
   }
   // Case 2: remediate is terminal but more recent than what PHASE_ORDER surfaced.
@@ -490,6 +559,7 @@ export function derivePhaseWithRemediate(phaseSigs, remediateSig) {
       model: remediateSig.model || null,
       startedAt: remediateSig.startedAt ?? null,
       updatedAt: remUpdated || null,
+      failureReason: remediateSig.failureReason ?? remediateSig.stalledReason ?? null,
     };
   }
   return cur;
@@ -639,10 +709,103 @@ function ticketUpdatedAt(phaseSigs) {
   return max;
 }
 
-function ticketTitle(ticket, triage, eligibleIndex) {
-  if (triage && (triage.title || triage.summary)) return triage.title || triage.summary;
-  if (eligibleIndex[ticket]?.title) return eligibleIndex[ticket].title;
+/** CTL-1130: extract call_to_action from the most-recent phase signal that
+ *  carries a structured explanation. Scanned newest-phase-first so the most
+ *  actionable question surfaces. Returns null when no signal has one. */
+export function deriveHumanQuestion(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const expl = sig.explanation;
+    if (expl && typeof expl === "object" && typeof expl.call_to_action === "string") {
+      return expl.call_to_action;
+    }
+  }
+  return null;
+}
+
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a
+ *  cohesive nested object so the detail pane can render a CTA-led card. Distinct
+ *  from deriveHumanQuestion (the canonical call_to_action sub-label). */
+const EXPLANATION_RENDER_FIELDS = [
+  "call_to_action", "outcome", "problem", "why_you", "why_not_auto", "what_to_do",
+];
+
+/** CTL-1110: extract the six extended explanation fields from the most-recent
+ *  phase signal whose explanation carries at least one of them (scanned
+ *  newest-first, same as deriveHumanQuestion). Absent sub-fields are projected to
+ *  null (the pane renders them absent, never fabricated). Returns null when no
+ *  signal carries any extended field. */
+export function deriveExplanation(phaseSigs) {
+  for (let i = phaseSigs.length - 1; i >= 0; i--) {
+    const sig = phaseSigs[i];
+    if (!sig || typeof sig !== "object") continue;
+    const expl = sig.explanation;
+    if (!expl || typeof expl !== "object") continue;
+    const out = {};
+    let any = false;
+    for (const k of EXPLANATION_RENDER_FIELDS) {
+      const v = expl[k];
+      if (typeof v === "string" && v !== "") { out[k] = v; any = true; }
+      else { out[k] = null; }
+    }
+    if (any) return out;
+  }
+  return null;
+}
+
+// CTL-1041: the TITLE is the outcome line and must lead on every surface (slot
+// cards, inbox detail, holding rows). The triage `summary` is the DESCRIPTION
+// (e.g. "Live probe confirmed the unified event log…") and must NEVER stand in
+// for the title — leading with it is the CTL-1041 bug. Priority:
+//   1. an explicit triage.title (a real title the triage pass recorded),
+//   2. the authoritative Linear title (durable cache via linfo, else the
+//      eligible projection),
+//   3. only then the triage.summary (last-ditch when no Linear title exists),
+//   4. the ticket key itself.
+export function ticketTitle(ticket, triage, eligibleIndex, linfo = {}) {
+  if (triage?.title) return triage.title;
+  const linearTitle = linfo[ticket]?.title ?? eligibleIndex[ticket]?.title ?? null;
+  if (linearTitle) return linearTitle;
+  if (triage?.summary) return triage.summary;
   return ticket;
+}
+
+// CTL-1046: which board IDs need a supplemental Linear-title fetch. A title is
+// "present" if EITHER source ticketTitle() consults has it (durable linfo cache
+// OR the eligible projection). CTL tickets carry their title via the eligible
+// projection; cross-team (ADV) records reach the payload only through ticket_state
+// (no title column) and have no eligible entry → both sources null → fetch needed.
+// Returns a de-duped array (order preserved).
+export function collectNullTitleIds(boardIds, linfo = {}, eligibleIndex = {}) {
+  return [
+    ...new Set(
+      boardIds.filter(
+        (id) => (linfo[id]?.title ?? eligibleIndex[id]?.title ?? null) === null,
+      ),
+    ),
+  ];
+}
+
+// CTL-1046: merge fetched Linear titles into linfo in-place (mirrors the
+// estimate-fallback merge). For each null-title ID, write the fetched title onto
+// linfo[id], creating a linfo entry first if the ticket was eligible-only (no
+// ticket_state row). A ticket Linear genuinely has no title for is left untouched
+// (honest null) so ticketTitle()'s summary/key fallback still runs. Returns linfo.
+export function mergeTitleFallback(linfo, nullTitleIds, fetched) {
+  for (const id of nullTitleIds) {
+    const fetchedTitle = fetched?.[id]?.title ?? null;
+    if (fetchedTitle === null) continue; // Linear has no title → leave honest null
+    if (!linfo[id]) {
+      linfo[id] = {
+        priority: 0, estimate: null, project: null, labels: [], relations: null,
+        assignee: null, linearState: null, title: null,
+        ownerHost: null, generation: null, fencePhase: null, claimedAt: null, heldSince: null,
+      };
+    }
+    linfo[id] = { ...linfo[id], title: fetchedTitle };
+  }
+  return linfo;
 }
 const ticketType = (triage) => triage?.classification || triage?.type || "task";
 // CTL-755: the scraped dependency ids triage recorded (flat string[] or rich
@@ -818,15 +981,21 @@ async function maxParallel() {
 // so derivePhaseWithRemediate overlays it on top of the PHASE_ORDER-based result).
 async function readTicketArtifacts(id) {
   const dir = join(WORKERS_DIR, id);
-  if (!(await exists(dir))) return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [] };
-  const [phaseSigs, remediateSig, triage, prSigs] = await Promise.all([
+  if (!(await exists(dir))) {
+    return { phaseSigs: [], remediateSig: null, triage: null, prSigs: [], needsHumanMarker: false };
+  }
+  const [phaseSigs, remediateSig, triage, prSigs, needsHumanMarker] = await Promise.all([
     Promise.all(PHASE_ORDER.map((p) => readJSON(join(dir, `phase-${p}.json`)))),
     readJSON(join(dir, `phase-${REMEDIATE_PHASE}.json`)),
     readJSON(join(dir, "triage.json")),
     Promise.all(["phase-pr.json", "phase-monitor-merge.json", "phase-monitor-deploy.json"]
       .map((f) => readJSON(join(dir, f)))),
+    // CTL-729: the host-local needs-human marker the daemon's labelOnce guard
+    // writes (before the Linear label round-trips) → the attention 'needs-human'
+    // fallback so the board lights up immediately without waiting on the webhook.
+    exists(join(dir, ".linear-label-needs-human.applied")),
   ]);
-  return { phaseSigs, remediateSig, triage, prSigs };
+  return { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker };
 }
 
 // CTL-922 (BFF10): read a single worker's own phase signal, positioned into a
@@ -844,13 +1013,40 @@ async function readWorkerPhaseSignals(ticket, phase) {
   return sigs;
 }
 
+// CTL-1066: active dispatch cool-downs, keyed by ticket. Markers are
+// `${ticket}-${phase}.json` ({expiresAt, consecutiveFailures}); a queue item is a
+// new-work ticket so we match by ticket id across phases and keep the latest expiry.
+async function loadDispatchCooldowns(now) {
+  const out = new Map();
+  if (!(await exists(COOLDOWNS_DIR))) return out;
+  let files;
+  try { files = await readdir(COOLDOWNS_DIR); } catch { return out; }
+  const markers = await Promise.all(
+    files.filter((f) => f.endsWith(".json")).map((f) => readJSON(join(COOLDOWNS_DIR, f))),
+  );
+  for (const m of markers) {
+    if (!m?.ticket || typeof m.expiresAt !== "number" || m.expiresAt <= now) continue;
+    const prev = out.get(m.ticket);
+    if (!prev || m.expiresAt > prev.expiresAt) {
+      out.set(m.ticket, { expiresAt: m.expiresAt, consecutiveFailures: m.consecutiveFailures ?? 1 });
+    }
+  }
+  return out;
+}
+
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid] = await Promise.all([
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(),
+    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
+
+  // CTL-1020: dependency edges derived from Linear blocked-by/blocks relations,
+  // projected once from the enrichment cache into Map<ticketId, Set<blockerId>>.
+  // Tickets without a triage.json (queued / relation-only) get their blockers[]
+  // from here so the dep graph can draw their edges.
+  const relationBlockerMap = buildBlockerMapFromRelations(linfo);
 
   // workers (live background agents that map to a ticket:phase)
   const now = Date.now();
@@ -916,7 +1112,7 @@ export async function assembleBoard() {
   // the live set feeds inFlight, freeSlots, ticketIds, and the "active" count.
   const liveWorkers = workers.filter((w) => !isWorkerDead(w));
   const inFlightTickets = new Map(liveWorkers.map((w) =>
-    [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs }]));
+    [w.ticket, { phase: w.phase, status: w.status, activeState: w.activeState, working: w.working, lastActiveMs: w.lastActiveMs, waitingOnUser: w.waitingOnUser, startedAt: w.startedAt }]));
 
   // tickets = in-flight (have a LIVE worker dir / live agent) ∪ eligible(queued).
   // CTL-928: a workers/<T>/ dir whose latest signal is a terminal INTERMEDIATE
@@ -993,15 +1189,56 @@ export async function assembleBoard() {
     }
   })();
 
+  // CTL-1046: supplemental TITLE fallback — the same data-layer pattern as the
+  // estimate fallback above. CTL tickets carry their Linear title via the eligible
+  // projection (eligibleIndex[id].title), but cross-team records (e.g. ADV) reach
+  // the payload only through ticket_state, which has NO title column, AND have no
+  // eligible entry (ADV's eligible/<TEAM>.json is empty) → linfo[id].title === null.
+  // Without this, ticketTitle() falls through to triage.summary (the description),
+  // which is the CTL-1046 bug (ADV rows rendered descriptions). Collect every board
+  // ticket ID whose title is null, batch-fetch from Linear (5-min TTL, fail-open,
+  // cross-team aware), and merge the real title into linfo so ticketTitle() returns
+  // the Linear title for ALL teams. A ticket genuinely missing a Linear title still
+  // resolves to null here, so ticketTitle()'s honest summary/key fallback still runs.
+  await (async () => {
+    const allBoardIds = [
+      ...[...cardTicketIds],
+      ...eligible.map((e) => e.id),
+    ];
+    // Only fetch titles for IDs that have NO title from either source the title
+    // resolver consults (durable linfo cache OR the eligible projection).
+    const nullTitleIds = collectNullTitleIds(allBoardIds, linfo, eligibleIndex);
+    if (nullTitleIds.length === 0) return;
+
+    // Batch-fetch titles (and descriptions/labels/relations) for null-title IDs,
+    // then merge the real titles into linfo (in-place — linfo is a plain object,
+    // never shared with the broker DB or cache reader, so mutation here is safe).
+    const fallback = await fillTitleDescriptionFallback(nullTitleIds);
+    mergeTitleFallback(linfo, nullTitleIds, fallback);
+  })();
+
   let tickets = await Promise.all([...cardTicketIds].map(async (id) => {
-    const { phaseSigs, remediateSig, triage, prSigs } = await readTicketArtifacts(id);
+    const { phaseSigs, remediateSig, triage, prSigs, needsHumanMarker } = await readTicketArtifacts(id);
     // CTL-972: use derivePhaseWithRemediate so ticket.phase matches the
     // phase-AGENT TYPE the queue/worker surfaces (incl. 'remediate').
     const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
     const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
+    // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
+    // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
+    // Linear labels (CTL-1031 webhook fold), and the host-local needs-human marker.
+    // The waiting-on-you anchor is the worker's current-phase start (how long it
+    // has been parked); the needs-human anchor falls back to heldSince downstream
+    // (no separate label-applied stamp is projected) → null here (honest).
+    const attn = deriveAttention({
+      waitingOnUser: live?.waitingOnUser ?? false,
+      labels: linfo[id]?.labels,
+      needsHumanMarker,
+      waitingSince: cur.startedAt ?? null,
+      needsHumanSince: null,
+    });
     return {
-      id, title: ticketTitle(id, triage, eligibleIndex), type: ticketType(triage),
+      id, title: ticketTitle(id, triage, eligibleIndex, linfo), type: ticketType(triage),
       repo: repoFor(id), team: teamFor(id),
       phase: cur.phase, status: cur.status, model: cur.model,
       linearState: PHASE_TO_LINEAR[cur.phase] || "Research",
@@ -1023,7 +1260,10 @@ export async function assembleBoard() {
       // `blockers` names the dependencies a `blocked` hold is waiting on (only
       // meaningful when held === "blocked"); empty otherwise.
       held: heldFor(linfo[id]?.labels),
-      blockers: ticketBlockers(triage),
+      // CTL-1020: triage-derived blockers (authoritative) ∪ Linear relation-derived
+      // blockers, so the dep graph draws an edge even when the dependency was set as
+      // a Linear "blocked by" relation rather than scraped into triage.json.
+      blockers: mergeBlockers(ticketBlockers(triage), relationBlockerMap.get(id)),
       // CTL-901 (HOME3): per-row "how long has this needed me / been running"
       // durations, sourced from DURABLE read-model timestamps only — never
       // fabricated. `heldSince` is the applied-at of the held (blocked/waiting)
@@ -1040,6 +1280,18 @@ export async function assembleBoard() {
       // when the surfaced phase carried no startedAt (pre-pipeline / corrupt
       // signal) → again rendered unavailable, never now-anchored to a guess.
       currentPhaseSince: cur.startedAt ?? null,
+      // CTL-1130: call_to_action from the most-recent phase signal's explanation,
+      // surfaced as the inbox sub-label for needs-human rows.
+      humanQuestion: deriveHumanQuestion(phaseSigs),
+      // CTL-1110: the six extended explanation fields surfaced for the detail
+      // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
+      explanation: deriveExplanation(phaseSigs),
+      // CTL-729: the single needs-attention bucket — 'waiting-on-you' (live
+      // blocked bg job) | 'needs-human' (escalation label/marker) | null, with an
+      // ISO attentionSince anchor (or null, never fabricated). Drives the ONE
+      // yellow board accent + the Inbox "Needs you" section. needs-human wins.
+      attention: attn.attention,
+      attentionSince: attn.attentionSince,
       costUSD: costs[id]?.costUSD ?? null, tokens: costs[id]?.tokens ?? null,
       turns: phaseCostsByTicket[id]
         ? Object.values(phaseCostsByTicket[id]).reduce((s, p) => s + p.turns, 0)
@@ -1055,6 +1307,7 @@ export async function assembleBoard() {
       // no cluster branch, no live attachment fetch.
       host: deriveHost(phaseSigs, linfo[id] ?? {}),
       generation: deriveGeneration(phaseSigs, linfo[id] ?? {}),
+      failureReason: cur.failureReason ?? null,
     };
   }));
 
@@ -1082,7 +1335,7 @@ export async function assembleBoard() {
   // ANY worker dir is already surfaced as live / between-phases above, so it is
   // excluded here (cardTicketIds) — it is accounted for, not duplicated.
   const notInFlight = eligible.filter((e) => !cardTicketIds.has(e.id));
-  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo));
+  const queuedTickets = notInFlight.map((e) => synthesizeQueuedTicket(e, linfo, relationBlockerMap));
   tickets = [...liveTickets, ...betweenPhases, ...recentDone, ...queuedTickets];
 
   // priority queue: eligible (not yet in-flight), globally ranked (Queue tab)
@@ -1108,6 +1361,8 @@ export async function assembleBoard() {
         // a queued ticket has no phase signal, so [] forces the fence fallback.
         // null when no fence attachment has been observed — never fabricated.
         host: deriveHost([], linfo[e.id] ?? {}),
+        // CTL-1066: active dispatch retry cool-down; null when not cooling down.
+        dispatchCooldown: cooldowns.get(e.id) ?? null,
       };
     }));
 

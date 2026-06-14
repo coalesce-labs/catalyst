@@ -224,6 +224,46 @@ describe("startDaemon", () => {
     expect(schedulerConfigPath).toBeNull();
   });
 
+  // CTL-1044: the daemon MUST pass an `appendIntentEvent` appender into the
+  // scheduler. Without it, runningOpts.appendIntentEvent is undefined and the
+  // advance-shadow comparator / CTL-936 intent.ineffective / executeEscalations
+  // emitters silently no-op (the bug: zero beliefs.* events ever reached the log
+  // on mini despite the shadow flags being live). This wiring test mirrors the
+  // gateway/configPath wiring tests above: capture the scheduler's opts and
+  // assert the appender is a function that actually lands a line in the unified
+  // event log carrying event.name verbatim + payload intact.
+  test("CTL-1044: passes appendIntentEvent into startScheduler — and it writes to the event log", () => {
+    let captured;
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        captured = o;
+      },
+      watchRegistry: false,
+    });
+    // The seam the advance-shadow comparator (and intent/escalation emitters)
+    // consume must be a real function in production — not null/undefined.
+    expect(typeof captured.appendIntentEvent).toBe("function");
+
+    // Drive exactly the object advance-shadow.mjs:177-180 hands `appendEvent`
+    // and prove it reaches the log (CATALYST_DIR is pinned to this test's tmp
+    // dir by the suite's beforeEach, so getEventLogPath resolves there).
+    const ok = captured.appendIntentEvent({
+      "event.name": "beliefs.advance_shadow.disagree",
+      payload: { ticket: "CTL-1044-IT", procedural: "research", belief: null },
+    });
+    expect(ok).toBe(true);
+
+    const lines = readFileSync(getEventLogPath(), "utf8").split("\n").filter(Boolean);
+    const env = JSON.parse(lines[lines.length - 1]);
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.disagree");
+    expect(env.body.payload.ticket).toBe("CTL-1044-IT");
+    expect(env.body.payload.procedural).toBe("research");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+  });
+
   // CTL-634: one cache instance is created in startDaemon and threaded into
   // BOTH composed boots, so the monitor's write-through and the scheduler's
   // read path share state. Capture each boot's `cache` arg and assert identity.
@@ -1113,7 +1153,7 @@ describe("handleCommentWake (CTL-549)", () => {
         removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
       },
     );
-    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human/question" });
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // CTL-1067 Bug 3
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
@@ -1271,6 +1311,34 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(resolveSpy).toEqual([]);             // resolveSession never called
     const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
     expect(sig.status).toBe("needs-input");     // not reset
+  });
+
+  test("CTL-1067: a stalled signal is cleared via clearStall, not re-dispatched", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement", generation: 2 });
+    const dispatched = [], clears = [], removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => dispatched.push(a),
+        removeLabel: async (t, l) => removed.push({ ticket: t, label: l }),
+        clearStall: ({ ticket, phase }) => { clears.push({ ticket, phase }); return true; },
+      },
+    );
+    expect(clears).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(dispatched).toEqual([]);
+  });
+
+  test("CTL-1067: stalled signal is a no-op when clearStall is not injected", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      { orchDir: orch, dispatch: (...a) => dispatched.push(a), removeLabel: async () => {} },
+    );
+    expect(dispatched).toEqual([]);
   });
 });
 

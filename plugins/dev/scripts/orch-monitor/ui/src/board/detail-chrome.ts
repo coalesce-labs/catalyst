@@ -19,16 +19,19 @@
 
 import type { DetailFrom, DetailLens } from "./route-search";
 import type { BoardActiveState } from "./types";
+import { C, LIVE } from "./board-tokens";
 
 // ── colour tokens ────────────────────────────────────────────────────────────
 /** The reserved "in-loop" live colour. The detail chrome reuses the SAME token
  *  as the board's breathing ring; it is the only cyan in the whole shell
- *  (peek frame + focus ring use CHROME_BLUE, below). */
-export const LIVE_CYAN = "#5be0ff";
-/** Stuck/error red. A stuck worker's static dot. */
-export const STUCK_RED = "#ef5d5d";
-/** The chrome's accent blue — peek frame + focus ring (NEVER cyan). */
-export const CHROME_BLUE = "#4ea1ff";
+ *  (peek frame + focus ring use CHROME_BLUE, below). CTL-1033: aliased onto the
+ *  canonical LIVE token (cyan is reserved; the stale #5be0ff is retired). */
+export const LIVE_CYAN = LIVE;
+/** Stuck/error red. A stuck worker's static dot. CTL-1033: canonical C.red. */
+export const STUCK_RED = C.red;
+/** The chrome's accent blue — peek frame + focus ring (NEVER cyan).
+ *  CTL-1033: canonical C.blue. */
+export const CHROME_BLUE = C.blue;
 
 // ── breadcrumb ───────────────────────────────────────────────────────────────
 /**

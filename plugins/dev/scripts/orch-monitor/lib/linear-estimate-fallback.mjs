@@ -38,7 +38,6 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 
 const HOME = homedir();
-const ESTIMATE_CACHE_DIR = join(HOME, "catalyst");
 
 // ── In-memory TTL cache ───────────────────────────────────────────────────────
 // Keyed by ticket ID (e.g. "CTL-774"). Value: { estimate: number|null, ts: number }.

@@ -48,9 +48,23 @@ export const KEYMAP: readonly KeymapSection[] = [
   {
     title: "Jump",
     entries: [
-      { keys: "g t", description: "From a worker → its parent ticket" },
-      { keys: "g w", description: "Fuzzy go-to a worker" },
+      { keys: "g t", description: "From a worker → its parent ticket (on a detail page)" },
+      { keys: "g w", description: "Fuzzy go-to a worker (on a detail page)" },
       { keys: "g a", description: "Scroll the lifecycle spine to the active phase node" },
+    ],
+  },
+  {
+    title: "Go to",
+    entries: [
+      { keys: "g h", description: "Inbox" },
+      { keys: "g b", description: "Tickets" },
+      { keys: "g w", description: "Workers (on non-detail pages)" },
+      { keys: "g t", description: "Telemetry (on non-detail pages)" },
+      { keys: "g u", description: "Utilization" },
+      { keys: "g f", description: "FinOps" },
+      { keys: "g o", description: "Fleet Ops" },
+      { keys: "g d", description: "DevOps" },
+      { keys: "c", description: "Create…" },
     ],
   },
   {

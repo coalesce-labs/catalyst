@@ -8,6 +8,7 @@ import { describe, it, expect } from "bun:test";
 import {
   buildArtifactList,
   readTicketArtifacts,
+  readTicketArtifactContent,
 } from "../lib/ticket-artifacts-reader.mjs";
 
 // Build a fake thoughts tree: dirname → [filenames]. The reader scans
@@ -120,5 +121,66 @@ describe("readTicketArtifacts — route-facing reader (P9)", () => {
     });
     expect(out.artifacts).toHaveLength(1);
     expect(out.artifacts[0].path).toBe("thoughts/shared/research/2026-06-08-CTL-845.md");
+  });
+});
+
+describe("readTicketArtifactContent — by-kind content serve (CTL-1042)", () => {
+  // The deep-dive pill route resolves the artifact by kind and returns its full
+  // markdown. These lock the found / wrong-kind-missing / unreadable branches the
+  // route maps to 200 / 404 / 404.
+  function fakeContentTree() {
+    const lister = (dir: string): string[] =>
+      dir.endsWith("research")
+        ? ["2026-06-08-CTL-845-research.md"]
+        : dir.endsWith("plans")
+          ? ["2026-06-08-CTL-845.md"]
+          : [];
+    const reader = (path: string): string => `# content of ${path.split("/").pop()}`;
+    return { lister, reader };
+  }
+
+  it("returns the matching artifact's content + path for the requested kind", async () => {
+    const { lister, reader } = fakeContentTree();
+    const doc = await readTicketArtifactContent("CTL-845", "research", {
+      cwd: "/repo",
+      lister,
+      reader,
+    });
+    expect(doc).not.toBeNull();
+    expect(doc?.kind).toBe("research");
+    expect(doc?.path).toBe("thoughts/shared/research/2026-06-08-CTL-845-research.md");
+    expect(doc?.content).toBe("# content of 2026-06-08-CTL-845-research.md");
+  });
+
+  it("serves the plan kind independently of research", async () => {
+    const { lister, reader } = fakeContentTree();
+    const doc = await readTicketArtifactContent("CTL-845", "plan", {
+      cwd: "/repo",
+      lister,
+      reader,
+    });
+    expect(doc?.path).toBe("thoughts/shared/plans/2026-06-08-CTL-845.md");
+  });
+
+  it("returns null when no artifact of that kind exists (route → 404)", async () => {
+    const doc = await readTicketArtifactContent("CTL-845", "research", {
+      cwd: "/repo",
+      lister: () => [], // empty tree → no research artifact
+      reader: () => "unused",
+    });
+    expect(doc).toBeNull();
+  });
+
+  it("returns null when the matched file cannot be read (route → 404)", async () => {
+    const lister = (dir: string): string[] =>
+      dir.endsWith("research") ? ["2026-06-08-CTL-845-research.md"] : [];
+    const doc = await readTicketArtifactContent("CTL-845", "research", {
+      cwd: "/repo",
+      lister,
+      reader: () => {
+        throw new Error("EACCES");
+      },
+    });
+    expect(doc).toBeNull();
   });
 });

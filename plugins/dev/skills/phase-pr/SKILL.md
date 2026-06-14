@@ -10,7 +10,7 @@ description: |
   `phase-agent-dispatch`, which invokes it via slash command — hence
   `user-invocable: true`.
 user-invocable: true
-disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
+disable-model-invocation: false # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
@@ -19,17 +19,17 @@ allowed-tools:
 
 # phase-pr
 
-Thin wrapper around `/catalyst-dev:create-pr`. The canonical skill already
-handles: commit, push, base-branch detection, PR creation, `describe-pr`
-auto-invocation, workflow-context tracking, Linear `inReview` transition,
-and the post-PR resolution loop. Phase-pr adds only the phase-agent envelope
-plus persisting `pr.number` + `pr.url` to the signal file for
-`phase-monitor-merge`.
+Thin wrapper around `/catalyst-dev:create-pr`. The canonical skill already handles: commit, push,
+base-branch detection, PR creation, `describe-pr` auto-invocation, workflow-context tracking, Linear
+`inReview` transition, and the post-PR resolution loop. Phase-pr adds only the phase-agent envelope
+plus persisting `pr.number` + `pr.url` to the signal file for `phase-monitor-merge`.
 
 ## Prerequisites
 
-- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=pr`, `CATALYST_TICKET` set by [[phase-agent-dispatch]].
-- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-review.json` exists with `status=done` — the dispatcher validates this; this skill assumes it.
+- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=pr`, `CATALYST_TICKET`
+  set by [[phase-agent-dispatch]].
+- The prior phase's signal file `${ORCH_DIR}/workers/<TICKET>/phase-review.json` exists with
+  `status=done` — the dispatcher validates this; this skill assumes it.
 - Current working directory is the ticket's worktree on the implementation branch (not main).
 
 ## Prelude
@@ -87,10 +87,10 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
 ## Already-merged detection (CTL-714)
 
 Before delegating to `create-pr`, detect whether this branch's `HEAD` is already contained in
-`origin/main` (manual rescue, or a sibling PR landed the same commits). If so, skip PR creation
-to avoid a duplicate / empty-diff PR. Two complementary checks: `git merge-base --is-ancestor`
-(works even if the branch was deleted from the remote) and `gh pr list --state merged` (recovers
-the merged PR number for the downstream probe).
+`origin/main` (manual rescue, or a sibling PR landed the same commits). If so, skip PR creation to
+avoid a duplicate / empty-diff PR. Two complementary checks: `git merge-base --is-ancestor` (works
+even if the branch was deleted from the remote) and `gh pr list --state merged` (recovers the merged
+PR number for the downstream probe).
 
 The detection fence is **side-effect-free** so the e2e test can source it in isolation.
 
@@ -119,8 +119,8 @@ if [[ -n "$BRANCH_NAME" ]]; then
 fi
 ```
 
-When `ALREADY_MERGED=1`, write the disposition into the signal file and complete without
-creating a PR:
+When `ALREADY_MERGED=1`, write the disposition into the signal file and complete without creating a
+PR:
 
 ```bash
 if [[ "$ALREADY_MERGED" -eq 1 ]]; then
@@ -145,11 +145,11 @@ fi
 
 ## Existing open PR detection (CTL-709)
 
-CTL-709's `phase-implement` may have already opened a draft PR for this branch. Detect it here so
-we can **promote** it (`gh pr ready`) rather than re-entering `create-pr`'s interactive
-"PR already exists" prompt (`create-pr/SKILL.md:96–104`) — that prompt would hang a `--bg`
-worker forever. Detection order: merged → existing-open → create-new. The detection fence is
-**side-effect-free** so the e2e test can source it in isolation.
+CTL-709's `phase-implement` may have already opened a draft PR for this branch. Detect it here so we
+can **promote** it (`gh pr ready`) rather than re-entering `create-pr`'s interactive "PR already
+exists" prompt (`create-pr/SKILL.md:96–104`) — that prompt would hang a `--bg` worker forever.
+Detection order: merged → existing-open → create-new. The detection fence is **side-effect-free** so
+the e2e test can source it in isolation.
 
 ```bash phase-pr-existing-pr-detect
 # CTL-709: phase-implement may have already opened a (draft) PR for this branch.
@@ -176,10 +176,53 @@ When an existing open PR is found, promote it (if draft) and finish — **withou
 "${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   echo "phase-pr: promoting existing PR #${EXISTING_PR_NUMBER} (draft=${EXISTING_PR_IS_DRAFT})" >&2
-  if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
-    if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+  if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+  fi
+  # CTL-1051: prove the remote branch (and the PR head) equal the worktree HEAD
+  # BEFORE announcing the promoted PR — remediation/rebase may have advanced
+  # local HEAD past the draft's pushed commit. Fail-closed: a stale ref is a
+  # phase FAILURE, not a silent complete.
+  # CTL-1119: rc=3 from draft_pr_push_verify means the push was rejected for
+  # missing 'workflow' OAuth scope; escalate with an actionable human_question.
+  VERIFIED_SHA=""
+  PUSH_VERIFY_RC=0
+  # CTL-1119 remediate: capture stdout ONLY (the verified SHA). draft_pr_push_verify
+  # writes diagnostic _draft_pr_warn lines to stderr on every retry path (force-with-lease
+  # AND the token-routed push); folding them in with 2>&1 made VERIFIED_SHA multi-line, so
+  # the PR_HEAD_OID != VERIFIED_SHA guard below always tripped and falsely failed the phase
+  # with stale_ref_push_verify_failed. No redirect: stderr flows to the worker log.
+  VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
+  if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
+    echo "phase-pr: push rejected — missing 'workflow' OAuth scope on existing PR path" >&2
+    if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
       # shellcheck source=/dev/null
-      source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+      source "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh"
+      _escalate_workflow_scope_push
+    else
+      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+        --phase "$PHASE" --ticket "$TICKET" --status failed \
+        --reason "push_rejected_no_workflow_scope"
+    fi
+    exit 1
+  elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
+    echo "phase-pr: push-verify failed for #${EXISTING_PR_NUMBER} (stale ref)" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "stale_ref_push_verify_failed"
+    exit 1
+  fi
+  PR_HEAD_OID="$(draft_pr_head_oid || true)"
+  if [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]]; then
+    echo "phase-pr: PR headRefOid ${PR_HEAD_OID} != worktree HEAD ${VERIFIED_SHA}" >&2
+    "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+      --phase "$PHASE" --ticket "$TICKET" --status failed \
+      --reason "stale_ref_push_verify_failed"
+    exit 1
+  fi
+  if [[ "$EXISTING_PR_IS_DRAFT" == "true" ]]; then
+    if type draft_pr_promote >/dev/null 2>&1; then
       draft_pr_promote || gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
     else
       gh pr ready "$EXISTING_PR_NUMBER" 2>/dev/null || true
@@ -211,25 +254,62 @@ Plan §"Per-phase /goal conditions":
        transcript)."
 ```
 
-Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`).
-This is intentionally tight because the work is mostly tool calls — most of
-the reasoning happens upstream in `create-pr` itself.
+Turn cap defaults to 12 (from `phase-agent-dispatch:phase_default_turn_cap`). This is intentionally
+tight because the work is mostly tool calls — most of the reasoning happens upstream in `create-pr`
+itself.
 
 ## Phase-specific work
 
-1. When `EXISTING_PR_NUMBER` is set (the draft opened by `phase-implement` was detected and
-   promoted above): invoke `/catalyst-dev:describe-pr` via the Task tool on `$EXISTING_PR_NUMBER`.
-   Then proceed directly to the End block — **do not** invoke `/catalyst-dev:create-pr`.
+1. When `EXISTING_PR_NUMBER` is set (the draft opened by `phase-implement` was detected and promoted
+   above): invoke `/catalyst-dev:describe-pr` via the Task tool on `$EXISTING_PR_NUMBER`. Then
+   proceed directly to the End block — **do not** invoke `/catalyst-dev:create-pr`.
 
-2. When `EXISTING_PR_NUMBER` is empty (Phase 3 draft creation failed or was disabled):
-   invoke `/catalyst-dev:create-pr` via the Task tool. The canonical skill handles: branch push,
-   base-branch resolution, idempotent PR creation if one already exists, `describe-pr`
-   invocation, and Linear `inReview` transition.
+2. When `EXISTING_PR_NUMBER` is empty (Phase 3 draft creation failed or was disabled): invoke
+   `/catalyst-dev:create-pr` via the Task tool. The canonical skill handles: branch push,
+   base-branch resolution, idempotent PR creation if one already exists, `describe-pr` invocation,
+   and Linear `inReview` transition.
 
-3. After either path, capture the PR metadata via `gh` and write it into the phase signal file
-   so `phase-monitor-merge` can read it directly without re-querying GitHub:
+3. After either path, capture the PR metadata via `gh` and write it into the phase signal file so
+   `phase-monitor-merge` can read it directly without re-querying GitHub. For the create-pr path,
+   push-verify before recording metadata (CTL-1051):
 
    ```bash
+   # CTL-1051: ensure create-pr's push left origin == HEAD and the PR points at it.
+   # CTL-1119: rc=3 means the push was rejected for missing 'workflow' OAuth scope.
+   [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+   VERIFIED_SHA=""
+   PUSH_VERIFY_RC=0
+   # CTL-1119 remediate: capture stdout ONLY (the verified SHA) — see the existing-PR path
+   # above. 2>&1 folded draft_pr_push_verify's stderr warnings into VERIFIED_SHA on retry
+   # paths, breaking the PR_HEAD_OID comparison with a false stale_ref_push_verify_failed.
+   VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
+   if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
+     echo "phase-pr: push rejected — missing 'workflow' OAuth scope on create-pr path" >&2
+     if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
+       # shellcheck source=/dev/null
+       source "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh"
+       _escalate_workflow_scope_push
+     else
+       "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+         --phase "$PHASE" --ticket "$TICKET" --status failed \
+         --reason "push_rejected_no_workflow_scope"
+     fi
+     exit 1
+   elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
+     echo "phase-pr: post-create-pr push-verify failed (stale ref)" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "stale_ref_push_verify_failed"
+     exit 1
+   fi
+   PR_HEAD_OID="$(draft_pr_head_oid || true)"
+   if [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]]; then
+     echo "phase-pr: PR headRefOid ${PR_HEAD_OID} != HEAD ${VERIFIED_SHA}" >&2
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "stale_ref_push_verify_failed"
+     exit 1
+   fi
    PR_INFO=$(gh pr view --json number,url,headRefName,baseRefName 2>/dev/null || echo "{}")
    PR_NUMBER=$(echo "$PR_INFO" | jq -r '.number // empty')
    PR_URL=$(echo "$PR_INFO" | jq -r '.url // empty')
@@ -245,23 +325,20 @@ the reasoning happens upstream in `create-pr` itself.
    fi
    ```
 
-4. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND
-   rebase) is **not** run here — that is `phase-monitor-merge`'s
-   responsibility. `create-pr`'s own brief monitoring window stays inside
-   `create-pr`; phase-pr exits as soon as the PR exists in `OPEN` state.
+4. The post-PR active resolution loop (CI fix-up, bot review threads, BEHIND rebase) is **not** run
+   here — that is `phase-monitor-merge`'s responsibility. `create-pr`'s own brief monitoring window
+   stays inside `create-pr`; phase-pr exits as soon as the PR exists in `OPEN` state.
 
 ## End block
 
-Mirror the phase output to Linear as a single comment (CTL-632). Describes the
-PR that was opened (number, URL, title, files changed, additions/deletions,
-commit count) plus the pre-merge verification surfaced from the verify phase's
-`verify.json` (test/typecheck/lint gate status + regression risk) so the trail
-records what was checked before the PR went up. PR metadata is re-read from the
-phase signal file (`.pr.number`/`.pr.url`, written in the phase-specific work
-above) and enriched via `gh pr view`; the verify summary is fail-soft if no
-`verify.json` exists. Body hard-truncated to 30,000 bytes. Fail-open and
-idempotent via the per-phase marker file. Uniquely-named fence so the e2e test
-can extract just this block.
+Mirror the phase output to Linear as a single comment (CTL-632). Describes the PR that was opened
+(number, URL, title, files changed, additions/deletions, commit count) plus the pre-merge
+verification surfaced from the verify phase's `verify.json` (test/typecheck/lint gate status +
+regression risk) so the trail records what was checked before the PR went up. PR metadata is re-read
+from the phase signal file (`.pr.number`/`.pr.url`, written in the phase-specific work above) and
+enriched via `gh pr view`; the verify summary is fail-soft if no `verify.json` exists. Body
+hard-truncated to 30,000 bytes. Fail-open and idempotent via the per-phase marker file.
+Uniquely-named fence so the e2e test can extract just this block.
 
 ```bash phase-pr-mirror
 LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
@@ -319,7 +396,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-pr: linear-comment-post failed (continuing)" >&2
@@ -356,17 +433,16 @@ exit 1
 
 Common failure modes:
 
-- **Branch not pushable** (e.g., diverged, network failure): `create-pr` errors;
-  phase-pr emits `failed` with the underlying reason.
-- **PR already exists with no new commits**: not a failure — `create-pr` is
-  idempotent and returns the existing PR. The signal file gets the existing
-  PR number written, downstream phases proceed normally.
-- **`gh` not authenticated**: emit `failed` with the gh stderr; orchestrator's
-  retry path will not unstick this — escalate via `attention`.
+- **Branch not pushable** (e.g., diverged, network failure): `create-pr` errors; phase-pr emits
+  `failed` with the underlying reason.
+- **PR already exists with no new commits**: not a failure — `create-pr` is idempotent and returns
+  the existing PR. The signal file gets the existing PR number written, downstream phases proceed
+  normally.
+- **`gh` not authenticated**: emit `failed` with the gh stderr; orchestrator's retry path will not
+  unstick this — escalate via `attention`.
 
 ## Why this is a thin wrapper
 
-Plan architectural commitment #3. `/catalyst-dev:create-pr` is mature (504
-lines as of CTL-373) and owns workflow-context, Linear linking, describe-pr,
-and idempotency. phase-pr adds the phase-agent envelope (~80 lines) and
-nothing else — improvements to create-pr propagate for free.
+Plan architectural commitment #3. `/catalyst-dev:create-pr` is mature (504 lines as of CTL-373) and
+owns workflow-context, Linear linking, describe-pr, and idempotency. phase-pr adds the phase-agent
+envelope (~80 lines) and nothing else — improvements to create-pr propagate for free.

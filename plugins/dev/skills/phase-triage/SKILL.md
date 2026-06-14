@@ -28,11 +28,11 @@ Both modes produce the same `triage.json` shape and emit the same canonical phas
 When refining the analysis, also assess whether the ticket meets the `/catalyst-dev:gherkin-ticket`
 standard: an outcome-first title (not a mechanism/file/symbol name) and a body that opens with a
 plain-English use case followed by tiered Gherkin acceptance criteria. If it does **not** conform,
-add one line to the triage analysis comment flagging it — e.g. *"⚠️ Ticket does not lead with a
-use-case (per gherkin-ticket); consider rewriting the title/opening for scannability."* This surfaces
-non-conformant tickets for the operator without auto-rewriting them — triage is a documentarian, so
-**do not** edit the ticket's title or description here; flag only. (The deterministic bash body and
-`triage.json` schema are unchanged.)
+add one line to the triage analysis comment flagging it — e.g. _"⚠️ Ticket does not lead with a
+use-case (per gherkin-ticket); consider rewriting the title/opening for scannability."_ This
+surfaces non-conformant tickets for the operator without auto-rewriting them — triage is a
+documentarian, so **do not** edit the ticket's title or description here; flag only. (The
+deterministic bash body and `triage.json` schema are unchanged.)
 
 ## /goal
 
@@ -45,12 +45,11 @@ non-conformant tickets for the operator without auto-rewriting them — triage i
        path on stdout."
 ```
 
-CTL-656: the `/goal` evaluator keeps the agent working until the triage is
-genuinely complete — every field populated and the Linear comment posted —
-instead of emitting the first-pass deterministic placeholder and exiting. A real
-blocker (unreadable ticket, a Linear 4xx on the comment) surfaces as needs-input
-rather than a silently-thin `triage.json`. (Production/Opus mode only; the CI
-bash body is self-sufficient and does not invoke the evaluator.)
+CTL-656: the `/goal` evaluator keeps the agent working until the triage is genuinely complete —
+every field populated and the Linear comment posted — instead of emitting the first-pass
+deterministic placeholder and exiting. A real blocker (unreadable ticket, a Linear 4xx on the
+comment) surfaces as needs-input rather than a silently-thin `triage.json`. (Production/Opus mode
+only; the CI bash body is self-sufficient and does not invoke the evaluator.)
 
 ## Triage completion signal
 
@@ -277,7 +276,7 @@ fi
 "${__PT_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-triage}" --ticket "$TICKET" || exit 10
 __PT_COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${__PT_REPO_ROOT}/plugins/dev/scripts/lib/linear-comment-post.sh}"
 if [[ ! -x "$__PT_COMMENT_POST" ]]; then __PT_COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-if [[ -n "$__PT_COMMENT_POST" && -x "$__PT_COMMENT_POST" ]] && "$__PT_COMMENT_POST" "${TICKET}" "${COMMENT_BODY}" >/dev/null 2>&1; then
+if [[ -n "$__PT_COMMENT_POST" && -x "$__PT_COMMENT_POST" ]] && "$__PT_COMMENT_POST" "${TICKET}" "${COMMENT_BODY}" >/dev/null; then
   true
 else
   echo "phase-triage: linear-comment-post failed (continuing)" >&2
@@ -344,21 +343,21 @@ curl -s -X POST https://api.linear.app/graphql \
 Map the bash-body's `estimated_scope` to the method's scale using this table (select the column
 matching the team's `type`):
 
-| scope   | fibonacci | tShirt | exponential | linear |
-|---------|-----------|--------|-------------|--------|
-| xs      | 1         | 0 (XS) | 1           | 1      |
-| small   | 1         | 1 (S)  | 1           | 1      |
-| medium  | 3         | 2 (M)  | 2           | 2      |
-| large   | 5         | 3 (L)  | 4           | 3      |
-| epic    | 8         | 5 (XL) | 8           | 5      |
+| scope  | fibonacci | tShirt | exponential | linear |
+| ------ | --------- | ------ | ----------- | ------ |
+| xs     | 1         | 0 (XS) | 1           | 1      |
+| small  | 1         | 1 (S)  | 1           | 1      |
+| medium | 3         | 2 (M)  | 2           | 2      |
+| large  | 5         | 3 (L)  | 4           | 3      |
+| epic   | 8         | 5 (XL) | 8           | 5      |
 
 Write the result to `triage.json` as **both** `"estimate": <points>` AND
 `"estimateMethod": "<type>"` (e.g. `"estimateMethod": "tShirt"`). The scheduler reads
 `estimateMethod` to validate the value against the correct scale without a second network call.
 
 If both Step 1 and Step 2 fail, leave `triage.json` without an `estimate` field — the coordinator
-skips the Linear estimate write for this ticket (fail-open; forward progress is unaffected).
-The bash body intentionally does **not** write `estimate` (CTL-558 guard).
+skips the Linear estimate write for this ticket (fail-open; forward progress is unaffected). The
+bash body intentionally does **not** write `estimate` (CTL-558 guard).
 
 **2c. Identify genuine blockers — semantic second-pass, READ-ONLY (CTL-838).** Catalyst does **not**
 parse or infer dependencies from the description text. The bash body writes an empty `dependencies`
@@ -372,13 +371,13 @@ and your job here is the second one:
    or re-emit them.
 
 2. **Triage as a SECOND PAIR OF EYES (your job).** You are NOT a parser. Do **not** add a dependency
-   because an id appears in the prose. Instead: read the ticket's intent, then **examine the relevant
-   backlog** — `linearis issues list` for the ticket's team / area (and `linearis issues read <id>`
-   to confirm a candidate) — and judge whether any in-flight or planned work is a **true
-   prerequisite the author may have missed**: work that must reach a terminal state before this
-   ticket can sensibly start (a shared interface not yet built, a migration that must land first,
-   an explicit "must follow" sequencing). Record **only** blockers you can justify, in the rich
-   shape with a `reason`:
+   because an id appears in the prose. Instead: read the ticket's intent, then **examine the
+   relevant backlog** — `linearis issues list` for the ticket's team / area (and
+   `linearis issues read <id>` to confirm a candidate) — and judge whether any in-flight or planned
+   work is a **true prerequisite the author may have missed**: work that must reach a terminal state
+   before this ticket can sensibly start (a shared interface not yet built, a migration that must
+   land first, an explicit "must follow" sequencing). Record **only** blockers you can justify, in
+   the rich shape with a `reason`:
 
 ```jsonc
 "dependencies": [
@@ -386,10 +385,10 @@ and your job here is the second one:
 ]
 ```
 
-   If you find no genuine missed blocker, leave `dependencies` as the empty list the bash body wrote.
-   A mention is not a dependency; a shared topic is not a dependency; "see also / prior art /
-   regression of / example" is not a dependency. When in doubt, leave it out — a false blocker
-   deadlocks real work, a missed one is caught on the next pass.
+If you find no genuine missed blocker, leave `dependencies` as the empty list the bash body wrote. A
+mention is not a dependency; a shared topic is not a dependency; "see also / prior art / regression
+of / example" is not a dependency. When in doubt, leave it out — a false blocker deadlocks real
+work, a missed one is caught on the next pass.
 
 **Hard constraint — the skill makes ZERO Linear writes for dependencies.** Do NOT call
 `linearis issues update ... --blocked-by` (or any `linearis issues update`) from this skill. The
@@ -397,12 +396,36 @@ admission gate's durable `blocked_by` persistence lives in the execution-core sc
 STEP E, `scheduler.mjs` — it reads `triage.json.dependencies`, re-validates each id via
 `fetchTicketState`, and drops unresolvable / terminal / cycle-closing / **parent-epic (CTL-878)** /
 **cross-team (CTL-838)** ids before writing the durable edge with `applyBlockedByRelation`). Keeping
-the write scheduler-side preserves the CTL-497/CTL-558 contract — the phase-triage e2e negative guard
-fails the build if this skill ever emits a `linearis issues update` call. `linearis issues read` is
-read-only and is fine. STEP E tolerates BOTH the flat-string and the rich `{id}` shapes.
+the write scheduler-side preserves the CTL-497/CTL-558 contract — the phase-triage e2e negative
+guard fails the build if this skill ever emits a `linearis issues update` call.
+`linearis issues read` is read-only and is fine. STEP E tolerates BOTH the flat-string and the rich
+`{id}` shapes.
 
 3. If the refined fields differ materially, post a follow-up `linearis issues discuss` comment
    marking the refinement.
 
 The refinement step is deliberately optional — the orchestrator hand-off in CTL-452 only needs the
 `phase.triage.complete.<TICKET>` event, and the bash body already emits that.
+
+## Structured escalation (CTL-1065)
+
+If triage genuinely cannot proceed (e.g., the ticket description is too
+ambiguous to classify, or a required external resource is unavailable), emit
+`failed` with a structured `explanation` block. Use the CLI shim:
+
+```bash
+EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+  --ticket "$TICKET" --phase triage \
+  --what-failed "{{ specific symptom }}" \
+  --why-gave-up "{{ reason autonomous triage cannot complete }}" \
+  --human-question "{{ one specific answerable question }}" \
+  2>/dev/null || echo '{}')"
+```
+
+The `human_question` MUST be specific and answerable — never:
+- "needs a human" / "requires human review"
+- "a human must decide" / "escalate to operator"
+
+Write the specific question instead:
+- Good: "should CTL-NNN be classified as a feature or a refactor — the
+  description mentions both adding a new API and removing the old one?"

@@ -699,6 +699,516 @@ else
   fail "Suite 2 ext: draft_pr_ensure --title should be 'feat: CTL-709 work commit', got: '$TITLE_LINE'"
 fi
 
+# ─── Suite 6: draft_pr_push_verify + draft_pr_head_oid (CTL-1051) ─────────────
+echo ""
+echo "Suite 6: draft_pr_push_verify and draft_pr_head_oid"
+
+# 6a: fast-forward push — no prior remote ref; returns 0, echoes HEAD sha, origin == HEAD.
+echo "6a: fast-forward push → returns 0, echoes HEAD sha, origin/feature == HEAD"
+new_fixture pv-ff
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-ff.exit"
+  echo "$out" > "${SCRATCH}/pv-ff.out"
+  git rev-parse HEAD > "${SCRATCH}/pv-ff.local"
+  git rev-parse origin/feature > "${SCRATCH}/pv-ff.remote" 2>/dev/null || echo "" > "${SCRATCH}/pv-ff.remote"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/pv-ff.exit" 2>/dev/null)" "6a: push_verify ff returns 0"
+assert_eq "$(cat "${SCRATCH}/pv-ff.local")" "$(cat "${SCRATCH}/pv-ff.out")" "6a: push_verify ff echoes HEAD sha"
+assert_eq "$(cat "${SCRATCH}/pv-ff.local")" "$(cat "${SCRATCH}/pv-ff.remote")" "6a: origin/feature == HEAD after ff"
+
+# 6b: non-fast-forward (rebase/amend) — plain push fails; force-with-lease succeeds;
+#     rc==0, origin/feature advances to HEAD.
+echo "6b: non-fast-forward (rebase) → force-with-lease; rc==0; origin advanced"
+new_fixture pv-nff
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1   # commit A on origin
+  git commit --quiet --amend -m "feat: amended work commit"              # diverge → commit B
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-nff.exit"
+  git rev-parse HEAD > "${SCRATCH}/pv-nff.local"
+  git rev-parse origin/feature > "${SCRATCH}/pv-nff.remote" 2>/dev/null || echo "" > "${SCRATCH}/pv-nff.remote"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/pv-nff.exit" 2>/dev/null)" "6b: push_verify rebase returns 0 (force-with-lease)"
+assert_eq "$(cat "${SCRATCH}/pv-nff.local")" "$(cat "${SCRATCH}/pv-nff.remote")" "6b: origin/feature advanced to HEAD"
+
+# 6c: detached HEAD — fail-closed; returns non-zero; echoes nothing.
+echo "6c: detached HEAD → fail-closed; rc!=0; no output"
+new_fixture pv-detached
+(
+  cd "$WORK"
+  git checkout --quiet --detach HEAD
+  source "$DRAFT_PR_LIB"
+  set +e
+  out="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-det.exit"
+  echo "$out" > "${SCRATCH}/pv-det.out"
+) || true
+DET_EXIT="$(cat "${SCRATCH}/pv-det.exit" 2>/dev/null)"
+DET_OUT="$(cat "${SCRATCH}/pv-det.out" 2>/dev/null)"
+if [[ "$DET_EXIT" != "0" ]]; then pass "6c: push_verify detached HEAD returns non-zero"
+else fail "6c: detached HEAD should return non-zero — got rc=$DET_EXIT"; fi
+if [[ -z "$DET_OUT" ]]; then pass "6c: push_verify detached HEAD echoes nothing"
+else fail "6c: detached HEAD should echo nothing — got '$DET_OUT'"; fi
+
+# 6d: draft_pr_head_oid reads PR.headRefOid from gh stub.
+echo "6d: draft_pr_head_oid reads PR.headRefOid"
+P6D_BIN="${SCRATCH}/hoid/bin"
+mkdir -p "$P6D_BIN"
+cat > "${P6D_BIN}/gh" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "pr" && "$2" == "view" ]]; then echo "deadbeefcafe"; exit 0; fi
+exit 1
+STUB
+chmod +x "${P6D_BIN}/gh"
+(
+  source "$DRAFT_PR_LIB"
+  out="$(PATH="${P6D_BIN}:$PATH" draft_pr_head_oid 2>/dev/null)"
+  echo "$out" > "${SCRATCH}/hoid.out"
+) || true
+assert_eq "deadbeefcafe" "$(cat "${SCRATCH}/hoid.out" 2>/dev/null)" "6d: head_oid echoes PR.headRefOid"
+
+# ─── Suite 7: CTL-1119 — workflow-scope rejection detection (Phase 1 & 2) ──────
+echo ""
+echo "Suite 7: workflow-scope push rejection detection (CTL-1119)"
+
+# Stub that emits the GitHub workflow-scope rejection on stderr and exits non-zero.
+install_git_stub_workflow_scope_reject() {
+  local bin_dir="$1" log_file="$2"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "git \$*" >> "\$LOG"
+for arg in "\$@"; do
+  if [[ "\$arg" == "push" ]]; then
+    printf 'refusing to allow an OAuth App to create or update workflow without workflow scope\n' >&2
+    exit 1
+  fi
+done
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# Stub: plain push fails with workflow-scope error; force-with-lease also fails the same way.
+install_git_stub_workflow_scope_reject_both() {
+  local bin_dir="$1" log_file="$2"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "git \$*" >> "\$LOG"
+for arg in "\$@"; do
+  if [[ "\$arg" == "push" ]]; then
+    printf 'refusing to allow an OAuth App to create or update workflow without workflow scope\n' >&2
+    exit 1
+  fi
+done
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# Stub: push fails with generic (non-scope) error.
+install_git_stub_generic_push_fail() {
+  local bin_dir="$1" log_file="$2"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+printf '%s\n' "git \$*" >> "\$LOG"
+for arg in "\$@"; do
+  if [[ "\$arg" == "push" ]]; then
+    printf 'error: failed to push some refs to origin\n' >&2
+    exit 1
+  fi
+done
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# Fixture builder with a .github/workflows/ commit.
+new_fixture_workflow() {
+  local tag="$1"
+  local origin="${SCRATCH}/${tag}/origin.git"
+  local work="${SCRATCH}/${tag}/work"
+  git init --quiet --bare -b main "${origin}"
+  git clone --quiet "${origin}" "${work}"
+  (
+    cd "${work}"
+    printf 'base\n' > base.txt
+    git add base.txt
+    git commit --quiet -m "initial"
+    git push --quiet origin main
+    git checkout --quiet -b feature
+    mkdir -p .github/workflows
+    cat > .github/workflows/ci.yml <<'WORKFLOW'
+on: [push]
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps: []
+WORKFLOW
+    git add .github/workflows/ci.yml
+    git commit --quiet -m "feat: add CI workflow"
+  )
+  ORIGIN="${origin}"
+  WORK="${work}"
+}
+
+# 7a: draft_pr_diff_touches_workflows — positive (workflow file in diff)
+echo "7a: draft_pr_diff_touches_workflows → 0 when .github/workflows/ in diff"
+new_fixture_workflow p7a
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_diff_touches_workflows "main" >/dev/null 2>&1
+  echo "$?" > "${SCRATCH}/p7a.exit"
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p7a.exit" 2>/dev/null)" "7a: detects workflow file in diff (returns 0)"
+
+# 7b: draft_pr_diff_touches_workflows — negative (no workflow file)
+echo "7b: draft_pr_diff_touches_workflows → 1 when no .github/workflows/ in diff"
+new_fixture p7b
+(
+  cd "$WORK"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_diff_touches_workflows "main" >/dev/null 2>&1
+  echo "$?" > "${SCRATCH}/p7b.exit"
+) || true
+P7B_EXIT="$(cat "${SCRATCH}/p7b.exit" 2>/dev/null || echo '')"
+if [[ "$P7B_EXIT" != "0" ]]; then pass "7b: no workflow file → returns 1 (non-zero)"
+else fail "7b: should return non-zero when no workflow file — got rc=$P7B_EXIT"; fi
+
+# 7c: draft_pr_push_verify returns 3 when push is rejected with workflow-scope error
+echo "7c: draft_pr_push_verify returns 3 for workflow-scope rejection"
+new_fixture p7c
+P7C_BIN="${SCRATCH}/p7c-bin"; P7C_LOG="${SCRATCH}/p7c.log"
+install_git_stub_workflow_scope_reject "$P7C_BIN" "$P7C_LOG"
+(
+  cd "$WORK"
+  PATH="${P7C_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p7c.exit"
+) || true
+assert_eq "3" "$(cat "${SCRATCH}/p7c.exit" 2>/dev/null)" "7c: workflow-scope rejection → rc=3"
+
+# 7d: draft_pr_push_verify returns 1 (not 3) for a generic push failure
+echo "7d: draft_pr_push_verify returns 1 for generic (non-workflow-scope) push failure"
+new_fixture p7d
+P7D_BIN="${SCRATCH}/p7d-bin"; P7D_LOG="${SCRATCH}/p7d.log"
+install_git_stub_generic_push_fail "$P7D_BIN" "$P7D_LOG"
+(
+  cd "$WORK"
+  PATH="${P7D_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p7d.exit"
+) || true
+assert_eq "1" "$(cat "${SCRATCH}/p7d.exit" 2>/dev/null)" "7d: generic push failure → rc=1 (not 3)"
+
+# 7e: draft_pr_push (fail-open) still returns 1 even on workflow-scope error
+echo "7e: draft_pr_push (fail-open) returns 1 even on workflow-scope error"
+new_fixture p7e
+P7E_BIN="${SCRATCH}/p7e-bin"; P7E_LOG="${SCRATCH}/p7e.log"
+install_git_stub_workflow_scope_reject "$P7E_BIN" "$P7E_LOG"
+(
+  cd "$WORK"
+  PATH="${P7E_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p7e.exit"
+) || true
+P7E_EXIT="$(cat "${SCRATCH}/p7e.exit" 2>/dev/null || echo '')"
+if [[ "$P7E_EXIT" != "0" ]]; then pass "7e: draft_pr_push fail-open returns non-zero on workflow-scope error"
+else fail "7e: draft_pr_push should return non-zero — got rc=$P7E_EXIT"; fi
+
+# ─── Suite 8: CATALYST_WORKFLOW_GITHUB_TOKEN routing (Phase 2) ─────────────────
+echo ""
+echo "Suite 8: CATALYST_WORKFLOW_GITHUB_TOKEN routing (CTL-1119 Phase 2)"
+
+# Stub: first plain push emits workflow-scope error (exits 1); token-routed push
+# detects env vars proving the token was used and succeeds (exits 0).
+# Records credential env to a log file for assertion.
+install_git_stub_token_routing() {
+  local bin_dir="$1" log_file="$2" cred_log="$3"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+CREDLOG="${cred_log}"
+IS_PUSH=false
+for arg in "\$@"; do [[ "\$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "\$IS_PUSH" == "true" ]]; then
+  if [[ -n "\${GIT_CONFIG_KEY_1:-}" ]]; then
+    # Token-routed push: log and fall through to real git (local bare origin, no HTTPS auth needed).
+    printf 'token_routed\n' >> "\$CREDLOG"
+  else
+    # Plain push without token: emit workflow-scope rejection and fail.
+    printf 'refusing to allow an OAuth App to create or update workflow without workflow scope\n' >&2
+    exit 1
+  fi
+fi
+printf '%s\n' "git \$*" >> "\$LOG"
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# Stub for non-workflow branch: plain push always succeeds; record credential env.
+install_git_stub_plain_push_ok() {
+  local bin_dir="$1" log_file="$2" cred_log="$3"
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<STUB
+#!/usr/bin/env bash
+LOG="${log_file}"
+CREDLOG="${cred_log}"
+IS_PUSH=false
+for arg in "\$@"; do [[ "\$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "\$IS_PUSH" == "true" ]]; then
+  if [[ -n "\${GIT_CONFIG_KEY_1:-}" ]]; then
+    printf 'token_routed\n' >> "\$CREDLOG"
+  else
+    printf 'plain_push\n' >> "\$CREDLOG"
+  fi
+fi
+printf '%s\n' "git \$*" >> "\$LOG"
+exec "${real_git}" "\$@"
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# 8a: CATALYST_WORKFLOW_GITHUB_TOKEN set + workflow diff → token-routed push; rc=0
+echo "8a: CATALYST_WORKFLOW_GITHUB_TOKEN set → token-routed push succeeds for workflow branch"
+new_fixture_workflow p8a
+P8A_BIN="${SCRATCH}/p8a-bin"; P8A_LOG="${SCRATCH}/p8a.log"; P8A_CRED="${SCRATCH}/p8a.cred"
+install_git_stub_token_routing "$P8A_BIN" "$P8A_LOG" "$P8A_CRED"
+(
+  cd "$WORK"
+  PATH="${P8A_BIN}:${PATH}"
+  export CATALYST_WORKFLOW_GITHUB_TOKEN="ghp_testworkflowtoken"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8a.exit"
+  unset CATALYST_WORKFLOW_GITHUB_TOKEN
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p8a.exit" 2>/dev/null)" "8a: token-routed push → rc=0"
+if grep -q 'token_routed' "${P8A_CRED}" 2>/dev/null; then
+  pass "8a: override credential (GIT_CONFIG_KEY env) was used"
+else
+  fail "8a: override credential should have been used — cred log: $(cat "${P8A_CRED}" 2>/dev/null)"
+fi
+
+# 8b: CATALYST_WORKFLOW_GITHUB_TOKEN set but NO workflow file in diff → plain push, token NOT used
+echo "8b: CATALYST_WORKFLOW_GITHUB_TOKEN set but non-workflow branch → normal credential used"
+new_fixture p8b
+P8B_BIN="${SCRATCH}/p8b-bin"; P8B_LOG="${SCRATCH}/p8b.log"; P8B_CRED="${SCRATCH}/p8b.cred"
+install_git_stub_plain_push_ok "$P8B_BIN" "$P8B_LOG" "$P8B_CRED"
+(
+  cd "$WORK"
+  PATH="${P8B_BIN}:${PATH}"
+  export CATALYST_WORKFLOW_GITHUB_TOKEN="ghp_testworkflowtoken"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8b.exit"
+  unset CATALYST_WORKFLOW_GITHUB_TOKEN
+) || true
+assert_eq "0" "$(cat "${SCRATCH}/p8b.exit" 2>/dev/null)" "8b: non-workflow branch → rc=0"
+if grep -q 'token_routed' "${P8B_CRED}" 2>/dev/null; then
+  fail "8b: token routing must NOT be used for non-workflow branch"
+else
+  pass "8b: non-workflow branch uses normal credential (no token routing)"
+fi
+
+# 8c: CATALYST_WORKFLOW_GITHUB_TOKEN NOT set + workflow-scope rejection → rc=3 (escalation path)
+echo "8c: no CATALYST_WORKFLOW_GITHUB_TOKEN + workflow-scope rejection → rc=3"
+new_fixture p8c
+P8C_BIN="${SCRATCH}/p8c-bin"; P8C_LOG="${SCRATCH}/p8c.log"
+install_git_stub_workflow_scope_reject_both "$P8C_BIN" "$P8C_LOG"
+(
+  cd "$WORK"
+  PATH="${P8C_BIN}:${PATH}"
+  unset CATALYST_WORKFLOW_GITHUB_TOKEN 2>/dev/null || true
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_verify >/dev/null 2>/dev/null
+  echo "$?" > "${SCRATCH}/p8c.exit"
+) || true
+assert_eq "3" "$(cat "${SCRATCH}/p8c.exit" 2>/dev/null)" "8c: no token + workflow rejection → rc=3 (escalation)"
+
+# ─── Suite 9: CTL-1119 remediate — SKILL.md capture-then-compare semantics ─────
+echo ""
+echo "Suite 9: phase-pr capture-then-compare (VERIFIED_SHA vs PR_HEAD_OID)"
+#
+# Regression guard for the 2>&1 bug: phase-pr/SKILL.md does
+#   VERIFIED_SHA="$(draft_pr_push_verify)"     # stdout ONLY
+#   ...
+#   [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]] && fail
+# On any RETRY path (force-with-lease or token-routed), draft_pr_push_verify
+# prints _draft_pr_warn lines to STDERR before the SHA to STDOUT. Capturing with
+# 2>&1 folds the warnings in, making VERIFIED_SHA multi-line so the guard always
+# trips with a FALSE stale_ref_push_verify_failed. Suites 6–8 only assert rc and
+# stdout-with-2>/dev/null; none reproduces the caller's capture+compare — the
+# exact gap that let the regression land. This suite closes it.
+
+# 9a: force-with-lease retry — stdout-only capture equals a clean single-line SHA;
+#     the PR_HEAD_OID guard does NOT trip; the warning is NOT folded into the value.
+echo "9a: force-with-lease retry → VERIFIED_SHA is clean single-line SHA; guard not tripped"
+new_fixture pv-capture
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1   # commit A on origin
+  git commit --quiet --amend -m "feat: amended work commit"             # diverge → force-with-lease retry
+  source "$DRAFT_PR_LIB"
+  set +e
+  # Capture EXACTLY as phase-pr/SKILL.md does: stdout only, stderr flows away.
+  VERIFIED_SHA="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-cap.exit"
+  printf '%s' "$VERIFIED_SHA" > "${SCRATCH}/pv-cap.verified"
+  git rev-parse HEAD > "${SCRATCH}/pv-cap.head"
+) || true
+CAP_RC="$(cat "${SCRATCH}/pv-cap.exit" 2>/dev/null)"
+CAP_VERIFIED="$(cat "${SCRATCH}/pv-cap.verified" 2>/dev/null)"
+CAP_HEAD="$(cat "${SCRATCH}/pv-cap.head" 2>/dev/null)"
+assert_eq "0" "$CAP_RC" "9a: push_verify returns 0 on force-with-lease retry"
+# Clean: exactly the HEAD sha, single line, no warning text folded in.
+assert_eq "$CAP_HEAD" "$CAP_VERIFIED" "9a: VERIFIED_SHA == clean HEAD sha (no stderr folded in)"
+assert_not_contains "$CAP_VERIFIED" "draft-pr:" "9a: VERIFIED_SHA carries no _draft_pr_warn line"
+CAP_LINES="$(printf '%s' "$CAP_VERIFIED" | grep -c '' 2>/dev/null || echo 0)"
+assert_eq "1" "$CAP_LINES" "9a: VERIFIED_SHA is a single line"
+# The SKILL.md guard: PR_HEAD_OID (clean gh SHA) vs VERIFIED_SHA must MATCH → no false fail.
+if [[ -n "$CAP_HEAD" && "$CAP_HEAD" != "$CAP_VERIFIED" ]]; then
+  fail "9a: PR_HEAD_OID != VERIFIED_SHA guard would FALSELY trip (the 2>&1 regression)"
+else
+  pass "9a: PR_HEAD_OID == VERIFIED_SHA — guard does not falsely trip"
+fi
+
+# 9b: prove the test is meaningful — the OLD 2>&1 capture WOULD be multi-line on
+#     this same retry path (so 9a's single-line assertion actually has teeth).
+echo "9b: 2>&1 capture (the old buggy form) folds the warning in → multi-line"
+new_fixture pv-capture-bug
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1
+  git commit --quiet --amend -m "feat: amended work commit"
+  source "$DRAFT_PR_LIB"
+  set +e
+  BUGGY_SHA="$(draft_pr_push_verify 2>&1)"        # the regressed redirection
+  set -e
+  printf '%s' "$BUGGY_SHA" > "${SCRATCH}/pv-bug.verified"
+) || true
+BUG_VERIFIED="$(cat "${SCRATCH}/pv-bug.verified" 2>/dev/null)"
+BUG_LINES="$(printf '%s' "$BUG_VERIFIED" | grep -c '' 2>/dev/null || echo 0)"
+if [[ "$BUG_LINES" -gt 1 ]] || [[ "$BUG_VERIFIED" == *"draft-pr:"* ]]; then
+  pass "9b: 2>&1 form is multi-line / carries warning (confirms 9a guards a real bug)"
+else
+  fail "9b: expected 2>&1 capture to fold stderr in — got '$BUG_VERIFIED'"
+fi
+
+# ─── Suite 10: CTL-1119 phase-review remediation — credential-helper injection ─
+echo ""
+echo "Suite 10: draft_pr_push_token credential-helper injection safety (CTL-1119)"
+
+# Stub git that faithfully emulates how real git runs a `!`-prefixed credential
+# helper: strip the leading '!' and run the remainder via `sh -c "<helper> get"`
+# with git's inherited environment. This is the exact sink the HIGH phase-review
+# finding exploited — if the token were interpolated into the helper string, a
+# token carrying shell metacharacters would execute right here.
+install_git_stub_emulate_cred_helper() {
+  local bin_dir="$1"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<'STUB'
+#!/usr/bin/env bash
+IS_PUSH=false
+for arg in "$@"; do [[ "$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "$IS_PUSH" == "true" && -n "${GIT_CONFIG_VALUE_1:-}" ]]; then
+  helper="${GIT_CONFIG_VALUE_1#!}"
+  sh -c "${helper} get" </dev/null >/dev/null 2>&1 || true
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# 10a: token with shell metacharacters must NOT execute (env-indirection closes
+#      the injection). The malicious token closes the printf double-quote, runs
+#      `touch <marker>`, then re-opens — exactly the reproduced exploit.
+echo "10a: token containing shell metacharacters does NOT execute (injection closed)"
+P10_BIN="${SCRATCH}/p10-bin"
+install_git_stub_emulate_cred_helper "$P10_BIN"
+INJECT_MARKER="${SCRATCH}/INJECTED_PWN_MARKER"
+rm -f "$INJECT_MARKER"
+(
+  PATH="${P10_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_token "abc\";touch ${INJECT_MARKER};echo \"" >/dev/null 2>&1
+  set -e
+) || true
+if [[ -e "$INJECT_MARKER" ]]; then
+  fail "10a: token injection EXECUTED — marker file was created (sink is open)"
+  rm -f "$INJECT_MARKER"
+else
+  pass "10a: token with shell metacharacters did not execute (env-indirection holds)"
+fi
+
+# 10b: the benign-token happy path still authenticates correctly — the helper
+#      emits the token verbatim as the credential password via $CATALYST_WF_TOK.
+echo "10b: benign token reaches the credential helper verbatim"
+P10B_BIN="${SCRATCH}/p10b-bin"; P10B_OUT="${SCRATCH}/p10b.out"
+mkdir -p "$P10B_BIN"
+cat > "${P10B_BIN}/git" <<STUB
+#!/usr/bin/env bash
+IS_PUSH=false
+for arg in "\$@"; do [[ "\$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "\$IS_PUSH" == "true" && -n "\${GIT_CONFIG_VALUE_1:-}" ]]; then
+  helper="\${GIT_CONFIG_VALUE_1#!}"
+  sh -c "\${helper} get" </dev/null > "${P10B_OUT}" 2>&1 || true
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "${P10B_BIN}/git"
+(
+  PATH="${P10B_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_token "ghp_benigntoken123" >/dev/null 2>&1
+  set -e
+) || true
+assert_contains "$(cat "$P10B_OUT" 2>/dev/null)" "password=ghp_benigntoken123" "10b: helper emits the token as the credential password"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

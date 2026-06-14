@@ -5,7 +5,7 @@
 // here (assignSlots excludes them). Plain data props only — no snapshot hook, no
 // router — so CTL-1016's Workers surface can mount it with its own payload slice.
 import { AnimatePresence, motion } from "motion/react";
-import { C, LIVE, PHASE } from "../../board/board-tokens";
+import { C, LIVE, PHASE, CARD_LIFT } from "../../board/board-tokens";
 import {
   EntityMarker,
 } from "../../board/entity-marker";
@@ -18,7 +18,7 @@ import {
   useReducedMotion,
 } from "../../board/motion-utils";
 import type { BoardWorker, BoardTicket, BoardConfig } from "../../board/types";
-import { assignSlots, isLiveWorker } from "./queue-model";
+import { assignSlots, isLiveWorker, slotLabel } from "./queue-model";
 import { TickerNumber } from "./ticker-number";
 
 // The state word + its color for a slot's worker (mirrors workerStatusText).
@@ -70,6 +70,7 @@ function OccupiedCard({
         borderRadius: 10,
         padding: "10px 12px",
         minHeight: 96,
+        boxShadow: CARD_LIFT, // CTL-1033: control-tower slot cards float off the canvas
         cursor: onOpenTicket ? "pointer" : "default",
       }}
     >
@@ -101,7 +102,7 @@ function OccupiedCard({
   );
 }
 
-function EmptyCard({ first }: { first: boolean }) {
+function EmptyCard({ slotLabel, first }: { slotLabel: string; first: boolean }) {
   const reduced = useReducedMotion();
   return (
     <motion.div
@@ -113,23 +114,42 @@ function EmptyCard({ first }: { first: boolean }) {
       style={{
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 4,
         background: "transparent",
         border: `1px dashed ${C.borderSubtle}`,
         borderRadius: 10,
         padding: "10px 12px",
         minHeight: 96,
-        textAlign: "center",
       }}
     >
-      <span style={{ fontSize: 12, color: C.fgDim }}>Open</span>
-      {first && (
-        <span style={{ fontSize: 11, color: C.fgDim, opacity: 0.7 }}>
-          next eligible ticket dispatches here
+      {/* CTL-1054: open cards share the occupied-card anatomy — "SLOT N" sits in
+          the upper-LEFT corner exactly like OccupiedCard's slot-label row (same
+          mono/uppercase/tracking), so a vacant slot reads as the SAME kind of
+          object as an occupied one. */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, color: C.fgDim, letterSpacing: 1.2, textTransform: "uppercase", fontFamily: C.mono }}>
+          {slotLabel}
         </span>
-      )}
+      </div>
+      {/* "Open" reads as the status, centered in the card body; the first vacant
+          slot keeps its dispatch hint underneath. */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: 4,
+          flex: 1,
+          textAlign: "center",
+        }}
+      >
+        <span style={{ fontSize: 12, color: C.fgDim }}>Open</span>
+        {first && (
+          <span style={{ fontSize: 11, color: C.fgDim, opacity: 0.7 }}>
+            next eligible ticket dispatches here
+          </span>
+        )}
+      </div>
     </motion.div>
   );
 }
@@ -188,12 +208,16 @@ export function SlotDeck({
               key={`slot-${w.name}`}
               w={w}
               ticket={infoById.get(w.ticket)}
-              slotLabel={`SLOT ${i + 1}`}
+              slotLabel={slotLabel(i + 1)}
               onOpenTicket={onOpenTicket}
             />
           ))}
           {Array.from({ length: emptyCount }).map((_, i) => (
-            <EmptyCard key={`empty-${i}`} first={i === 0} />
+            <EmptyCard
+              key={`empty-${i}`}
+              slotLabel={slotLabel(occupied.length + i + 1)}
+              first={i === 0}
+            />
           ))}
           {overCapacity.map((w) => (
             <OccupiedCard

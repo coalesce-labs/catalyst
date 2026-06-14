@@ -1,9 +1,11 @@
-// elevation-ladder.test.ts — CTL-1013 token CONTRACT test.
-// Asserts the elevation ladder ORDER (chrome < content < cards, by perceived
-// lightness) holds in BOTH themes, derived directly from the hex values declared
-// in app.css. This is the gherkin acceptance contract made executable:
-//   sidebar/nav (chrome) DARKEST → content canvas one step lighter → cards lighter
-//   again, in dark; chrome-tinted < canvas < cards in warm-light.
+// elevation-ladder.test.ts — CTL-1033 token CONTRACT test (extends CTL-1013).
+// Asserts the SEMANTIC elevation ladder ORDER (chrome < canvas < subtle < card <
+// elevated, by perceived lightness) holds in BOTH themes, derived directly from the
+// hex values declared in app.css, plus the alias chains (--surface-0 → chrome, etc.).
+// This is the gherkin acceptance contract made executable:
+//   sidebar/nav (chrome) DARKEST → canvas → lane bands (subtle) → cards → popovers,
+//   in dark; chrome-tinted < canvas < subtle < card < elevated in warm-light.
+//   --surface-hover is the interaction tint (EXEMPT — darker in light by design).
 //
 //   cd ui && bun test src/elevation-ladder.test.ts
 import { describe, it, expect } from "bun:test";
@@ -34,6 +36,14 @@ function tokenHex(block: string, name: string): string {
   return m[1];
 }
 
+/** Extract any `--var: <value>;` declaration (value not necessarily a hex). */
+function tokenValue(block: string, name: string): string {
+  const re = new RegExp(`${name}\\s*:\\s*([^;]+);`);
+  const m = block.match(re);
+  if (!m) throw new Error(`token ${name} not found in block`);
+  return m[1].trim();
+}
+
 function selectorBlock(selector: string): string {
   // Grab the balanced { ... } body of the actual RULE (selector immediately
   // followed by optional whitespace + `{`), not a mention inside a comment.
@@ -53,41 +63,53 @@ function selectorBlock(selector: string): string {
   throw new Error(`unbalanced block for ${selector}`);
 }
 
-describe("CTL-1013 elevation ladder — surfaces stack upward in both themes", () => {
-  it("dark: chrome (s0) < content canvas (s1) < cards (s2) < raised (s3) < hover (s4)", () => {
+const LADDER = [
+  "--surface-chrome",
+  "--surface-canvas",
+  "--surface-subtle",
+  "--surface-card",
+  "--surface-elevated",
+] as const;
+
+describe("CTL-1033 elevation ladder — semantic surfaces stack upward in both themes", () => {
+  it("dark: chrome < canvas < subtle < card < elevated (strictly ascending luminance)", () => {
     const dark = selectorBlock(".dark");
-    const s0 = luminance(tokenHex(dark, "--surface-0"));
-    const s1 = luminance(tokenHex(dark, "--surface-1"));
-    const s2 = luminance(tokenHex(dark, "--surface-2"));
-    const s3 = luminance(tokenHex(dark, "--surface-3"));
-    const s4 = luminance(tokenHex(dark, "--surface-4"));
-    expect(s0).toBeLessThan(s1); // chrome darker than content
-    expect(s1).toBeLessThan(s2); // content darker than cards
-    expect(s2).toBeLessThan(s3);
-    expect(s3).toBeLessThan(s4);
+    const ls = LADDER.map((t) => luminance(tokenHex(dark, t)));
+    for (let i = 1; i < ls.length; i++) {
+      expect(ls[i]).toBeGreaterThan(ls[i - 1]);
+    }
   });
 
-  it("warm-light: chrome (s0) < content canvas (s1) < cards (s2)", () => {
-    // :root is the warm-light theme.
+  it("warm-light: chrome < canvas < subtle < card < elevated (strictly ascending)", () => {
     const light = selectorBlock(":root");
-    const s0 = luminance(tokenHex(light, "--surface-0"));
-    const s1 = luminance(tokenHex(light, "--surface-1"));
-    const s2 = luminance(tokenHex(light, "--surface-2"));
-    expect(s0).toBeLessThan(s1); // chrome tint darker than canvas
-    expect(s1).toBeLessThan(s2); // canvas darker than raised paper cards
+    const ls = LADDER.map((t) => luminance(tokenHex(light, t)));
+    for (let i = 1; i < ls.length; i++) {
+      expect(ls[i]).toBeGreaterThan(ls[i - 1]);
+    }
   });
 
-  it("dark: sidebar/nav (chrome) is the DARKEST surface — was inverted before", () => {
+  it("--surface-hover is present in both themes (interaction token, EXEMPT from order)", () => {
+    expect(tokenHex(selectorBlock(".dark"), "--surface-hover")).toMatch(/^#[0-9a-f]{6}$/i);
+    expect(tokenHex(selectorBlock(":root"), "--surface-hover")).toMatch(/^#[0-9a-f]{6}$/i);
+  });
+
+  it("dark: numeric aliases chain onto the semantic ladder", () => {
     const dark = selectorBlock(".dark");
-    // --sidebar aliases --surface-0; --background aliases --surface-1.
+    expect(tokenValue(dark, "--surface-0")).toBe("var(--surface-chrome)");
+    expect(tokenValue(dark, "--surface-1")).toBe("var(--surface-canvas)");
+    expect(tokenValue(dark, "--surface-2")).toBe("var(--surface-card)");
+    expect(tokenValue(dark, "--surface-3")).toBe("var(--surface-elevated)");
     expect(dark).toContain("--sidebar: var(--surface-0)");
     expect(dark).toContain("--background: var(--surface-1)");
-    // cards float above the canvas.
     expect(dark).toContain("--card: var(--surface-2)");
   });
 
-  it("light: sidebar (chrome) tinted below the content canvas", () => {
+  it("light: numeric aliases chain; --surface-3 stays the literal #ece7dd inset tint", () => {
     const light = selectorBlock(":root");
+    expect(tokenValue(light, "--surface-0")).toBe("var(--surface-chrome)");
+    expect(tokenValue(light, "--surface-1")).toBe("var(--surface-canvas)");
+    expect(tokenValue(light, "--surface-2")).toBe("var(--surface-card)");
+    expect(tokenHex(light, "--surface-3")).toBe("#ece7dd");
     expect(light).toContain("--sidebar: var(--surface-0)");
     expect(light).toContain("--background: var(--surface-1)");
     expect(light).toContain("--card: var(--surface-2)");

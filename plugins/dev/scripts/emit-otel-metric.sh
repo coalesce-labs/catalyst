@@ -32,23 +32,23 @@
 
 set -uo pipefail
 
-die_silent() { exit 0; }  # explicit shorthand for "fail silently"
+die_silent() { exit 0; } # explicit shorthand for "fail silently"
 
 # Append one k=v into a JSON attr array on stdin, choosing intValue for
 # integer-looking values (matches otel-forward otlp.ts), stringValue otherwise.
-append_attr_json() {  # args: <key> <val>; reads array on stdin, writes on stdout
-  local k="$1" v="$2"
-  if [[ "$v" =~ ^-?[0-9]+$ ]]; then
-    jq -c --arg k "$k" --argjson n "$v" '. + [{key:$k,value:{intValue:$n}}]'
-  else
-    jq -c --arg k "$k" --arg v "$v" '. + [{key:$k,value:{stringValue:$v}}]'
-  fi
+append_attr_json() { # args: <key> <val>; reads array on stdin, writes on stdout
+	local k="$1" v="$2"
+	if [[ $v =~ ^-?[0-9]+$ ]]; then
+		jq -c --arg k "$k" --argjson n "$v" '. + [{key:$k,value:{intValue:$n}}]'
+	else
+		jq -c --arg k "$k" --arg v "$v" '. + [{key:$k,value:{stringValue:$v}}]'
+	fi
 }
 
 # ─── Parse args ─────────────────────────────────────────────────────────────
 
-METRIC_NAME="${1:-}"
-[[ -n "$METRIC_NAME" ]] || die_silent
+METRIC_NAME="${1-}"
+[[ -n $METRIC_NAME ]] || die_silent
 shift
 
 KIND=""
@@ -60,26 +60,55 @@ PHASE=""
 RES_EXTRA_ATTRS=()
 
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --kind)          KIND="$2";              shift 2 ;;
-    --count)         COUNT="$2";             shift 2 ;;
-    --linear-key)    LINEAR_KEY="$2";        shift 2 ;;
-    --start-ns)      START_NS="$2";          shift 2 ;;
-    --scope)         SCOPE="$2";             shift 2 ;;
-    --phase)         PHASE="$2";             shift 2 ;;
-    --resource-attr) RES_EXTRA_ATTRS+=("$2"); shift 2 ;;
-    *) die_silent ;;  # unknown flag — silent noop, we're on the session-end hot path
-  esac
+	case "$1" in
+	--kind)
+		KIND="$2"
+		shift 2
+		;;
+	--count)
+		COUNT="$2"
+		shift 2
+		;;
+	--linear-key)
+		LINEAR_KEY="$2"
+		shift 2
+		;;
+	--start-ns)
+		START_NS="$2"
+		shift 2
+		;;
+	--scope)
+		SCOPE="$2"
+		shift 2
+		;;
+	--phase)
+		PHASE="$2"
+		shift 2
+		;;
+	--resource-attr)
+		RES_EXTRA_ATTRS+=("$2")
+		shift 2
+		;;
+	*) die_silent ;; # unknown flag — silent noop, we're on the session-end hot path
+	esac
 done
 
 # Minimal validation; anything odd → silent noop.
-[[ -n "$KIND" && -n "$COUNT" ]] || die_silent
-[[ "$COUNT" =~ ^[0-9]+$ ]] || die_silent
+[[ -n $KIND && -n $COUNT ]] || die_silent
+[[ $COUNT =~ ^[0-9]+$ ]] || die_silent
 
 # ─── Endpoint resolution ────────────────────────────────────────────────────
 
-ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-}"
-[[ -n "$ENDPOINT" ]] || die_silent
+ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT-}"
+if [[ -z $ENDPOINT ]]; then
+	# CTL-1008 Phase 3: fall back to workspace config endpoint so iteration_count
+	# metrics don't silently no-op in workers whose launching shell lacks the env var.
+	_CFG_FILE="${HOME}/.config/catalyst/config-catalyst-workspace.json"
+	if [[ -r $_CFG_FILE ]] && command -v jq >/dev/null 2>&1; then
+		ENDPOINT="$(jq -r '.catalyst.observability.forwarders.otlp.endpoint // empty' "$_CFG_FILE" 2>/dev/null || true)"
+	fi
+fi
+[[ -n $ENDPOINT ]] || die_silent
 
 # Strip trailing slashes.
 ENDPOINT="${ENDPOINT%/}"
@@ -87,9 +116,9 @@ ENDPOINT="${ENDPOINT%/}"
 # Swap the default gRPC port (4317) → HTTP port (4318). Any other port
 # configuration is used verbatim; users running a non-standard setup can
 # point OTEL_EXPORTER_OTLP_METRICS_ENDPOINT at the explicit HTTP URL.
-HTTP_ENDPOINT="${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT:-}"
-if [[ -z "$HTTP_ENDPOINT" ]]; then
-  HTTP_ENDPOINT="${ENDPOINT/:4317/:4318}"
+HTTP_ENDPOINT="${OTEL_EXPORTER_OTLP_METRICS_ENDPOINT-}"
+if [[ -z $HTTP_ENDPOINT ]]; then
+	HTTP_ENDPOINT="${ENDPOINT/:4317/:4318}"
 fi
 METRICS_URL="${HTTP_ENDPOINT}/v1/metrics"
 
@@ -102,29 +131,30 @@ SERVICE_NAME="${OTEL_SERVICE_NAME:-claude-code}"
 
 # Build resource attributes via step-append (preserves today's exact order).
 RES_ATTRS_JSON=$(jq -nc --arg svc "$SERVICE_NAME" '[{key:"service.name",value:{stringValue:$svc}}]')
-if [[ -n "$LINEAR_KEY" ]]; then
-  RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" \
-    | jq -c --arg k "$LINEAR_KEY" '. + [{key:"linear.key",value:{stringValue:$k}}]')
+if [[ -n $LINEAR_KEY ]]; then
+	RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" |
+		jq -c --arg k "$LINEAR_KEY" '. + [{key:"linear.key",value:{stringValue:$k}}]')
 fi
-for kv in "${RES_EXTRA_ATTRS[@]:-}"; do
-  [[ -n "$kv" ]] || continue
-  key="${kv%%=*}"; val="${kv#*=}"
-  [[ -n "$key" && "$key" != "$kv" ]] || continue
-  RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" | append_attr_json "$key" "$val")
+for kv in "${RES_EXTRA_ATTRS[@]-}"; do
+	[[ -n $kv ]] || continue
+	key="${kv%%=*}"
+	val="${kv#*=}"
+	[[ -n $key && $key != "$kv" ]] || continue
+	RES_ATTRS_JSON=$(printf '%s' "$RES_ATTRS_JSON" | append_attr_json "$key" "$val")
 done
 
 # Emit the OTLP/HTTP payload. Uses `jq -n` with --arg so caller-supplied
 # values can never break the JSON structure.
 PAYLOAD=$(jq -nc \
-  --arg metric       "$METRIC_NAME" \
-  --arg scope        "$SCOPE" \
-  --argjson res_attrs "$RES_ATTRS_JSON" \
-  --arg kind         "$KIND" \
-  --arg count        "$COUNT" \
-  --arg start_ns     "$START_NS" \
-  --arg now_ns       "$NOW_NS" \
-  --arg phase        "$PHASE" \
-  '{
+	--arg metric "$METRIC_NAME" \
+	--arg scope "$SCOPE" \
+	--argjson res_attrs "$RES_ATTRS_JSON" \
+	--arg kind "$KIND" \
+	--arg count "$COUNT" \
+	--arg start_ns "$START_NS" \
+	--arg now_ns "$NOW_NS" \
+	--arg phase "$PHASE" \
+	'{
     resourceLogs: null,
     resourceMetrics: [{
       resource: {
@@ -160,12 +190,12 @@ PAYLOAD=$(jq -nc \
 # `--max-time 2` bounds the session-end hot path. A slow or unreachable
 # collector must not block `catalyst-session.sh end` for more than a blink.
 if command -v curl >/dev/null 2>&1; then
-  printf '%s' "$PAYLOAD" | curl -s -S \
-    --max-time 2 \
-    -X POST \
-    -H "Content-Type: application/json" \
-    --data @- \
-    "$METRICS_URL" >/dev/null 2>&1 || true
+	printf '%s' "$PAYLOAD" | curl -s -S \
+		--max-time 2 \
+		-X POST \
+		-H "Content-Type: application/json" \
+		--data @- \
+		"$METRICS_URL" >/dev/null 2>&1 || true
 fi
 
 exit 0

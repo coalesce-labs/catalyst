@@ -45,6 +45,12 @@ export function stopTailing() {
   eventsWatcher?.close();
 }
 
+// CTL-1077: expose the tailer's current byte offset so the broker self-reload
+// path can write a gap-free handoff file for its successor.
+export function getLastByteOffset() {
+  return lastByteOffset;
+}
+
 function readNewEvents() {
   const logPath = getEventLogPath();
 

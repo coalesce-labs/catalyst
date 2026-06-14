@@ -71,3 +71,27 @@ describe("CTL-945 Fix2 — Board is eagerly imported (no lazy chunk-fetch race)"
     expect(board["$$typeof"]).not.toBe(lazyType);
   });
 });
+
+// ── CTL-1100 — BeliefsContext exported (single-EventSource guard) ─────────────
+// Mirrors the CTL-945 Fix1 pattern: exactly ONE /api/beliefs/stream EventSource
+// must exist across the app. AppShell calls useBeliefs() once and distributes
+// via BeliefsContext so surfaces use useBeliefsContext() — never a direct
+// useBeliefs() call in a leaf component.
+describe("CTL-1100 — BeliefsContext exported", () => {
+  it("BeliefsContext is exported and has a Provider", async () => {
+    const mod = await import("../hooks/use-beliefs");
+    expect(mod.BeliefsContext).toBeDefined();
+    expect(typeof mod.BeliefsContext).toBe("object");
+    expect(mod.BeliefsContext).toHaveProperty("Provider");
+  });
+
+  it("useBeliefsContext is exported and is a function", async () => {
+    const mod = await import("../hooks/use-beliefs");
+    expect(typeof mod.useBeliefsContext).toBe("function");
+  });
+
+  it("useBeliefs (the SSE hook) is exported for the single provider call", async () => {
+    const mod = await import("../hooks/use-beliefs");
+    expect(typeof mod.useBeliefs).toBe("function");
+  });
+});

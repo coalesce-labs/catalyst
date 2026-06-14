@@ -766,6 +766,21 @@ describe("defaultProgressMark (CTL-736 Phase 3)", () => {
     expect(defaultProgressMark({ ticket: "CTL-9", phase: "remediate", repoRoot: "/repo" }, { runGit })).toBe(3);
   });
 
+  test("CTL-729 regression: worktreePath without repoRoot → 0; the probe resolves via repoRoot", () => {
+    // The scheduler's Pass 0w originally passed { worktreePath } and dropped
+    // repoRoot, so resolveWorktree (work-done-probes.mjs:60) got repoRoot=undefined
+    // → null → the commit gate always read 0 and could NEVER spare a
+    // committed-but-silent code worker (the safeguard the gate exists for).
+    const runGit = makeRunGit({
+      "worktree list --porcelain": { code: 0, stdout: porcelainFor("CTL-9", WT), stderr: "" },
+      "rev-list --count origin/main..HEAD": { code: 0, stdout: "3\n", stderr: "" },
+    });
+    // Broken call shape (what the scheduler used to send): worktreePath, no repoRoot.
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "implement", worktreePath: WT }, { runGit })).toBe(0);
+    // Correct call shape (what the scheduler sends now): repoRoot resolves the worktree.
+    expect(defaultProgressMark({ ticket: "CTL-9", phase: "implement", repoRoot: "/repo" }, { runGit })).toBe(3);
+  });
+
   test("implement → 0 when the worktree does not resolve (no progress observable)", () => {
     const runGit = makeRunGit({
       "worktree list --porcelain": { code: 0, stdout: porcelainFor("OTHER", WT), stderr: "" },

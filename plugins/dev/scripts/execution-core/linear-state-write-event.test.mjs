@@ -76,6 +76,18 @@ describe("buildLinearStateWriteEvent", () => {
     expect(ev.resource["service.name"]).toBe("catalyst.execution-core");
   });
 
+  // CTL-1023: work-type dimension. Post-triage state writes carry the resolved
+  // type; the attribute defaults to "unknown" so it is never inconsistently missing.
+  test("CTL-1023: catalyst.ticket.type passes through when supplied (post-triage write)", () => {
+    const ev = JSON.parse(buildLinearStateWriteEvent({ ticket: "CTL-757", ticketType: "feature" }));
+    expect(ev.attributes["catalyst.ticket.type"]).toBe("feature");
+  });
+
+  test("CTL-1023: catalyst.ticket.type defaults to 'unknown' when omitted", () => {
+    const ev = JSON.parse(buildLinearStateWriteEvent({ ticket: "CTL-757" }));
+    expect(ev.attributes["catalyst.ticket.type"]).toBe("unknown");
+  });
+
   test("payload round-trip — all caller-supplied fields survive serialization", () => {
     const ev = JSON.parse(
       buildLinearStateWriteEvent({

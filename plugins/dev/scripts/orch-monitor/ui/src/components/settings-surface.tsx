@@ -8,6 +8,7 @@ import {
 } from "@/components/ui/toggle-group";
 import { useSidebar } from "@/components/ui/sidebar";
 import { THEMES, THEME_LABEL, useTheme } from "@/lib/theme";
+import { BRANDS, BRAND_LABEL, useBrand } from "@/lib/brand";
 import {
   LANDING_SURFACES,
   readLandingSurface,
@@ -34,6 +35,12 @@ import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 import { useRepoIcons } from "@/hooks/use-repo-icons";
 import { repoIconPicksAtom } from "@/lib/repo-icon-picks-store";
 import { buildIconPickerRows } from "@/components/icon-picker-model";
+import { NAMED_COLORS } from "@/lib/color-palette";
+import {
+  repoColorPicksAtom,
+  applyColorPick,
+  NAMED_COLOR_NAMES,
+} from "@/lib/repo-color-picks-store";
 
 // settings-surface.tsx — the Settings preferences surface (CTL-911 / SURF3).
 // Replaces the footer Settings placeholder (handoff next-step #4). Renders the
@@ -124,8 +131,11 @@ export function SettingsSurface() {
   const patch = (d: Partial<BoardPrefs>) =>
     setBoardPrefs((p) => patchBoardPrefs(p, d));
 
-  // Theme — the SHELL3 theme system (`.dark` class + catalyst:theme key).
+  // Theme — TWO orthogonal axes (CTL-1099):
+  //   MODE  → the SHELL3 theme system (`.dark` class + catalyst:theme key).
+  //   BRAND → the CTL-1099 brand system (`data-theme` attr + catalyst:brand key).
   const { theme, setTheme } = useTheme();
+  const { brand, setBrand } = useBrand();
 
   // Sidebar collapse — the shell's controlled provider (persisted by the
   // shell's writeSidebarOpen effect, SHELL4).
@@ -142,8 +152,12 @@ export function SettingsSurface() {
   const [iconPicks, setIconPicks] = useAtom(repoIconPicksAtom);
   const iconPickerRows = buildIconPickerRows(repos, iconMap, iconPicks);
 
+  // Project colors — per-repo hue picker (CTL-1027).
+  const [colorPicks, setColorPicks] = useAtom(repoColorPicksAtom);
+  const colorPickerRows = repos;
+
   return (
-    <div className="h-full min-h-0 overflow-y-auto bg-surface-0">
+    <div className="h-full min-h-0 overflow-y-auto bg-surface-1">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-5 px-5 py-6">
         <header>
           <h1 className="text-lg font-semibold text-fg">Settings</h1>
@@ -213,15 +227,26 @@ export function SettingsSurface() {
         </Section>
 
         {/* ── Theme ──────────────────────────────────────────────────────────── */}
+        {/* CTL-1099: two orthogonal axes. "Appearance" = MODE (dark ⇄ light, the
+            SHELL3 `.dark` class). "Theme" = BRAND (Warm ⇄ Slate, the data-theme
+            attribute). Warm is the no-attribute default. */}
         <Section
           title="Theme"
-          description="Calm dark is the default. The footer toggle writes this same choice."
+          description="Warm is the default theme; Slate is the cooler graphite alternative. Appearance picks dark or light mode."
         >
           <Field
             label="Appearance"
+            hint="Dark or light mode — the footer toggle writes this same choice."
             value={theme}
             onChange={(v) => setTheme(v)}
             options={THEMES.map((t) => ({ k: t, label: THEME_LABEL[t] }))}
+          />
+          <Field
+            label="Theme"
+            hint="Warm (terracotta) or Slate (Linear blue/graphite)."
+            value={brand}
+            onChange={(v) => setBrand(v)}
+            options={BRANDS.map((b) => ({ k: b, label: BRAND_LABEL[b] }))}
           />
         </Section>
 
@@ -318,6 +343,72 @@ export function SettingsSurface() {
                         </ToggleGroupItem>
                       );
                     })}
+                  </ToggleGroup>
+                </div>
+              );
+            })
+          )}
+        </Section>
+
+        {/* ── Project colors ─────────────────────────────────────────────────── */}
+        <Section
+          title="Project colors"
+          description="Tint each project's swimlane rows with a color, or let Catalyst inherit the configured default. Saved in this browser."
+        >
+          {colorPickerRows.length === 0 ? (
+            <p className="py-3 text-xs text-muted">No projects to color yet.</p>
+          ) : (
+            colorPickerRows.map((repo) => {
+              const active = colorPicks[repo] ?? "auto";
+              return (
+                <div
+                  key={repo}
+                  className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-6"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-fg">{repo}</div>
+                  </div>
+                  <ToggleGroup
+                    type="single"
+                    value={active}
+                    onValueChange={(v) =>
+                      setColorPicks((p) => applyColorPick(p, repo, v))
+                    }
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                  >
+                    <ToggleGroupItem
+                      value="auto"
+                      className={cn(
+                        "text-xs",
+                        active === "auto" ? "text-fg" : "text-muted",
+                      )}
+                      title="Auto (inherit configured default)"
+                    >
+                      Auto
+                    </ToggleGroupItem>
+                    {NAMED_COLOR_NAMES.map((name) => (
+                      <ToggleGroupItem
+                        key={name}
+                        value={name}
+                        title={name}
+                        className={cn(
+                          "gap-1 text-xs",
+                          active === name ? "text-fg" : "text-muted",
+                        )}
+                      >
+                        <span
+                          aria-hidden
+                          className="size-3 rounded-full"
+                          style={{
+                            background: NAMED_COLORS[name]?.bg,
+                            outline: "1px solid var(--border-subtle)",
+                          }}
+                        />
+                        {name}
+                      </ToggleGroupItem>
+                    ))}
                   </ToggleGroup>
                 </div>
               );

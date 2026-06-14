@@ -208,9 +208,6 @@ export function resolveRepoIconCandidates(
  * Re-implemented atop resolveRepoIconCandidates. For the format-ranked best candidate,
  * call pickBestCandidate(resolveRepoIconCandidates(...)) instead.
  */
-export function resolveRepoIconPath(ownerRepo: string): { path: string; downloadUrl: string } | null {
-  return resolveRepoIconCandidates(ownerRepo)[0] ?? null;
-}
 
 /**
  * Fetch the best icon for a GitHub repo, with disk cache.

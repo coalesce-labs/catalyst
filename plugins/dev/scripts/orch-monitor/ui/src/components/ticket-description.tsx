@@ -86,4 +86,3 @@ export function TicketDescription({
   );
 }
 
-export default TicketDescription;

@@ -137,6 +137,26 @@ export function idleBetweenPhases(
 // matching the error string / status_code / raw line against the rate-limit tokens.
 // Live → [] (no 429s in range — the healthy zero the ChartCard renders honestly).
 
+// ── CTL-1040: throughput by work type (P_throughput) ────────────────────────
+
+/** One ranked throughput row: the type label and its completed-ticket count. */
+export interface CountRow {
+  label: string;
+  /** Completed-ticket count over the window (> 0 — zero rows are dropped). */
+  count: number;
+}
+
+/** Rank a type→count map into descending rows with the mandatory zero-filter
+ *  (drop count ≤ 0 and non-finite). PURE — a null/empty map is an empty array
+ *  (the ChartCard renders the honest empty state, never a fabricated row). */
+export function rankCountMap(map: Record<string, number> | null): CountRow[] {
+  if (!map) return [];
+  return Object.entries(map)
+    .filter(([, n]) => Number.isFinite(n) && n > 0)
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
 /** The rate-limit / overload tokens an api_error line is matched against. 429 =
  *  rate_limit, 529 = overloaded; the word forms catch the JSON `type` shapes
  *  Anthropic returns ("rate_limit_error", "overloaded_error"). Matched

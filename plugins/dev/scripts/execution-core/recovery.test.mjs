@@ -41,6 +41,8 @@ import {
   clearProgressMarks,
   // CTL-1006
   defaultAppendBootResumePhaseRegressionEvent,
+  // CTL-1044
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
@@ -2820,6 +2822,42 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.severityNumber).toBe(9);
   });
 
+  // CTL-1023: the work-type dimension rides on every dispatch lifecycle event.
+  // Resolved from workers/<ticket>/triage.json .classification; "unknown" when
+  // no triage.json exists yet (the pre-triage first dispatch).
+  test("CTL-1023: dispatch-requested carries catalyst.ticket.type from triage.json", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl1023-disp-"));
+    mkdirSync(join(orchDir, "workers", "CTL-TT-1"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-TT-1", "triage.json"),
+      JSON.stringify({ classification: "bug" }),
+    );
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir,
+      ticket: "CTL-TT-1",
+      target_phase: "implement",
+      reason: "advance",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("bug");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("CTL-1023: dispatch-requested defaults catalyst.ticket.type to 'unknown' pre-triage", () => {
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir: undefined,
+      ticket: "CTL-TT-2",
+      target_phase: "triage",
+      reason: "new-work",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("unknown");
+  });
+
   test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
     const ok = defaultAppendRunawayEvent({
       ticket: "CTL-9",
@@ -2947,6 +2985,101 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.load_per_core).toBe(0.3);
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+});
+
+// CTL-1044: the generic operator-event appender. This is the PRODUCTION default
+// for the scheduler's `appendIntentEvent` seam (advance-shadow disagree/tick,
+// CTL-936 intent.ineffective, executeEscalations). The seam contract is a RAW
+// `{ "event.name": string, payload: object }` object that does NOT fit
+// buildEventEnvelope's phase/action schema — so this helper wraps it in a valid
+// unified-event-log envelope, carrying event.name VERBATIM and payload intact.
+describe("defaultAppendOperatorEvent (CTL-1044)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1044-op-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes a parseable envelope carrying event.name verbatim and payload intact", () => {
+    // Exactly the object the advance-shadow comparator hands the seam
+    // (advance-shadow.mjs:177-180): the disagree event.
+    const disagreement = {
+      ticket: "CTL-9",
+      procedural: "research",
+      belief: null,
+      procedural_exhausted: false,
+      belief_exhausted: false,
+      signals: { triage: "done" },
+      differingInput: { verdict: null, remediateCycleCount: 0 },
+    };
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.disagree",
+      payload: disagreement,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // event.name is preserved VERBATIM — NOT mangled into phase.<phase>.<action>.
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.disagree");
+    // payload survives the round-trip byte-for-byte.
+    expect(env.body.payload).toEqual(disagreement);
+    // Same resource/service fields every other daemon emitter stamps.
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.resource["service.namespace"]).toBe("catalyst");
+    expect(env.resource["host.name"]).toBeTruthy();
+    expect(env.resource["host.id"]).toBeTruthy();
+    // Required envelope scaffold the log reader/otel-forward depend on.
+    expect(typeof env.id).toBe("string");
+    expect(env.id.length).toBeGreaterThan(0);
+    expect(env.ts).toBeTruthy();
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
+  });
+
+  test("writes the tick-summary event with its agree/disagree counts", () => {
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.tick",
+      payload: { agree: 3, disagree: 1 },
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.tick");
+    expect(env.body.payload).toEqual({ agree: 3, disagree: 1 });
+  });
+
+  test("is best-effort: returns false (never throws) on a malformed event with no event.name", () => {
+    expect(defaultAppendOperatorEvent({ payload: { x: 1 } })).toBe(false);
+    expect(defaultAppendOperatorEvent(null)).toBe(false);
+    expect(defaultAppendOperatorEvent({})).toBe(false);
+  });
+
+  test("is fail-open: returns false (never throws) when the log dir is unwriteable", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-op");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendOperatorEvent({
+        "event.name": "beliefs.advance_shadow.disagree",
+        payload: { ticket: "CTL-FAIL" },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -4048,6 +4181,211 @@ Final polish, documentation, and code cleanup.
   });
 });
 
+// ─── CTL-1090: readClusterHeartbeats cross-host merge ────────────────────────
+
+import { readClusterHeartbeats } from "./recovery.mjs";
+
+const makeHbLine = (host, ts) =>
+  JSON.stringify({
+    ts,
+    attributes: { "event.name": "node.heartbeat" },
+    body: { payload: { "host.name": host } },
+  });
+
+describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
+  let tmpDir;
+  let logPath;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1090-hb-"));
+    logPath = join(tmpDir, "events.jsonl");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("multi-host: merges injected peer timestamps over the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+  });
+
+  test("peer entry never clobbers a FRESHER local timestamp for the same host", () => {
+    const localTs = "2026-06-13T01:05:00Z";
+    const peerTs = "2026-06-13T00:50:00Z";
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(localTs); // local fresher wins
+  });
+
+  test("single-host (roster<=1): peer reader is NEVER called — exact no-op", () => {
+    const readPeers = () => { throw new Error("must not be called single-host"); };
+    expect(() =>
+      readClusterHeartbeats({
+        logPath: join(tmpDir, "absent.jsonl"),
+        roster: ["mini"],
+        anchorIssue: "CTL-9999",
+        readPeers,
+      }),
+    ).not.toThrow();
+  });
+
+  test("peer-read failure is swallowed — returns the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => { throw new Error("Linear down"); };
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
+  test("no anchorIssue → no peer read, local map only", () => {
+    const readPeers = () => { throw new Error("must not be called"); };
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: null,
+      readPeers,
+    });
+    expect(result).toEqual({});
+  });
+
+  test("missing log file with multi-host + anchor → returns peers only", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+    expect(result.mini).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: a peer's last_seen is untrusted. An unparseable
+  // value must never enter the merged map — otherwise it sorts above real ISO
+  // strings and (via deadHosts' Date.parse → NaN) makes the host look
+  // forever-alive, silently defeating takeover.
+  test("garbage peer last_seen is dropped, never poisons the merge", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "zzz-not-a-date", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: local ts is second-precision (millis stripped),
+  // peers publish millisecond ISO. A genuinely newer peer ts within the same
+  // second must win — a lexicographic compare would wrongly discard it because
+  // "…00.500Z" < "…00Z".
+  test("mixed-precision: a newer millisecond peer ts beats a second-precision local ts", () => {
+    const localTs = "2026-06-13T01:00:00Z";        // second precision (from event log)
+    const peerTs = "2026-06-13T01:00:00.500Z";     // 500ms later, same second
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(peerTs); // newer peer wins under numeric compare
+  });
+});
+
+// ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─
+
+describe("deadHosts — flags a stale peer in merged lastSeen (CTL-1090)", () => {
+  test("a peer with an aged last_seen is flagged dead", () => {
+    const now = Date.parse("2026-06-13T02:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-13T01:59:30Z",   // 30s ago — alive
+      laptop: "2026-06-13T01:40:00Z", // 20m ago — dead (past 10m grace)
+    };
+    // deadHosts is imported below; use the already-imported version
+    const { deadHosts: dh } = { deadHosts };
+    expect(dh({ lastSeen, roster: ["mini", "laptop"], graceMs: 600_000, nowMs: now }))
+      .toEqual(["laptop"]);
+  });
+});
+
+// ─── CTL-1090: reclaimDeadHostWork respects injected ownedTicketsForHost ──────
+// defaultOwnedTicketsForHost is internal; its peer-ticket logic is covered by the
+// reclaimDeadHostWork seam (ownedTicketsForHost option). The injectable seam is the
+// correct test surface (same pattern used for all other collaborators).
+
+describe("reclaimDeadHostWork — peer in_flight_tickets seam (CTL-1090)", () => {
+  const nowISO1090 = () => new Date().toISOString();
+  const oldISO1090 = () => new Date(Date.now() - 20 * 60_000).toISOString();
+
+  test("ownedTicketsForHost returning peer tickets results in dispatch", async () => {
+    const dispatched = [];
+    await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        readHeartbeats: () => ({ mini: nowISO1090(), laptop: oldISO1090() }),
+        roster: ["mini", "laptop"],
+        self: "mini",
+        graceMs: 600_000,
+        nowMs: Date.now(),
+        ownedTicketsForHost: () => ["CTL-7", "CTL-8"],
+        ownerForTicket: () => "mini",
+        claim: () => ({ won: true, generation: 1 }),
+        inferResume: async () => "implement",
+        alreadyComplete: () => false,
+        rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-7" }),
+        thoughtsPull: () => ({ ok: true }),
+        dispatch: (od, ticket) => { dispatched.push(ticket); return { code: 0 }; },
+      },
+    );
+    expect(dispatched.sort()).toEqual(["CTL-7", "CTL-8"]);
+  });
+
+  test("single-host roster: exact no-op regardless of injected seams", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        roster: ["mini"],
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      },
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+});
+
 // ─── CTL-863: deadHosts, survivingRoster, inferResumePhase ───────────────────
 
 import { deadHosts, survivingRoster, inferResumePhase } from "./recovery.mjs";
@@ -4328,6 +4666,48 @@ describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
   });
 });
 
+// ─── CTL-866: thoughtsPull seam in reclaimDeadHostWork ───────────────────────
+
+describe("reclaimDeadHostWork — thoughtsPull seam (CTL-866)", () => {
+  test("CTL-866: thoughtsPull runs after rebuildWorktree and before inferResume", async () => {
+    const order = [];
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => { order.push("rebuild"); return { ok: true, cwd: "/wt/CTL-900" }; },
+      thoughtsPull: (cwd) => { order.push(`pull:${cwd}`); return { ok: true }; },
+      inferResume: async () => { order.push("infer"); return "implement"; },
+    }));
+    expect(order).toEqual(["rebuild", "pull:/wt/CTL-900", "infer"]);
+  });
+
+  test("CTL-866: thoughtsPull failure is fail-open — reclaim still dispatches", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      thoughtsPull: () => { throw new Error("pull boom"); },
+      dispatch: () => { dispatched = true; return { code: 0 }; },
+    }));
+    expect(dispatched).toBe(true);
+    expect(r.taken).toHaveLength(1);
+  });
+
+  test("CTL-866: single-host roster → no thoughtsPull (whole fn short-circuits)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      roster: ["mini"],
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+
+  test("CTL-866: rebuildWorktree failure → thoughtsPull NOT called (skipped with the ticket)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => ({ ok: false, cwd: null }),
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+});
+
 // CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
 // phase.<phase>.complete AND whose probe passes is reconciled without waiting
 // for it to die. The completeEventSeen seam is the precise disambiguator
@@ -4425,5 +4805,53 @@ describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
     expect(r).toBe("alive-suppressed");
     expect(probe.calls.length).toBe(0);
     expect(emit.calls.length).toBe(0);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-1065: escalateOnce carries a valid structured explanation
+// ──────────────────────────────────────────────────────────────────────────
+import { validateExplanation } from "./escalation-explanation.mjs";
+
+describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanation", () => {
+  const orch = mkdtempSync(join(tmpdir(), "ctl1065-reclaim-"));
+  afterEach(() => { try { rmSync(orch, { recursive: true, force: true }); } catch { /* */ } });
+
+  function impl1065(extra = {}) {
+    mkdirSync(join(orch, "workers", "CTL-65"), { recursive: true });
+    return {
+      ticket: "CTL-65", phase: "implement", status: "running",
+      startedAt: new Date(0).toISOString(),
+      liveness: { kind: "bg", value: "abcd1234" },
+      raw: { bg_job_id: "abcd1234", generation: 1, startedAt: new Date(0).toISOString() },
+      ...extra,
+    };
+  }
+
+  test("busy-ceiling escalation carries a valid explanation alongside reason", () => {
+    const captured = [];
+    const appendEscalatedEvent = (obj) => captured.push(obj);
+    reclaimDeadWorkIfPossible(
+      orch,
+      impl1065(),
+      {
+        statJob: () => ({ mtimeMs: Date.now(), exists: true }),
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+        applyStalledLabel: recorder({ applied: true }),
+        inEscalationCooldownFn: () => false,
+        recordEscalationFn: () => {},
+        breaker: { isOpen: () => false },
+      },
+    );
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    const call = captured[0];
+    expect(call.reason).toBe("busy-ceiling-exceeded"); // unchanged
+    const expl = call.extras?.explanation;
+    expect(expl).toBeTruthy();
+    expect(validateExplanation(expl).valid).toBe(true);
   });
 });

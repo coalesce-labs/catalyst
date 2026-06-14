@@ -16,6 +16,10 @@
 
 import type { CostValidationRow } from "@/lib/types";
 
+// CTL-1040: costByWorkType lives in lib/otel-queries (server-importable); re-exported
+// here so the UI and its tests import from the canonical observe module path.
+export { costByWorkType } from "../../../../lib/otel-queries";
+
 // ── ranked cost rows (P-C expensive tickets, P-B by-stage, P-D by-model/agent) ──
 
 /** One ranked breakdown row: the label (ticket / stage / model / agent) and its

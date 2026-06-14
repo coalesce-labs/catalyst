@@ -8,6 +8,14 @@
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { getEventLogPath, log } from "./config.mjs";
+// CTL-1004 / CTL-1005 / CTL-1056: the stall-janitor's emit vocabulary lives in a
+// dependency-free leaf both modules import, so the producer (stall-janitor.mjs)
+// and this closed vocabulary can never drift again. CTL-1005 added the J3 types
+// janitor.stall.cleared / janitor.would.clear to the emitter but forgot to
+// register them here, so every J3 verdict threw "unknown reap-intent event type"
+// at this emitter and was silently lost. Importing the list (instead of
+// re-typing it) makes that class of bug structurally impossible.
+import { JANITOR_EVENT_TYPES } from "./janitor-event-types.mjs";
 
 export const REAP_INTENT_TYPES = Object.freeze([
   "phase.yield.reap-requested",
@@ -33,6 +41,15 @@ export const REAP_INTENT_TYPES = Object.freeze([
   // request — the reaper does not act on it; it surfaces the deferred worktree in
   // the out-of-tree cleanup queue + orch-monitor for an operator / later tick.
   "worktree.cleanup-deferred",
+  // CTL-1004 / CTL-1005 stall-janitor (shadow-first). In "enforce" the janitor
+  // emits the real targeted orphans.reap-requested (already above) and the
+  // enforce flags; in "shadow" it emits these would.* twins instead of acting. A
+  // FLAG class — the reaper does not act on any of these; they surface in the
+  // operator event log. Spread from janitor-event-types.mjs (the single source of
+  // truth the producer ALSO imports) so this vocabulary can never drift behind a
+  // new janitor emit type (CTL-1056): J1 deferred/would.defer/would.reap-request,
+  // J2 would.kill-intent, J3 stall.cleared/would.clear.
+  ...JANITOR_EVENT_TYPES,
 ]);
 
 // camelCase → snake_case key mapping. The on-disk schema uses snake_case so

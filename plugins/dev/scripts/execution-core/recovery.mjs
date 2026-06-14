@@ -31,6 +31,7 @@ import {
   getEventLogPath,
   getClusterHosts,
   getHostName,
+  getLivenessAnchorIssue,
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
@@ -39,7 +40,9 @@ import {
   ZOMBIE_STALE_FLOOR_MS,
   NEVER_STARTED_MS,
 } from "./config.mjs";
+import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
 import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
+import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
@@ -84,40 +87,12 @@ const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
 
-// resolvePhaseSessionId — JS port of orchestrate-revive's resolve_phase_session_id
-// (orchestrate-revive:160-177). Resolves a `claude --resume`-compatible session
-// UUID from a dead worker's bg_job_id by reading the job's state.json.
-// Returns null on any miss (no bgJobId, no state.json, no session field).
-// MUST stay in sync with the bash resolver — they read the same on-disk contract
-// and honour the same CATALYST_REVIVE_JOBS_DIR override (NOT getJobsRoot's
-// CATALYST_HEALTHCHECK_JOBS_ROOT) so a test overriding one env var matches bash.
-//
-// Claude Code ≥2.x schema: state.json contains `resumeSessionId` directly.
-// Claude Code <2.x schema: state.json contains `linkScanPath` (path to .jsonl);
-//   the basename minus `.jsonl` is the session UUID. Still supported as fallback.
-export function resolvePhaseSessionId(
-  bgJobId,
-  { jobsDir = process.env.CATALYST_REVIVE_JOBS_DIR || join(homedir(), ".claude", "jobs") } = {},
-) {
-  if (!bgJobId) return null;
-  const stateFile = join(jobsDir, bgJobId, "state.json");
-  if (!existsSync(stateFile)) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(stateFile, "utf8"));
-  } catch {
-    return null;
-  }
-  // New schema (Claude Code ≥2.x): resumeSessionId stored directly.
-  if (typeof parsed?.resumeSessionId === "string" && parsed.resumeSessionId) {
-    return parsed.resumeSessionId;
-  }
-  // Legacy schema: derive UUID from linkScanPath basename.
-  const linkPath = parsed?.linkScanPath;
-  if (typeof linkPath !== "string" || !linkPath.endsWith(".jsonl")) return null;
-  const sid = basename(linkPath, ".jsonl");
-  return sid || null;
-}
+// resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
+// transcript-silence.mjs can import it without pulling in recovery.mjs's
+// heavy dependency graph. Imported for local use + re-exported for callers.
+import { resolvePhaseSessionId } from "./session-resolve.mjs";
+export { resolvePhaseSessionId };
+import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
@@ -294,7 +269,12 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // revive, escalated, and revive-suppressed audit events (CTL-574 + CTL-587).
 // Shape mirrors lib/canonical-event.sh. Centralizing it here keeps the four
 // per-action helpers tiny and prevents shape drift between actions.
-function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13 }) {
+//
+// CTL-1023: every event carries `catalyst.ticket.type` (work-type dimension).
+// `ticketType` is resolved by the caller from triage.json (resolveTicketType);
+// when omitted it defaults to UNKNOWN_TICKET_TYPE so the attribute is ALWAYS
+// present, never inconsistently missing (the gherkin contract).
+function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13, ticketType = UNKNOWN_TICKET_TYPE }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
@@ -318,6 +298,7 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
+        "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
@@ -359,6 +340,7 @@ export function defaultAppendReclaimEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   death_signal,
   prev_state_json_mtime = null,
   probe_passed = true,
@@ -376,6 +358,7 @@ export function defaultAppendReclaimEvent({
       orchId,
       action: "reclaim",
       reason: "work-done-despite-dead-bg",
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: {
         death_signal,
         prev_state_json_mtime,
@@ -714,6 +697,7 @@ export function defaultAppendReviveEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   attempt,
   reason,
   prev_state_json_mtime,
@@ -726,6 +710,7 @@ export function defaultAppendReviveEvent({
       orchId,
       action: "revive",
       reason,
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
     }),
     "revive",
@@ -799,6 +784,11 @@ function defaultAppendReviveSuppressedEvent({
 // being dispatched is carried in payload.target_phase so operators can filter.
 // Best-effort like every other audit emitter — return value lets the caller
 // log (no current caller gates on it; matches recordDispatchFailure shape).
+// CTL-1004/CTL-1056 Bug 2: stderr_tail / spawn_error / signal carry the captured
+// dispatch-failure diagnostics (last ~500 chars of the worker's stderr, the
+// spawn error code e.g. ETIMEDOUT, the kill signal e.g. SIGKILL) so the failure
+// is diagnosable from the unified event log. Each is included in payloadExtras
+// only when present (an empty/absent diagnostic produces no key — no noise).
 export function defaultAppendDispatchFailedEvent({
   orchId,
   ticket,
@@ -807,6 +797,9 @@ export function defaultAppendDispatchFailedEvent({
   reason,
   expiresAt,
   consecutiveFailures,
+  stderr_tail,
+  spawn_error,
+  signal,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -815,7 +808,15 @@ export function defaultAppendDispatchFailedEvent({
       orchId,
       action: "failed",
       reason,
-      payloadExtras: { target_phase, code, ...(expiresAt !== undefined && { expiresAt }), ...(consecutiveFailures !== undefined && { consecutiveFailures }) },
+      payloadExtras: {
+        target_phase,
+        code,
+        ...(expiresAt !== undefined && { expiresAt }),
+        ...(consecutiveFailures !== undefined && { consecutiveFailures }),
+        ...(stderr_tail !== undefined && stderr_tail !== "" && { stderr_tail }),
+        ...(spawn_error !== undefined && spawn_error !== "" && { spawn_error }),
+        ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
+      },
     }),
     "dispatch-failed",
   );
@@ -858,7 +859,7 @@ export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) 
 // defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
 // Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
 // `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
-export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_phase, reason }) {
+export function defaultAppendDispatchRequestedEvent({ orchId, orchDir, ticket, target_phase, reason }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase: "dispatch",
@@ -869,6 +870,8 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
       payloadExtras: { target_phase },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: resolves to "unknown" pre-triage (no triage.json yet) — correct.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-requested",
   );
@@ -880,6 +883,7 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
 // launched↔complete wall-clock can be computed downstream.
 export function defaultAppendDispatchLaunchedEvent({
   orchId,
+  orchDir,
   ticket,
   target_phase,
   bg_job_id,
@@ -894,6 +898,8 @@ export function defaultAppendDispatchLaunchedEvent({
       payloadExtras: { target_phase, bg_job_id, worktree_path },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: "unknown" until triage.json lands; full type post-triage.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-launched",
   );
@@ -1097,6 +1103,58 @@ export function defaultAppendAutotuneGaugeEvent({
   );
 }
 
+// CTL-1044: generic operator-event appender. The scheduler's `appendIntentEvent`
+// seam (scheduler.mjs:4300, threaded into the advance-shadow comparator, CTL-936
+// reconcileIntents, and executeEscalations) consumes a RAW operator-event object:
+//   { "event.name": string, payload: object }
+// This does NOT fit buildEventEnvelope's phase.<phase>.<action>.<ticket> schema
+// (those events are phase-keyed; operator telemetry is name-keyed), so it gets a
+// dedicated envelope builder here. The envelope carries `evt["event.name"]`
+// VERBATIM as attributes["event.name"] and `evt.payload` under body.payload —
+// matching the unified-event-log line shape every other daemon emitter writes
+// (ts/id/observedTs/severity/resource{service.name,namespace,host}/attributes/body).
+// Production wires this at daemon.mjs's schedulerFn({ appendIntentEvent }) call;
+// startScheduler keeps its null default (CTL-936 chose silence for legacy/tests).
+// Best-effort: a malformed evt or an unwriteable log never throws — operator
+// telemetry must never break a tick (the shadow contract). The broker's
+// shouldSkipEvent (broker/router.mjs:1395) does NOT skip beliefs.* names and no
+// handler keys off them, so these land in the log as inert telemetry — no loop.
+export function defaultAppendOperatorEvent(evt) {
+  try {
+    const name = evt?.["event.name"];
+    if (typeof name !== "string" || name.length === 0) return false;
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const line =
+      JSON.stringify({
+        ts,
+        id: randomBytes(8).toString("hex"),
+        observedTs: ts,
+        // Operator telemetry (shadow disagreements, intent.ineffective,
+        // escalations) is INFO — it records evidence; it is NOT a daemon-health
+        // warning. Matches the dispatch-lifecycle precedent (CTL-700 Item B).
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: randomBytes(16).toString("hex"),
+        spanId: randomBytes(8).toString("hex"),
+        resource: {
+          "service.name": "catalyst.execution-core",
+          "service.namespace": "catalyst",
+          "host.name": hostName(),
+          "host.id": hostId(),
+        },
+        attributes: {
+          "event.name": name,
+        },
+        body: { payload: evt?.payload ?? null },
+      }) + "\n";
+    return appendEnvelopeBestEffort(line, "operator-event");
+  } catch {
+    // Best-effort — a serialization failure (e.g. a circular payload) must
+    // never break the tick. The caller's own try/catch is a second backstop.
+    return false;
+  }
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
@@ -1172,7 +1230,7 @@ export function defaultReviveDispatch(
   // then the verified launch after a clean dispatch. Both best-effort — the
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
   // proceeds regardless of either return value.
-  appendRequested({ orchId, ticket, target_phase: phase, reason: "revive" });
+  appendRequested({ orchId, orchDir, ticket, target_phase: phase, reason: "revive" });
   const res = dispatch(dispatchArgs);
   if (res && res.code === 0) {
     // Re-read the signal the dispatcher just rewrote (status dispatched/running
@@ -1185,6 +1243,7 @@ export function defaultReviveDispatch(
     }
     appendLaunched({
       orchId,
+      orchDir,
       ticket,
       target_phase: phase,
       bg_job_id: sig2?.bg_job_id,
@@ -1852,6 +1911,39 @@ export function reclaimDeadWorkIfPossible(
   // CTL-932: `extras` (optional) rides evidence into the escalated event
   // payload (e.g. the wedge screen captures). Cool-down/breaker behaviour is
   // untouched.
+  // reasonToType — GATE 1: push_rejected_no_workflow_scope is a capability
+  // boundary (MANUAL); all other production reasons → AUTHORIZATION (never MANUAL
+  // for a non-capability reason — D-recovery).
+  function reasonToType(r) {
+    return r === "push_rejected_no_workflow_scope" ? "manual" : "authorization";
+  }
+
+  // reasonToWhyField — maps reason to the correct type-specific "why" field name
+  // and value for the union (why_not_auto for MANUAL, why_asking for AUTHORIZATION).
+  function reasonToWhyField(r, n) {
+    if (r === "push_rejected_no_workflow_scope") {
+      return {
+        field: "why_not_auto",
+        value: "the daemon cannot grant itself an OAuth scope (capability boundary)",
+      };
+    }
+    const text = (() => {
+      switch (r) {
+        case "busy-ceiling-exceeded":
+          return "worker was alive past the busy ceiling with no committed work";
+        case "no-progress":
+          return `no forward progress after ${n} attempt(s) — stop-and-escalate`;
+        case "no-probe-for-phase":
+          return "no probe available for this phase — cannot verify work is done";
+        case "wedged-never-started-exhausted":
+          return `wedged-never-started replacement budget exhausted after ${n} attempt(s)`;
+        default:
+          return `escalation reason: ${r} (after ${n} attempt(s))`;
+      }
+    })();
+    return { field: "why_asking", value: text };
+  }
+
   function escalateOnce(reason, finalAttemptCount, extras) {
     // CTL-679 — while the Linear breaker is open we are rate-limited; the
     // needs-human apply would 429 and write no marker, re-firing every tick.
@@ -1868,13 +1960,51 @@ export function reclaimDeadWorkIfPossible(
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }
+    // CTL-1130: build a typed-union explanation classified by the three gates.
+    // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
+    // all other reasons → AUTHORIZATION (agent can retry with authority).
+    const escType = reasonToType(reason);
+    const whyField = reasonToWhyField(reason, finalAttemptCount);
+    let explanation;
+    const explanationFields = escType === "manual"
+      ? {
+          escalation_type: "manual",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
+          blocked_capability: extras?.blockedCapability ?? "required OAuth scope or credential unavailable",
+          instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
+          remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
+          why_not_auto: whyField.value,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        }
+      : {
+          escalation_type: "authorization",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
+          recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
+          risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+          why_asking: whyField.value,
+          could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
+          authorize_label: `retry ${ticket} ${phase}`,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        };
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so observed/recommendation/risk (or the manual capability fields) survive.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: escType !== "manual" });
+    }
+    const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
       ticket,
       orchId,
       reason,
       final_attempt_count: finalAttemptCount,
-      ...(extras ? { extras } : {}),
+      extras: enrichedExtras,
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
@@ -1912,6 +2042,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal: "terminal-short-circuit",
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: false,
@@ -1986,6 +2117,7 @@ export function reclaimDeadWorkIfPossible(
         phase,
         ticket,
         orchId,
+        orchDir,
         death_signal: "alive-probe-done",
         prev_state_json_mtime: null,
         probe_passed: true,
@@ -2337,6 +2469,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal,
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: true,
@@ -2534,6 +2667,7 @@ export function reclaimDeadWorkIfPossible(
     phase,
     ticket,
     orchId,
+    orchDir,
     attempt,
     reason: "work-not-done-after-stale-bg",
     prev_state_json_mtime: prevStateJsonMtime,
@@ -2634,32 +2768,68 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
 // missing log, unreadable file, and malformed lines are skipped, never thrown.
 // `logPath` is injectable for tests; defaults to the same getEventLogPath()
 // every emitter uses.
-export function readClusterHeartbeats({ logPath = getEventLogPath() } = {}) {
+export function readClusterHeartbeats({
+  logPath = getEventLogPath(),
+  roster = getClusterHosts(),
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
   const lastSeen = {};
   let raw;
   try {
     raw = readFileSync(logPath, "utf8");
   } catch {
-    return lastSeen; // no event log yet
+    // no event log yet — continue to peer merge below if multi-host
   }
-  for (const line of raw.split("\n")) {
-    if (!line) continue;
-    if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
-    let evt;
-    try {
-      evt = JSON.parse(line);
-    } catch {
-      continue; // partial/garbage line
+  if (raw) {
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue; // partial/garbage line
+      }
+      if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
+      const host =
+        evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+      const ts = evt?.ts;
+      if (typeof host !== "string" || host.length === 0) continue;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // Keep the latest ts per host (ISO-8601 sorts lexicographically).
+      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
     }
-    if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
-    const host =
-      evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
-    const ts = evt?.ts;
-    if (typeof host !== "string" || host.length === 0) continue;
-    if (typeof ts !== "string" || ts.length === 0) continue;
-    // Keep the latest ts per host (ISO-8601 sorts lexicographically).
-    if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
   }
+
+  // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
+  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
+    let peers = {};
+    try {
+      peers = readPeers(anchorIssue) ?? {};
+    } catch {
+      peers = {}; // fail-open: a Linear hiccup must never break liveness
+    }
+    for (const [host, rec] of Object.entries(peers)) {
+      const ts = rec?.last_seen;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+      // would sort ABOVE real ISO strings lexicographically and then make the host
+      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+      // false) — can never poison the merge.
+      const peerMs = Date.parse(ts);
+      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+      // lexicographically: the local event log carries second-precision ts
+      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+      // lexicographic compare would discard a genuinely newer peer ts.
+      const cur = lastSeen[host];
+      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+    }
+  }
+
   return lastSeen;
 }
 
@@ -2735,10 +2905,27 @@ export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd 
   return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
 }
 
-// defaultOwnedTicketsForHost — scan the local worker signal directory for non-terminal
-// signals dispatched from the given dead host. Local-only (no network). Returns ticket
-// IDs whose most-recent signal has host.name === deadHost and a non-terminal status.
-function defaultOwnedTicketsForHost(deadHost, { orchDir }) {
+// defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
+// Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
+// from the cross-host liveness channel (one Linear read = liveness + tickets).
+// Fallback: scan the local worker signal directory for non-terminal signals
+// dispatched from the dead host (the original local-only behavior, unchanged).
+// `anchorIssue`/`readPeers` are injectable for unit tests.
+function defaultOwnedTicketsForHost(deadHost, {
+  orchDir,
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
+  if (anchorIssue) {
+    try {
+      const peerMap = readPeers(anchorIssue);
+      const rec = peerMap?.[deadHost];
+      if (Array.isArray(rec?.in_flight_tickets) && rec.in_flight_tickets.length > 0) {
+        return [...new Set(rec.in_flight_tickets)];
+      }
+    } catch { /* fail-open → local scan */ }
+  }
+  // Fallback: local signal scan (original behavior; also runs when anchor unset).
   const signals = readWorkerSignals(orchDir);
   const tickets = new Set();
   for (const sig of signals) {
@@ -2779,6 +2966,7 @@ export async function reclaimDeadHostWork(
       const result = defaultRebuildWorktree(ticket, { orchDir });
       return result;
     },
+    thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
     dispatch = (od, ticket, phase, cwd) =>
       dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
   } = {},
@@ -2808,6 +2996,12 @@ export async function reclaimDeadHostWork(
       const wt = rebuildWorktree(ticket);
       if (!wt?.ok) continue;
 
+      // CTL-866: refresh thoughts/ before the artifact probes read it, so a
+      // takeover host sees the dead host's pushed research/plan docs.
+      // Fail-open: a failed pull must not abort reclaim (worst case the probe
+      // re-dispatches, the prior behavior).
+      try { thoughtsPull(wt.cwd); } catch { /* fail-open */ }
+
       // Infer the next phase to dispatch from durable artifacts.
       const phase = await inferResume(ticket, wt.cwd);
       if (!phase) continue; // terminal — nothing to resume
@@ -2823,6 +3017,19 @@ export async function reclaimDeadHostWork(
   }
 
   return { taken };
+}
+
+// defaultThoughtsPull — refresh the thoughts/ git repo inside the rebuilt
+// worktree before artifact probes read it. Best-effort; `humanlayer thoughts
+// sync` is the available primitive (no `thoughts pull` subcommand exists).
+// Returns { ok }. Never throws (caller also guards).
+function defaultThoughtsPull(cwd) {
+  try {
+    const res = spawnSync("humanlayer", ["thoughts", "sync"], { cwd, stdio: "ignore" });
+    return { ok: res.status === 0 };
+  } catch {
+    return { ok: false };
+  }
 }
 
 // defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.

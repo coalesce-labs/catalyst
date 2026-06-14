@@ -23,7 +23,7 @@ import {
 } from "../../board/queue-grouping";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { BoardQueueItem } from "../../board/types";
-import { ordinal, fmtAge } from "./queue-model";
+import { ordinal, fmtAge, fmtCountdown } from "./queue-model";
 import { QueueRowShell } from "./queue-row";
 
 const DISPATCH_BG = "rgba(65,189,125,0.05)";
@@ -88,6 +88,11 @@ function DispatchRow({
         meta={
           <>
             <ScopeChip scope={q.scope} estimate={q.estimate} estimateDisplay={q.estimateDisplay} />
+            {q.dispatchCooldown && (
+              <span style={{ fontFamily: C.mono, fontSize: 11, color: C.fgMuted, lineHeight: "18px" }}>
+                retrying in {fmtCountdown(q.dispatchCooldown.expiresAt - Date.now())} (attempt {q.dispatchCooldown.consecutiveFailures})
+              </span>
+            )}
             {age && (
               <span style={{ fontFamily: C.mono, fontSize: 11, fontVariantNumeric: "tabular-nums", color: C.fgDim, lineHeight: "18px" }}>
                 {age}
@@ -125,6 +130,7 @@ export function DispatchQueue({
   const multiHost = queueHostMode(queue) === "multi";
   const [groupByNode, setGroupByNode] = useState(false);
   const grouped = multiHost && groupByNode;
+  const coolingCount = queue.filter((q) => q.dispatchCooldown).length;
 
   // dispatches-next affordance: the top min(freeSlots, queue.length) rows tint.
   const dispatchCount = Math.min(Math.max(0, freeSlots), queue.length);
@@ -156,7 +162,7 @@ export function DispatchQueue({
     <section>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: C.fg }}>Dispatching next</span>
-        <span style={{ fontSize: 13, fontWeight: 400, color: C.fgDim }}>· {queue.length} waiting</span>
+        <span style={{ fontSize: 13, fontWeight: 400, color: C.fgDim }}>· {queue.length} waiting{coolingCount > 0 ? ` · ${coolingCount} cooling down` : ""}</span>
         <span style={{ flex: 1 }} />
         {multiHost && (
           <ToggleGroup

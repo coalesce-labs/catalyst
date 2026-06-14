@@ -9,6 +9,14 @@
 // dead worker is excluded from in-flight + consumed capacity.
 export type BoardActiveState = "active" | "stuck" | "dead" | null;
 
+// CTL-729: the single "needs attention" bucket (operator-approved 2026-06-11) —
+// the ONE yellow board accent + Inbox "Needs you" reason. 'waiting-on-you' (a live
+// worker's bg job is blocked, paused for a human prompt) | 'needs-human' (a
+// watchdog/phase escalation via a needs-human/needs-input label or the host-local
+// marker) | null. needs-human wins over waiting-on-you. DISTINCT from `held` (the
+// admission-gate blocked/waiting pair).
+export type BoardAttention = "waiting-on-you" | "needs-human" | null;
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
  *  the node-aware surfaces can attribute/group by host. `name` is the
  *  configurable host name (CATALYST_HOST_NAME / os.hostname() minus ".local");
@@ -127,6 +135,17 @@ export interface BoardTicket {
    *  its current state" anchor for the running set. null when the surfaced phase
    *  carried no startedAt. */
   currentPhaseSince: string | null;
+  /** CTL-729: the single needs-attention bucket — 'waiting-on-you' (live worker's
+   *  bg job blocked, paused for a human prompt) | 'needs-human' (a watchdog/phase
+   *  escalation via a needs-human/needs-input label or the host-local marker) |
+   *  null. needs-human wins. Drives the ONE yellow board accent + Inbox "Needs
+   *  you" section. DISTINCT from `held` (the admission-gate pair). */
+  attention: BoardAttention;
+  /** CTL-729: ISO timestamp the attention started — the worker's current-phase
+   *  start for waiting-on-you; null for needs-human (no durable label-applied
+   *  stamp is projected). The Inbox row anchors its duration to attentionSince ??
+   *  heldSince; null is rendered unavailable, never fabricated. */
+  attentionSince: string | null;
   /** CTL-922 (BFF10): the node owning this ticket, from the phase signals
    *  host:{name,id} (CTL-852) or the durable fence projection owner_host (BFF11).
    *  null when no host is named (single-host resolves to the one node). */
@@ -135,6 +154,25 @@ export interface BoardTicket {
    *  (BFF11) or the phase signal — the value a fence-aware web mutation passes to
    *  isFenceCurrent without a live attachment fetch. null when no fence. */
   generation: number | null;
+  /** CTL-1066: reason a stalled/failed phase gave up, from the surfaced phase
+   *  signal's stalledReason/failureReason. null unless status is stalled/failed. */
+  failureReason?: string | null;
+  /** CTL-1110: extended escalation explanation for the needs-human detail-pane
+   *  card. null/absent unless attention is needs-human and a signal carried the
+   *  extended fields. */
+  explanation?: BoardEscalationExplanation | null;
+}
+
+/** CTL-1110: the six extended escalation-explanation fields, surfaced as a nested
+ *  object for the detail pane's CTA-led card. Each field is null when the signal
+ *  omitted it (rendered absent, never fabricated). */
+export interface BoardEscalationExplanation {
+  call_to_action: string | null;
+  outcome: string | null;
+  problem: string | null;
+  why_you: string | null;
+  why_not_auto: string | null;
+  what_to_do: string | null;
 }
 
 export interface BoardQueueItem {
@@ -156,6 +194,9 @@ export interface BoardQueueItem {
   /** CTL-922 (BFF10): the node owning this queued ticket, from the durable fence
    *  projection owner_host (BFF11); null when no fence attachment observed. */
   host: BoardHostRef | null;
+  /** CTL-1066: active dispatch retry cool-down for this queued ticket; null when
+   *  not cooling down. expiresAt is epoch ms; consecutiveFailures is the attempt count. */
+  dispatchCooldown?: { expiresAt: number; consecutiveFailures: number } | null;
 }
 
 export interface BoardConfig {
@@ -176,6 +217,20 @@ export interface BoardConfig {
   dead?: number;
 }
 
+/** CTL-1050 §3.2: one current service outage, decorated onto the board payload
+ *  for the inbox awareness item. State-derived (current `down` entries only). */
+export interface BoardServiceOutage {
+  id: string;
+  label: string;
+  downSince: number | null;
+  detail: string | null;
+}
+
+export interface BoardServiceHealth {
+  generatedAt: number;
+  outages: BoardServiceOutage[];
+}
+
 export interface BoardPayload {
   generatedAt: string;
   config: BoardConfig;
@@ -183,6 +238,9 @@ export interface BoardPayload {
   workers: BoardWorker[];
   tickets: BoardTicket[];
   queue: BoardQueueItem[];
+  /** CTL-1050: server-decorated current service outages (down only). Absent when
+   *  the registry has not resolved any down entry. */
+  serviceHealth?: BoardServiceHealth;
 }
 
 export const PHASE_ORDER: string[];
@@ -201,6 +259,21 @@ export const PIPELINE_DONE_PHASE: string;
 export const HELD_LABEL_BLOCKED: string;
 export const HELD_LABEL_WAITING: string;
 export function heldFor(labels: unknown): "blocked" | "waiting" | null;
+
+/** CTL-729: the escalation labels that trigger attention 'needs-human'. */
+export const ATTENTION_LABEL_NEEDS_HUMAN: string;
+export const ATTENTION_LABEL_NEEDS_INPUT: string;
+/** CTL-729: PURE classifier for the single needs-attention bucket. needs-human
+ *  (a needs-human/needs-input label OR the host-local marker) WINS over
+ *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning
+ *  reason; null when that reason carries no durable stamp (never fabricated). */
+export function deriveAttention(opts?: {
+  waitingOnUser?: boolean;
+  labels?: unknown;
+  needsHumanMarker?: boolean;
+  waitingSince?: string | null;
+  needsHumanSince?: string | null;
+}): { attention: BoardAttention; attentionSince: string | null };
 
 /** CTL-928: a single ticket's lane on the queue board (live | between-phases |
  *  recent-done). Honors the terminal-intermediate vs pipeline-done distinction. */
@@ -277,6 +350,34 @@ export function synthesizeQueuedTicket(
   eligible: unknown,
   linfo: Record<string, unknown>,
 ): BoardTicket;
+/** CTL-1041: resolve a ticket's display TITLE (the outcome line — leads on every
+ *  surface). Priority: explicit triage.title → the authoritative Linear title
+ *  (linfo, then the eligible projection) → triage.summary (last-ditch) → the
+ *  ticket key. NEVER lets the triage summary (a description) stand in for a real
+ *  Linear title. */
+export function ticketTitle(
+  ticket: string,
+  triage: { title?: string | null; summary?: string | null } | null | undefined,
+  eligibleIndex: Record<string, { title?: string | null } | undefined>,
+  linfo?: Record<string, { title?: string | null } | undefined>,
+): string;
+/** CTL-1046: board IDs whose title is null in BOTH sources ticketTitle() consults
+ *  (durable linfo cache + eligible projection) — i.e. cross-team (ADV) records that
+ *  reach the payload via ticket_state (no title column) with no eligible entry.
+ *  De-duped, order preserved. */
+export function collectNullTitleIds(
+  boardIds: string[],
+  linfo?: Record<string, { title?: string | null } | undefined>,
+  eligibleIndex?: Record<string, { title?: string | null } | undefined>,
+): string[];
+/** CTL-1046: merge fetched Linear titles into linfo in-place (creates a linfo entry
+ *  for eligible-only tickets). A null fetched title is left untouched (honest null).
+ *  Returns the mutated linfo. */
+export function mergeTitleFallback(
+  linfo: Record<string, { title?: string | null } & Record<string, unknown>>,
+  nullTitleIds: string[],
+  fetched: Record<string, { title?: string | null } | undefined>,
+): Record<string, { title?: string | null } & Record<string, unknown>>;
 export function assembleBoard(): Promise<BoardPayload>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
@@ -306,3 +407,10 @@ export function peekTranscriptCache(sessionId: string): string | null;
  * Falls back to a single project-dir scan only on a cache miss.
  */
 export function resolveTranscript(sessionId: string): Promise<string | null>;
+
+/**
+ * CTL-954: derive the human-readable display string for an estimate value.
+ * Maps tShirt values to size labels ("XS"/"S"/"M"/"L"/"XL"), falls back to
+ * String(estimate) for other methods. Returns null when estimate is null.
+ */
+export function deriveEstimateDisplay(estimate: number | null, estimateMethod: string | null): string | null;

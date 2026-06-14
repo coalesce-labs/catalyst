@@ -60,6 +60,7 @@ new_fixture() {
 		mkdir -p .catalyst .claude
 		printf '{"committed":true}\n' >.catalyst/config.json
 		printf '{"claude":true}\n' >.claude/config.json
+		printf '{"sessionId":"seed","pid":1,"acquiredAt":0}\n' >.claude/scheduled_tasks.lock
 		git add -A
 		git commit --quiet -m "initial"
 		git push --quiet origin main
@@ -606,6 +607,166 @@ assert_eq '{"committed":false,"dirty":true}' "$(cat "$WORK/.catalyst/config.json
   "refresh: dirty noise restored after rebase"
 T18_BASE="no"; [[ -f "$WORK/upstream.txt" ]] && T18_BASE="yes"
 assert_eq "yes" "$T18_BASE" "refresh: worktree advanced onto new base"
+
+# ── 20. deleted tracked .claude/scheduled_tasks.lock → stashed noise, clean rebase
+echo "20. deleted scheduled_tasks.lock is settling-debris noise → rc 0"
+new_fixture t20
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # Simulate the dying worker: delete the tracked lock file (unstaged deletion).
+  rm -f .claude/scheduled_tasks.lock
+  rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t20.rc"
+  [[ -f upstream.txt ]] && echo yes >"$SCRATCH/t20.base" || echo no >"$SCRATCH/t20.base"
+  git diff --quiet && echo clean >"$SCRATCH/t20.tree" || echo dirty >"$SCRATCH/t20.tree"
+)
+assert_eq "0" "$(cat "$SCRATCH/t20.rc")" "deleted scheduled_tasks.lock → rc 0 (stashed as noise)"
+assert_eq "yes" "$(cat "$SCRATCH/t20.base")" "rebase still advanced onto new base"
+
+# ── 20b. noise_stash_push captures a deleted tracked noise path
+echo "20b. noise_stash_push stashes a deleted tracked noise file"
+new_fixture t20b
+(
+  cd "$WORK"
+  rm -f .claude/scheduled_tasks.lock           # tracked deletion, file absent on disk
+  marker="$(noise_stash_push)"
+  echo "$marker" >"$SCRATCH/t20b.marker"
+  git status --porcelain -- .claude/scheduled_tasks.lock >"$SCRATCH/t20b.afterpush"
+  noise_stash_pop "$marker"
+)
+assert_eq "1" "$(cat "$SCRATCH/t20b.marker")" "noise_stash_push reports the deleted noise stashed"
+assert_eq "" "$(cat "$SCRATCH/t20b.afterpush")" "deleted noise path clean after stash push"
+
+# ── 21. real uncommitted source still parks IMMEDIATELY (CTL-1068 preserved) ─
+echo "21. real source dirt → immediate rebase_refused_dirty_tree (no grace)"
+new_fixture t21
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  printf 'dirty-edit\n' >shared.txt            # real tracked source, uncommitted
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t21.rc"
+  echo "${REBASE_LAST_STALL_REASON:-}" >"$SCRATCH/t21.reason"
+  # 21b: capture RT_PRECHECK inside the subshell where it is set (CTL-1076 Phase 3)
+  printf '%s\n' "${RT_PRECHECK[@]+"${RT_PRECHECK[@]}"}" >"$SCRATCH/t21.files"
+)
+assert_eq "2" "$(cat "$SCRATCH/t21.rc")" "real source dirt → rc 2"
+assert_eq "rebase_refused_dirty_tree" "$(cat "$SCRATCH/t21.reason")" "real source → typed reason"
+
+# ── 21b. RT_PRECHECK carries offending file name after stall ──────────────────
+echo "21b. RT_PRECHECK carries offending file name after stall"
+assert_eq "shared.txt" "$(grep -Fx shared.txt "$SCRATCH/t21.files")" \
+  "RT_PRECHECK lists the dirty source file"
+
+# ── 22. settling-debris-only (untracked node_modules/) → grace re-probe → clean
+echo "22. untracked node_modules settling-debris → grace re-probe → rc 0"
+new_fixture t22
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  mkdir -p node_modules/pkg
+  printf 'junk\n' >node_modules/pkg/index.js   # untracked settling-debris
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t22.rc"
+  [[ -f upstream.txt ]] && echo yes >"$SCRATCH/t22.base" || echo no >"$SCRATCH/t22.base"
+)
+assert_eq "0" "$(cat "$SCRATCH/t22.rc")" "node_modules-only debris → rc 0 after grace re-probe"
+assert_eq "yes" "$(cat "$SCRATCH/t22.base")" "debris re-probe still advanced onto new base"
+
+# ── 23. mixed real source + debris → stalls (real source dominates) ──────────
+echo "23. real source + debris mixed → rc 2 (real source forces park)"
+new_fixture t23
+advance_origin_main_clean
+(
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  printf 'dirty-edit\n' >shared.txt            # real source
+  mkdir -p node_modules/pkg
+  printf 'junk\n' >node_modules/pkg/index.js   # debris
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t23.rc"
+)
+assert_eq "2" "$(cat "$SCRATCH/t23.rc")" "mixed source+debris → rc 2"
+
+# ── 24. _is_settling_debris_path matches debris, rejects source ───────────────
+echo "24. _is_settling_debris_path classification"
+for d in node_modules/pkg/index.js build/output.log foo.log .claude/scheduled_tasks.lock; do
+  if _is_settling_debris_path "$d"; then pass "_is_settling_debris_path $d → true"
+  else fail "_is_settling_debris_path $d → true (expected debris)"; fi
+done
+for s in src/index.ts shared.txt plugins/dev/scripts/foo.sh; do
+  if _is_settling_debris_path "$s"; then fail "_is_settling_debris_path $s → false (expected source)"
+  else pass "_is_settling_debris_path $s → false"; fi
+done
+
+# ── 25. CTL-1120: orch-monitor build artifact paths classify as settling-debris ─
+echo "25. _is_settling_debris_path — orch-monitor build artifacts (CTL-1120)"
+for d in \
+  plugins/dev/scripts/orch-monitor/public/assets/Board-4MoUfxM8.js \
+  plugins/dev/scripts/orch-monitor/public/assets/main-ynmsqRqh.css \
+  plugins/dev/scripts/orch-monitor/public/index.html \
+  orch-monitor/public/assets/main-abc123.js \
+  orch-monitor/public/index.html; do
+  if _is_settling_debris_path "$d"; then pass "_is_settling_debris_path $d → true"
+  else fail "_is_settling_debris_path $d → true (expected debris)"; fi
+done
+# real orch-monitor source must NOT be classified as debris
+for s in \
+  plugins/dev/scripts/orch-monitor/server.ts \
+  plugins/dev/scripts/orch-monitor/ui/src/main.tsx \
+  plugins/dev/scripts/orch-monitor/public/mockups/index.html \
+  plugins/dev/scripts/orch-monitor/public/favicon.svg; do
+  if _is_settling_debris_path "$s"; then fail "_is_settling_debris_path $s → false (expected source)"
+  else pass "_is_settling_debris_path $s → false"; fi
+done
+
+# ── 26. mixed orch-monitor artifact + real source still rc 2 ─────────────────
+echo "26. mixed orch-monitor artifact + real source → rc 2 (exclusive-artifact gate)"
+(
+  new_fixture t26
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # dirt: one real source change + one orch-monitor build artifact
+  printf 'dirty-edit\n' >shared.txt
+  mkdir -p plugins/dev/scripts/orch-monitor/public/assets
+  printf 'junk\n' >plugins/dev/scripts/orch-monitor/public/assets/main-fake.js
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t26.rc"
+)
+assert_eq "2" "$(cat "$SCRATCH/t26.rc")" "mixed source + orch-monitor artifact → rc 2"
+
+# ── 27. escalation-explain.mjs threads observed.dirtyFiles through unchanged ─
+echo "27. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1130, D1 passthrough)"
+EXPLAIN_MJS="${SCRIPT_DIR}/../../execution-core/escalation-explain.mjs"
+if [[ -f "$EXPLAIN_MJS" ]] && command -v node >/dev/null 2>&1; then
+  OBS='{"rebaseRc":2,"stallReason":"rebase_refused_dirty_tree","dirtyFiles":["shared.txt"]}'
+  EXPL_OUT="$(node "$EXPLAIN_MJS" \
+    --ticket CTL-1076 --phase plan \
+    --type decision \
+    --problem "rebase refused dirty tree: shared.txt has uncommitted changes" \
+    --call-to-action "resolve shared.txt by hand or discard the local edit and re-run?" \
+    --options '[{"label":"resolve","tradeoff":"manual merge work"},{"label":"discard","tradeoff":"lose local change to shared.txt"}]' \
+    --why-you "conflict resolution is a judgment call the agent cannot make unilaterally" \
+    --observed "$OBS" 2>/dev/null || echo '{}')"
+  assert_eq "shared.txt" \
+    "$(printf '%s' "$EXPL_OUT" | jq -r '.observed.dirtyFiles[0]' 2>/dev/null)" \
+    "escalation-explain: observed.dirtyFiles[0] passes through unchanged (D1)"
+else
+  echo "  SKIP: escalation-explain.mjs or node not available"
+fi
 
 echo
 echo "results: $PASSES passed, $FAILURES failed"

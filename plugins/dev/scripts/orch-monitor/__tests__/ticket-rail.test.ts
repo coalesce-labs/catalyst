@@ -3,15 +3,12 @@
 // asserted via static source analysis and the PURE helpers (state-icon mapping,
 // collapse-persistence round-trip, relation slice/show-more arithmetic) are
 // unit-tested directly.
-import { describe, it, expect, beforeEach } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { stateIconSpec } from "../ui/src/components/relation-state-icon";
 import {
-  railCollapseKey,
-  readRailCollapsed,
-  writeRailCollapsed,
   relationHiddenCount,
   RELATION_GROUP_LIMIT,
 } from "../ui/src/board/ticket-rail-model";
@@ -46,51 +43,24 @@ describe("stateIconSpec — pure, total Linear-state → icon mapping (CTL-1003)
   });
 });
 
-// ── collapse persistence — localStorage round-trip (§B1) ─────────────────────
-describe("rail collapse persistence — localStorage round-trip (CTL-1003)", () => {
-  // Minimal in-memory localStorage shim for the bun (no-DOM) runner.
-  beforeEach(() => {
-    const store = new Map<string, string>();
-    (globalThis as { localStorage?: Storage }).localStorage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-      clear: () => store.clear(),
-      key: () => null,
-      length: 0,
-    } as Storage;
+// ── collapse is per-entry transient state, NOT global localStorage (CTL-1049) ─
+describe("rail collapse is back-stack entry state, not the global leak (CTL-1049)", () => {
+  it("the rail no longer reads/writes the shared localStorage collapse key", () => {
+    // The old `catalyst.ticket-rail.<id>.collapsed` round-trip was GLOBAL: a
+    // section collapsed on ticket A stayed collapsed on ticket B. CTL-1049 sources
+    // collapse from the per-history-entry entry-state family instead — so the leak
+    // helpers and their localStorage key are gone from the rail entirely.
+    // (the leak helpers' call sites are gone; the entry-state doc comment may still
+    // NAME the retired key/helper, so we assert on the call sites + the import.)
+    expect(railSrc).not.toContain("readRailCollapsed(");
+    expect(railSrc).not.toContain("writeRailCollapsed(");
+    expect(railSrc).not.toMatch(/import[^;]*\bwriteRailCollapsed\b/);
   });
 
-  it("namespaces the key per section", () => {
-    expect(railCollapseKey("relations")).toBe("catalyst.ticket-rail.relations.collapsed");
-    expect(railCollapseKey("properties")).toBe("catalyst.ticket-rail.properties.collapsed");
-  });
-
-  it("defaults to open (not collapsed) when nothing is stored", () => {
-    expect(readRailCollapsed("relations")).toBe(false);
-  });
-
-  it("round-trips collapsed=true and back to open", () => {
-    writeRailCollapsed("relations", true);
-    expect(readRailCollapsed("relations")).toBe(true);
-    writeRailCollapsed("relations", false);
-    expect(readRailCollapsed("relations")).toBe(false);
-  });
-
-  it("fails open (default) when localStorage throws", () => {
-    (globalThis as { localStorage?: Storage }).localStorage = {
-      getItem: () => {
-        throw new Error("blocked");
-      },
-      setItem: () => {
-        throw new Error("blocked");
-      },
-      removeItem: () => {
-        throw new Error("blocked");
-      },
-    } as unknown as Storage;
-    expect(readRailCollapsed("relations")).toBe(false);
-    expect(() => writeRailCollapsed("relations", true)).not.toThrow();
+  it("the RailCard open-state comes from the entry-state family (railSectionExpanded)", () => {
+    expect(railSrc).toContain("useDetailEntryState");
+    expect(railSrc).toContain("railSectionExpanded(entryState, id)");
+    expect(railSrc).toContain("setRailSection(prev, id, next)");
   });
 });
 
@@ -119,15 +89,19 @@ describe("ticket-rail.tsx — floating cards + readable relations (CTL-1003)", (
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
 
-  it("each card is a collapsible floating card (bordered surface-1, persisted)", () => {
+  it("each card is a collapsible floating card (bordered surface-1, entry-state open)", () => {
     expect(railSrc).toContain("rounded-lg border border-border bg-surface-1");
     expect(railSrc).toContain("CollapsibleTrigger");
-    expect(railSrc).toContain("writeRailCollapsed");
+    // CTL-1049: the open-state now flows through the entry-state family setter.
+    expect(railSrc).toContain("setRailSection(prev, id, next)");
   });
 
-  it("the rail aside is transparent + no-scrollbar (floating cards, no rail panel)", () => {
-    expect(railSrc).toContain('className="no-scrollbar"');
+  it("the rail aside is transparent (floating cards, no rail panel / nested scroller)", () => {
+    // CTL-1048: the rail no longer owns a nested `overflowY:auto` scroller — the
+    // whole detail page is ONE scroll context on Shell's `data-shell-scroll`, so the
+    // old per-rail `cat-overlay-scroll` aside is gone (its scroll moved to Shell).
     expect(railSrc).toMatch(/background: "transparent"/);
+    expect(railSrc).not.toContain('className="cat-overlay-scroll"');
     expect(railSrc).not.toMatch(/borderLeft/);
   });
 

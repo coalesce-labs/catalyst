@@ -148,7 +148,7 @@ describe("defaultDispatch — worktreePath / expectedBranch wiring (CTL-615)", (
         phase: "implement",
         expectedWorktreePath: "/wt/CTL-9",
       },
-      s,
+      s
     );
     expect(r.code).toBe(0);
     expect(s.calls.some((c) => c[0] === "run")).toBe(true);
@@ -167,7 +167,7 @@ describe("defaultDispatch — worktreePath / expectedBranch wiring (CTL-615)", (
         phase: "implement",
         expectedWorktreePath: "/wt/CTL-9",
       },
-      s,
+      s
     );
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/revive-aborted-wrong-cwd/);
@@ -208,7 +208,7 @@ describe("defaultDispatch — resumeSession passthrough (CTL-658)", () => {
     const s = baseSeams();
     defaultDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement", resumeSession: "9f8e-uuid" },
-      s,
+      s
     );
     expect(s.calls[0].resumeSession).toBe("9f8e-uuid");
   });
@@ -235,8 +235,14 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
   test("appends --resume-session <uuid> when resumeSession is set", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
-      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", resumeSession: "9f8e-uuid" },
-      { spawn },
+      {
+        orchDir: "/ec",
+        ticket: "CTL-1",
+        phase: "implement",
+        worktreePath: "/wt/CTL-1",
+        resumeSession: "9f8e-uuid",
+      },
+      { spawn }
     );
     const { args } = spawn.calls[0];
     expect(args).toContain("--resume-session");
@@ -248,11 +254,20 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
-      { spawn },
+      { spawn }
     );
     const { args } = spawn.calls[0];
     expect(args).not.toContain("--resume-session");
-    expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
+    expect(args).toEqual([
+      "--phase",
+      "implement",
+      "--ticket",
+      "CTL-1",
+      "--orch-dir",
+      "/ec",
+      "--orch-id",
+      "CTL-1",
+    ]);
   });
 
   // CTL-990: an exec-looping phase-agent-dispatch (the recreate→rebase-refused
@@ -262,7 +277,7 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
       { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
-      { spawn },
+      { spawn }
     );
     const { opts } = spawn.calls[0];
     expect(opts.timeout).toBeGreaterThan(0);
@@ -275,7 +290,7 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     try {
       defaultRunPhaseAgent(
         { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
-        { spawn },
+        { spawn }
       );
     } finally {
       delete process.env.CATALYST_DISPATCH_TIMEOUT_MS;
@@ -292,12 +307,65 @@ describe("defaultRunPhaseAgent — spawn-arg construction (CTL-658)", () => {
     try {
       defaultRunPhaseAgent(
         { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
-        { spawn },
+        { spawn }
       );
     } finally {
       delete process.env.CATALYST_RECREATE_ATTEMPTED;
     }
     expect("CATALYST_RECREATE_ATTEMPTED" in spawn.calls[0].opts.env).toBe(false);
+  });
+});
+
+// CTL-1004 / CTL-1056 Bug 2: a failing dispatch must surface the captured
+// stderr + the spawn error code / kill signal so the scheduler's "dispatch
+// failed" log is diagnosable (today it logged a bare {ticket, code} with no
+// stderr). defaultRunPhaseAgent must thread res.error?.code (e.g. ETIMEDOUT) and
+// res.signal (e.g. SIGKILL from the CTL-990 timeout) into its result.
+describe("defaultRunPhaseAgent — failure diagnostics (CTL-1004/CTL-1056 Bug 2)", () => {
+  test("a spawn that exits non-zero returns its stderr verbatim", () => {
+    const spawn = () => ({ status: 2, stdout: "", stderr: "phase-agent-dispatch: prior artifact missing\n" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/prior artifact missing/);
+  });
+
+  test("a timeout (res.error ETIMEDOUT + res.signal SIGKILL) surfaces spawnError + signal", () => {
+    const err = new Error("spawnSync phase-agent-dispatch ETIMEDOUT");
+    err.code = "ETIMEDOUT";
+    const spawn = () => ({ error: err, signal: "SIGKILL", stdout: "", stderr: "partial output before kill" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(127);
+    expect(r.spawnError).toBe("ETIMEDOUT");
+    expect(r.signal).toBe("SIGKILL");
+    // stderr captured up to the kill must still be carried (not dropped for the error message).
+    expect(r.stderr).toMatch(/ETIMEDOUT|partial output before kill/);
+  });
+
+  test("a clean exit carries res.signal=null and no spawnError (keys absent)", () => {
+    const spawn = () => ({ status: 0, stdout: "ok", stderr: "", signal: null });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "research", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.code).toBe(0);
+    expect("spawnError" in r).toBe(false);
+    expect(r.signal == null).toBe(true);
+  });
+
+  test("a SIGKILL'd spawn without res.error still surfaces the signal", () => {
+    const spawn = () => ({ status: null, signal: "SIGKILL", stdout: "", stderr: "killed mid-run" });
+    const r = defaultRunPhaseAgent(
+      { orchDir: "/ec", ticket: "CTL-1", phase: "verify", worktreePath: "/wt/CTL-1" },
+      { spawn }
+    );
+    expect(r.signal).toBe("SIGKILL");
+    expect(r.stderr).toMatch(/killed mid-run/);
   });
 });
 
@@ -321,7 +389,10 @@ describe("dispatchTicket", () => {
   // CTL-705 Phase 3: resumeSession thread-through
   test("backward compat: no resumeSession → dispatch receives exactly {orchDir, ticket, phase}", () => {
     const calls = [];
-    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    const dispatch = (args) => {
+      calls.push(args);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
     expect(calls[0]).toEqual({ orchDir: "/orch", ticket: "CTL-1", phase: "triage" });
     expect("resumeSession" in calls[0]).toBe(false);
@@ -329,7 +400,10 @@ describe("dispatchTicket", () => {
 
   test("forwards resumeSession to dispatch when provided", () => {
     const calls = [];
-    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    const dispatch = (args) => {
+      calls.push(args);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, resumeSession: "uuid-123" });
     expect(calls[0].resumeSession).toBe("uuid-123");
   });
@@ -337,14 +411,20 @@ describe("dispatchTicket", () => {
   // CTL-549: handoffPath thread-through
   test("backward compat: no handoffPath → dispatch receives no handoffPath key", () => {
     const calls = [];
-    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    const dispatch = (args) => {
+      calls.push(args);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
     expect("handoffPath" in calls[0]).toBe(false);
   });
 
   test("forwards handoffPath to dispatch when provided", () => {
     const calls = [];
-    const dispatch = (args) => { calls.push(args); return { code: 0 }; };
+    const dispatch = (args) => {
+      calls.push(args);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, handoffPath: "/path/to/handoff.md" });
     expect(calls[0].handoffPath).toBe("/path/to/handoff.md");
   });
@@ -365,8 +445,14 @@ describe("defaultRunPhaseAgent — handoffPath env injection (CTL-549)", () => {
   test("sets CATALYST_HANDOFF_PATH when handoffPath provided", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
-      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", handoffPath: "/path/to/handoff.md" },
-      { spawn },
+      {
+        orchDir: "/ec",
+        ticket: "CTL-1",
+        phase: "implement",
+        worktreePath: "/wt/CTL-1",
+        handoffPath: "/path/to/handoff.md",
+      },
+      { spawn }
     );
     expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBe("/path/to/handoff.md");
   });
@@ -375,7 +461,7 @@ describe("defaultRunPhaseAgent — handoffPath env injection (CTL-549)", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
-      { spawn },
+      { spawn }
     );
     expect(spawn.calls[0].opts.env.CATALYST_HANDOFF_PATH).toBeUndefined();
   });
@@ -388,7 +474,10 @@ describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
     return {
       resolveProject: () => ({ repoRoot: "/repo" }),
       createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
-      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      runPhaseAgent: (args) => {
+        calls.push(args);
+        return { code: 0 };
+      },
       calls,
       handoffPath,
     };
@@ -398,7 +487,11 @@ describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
     const s = seams("/path/to/handoff.md");
     defaultDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement", handoffPath: "/path/to/handoff.md" },
-      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+      {
+        resolveProject: s.resolveProject,
+        createWorktree: s.createWorktree,
+        runPhaseAgent: s.runPhaseAgent,
+      }
     );
     expect(s.calls[0].handoffPath).toBe("/path/to/handoff.md");
   });
@@ -407,7 +500,11 @@ describe("defaultDispatch — handoffPath passthrough (CTL-549)", () => {
     const s = seams(undefined);
     defaultDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
-      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+      {
+        resolveProject: s.resolveProject,
+        createWorktree: s.createWorktree,
+        runPhaseAgent: s.runPhaseAgent,
+      }
     );
     expect(s.calls[0].handoffPath).toBeUndefined();
   });
@@ -428,8 +525,14 @@ describe("defaultRunPhaseAgent — attempt arg (CTL-761)", () => {
   test("forwards --attempt to phase-agent-dispatch when provided", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
-      { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1", attempt: 2 },
-      { spawn },
+      {
+        orchDir: "/ec",
+        ticket: "CTL-1",
+        phase: "implement",
+        worktreePath: "/wt/CTL-1",
+        attempt: 2,
+      },
+      { spawn }
     );
     const { args } = spawn.calls[0];
     expect(args).toContain("--attempt");
@@ -440,11 +543,20 @@ describe("defaultRunPhaseAgent — attempt arg (CTL-761)", () => {
     const spawn = spy();
     defaultRunPhaseAgent(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement", worktreePath: "/wt/CTL-1" },
-      { spawn },
+      { spawn }
     );
     const { args } = spawn.calls[0];
     expect(args).not.toContain("--attempt");
-    expect(args).toEqual(["--phase", "implement", "--ticket", "CTL-1", "--orch-dir", "/ec", "--orch-id", "CTL-1"]);
+    expect(args).toEqual([
+      "--phase",
+      "implement",
+      "--ticket",
+      "CTL-1",
+      "--orch-dir",
+      "/ec",
+      "--orch-id",
+      "CTL-1",
+    ]);
   });
 });
 
@@ -454,7 +566,10 @@ describe("defaultDispatch — attempt passthrough (CTL-761)", () => {
     return {
       resolveProject: () => ({ repoRoot: "/repo" }),
       createWorktree: () => ({ code: 0, worktreePath: "/wt/CTL-1" }),
-      runPhaseAgent: (args) => { calls.push(args); return { code: 0 }; },
+      runPhaseAgent: (args) => {
+        calls.push(args);
+        return { code: 0 };
+      },
       calls,
     };
   };
@@ -463,7 +578,11 @@ describe("defaultDispatch — attempt passthrough (CTL-761)", () => {
     const s = seams();
     defaultDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "plan", attempt: 3 },
-      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+      {
+        resolveProject: s.resolveProject,
+        createWorktree: s.createWorktree,
+        runPhaseAgent: s.runPhaseAgent,
+      }
     );
     expect(s.calls[0].attempt).toBe(3);
   });
@@ -472,7 +591,11 @@ describe("defaultDispatch — attempt passthrough (CTL-761)", () => {
     const s = seams();
     defaultDispatch(
       { orchDir: "/ec", ticket: "CTL-1", phase: "implement" },
-      { resolveProject: s.resolveProject, createWorktree: s.createWorktree, runPhaseAgent: s.runPhaseAgent },
+      {
+        resolveProject: s.resolveProject,
+        createWorktree: s.createWorktree,
+        runPhaseAgent: s.runPhaseAgent,
+      }
     );
     expect(s.calls[0].attempt).toBeUndefined();
   });
@@ -481,14 +604,20 @@ describe("defaultDispatch — attempt passthrough (CTL-761)", () => {
 describe("dispatchTicket — attempt thread-through (CTL-761)", () => {
   test("backward compat: no attempt → dispatch receives no attempt key", () => {
     const calls = [];
-    const dispatch = (a) => { calls.push(a); return { code: 0 }; };
+    const dispatch = (a) => {
+      calls.push(a);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "triage", { dispatch });
     expect("attempt" in calls[0]).toBe(false);
   });
 
   test("forwards attempt to dispatch when provided", () => {
     const calls = [];
-    const dispatch = (a) => { calls.push(a); return { code: 0 }; };
+    const dispatch = (a) => {
+      calls.push(a);
+      return { code: 0 };
+    };
     dispatchTicket("/orch", "CTL-1", "implement", { dispatch, attempt: 2 });
     expect(calls[0].attempt).toBe(2);
   });

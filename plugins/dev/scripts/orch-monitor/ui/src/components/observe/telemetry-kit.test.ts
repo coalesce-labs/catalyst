@@ -11,8 +11,11 @@ import {
   heroState,
   freshnessLabel,
   errorRateLabel,
+  errorChipCopy,
+  isReconnecting,
   HERO_TONE,
   FRESHNESS_FLOWING_MS,
+  MIN_ERRORS_FOR_RED,
 } from "./hero-state";
 import {
   isErrorRow,
@@ -43,68 +46,117 @@ function row(over: Partial<TailRow> = {}): TailRow {
   };
 }
 
-describe("heroState — the 4-state hero machine", () => {
+describe("heroState — the 4-state hero machine (CTL-1039 proportional)", () => {
   it("DARK when not configured (no-stack install)", () => {
     expect(
-      heroState({ lokiReachable: true, configured: false, freshnessMs: 1000, errorRate: 0 }),
+      heroState({ lokiSeverity: "up", configured: false, freshnessMs: 1000, errorRate: 0 }),
     ).toBe("DARK");
   });
 
-  it("DARK when Loki is explicitly unreachable", () => {
+  it("DARK when Loki severity is down (≥3 consecutive failures)", () => {
     expect(
-      heroState({ lokiReachable: false, freshnessMs: 1000, errorRate: 0 }),
+      heroState({ lokiSeverity: "down", freshnessMs: 1000, errorRate: 0 }),
     ).toBe("DARK");
   });
 
-  it("ERRORING when error-rate > 2%", () => {
+  it("ERRORING when rate > 2% AND ≥ MIN_ERRORS_FOR_RED errors in last 15m", () => {
     expect(
-      heroState({ lokiReachable: true, freshnessMs: 1000, errorRate: 0.05 }),
+      heroState({
+        lokiSeverity: "up",
+        freshnessMs: 1000,
+        errorRate: 0.05,
+        errorCount15m: MIN_ERRORS_FOR_RED,
+      }),
     ).toBe("ERRORING");
   });
 
-  it("reachability fault wins over a high error-rate (DARK, not ERRORING)", () => {
+  it("NOT ERRORING for 1 error / 50 req (2%) — only one error → NOTED/FLOWING", () => {
+    // 1 error / 50 requests = 2% rate but only ONE error → red criteria unmet.
     expect(
-      heroState({ lokiReachable: false, freshnessMs: 1000, errorRate: 0.9 }),
+      heroState({
+        lokiSeverity: "up",
+        freshnessMs: 1000,
+        errorRate: 1 / 50,
+        errorCount15m: 1,
+      }),
+    ).not.toBe("ERRORING");
+  });
+
+  it("a degraded severity does NOT make the hero DARK (the proportional fix)", () => {
+    // 1-2 failures / slow probe → quiet reconnecting hint; the hero keeps its
+    // last data-driven state (here FLOWING), never DARK.
+    expect(
+      heroState({ lokiSeverity: "degraded", freshnessMs: 2_000, errorRate: 0 }),
+    ).toBe("FLOWING");
+    expect(isReconnecting("degraded")).toBe(true);
+    expect(isReconnecting("down")).toBe(false);
+  });
+
+  it("reachability fault (down) wins over a high error-rate (DARK, not ERRORING)", () => {
+    expect(
+      heroState({
+        lokiSeverity: "down",
+        freshnessMs: 1000,
+        errorRate: 0.9,
+        errorCount15m: 100,
+      }),
     ).toBe("DARK");
   });
 
-  it("FLOWING when fresh (≤60s) and error-rate ≤ 2%", () => {
+  it("FLOWING when fresh (≤60s) and sub-threshold errors", () => {
     expect(
-      heroState({ lokiReachable: true, freshnessMs: 4_000, errorRate: 0.004 }),
+      heroState({ lokiSeverity: "up", freshnessMs: 4_000, errorRate: 0.004 }),
     ).toBe("FLOWING");
   });
 
   it("FLOWING exactly at the freshness threshold", () => {
     expect(
-      heroState({ lokiReachable: true, freshnessMs: FRESHNESS_FLOWING_MS, errorRate: 0 }),
+      heroState({ lokiSeverity: "up", freshnessMs: FRESHNESS_FLOWING_MS, errorRate: 0 }),
     ).toBe("FLOWING");
   });
 
   it("QUIET when reachable but no recent events (freshness null) — NOT an error", () => {
     expect(
-      heroState({ lokiReachable: true, freshnessMs: null, errorRate: null }),
+      heroState({ lokiSeverity: "up", freshnessMs: null, errorRate: null }),
     ).toBe("QUIET");
   });
 
   it("QUIET when reachable but events are stale (> 60s)", () => {
     expect(
-      heroState({ lokiReachable: true, freshnessMs: 300_000, errorRate: 0 }),
+      heroState({ lokiSeverity: "up", freshnessMs: 300_000, errorRate: 0 }),
     ).toBe("QUIET");
   });
 
-  it("optimistic (not DARK) while the probe is unresolved (lokiReachable null)", () => {
-    // null reachability → treated as reachable; fresh ⇒ FLOWING, not DARK.
+  it("optimistic (not DARK) while the probe is unresolved (lokiSeverity null)", () => {
     expect(
-      heroState({ lokiReachable: null, freshnessMs: 2_000, errorRate: 0 }),
+      heroState({ lokiSeverity: null, freshnessMs: 2_000, errorRate: 0 }),
     ).toBe("FLOWING");
   });
 
   it("QUIET maps to a NEUTRAL tone (never amber — §5 violation #1)", () => {
     expect(HERO_TONE.QUIET).toBe("neutral");
-    // Amber is reserved strictly for DARK.
     expect(HERO_TONE.DARK).toBe("stale");
     expect(HERO_TONE.FLOWING).toBe("ok");
     expect(HERO_TONE.ERRORING).toBe("err");
+  });
+});
+
+describe("errorChipCopy — NOTED neutral chip with EXPLICIT windows", () => {
+  it("0 errors today → '0 errors today'", () => {
+    expect(errorChipCopy(0, 0)).toBe("0 errors today");
+  });
+  it("1 error today, none in 15m → '1 error today'", () => {
+    expect(errorChipCopy(1, 0)).toBe("1 error today");
+  });
+  it("N errors today, none in 15m → 'N errors today'", () => {
+    expect(errorChipCopy(4, 0)).toBe("4 errors today");
+  });
+  it("N today with M in last 15m → states BOTH windows", () => {
+    expect(errorChipCopy(5, 2)).toBe("5 errors today · 2 in last 15m");
+  });
+  it("every copy names its window ('today' / 'last 15m')", () => {
+    expect(errorChipCopy(3, 1)).toContain("today");
+    expect(errorChipCopy(3, 1)).toContain("last 15m");
   });
 });
 

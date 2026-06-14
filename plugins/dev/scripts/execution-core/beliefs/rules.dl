@@ -1,0 +1,580 @@
+/* Stratum 1: ground correlations (read obs_* only) */
+
+extern R3 progress_evidence
+stratum 1
+@description The most recent positive evidence of work, taken as the max over heartbeat, transcript, and signal timestamps.
+@feeds R5
+@feeds R6
+@severity info
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH evidence(tick_id, subject, ts, ref, channel) AS (
+  -- signal updatedAt (always present for a running phase). ref is pre-TAGGED
+  -- per channel ('s'/'r'/'h') so the per-table fact_id collision can't bite.
+  SELECT t.tick_id, s.ticket || '/' || s.phase, s.updated_at_ms, 's' || s.fact_id, 'signal'
+  FROM tick t JOIN obs_signal s ON s.tick_id = t.tick_id
+  WHERE t.tick_id = :tick AND s.updated_at_ms IS NOT NULL
+  UNION ALL
+  -- transcript mtime, mapped phase←signal(bg)←agent(short)→transcript(session)
+  SELECT t.tick_id, s.ticket || '/' || s.phase, tr.mtime_ms, 'r' || tr.fact_id, 'transcript'
+  FROM tick t
+  JOIN obs_signal     s  ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+  JOIN obs_agent      a  ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id
+  JOIN obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id
+                        AND tr.exists_flag = 1 AND tr.mtime_ms IS NOT NULL
+  WHERE t.tick_id = :tick
+  UNION ALL
+  -- worker.heartbeat ts (own time axis; matched by ticket/phase)
+  SELECT t.tick_id, s.ticket || '/' || s.phase, h.ts_ms, 'h' || h.fact_id, 'heartbeat'
+  FROM tick t
+  JOIN obs_signal s ON s.tick_id = t.tick_id
+  JOIN obs_heartbeat h ON h.ticket = s.ticket AND h.phase = s.phase
+  WHERE t.tick_id = :tick
+)
+SELECT e.tick_id, 1, 'progress_evidence', e.subject,
+       json_object('ts_ms', mx.ts),
+       'R3', (SELECT json_group_array(ref) FROM evidence e2 WHERE e2.subject = e.subject)
+FROM evidence e
+JOIN (SELECT subject, MAX(ts) AS ts FROM evidence GROUP BY subject) mx
+  ON mx.subject = e.subject AND mx.ts = e.ts
+GROUP BY e.subject"""
+
+rule R1 session_registered
+stratum 1
+@description The signal's background job shows up in the live agents listing — the session is registered.
+@severity info
+@since 2026-06-09
+@ticket CTL-933
+@example
+  facts:
+    - table: obs_signal, row: {'ticket': 'CTL-X', 'phase': 'implement', 'status': 'running', 'bg_job_id': 'abc', 'started_at_ms': 1000}
+    - table: obs_agent, row: {'short_id': 'abc', 'kind': 'background', 'session_id': 'sess123'}
+  expect: {'name': 'session_registered', 'subject': 'CTL-X/implement', 'rule_id': 'R1'}
+  now: 2000
+subject: s.ticket || '/' || s.phase
+value: json_object('session_id', a.session_id, 'short_id', a.short_id)
+:-
+  tick t,
+  obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL,
+  obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id AND a.kind = 'background',
+  provenance [s:s.fact_id, a:a.fact_id].
+
+rule R2 turn_started
+stratum 1
+@description The session has produced a transcript, so its prompt actually became a running turn.
+@feeds R4
+@severity info
+@since 2026-06-09
+@ticket CTL-933
+subject: s.ticket || '/' || s.phase
+value: json_object('session_id', a.session_id, 'bytes', tr.bytes)
+:-
+  tick t,
+  obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL,
+  obs_agent a ON a.tick_id = t.tick_id AND a.short_id = s.bg_job_id,
+  obs_transcript tr ON tr.tick_id = t.tick_id AND tr.session_id = a.session_id AND tr.exists_flag = 1,
+  provenance [s:s.fact_id, a:a.fact_id, r:tr.fact_id].
+
+extern R7 worker_dead
+stratum 1
+@description Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.
+@feeds R4
+@feeds R5
+@feeds R6
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 1, 'worker_dead', s.ticket || '/' || s.phase,
+       json_object('reason',
+         CASE
+           WHEN j.exists_flag = 0 THEN 'job_gone'
+           WHEN j.first_terminal_at IS NOT NULL THEN 'first_terminal_at'
+           ELSE 'state:' || j.state
+         END),
+       'R7', json_array('s' || s.fact_id, 'j' || j.fact_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.bg_job_id IS NOT NULL
+JOIN obs_job    j ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id
+WHERE t.tick_id = :tick
+  AND ( j.exists_flag = 0
+     OR j.first_terminal_at IS NOT NULL
+     OR j.state IN ('stopped','failed','done','blocked') )"""
+
+/* Stratum 2: liveness verdicts (stratified negation over S1) */
+
+rule R4 wedged_never_started
+stratum 2
+@description A running phase whose session registered but never started a turn within never_started_ms — a never-started wedge.
+@feeds R10
+@cfg never_started_ms
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+@example
+  facts:
+    - table: obs_signal, row: {'ticket': 'CTL-X', 'phase': 'implement', 'status': 'running', 'bg_job_id': 'abc', 'started_at_ms': 1000}
+    - table: obs_agent, row: {'short_id': 'abc', 'kind': 'background', 'session_id': 'abc123'}
+    - table: cfg, row: {'key': 'never_started_ms', 'value_int': 60000}
+  expect: {'name': 'wedged_never_started', 'subject': 'CTL-X/implement', 'rule_id': 'R4'}
+  now: 1062000
+subject: s.ticket || '/' || s.phase
+:-
+  tick t,
+  obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running',
+  belief sr ON sr.tick_id = t.tick_id AND sr.name = 'session_registered' AND sr.subject = s.ticket || '/' || s.phase,
+  cfg c ON c.key = 'never_started_ms',
+  guard s.started_at_ms IS NOT NULL,
+  guard t.now_ms - s.started_at_ms > c.value_int,
+  not turn_started(sr.subject),
+  not worker_dead(sr.subject),
+  provenance [b:sr.belief_id, s:s.fact_id, t:t.tick_id].
+
+extern R5 lease_valid
+stratum 2
+@description The phase has progress evidence inside its freshness window, so its lease is still valid.
+@feeds R6
+@cfg lease_window_doc_ms
+@cfg lease_window_build_ms
+@severity info
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'lease_valid', s.ticket || '/' || s.phase,
+       json_object('evidence_ts_ms', CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER),
+                   'window_ms', win.value_int),
+       'R5', json_array('b' || pe.belief_id, 's' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN belief pe    ON pe.tick_id = t.tick_id AND pe.name = 'progress_evidence'
+                 AND pe.subject = s.ticket || '/' || s.phase
+JOIN cfg win ON win.key = CASE
+      WHEN s.phase IN ('triage','research','plan','pr','monitor-merge','monitor-deploy')
+        THEN 'lease_window_doc_ms' ELSE 'lease_window_build_ms' END
+WHERE t.tick_id = :tick
+  AND t.now_ms - CAST(json_extract(pe.value, '$.ts_ms') AS INTEGER) <= win.value_int
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"""
+
+extern R6 lease_expired
+stratum 2
+@description A running phase with no valid lease and not dead — its lease has expired (stalled-alive).
+@feeds R10
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'lease_expired', s.ticket || '/' || s.phase, 'R6',
+       json_array('s' || s.fact_id, 't' || t.tick_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'lease_valid' AND b.subject = s.ticket || '/' || s.phase)
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'worker_dead' AND b.subject = s.ticket || '/' || s.phase)"""
+
+extern R9 board_drift
+stratum 2
+@description The Linear board state disagrees with what the running phase is actually doing — board drift.
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 2, 'board_drift', s.ticket,
+       json_object('have', l.state, 'want', want.k, 'phase', s.phase),
+       'R9', json_array('s' || s.fact_id, 'l' || l.fact_id)
+FROM tick t
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.status = 'running'
+JOIN obs_linear l ON l.tick_id = t.tick_id AND l.ticket = s.ticket
+                 AND l.state IS NOT NULL
+JOIN (SELECT 'triage' AS phase, 'Research' AS k UNION ALL
+      SELECT 'research','Research' UNION ALL
+      SELECT 'plan','Plan' UNION ALL
+      SELECT 'implement','Implement' UNION ALL
+      SELECT 'verify','Validate' UNION ALL
+      SELECT 'review','Validate' UNION ALL
+      SELECT 'remediate','Validate' UNION ALL
+      SELECT 'pr','PR' UNION ALL
+      SELECT 'monitor-merge','PR' UNION ALL
+      SELECT 'monitor-deploy','PR') want ON want.phase = s.phase
+WHERE t.tick_id = :tick
+  AND l.state <> want.k
+  AND l.state NOT IN ('Done','Canceled','Cancelled')"""
+
+/* Stratum 3: capacity aggregation */
+
+extern R8 free_slots
+stratum 3
+@description Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.
+@cfg max_parallel
+@cfg session_cap
+@severity info
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 3, 'free_slots', 'host:' || t.host,
+       json_object(
+         'free_slots', MAX(0, MIN(mp.value_int - lv.n, sc.value_int - bg.n)),
+         'by_lease',   mp.value_int - lv.n,
+         'by_session_cap', sc.value_int - bg.n,
+         'max_parallel', mp.value_int,
+         'session_cap', sc.value_int,
+         'lease_valid_count', lv.n,
+         'bg_session_count', bg.n),
+       'R8',
+       json_array(
+         (SELECT json_group_array('b' || belief_id) FROM belief
+            WHERE tick_id = t.tick_id AND name = 'lease_valid'),
+         (SELECT json_group_array('a' || fact_id) FROM obs_agent
+            WHERE tick_id = t.tick_id AND kind = 'background'))
+FROM tick t
+JOIN cfg mp ON mp.key = 'max_parallel'
+JOIN cfg sc ON sc.key = 'session_cap'
+JOIN (SELECT COUNT(*) AS n FROM belief
+        WHERE tick_id = :tick AND name = 'lease_valid') lv
+JOIN (SELECT COUNT(*) AS n FROM obs_agent
+        WHERE tick_id = :tick AND kind = 'background') bg
+WHERE t.tick_id = :tick"""
+
+/* Stratum 4: escalation ladder (stratified negation over intent) */
+
+extern R10a wake_diagnostician
+stratum 4
+@description Wake the diagnostician for a never-started wedge (no cooldown intent in the window).
+@feeds R11
+@feeds R12
+@cfg diag_cooldown_ms
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'wake_diagnostician', w.subject,
+       json_object('reason', 'never-started'),
+       'R10', json_array('b' || w.belief_id)
+FROM tick t
+JOIN belief w ON w.tick_id = t.tick_id AND w.name = 'wedged_never_started'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (
+    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c
+    WHERE c.key = 'diag_cooldown_ms'
+      AND i.kind = 'wake-diagnostician' AND i.subject = w.subject
+      AND t.now_ms - it.now_ms <= c.value_int)"""
+
+extern R10b wake_diagnostician_stalled_alive
+stratum 4
+@description Wake the diagnostician for a stalled-alive phase whose job is still in the working state.
+@feeds R11
+@feeds R12
+@cfg diag_cooldown_ms
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'wake_diagnostician', le.subject,
+       json_object('reason', 'stalled-alive'),
+       'R10', json_array('b' || le.belief_id, 'j' || j.fact_id)
+FROM tick t
+JOIN belief le ON le.tick_id = t.tick_id AND le.name = 'lease_expired'
+JOIN obs_signal s ON s.tick_id = t.tick_id AND s.ticket || '/' || s.phase = le.subject
+JOIN obs_job   j  ON j.tick_id = t.tick_id AND j.bg_job_id = s.bg_job_id
+                 AND j.state = 'working'
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (SELECT 1 FROM belief b WHERE b.tick_id = t.tick_id
+                  AND b.name = 'wake_diagnostician' AND b.subject = le.subject)
+  AND NOT EXISTS (
+    SELECT 1 FROM intent i JOIN tick it ON it.tick_id = i.tick_id, cfg c
+    WHERE c.key = 'diag_cooldown_ms'
+      AND i.kind = 'wake-diagnostician' AND i.subject = le.subject
+      AND t.now_ms - it.now_ms <= c.value_int)"""
+
+extern R11 action_ineffective
+stratum 4
+@description An intent has exhausted its max_attempts with no outcome — the action proved ineffective.
+@feeds R12
+@cfg max_attempts
+@severity warn
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'action_ineffective', i.kind || ':' || i.subject,
+       json_object('kind', i.kind, 'attempts', i.attempts),
+       'R11', json_array('i' || i.intent_id)
+FROM tick t
+JOIN cfg c ON c.key = 'max_attempts'
+JOIN intent i ON i.outcome IS NULL AND i.attempts >= c.value_int
+WHERE t.tick_id = :tick"""
+
+extern R12 escalate_human
+stratum 4
+@description The diagnostician was woken and the action was ineffective, so the work escalates to a human.
+@severity error
+@since 2026-06-09
+@ticket CTL-933
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 4, 'escalate_human', wd.subject,
+       json_object('why', json_extract(wd.value, '$.reason')),
+       'R12', json_array('b' || wd.belief_id, 'b' || ai.belief_id)
+FROM tick t
+JOIN belief wd ON wd.tick_id = t.tick_id AND wd.name = 'wake_diagnostician'
+JOIN belief ai ON ai.tick_id = t.tick_id AND ai.name = 'action_ineffective'
+              AND ai.subject = 'wake-diagnostician:' || wd.subject
+WHERE t.tick_id = :tick"""
+
+/* Stratum 5: recursive dependency beliefs */
+
+extern R13 blocker_rank
+stratum 5
+@description A ticket's transitive blocker count, computed over the full dependency closure.
+@severity info
+@since 2026-06-09
+@ticket CTL-965
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+
+WITH RECURSIVE
+  edges(dependent, dependency, fact_id) AS (
+    SELECT target_ticket, source_ticket, fact_id
+      FROM obs_relation
+     WHERE tick_id = :tick AND relation_type = 'blocks'
+  ),
+  closure(dependent, dependency, depth) AS (
+    -- base: each direct edge (A depends_on B) is depth 1
+    SELECT dependent, dependency, 1 FROM edges
+    UNION
+    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C
+    SELECT c.dependent, e.dependency, c.depth + 1
+      FROM closure c
+      JOIN edges e ON e.dependent = c.dependency
+     WHERE c.depth < (SELECT COUNT(*) FROM edges) + 1
+  )
+SELECT :tick, 5, 'blocker_rank', cl.dependent,
+       json_object(
+         'rank', COUNT(DISTINCT cl.dependency),
+         'direct', (SELECT json_group_array(e.dependency)
+                      FROM edges e WHERE e.dependent = cl.dependent),
+         'transitive', json_group_array(DISTINCT cl.dependency)),
+       'R13',
+       (SELECT json_group_array('x' || e.fact_id)
+          FROM edges e WHERE e.dependent = cl.dependent)
+FROM closure cl
+GROUP BY cl.dependent"""
+
+extern R14 cycle_detected
+stratum 5
+@description A dependency cycle exists (A blocks B blocks A) in the relations graph.
+@severity error
+@since 2026-06-09
+@ticket CTL-965
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+
+WITH RECURSIVE
+  edges(dependent, dependency, fact_id) AS (
+    SELECT target_ticket, source_ticket, fact_id
+      FROM obs_relation
+     WHERE tick_id = :tick AND relation_type = 'blocks'
+  ),
+  closure(dependent, dependency, depth) AS (
+    -- base: each direct edge (A depends_on B) is depth 1
+    SELECT dependent, dependency, 1 FROM edges
+    UNION
+    -- step: A depends_on B, B depends_on C  ⇒  A depends_on C
+    SELECT c.dependent, e.dependency, c.depth + 1
+      FROM closure c
+      JOIN edges e ON e.dependent = c.dependency
+     WHERE c.depth < (SELECT COUNT(*) FROM edges) + 1
+  ),
+  -- A is in a cycle iff (A,A) is in the closure
+  self_cycle(t) AS (SELECT DISTINCT dependent FROM closure WHERE dependent = dependency)
+SELECT :tick, 5, 'cycle_detected', sc.t,
+       json_object('members',
+         (SELECT json_group_array(DISTINCT m) FROM (
+            SELECT sc.t AS m
+            UNION
+            -- every D that A reaches AND that reaches back to A
+            SELECT c1.dependency AS m
+              FROM closure c1
+              JOIN closure c2 ON c2.dependent = c1.dependency
+                             AND c2.dependency = sc.t
+             WHERE c1.dependent = sc.t
+         ))),
+       'R14',
+       (SELECT json_group_array('x' || e.fact_id) FROM edges e)
+FROM self_cycle sc"""
+
+extern R15 ready
+stratum 5
+@description A ticket is in an eligible state with every blocker done — it is ready to start.
+@cfg eligible_state
+@severity info
+@since 2026-06-09
+@ticket CTL-965
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+SELECT t.tick_id, 5, 'ready', la.ticket,
+       json_object('ready', 1),
+       'R15',
+       COALESCE(
+         (SELECT json_group_array('x' || r.fact_id)
+            FROM obs_relation r
+           WHERE r.tick_id = t.tick_id AND r.relation_type = 'blocks'
+             AND r.target_ticket = la.ticket),
+         json_array())
+FROM tick t
+JOIN cfg es ON es.key = 'eligible_state'
+JOIN obs_linear la ON la.tick_id = t.tick_id
+                  AND la.state IS NOT NULL
+                  AND la.state = es.value_text
+WHERE t.tick_id = :tick
+  AND NOT EXISTS (
+    -- a direct blocker B of A (obs_relation source=B, target=A) whose OWN
+    -- obs_linear state this tick is non-terminal
+    SELECT 1
+      FROM obs_relation r
+      JOIN obs_linear lb ON lb.tick_id = t.tick_id
+                        AND lb.ticket = r.source_ticket
+                        AND lb.state IS NOT NULL
+                        AND lb.state NOT IN ('Done','Canceled','Cancelled')
+     WHERE r.tick_id = t.tick_id
+       AND r.relation_type = 'blocks'
+       AND r.target_ticket = la.ticket)"""
+
+/* Stratum 6: FSM advancement prediction (CTL-966) */
+/* FSM values (fsmRankValues, nextPhaseValues, REMEDIATE_PHASE, REMEDIATE_CYCLE_CAP, TERMINAL_SUCCESS) */
+/* are spliced at generate time by compile-rules.mjs importing phase-fsm.mjs.                         */
+
+extern R16 advance_to
+stratum 6
+@description The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.
+@severity info
+@since 2026-06-09
+@ticket CTL-966
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),
+  nxt(cur, nextp) AS (VALUES ('triage', 'research'), ('research', 'plan'), ('plan', 'implement'), ('implement', 'verify'), ('verify', 'review'), ('review', 'pr'), ('pr', 'monitor-merge'), ('monitor-merge', 'monitor-deploy'), ('monitor-deploy', 'teardown'), ('teardown', 'done')),
+  -- latest(ticket) = the max-FSM-rank phase present in obs_signal this tick.
+  -- remediate is excluded by the rank JOIN (no rank row), matching the oracle's
+  -- PHASES-only latest-selection loop.
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  -- the latest row joined to its signal (for status + provenance) and the verdict
+  -- + cycle facts. There can be >1 obs_signal row for the latest phase only if a
+  -- producer wrote duplicates; the MIN(fact_id) picks one deterministically and
+  -- status is read from that same row.
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+-- arm A: verify→remediate detour
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', 'remediate'),
+       'R16',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   -- budget left: remediate_count < cap (count==cap-1 advances; count==cap does not)
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) < 3
+   -- remediate not already dispatched this cycle (no remediate signal present)
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = 'remediate')
+UNION ALL
+-- arm B: normal FSM edge
+SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
+       json_object('from', ls.phase, 'to', n.nextp),
+       'R16',
+       json_array('s' || ls.sig_fact_id)
+  FROM latest_sig ls
+  JOIN nxt n ON n.cur = ls.phase
+ WHERE ls.tick_id = :tick
+   -- advance-eligible: done, OR monitor-deploy skipped (CTL-703 carve-out)
+   AND ( ls.status = 'done'
+      OR (ls.status = 'skipped' AND ls.phase = 'monitor-deploy') )
+   -- NOT the verify→remediate detour (arm A owns it): a verify ticket with a
+   -- fail verdict short-circuits in the oracle and never takes verify→review.
+   AND NOT ( ls.phase = 'verify'
+             AND EXISTS (SELECT 1 FROM obs_verdict v
+                          WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail') )
+   -- next non-terminal (teardown→done suppresses the advance off teardown)
+   AND n.nextp <> 'done'
+   -- successor not already dispatched
+   AND NOT EXISTS (SELECT 1 FROM obs_signal s
+                    WHERE s.tick_id = ls.tick_id AND s.ticket = ls.ticket AND s.phase = n.nextp)"""
+
+extern R17 cycle_exhausted
+stratum 6
+@description The remediate count has reached its cap — no more retries; the cycle is exhausted.
+@severity error
+@since 2026-06-09
+@ticket CTL-966
+sql """
+INSERT OR IGNORE INTO belief (tick_id, stratum, name, subject, value, rule_id, source_fact_ids)
+WITH
+  rank(phase, r) AS (VALUES ('triage', 0), ('research', 1), ('plan', 2), ('implement', 3), ('verify', 4), ('review', 5), ('pr', 6), ('monitor-merge', 7), ('monitor-deploy', 8), ('teardown', 9)),
+  latest(tick_id, ticket, phase, r) AS (
+    SELECT s.tick_id, s.ticket, s.phase, rk.r
+      FROM obs_signal s
+      JOIN rank rk ON rk.phase = s.phase
+     WHERE s.tick_id = :tick
+       AND rk.r = (SELECT MAX(rk2.r)
+                     FROM obs_signal s2
+                     JOIN rank rk2 ON rk2.phase = s2.phase
+                    WHERE s2.tick_id = s.tick_id AND s2.ticket = s.ticket)
+  ),
+  latest_sig(tick_id, ticket, phase, status, sig_fact_id) AS (
+    SELECT l.tick_id, l.ticket, l.phase, s.status, MIN(s.fact_id)
+      FROM latest l
+      JOIN obs_signal s ON s.tick_id = l.tick_id AND s.ticket = l.ticket AND s.phase = l.phase
+     GROUP BY l.tick_id, l.ticket, l.phase, s.status
+  )
+SELECT ls.tick_id, 6, 'cycle_exhausted', ls.ticket,
+       json_object('phase', ls.phase, 'remediate_count',
+         COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                    WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0),
+         'cap', 3),
+       'R17',
+       json_array('s' || ls.sig_fact_id,
+                  (SELECT 'v' || v.fact_id FROM obs_verdict v
+                     WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket LIMIT 1),
+                  (SELECT 'c' || c.fact_id FROM obs_cycle c
+                     WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1))
+  FROM latest_sig ls
+ WHERE ls.tick_id = :tick
+   AND ls.phase = 'verify'
+   AND ls.status = 'done'
+   AND EXISTS (SELECT 1 FROM obs_verdict v
+                WHERE v.tick_id = ls.tick_id AND v.ticket = ls.ticket AND v.verdict = 'fail')
+   AND COALESCE((SELECT c.remediate_count FROM obs_cycle c
+                  WHERE c.tick_id = ls.tick_id AND c.ticket = ls.ticket LIMIT 1), 0) >= 3"""

@@ -12,6 +12,8 @@
 
 import type { BoardPayload, BoardTicket } from "./types";
 import { resolveList, type ListLens, type Ordering } from "./list-order";
+// CTL-1033: column accent colors come from the SINGLE canonical PHASE map.
+import { PHASE } from "./board-tokens";
 
 /** One board column definition: the filter key, its display label, accent color. */
 export interface BoardColumnDef {
@@ -22,15 +24,16 @@ export interface BoardColumnDef {
 
 // Lifted verbatim from Board.tsx (LINEAR_COLS / PHASE_COLS) — same keys, same
 // colors. LINEAR_COLS had no explicit labels (key === label); normalized here.
+// CTL-1033: the status lens (a.k.a. STATUS_COLUMNS) — accents from canonical PHASE.
 export const LINEAR_COLUMNS: readonly BoardColumnDef[] = [
-  { key: "Todo", label: "Todo", c: "#94a3b8" },
-  { key: "Triage", label: "Triage", c: "#64748b" },
-  { key: "Research", label: "Research", c: "#3b82f6" },
-  { key: "Plan", label: "Plan", c: "#a855f7" },
-  { key: "Implement", label: "Implement", c: "#10b981" },
-  { key: "Validate", label: "Validate", c: "#f59e0b" },
-  { key: "PR", label: "PR", c: "#14b8a6" },
-  { key: "Done", label: "Done", c: "#6b7280" },
+  { key: "Todo", label: "Todo", c: PHASE.todo },
+  { key: "Triage", label: "Triage", c: PHASE.triage },
+  { key: "Research", label: "Research", c: PHASE.research },
+  { key: "Plan", label: "Plan", c: PHASE.plan },
+  { key: "Implement", label: "Implement", c: PHASE.implement },
+  { key: "Validate", label: "Validate", c: PHASE.verify },
+  { key: "PR", label: "PR", c: PHASE.pr },
+  { key: "Done", label: "Done", c: PHASE.done },
 ];
 
 // CTL-972: PHASE_COLUMNS includes the ancillary 'remediate' phase between
@@ -38,17 +41,17 @@ export const LINEAR_COLUMNS: readonly BoardColumnDef[] = [
 // is a real phase-agent type that cycles with verify; its color matches Board.tsx
 // PHASE_C.remediate (#d98ab2, already defined there).
 export const PHASE_COLUMNS: readonly BoardColumnDef[] = [
-  { key: "triage", label: "Triage", c: "#64748b" },
-  { key: "research", label: "Research", c: "#3b82f6" },
-  { key: "plan", label: "Plan", c: "#a855f7" },
-  { key: "implement", label: "Implement", c: "#10b981" },
-  { key: "verify", label: "Verify", c: "#f59e0b" },
-  { key: "remediate", label: "Remediate", c: "#d98ab2" },
-  { key: "review", label: "Review", c: "#eab308" },
-  { key: "pr", label: "PR", c: "#14b8a6" },
-  { key: "monitor-merge", label: "Merge", c: "#4ea1ff" },
-  { key: "monitor-deploy", label: "Deploy", c: "#39d07a" },
-  { key: "teardown", label: "Teardown", c: "#6b7280" },
+  { key: "triage", label: "Triage", c: PHASE.triage },
+  { key: "research", label: "Research", c: PHASE.research },
+  { key: "plan", label: "Plan", c: PHASE.plan },
+  { key: "implement", label: "Implement", c: PHASE.implement },
+  { key: "verify", label: "Verify", c: PHASE.verify },
+  { key: "remediate", label: "Remediate", c: PHASE.remediate },
+  { key: "review", label: "Review", c: PHASE.review },
+  { key: "pr", label: "PR", c: PHASE.pr },
+  { key: "monitor-merge", label: "Merge", c: PHASE["monitor-merge"] },
+  { key: "monitor-deploy", label: "Deploy", c: PHASE["monitor-deploy"] },
+  { key: "teardown", label: "Teardown", c: PHASE.teardown },
 ];
 
 /** The display options that drive the ticket-column derivation (a subset of

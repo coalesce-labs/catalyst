@@ -20,9 +20,10 @@
 // The page surface drops its body into <DetailBody> and appends page-specific
 // Property rows below the shared rail divider; the shell never renders body panels.
 
-import { useCallback, useEffect, useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { useAtom, useSetAtom } from "jotai";
 import { useCanGoBack, useNavigate, useRouter } from "@tanstack/react-router";
+import { useDetailEntryState } from "../hooks/use-detail-entry-state";
 import {
   breadcrumbText,
   resolveBreadcrumb,
@@ -32,6 +33,7 @@ import {
   type LiveSignal,
   type PagerState,
 } from "./detail-chrome";
+import { C } from "./board-tokens";
 import {
   cheatsheetOpenAtom,
   listContextAtom,
@@ -40,22 +42,14 @@ import {
 } from "./nav-store";
 import type { DetailSearch } from "./route-search";
 import { useKeyboardNav } from "../hooks/use-keyboard-nav";
+import { canReturnViaBack } from "./detail-nav";
 import { ChevronUp, ChevronDown } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { HeaderActions } from "@/components/header-actions";
 
-// ── tokens (mirror Board.tsx's inline-`C` palette; DESIGN.md dark surfaces) ──
-const C = {
-  s0: "#0b0d10",
-  s1: "#111318",
-  border: "#262d36",
-  fg: "#e6e9ef",
-  fgMuted: "#8b93a1",
-  fgDim: "#5b626f",
-  green: "#39d07a",
-  red: "#ef5d5d",
-  mono: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-} as const;
+// ── tokens (CTL-1033: the ONE canonical palette from board-tokens.ts; the stale
+//    local ramp here was the cause of detail pages rendering darker than the
+//    sidebar — C.s1 is now the shared content canvas) ──────────────────────────
 
 // ── live-dot CSS (reuses the board's `catalyst-live-dot` breathing-ring keyframe,
 //    Board.tsx:118/121 — the SAME cyan signal, no new animation) ──────────────
@@ -326,6 +320,12 @@ function LiveDotTitle({ id, title, live }: { id: string; title: string | null; l
 // ── Properties rail ─────────────────────────────────────────────────────────
 function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNode }) {
   return (
+    // CTL-1048: the rail no longer owns its own scroller — it is a plain flex
+    // column inside the Shell's single scrolling body row, so a wheel gesture over
+    // it scrolls the whole page (it "chains" by construction; a short rail rides
+    // along, a tall rail extends the shared scrollHeight). No `overflowY` / no
+    // `cat-overlay-scroll` here, or it would re-split the scroll context and
+    // re-create the dead zone CTL-1048 fixes.
     <aside
       data-shell-rail
       style={{
@@ -334,7 +334,6 @@ function PropertiesRail({ rows, extra }: { rows: PropertyRow[]; extra?: ReactNod
         background: C.s1,
         borderLeft: `1px solid ${C.border}`,
         padding: "12px 14px",
-        overflowY: "auto",
       }}
     >
       {rows.map((r) => {
@@ -449,6 +448,57 @@ export function Shell({
   const navigate = useNavigate();
   const router = useRouter();
   const canGoBack = useCanGoBack();
+
+  // ── CTL-1049 back-stack entry state ─────────────────────────────────────────
+  // The shared scaffolding owns the SCROLL half of the convention: it saves the
+  // single detail scroller's (the scroll-body row) offset into the current history
+  // entry's state on scroll-idle, and restores it on mount when the entry already
+  // carries a non-default offset (a back/forward traverse). A fresh PUSH lands on
+  // a new entry key whose `scrollY` is 0, so the page opens at the top. Both detail
+  // pages inherit this because both render through this Shell — no per-page wiring.
+  const { key: entryKey, state: entryState, setState: setEntryState } = useDetailEntryState();
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Snapshot the restore target ONCE per entry key (a back/forward traverse), so
+  // the restore effect doesn't fight the live scroll writes that follow.
+  const restoreYRef = useRef<{ key: string; y: number } | null>(null);
+  if (restoreYRef.current?.key !== entryKey) {
+    restoreYRef.current = { key: entryKey, y: entryState.scrollY };
+  }
+
+  // Restore the saved offset when this entry mounts / changes (back/forward).
+  // Fresh push → scrollY 0 → a no-op (already at top). We restore AFTER paint so
+  // the body has its real scrollHeight; rAF avoids a layout-thrash on first frame.
+  useEffect(() => {
+    const el = scrollRef.current;
+    const target = restoreYRef.current;
+    if (!el || !target || target.y <= 0) return;
+    const raf = requestAnimationFrame(() => {
+      el.scrollTop = target.y;
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [entryKey]);
+
+  // Save the offset on scroll-idle (debounced) into THIS entry's state so a later
+  // back/forward traverse restores it. Debounced so a fling doesn't write on every
+  // frame; the trailing write captures the resting offset.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const onScroll = () => {
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => {
+        const y = el.scrollTop;
+        setEntryState((prev) => (prev.scrollY === y ? prev : { ...prev, scrollY: y }));
+      }, 120);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      if (idle) clearTimeout(idle);
+    };
+  }, [entryKey, setEntryState]);
+
   const [listContext, setListContext] = useAtom(listContextAtom);
   const recordRecent = useSetAtom(recordRecentAtom);
   // ── overlay open-state (CTL-916 / DETAIL5): the ⌘K palette + the `?` cheatsheet
@@ -512,12 +562,16 @@ export function Shell({
   // navigate forward to the originating surface route (Workers vs the Tickets
   // board, derived from `?from`). Display-options ride their own persisted atoms.
   const goRoot = useCallback(() => {
-    if (canGoBack) {
+    // CTL-1059: __TSR_index is the router-owned position in the history stack.
+    // On a cold deep-link it is 0/undefined even when useCanGoBack() is spuriously
+    // true, so we must NOT back() out of the tab to the prior `/` entry.
+    const tsrIndex = (router.state.location.state as { __TSR_index?: number })
+      .__TSR_index;
+    if (canReturnViaBack({ canGoBack, tsrIndex })) {
       router.history.back();
       return;
     }
-    // Cold deep-link (no back entry): forward to the originating surface route.
-    // A worker page returns to /workers; a ticket page to the Tickets board.
+    // Cold deep-link (or first entry): forward to the originating surface route.
     void navigate({ to: kind === "worker" ? "/workers" : "/board" });
   }, [canGoBack, router, navigate, kind]);
 
@@ -575,19 +629,23 @@ export function Shell({
   const footerContext = breadcrumbText(breadcrumbCtx);
 
   return (
-    // CTL-949 / CTL-989: `minHeight: "100vh"` is the viewport-fill safety net for
-    // deep-links (where the parent height chain may not be 100%). `height: "100%"`
-    // fills the container when the chain IS wired — the detail Shell now renders
-    // inside AppShell's <Outlet/> (a flex-col content slot), so the height chain is
-    // the AppShell inset. The two rules together mean the shell always fills at
-    // least the full viewport without capping shorter-than-viewport content.
+    // CTL-989: the detail Shell renders inside AppShell's <Outlet/> (a flex-col
+    // content slot, `flex min-h-0 flex-1` → its height IS the inset content area).
+    // CTL-1048: this outer div fills that slot EXACTLY (`height:100%`, `minHeight:0`
+    // so the flex child can shrink) and the SCROLL lives one level down on the body
+    // row — NOT here. The old `minHeight:"100vh"` + `overflow:"hidden"` made the
+    // shell taller than its clipped slot, so its only inner scroller was the narrow
+    // prose column; wheel input anywhere ELSE (rail, gutters, header padding) hit
+    // this overflow-hidden box with no scrollable ancestor and went dead. Removing
+    // both, and moving overflow to the full-width body row below, makes the entire
+    // detail viewport (prose + rail) ONE scroll context with no dead zones.
     <div
       data-detail-shell={kind}
       style={{
         display: "flex",
         flexDirection: "column",
         height: "100%",
-        minHeight: "100vh",
+        minHeight: 0,
         background: C.s1,
         color: C.fg,
         overflow: "hidden",
@@ -629,12 +687,25 @@ export function Shell({
         )
       )}
 
-      {/* Body row: <DetailBody> slot + Properties rail */}
-      <div style={{ display: "flex", flex: "1 1 auto", minHeight: 0 }}>
+      {/* Body row: <DetailBody> slot + Properties rail.
+          CTL-1048: THIS row is the single scroll context for the whole detail page.
+          It spans the full width (prose column + rail), so a wheel/trackpad gesture
+          anywhere over the page — prose, rail, or the gutter between them — scrolls
+          the same element. The prose column and the rail are plain (non-scrolling)
+          flex children inside it; neither owns its own `overflow` anymore, so there
+          is no dead zone and no overscroll-behavior trap (a short rail simply rides
+          along with the body). `min-h-0` lets it shrink below content height so the
+          overflow actually engages; `cat-overlay-scroll` keeps the CTL-1036 overlay
+          scrollbar styling on the new scroller. */}
+      <div
+        ref={scrollRef}
+        data-shell-scroll
+        className="cat-overlay-scroll"
+        style={{ display: "flex", flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
+      >
         <div
           data-shell-body
-          className="no-scrollbar"
-          style={{ flex: "1 1 auto", minWidth: 0, overflowY: "auto", padding: "14px 16px" }}
+          style={{ flex: "1 1 auto", minWidth: 0, padding: "14px 16px" }}
         >
           {/* CTL-1003 §A1: in bare mode the floating mono-key + live dot above the
               title is suppressed (the page <h1> + status row own the title). */}
