@@ -20,6 +20,24 @@ describe("strataTone", () => {
     const tones = [1, 2, 3, 4, 5, 6].map(strataTone);
     expect(new Set(tones).size).toBe(6);
   });
+
+  // CTL-1103 remediate (coverage): pin the modulo-wrap branch — tests previously
+  // only exercised ids 1–6 (the non-wrapping range), leaving the (id - 1) % 6
+  // wraparound for id > 6 and the defensive id <= 0 path unasserted.
+  it("wraps id 7 back to id 1 (modulo over the 6 strata)", () => {
+    expect(strataTone(7)).toBe(strataTone(1));
+    expect(strataTone(8)).toBe(strataTone(2));
+    expect(strataTone(12)).toBe(strataTone(6));
+  });
+
+  it("still returns a valid token for out-of-range ids", () => {
+    // The non-negative modulo keeps strataTone total: a bare `(id - 1) % 6`
+    // yields a negative index (→ undefined) for id <= 0. The contract is that
+    // strataTone always returns a token string, never undefined.
+    expect(typeof strataTone(0)).toBe("string");
+    expect(strataTone(0).length).toBeGreaterThan(0);
+    expect(typeof strataTone(-5)).toBe("string");
+  });
 });
 
 describe("severityTone", () => {

@@ -12,18 +12,80 @@ interface EntityRowProps {
   onOpenSource?: (ruleId: string) => void;
 }
 
+// CTL-1103 remediate: an explicit, discriminated row state. Previously a single
+// `trace: TraceResult | null` conflated three outcomes — (a) a 500/network
+// failure, (b) a genuinely empty trace, and (c) still loading — all rendering
+// the same "Loading…"/"No derivation available." text. In a governance audit
+// tool that falsely implied a firing rule had no traceable cause while masking a
+// real backend error. The states below keep those distinct.
+type RowState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "loaded"; trace: TraceResult };
+
 function EntityRow({ subject, onOpenSource }: EntityRowProps) {
   const [expanded, setExpanded] = useState(false);
-  const [trace, setTrace] = useState<TraceResult | null>(null);
+  const [state, setState] = useState<RowState>({ status: "idle" });
   const ticket = subjectToTicket(subject);
 
   useEffect(() => {
-    if (!expanded || !ticket) return;
-    fetch(`/api/beliefs/why?ticket=${encodeURIComponent(ticket)}`)
-      .then((r) => (r.ok ? (r.json() as Promise<unknown>) : null))
-      .then((d) => setTrace(isTraceResult(d) ? d : emptyTrace(ticket ?? "")))
-      .catch(() => setTrace(emptyTrace(ticket ?? "")));
+    // Reset to loading state on (re)expand so a re-expand never flashes the
+    // previous subject's trace; collapse resets back to idle.
+    if (!expanded || !ticket) {
+      setState({ status: "idle" });
+      return;
+    }
+    const controller = new AbortController();
+    let ignore = false;
+    setState({ status: "loading" });
+    fetch(`/api/beliefs/why?ticket=${encodeURIComponent(ticket)}`, {
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) {
+          throw new Error(`status ${r.status}`);
+        }
+        const d: unknown = await r.json();
+        if (ignore) return;
+        setState(
+          isTraceResult(d)
+            ? { status: "loaded", trace: d }
+            : { status: "loaded", trace: emptyTrace(ticket) },
+        );
+      })
+      .catch((e: unknown) => {
+        // AbortError fires on unmount/collapse — not a real failure to surface.
+        if (ignore || (e instanceof DOMException && e.name === "AbortError")) {
+          return;
+        }
+        setState({
+          status: "error",
+          message: e instanceof Error ? e.message : "request failed",
+        });
+      });
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
   }, [expanded, ticket]);
+
+  // CTL-1103 remediate: a subject with no parseable ticket (no '/') can never be
+  // fetched — the old code left it stuck on a perpetual "Loading…" spinner.
+  // Surface that it is not addressable instead of pretending to load.
+  if (ticket === null) {
+    return (
+      <div className="border-b last:border-0">
+        <div className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs opacity-60">
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+          <span className="font-mono text-xs">{subject}</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            not addressable (no ticket)
+          </span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="border-b last:border-0">
@@ -41,12 +103,16 @@ function EntityRow({ subject, onOpenSource }: EntityRowProps) {
       </button>
       {expanded && (
         <div className="px-3 pb-2">
-          {trace === null ? (
+          {state.status === "loading" || state.status === "idle" ? (
             <p className="text-xs text-muted-foreground">Loading…</p>
-          ) : trace.beliefs.length === 0 ? (
+          ) : state.status === "error" ? (
+            <p className="text-xs text-destructive">
+              Failed to load derivation ({state.message}).
+            </p>
+          ) : state.trace.beliefs.length === 0 ? (
             <p className="text-xs text-muted-foreground">No derivation available.</p>
           ) : (
-            <DerivationTree trace={trace} onOpenSource={onOpenSource} />
+            <DerivationTree trace={state.trace} onOpenSource={onOpenSource} />
           )}
         </div>
       )}

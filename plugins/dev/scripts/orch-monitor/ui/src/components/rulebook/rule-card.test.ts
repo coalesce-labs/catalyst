@@ -79,4 +79,53 @@ describe("ruleCardTabs", () => {
     const sql = tabs.find((t: RuleCardTab) => t.label === "SQL");
     expect(sql?.content).toBe(EXTERN_RULE.arms[0].sql);
   });
+
+  // CTL-1103 remediate: multi-arm rules (e.g. R10 = R10a + R10b) must render
+  // EVERY arm, not just arms[0] — previously later arms were silently dropped,
+  // presenting partial governance logic as complete.
+  const MULTI_ARM_RULE: RuleManifestRule = {
+    ...BASE_RULE,
+    rule_id: "R10",
+    name: "wedged_or_stalled",
+    arms: [
+      {
+        arm_id: "R10a",
+        datalog: "wedged :- never_started(T).",
+        sql: "INSERT INTO belief SELECT 'wedged' ...",
+      },
+      {
+        arm_id: "R10b",
+        datalog: "stalled :- stalled_alive(T).",
+        sql: "INSERT INTO belief SELECT 'stalled' ...",
+      },
+    ],
+  };
+
+  it("SQL tab includes every arm for a multi-arm rule", () => {
+    const tabs = ruleCardTabs(MULTI_ARM_RULE);
+    const sql = tabs.find((t: RuleCardTab) => t.label === "SQL");
+    expect(sql?.content).toContain("R10a");
+    expect(sql?.content).toContain("R10b");
+    expect(sql?.content).toContain(MULTI_ARM_RULE.arms[0].sql as string);
+    expect(sql?.content).toContain(MULTI_ARM_RULE.arms[1].sql as string);
+  });
+
+  it("Datalog tab includes every arm for a multi-arm rule", () => {
+    const tabs = ruleCardTabs(MULTI_ARM_RULE);
+    const datalog = tabs.find((t: RuleCardTab) => t.label === "Datalog");
+    expect(datalog?.content).toContain("R10a");
+    expect(datalog?.content).toContain("R10b");
+    expect(datalog?.content).toContain(MULTI_ARM_RULE.arms[0].datalog as string);
+    expect(datalog?.content).toContain(MULTI_ARM_RULE.arms[1].datalog as string);
+    expect(datalog?.isExtern).toBe(false);
+  });
+
+  it("single-arm rules render the arm source verbatim (no heading)", () => {
+    const tabs = ruleCardTabs(BASE_RULE);
+    const sql = tabs.find((t: RuleCardTab) => t.label === "SQL");
+    const datalog = tabs.find((t: RuleCardTab) => t.label === "Datalog");
+    // Exactly the arm's content — no `-- arm_id` heading injected.
+    expect(sql?.content).toBe(BASE_RULE.arms[0].sql);
+    expect(datalog?.content).toBe(BASE_RULE.arms[0].datalog);
+  });
 });

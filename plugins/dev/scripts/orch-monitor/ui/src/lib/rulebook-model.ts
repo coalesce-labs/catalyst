@@ -76,7 +76,11 @@ export function groupRulesByStratum(manifest: RuleManifest): StratumGroup[] {
 
 const SEVERITY_TOKENS: Record<string, string> = {
   error: "text-destructive",
-  warn: "text-warning",
+  // CTL-1103 remediate: `text-warning` had no backing --warning/--color-warning
+  // token in app.css or the Tailwind theme, so warn-severity labels rendered
+  // colorless. Use the amber utility pair (mirrors the info token's blue pair) —
+  // a real, resolvable color distinct from error (destructive) and info (blue).
+  warn: "text-amber-600 dark:text-amber-400",
   info: "text-blue-600 dark:text-blue-400",
   "": "text-muted-foreground",
 };

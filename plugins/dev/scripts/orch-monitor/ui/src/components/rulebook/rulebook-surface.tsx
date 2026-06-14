@@ -48,18 +48,25 @@ function StratumSection({
       </div>
       {group.rules.map((rule) => {
         const count = firingCounts.get(rule.rule_id) ?? 0;
+        // CTL-1103 remediate: selection is scoped to the LiveIndicator badge (the
+        // dedicated header affordance) rather than wrapping the whole card in a
+        // <button>. That wrapper nested the card's Tabs buttons + feed/cfg anchors
+        // inside a button (invalid HTML) and let tab/anchor clicks bubble out as
+        // unintended rule selections. The badge only renders when count > 0, so
+        // selection stays gated on a firing rule exactly as before.
         return (
           <div key={rule.rule_id}>
-            <button
-              type="button"
-              className="w-full text-left"
-              onClick={() => count > 0 && onSelectRule(rule.rule_id)}
-            >
-              <RuleCard
-                rule={rule}
-                liveSlot={<LiveIndicator count={count} />}
-              />
-            </button>
+            <RuleCard
+              rule={rule}
+              liveSlot={
+                <LiveIndicator
+                  count={count}
+                  onSelect={
+                    count > 0 ? () => onSelectRule(rule.rule_id) : undefined
+                  }
+                />
+              }
+            />
           </div>
         );
       })}

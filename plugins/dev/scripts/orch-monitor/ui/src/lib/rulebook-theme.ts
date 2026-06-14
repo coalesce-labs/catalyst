@@ -16,9 +16,15 @@ const STRATA_VAR = [
   "var(--chart-6)",
 ] as const;
 
-/** CSS variable string for stratum id (1–6). Wraps --chart-N tokens. */
+/** CSS variable string for stratum id (1–6). Wraps --chart-N tokens.
+ *  CTL-1103 remediate: use a non-negative modulo so the helper is total — the
+ *  bare `(id - 1) % length` returned `undefined` for id <= 0 (JS yields a
+ *  negative index), breaking the "always a token" contract for defensive
+ *  callers. Real strata are 1–6; this just keeps unexpected ids from producing
+ *  `undefined`. */
 export function strataTone(id: number): string {
-  return STRATA_VAR[(id - 1) % STRATA_VAR.length];
+  const n = STRATA_VAR.length;
+  return STRATA_VAR[(((id - 1) % n) + n) % n];
 }
 
 /** CSS variable string for the live-indicator badge. Distinct from strata + severity. */
