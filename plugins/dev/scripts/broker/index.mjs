@@ -74,6 +74,7 @@ import {
   appendEvent,
   maybeEmitProseDisabled,
   startWatchdog,
+  startDriftCheckWatcher,
   clearDebounceTimers,
 } from "./router.mjs";
 import { seedTailer, startTailing, stopTailing, loadExistingRegistrations } from "./tailer.mjs";
@@ -147,6 +148,7 @@ export {
   __getPendingBatchForTest,
   __clearPendingBatchForTest,
   runWatchdogTick,
+  startDriftCheckWatcher,
   processEvent,
   handleWorkerStateChanged,
 } from "./router.mjs";
@@ -154,13 +156,19 @@ export { loadExistingRegistrations, getLastByteOffset } from "./tailer.mjs";
 // CTL-993: merge-to-main plugin-checkout refresh. router.mjs calls
 // handlePluginRefreshEvent in processEvent; the rest are pure units re-exported
 // through the barrel so the public import surface stays complete.
+// CTL-1161: added isDaemonLocalMergeSignal, refreshAllPluginCheckouts,
+// startPluginDriftCheck, PLUGIN_DRIFT_CHECK_INTERVAL_MS.
 export {
   resolvePluginCheckoutRoots,
   resolveRepoFullName,
   isThisRepoMergeEvent,
+  isDaemonLocalMergeSignal,
   refreshPluginCheckout,
+  refreshAllPluginCheckouts,
+  startPluginDriftCheck,
   handlePluginRefreshEvent,
   PLUGIN_REFRESH_THROTTLE_MS,
+  PLUGIN_DRIFT_CHECK_INTERVAL_MS,
   __clearThrottleForTest,
   CHECKOUT_LAG_FAILURE_THRESHOLD, // CTL-1106
   __clearLagStateForTest, // CTL-1106
@@ -465,6 +473,7 @@ function main() {
 
   startTailing();
   const watchdogId = startWatchdog();
+  const driftCheckId = startDriftCheckWatcher();
   log.info(
     {
       pid: process.pid,
@@ -486,6 +495,7 @@ function main() {
   const shutdown = (signal) => {
     stopTailing();
     clearInterval(watchdogId);
+    clearInterval(driftCheckId); // CTL-1161: drift-check backstop timer
     // CTL-529: the debounce timer handles are router module-internal.
     clearDebounceTimers();
     // CTL-351: emit a parallel shutdown event so subscribers can pair

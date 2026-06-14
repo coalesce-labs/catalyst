@@ -237,6 +237,13 @@ export function resolveRepoFullName({
 
 // --- merge-event matcher -----------------------------------------------------
 
+// Periodic drift-check backstop (CTL-1161). Covers merges that arrive with
+// neither a github webhook NOR a phase.monitor-merge.complete signal (manual /
+// out-of-pipeline merges), and any sustained lag. Longer than the 60 s throttle
+// so a tick landing right after an event-driven pull is a cheap no-op.
+export const PLUGIN_DRIFT_CHECK_INTERVAL_MS =
+  Number(process.env.CATALYST_PLUGIN_DRIFT_CHECK_INTERVAL_MS) || 300_000;
+
 // Read the repo identity from an event shape-agnostically: canonical envelopes
 // carry it at attributes["vcs.repository.name"], legacy flat events at
 // scope.repo (mirrors how router.summarizeEvent resolves repo).
@@ -264,6 +271,18 @@ export function isThisRepoMergeEvent(event, { repoFullName } = {}) {
   if (name === "github.pr.merged") return true;
   if (name === "github.push") return eventRefBranch(event) === "main";
   return false;
+}
+
+// Daemon-local merge signal: phase.monitor-merge.complete.<TICKET> is emitted
+// into THIS daemon's event log by every pipeline merge (phase-agent-emit-complete),
+// independently of GitHub webhook delivery. It carries no vcs.repository.name —
+// by construction every such event in this log is for this daemon's repo — so we
+// match on event name only and do NOT repo-match. Second, webhook-independent
+// trigger for CTL-1161 (the github.push/github.pr.merged path can be missed).
+// Ticket suffix must match: [A-Za-z][A-Za-z0-9_]*-\d+ (parity with router.mjs PHASE_EVENT_PATTERN).
+const MONITOR_MERGE_COMPLETE_RE = /^phase\.monitor-merge\.complete\.[A-Za-z][A-Za-z0-9_]*-\d+$/;
+export function isDaemonLocalMergeSignal(event) {
+  return MONITOR_MERGE_COMPLETE_RE.test(getEventName(event) ?? "");
 }
 
 // --- refresh ----------------------------------------------------------------
@@ -407,7 +426,9 @@ export function handlePluginRefreshEvent({
   loadedCommitRoot = null,
 }) {
   try {
-    if (!isThisRepoMergeEvent(event, { repoFullName })) return null;
+    const isMerge =
+      isThisRepoMergeEvent(event, { repoFullName }) || isDaemonLocalMergeSignal(event);
+    if (!isMerge) return null;
     const roots = resolvePluginCheckoutRoots({
       env,
       machineConfigPath,
@@ -425,4 +446,56 @@ export function handlePluginRefreshEvent({
     // pull failures are already surfaced as refresh_failed events above.
     return null;
   }
+}
+
+/**
+ * refreshAllPluginCheckouts — timer-driven analogue of handlePluginRefreshEvent's
+ * body, without the event gate. Resolves roots via resolvePluginCheckoutRoots and
+ * calls refreshPluginCheckout per root. Used by the periodic drift-check backstop
+ * (CTL-1161) to cover merges that arrive with neither a webhook nor a
+ * phase.monitor-merge.complete signal (manual/out-of-pipeline merges).
+ *
+ * Best-effort: returns [] on any resolution failure (never throws).
+ */
+export function refreshAllPluginCheckouts({
+  now = Date.now(),
+  env = process.env,
+  machineConfigPath,
+  repoConfigPath = null,
+  readFileFn,
+  gitToplevelFn,
+  gitFn,
+  emitFn,
+  loadedCommit = null,
+  loadedCommitRoot = null,
+} = {}) {
+  try {
+    const roots = resolvePluginCheckoutRoots({
+      env,
+      machineConfigPath,
+      repoConfigPath,
+      readFileFn,
+      gitToplevelFn,
+    });
+    const results = [];
+    for (const root of roots) {
+      results.push(refreshPluginCheckout({ root, now, gitFn, emitFn, loadedCommit, loadedCommitRoot }));
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * startPluginDriftCheck — thin, seam-injected wrapper around setInterval,
+ * mirroring startWatchdog (router.mjs:1780). Returns the timer handle so the
+ * caller can clearInterval on shutdown.
+ */
+export function startPluginDriftCheck({
+  intervalMs = PLUGIN_DRIFT_CHECK_INTERVAL_MS,
+  tickFn,
+  setIntervalFn = setInterval,
+} = {}) {
+  return setIntervalFn(tickFn, intervalMs);
 }
