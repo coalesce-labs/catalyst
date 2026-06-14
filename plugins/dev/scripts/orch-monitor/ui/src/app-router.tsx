@@ -96,6 +96,12 @@ const RulebookSurface = lazy(() =>
   })),
 );
 
+const ProcessRoute = lazy(() =>
+  import("./components/reason/process-route").then((m) => ({
+    default: m.ProcessRoute,
+  })),
+);
+
 // ── detail routes (code-split — the entry-split that forced board.html to ship
 //    them eagerly is gone, so split them now to keep the main bundle lean) ─────
 const TicketDetailRoute = lazy(() =>
@@ -253,6 +259,17 @@ const devopsRoute = createRoute({
   ),
 });
 
+// CTL-1101: REASON surface — Process (FSM machine map)
+const processRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/process",
+  component: () => (
+    <S>
+      <ProcessRoute />
+    </S>
+  ),
+});
+
 const rulebookRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/rules",
@@ -325,6 +342,7 @@ const routeTree = rootRoute.addChildren([
   finopsRoute,
   fleetopsRoute,
   devopsRoute,
+  processRoute,
   rulebookRoute,
   settingsRoute,
   ticketRoute,

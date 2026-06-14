@@ -31,6 +31,7 @@ export const SURFACE_PATH: Record<Surface, string> = {
   finops: "/finops",
   fleetops: "/fleetops",
   devops: "/devops",
+  process: "/process",
   rulebook: "/rules",
 };
 

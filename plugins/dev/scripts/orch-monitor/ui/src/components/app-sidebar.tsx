@@ -12,6 +12,7 @@ import {
   SettingsIcon,
   UsersIcon,
   WalletIcon,
+  WorkflowIcon,
 } from "lucide-react";
 
 import { useNavigate } from "@tanstack/react-router";
@@ -48,8 +49,8 @@ import {
   repoScopeAtom,
   navGroupsOpenAtom,
   navOverallOpenAtom,
-  navObserveOpenAtom,
   navReasonOpenAtom,
+  navObserveOpenAtom,
 } from "@/board/nav-store";
 import { useBoardSnapshot } from "@/hooks/use-board-snapshot";
 // CTL-961: per-project icon auto-detection (favicon from GitHub) + manual override.
@@ -193,8 +194,9 @@ const OBSERVE_SOON = [
   { label: "DevOps", icon: CodeIcon },
 ] as const;
 
-// ── REASON items (CTL-1103) ──────────────────────────────────────────────────
+// ── REASON items — Process FSM map (CTL-1101) + Rulebook (CTL-1103) ──────────
 const REASON_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
+  { surface: "process", label: "Process", icon: WorkflowIcon },
   { surface: "rulebook", label: "Rulebook", icon: BookOpenIcon },
 ];
 
@@ -253,8 +255,8 @@ export function AppSidebar() {
   // open-state (atomWithStorage), matching the per-project groups. Both default
   // open; a section force-renders open when it contains the active surface.
   const [overallOpen, setOverallOpen] = useAtom(navOverallOpenAtom);
-  const [observeOpen, setObserveOpen] = useAtom(navObserveOpenAtom);
   const [reasonOpen, setReasonOpen] = useAtom(navReasonOpenAtom);
+  const [observeOpen, setObserveOpen] = useAtom(navObserveOpenAtom);
   // CTL-945: consume from AppShell's shared contexts — no new EventSources opened.
   // CTL-896 / SHELL6 — the live nav signal off the read-model SSE projection.
   const nav = useNavSignalContext();
@@ -310,11 +312,12 @@ export function AppSidebar() {
     if (isMobile) setOpenMobile(false);
   }
 
-  // OBS-5: force the OBSERVE group open while a live OBSERVE surface is active.
-  const observeContainsActive = OBSERVE_LIVE.some(
+  // CTL-1101: force REASON open while a REASON surface is active.
+  const reasonContainsActive = REASON_LIVE.some(
     (item) => item.surface === surface,
   );
-  const reasonContainsActive = REASON_LIVE.some(
+  // OBS-5: force the OBSERVE group open while a live OBSERVE surface is active.
+  const observeContainsActive = OBSERVE_LIVE.some(
     (item) => item.surface === surface,
   );
 
@@ -662,6 +665,56 @@ export function AppSidebar() {
           );
         })}
 
+        {/* ── REASON — collapsible, defaults open — "Process" + "Rulebook" ─── */}
+        {/* CTL-1101: the REASON tier groups the two analytical/governance surfaces
+            (Process FSM map + Rulebook) below the per-project OPERATE groups and
+            above the OBSERVE analytics tier. Force-opens when a REASON surface is
+            the active route. */}
+        <Collapsible
+          open={reasonOpen || reasonContainsActive}
+          onOpenChange={(open) => {
+            if (!reasonContainsActive) setReasonOpen(open);
+          }}
+          className="group/reason"
+        >
+          <SidebarGroup className="px-1 pt-0">
+            <CollapsibleTrigger className={cn(GROUP_TRIGGER_BASE, "gap-1")}>
+              Reason
+              <ChevronRightIcon className="size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/reason:rotate-90" />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {REASON_LIVE.map((item) => {
+                    const active = surface === item.surface;
+                    const kb = surfaceKeybinding(item.surface);
+                    return (
+                      <SidebarMenuItem key={item.surface}>
+                        <SidebarMenuButton
+                          isActive={active}
+                          tooltip={kb ? `${item.label} · ${kb}` : item.label}
+                          onClick={() => go(item.surface)}
+                          data-keybinding={kb || undefined}
+                          className={cn(
+                            active
+                              ? "text-sidebar-primary"
+                              : "font-medium text-sidebar-foreground/72 hover:text-sidebar-foreground",
+                          )}
+                        >
+                          <span className="relative flex shrink-0 items-center justify-center">
+                            <item.icon className="size-4 shrink-0" />
+                          </span>
+                          <span>{item.label}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </CollapsibleContent>
+          </SidebarGroup>
+        </Collapsible>
+
         {/* ── OBSERVE — collapsible, defaults collapsed, "soon" items ──────── */}
         {/* CTL-977: natural-case "Observe", twistie on RIGHT to match project groups. */}
         {/* OBS-5: force-open when a live OBSERVE surface is active (e.g. reached via
@@ -734,51 +787,6 @@ export function AppSidebar() {
           </SidebarGroup>
         </Collapsible>
 
-        {/* ── REASON group (CTL-1103): Rulebook ──────────────────────────── */}
-        <Collapsible
-          open={reasonOpen || reasonContainsActive}
-          onOpenChange={(open) => {
-            if (!reasonContainsActive) setReasonOpen(open);
-          }}
-          className="group/reason"
-        >
-          <SidebarGroup className="px-1 pt-0">
-            <CollapsibleTrigger className={cn(GROUP_TRIGGER_BASE, "gap-1")}>
-              Reason
-              <ChevronRightIcon className="size-3 flex-shrink-0 transition-transform duration-200 group-data-[state=open]/reason:rotate-90" />
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <SidebarGroupContent>
-                <SidebarMenu>
-                  {REASON_LIVE.map((item) => {
-                    const active = surface === item.surface;
-                    const reasonKb = surfaceKeybinding(item.surface);
-                    return (
-                      <SidebarMenuItem key={item.surface}>
-                        <SidebarMenuButton
-                          isActive={active}
-                          tooltip={reasonKb ? `${item.label} · ${reasonKb}` : item.label}
-                          onClick={() => go(item.surface)}
-                          data-keybinding={reasonKb || undefined}
-                          className={cn(
-                            active
-                              ? "text-sidebar-primary"
-                              : "font-medium text-sidebar-foreground/72 hover:text-sidebar-foreground",
-                          )}
-                        >
-                          <span className="relative flex shrink-0 items-center justify-center">
-                            <item.icon className="size-4 shrink-0" />
-                          </span>
-                          <span>{item.label}</span>
-                        </SidebarMenuButton>
-                      </SidebarMenuItem>
-                    );
-                  })}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </CollapsibleContent>
-          </SidebarGroup>
-        </Collapsible>
       </SidebarContent>
 
       {/* ── FOOTER: node filter (multi-host only) + Settings ──────────────── */}

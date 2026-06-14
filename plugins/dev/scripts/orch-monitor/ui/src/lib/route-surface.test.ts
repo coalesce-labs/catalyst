@@ -25,6 +25,8 @@ describe("surfaceToPath", () => {
     expect(surfaceToPath("finops")).toBe("/finops");
     expect(surfaceToPath("fleetops")).toBe("/fleetops");
     expect(surfaceToPath("devops")).toBe("/devops");
+    expect(surfaceToPath("process")).toBe("/process");
+    expect(surfaceToPath("rulebook")).toBe("/rules");
   });
 
   it("has a path for EVERY declared surface (totality)", () => {

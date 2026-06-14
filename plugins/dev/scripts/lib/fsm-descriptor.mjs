@@ -26,8 +26,9 @@ import {
   ANCILLARY_PHASES,
   REMEDIATE_PHASE,
   REMEDIATE_CYCLE_CAP,
+  PHASE_LINEAR_KEY,
 } from "./workflow-descriptor.mjs";
-import { REVIVE_BUDGET, PARK_STATE, TERMINAL_FAILURE } from "./phase-fsm.mjs";
+import { REVIVE_BUDGET, PARK_STATE, TERMINAL_FAILURE, TERMINAL_LINEAR_KEY } from "./phase-fsm.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GUARDS_PATH = join(HERE, "fsm-guards.json");
@@ -211,6 +212,8 @@ export async function buildFsmDescriptor() {
       },
     ],
     transitions: enumerateTransitions(),
+    phaseLinearKey: PHASE_LINEAR_KEY,
+    terminalLinearKey: TERMINAL_LINEAR_KEY,
     descriptorSha,
     rulesSha,
   };

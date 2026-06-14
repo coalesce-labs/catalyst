@@ -17,7 +17,6 @@ const config: KnipConfig = {
     "ui/src/components/governance/derivation-tree.tsx",
     "ui/src/components/governance/governance-flags-chip.tsx",
     "ui/src/components/governance/journey-strip.tsx",
-    "ui/src/components/governance/source-sheet.tsx",
   ],
   workspaces: {
     ".": {

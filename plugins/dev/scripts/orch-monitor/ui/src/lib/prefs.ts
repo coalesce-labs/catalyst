@@ -29,6 +29,7 @@ export const LANDING_SURFACES: readonly Surface[] = SURFACES.filter(
     s !== "finops" &&
     s !== "fleetops" &&
     s !== "devops" &&
+    s !== "process" &&     // CTL-1101: REASON surfaces are not landing defaults
     s !== "rulebook",
 );
 

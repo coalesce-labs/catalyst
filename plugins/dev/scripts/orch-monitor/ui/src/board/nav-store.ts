@@ -84,12 +84,12 @@ export const navOverallOpenAtom = atomWithStorage<boolean>(
   "catalyst-nav-overall-v1",
   true,
 );
-export const navObserveOpenAtom = atomWithStorage<boolean>(
-  "catalyst-nav-observe-v1",
-  true,
-);
 export const navReasonOpenAtom = atomWithStorage<boolean>(
   "catalyst-nav-reason-v1",
+  true,
+);
+export const navObserveOpenAtom = atomWithStorage<boolean>(
+  "catalyst-nav-observe-v1",
   true,
 );
 

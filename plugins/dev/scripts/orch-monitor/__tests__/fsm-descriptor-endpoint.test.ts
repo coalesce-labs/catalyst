@@ -98,11 +98,17 @@ describe("GET /api/fsm/descriptor", () => {
     expect(body.transitions.some((t) => t.from === "remediate" && t.to === "verify")).toBe(true);
   });
 
-  it("at least one transition is classification:'unclassified'", async () => {
+  it("advance transitions are classification:'advance' (CTL-1101 P2: *->advance guard)", async () => {
+    // CTL-1101 P2 added *->advance to fsm-guards.json, classifying all 9 advance edges.
+    // Previously these were 'unclassified'; now they carry classification:'advance'.
     const body = await (await fetch(`${baseUrl}/api/fsm/descriptor`)).json() as {
-      transitions: Array<{ classification: string }>;
+      transitions: Array<{ kind: string; classification: string }>;
     };
-    expect(body.transitions.some((t) => t.classification === "unclassified")).toBe(true);
+    const advanceEdges = body.transitions.filter((t) => t.kind === "advance");
+    expect(advanceEdges.length).toBeGreaterThan(0);
+    for (const edge of advanceEdges) {
+      expect(edge.classification).toBe("advance");
+    }
   });
 
   it("transitions count matches enumerateTransitions() output", async () => {
