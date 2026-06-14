@@ -116,10 +116,10 @@ describe("Theme routes through the ONE theme system, @/lib/theme (CTL-911)", () 
   it("the Settings theme control reads/writes useTheme() from @/lib/theme", () => {
     expect(settingsSrc).toContain("useTheme");
     expect(settingsSrc).toContain("@/lib/theme");
-    // The control's options are the canonical THEMES + THEME_LABEL pair.
-    expect(settingsSrc).toContain("THEMES");
-    expect(settingsSrc).toContain("THEME_LABEL");
-    expect(settingsSrc).toContain("setTheme");
+    // CTL-1147: the control's options are the three-way THEME_PREFERENCES + PREFERENCE_LABEL pair.
+    expect(settingsSrc).toContain("THEME_PREFERENCES");
+    expect(settingsSrc).toContain("PREFERENCE_LABEL");
+    expect(settingsSrc).toContain("setPreference");
   });
 
   it("the theme control lives in Settings, not the sidebar footer (CTL-1052)", () => {

@@ -206,8 +206,9 @@ describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
     const settingsSrc = read("components/settings-surface.tsx");
     expect(settingsSrc).toContain("useTheme");
     expect(settingsSrc).toContain("@/lib/theme");
-    // The Appearance field reads `theme` and writes via the hook's setTheme.
-    expect(settingsSrc).toMatch(/onChange=\{\(v\)\s*=>\s*setTheme\(v\)\}/);
+    // CTL-1147: the Appearance field is now a three-way preference (system/dark/light);
+    // it reads `preference` and writes via the hook's setPreference.
+    expect(settingsSrc).toMatch(/onChange=\{\(v\)\s*=>\s*setPreference\(v as ThemePreference\)\}/);
     // The sidebar no longer owns the toggle.
     expect(sidebarSrc).not.toContain("toggleTheme");
   });

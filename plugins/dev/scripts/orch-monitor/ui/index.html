@@ -6,17 +6,20 @@
      stored slate brand needs the attribute set BEFORE first paint to avoid a
      brand FOUC (and the pre-existing mode FOUC). The inline <head> script below
      applies both from localStorage; class="dark" stays the static JS-disabled
-     fallback. -->
+     fallback.
+     CTL-1147: THREE-WAY appearance preference (system|dark|light). "system"
+     (and absent = fresh install default) defers to matchMedia
+     "prefers-color-scheme: dark" so the OS theme is honored FOUC-free. -->
 <html lang="en" class="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Catalyst Monitor</title>
     <link rel="icon" type="image/svg+xml" href="/public/favicon.svg" />
-    <!-- CTL-1099: pre-paint brand + mode resolve (FOUC fix). Runs before the
-         module loads (which is at end of <body>), so the right tokens are live
-         on first paint. try/catch is mandatory — localStorage throws in
-         private-mode / SSR. -->
+    <!-- CTL-1099/CTL-1147: pre-paint brand + mode resolve (FOUC fix). Runs
+         before the module loads (which is at end of <body>), so the right
+         tokens are live on first paint. try/catch is mandatory — localStorage
+         throws in private-mode / SSR. -->
     <script>
       try {
         var b = localStorage.getItem("catalyst:brand");
@@ -25,7 +28,13 @@
         var t = localStorage.getItem("catalyst:theme");
         var d = document.documentElement.classList;
         if (t === "light") d.remove("dark");
-        else d.add("dark");
+        else if (t === "dark") d.add("dark");
+        else {
+          // "system" or absent (fresh install default) → follow the OS.
+          var osDark = window.matchMedia
+            && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          if (osDark) d.add("dark"); else d.remove("dark");
+        }
       } catch (e) {}
     </script>
   </head>

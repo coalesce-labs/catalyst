@@ -23,7 +23,7 @@
 // reads left (blockers) → right (dependents). Applied synchronously before first
 // render so there is never a layout-jump frame.
 
-import { useCallback, useMemo, type MouseEvent } from "react";
+import { useCallback, useMemo, useState, useEffect, type MouseEvent } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ReactFlow,
@@ -57,6 +57,26 @@ const SUBGRAPH_NODE_HEIGHT = 68;
  * Run dagre LR layout over nodes + edges (in-place mutation on node.position).
  * Returns the laid-out nodes with updated x/y.
  */
+// CTL-1147: resolve a CSS custom property for SVG presentation attributes where
+// var(--…) may not resolve (e.g. React Flow Background color prop).
+function useCssVar(name: string): string {
+  const [val, setVal] = useState("");
+  useEffect(() => {
+    const read = () => {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      setVal(v);
+    };
+    read();
+    const obs = new MutationObserver(read);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-theme"],
+    });
+    return () => obs.disconnect();
+  }, [name]);
+  return val;
+}
+
 function applyDagreLayout(
   nodes: Node[],
   edges: Edge[],
@@ -239,6 +259,7 @@ export interface BacklogDepGraphProps {
 }
 
 export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
+  const dotColor = useCssVar("--border-subtle") || "rgba(255,255,255,0.07)";
   const navigate = useNavigate();
 
   // Build a reverse index: id → ids that list it in their blockers[]
@@ -356,7 +377,7 @@ export function BacklogDepGraph({ tickets, visibleIds }: BacklogDepGraphProps) {
       style={{ background: C.s1 }}
       proOptions={{ hideAttribution: false }}
     >
-      <Background color={C.borderSubtle} variant={BackgroundVariant.Dots} gap={20} size={1} />
+      <Background color={dotColor} variant={BackgroundVariant.Dots} gap={20} size={1} />
       <Controls style={{ background: C.s2, border: `1px solid ${C.border}` }} />
     </ReactFlow>
   );
@@ -375,6 +396,7 @@ export interface TicketDepSubGraphProps {
 }
 
 export function TicketDepSubGraph({ focusId, tickets, height = 340 }: TicketDepSubGraphProps) {
+  const dotColor = useCssVar("--border-subtle") || "rgba(255,255,255,0.07)";
   const navigate = useNavigate();
 
   const ticketById = useMemo(() => new Map(tickets.map((t) => [t.id, t])), [tickets]);
@@ -521,7 +543,7 @@ export function TicketDepSubGraph({ focusId, tickets, height = 340 }: TicketDepS
         style={{ background: C.s1 }}
         proOptions={{ hideAttribution: false }}
       >
-        <Background color={C.borderSubtle} variant={BackgroundVariant.Dots} gap={20} size={1} />
+        <Background color={dotColor} variant={BackgroundVariant.Dots} gap={20} size={1} />
         <Controls style={{ background: C.s2, border: `1px solid ${C.border}` }} />
       </ReactFlow>
     </div>

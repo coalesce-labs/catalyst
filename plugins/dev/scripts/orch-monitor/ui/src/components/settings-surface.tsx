@@ -7,7 +7,7 @@ import {
   ToggleGroupItem,
 } from "@/components/ui/toggle-group";
 import { useSidebar } from "@/components/ui/sidebar";
-import { THEMES, THEME_LABEL, useTheme } from "@/lib/theme";
+import { THEME_PREFERENCES, PREFERENCE_LABEL, useTheme, type ThemePreference } from "@/lib/theme";
 import { BRANDS, BRAND_LABEL, useBrand } from "@/lib/brand";
 import {
   LANDING_SURFACES,
@@ -131,10 +131,10 @@ export function SettingsSurface() {
   const patch = (d: Partial<BoardPrefs>) =>
     setBoardPrefs((p) => patchBoardPrefs(p, d));
 
-  // Theme — TWO orthogonal axes (CTL-1099):
-  //   MODE  → the SHELL3 theme system (`.dark` class + catalyst:theme key).
+  // Appearance — TWO orthogonal axes (CTL-1099/CTL-1147):
+  //   MODE  → THREE-WAY preference: system|dark|light (catalyst:theme key).
   //   BRAND → the CTL-1099 brand system (`data-theme` attr + catalyst:brand key).
-  const { theme, setTheme } = useTheme();
+  const { preference, setPreference } = useTheme();
   const { brand, setBrand } = useBrand();
 
   // Sidebar collapse — the shell's controlled provider (persisted by the
@@ -236,10 +236,10 @@ export function SettingsSurface() {
         >
           <Field
             label="Appearance"
-            hint="Dark or light mode — the footer toggle writes this same choice."
-            value={theme}
-            onChange={(v) => setTheme(v)}
-            options={THEMES.map((t) => ({ k: t, label: THEME_LABEL[t] }))}
+            hint="System follows your OS; Dark/Light pin the mode. The footer toggle writes this same choice."
+            value={preference}
+            onChange={(v) => setPreference(v as ThemePreference)}
+            options={THEME_PREFERENCES.map((p) => ({ k: p, label: PREFERENCE_LABEL[p] }))}
           />
           <Field
             label="Theme"
