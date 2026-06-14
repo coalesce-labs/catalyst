@@ -36,6 +36,20 @@ describe("liveIndicatorTone", () => {
     expect(typeof liveIndicatorTone(false)).toBe("string");
     expect(liveIndicatorTone(true).length).toBeGreaterThan(0);
   });
+
+  it("firing and not-firing tokens are distinct", () => {
+    expect(liveIndicatorTone(true)).not.toBe(liveIndicatorTone(false));
+  });
+
+  it("not-firing token does not alias any stratum or severity token", () => {
+    const notFiring = liveIndicatorTone(false);
+    for (const id of [1, 2, 3, 4, 5, 6]) {
+      expect(strataTone(id)).not.toBe(notFiring);
+    }
+    for (const sev of ["info", "warn", "error"]) {
+      expect(severityTone(sev)).not.toBe(notFiring);
+    }
+  });
 });
 
 describe("three visual channels are mutually distinct", () => {
