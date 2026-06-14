@@ -71,6 +71,9 @@ export interface BoardWorker {
    *  derived from the durable bg-job state "blocked" (Claude Code paused for
    *  user input / a permission grant). false/absent when not waiting. */
   waitingOnUser?: boolean;
+  /** CTL-1129: the daemon's Claude account email (from `claude auth status --json`).
+   *  null when the board-data layer could not resolve it. Optional for back-compat. */
+  ownerAccount?: string | null;
 }
 
 export interface BoardPhaseCost {
@@ -273,6 +276,10 @@ export interface BoardPayload {
   queue: BoardQueueItem[];
   /** CTL-1050: server-decorated current service outages (down only). */
   serviceHealth?: BoardServiceHealth;
+  /** CTL-1129: the operator identity — the orch-monitor host's Claude account email
+   *  (from `claude auth status --json`), for the View-in-Claude account-mismatch check.
+   *  null when unresolved. Optional so `ContractPayloadFitsUiView` stays assignable. */
+  daemonAccount?: string | null;
 }
 
 // ── SharedWorker ⇄ client message protocol (CTL-733 PR-2b) ──────────────────

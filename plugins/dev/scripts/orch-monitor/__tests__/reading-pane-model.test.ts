@@ -26,6 +26,7 @@ import {
   accentFor,
   aboutBlockFor,
   escalationExplanationFor,
+  accountMismatchFor,
 } from "../ui/src/board/reading-pane-model";
 import { deriveInbox, type InboxRow } from "../ui/src/board/home-inbox";
 import type { BoardPayload, BoardTicket, BoardWorker, DecisionOption } from "../ui/src/board/types";
@@ -350,5 +351,59 @@ describe("CTL-1110: escalationExplanationFor", () => {
   it("returns null for a waiting-on-you (non-escalated) row even if explanation is present", () => {
     const row = rowFor(mkTicket("CTL-4", { attention: "waiting-on-you", explanation: FULL_EXPL }));
     expect(escalationExplanationFor(row)).toBeNull();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// CTL-1129: View in Claude — account mismatch (ownerAccount projection + accountMismatchFor)
+// ════════════════════════════════════════════════════════════════════════════
+describe("View in Claude — account mismatch (CTL-1129)", () => {
+  const row = rowFor(mkTicket("CTL-642", { held: "waiting" }));
+
+  it("viewInClaudeFor carries ownerAccount from the matching worker", () => {
+    const workers = [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def", ownerAccount: "agent@x.com" })];
+    const link = viewInClaudeFor(row, workers);
+    expect(link).not.toBeNull();
+    expect(link?.ownerAccount).toBe("agent@x.com");
+  });
+
+  it("ownerAccount is null when the worker omits it (back-compat)", () => {
+    const workers = [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def" })];
+    const link = viewInClaudeFor(row, workers);
+    expect(link?.ownerAccount).toBeNull();
+  });
+
+  it("Scenario 1 (match) — no mismatch when both accounts are the same", () => {
+    const link = viewInClaudeFor(row, [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def", ownerAccount: "agent@x.com" })])!;
+    const result = accountMismatchFor(link, "agent@x.com");
+    expect(result.mismatch).toBe(false);
+  });
+
+  it("Scenario 2 (mismatch) — mismatch=true, ownerAccount, and resumeCommand on different accounts", () => {
+    const link = viewInClaudeFor(row, [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def", ownerAccount: "agent@x.com" })])!;
+    const result = accountMismatchFor(link, "operator@y.com");
+    expect(result.mismatch).toBe(true);
+    expect(result.ownerAccount).toBe("agent@x.com");
+    expect(result.resumeCommand).toBe("claude --resume abc-123-def");
+  });
+
+  it("fail-open when owner is null — no mismatch even if operator is known", () => {
+    const link = viewInClaudeFor(row, [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def" })])!;
+    const result = accountMismatchFor(link, "operator@y.com");
+    expect(result.mismatch).toBe(false);
+  });
+
+  it("fail-open when operator is null — no mismatch even if owner is known", () => {
+    const link = viewInClaudeFor(row, [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def", ownerAccount: "agent@x.com" })])!;
+    const result = accountMismatchFor(link, null);
+    expect(result.mismatch).toBe(false);
+  });
+
+  it("resumeCommand is always present regardless of match/mismatch", () => {
+    const link = viewInClaudeFor(row, [mkWorker({ ticket: "CTL-642", sessionId: "abc-123-def", ownerAccount: "agent@x.com" })])!;
+    const matchResult = accountMismatchFor(link, "agent@x.com");
+    expect(matchResult.resumeCommand).toBe("claude --resume abc-123-def");
+    const mismatchResult = accountMismatchFor(link, "operator@y.com");
+    expect(mismatchResult.resumeCommand).toBe("claude --resume abc-123-def");
   });
 });
