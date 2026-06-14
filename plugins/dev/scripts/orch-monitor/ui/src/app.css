@@ -164,11 +164,13 @@
   --border-subtle: #e7e1d4; /* hairline card edge on paper */
   --fg: #2b2722;
   --fg-muted: #76705f;
+  --fg-dim: #9c9683; /* CTL-1147: most-recessive ink on paper (lighter than muted) */
 
   /* CTL-1033: light card lift — soft warm shadows (no inset highlight; light
      elevation reads via shadow + the bright card paper, not a top edge). */
   --shadow-card: 0 1px 3px rgba(43, 39, 34, 0.08);
   --shadow-elevated: 0 8px 24px rgba(43, 39, 34, 0.16);
+  --shadow-tray: 0 1px 3px rgba(43, 39, 34, 0.06); /* CTL-1147: softer than card */
 
   --background: var(--surface-1);
   --foreground: var(--color-light-fg);
@@ -235,6 +237,7 @@
   --border-subtle: rgba(255, 255, 255, 0.07); /* card edges, in-card hairlines */
   --fg: #e9e5dc; /* textbook --ink */
   --fg-muted: #a39d91; /* textbook --ink-dim */
+  --fg-dim: #6f6a5f; /* CTL-1147: most-recessive ink on charcoal (= old C.fgDim) */
   /* warm-dark accent — terracotta (NOT amber). Drives --primary/--ring/--sidebar-primary. */
   --accent: #d28e63;
   /* CTL-1148: dark themes keep the accent fill (was data-[state=on]:bg-accent).
@@ -247,6 +250,7 @@
      bg is the PRIMARY lift (lightness); the shadow is the secondary signal. UNCHANGED. */
   --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
   --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-tray: 0 1px 3px rgba(0, 0, 0, 0.28); /* CTL-1147: = old TRAY_LIFT */
 
   --background: var(--surface-1); /* CTL-1013: canvas lightens one step (was s0) */
   --foreground: var(--color-fg);
@@ -325,9 +329,11 @@
   --border-subtle: rgba(255, 255, 255, 0.07);
   --fg: #edf1f7;
   --fg-muted: #9ba6b5;
+  --fg-dim: #6e7a8a; /* CTL-1147: slate-dark dim ink */
   --accent: #5e9ee8; /* slate-dark accent — Linear-graphite blue */
   --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
   --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --shadow-tray: 0 1px 3px rgba(0, 0, 0, 0.28); /* CTL-1147: matches warm-dark tray */
   --background: var(--surface-1);
   --foreground: var(--color-fg);
   --card: var(--surface-2);
