@@ -114,4 +114,20 @@ describe("CTL-1033 elevation ladder — semantic surfaces stack upward in both t
     expect(light).toContain("--background: var(--surface-1)");
     expect(light).toContain("--card: var(--surface-2)");
   });
+
+  it("CTL-1147: --fg-dim and --shadow-tray exist in both :root and .dark", () => {
+    const light = selectorBlock(":root");
+    const dark = selectorBlock(".dark");
+    expect(light).toContain("--fg-dim");
+    expect(dark).toContain("--fg-dim");
+    expect(light).toContain("--shadow-tray");
+    expect(dark).toContain("--shadow-tray");
+  });
+
+  it("CTL-1147: warm-light --fg-dim is more recessive (lighter) than --fg-muted on paper", () => {
+    const light = selectorBlock(":root");
+    expect(luminance(tokenHex(light, "--fg-dim"))).toBeGreaterThan(
+      luminance(tokenHex(light, "--fg-muted")),
+    );
+  });
 });

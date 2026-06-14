@@ -774,7 +774,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "left",
-            background: `linear-gradient(to right, ${C.s1}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to right, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
             marginRight: -32,
           }}
         />
@@ -837,7 +837,7 @@ export function SwimlaneBoard<T extends GroupableEntity>({
             pointerEvents: "none",
             zIndex: 10,
             float: "right",
-            background: `linear-gradient(to left, ${C.s1}cc 0%, transparent 100%)`,
+            background: `linear-gradient(to left, color-mix(in srgb, ${C.s1} 80%, transparent) 0%, transparent 100%)`,
             marginLeft: -32,
           }}
         />
