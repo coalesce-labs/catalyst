@@ -463,7 +463,7 @@ cmd_restart() {
   # Pass through all flags except --hotpatch (already applied above)
   local start_args=()
   for a in "$@"; do [[ "$a" != "--hotpatch" ]] && start_args+=("$a"); done
-  cmd_start "${start_args[@]}"
+  cmd_start "${start_args[@]+"${start_args[@]}"}"
 }
 
 # CTL-1084: read the latest node.boot payload from the unified event log.
