@@ -90,6 +90,11 @@ const DashboardSurface = lazy(() =>
     default: m.DashboardSurface,
   })),
 );
+const RulebookSurface = lazy(() =>
+  import("./components/rulebook/rulebook-surface").then((m) => ({
+    default: m.RulebookSurface,
+  })),
+);
 
 // ── detail routes (code-split — the entry-split that forced board.html to ship
 //    them eagerly is gone, so split them now to keep the main bundle lean) ─────
