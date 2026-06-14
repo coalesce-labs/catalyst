@@ -710,7 +710,46 @@ for s in src/index.ts shared.txt plugins/dev/scripts/foo.sh; do
   else pass "_is_settling_debris_path $s → false"; fi
 done
 
-# ── 25. escalation-explain.mjs threads observed.dirtyFiles through unchanged ─
+# ── 25. CTL-1120: orch-monitor build artifact paths classify as settling-debris ─
+echo "25. _is_settling_debris_path — orch-monitor build artifacts (CTL-1120)"
+for d in \
+  plugins/dev/scripts/orch-monitor/public/assets/Board-4MoUfxM8.js \
+  plugins/dev/scripts/orch-monitor/public/assets/main-ynmsqRqh.css \
+  plugins/dev/scripts/orch-monitor/public/index.html \
+  orch-monitor/public/assets/main-abc123.js \
+  orch-monitor/public/index.html; do
+  if _is_settling_debris_path "$d"; then pass "_is_settling_debris_path $d → true"
+  else fail "_is_settling_debris_path $d → true (expected debris)"; fi
+done
+# real orch-monitor source must NOT be classified as debris
+for s in \
+  plugins/dev/scripts/orch-monitor/server.ts \
+  plugins/dev/scripts/orch-monitor/ui/src/main.tsx \
+  plugins/dev/scripts/orch-monitor/public/mockups/index.html \
+  plugins/dev/scripts/orch-monitor/public/favicon.svg; do
+  if _is_settling_debris_path "$s"; then fail "_is_settling_debris_path $s → false (expected source)"
+  else pass "_is_settling_debris_path $s → false"; fi
+done
+
+# ── 26. mixed orch-monitor artifact + real source still rc 2 ─────────────────
+echo "26. mixed orch-monitor artifact + real source → rc 2 (exclusive-artifact gate)"
+(
+  new_fixture t26
+  cd "$WORK"
+  printf 'local-feature\n' >local.txt
+  git add -A && git commit --quiet -m "local feature"
+  # dirt: one real source change + one orch-monitor build artifact
+  printf 'dirty-edit\n' >shared.txt
+  mkdir -p plugins/dev/scripts/orch-monitor/public/assets
+  printf 'junk\n' >plugins/dev/scripts/orch-monitor/public/assets/main-fake.js
+  CATALYST_REBASE_GRACE_TOTAL_S=0 CATALYST_REBASE_GRACE_INTERVAL_S=0 \
+    rebase_onto_base_classified "main"
+  echo "$?" >"$SCRATCH/t26.rc"
+)
+assert_eq "2" "$(cat "$SCRATCH/t26.rc")" "mixed source + orch-monitor artifact → rc 2"
+
+# ── 27. escalation-explain.mjs threads observed.dirtyFiles through unchanged ─
+echo "27. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1076 Phase 3)"
 echo "25. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1076 Phase 3)"
 EXPLAIN_MJS="${SCRIPT_DIR}/../../execution-core/escalation-explain.mjs"
 if [[ -f "$EXPLAIN_MJS" ]] && command -v node >/dev/null 2>&1; then

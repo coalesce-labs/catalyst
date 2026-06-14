@@ -63,8 +63,11 @@ _is_settling_debris_path() {
   local f="$1"
   _is_noise_path "$f" && return 0
   case "$f" in
-    node_modules/*|*/node_modules/*) return 0 ;;
-    *.log)                           return 0 ;;
+    node_modules/*|*/node_modules/*)                                  return 0 ;;
+    *.log)                                                            return 0 ;;
+    # CTL-1120: orch-monitor vite build outputs are never real source.
+    */orch-monitor/public/assets/*|orch-monitor/public/assets/*)     return 0 ;;
+    */orch-monitor/public/index.html|orch-monitor/public/index.html) return 0 ;;
   esac
   return 1
 }
