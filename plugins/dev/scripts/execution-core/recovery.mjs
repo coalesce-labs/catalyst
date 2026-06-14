@@ -1966,9 +1966,8 @@ export function reclaimDeadWorkIfPossible(
     const escType = reasonToType(reason);
     const whyField = reasonToWhyField(reason, finalAttemptCount);
     let explanation;
-    try {
-      if (escType === "manual") {
-        explanation = buildExplanation({
+    const explanationFields = escType === "manual"
+      ? {
           escalation_type: "manual",
           problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
           call_to_action: extras?.call_to_action ?? `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
@@ -1978,9 +1977,8 @@ export function reclaimDeadWorkIfPossible(
           why_not_auto: whyField.value,
           observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
           attempts: extras?.attempts ?? [],
-        });
-      } else {
-        explanation = buildExplanation({
+        }
+      : {
           escalation_type: "authorization",
           problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
           call_to_action: extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
@@ -1991,13 +1989,13 @@ export function reclaimDeadWorkIfPossible(
           authorize_label: `retry ${ticket} ${phase}`,
           observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
           attempts: extras?.attempts ?? [],
-        });
-      }
+        };
+    try {
+      explanation = buildExplanation(explanationFields);
     } catch {
-      explanation = coerceExplanation(
-        { problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}` },
-        { ticket, phase, canExecute: escType !== "manual" },
-      );
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so observed/recommendation/risk (or the manual capability fields) survive.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: escType !== "manual" });
     }
     const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({

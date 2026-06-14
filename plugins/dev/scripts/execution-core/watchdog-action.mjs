@@ -103,24 +103,24 @@ export async function killHungWorker(
     if (SETTLED.has(cur.status)) return { outcome: "already-terminal" };
     // CTL-1130: AUTHORIZATION — agent can retry (revive budget); only risk stops it.
     let explanation;
+    const explanationFields = {
+      escalation_type: "authorization",
+      problem: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes`,
+      call_to_action: `restart ${ticket} ${phase} from scratch, or is this a known slow/flaky step (extend the threshold)?`,
+      recommendation: `restart ${ticket} ${phase} with a clean checkout`,
+      risk: `restarting discards ${Math.floor(elapsedMin)} minutes of elapsed work; ${commitCount} commits made`,
+      why_asking: "risk-authority gate, not a capability gap",
+      could_higher_tier_resolve: tierProducer(signal?.raw?.model),
+      authorize_label: `restart ${ticket} ${phase}`,
+      observed: { elapsedMin: Math.floor(elapsedMin), commitCount, bgJobId },
+      attempts: [],
+    };
     try {
-      explanation = buildExplanation({
-        escalation_type: "authorization",
-        problem: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes`,
-        call_to_action: `restart ${ticket} ${phase} from scratch, or is this a known slow/flaky step (extend the threshold)?`,
-        recommendation: `restart ${ticket} ${phase} with a clean checkout`,
-        risk: `restarting discards ${Math.floor(elapsedMin)} minutes of elapsed work; ${commitCount} commits made`,
-        why_asking: "risk-authority gate, not a capability gap",
-        could_higher_tier_resolve: tierProducer(signal?.raw?.model),
-        authorize_label: `restart ${ticket} ${phase}`,
-        observed: { elapsedMin: Math.floor(elapsedMin), commitCount, bgJobId },
-        attempts: [],
-      });
+      explanation = buildExplanation(explanationFields);
     } catch {
-      explanation = coerceExplanation(
-        { problem: `${phase} phase worker made no commits in ${Math.floor(elapsedMin)} minutes` },
-        { ticket, phase, canExecute: true },
-      );
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so the operator keeps observed/recommendation/risk evidence on the page.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: true });
     }
     const updated = {
       ...cur,

@@ -1788,28 +1788,28 @@ export function escalateDispatchExhausted(
   // priority call the scheduler cannot compute (D7). GATE 1 passes (re-dispatch
   // is possible), no single dominant option → tie-break is human preference.
   let explanation;
+  const explanationFields = {
+    escalation_type: "decision",
+    problem: `${phase} dispatch retries exhausted (${cause ?? code})`,
+    call_to_action: `${ticket}/${phase} dispatch has exhausted retries. Re-dispatch or abandon / re-scope?`,
+    options: [
+      {
+        label: `re-dispatch ${ticket}/${phase}`,
+        tradeoff: "may re-hit the same failure if root cause is unresolved",
+      },
+      {
+        label: "abandon / re-scope",
+        tradeoff: "loses partial progress toward current phase goals",
+      },
+    ],
+    why_you: `after ${cause ?? code ?? "exhausted retries"}, re-dispatch vs abandon is a priority call the scheduler cannot compute`,
+  };
   try {
-    explanation = buildExplanation({
-      escalation_type: "decision",
-      problem: `${phase} dispatch retries exhausted (${cause ?? code})`,
-      call_to_action: `${ticket}/${phase} dispatch has exhausted retries. Re-dispatch or abandon / re-scope?`,
-      options: [
-        {
-          label: `re-dispatch ${ticket}/${phase}`,
-          tradeoff: "may re-hit the same failure if root cause is unresolved",
-        },
-        {
-          label: "abandon / re-scope",
-          tradeoff: "loses partial progress toward current phase goals",
-        },
-      ],
-      why_you: `after ${cause ?? code ?? "exhausted retries"}, re-dispatch vs abandon is a priority call the scheduler cannot compute`,
-    });
+    explanation = buildExplanation(explanationFields);
   } catch {
-    explanation = coerceExplanation(
-      { problem: `${phase} dispatch retries exhausted (${cause ?? code})` },
-      { ticket, phase },
-    );
+    // CTL-1130: degrade with the full assembled fields (not just { problem })
+    // so the operator keeps the options/why_you decision context on the page.
+    explanation = coerceExplanation(explanationFields, { ticket, phase });
   }
   try {
     mkdirSync(dir, { recursive: true });
