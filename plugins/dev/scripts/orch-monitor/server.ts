@@ -12,6 +12,7 @@ import {
 import { readSessionStore } from "./lib/session-store";
 import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
+import { assembleBoard } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
 // CTL-896 (SHELL6): the dedicated nav-signal projection — worker count, queue
 // depth, board anomaly, and the local daemon-health dot — derived off the SAME
@@ -1166,7 +1167,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // CTL-733: one shared, reactively-recomputed board snapshot pushed over SSE
   // (/api/board/stream) — replaces per-tab polling of /api/board. Subscriber-
   // gated, so it does zero work when no board tab is open.
-  const boardSnapshot = createBoardSnapshotManager();
+  const boardSnapshot = createBoardSnapshotManager({
+    assemble: () => assembleBoard({ getPrStatus: (r, n) => prFetcher?.get(r, n) ?? null }),
+  });
 
   // CTL-896 (SHELL6): the local daemon-health reader for the footer health dot.
   //

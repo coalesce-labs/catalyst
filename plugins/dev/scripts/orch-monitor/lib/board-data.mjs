@@ -190,12 +190,17 @@ export function deriveAttention({
   needsHumanMarker = false,
   waitingSince = null,
   needsHumanSince = null,
+  prStuck = false,            // CTL-1158: PR in a real-blocker merge state ≥ 300 s
+  prStuckSince = null,
 } = {}) {
   const set = new Set(Array.isArray(labels) ? labels : []);
   const labelNeedsHuman = set.has(ATTENTION_LABEL_NEEDS_HUMAN) || set.has(ATTENTION_LABEL_NEEDS_INPUT);
-  const needsHuman = labelNeedsHuman || needsHumanMarker === true;
+  const needsHuman = labelNeedsHuman || needsHumanMarker === true || prStuck === true;
   if (needsHuman) {
-    return { attention: "needs-human", attentionSince: needsHumanSince ?? null };
+    // Label/marker stamp is the more authoritative anchor when present; the
+    // PR-stuck anchor is the fallback. needs-human (any source) outranks
+    // waiting-on-you.
+    return { attention: "needs-human", attentionSince: needsHumanSince ?? (prStuck ? prStuckSince : null) };
   }
   if (waitingOnUser === true) {
     return { attention: "waiting-on-you", attentionSince: waitingSince ?? null };
@@ -842,6 +847,45 @@ function prFor(prSigs) {
   return null;
 }
 
+// CTL-1158: the PR phase signal's startedAt — the "stuck since" anchor for the
+// 300 s gate. Same newest-first scan as prFor.
+function prStartedAt(prSigs) {
+  for (const sig of prSigs) {
+    if (sig?.pr?.number && sig.startedAt) return sig.startedAt;
+  }
+  return null;
+}
+
+// CTL-1158: PR merge states that warrant an operator row. Mirrors the "real
+// blocker" mapping in pr-variant.ts (DIRTY/BLOCKED/UNSTABLE). BEHIND is
+// excluded — the pipeline may auto-rebase it (transient).
+const PR_BLOCKER_STATES = new Set(["DIRTY", "BLOCKED", "UNSTABLE"]);
+const PR_STUCK_DEBOUNCE_MS = 300_000; // 300 s sustained-state gate
+
+export function isPrStuck(prStatus, prPhaseStartedAt, now) {
+  if (!prStatus) return false;
+  const { state, mergeStateStatus } = prStatus;
+  if (state && state !== "OPEN" && state !== "UNKNOWN") return false;
+  if (!PR_BLOCKER_STATES.has(mergeStateStatus)) return false;
+  const startedMs = prPhaseStartedAt ? Date.parse(prPhaseStartedAt) : NaN;
+  if (Number.isNaN(startedMs)) return false;
+  return now - startedMs >= PR_STUCK_DEBOUNCE_MS;
+}
+
+export function prStuckReason(mergeStateStatus, prNumber) {
+  const n = prNumber ? `#${prNumber}` : "the PR";
+  switch (mergeStateStatus) {
+    case "DIRTY":
+      return `PR ${n} has a merge conflict the pipeline couldn't auto-resolve — decide which change wins`;
+    case "BLOCKED":
+      return `PR ${n} is blocked by a failing required check or branch-protection rule`;
+    case "UNSTABLE":
+      return `PR ${n} has a failing check — review before it can merge`;
+    default:
+      return null;
+  }
+}
+
 // ── Linear enrichment: priority / estimate / project / labels / relations /
 // assignee, read EXCLUSIVELY from the broker's durable caches (CTL-883).
 //
@@ -1035,7 +1079,7 @@ async function loadDispatchCooldowns(now) {
 }
 
 // ── main assembly ───────────────────────────────────────────────────────────
-export async function assembleBoard() {
+export async function assembleBoard({ getPrStatus = null } = {}) {
   const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
     catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
@@ -1224,18 +1268,26 @@ export async function assembleBoard() {
     const cur = derivePhaseWithRemediate(phaseSigs, remediateSig);
     const phaseSummary = buildPhaseSummary(phaseSigs, now);
     const live = inFlightTickets.get(id);
+    // CTL-1158: PR-stuck attention signal. getPrStatus is an O(1) in-memory lookup
+    // on the PrStatusFetcher cache — no extra gh calls, negligible cost.
+    const prNumber = prFor(prSigs);
+    const prPhaseStartedAt = prStartedAt(prSigs);
+    const prStatus = getPrStatus && prNumber != null ? getPrStatus(repoFor(id), prNumber) : null;
+    const prStuck = isPrStuck(prStatus, prPhaseStartedAt, now);
+    const prReason = prStuck ? prStuckReason(prStatus?.mergeStateStatus, prNumber) : null;
     // CTL-729: the single needs-attention bucket (waiting-on-you ∪ needs-human),
     // merging the live worker's blocked-bg-job flag, the needs-human/needs-input
-    // Linear labels (CTL-1031 webhook fold), and the host-local needs-human marker.
-    // The waiting-on-you anchor is the worker's current-phase start (how long it
-    // has been parked); the needs-human anchor falls back to heldSince downstream
-    // (no separate label-applied stamp is projected) → null here (honest).
+    // Linear labels (CTL-1031 webhook fold), the host-local needs-human marker,
+    // and the CTL-1158 PR-stuck signal. The waiting-on-you anchor is the worker's
+    // current-phase start; the needs-human anchor falls back to heldSince downstream.
     const attn = deriveAttention({
       waitingOnUser: live?.waitingOnUser ?? false,
       labels: linfo[id]?.labels,
       needsHumanMarker,
       waitingSince: cur.startedAt ?? null,
       needsHumanSince: null,
+      prStuck,
+      prStuckSince: prPhaseStartedAt,
     });
     return {
       id, title: ticketTitle(id, triage, eligibleIndex, linfo), type: ticketType(triage),
@@ -1281,8 +1333,9 @@ export async function assembleBoard() {
       // signal) → again rendered unavailable, never now-anchored to a guess.
       currentPhaseSince: cur.startedAt ?? null,
       // CTL-1130: call_to_action from the most-recent phase signal's explanation,
-      // surfaced as the inbox sub-label for needs-human rows.
-      humanQuestion: deriveHumanQuestion(phaseSigs),
+      // surfaced as the inbox sub-label for needs-human rows. CTL-1158: fall back
+      // to the PR-stuck reason so the inbox sub-label names WHY (research F12).
+      humanQuestion: deriveHumanQuestion(phaseSigs) ?? prReason,
       // CTL-1110: the six extended explanation fields surfaced for the detail
       // pane's CTA-led card (distinct from humanQuestion, the list-row sub-label).
       explanation: deriveExplanation(phaseSigs),
@@ -1298,7 +1351,10 @@ export async function assembleBoard() {
         : null,
       phaseCosts: phaseCostsByTicket[id] ?? null,
       phaseSummary,
-      pr: prFor(prSigs),
+      pr: prNumber,
+      // CTL-1158: PR merge state + the PR-stuck operator CTA (null unless stuck).
+      mergeStateStatus: prStatus?.mergeStateStatus ?? null,
+      prStuckReason: prReason,
       updatedAt: ticketUpdatedAt(phaseSigs),
       // CTL-922 (BFF10): node attribution. host:{name,id} from the ticket's phase
       // signals (CTL-852, dispatch-stamped) falling back to the durable fence
