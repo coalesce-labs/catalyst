@@ -141,6 +141,20 @@ export function swipeBlockDirection(
 }
 const COL_GAP = 16;
 const PAD_X = 16;
+
+/** CTL-1144: the board's intrinsic minimum width — N column tracks at COL_W,
+ *  (N-1) inter-column gaps at COL_GAP, plus the row's left+right PAD_X. Drives
+ *  the scroll inner container's min-width so columns hold COL_W and the board
+ *  scrolls on narrow viewports, while still filling (1fr) on wide ones. */
+export function boardMinWidth(
+  columnCount: number,
+  colW = COL_W,
+  gap = COL_GAP,
+  padX = PAD_X,
+): number {
+  if (columnCount <= 0) return 2 * padX;
+  return columnCount * colW + (columnCount - 1) * gap + 2 * padX;
+}
 // Sticky offset for the group-label row — it pins just below the column header
 // (header content + its vertical padding + the 1px rule ≈ 44px).
 const HEADER_H = 44;
@@ -189,19 +203,26 @@ function ColumnHeaderRow({ columns }: { columns: SharedColumn[] }) {
         display: "grid",
         gridTemplateColumns: `repeat(${columns.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
-        padding: `8px ${PAD_X}px 10px`,
+        // CTL-1144: top padding increased to 16px for comfortable board breathing room.
+        padding: `16px ${PAD_X}px 0`,
         position: "sticky",
         top: 0,
         zIndex: 3,
-        // CTL-1033: kanban column-header chips sit on `subtle` — a visible step
-        // ABOVE the canvas and clearly above the chrome (was C.s0 == sidebar dark).
-        background: C.subtle,
-        borderBottom: `1px solid ${C.borderSubtle}`,
+        // CTL-1144: continuous row background removed; each header cell gets its own
+        // tray surface so the canvas gutter shows between headers (matching columns).
         width: "100%",
       }}
     >
       {columns.map((col) => (
-        <div key={col.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        // CTL-1144: each header cell is the rounded top cap of its column tray.
+        <div key={col.key} style={{
+          display: "flex", alignItems: "center", gap: 8,
+          background: C.s1,
+          borderRadius: "10px 10px 0 0",
+          border: `1px solid ${C.borderSubtle}`,
+          borderBottom: "none",
+          padding: "8px 10px 10px",
+        }}>
           <span style={{ width: 9, height: 9, borderRadius: "50%", background: col.c, flex: "0 0 auto" }} />
           <span style={{ fontSize: 13, fontWeight: 600, color: C.fg, letterSpacing: 0.2 }}>{col.label}</span>
           <span style={{ fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 11, color: C.fgMuted, background: C.s3, padding: "1px 7px", borderRadius: 9 }}>{col.count}</span>
@@ -248,7 +269,7 @@ function GroupLabelRow({
 }) {
   const isLive = live === "live";
   const dotColor = isLive ? LIVE : live === "degraded" ? C.yellow : live === "offline" ? C.fgDim : C.blue;
-  const bg = laneBg ?? C.subtle;
+  const bg = laneBg ?? C.s1;
   return (
     // Outer band: sticky-TOP only — holds its row position during vertical scroll;
     // scrolls horizontally with the column grid so the background fills the full width.
@@ -260,15 +281,15 @@ function GroupLabelRow({
         position: "sticky",
         top: HEADER_H,
         zIndex: 2,
-        // CTL-1033: swimlane group bands sit on `subtle` — visibly lighter than
-        // the sidebar chrome (the ticket bug: rows sat at sidebar darkness).
+        // CTL-1033: swimlane group bands.
         // CTL-1027: tinted when the lane's project has a resolved hue.
+        // CTL-1144: re-based from subtle to s1; inset by PAD_X for rounded edges.
         background: bg,
-        width: "max-content",
-        minWidth: "100%",
-        // CTL-1132: hairline between consecutive project bands (skip first to
-        // avoid doubling the sticky column-header's bottom border).
-        ...(!isFirst ? { borderTop: `1px solid ${C.borderSubtle}` } : {}),
+        borderRadius: 10,
+        marginLeft: PAD_X,
+        marginRight: PAD_X,
+        // CTL-1144: real vertical separation above non-first bands (replaces hairline).
+        ...(!isFirst ? { marginTop: 12 } : {}),
       }}
     >
       {/* Inner chip: ALSO sticky-LEFT:0 — pins the label to the board's left edge
@@ -282,11 +303,14 @@ function GroupLabelRow({
           gap: 8,
           padding: `10px ${PAD_X}px 8px`,
           position: "sticky",
-          left: 0,
+          // CTL-1144: band is inset by PAD_X; align chip to band's rounded left edge.
+          left: PAD_X,
           zIndex: 3,
-          // CTL-1033: the dual-sticky chip paints over the band — same `subtle`.
+          // CTL-1033: the dual-sticky chip paints over the band — same surface.
           // CTL-1027: tinted to match the outer band when the lane has a hue.
           background: bg,
+          borderTopLeftRadius: 10,
+          borderBottomLeftRadius: 10,
         }}
       >
         {iconSrc ? (
@@ -362,7 +386,11 @@ function LaneCardsRow({
         gridTemplateColumns: `repeat(${cells.length}, minmax(${COL_W}px, 1fr))`,
         gap: COL_GAP,
         padding: `6px ${PAD_X}px 16px`,
-        alignItems: "start",
+        // CTL-1144: flexGrow:1 lets this row expand to fill leftover vertical space
+        // (full-height lane cells, Phase 3); stretch fills the taller row height.
+        // flexGrow is inert when content overflows — water-fill caps still govern.
+        flexGrow: 1,
+        alignItems: "stretch",
         width: "100%",
       }}
     >
@@ -376,14 +404,12 @@ function LaneCardsRow({
             flexDirection: "column",
             gap: 8,
             minWidth: 0,
-            // CTL-1033 column-tray: each column's track is its OWN `subtle`-level
-            // surface (one step ABOVE the canvas) so columns read as discrete
-            // trays, not one continuous slab. The COL_GAP between grid tracks is the
-            // visible canvas-colored gutter that separates adjacent columns; cards
-            // (C.s2) sit one further step above this tray. The dashed-edge well + 8px
-            // internal padding give the tray a Linear-style enclosed feel.
+            // CTL-1033 column-tray: each column's track is its OWN surface so
+            // columns read as discrete trays, not one continuous slab. The COL_GAP
+            // between grid tracks is the visible canvas-colored gutter.
             // CTL-1027: tinted when the lane's project has a resolved hue.
-            background: laneBg ?? C.subtle,
+            // CTL-1144: re-based from subtle to s1 so cards (s2) read as elevated.
+            background: laneBg ?? C.s1,
             borderRadius: 10,
             border: `1px solid ${C.borderSubtle}`,
             boxShadow: TRAY_LIFT,
@@ -753,9 +779,13 @@ export function SwimlaneBoard<T extends GroupableEntity>({
           }}
         />
       )}
-      {/* the inner block sizes to the full column run (max-content) so the single
-          overflow-x container scrolls the header + every lane together. */}
-      <div ref={bumpRef} style={{ width: "max-content", minWidth: "100%" }}>
+      {/* CTL-1144: min-width driven by column count so tracks never compete for
+          negative space; flex column + minHeight:100% lets lane rows divide the
+          leftover vertical space (Phase 3 full-height cells). */}
+      <div ref={bumpRef} style={{
+        width: `max(100%, ${boardMinWidth(columns.length)}px)`,
+        display: "flex", flexDirection: "column", minHeight: "100%",
+      }}>
         <ColumnHeaderRow columns={columns} />
         {/* axis="none" (and the empty-on-a-real-axis fallthrough) → one synthetic
             lane, no group label. Real axis → a sticky group-label divider per lane,

@@ -97,6 +97,7 @@ import { laneColumns, visibleColumnDefs, PHASE_COLUMNS, type BoardColumnDef } fr
 import { C, LIVE, PHASE, TYPE as TYPE_MAP, NODE_ACCENTS, CARD_LIFT } from "./board-tokens";
 import { typeSymbol } from "./type-icon";
 import { SwimlaneBoard, type SharedColumn, type LaneCell } from "./Swimlane";
+import { formatIssueCount } from "./board-counts";
 import { useResolvedRepoColors } from "@/hooks/use-resolved-repo-colors";
 // ── BOARD4 / CTL-908: the dense List layout ────────────────────────────────────
 // When the BOARD2 popover's Layout toggle is "list", the Tickets body renders the
@@ -1024,6 +1025,15 @@ export function Board({
             SINGLE app-shell header row (the breadcrumb bar already names the
             surface). One header per surface; behavior + persistence unchanged. */}
         <HeaderActions>
+          {/* CTL-1144: combined board total — quiet, mono, no accent color. */}
+          {view === "tickets" && data && (
+            <span style={{
+              fontFamily: C.mono, fontVariantNumeric: "tabular-nums", fontSize: 12,
+              fontWeight: 600, color: C.fg, whiteSpace: "nowrap",
+            }}>
+              {formatIssueCount(fTickets.length)}
+            </span>
+          )}
           {/* CTL-972: lens-aware tagline + quiet active-lens indicator. Muted, and
               hidden on narrow widths so the header stays calm. */}
           <span className="hidden text-[12px] text-muted-foreground lg:inline">
