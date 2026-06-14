@@ -4,7 +4,7 @@
 // this file carries the DOM-bound React portions — not imported in bun test.
 // Named process-canvas (not process-surface) to avoid bun's .tsx-before-.ts
 // resolution ordering shadowing process-surface.ts in the test runner.
-import { useMemo } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ReactFlow,
@@ -26,6 +26,28 @@ import type { ProcessModel } from "../lib/process-model";
 import { useScopedBoardSnapshot } from "../hooks/use-scoped-board-snapshot";
 
 const CANVAS_HEIGHT = 400;
+
+// CTL-1147: read a CSS custom property off <html> so React Flow's SVG-rendered
+// <Background> gets a resolved hex/rgba value instead of var(--…), which may not
+// resolve in SVG presentation attributes. Re-reads when theme/brand changes via
+// MutationObserver on <html> class/data-theme attributes.
+function useCssVar(name: string): string {
+  const [val, setVal] = useState("");
+  useEffect(() => {
+    const read = () => {
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      setVal(v);
+    };
+    read();
+    const obs = new MutationObserver(read);
+    obs.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-theme"],
+    });
+    return () => obs.disconnect();
+  }, [name]);
+  return val;
+}
 
 // ── CTL-1020 invisible Handle stanza ─────────────────────────────────────────
 // RF v12 gates isNodeInitialized on handleBounds — a node without mounted
@@ -304,6 +326,7 @@ export interface ProcessSurfaceProps {
 }
 
 export function ProcessSurface({ model, children, onEdgeClick }: ProcessSurfaceProps) {
+  const dotColor = useCssVar("--border-subtle") || "rgba(255,255,255,0.07)";
   const { payload } = useScopedBoardSnapshot();
 
   const dotGroupByPhase = useMemo(() => {
@@ -358,7 +381,7 @@ export function ProcessSurface({ model, children, onEdgeClick }: ProcessSurfaceP
           proOptions={{ hideAttribution: false }}
           onEdgeClick={onEdgeClick ? (_, edge) => onEdgeClick(edge.source, edge.target) : undefined}
         >
-          <Background color={C.borderSubtle} variant={BackgroundVariant.Dots} gap={20} size={1} />
+          <Background color={dotColor} variant={BackgroundVariant.Dots} gap={20} size={1} />
           <Controls style={{ background: C.s2, border: `1px solid ${C.border}` }} />
         </ReactFlow>
       </div>
