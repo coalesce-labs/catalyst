@@ -1,7 +1,7 @@
-// rulebook-surface.tsx — CTL-1103 Phase 3: full static textbook surface.
+// rulebook-surface.tsx — CTL-1103 Phase 3+4: full static textbook + live margins.
 // Renders preface → strata ladder → per-stratum rule cards → thresholds.
-// Data: one /api/beliefs/rules fetch; no dependence on belief recording.
-// SSE dedup contract: use useBeliefsContext(), NEVER useBeliefs().
+// Live firing counts come from useBeliefsContext() (the already-open shared SSE
+// — zero new EventSources, SSE dedup contract CTL-945).
 import { useEffect, useState } from "react";
 import { useBeliefsContext } from "@/hooks/use-beliefs";
 import {
@@ -10,15 +10,29 @@ import {
   type RuleManifest,
   type StratumGroup,
 } from "@/lib/rulebook-model";
+import { countFiringByRule, subjectsForRule } from "@/lib/rulebook-live";
 import { PrefaceSection } from "./preface-section";
 import { StrataLadder, stratumColorForId } from "./strata-ladder";
 import { RuleCard } from "./rule-card";
+import { LiveIndicator } from "./live-indicator";
+import { DerivationsRail } from "./derivations-rail";
 import { ThresholdsAppendix } from "./thresholds-appendix";
 import { cn } from "@/lib/utils";
+import type { RuleManifestRule } from "@/lib/rulebook-model";
 
-function StratumSection({ group }: { group: StratumGroup }) {
+function StratumSection({
+  group,
+  firingCounts,
+  selectedRuleId,
+  onSelectRule,
+}: {
+  group: StratumGroup;
+  firingCounts: Map<string, number>;
+  selectedRuleId: string | null;
+  onSelectRule: (id: string) => void;
+}) {
   const colorClass = stratumColorForId(group.stratum.id);
-  const borderClass = colorClass.split(" ")[0]; // border-* token only
+  const borderClass = colorClass.split(" ")[0];
   return (
     <section id={`stratum-${group.stratum.id}`} className="mb-8">
       <div
@@ -35,9 +49,23 @@ function StratumSection({ group }: { group: StratumGroup }) {
           — {group.stratum.prose}
         </span>
       </div>
-      {group.rules.map((rule) => (
-        <RuleCard key={rule.rule_id} rule={rule} />
-      ))}
+      {group.rules.map((rule) => {
+        const count = firingCounts.get(rule.rule_id) ?? 0;
+        return (
+          <div key={rule.rule_id}>
+            <button
+              type="button"
+              className="w-full text-left"
+              onClick={() => count > 0 && onSelectRule(rule.rule_id)}
+            >
+              <RuleCard
+                rule={rule}
+                liveSlot={<LiveIndicator count={count} />}
+              />
+            </button>
+          </div>
+        );
+      })}
     </section>
   );
 }
@@ -53,11 +81,13 @@ function LoadingSkeleton() {
 }
 
 export function RulebookSurface() {
-  useBeliefsContext(); // dedup contract: consume context, never useBeliefs()
+  const beliefs = useBeliefsContext(); // dedup contract: never useBeliefs()
+  const firingCounts = countFiringByRule(beliefs.store);
 
   const [manifest, setManifest] = useState<RuleManifest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [groups, setGroups] = useState<StratumGroup[]>([]);
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchRuleManifest()
@@ -70,6 +100,11 @@ export function RulebookSurface() {
       });
   }, []);
 
+  const selectedRule: RuleManifestRule | null =
+    selectedRuleId && manifest
+      ? (manifest.rules.find((r) => r.rule_id === selectedRuleId) ?? null)
+      : null;
+
   if (error) {
     return (
       <div className="p-6 text-sm text-destructive">
@@ -79,31 +114,67 @@ export function RulebookSurface() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto max-w-3xl px-6 py-6">
-        <div className="mb-6">
-          <h1 className="text-xl font-bold">Belief Engine Rulebook</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            17 rules · 6 strata · compiled from{" "}
-            <span className="font-mono">beliefs/rules.dl</span>
-          </p>
+    <div className="flex flex-1 overflow-hidden">
+      {/* Main textbook column */}
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-3xl px-6 py-6">
+          <div className="mb-6">
+            <h1 className="text-xl font-bold">Belief Engine Rulebook</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              17 rules · 6 strata · compiled from{" "}
+              <span className="font-mono">beliefs/rules.dl</span>
+            </p>
+          </div>
+
+          {manifest === null ? (
+            <LoadingSkeleton />
+          ) : (
+            <>
+              <PrefaceSection preface={manifest.preface} />
+              <StrataLadder groups={groups} />
+
+              {groups.map((group) => (
+                <StratumSection
+                  key={group.stratum.id}
+                  group={group}
+                  firingCounts={firingCounts}
+                  selectedRuleId={selectedRuleId}
+                  onSelectRule={setSelectedRuleId}
+                />
+              ))}
+
+              <ThresholdsAppendix />
+            </>
+          )}
         </div>
-
-        {manifest === null ? (
-          <LoadingSkeleton />
-        ) : (
-          <>
-            <PrefaceSection preface={manifest.preface} />
-            <StrataLadder groups={groups} />
-
-            {groups.map((group) => (
-              <StratumSection key={group.stratum.id} group={group} />
-            ))}
-
-            <ThresholdsAppendix />
-          </>
-        )}
       </div>
+
+      {/* Derivations rail — shown when a firing rule is selected */}
+      {selectedRule && (
+        <div className="w-80 shrink-0 border-l overflow-y-auto p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+              Derivations
+            </span>
+            <button
+              type="button"
+              className="text-xs text-muted-foreground hover:text-foreground"
+              onClick={() => setSelectedRuleId(null)}
+            >
+              ×
+            </button>
+          </div>
+          <DerivationsRail
+            ruleId={selectedRule.rule_id}
+            subjects={subjectsForRule(beliefs.store, selectedRule.rule_id)}
+            onOpenSource={(ruleId) => {
+              document
+                .getElementById(`rule-${ruleId}`)
+                ?.scrollIntoView({ behavior: "smooth" });
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }
