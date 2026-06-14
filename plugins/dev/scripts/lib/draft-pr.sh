@@ -53,12 +53,21 @@ draft_pr_diff_touches_workflows() {
 # draft_pr_push_token TOKEN [git push args...] — push using TOKEN as the GitHub
 # credential, bypassing the ambient GITHUB_TOKEN / gh credential helper.
 # Uses per-invocation GIT_CONFIG_* env vars — never mutates persistent config. (CTL-1119)
+#
+# The token is handed to the credential helper via the CATALYST_WF_TOK
+# environment variable, NOT interpolated into the helper string. git executes a
+# `!`-prefixed credential helper through `sh -c`, so a token containing a
+# double-quote plus shell metacharacters interpolated into the printf argument
+# would break out of the quoting and run arbitrary commands. Env-indirection
+# means the helper's `sh` expands $CATALYST_WF_TOK at runtime and never
+# re-parses the secret's bytes as shell. (CTL-1119 phase-review remediation)
 draft_pr_push_token() {
   local token="$1"; shift
   GIT_CONFIG_COUNT=2 \
   GIT_CONFIG_KEY_0="credential.https://github.com.helper" GIT_CONFIG_VALUE_0="" \
   GIT_CONFIG_KEY_1="credential.https://github.com.helper" \
-  GIT_CONFIG_VALUE_1="!f() { printf 'username=x-access-token\npassword=%s\n' \"$token\"; }; f" \
+  GIT_CONFIG_VALUE_1="!f() { printf 'username=x-access-token\npassword=%s\n' \"\$CATALYST_WF_TOK\"; }; f" \
+  CATALYST_WF_TOK="$token" \
     env -u GITHUB_TOKEN git -c core.hooksPath=/dev/null push "$@"
 }
 

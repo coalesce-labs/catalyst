@@ -1135,6 +1135,80 @@ else
   fail "9b: expected 2>&1 capture to fold stderr in — got '$BUG_VERIFIED'"
 fi
 
+# ─── Suite 10: CTL-1119 phase-review remediation — credential-helper injection ─
+echo ""
+echo "Suite 10: draft_pr_push_token credential-helper injection safety (CTL-1119)"
+
+# Stub git that faithfully emulates how real git runs a `!`-prefixed credential
+# helper: strip the leading '!' and run the remainder via `sh -c "<helper> get"`
+# with git's inherited environment. This is the exact sink the HIGH phase-review
+# finding exploited — if the token were interpolated into the helper string, a
+# token carrying shell metacharacters would execute right here.
+install_git_stub_emulate_cred_helper() {
+  local bin_dir="$1"
+  mkdir -p "$bin_dir"
+  cat > "${bin_dir}/git" <<'STUB'
+#!/usr/bin/env bash
+IS_PUSH=false
+for arg in "$@"; do [[ "$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "$IS_PUSH" == "true" && -n "${GIT_CONFIG_VALUE_1:-}" ]]; then
+  helper="${GIT_CONFIG_VALUE_1#!}"
+  sh -c "${helper} get" </dev/null >/dev/null 2>&1 || true
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "${bin_dir}/git"
+}
+
+# 10a: token with shell metacharacters must NOT execute (env-indirection closes
+#      the injection). The malicious token closes the printf double-quote, runs
+#      `touch <marker>`, then re-opens — exactly the reproduced exploit.
+echo "10a: token containing shell metacharacters does NOT execute (injection closed)"
+P10_BIN="${SCRATCH}/p10-bin"
+install_git_stub_emulate_cred_helper "$P10_BIN"
+INJECT_MARKER="${SCRATCH}/INJECTED_PWN_MARKER"
+rm -f "$INJECT_MARKER"
+(
+  PATH="${P10_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_token "abc\";touch ${INJECT_MARKER};echo \"" >/dev/null 2>&1
+  set -e
+) || true
+if [[ -e "$INJECT_MARKER" ]]; then
+  fail "10a: token injection EXECUTED — marker file was created (sink is open)"
+  rm -f "$INJECT_MARKER"
+else
+  pass "10a: token with shell metacharacters did not execute (env-indirection holds)"
+fi
+
+# 10b: the benign-token happy path still authenticates correctly — the helper
+#      emits the token verbatim as the credential password via $CATALYST_WF_TOK.
+echo "10b: benign token reaches the credential helper verbatim"
+P10B_BIN="${SCRATCH}/p10b-bin"; P10B_OUT="${SCRATCH}/p10b.out"
+mkdir -p "$P10B_BIN"
+cat > "${P10B_BIN}/git" <<STUB
+#!/usr/bin/env bash
+IS_PUSH=false
+for arg in "\$@"; do [[ "\$arg" == "push" ]] && IS_PUSH=true && break; done
+if [[ "\$IS_PUSH" == "true" && -n "\${GIT_CONFIG_VALUE_1:-}" ]]; then
+  helper="\${GIT_CONFIG_VALUE_1#!}"
+  sh -c "\${helper} get" </dev/null > "${P10B_OUT}" 2>&1 || true
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "${P10B_BIN}/git"
+(
+  PATH="${P10B_BIN}:${PATH}"
+  source "$DRAFT_PR_LIB"
+  set +e
+  draft_pr_push_token "ghp_benigntoken123" >/dev/null 2>&1
+  set -e
+) || true
+assert_contains "$(cat "$P10B_OUT" 2>/dev/null)" "password=ghp_benigntoken123" "10b: helper emits the token as the credential password"
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"
