@@ -36,13 +36,20 @@ if command -v humanlayer >/dev/null 2>&1; then
 	if grep -q "Status: ✓ Initialized" <<<"$STATUS_OUTPUT"; then
 		echo "Thoughts already initialized for this workspace"
 	else
-		HL_CMD=(humanlayer thoughts init --directory "$THOUGHTS_DIRECTORY")
+		# CTL-845: use vendored init to avoid ERR_INVALID_ARG_TYPE crash in humanlayer v0.17.2-npm.
+		VENDOR_INIT="${SCRIPT_DIR}/worktree-thoughts-init.sh"
+		HL_CMD=("$VENDOR_INIT" --directory "$THOUGHTS_DIRECTORY")
 		if [[ -n "$THOUGHTS_PROFILE" ]]; then
 			HL_CMD+=(--profile "$THOUGHTS_PROFILE")
 		fi
 
 		echo "Running: ${HL_CMD[*]}"
-		"${HL_CMD[@]}"
+		if [[ -x "$VENDOR_INIT" ]]; then
+			"${HL_CMD[@]}"
+		else
+			humanlayer thoughts init --directory "$THOUGHTS_DIRECTORY" \
+				${THOUGHTS_PROFILE:+--profile "$THOUGHTS_PROFILE"}
+		fi
 	fi
 
 	echo "Running: humanlayer thoughts sync"

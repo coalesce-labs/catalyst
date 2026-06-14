@@ -160,6 +160,173 @@ assert_exit_nonzero \
   "exits non-zero when no creds and no config file" \
   bash -c "cd /tmp && bash '$HELPER' CTL-550 body"
 
+# Reinstate the success curl stub for the file-resolution back-compat tests.
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+# Test 9 (CTL-749 back-compat): NEW global path
+# ~/.config/catalyst/config.json → catalyst.linear.bot.worker.{clientId,clientSecret}.
+# No env creds, no per-team file — must resolve from the global bot.worker key.
+NEW_HOME="${TMPDIR_TEST}/home-new"
+mkdir -p "${NEW_HOME}/.config/catalyst" "${NEW_HOME}/work"
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"new-cid","clientSecret":"new-csec"}}}}}' \
+  >"${NEW_HOME}/.config/catalyst/config.json"
+PATH="${BIN_DIR}:$PATH" assert_exit_zero \
+  "resolves NEW global catalyst.linear.bot.worker.{clientId,clientSecret}" \
+  env HOME="${NEW_HOME}" bash -c "cd '${NEW_HOME}/work' && bash '$HELPER' CTL-550 body"
+
+# Test 10 (CTL-749 back-compat): OLD per-team fallback
+# config-<key>.json → catalyst.linear.agent.* resolved via nested .catalyst.projectKey,
+# with the global config carrying only the orchestrator placeholder (no bot.worker).
+OLD_HOME="${TMPDIR_TEST}/home-old"
+mkdir -p "${OLD_HOME}/.config/catalyst" "${OLD_HOME}/repo/.catalyst"
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"orch-only"}}}}}' \
+  >"${OLD_HOME}/.config/catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"old-cid","clientSecret":"old-csec"}}}}' \
+  >"${OLD_HOME}/.config/catalyst/config-catalyst-workspace.json"
+printf '%s' '{"catalyst":{"projectKey":"catalyst-workspace"}}' \
+  >"${OLD_HOME}/repo/.catalyst/config.json"
+PATH="${BIN_DIR}:$PATH" assert_exit_zero \
+  "falls back to OLD per-team catalyst.linear.agent.* via nested projectKey" \
+  env HOME="${OLD_HOME}" bash -c "cd '${OLD_HOME}/repo' && bash '$HELPER' CTL-550 body"
+
+# Test 11 (CTL-835): the oauth/token mint request carries the scope param.
+# Without an explicit scope Linear rejects the mint with 400 invalid_scope and
+# the mirror fails open — the comment silently never posts. Stub curl records
+# the args it received for the oauth/token call so we can assert scope is present.
+export CATALYST_LINEAR_AGENT_CLIENT_ID="test-cid"
+export CATALYST_LINEAR_AGENT_CLIENT_SECRET="test-csec"
+
+SCOPE_CAPTURE="${TMPDIR_TEST}/token-args.txt"
+cat >"${BIN_DIR}/curl" <<CURLEOF
+#!/usr/bin/env bash
+ARGS_STR="\$*"
+if printf '%s' "\$ARGS_STR" | grep -q "oauth/token"; then
+  printf '%s\n' "\$ARGS_STR" >"${SCOPE_CAPTURE}"
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "\$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "body" >/dev/null 2>&1 || true
+if grep -q "scope=read,write,comments:create" "${SCOPE_CAPTURE}" 2>/dev/null; then
+  echo "PASS: oauth/token mint request includes scope=read,write,comments:create"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: oauth/token mint request missing scope (got: $(cat "${SCOPE_CAPTURE}" 2>/dev/null))"
+  FAIL=$((FAIL+1))
+fi
+
+# Test 12 (CTL-835): a 400 invalid_scope mint emits EXACTLY ONE diagnostic line,
+# and that line carries the real cause (invalid_scope) — no longer silent.
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  # Emulate `curl -w '\n%{http_code}'`: body + newline + status. -f is NOT used
+  # by the helper, so the body is returned even on a 400.
+  printf '{"error":"invalid_scope","error_description":"missing scope"}\n400'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+
+STDERR_OUT="$(PATH="${BIN_DIR}:$PATH" bash "$HELPER" "CTL-550" "body" 2>&1 1>/dev/null || true)"
+DIAG_LINES="$(printf '%s' "$STDERR_OUT" | grep -c .)"
+if [[ "$DIAG_LINES" -eq 1 ]]; then
+  echo "PASS: invalid_scope mint emits exactly one diagnostic line"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: invalid_scope mint emitted ${DIAG_LINES} diagnostic line(s), expected 1 (out: ${STDERR_OUT})"
+  FAIL=$((FAIL+1))
+fi
+if printf '%s' "$STDERR_OUT" | grep -q "invalid_scope"; then
+  echo "PASS: diagnostic surfaces the invalid_scope cause"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: diagnostic did not surface invalid_scope (out: ${STDERR_OUT})"
+  FAIL=$((FAIL+1))
+fi
+
+# --- Test 13 (CTL-1111): projectKey-absent path emits a loud warning AND still
+#     posts via branch 1 (global bot.worker). The warning must name the missing
+#     projectKey and go to stderr; it must NOT corrupt the resolved path. ---
+NOKEY_HOME="${TMPDIR_TEST}/home-nokey"
+mkdir -p "${NOKEY_HOME}/.config/catalyst" "${NOKEY_HOME}/work/sub"
+# Global config carries bot.worker so the post still succeeds (branch 1 wins).
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"nk-cid","clientSecret":"nk-csec"}}}}}' \
+  >"${NOKEY_HOME}/.config/catalyst/config.json"
+unset CATALYST_LINEAR_AGENT_CLIENT_ID CATALYST_LINEAR_AGENT_CLIENT_SECRET 2>/dev/null || true
+# Reinstate success curl stub for this test.
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+NK_STDERR="$(PATH="${BIN_DIR}:$PATH" env HOME="${NOKEY_HOME}" \
+  bash -c "cd '${NOKEY_HOME}/work/sub' && bash '$HELPER' CTL-550 body" 2>&1 1>/dev/null || true)"
+NK_EXIT=0
+PATH="${BIN_DIR}:$PATH" env HOME="${NOKEY_HOME}" \
+  bash -c "cd '${NOKEY_HOME}/work/sub' && bash '$HELPER' CTL-550 body" >/dev/null 2>/dev/null || NK_EXIT=$?
+if printf '%s' "$NK_STDERR" | grep -qi "no projectKey"; then
+  echo "PASS: projectKey-absent path emits a loud warning naming the missing key"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: projectKey-absent path emitted no warning (stderr: ${NK_STDERR})"
+  FAIL=$((FAIL+1))
+fi
+if [[ "$NK_EXIT" -eq 0 ]]; then
+  echo "PASS: projectKey-absent path still posts via global bot.worker (back-compat)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: projectKey-absent path broke back-compat post (exit $NK_EXIT)"
+  FAIL=$((FAIL+1))
+fi
+
+# --- Test 14 (CTL-1111): projectKey-PRESENT path must NOT emit the drift warning
+#     (guards against the warning over-firing on correctly-configured worktrees). ---
+HASKEY_HOME="${TMPDIR_TEST}/home-haskey"
+mkdir -p "${HASKEY_HOME}/.config/catalyst" "${HASKEY_HOME}/repo/.catalyst"
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"orch-only"}}}}}' \
+  >"${HASKEY_HOME}/.config/catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"hk-cid","clientSecret":"hk-csec"}}}}' \
+  >"${HASKEY_HOME}/.config/catalyst/config-catalyst-workspace.json"
+printf '%s' '{"catalyst":{"projectKey":"catalyst-workspace"}}' \
+  >"${HASKEY_HOME}/repo/.catalyst/config.json"
+HK_STDERR="$(PATH="${BIN_DIR}:$PATH" env HOME="${HASKEY_HOME}" \
+  bash -c "cd '${HASKEY_HOME}/repo' && bash '$HELPER' CTL-550 body" 2>&1 1>/dev/null || true)"
+if printf '%s' "$HK_STDERR" | grep -qi "no projectKey"; then
+  echo "FAIL: drift warning over-fired on a projectKey-present worktree (stderr: ${HK_STDERR})"
+  FAIL=$((FAIL+1))
+else
+  echo "PASS: no drift warning when projectKey resolves correctly"
+  PASS=$((PASS+1))
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]

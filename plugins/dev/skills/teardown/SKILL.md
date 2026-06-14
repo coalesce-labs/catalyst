@@ -126,7 +126,7 @@ On refusal (preconditions failed and no `--force`), print what's blocking and ex
 
 ## Related
 
-- `/catalyst-dev:orchestrate` Phase 7 — runs the sweep automatically when orchestration ends.
+- `/catalyst-legacy:orchestrate` Phase 7 — runs the sweep automatically when orchestration ends.
 - `bun plugins/dev/scripts/orch-monitor/catalyst-archive.ts` — the archive CLI with
   `sweep|sync|prune|list|show` subcommands.
 - See `docs/architecture.md` § "Artifact Persistence" for the end-to-end lifecycle.

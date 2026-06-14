@@ -40,6 +40,7 @@ CLI_ENTRIES=(
   "catalyst-filter:catalyst-filter"
   "catalyst-otel-forward:catalyst-otel-forward"
   "catalyst-transitions:catalyst-transitions"
+  "catalyst-why:catalyst-why"
   "catalyst-session.sh:catalyst-session"
   "catalyst-state.sh:catalyst-state"
   "catalyst-statusline.sh:catalyst-statusline"
@@ -51,6 +52,7 @@ CLI_ENTRIES=(
   "workflow-context.sh:workflow-context"
   "catalyst-hud:catalyst-hud"
   "catalyst-hud-classic.sh:catalyst-hud-classic"
+  "catalyst-stack:catalyst-stack"
   "../hooks/emit-lifecycle-event.sh:emit-lifecycle-event"
 )
 
@@ -280,20 +282,111 @@ for entry in "${CLI_ENTRIES[@]}"; do
     # CTL-390: wrapper intercepts --version|-V, prints its own resolution path,
     # then exec's the resolved CLI with --version so the underlying tool's
     # three-line version block follows.
+    #
+    # CTL-1000: the wrapper prefers the per-host pristine plugin CHECKOUT
+    # (pluginDirs) over the marketplace cache when the checkout is healthy, so
+    # daemons launched through the wrapper load the checkout's main HEAD (their
+    # SCRIPT_DIR becomes the checkout's scripts/ dir). Resolution order:
+    #   1. CATALYST_FORCE_CACHE=1 (or empty pluginDirs) → cache, silently.
+    #   2. resolve pluginDirs (env CATALYST_PLUGIN_DIRS > repo .catalyst/config.json
+    #      walked up from $PWD > machine config); take the FIRST entry.
+    #   3. inlined git-only health probe (mirrors lib/plugin-dirs.sh
+    #      plugin_source_health: MISSING/NOT_A_CHECKOUT/LINKED_WORKTREE/OFF_MAIN/
+    #      DIRTY). Healthy → exec the checkout's script.
+    #   4. unhealthy/absent → fall back to the latest cache version with ONE loud
+    #      stderr warning naming the typed health problem (guarded by
+    #      CATALYST_WRAPPER_WARNED so a parent wrapper warns at most once per
+    #      logical invocation, not per sibling exec).
+    # The probe sources NEITHER copy of plugin-dirs.sh (chicken-and-egg): it is
+    # pure `git -C <path>` calls with no library state.
     {
       echo '#!/usr/bin/env bash'
-      echo "# ${WRAPPER_MARKER} (version-auto) — do not edit"
+      echo "# ${WRAPPER_MARKER} (version-auto, checkout-preferring) — do not edit"
       echo '_CACHE="${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"'
       echo '_LATEST=$(ls -d "${_CACHE}"/[0-9]*.*.*/ 2>/dev/null | sort -V | tail -1 | sed '"'"'s|/$||'"'"')'
-      echo '[[ -z "${_LATEST}" ]] && { echo "error: catalyst-dev plugin not found in ${_CACHE}" >&2; exit 1; }'
+      echo ''
+      echo '# --- resolve pluginDirs (env > repo .catalyst/config.json (walk up) > machine config) ---'
+      echo '_pd_from_file() {'
+      echo '  [[ -n "$1" && -f "$1" ]] || return 0'
+      echo '  command -v jq >/dev/null 2>&1 || return 0'
+      echo "  jq -r '.catalyst.orchestration.pluginDirs | if type==\"array\" then join(\":\") else . end // empty' \"\$1\" 2>/dev/null || true"
+      echo '}'
+      echo '_PD=""'
+      echo 'if [[ -n "${CATALYST_PLUGIN_DIRS:-}" ]]; then'
+      echo '  _PD="$CATALYST_PLUGIN_DIRS"'
+      echo 'else'
+      echo '  _d="$PWD"'
+      echo '  while [[ -n "$_d" && "$_d" != "/" ]]; do'
+      echo '    if [[ -f "$_d/.catalyst/config.json" ]]; then'
+      echo '      _PD="$(_pd_from_file "$_d/.catalyst/config.json")"; break'
+      echo '    fi'
+      echo '    _d="$(dirname "$_d")"'
+      echo '  done'
+      echo '  if [[ -z "$_PD" ]]; then'
+      echo '    _MC="${CATALYST_MACHINE_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/catalyst/config.json}"'
+      echo '    _PD="$(_pd_from_file "$_MC")"'
+      echo '  fi'
+      echo 'fi'
+      echo '# take the FIRST colon-separated entry (multi-entry stacks share a root)'
+      echo '_PD="${_PD%%:*}"'
+      echo ''
+      echo '# --- decide source ---'
+      echo '_SRC_KIND="cache"; _ROOT=""; _HEALTH=""'
+      echo 'if [[ -n "${CATALYST_FORCE_CACHE:-}" ]]; then'
+      echo '  _SRC_KIND="cache"            # forced — silent, intentional'
+      echo 'elif [[ -n "$_PD" ]]; then'
+      echo '  # inlined health probe (mirrors plugin_source_health, first fail wins):'
+      echo '  if [[ ! -d "$_PD" ]]; then'
+      echo '    _HEALTH="MISSING $_PD"'
+      echo '  else'
+      echo '    _ROOT="$(git -C "$_PD" rev-parse --show-toplevel 2>/dev/null)"'
+      echo '    if [[ -z "$_ROOT" ]]; then'
+      echo '      _HEALTH="NOT_A_CHECKOUT $_PD"'
+      echo '    else'
+      echo '      _GD="$(git -C "$_ROOT" rev-parse --absolute-git-dir 2>/dev/null)"'
+      echo '      _CD="$(git -C "$_ROOT" rev-parse --git-common-dir 2>/dev/null)"'
+      echo '      if [[ -n "$_CD" && "$_CD" != /* ]]; then'
+      echo '        _CD="$(cd "$_ROOT" && cd "$_CD" 2>/dev/null && pwd -P)"'
+      echo '      fi'
+      echo '      _BR="$(git -C "$_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null)"'
+      echo '      if [[ -n "$_GD" && -n "$_CD" && "$_GD" != "$_CD" ]]; then'
+      echo '        _HEALTH="LINKED_WORKTREE $_ROOT"'
+      echo '      elif [[ -n "$_BR" && "$_BR" != "main" ]]; then'
+      echo '        _HEALTH="OFF_MAIN $_ROOT $_BR"'
+      echo '      elif [[ -n "$(git -C "$_ROOT" status --porcelain 2>/dev/null)" ]]; then'
+      echo '        _HEALTH="DIRTY $_ROOT"'
+      echo '      fi'
+      echo '    fi'
+      echo '  fi'
+      echo '  [[ -z "$_HEALTH" ]] && _SRC_KIND="checkout"'
+      echo 'fi'
+      echo ''
+      echo '# --- choose exec target ---'
+      echo 'if [[ "$_SRC_KIND" == "checkout" ]]; then'
+      echo "  _TARGET=\"\${_ROOT}/plugins/dev/scripts/${src_name}\""
+      echo 'else'
+      echo '  [[ -z "${_LATEST}" ]] && { echo "error: catalyst-dev plugin not found in ${_CACHE}" >&2; exit 1; }'
+      echo "  _TARGET=\"\${_LATEST}/scripts/${src_name}\""
+      echo '  if [[ -n "$_HEALTH" && -z "${CATALYST_WRAPPER_WARNED:-}" ]]; then'
+      echo '    echo "WARN: catalyst pluginDirs checkout unhealthy (${_HEALTH}) — falling back to cache ${_LATEST}" >&2'
+      echo '    export CATALYST_WRAPPER_WARNED=1'
+      echo '  fi'
+      echo 'fi'
+      echo ''
       echo 'case "${1:-}" in --version|-V)'
       echo "  echo \"${dest_name} wrapper (\${BASH_SOURCE[0]})\""
-      echo "  echo \"resolves to: \${_LATEST}/scripts/${src_name}\""
+      echo '  echo "source: ${_SRC_KIND}"'
+      echo '  if [[ "$_SRC_KIND" == "checkout" ]]; then'
+      echo '    echo "resolves to: ${_TARGET} (checkout ${_ROOT} HEAD $(git -C "$_ROOT" rev-parse --short HEAD 2>/dev/null))"'
+      echo '  else'
+      echo '    echo "resolves to: ${_TARGET}"'
+      echo '    [[ -n "$_HEALTH" ]] && echo "fallback reason: ${_HEALTH}"'
+      echo '  fi'
       echo '  echo "forwarding to underlying CLI for full version info..."'
       echo '  echo ""'
-      echo "  exec \"\${_LATEST}/scripts/${src_name}\" --version ;;"
+      echo '  exec "${_TARGET}" --version ;;'
       echo 'esac'
-      echo "exec \"\${_LATEST}/scripts/${src_name}\" \"\$@\""
+      echo 'exec "${_TARGET}" "$@"'
     } > "$link"
     chmod +x "$link"
   else

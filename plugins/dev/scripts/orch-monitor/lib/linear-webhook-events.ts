@@ -24,6 +24,12 @@ export type LinearWebhookEvent =
       teamKey: string | null;
       data: Record<string, unknown>;
       updatedFromKeys: string[];
+      /**
+       * Linear issue entityId UUID from data.id; null when absent. The
+       * `remove` action's payload carries ONLY this UUID (no identifier), so
+       * the Gateway's UUID→identifier index (CTL-821) is keyed off it. CTL-822.
+       */
+      issueId: string | null;
       /** Linear user UUID who triggered the action; null when absent. CTL-263. */
       actorId: string | null;
       /** Current state name from data.state.name; null when absent. CTL-424. */
@@ -37,9 +43,13 @@ export type LinearWebhookEvent =
       /** Actor display name from actor.name; null when absent. CTL-424. */
       actorName: string | null;
       /**
-       * Current label name list from data.labels.nodes[].name; null when the
-       * payload omits `labels` entirely (distinguishes "no label info" from
-       * "explicitly empty"). Eligible-set scoping needs this. CTL-681.
+       * Current label name list. Accepts BOTH Linear shapes: the GraphQL API's
+       * `data.labels = {nodes:[{name}]}` (CTL-681) and the WEBHOOK's flat array
+       * `data.labels = [{id,name,color}]` (CTL-1031 — the shape real
+       * label-change webhooks actually carry). null when the payload omits
+       * `labels` entirely OR the array is malformed (distinguishes "no/unknown
+       * label info" from "explicitly empty" []). Eligible-set scoping + the
+       * broker's held_since fold need this. CTL-681, CTL-1031.
        */
       toLabels: string[] | null;
       /**
@@ -65,6 +75,12 @@ export type LinearWebhookEvent =
       description: string | null;
       /** True when "description" key appears in updatedFrom (description was edited). CTL-749. */
       descriptionChanged: boolean;
+      /**
+       * Current estimate (numeric story points) from data.estimate; null when
+       * explicitly unset; undefined (field absent) when `estimate` was not present
+       * in the webhook payload — KEY-PRESENCE: absent → keep stored value. CTL-957.
+       */
+      toEstimate?: number | null;
     }
   | {
       kind: "comment";
@@ -178,11 +194,12 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
   const assigneeObj = isObject(data.assignee) ? data.assignee : null;
   const toAssigneeId = assigneeObj !== null ? getOptStr(assigneeObj, "id") : null;
   const toAssigneeName = assigneeObj !== null ? getOptStr(assigneeObj, "name") : null;
-  // CTL-681 — eligible-set scoping fields. Linear's API returns label info as
-  // `labels: { nodes: [{id, name, …}] }` (confirmed by orch-monitor/lib/
-  // linear.ts and linear-write.mjs:145). `null` when `labels` is absent
-  // entirely, `[]` when the array is present but empty — preserves the
-  // distinction the daemon's incremental projection needs.
+  // CTL-681/CTL-1031 — eligible-set scoping + held_since fold. Linear's GraphQL
+  // API returns labels as `{ nodes: [{id, name, …}] }`, but WEBHOOK payloads
+  // (the only thing this parser sees) serialize them as a FLAT ARRAY
+  // `[{id, name, color}]`. parseLabelNames accepts both. `null` when `labels`
+  // is absent / malformed (unknown → keep), `[]` when explicitly empty (clear)
+  // — the distinction the daemon's incremental projection + router fold need.
   const toLabels = parseLabelNames(data.labels);
   const projectObj = isObject(data.project) ? data.project : null;
   const toProject = projectObj !== null ? getOptStr(projectObj, "name") : null;
@@ -190,6 +207,13 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     projectObj !== null ? getOptStr(projectObj, "id") : getOptStr(data, "projectId");
   const description = getOptStr(data, "description") ?? null; // CTL-749
   const descriptionChanged = updatedFromKeys.includes("description"); // CTL-749
+  // CTL-957: estimate (numeric story points) — Linear sends data.estimate as a
+  // number (or omits it). "estimate" key in updatedFrom means it changed; even
+  // when not in updatedFrom the full snapshot always carries the current value
+  // when present, so we read it unconditionally when the key exists in data.
+  const toEstimate = "estimate" in data
+    ? (typeof data.estimate === "number" ? data.estimate : null)
+    : undefined; // absent → keep stored value
   return {
     kind: "issue",
     action,
@@ -198,6 +222,7 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     teamKey: teamKeyFromData(data),
     data,
     updatedFromKeys,
+    issueId: getOptStr(data, "id"), // CTL-822 — entityId UUID (all a `remove` carries)
     actorId,
     actorName,
     toState,
@@ -210,21 +235,58 @@ function parseIssue(payload: Record<string, unknown>): LinearWebhookEvent {
     previousFromValues: updatedFrom,
     description,
     descriptionChanged,
+    toEstimate,
   };
 }
 
-// parseLabelNames — extract the label-name list from a webhook `data.labels`
-// value. Returns null when labels is absent (not an object), [] when present
-// with an empty nodes array, or the names otherwise. CTL-681.
+// parseLabelNames — extract the label-name list from a `data.labels` value.
+//
+// Linear serializes labels two different ways depending on the source:
+//   • GraphQL API  → `{ nodes: [{ id, name, … }] }`  (paginated relation)
+//   • WEBHOOK      → `[{ id, name, color }, …]`        (FLAT ARRAY, CTL-1031)
+//
+// The pre-CTL-1031 parser only accepted the `{nodes}` shape, so every real
+// label-change webhook (a flat array) fell through to null and the broker's
+// label fold + held_since stamp never fired (router.mjs:1035,1044). We now
+// accept BOTH shapes.
+//
+// Return contract (the [] vs null distinction the router relies on):
+//   • null → "unknown" — labels absent, or a MALFORMED array we can't trust.
+//            router.mjs:1035 leaves the stored label set untouched (keep).
+//   • []   → "explicitly empty" — a genuine empty label set; router CLEARS
+//            the stored labels and clears held_since.
+//   • [names…] → the resolved label names.
+//
+// A flat array is rejected to null (not partially parsed) when ANY entry is a
+// non-object or an object without a usable string `name` — a partial parse
+// could silently shrink the set and mis-clear `blocked`/`waiting`, which is
+// worse than "unknown → keep". CTL-1031.
 function parseLabelNames(value: unknown): string[] | null {
-  if (!isObject(value)) return null;
-  const nodes = value.nodes;
-  if (!Array.isArray(nodes)) return null;
+  // Flat-array webhook shape: [{ id, name, color }, …]
+  if (Array.isArray(value)) {
+    return parseLabelArray(value);
+  }
+  // GraphQL API shape: { nodes: [{ id, name, … }] }
+  if (isObject(value)) {
+    const nodes = value.nodes;
+    if (Array.isArray(nodes)) {
+      return parseLabelArray(nodes);
+    }
+  }
+  // Anything else (absent, ids-only in updatedFrom, scalar) → unknown.
+  return null;
+}
+
+// parseLabelArray — turn an array of label-node objects into a name list, or
+// null if the array contains any entry we can't extract a non-empty string
+// name from. An empty input array yields [] (the genuine empty-set signal).
+function parseLabelArray(arr: unknown[]): string[] | null {
   const names: string[] = [];
-  for (const node of nodes) {
-    if (!isObject(node)) continue;
+  for (const node of arr) {
+    if (!isObject(node)) return null;
     const name = getOptStr(node, "name");
-    if (name !== null) names.push(name);
+    if (name === null) return null;
+    names.push(name);
   }
   return names;
 }

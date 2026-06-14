@@ -12,6 +12,15 @@
 // never appears in the ready/blocked sets. Override via options.terminalStatuses.
 export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 
+// teamOf — the Linear team key from an issue identifier (the prefix before the
+// first `-`): "CTL-863" → "CTL", "OTL-4" → "OTL". Used by the CTL-838 cross-team
+// edge drop. A malformed/empty id yields "" (never matches a real team key).
+export function teamOf(id) {
+  if (typeof id !== "string") return "";
+  const i = id.indexOf("-");
+  return i === -1 ? id : id.slice(0, i);
+}
+
 // buildDependencyEdges — normalize Linear relations into canonical directed
 // edges (CTL-530). An edge is kept when both endpoints are in-set, OR (CTL-565
 // D5) when `to` is in-set and `from` is a declared external blocker — so an
@@ -20,12 +29,36 @@ export const DEFAULT_TERMINAL_STATUSES = ["Done", "Canceled"];
 // `linearis` emits only `blocks`; the API-native `blocked_by` form is also
 // accepted for forward-compat.
 //
+// CTL-878: a `blocks` edge whose source is the target's PARENT epic is DROPPED.
+// A Linear parent/child hierarchy link is not a dependency, but triage scrapes a
+// child's body for ticket refs and the scheduler (CTL-755 STEP E) was persisting
+// `child blocked_by parent-epic` durably. Because a tracking epic is never worked
+// (it never reaches a terminal state and the daemon's eligible query is Todo-only),
+// that edge deadlocks the child forever. Each in-set issue carries `parent` (the
+// epic identifier, threaded from linearis) so the drop also fires when the parent
+// is an out-of-set externalId — exactly the deadlock case (CTL-859→863, CTL-718→722).
+//
+// CTL-838: a `blocks` edge that crosses TEAMS is DROPPED. The team is the
+// identifier prefix (CTL-863 → "CTL", OTL-4 → "OTL"). A single daemon orchestrates
+// one team's backlog and cannot work another team's tickets, so a cross-team
+// blocker can never reach a terminal state from the daemon's side — it can only
+// deadlock the dependent forever. Such edges were created by the now-removed
+// prose scrape (a foreign id mentioned in the body, e.g. OTL-4 → CTL-838); a
+// genuine cross-team prerequisite, if one ever exists, is handled out-of-band by
+// a human, not by the daemon's auto-sequencing.
+//
 // options.externalIds — out-of-set blocker identifiers (D5) that remain valid
 // edge endpoints on the `from` side.
 export function buildDependencyEdges(issues, { externalIds } = {}) {
   const list = issues ?? [];
   const inSet = new Set(list.map((i) => i?.identifier).filter(Boolean));
   const ext = externalIds instanceof Set ? externalIds : new Set(externalIds ?? []);
+  // CTL-878: child identifier → its parent epic identifier, for the parent-edge
+  // drop below. Built from the in-set issues' `parent` field (normalized to a
+  // string id upstream); a missing parent leaves the child absent from the map.
+  const parentOf = new Map(
+    list.filter((i) => i?.identifier && i?.parent).map((i) => [i.identifier, i.parent]),
+  );
   const seen = new Set();
   const edges = [];
 
@@ -35,6 +68,8 @@ export function buildDependencyEdges(issues, { externalIds } = {}) {
     // declared external blocker. A genuinely out-of-set edge is dropped.
     if (!inSet.has(to)) return;
     if (!inSet.has(from) && !ext.has(from)) return;
+    if (parentOf.get(to) === from) return; // CTL-878: parent→child is hierarchy, not a dependency
+    if (teamOf(from) !== teamOf(to)) return; // CTL-838: cross-team blocker can't be worked by this daemon → only deadlocks
     const key = `${from} ${to}`;
     if (seen.has(key)) return; // dedup symmetric relations/inverseRelations
     seen.add(key);
@@ -230,4 +265,37 @@ export function analyzeDependencyGraph(issues, options = {}) {
   const { ready, blocked } = computeReadySet(list, edges, options);
   const anomalies = detectCycles(list.map((i) => i?.identifier).filter(Boolean), edges);
   return { ready, blocked, anomalies };
+}
+
+// wouldCreateCycle — would adding a NEW edge `from → to` (from blocks to) to
+// the given edge set close a dependency cycle? (CTL-925)
+//
+// Adding `from → to` creates a cycle iff `to` can already reach `from` over
+// the existing edges (a path to → … → from, which the new edge would close
+// back to `to`), OR the edge is a self-loop (from === to). Pure DFS
+// reachability over the forward `blocks` direction — O(V + E), no SCC
+// allocation. Defensive against a null/undefined edge list (treated as
+// empty → no cycle). Used by STEP E and the CTL-537 sequencing seam in
+// scheduler.mjs to refuse a cycle-closing blocked_by write of ANY length,
+// superseding the prior direct 2-node candidateBlocks.has shortcut.
+export function wouldCreateCycle(edges, from, to) {
+  if (!from || !to) return false;
+  if (from === to) return true;
+  const list = edges ?? [];
+  const adj = new Map();
+  for (const { from: f, to: t } of list) {
+    if (!f || !t) continue;
+    if (!adj.has(f)) adj.set(f, []);
+    adj.get(f).push(t);
+  }
+  const stack = [to];
+  const seen = new Set();
+  while (stack.length) {
+    const node = stack.pop();
+    if (node === from) return true;
+    if (seen.has(node)) continue;
+    seen.add(node);
+    for (const next of adj.get(node) ?? []) stack.push(next);
+  }
+  return false;
 }

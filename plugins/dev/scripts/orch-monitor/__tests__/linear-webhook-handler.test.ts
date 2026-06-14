@@ -323,7 +323,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const botPayload = {
       action: "update",
@@ -337,11 +337,29 @@ describe("createLinearWebhookHandler", () => {
     expect(eventLog.appends.length).toBe(0);
   });
 
-  it("non-bot actor writes normally even when botUserId is configured", async () => {
+  it("suppresses issue event from orchestrator bot (second id in Set)", async () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["worker-uuid", "orch-uuid"]),
+    });
+    const orchPayload = {
+      action: "update",
+      type: "Issue",
+      actor: { id: "orch-uuid", name: "Catalyst Orchestrator" },
+      data: { id: "i1", identifier: "CTL-263", team: { key: "CTL" } },
+      updatedFrom: { stateId: "old" },
+    };
+    const res = await handler.handle(makeReq(orchPayload));
+    expect(res.status).toBe(200);
+    expect(eventLog.appends.length).toBe(0);
+  });
+
+  it("non-bot actor writes normally even when botUserIds is configured", async () => {
+    const handler = createLinearWebhookHandler({
+      linearSecrets: [{ key: "test", secret: SECRET }],
+      eventLog,
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const humanPayload = {
       action: "update",
@@ -358,7 +376,7 @@ describe("createLinearWebhookHandler", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const commentPayload = {
       action: "create",
@@ -382,6 +400,7 @@ describe("buildLinearEventLogEnvelope — description fields (CTL-749)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["description"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -412,6 +431,7 @@ describe("buildLinearEventLogEnvelope — description fields (CTL-749)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -483,7 +503,7 @@ describe("buildLinearEventLogEnvelope — comment fields (CTL-681)", () => {
     const handler = createLinearWebhookHandler({
       linearSecrets: [{ key: "test", secret: SECRET }],
       eventLog: eventLog2,
-      botUserId: "bot-uuid-123",
+      botUserIds: new Set(["bot-uuid-123"]),
     });
     const botComment = {
       action: "create",
@@ -507,6 +527,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -540,6 +561,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: "In Review",
@@ -569,6 +591,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -598,6 +621,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: "actor-uuid-123",
         actorName: null,
         toState: null,
@@ -628,6 +652,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -657,6 +682,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId", "labelIds"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: "Ready",
@@ -695,6 +721,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: "actor-uuid-424",
         actorName: "Ryan",
         toState: "In Progress",
@@ -728,6 +755,7 @@ describe("buildLinearEventLogEnvelope (canonical)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -823,6 +851,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: ["stateId"],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -853,6 +882,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "FOO",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -883,6 +913,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: null,
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -1015,6 +1046,7 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
         teamKey: "CTL",
         data: {},
         updatedFromKeys: [],
+        issueId: null,
         actorId: null,
         actorName: null,
         toState: null,
@@ -1031,6 +1063,37 @@ describe("buildLinearEventLogEnvelope — team→repo lookup (CTL-362)", () => {
       TS
     );
     expect(env!.attributes["vcs.repository.name"]).toBeUndefined();
+  });
+
+  it("issueId flows to attrs[linear.issue.id] and payload.issueId (CTL-822)", () => {
+    const env = buildLinearEventLogEnvelope(
+      {
+        kind: "issue",
+        action: "remove",
+        topic: "linear.issue.removed",
+        ticket: null, // a real remove carries no identifier — only the UUID
+        teamKey: null,
+        data: { id: "entity-uuid-7" },
+        updatedFromKeys: [],
+        issueId: "entity-uuid-7",
+        actorId: null,
+        actorName: null,
+        toState: null,
+        toPriority: null,
+        toAssigneeId: null,
+        toAssigneeName: null,
+        toLabels: null,
+        toProject: null,
+        toProjectId: null,
+        previousFromValues: {},
+        description: null,
+        descriptionChanged: false,
+      },
+      TS
+    );
+    expect(env!.attributes["event.name"]).toBe("linear.issue.removed");
+    expect(env!.attributes["linear.issue.id"]).toBe("entity-uuid-7");
+    expect((env!.body.payload as { issueId: string | null }).issueId).toBe("entity-uuid-7");
   });
 });
 

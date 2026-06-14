@@ -4,6 +4,14 @@ import tailwindcss from "@tailwindcss/vite";
 import { resolve } from "path";
 import { assembleBoard } from "../lib/board-data.mjs";
 
+// CTL-1088: build out of the pristine plugin clone. When the wrapper provides a
+// dist dir, writes outside the tracked public/; falls back to ../public so plain
+// `bunx vite build` from a checkout still behaves as before.
+export const OUT_DIR =
+  process.env.MONITOR_UI_DIST_DIR && process.env.MONITOR_UI_DIST_DIR.length > 0
+    ? resolve(process.env.MONITOR_UI_DIST_DIR)
+    : resolve(__dirname, "../public");
+
 // CTL-727/730: serve the live board payload from the dev server (Node side), so
 // the React board can fetch real execution-core state without the legacy :7400
 // monitor. Matches the SAME path the production monitor serves (`/api/board`,
@@ -41,16 +49,18 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: resolve(__dirname, "../public"),
+    outDir: OUT_DIR,
     emptyOutDir: false,
     rollupOptions: {
-      // CTL-730: build BOTH entries. `index.html` is the legacy dashboard
-      // (served at /legacy); `board.html` is the CTL-727 board (the default
-      // page at /). Without this, Vite's single-entry default only emits
-      // index.html and the board is never produced for production.
+      // CTL-989: SINGLE entry. The two SPA bundles are unified into ONE TanStack
+      // Router mounted from index.html (→ main.tsx → RouterProvider, with AppShell
+      // as the rootRoute layout). The standalone board.html bundle is retired —
+      // its routes (/ticket/$id, /worker/$id, /dep-graph) are now child routes of
+      // the unified router and the server serves index.html for every app path
+      // (see server.ts isAppRoute). The detail + OBSERVE surface routes are
+      // code-split (React.lazy in app-router.tsx) so the main bundle stays lean.
       input: {
         main: resolve(__dirname, "index.html"),
-        board: resolve(__dirname, "board.html"),
       },
     },
   },

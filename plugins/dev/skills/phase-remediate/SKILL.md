@@ -276,7 +276,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-remediate: linear-comment-post failed (continuing)" >&2
@@ -326,10 +326,26 @@ fi
 
 ## Failure handling
 
-One failure mode — hard error (caller-supplied reason).
+One failure mode — hard error (caller-supplied reason). When escalating to
+`stalled`/`needs-human`, populate an `explanation` block per CTL-1065 using
+the CLI shim (always exits 0; degrades gracefully on bad input):
 
 ```bash
 REASON="${1:-remediation failed}"  # caller-supplied short string
+
+# CTL-1130: AUTHORIZATION — agent can re-remediate; only regression risk stops it.
+EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
+  --ticket "$TICKET" --phase "$PHASE" \
+  --type authorization \
+  --problem "remediation failed: ${REASON}" \
+  --call-to-action "should ${TICKET} be re-remediated manually, or should verify findings be waived?" \
+  --recommendation "re-run verify with the updated remediation" \
+  --risk "${REGRESSION_RISK:+regression_risk ${REGRESSION_RISK} with ${HIGH_COUNT:-?} HIGH finding(s) — merging risks a regression}${REGRESSION_RISK:-remediation budget exhausted with unresolvable verify failures}" \
+  --why-asking "risk-authority gate, not a capability gap" \
+  --authorize-label "re-remediate ${TICKET}" \
+  --could-higher-tier-resolve false \
+  --can-execute true \
+  2>/dev/null || echo '{}')"
 
 # Hard-error: emit failed + attention, exit non-zero. A `failed` event lets
 # the FSM revive remediate once (REVIVE_BUDGET) before stalling — distinct

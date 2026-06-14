@@ -138,6 +138,7 @@ function projectEnvelope(raw: unknown): CanonicalEvent {
   const body = (r.body ?? {}) as Record<string, unknown>;
   const resource = (r.resource ?? {}) as Record<string, unknown>;
   return {
+    id: typeof r.id === "string" ? r.id : "",
     ts: typeof r.ts === "string" ? r.ts : "",
     observedTs: typeof r.observedTs === "string" ? r.observedTs : undefined,
     severityText:
@@ -164,6 +165,14 @@ function projectEnvelope(raw: unknown): CanonicalEvent {
         typeof resource["service.version"] === "string"
           ? resource["service.version"]
           : "0.0.0",
+      // CTL-852: host identity is required on Resource. Pre-CTL-852 events on
+      // the wire lack these keys, so default to "" rather than synthesizing.
+      "host.name":
+        typeof resource["host.name"] === "string"
+          ? resource["host.name"]
+          : "",
+      "host.id":
+        typeof resource["host.id"] === "string" ? resource["host.id"] : "",
     },
     attributes: {
       "event.name":

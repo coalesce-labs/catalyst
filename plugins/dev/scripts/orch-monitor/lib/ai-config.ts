@@ -43,16 +43,16 @@ export function loadAiConfig(
   const aiSecrets = isRecord(secrets.ai) ? secrets.ai : null;
   if (!aiSecrets) return DISABLED;
 
-  const gateway =
-    typeof aiSecrets.gateway === "string" ? aiSecrets.gateway : "";
-  const apiKey = typeof aiSecrets.apiKey === "string" ? aiSecrets.apiKey : "";
-
-  if (!gateway || !apiKey) return DISABLED;
-
   const provider =
     typeof aiSecrets.provider === "string" && aiSecrets.provider
       ? aiSecrets.provider
       : DEFAULT_PROVIDER;
+  const gateway =
+    typeof aiSecrets.gateway === "string" ? aiSecrets.gateway : "";
+  const apiKey = typeof aiSecrets.apiKey === "string" ? aiSecrets.apiKey : "";
+
+  if (provider !== "claude-cli" && (!gateway || !apiKey)) return DISABLED;
+
   const model =
     typeof aiSecrets.model === "string" && aiSecrets.model
       ? aiSecrets.model

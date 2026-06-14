@@ -11,8 +11,10 @@ Migrated from `catalyst-dev` v11.0.0 (CTL-726).
 | `/catalyst-legacy:orchestrate` | Multi-ticket wave-based orchestrator (legacy predecessor to execution-core) |
 | `/catalyst-legacy:god` | God-mode orchestration — wide-scope multi-ticket dispatch |
 | `/catalyst-legacy:setup-orchestrate` | Initial orchestrator setup (workspace + config initialization) |
-| `/catalyst-legacy:briefing-followup` | Follow-up on a morning briefing with triage and dispatch |
-| `/catalyst-legacy:iterate-plan` | Iterate on an existing implementation plan |
+
+> `briefing-followup` and `iterate-plan` were originally migrated here by CTL-726 but moved back
+> to `catalyst-dev` — they are general workflow skills, not wave-orchestration. Use
+> `/catalyst-dev:briefing-followup` and `/catalyst-dev:iterate-plan`.
 
 ## Architecture
 
@@ -24,22 +26,27 @@ coordinated by the execution-core daemon).
 The wave model is preserved here for users who depend on it. For new work, prefer the
 phase-agent pipeline via `catalyst-dev`.
 
-## Backing Scripts
+## Requires catalyst-dev
 
-All shell scripts remain in `plugins/dev/scripts/` because many (`orchestrate-dispatch-next`,
+catalyst-legacy is a thin skill plugin: the SKILL.md files live here, but all backing shell
+scripts remain in `plugins/dev/scripts/` because many (`orchestrate-dispatch-next`,
 `orchestrate-phase-advance`, `catalyst-session.sh`, etc.) are shared with the live phase-agent
-pipeline. Skills resolve the scripts directory at runtime:
+pipeline. **catalyst-dev is therefore a hard dependency** — declared in `plugin.json`
+(`"dependencies": ["catalyst-dev"]`), so the Claude Code install layer auto-installs/enables it and
+blocks disabling it while catalyst-legacy is enabled.
+
+Each skill resolves the shared scripts at runtime via the bundled helper, which fails fast with an
+actionable message if catalyst-dev cannot be found (older Claude Code versions, source checkouts, or
+a disabled dev plugin):
 
 ```bash
-CATALYST_DEV_SCRIPTS="${CATALYST_DEV_SCRIPTS:-}"
-if [[ -z "$CATALYST_DEV_SCRIPTS" ]]; then
-  CATALYST_DEV_SCRIPTS="$(ls -d "$HOME"/.claude/plugins/cache/catalyst/catalyst-dev/*/scripts 2>/dev/null | sort -V | tail -1)"
-fi
-[[ -n "$CATALYST_DEV_SCRIPTS" ]] || CATALYST_DEV_SCRIPTS="${CLAUDE_PLUGIN_ROOT}/scripts"
+source "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}/scripts/require-catalyst-dev.sh" \
+    "${CLAUDE_PLUGIN_ROOT:-plugins/legacy}" || exit 1
+# $CATALYST_DEV_SCRIPTS is now exported and points at catalyst-dev's scripts dir.
 ```
 
 Set `CATALYST_DEV_SCRIPTS` explicitly in your environment to override the auto-resolved path
-(required for dev-symlink installs where no versioned cache directory exists).
+(e.g. for dev-symlink installs where no versioned cache directory exists).
 
 ## See Also
 

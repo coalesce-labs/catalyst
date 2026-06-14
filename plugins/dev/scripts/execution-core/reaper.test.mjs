@@ -7,6 +7,8 @@ import {
   groupBackgroundSessionsByTicket,
   CLEANUP_GRACE_MS,
   defaultAgents,
+  defaultAssessWorktreeRemoval,
+  defaultReadSignalBgJobId,
 } from "./reaper.mjs";
 import {
   refreshAgents,
@@ -329,6 +331,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: (id) => { trace.push(["reap", id]); return Promise.resolve({ ok: true }); },
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
       gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
       emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
@@ -353,6 +357,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: () => Promise.resolve({ ok: true }),
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: () => Promise.resolve({ ok: true }),
       gitBranchDelete: (b, force) => { calls.push({ b, force }); return Promise.resolve({ ok: true }); },
       emit: () => Promise.resolve(),
@@ -373,6 +379,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
     const r = new Reaper({
       executorReap: () => Promise.resolve({ ok: true }),
       agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: () => Promise.resolve({ ok: true }),
       // Non-force `-d` refuses an unmerged branch.
       gitBranchDelete: () => Promise.resolve({ ok: false, error: "not fully merged" }),
@@ -446,6 +454,8 @@ describe("Reaper._handlePrMergedCleanup", () => {
       agents: agentsFixture([
         { sessionId: "99999999-aaaa-bbbb-cccc-dddddddddddd", cwd: "/wt/CTL-649", status: "idle" },
       ]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791: gate satisfied
+      archiveWorktree: () => ({ ok: true }),
       gitWorktreeRemove: wtRemove,
       gitBranchDelete: () => Promise.resolve({ ok: true }),
       emit: () => Promise.resolve(),
@@ -460,6 +470,44 @@ describe("Reaper._handlePrMergedCleanup", () => {
     // Sibling session untouched, and cleanup proceeds for the real target.
     expect(stopped).toEqual([]);
     expect(wtRemove).toHaveBeenCalled();
+  });
+
+  it("CTL-791: defaultAssessWorktreeRemoval is FAIL-CLOSED on a failed `claude agents` read (agents-stale)", async () => {
+    // The production seam must NOT treat an unreadable/cold fleet as empty: a
+    // failed read ({ ok:false }) → agents-stale → unsafe (never a false no-session).
+    const verdict = await defaultAssessWorktreeRemoval(
+      { worktree_path: "/nonexistent/wt/CTL-1", ticket: "CTL-1", branch: "b", force: true },
+      () => ({ agents: [], ok: false }), // injected failed read
+    );
+    expect(verdict.safe).toBe(false);
+    expect(verdict.reasons).toContain("agents-stale");
+  });
+
+  it("CTL-791: an UNSAFE gate verdict DEFERS — no worktree remove, no branch delete, emits cleanup-deferred + failed", async () => {
+    const wtRemove = mock(() => Promise.resolve({ ok: true }));
+    const brDelete = mock(() => Promise.resolve({ ok: true }));
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: false, reasons: ["dirty-worktree", "unknown-provenance"] }),
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: wtRemove,
+      gitBranchDelete: brDelete,
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "pr.merged.cleanup-requested",
+      ticket: "CTL-1",
+      worktree_path: "/wt/CTL-1",
+      branch: "ryan/ctl-1",
+      force: true,
+    });
+    expect(wtRemove).not.toHaveBeenCalled();
+    expect(brDelete).not.toHaveBeenCalled();
+    expect(emitted.find((e) => e.evt === "worktree.cleanup-deferred")).toBeTruthy();
+    expect(emitted.find((e) => e.evt === "pr.merged.cleanup-failed")).toBeTruthy();
   });
 });
 
@@ -595,6 +643,79 @@ describe("Reaper.scanOrphans", () => {
     await r.scanOrphans();
     expect(emitted.length).toBe(1);
     expect(emitted[0].bgJobId).toBe("11111111");
+  });
+});
+
+// CTL-1004: the stall-janitor's J1 reap is a TARGETED orphans.reap-requested —
+// it names a specific worktree_path + ticket so the reaper acts on THAT tree (the
+// targeted removal + CTL-791 evidence path), not a blanket session sweep. An
+// untargeted orphans.reap-requested (the legacy 600s timer, payload {}) still
+// runs the blanket scanOrphans. This locks the consumption contract the janitor
+// depends on.
+describe("Reaper.handle orphans.reap-requested routing (CTL-1004)", () => {
+  it("UNTARGETED (no worktree_path) → blanket scanOrphans, NOT a targeted removal", async () => {
+    let scanned = false;
+    let removed = false;
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      gitWorktreeRemove: () => { removed = true; return Promise.resolve({ ok: true }); },
+      emit: () => Promise.resolve(),
+      log: silentLog(),
+    });
+    r.scanOrphans = async () => { scanned = true; };
+    await r.handle({ event: "orphans.reap-requested" });
+    expect(scanned).toBe(true);
+    expect(removed).toBe(false);
+  });
+
+  it("TARGETED (worktree_path present) → targeted removal path (presweep+CTL-791+remove), NOT a blanket scan", async () => {
+    let scanned = false;
+    const trace = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: true, reasons: [] }), // CTL-791 gate satisfied
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: (p) => { trace.push(["wt", p]); return Promise.resolve({ ok: true }); },
+      gitBranchDelete: (b, force) => { trace.push(["br", b, force]); return Promise.resolve({ ok: true }); },
+      emit: (evt) => { trace.push(["emit", evt]); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    r.scanOrphans = async () => { scanned = true; };
+    await r.handle({
+      event: "orphans.reap-requested",
+      ticket: "CTL-100",
+      worktree_path: "/wt/CTL-100",
+      branch: "CTL-100",
+    });
+    // Blanket scan is NOT used for a targeted event.
+    expect(scanned).toBe(false);
+    // The named worktree is removed via the evidence-gated path.
+    expect(trace).toContainEqual(["wt", "/wt/CTL-100"]);
+    expect(trace.some((t) => t[0] === "emit" && t[1] === "pr.merged.cleanup-complete")).toBe(true);
+  });
+
+  it("TARGETED reap honors the CTL-791 evidence gate — unsafe tree is deferred, NOT removed", async () => {
+    let removed = false;
+    const emitted = [];
+    const r = new Reaper({
+      executorReap: () => Promise.resolve({ ok: true }),
+      agents: agentsFixture([]),
+      assessWorktreeRemoval: async () => ({ safe: false, reasons: ["dirty-worktree"] }),
+      archiveWorktree: () => ({ ok: true }),
+      gitWorktreeRemove: () => { removed = true; return Promise.resolve({ ok: true }); },
+      gitBranchDelete: () => Promise.resolve({ ok: true }),
+      emit: (evt, fields) => { emitted.push({ evt, fields }); return Promise.resolve(); },
+      log: silentLog(),
+    });
+    await r.handle({
+      event: "orphans.reap-requested",
+      ticket: "CTL-100",
+      worktree_path: "/wt/CTL-100",
+      branch: "CTL-100",
+    });
+    expect(removed).toBe(false);
+    expect(emitted.some((e) => e.evt === "pr.merged.cleanup-failed")).toBe(true);
   });
 });
 
@@ -876,5 +997,126 @@ describe("Reaper.reconcileTicketWorkers — CLEANUP_GRACE_MS spawn grace", () =>
     expect(CLEANUP_GRACE_MS).toBe(60_000);
     expect(CLEANUP_GRACE_MS).not.toBe(5 * 60 * 1000); // STALE_MS
     expect(CLEANUP_GRACE_MS).not.toBe(15 * 60 * 1000); // DEFAULT_MIN_IDLE_MS
+  });
+});
+
+// CTL-778 Step 2B — reaper backstop on phase.*.complete events.
+// Safety net for a worker that emits complete but fails to self-stop.
+describe("Reaper — CTL-778 complete-event reap backstop", () => {
+  it("emits terminal reap-request on phase.<phase>.complete.<ticket>", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([{ sessionId: "abc12345-0000-0000-0000-000000000000", kind: "background" }]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } });
+    expect(emitted.length).toBe(1);
+    expect(emitted[0][0]).toBe("phase.terminal.reap-requested");
+    expect(emitted[0][1].ticket).toBe("CTL-1");
+    expect(emitted[0][1].phase).toBe("plan");
+  });
+
+  it("complete-event reap is once-guarded — duplicate event is a no-op", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([{ sessionId: "abc12345-0000-0000-0000-000000000000", kind: "background" }]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    const ev = { event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } };
+    await r.handle(ev);
+    await r.handle(ev); // duplicate — should be a no-op
+    expect(emitted.length).toBe(1);
+  });
+
+  it("no bg_job_id (readSignalBgJobId returns null) → no emit", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => null,
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.complete.CTL-1", attributes: { "event.name": "phase.plan.complete.CTL-1" } });
+    expect(emitted.length).toBe(0);
+  });
+
+  it("non-complete phase events (e.g. phase.plan.revive.CTL-1) are not processed", async () => {
+    const emitted = [];
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock((type, fields) => { emitted.push([type, fields]); return Promise.resolve(); }),
+      readSignalBgJobId: () => "abc12345",
+      log: silentLog(),
+    });
+    await r.handle({ event: "phase.plan.revive.CTL-1", attributes: { "event.name": "phase.plan.revive.CTL-1" } });
+    expect(emitted.length).toBe(0);
+  });
+
+  it("emit throwing in _handleCompleteEvent is caught at the outer handle() catch", async () => {
+    const warns = [];
+    const logger = { info: () => {}, warn: (o) => warns.push(o), error: (o) => warns.push(o) };
+    const r = new Reaper({
+      agents: agentsFixture([]),
+      emit: mock(() => { throw new Error("emit boom"); }),
+      readSignalBgJobId: () => "abc12345",
+      log: logger,
+    });
+    // Should not throw — outer catch in handle() absorbs the error.
+    await expect(r.handle({ event: "phase.plan.complete.CTL-1", attributes: {} })).resolves.toBeUndefined();
+    expect(warns.length).toBeGreaterThan(0); // logged by outer catch
+  });
+});
+
+// CTL-778: defaultReadSignalBgJobId — production signal-file reader.
+describe("defaultReadSignalBgJobId (CTL-778)", () => {
+  it("returns bg_job_id from a valid signal file", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), JSON.stringify({ bg_job_id: "abc12345", status: "running" }));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBe("abc12345");
+  });
+
+  it("returns null when signal file is missing", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when bg_job_id field is absent", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), JSON.stringify({ status: "running" }));
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when file content is invalid JSON", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const orchDir = mkdtempSync(join(tmpdir(), "reaper-sig-"));
+    const workerDir = join(orchDir, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(join(workerDir, "phase-plan.json"), "not json");
+    expect(defaultReadSignalBgJobId(orchDir, "CTL-1", "plan")).toBeNull();
+  });
+
+  it("returns null when called with missing args", () => {
+    expect(defaultReadSignalBgJobId(null, "CTL-1", "plan")).toBeNull();
+    expect(defaultReadSignalBgJobId("/orch", null, "plan")).toBeNull();
+    expect(defaultReadSignalBgJobId("/orch", "CTL-1", null)).toBeNull();
   });
 });

@@ -281,7 +281,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-review: linear-comment-post failed (continuing)" >&2
@@ -289,9 +289,43 @@ _... (truncated)_"
 fi
 ```
 
+## Step N — Capture friction (compound loop, CTL-789)
+
+Before you emit completion, append this phase's friction to the shared per-ticket
+friction log. This is the PRODUCER half of the compound-engineering loop: the
+`ticket-compound` curator harvests `thoughts/shared/friction/${TICKET}.md` to distil
+durable learnings and ADR proposals. REPLACE each `<…>` placeholder below with your
+real experience THIS phase — terse, 3–6 lines total; `"None."` is a valid value when
+the phase was frictionless. `${TICKET}` is already resolved in the Prelude — do not
+re-derive it. This append is **off the critical path and best-effort**: it must NEVER
+fail or block `emit-complete`.
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## review · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
 ```bash
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
+
+# Self-halt after complete to prevent zombie workers (CTL-778 step 2).
+# Read our own bg_job_id from the signal file and ask Claude to stop us.
+# Best-effort: a failed stop is covered by the daemon reaper backstop.
+if [[ -n "${ORCH_DIR:-}" && -f "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" ]]; then
+  _SELF_BG=$(jq -r '.bg_job_id // empty' \
+    "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" 2>/dev/null || true)
+  [[ -n "$_SELF_BG" ]] && claude stop "${_SELF_BG:0:8}" >/dev/null 2>&1 || true
+fi
 
 [[ -n "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
 ```

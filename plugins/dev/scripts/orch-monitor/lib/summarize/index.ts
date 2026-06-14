@@ -133,7 +133,8 @@ export function createSummarizeHandler(
       const provider = parsed.provider ?? deps.config.defaultProvider;
       const model = parsed.model ?? deps.config.defaultModel;
       const providerCfg = deps.config.providers[provider];
-      if (!providerCfg?.apiKey) {
+      const needsKey = provider !== "claude-cli";
+      if (!providerCfg || (needsKey && !providerCfg.apiKey)) {
         return Response.json(
           { error: `provider ${provider} is not configured` },
           { status: 503 },
@@ -177,7 +178,10 @@ export function createSummarizeHandler(
           systemPrompt,
           userPrompt,
           model,
-          apiKey: providerCfg.apiKey,
+          // claude-cli runs on the subscription and ignores apiKey; coalesce so
+          // the gate's `needsKey === false` branch (apiKey may be undefined)
+          // still satisfies SummarizeArgs.apiKey: string (CTL-1109 remediate).
+          apiKey: providerCfg.apiKey ?? "",
           fetcher: deps.fetcher,
         });
         const generatedAt = new Date().toISOString();

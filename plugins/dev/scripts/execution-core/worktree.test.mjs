@@ -125,7 +125,9 @@ describe("teardownWorktree", () => {
   test("resolves the worktree by branch and git-worktree-removes it → true", () => {
     const spawn = spawnSeq(listWith("/wt/CTL-7", "CTL-7"), { status: 0, stdout: "", stderr: "" });
     expect(teardownWorktree({ repoRoot: "/repo", ticket: "CTL-7" }, { spawn })).toBe(true);
-    expect(spawn.calls[1]).toEqual(["-C", "/repo", "worktree", "remove", "--force", "/wt/CTL-7"]);
+    // CTL-791: no `--force` — a plain remove refuses on a dirty/locked tree
+    // rather than destroying uncommitted/untracked work.
+    expect(spawn.calls[1]).toEqual(["-C", "/repo", "worktree", "remove", "/wt/CTL-7"]);
   });
 
   test("no worktree for the ticket → true (already torn down), no remove call", () => {

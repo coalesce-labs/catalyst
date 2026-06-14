@@ -11,7 +11,7 @@
 # Examples:
 #   launch-worktree-tab.sh --project catalyst pm main
 #   launch-worktree-tab.sh --project catalyst --prompt-file /path/to/pm-kickoff.md pm main
-#   launch-worktree-tab.sh --project catalyst --prompt '/catalyst-dev:oneshot CTL-123' CTL-123 main
+#   launch-worktree-tab.sh --project catalyst --prompt '/catalyst-legacy:oneshot CTL-123' CTL-123 main
 #   launch-worktree-tab.sh --project catalyst CTL-64 main fix-auth
 #   launch-worktree-tab.sh ADV-230 main                  # --project omitted
 #
@@ -24,7 +24,7 @@
 # warning; the tab still opens normally.
 #
 # --prompt: Literal string passed to claude as the initial prompt. Use this
-# when the prompt is built from Warp params (e.g., /catalyst-dev:oneshot
+# when the prompt is built from Warp params (e.g., /catalyst-legacy:oneshot
 # {{ticket}}). If both --prompt and --prompt-file are given, --prompt wins.
 #
 # Must be invoked from the repo root (Warp tab sets `directory`). Expects

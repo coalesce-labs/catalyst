@@ -9,24 +9,29 @@
 import { describe, test, expect } from "bun:test";
 import * as wd from "./workflow-descriptor.mjs";
 
-// GOLDEN — transcribed verbatim from the historical literals.
+// GOLDEN — transcribed verbatim from the historical literals, plus the
+// teardown phase added in CTL-703 (10-phase pipeline: teardown is the new
+// terminal step after monitor-deploy).
 const GOLDEN_PHASES = [
   "triage", "research", "plan", "implement", "verify",
-  "review", "pr", "monitor-merge", "monitor-deploy",
+  "review", "pr", "monitor-merge", "monitor-deploy", "teardown",
 ];
 const GOLDEN_NEXT_PHASE = {
   triage: "research", research: "plan", plan: "implement", implement: "verify",
   verify: "review", review: "pr", pr: "monitor-merge",
-  "monitor-merge": "monitor-deploy", "monitor-deploy": "done",
+  "monitor-merge": "monitor-deploy", "monitor-deploy": "teardown",
+  teardown: "done",
 };
 const GOLDEN_PHASE_LINEAR_KEY = {
   triage: null, research: "research", plan: "planning", implement: "inProgress",
   verify: "verifying", review: "reviewing", pr: "inReview",
-  "monitor-merge": "inReview", "monitor-deploy": "inReview", remediate: "remediating",
+  "monitor-merge": "inReview", "monitor-deploy": "inReview",
+  teardown: "inReview", remediate: "remediating",
 };
 const GOLDEN_STAGE_RANK = {
   triage: 0, research: 1, plan: 2, implement: 3, verify: 5,
-  review: 6, pr: 7, "monitor-merge": 8, "monitor-deploy": 9, remediate: 4,
+  review: 6, pr: 7, "monitor-merge": 8, "monitor-deploy": 9, teardown: 10,
+  remediate: 4,
 };
 
 describe("workflow-descriptor provenance swap — drift guard", () => {
@@ -49,13 +54,13 @@ describe("workflow-descriptor provenance swap — drift guard", () => {
     expect(Object.isFrozen(wd.STAGE_RANK)).toBe(true);
   });
   test("TERMINAL_PHASE", () => {
-    expect(wd.TERMINAL_PHASE).toBe("monitor-deploy");
+    expect(wd.TERMINAL_PHASE).toBe("teardown");
   });
   test("NEW_WORK_ENTRY_PHASE", () => {
     expect(wd.NEW_WORK_ENTRY_PHASE).toBe("research");
   });
   test("NON_PREEMPTABLE_PHASES", () => {
-    expect([...wd.NON_PREEMPTABLE_PHASES].sort()).toEqual(["monitor-deploy", "triage"]);
+    expect([...wd.NON_PREEMPTABLE_PHASES].sort()).toEqual(["monitor-deploy", "teardown", "triage"]);
   });
   test("ANCILLARY_PHASES", () => {
     expect(wd.ANCILLARY_PHASES).toEqual(["remediate"]);

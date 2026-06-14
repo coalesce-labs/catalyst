@@ -30,7 +30,7 @@ scripts/
 
 ```bash
 # Install HumanLayer CLI first
-pip install humanlayer  # or: pipx install humanlayer
+npm install -g humanlayer
 
 # Run setup
 ./scripts/humanlayer/setup-thoughts.sh
@@ -139,7 +139,7 @@ HumanLayer now supports profiles for managing multiple thoughts repositories.
 
 ```bash
 # 1. Install HumanLayer CLI
-pip install humanlayer
+npm install -g humanlayer
 
 # 2. Set up thoughts (creates default profile)
 ./scripts/humanlayer/setup-thoughts.sh
@@ -283,9 +283,7 @@ These scripts are no longer needed with HumanLayer's profile system:
 ### "humanlayer command not found"
 
 ```bash
-pip install humanlayer
-# or
-pipx install humanlayer
+npm install -g humanlayer
 ```
 
 ### "Profile not found"

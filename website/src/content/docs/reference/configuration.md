@@ -55,7 +55,7 @@ You usually don't edit this by hand. When you run `setup-catalyst.sh` with a Lin
 The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 
 - **`execution-core`** — the autonomous daemon. It watches your board, picks up ready tickets, and runs them with no command from you. This is the away-from-keyboard mode.
-- **`phase-agents`** — runs each ticket as nine short background jobs, one per step.
+- **`phase-agents`** — runs each ticket as ten short background jobs, one per step.
 - **`oneshot-legacy`** — one long-running job per ticket. The older default.
 
 ```json
@@ -79,8 +79,17 @@ The `orchestration.dispatchMode` key picks how Catalyst runs each ticket:
 | `orchestration.dispatchMode` | `oneshot-legacy` | Which run mode to use (above) |
 | `orchestration.maxParallel` | `3` | How many tickets run at once |
 | `orchestration.worktreeDir` | `~/catalyst/wt/<projectKey>` | Where worktrees are created |
-| `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy` |
+| `orchestration.pluginDirs` | unset | Path(s) to the plugin checkout(s) workers run from (`<checkout>/plugins/dev`). Set by `setup-plugin-source.sh`; resolved by `phase-agent-dispatch` and refreshed by `catalyst-stack hotpatch` / merge-to-main. String or `:`-joined array. May also live in the machine config (Layer 2); the `CATALYST_PLUGIN_DIRS` env var overrides both. |
+| `orchestration.phaseAgents.models[phase]` | `opus` | Model per step (`opus`, `sonnet`, or `haiku`). Phases: `triage`, `research`, `plan`, `implement`, `verify`, `review`, `pr`, `monitor-merge`, `monitor-deploy`, `teardown` |
 | `orchestration.phaseAgents.turnCaps[phase]` | per-phase | Max Claude turns per step |
+| `orchestration.draftPr.enabled` | `true` | Open a draft PR at the first implement commit; phase-pr flips it ready. Set `false` to create the PR only at the pr phase. |
+| `CATALYST_WORKFLOW_GITHUB_TOKEN` _(env var, never committed)_ | unset | A GitHub PAT with the `workflow` OAuth scope. When set, phase-pr automatically routes pushes that touch `.github/workflows/` through this token instead of the ambient `GITHUB_TOKEN` (which lacks `workflow` scope). When unset and such a push is attempted, phase-pr escalates with an actionable `human_question` telling the operator to grant the scope or push manually. Provision via the daemon launch environment or `~/.config/catalyst/config-<projectKey>.json`. Alternative: `gh auth refresh -s workflow` re-auths the host token. |
+| `orchestration.stalePrRescue.enabled` | `true` | Periodically rescue orphaned PRs that drifted to DIRTY or BEHIND after their workers died. |
+| `orchestration.stalePrRescue.intervalSeconds` | `600` | How often the rescue timer ticks (seconds). |
+| `orchestration.stalePrRescue.stableSeconds` | `300` | How long a PR must sit DIRTY/BEHIND before a rescue is attempted (avoids reacting to transient states). |
+| `orchestration.stalePrRescue.behindThreshold` | `10` | BEHIND-commit count that triggers a rebase rescue (commits-behind below this are skipped). |
+| `orchestration.stalePrRescue.maxAttempts` | `1` | Max rescue attempts per ticket. After exhaustion, the ticket is escalated to `needs-human`. |
+| `orchestration.stalePrRescue.maxConflictFiles` | `5` | Max conflicting files before a DIRTY PR is deemed unresolvable and escalated instead of dispatched. |
 
 For `execution-core` mode, the number of workers comes from a separate committed block, `orchestration.executionCore.maxParallel` (default `4`). One daemon runs per machine and serves all your projects.
 
@@ -88,18 +97,37 @@ For `execution-core` mode, the number of workers comes from a separate committed
 
 In `execution-core` mode, the daemon reads a central registry at `~/catalyst/execution-core/registry.json`. Each project there has an `eligibleQuery` that says which tickets are ready — for example, `status: "Ready"`. The setup tool `setup-execution-core-states.sh` writes this for you; you don't edit it by hand. That mode also needs six Linear states to exist — `Ready`, `Research`, `Plan`, `Implement`, `Validate`, and `PR` — which the same tool creates.
 
-## Linear app-actor identity (`catalyst.monitor.linear.botUserId`)
+If the registry is missing (a fresh or headless host), enroll a project with
+`catalyst-execution-core register --team <TEAM> --repo-root <path>` rather than writing the
+file by hand — see [Remote and unattended hosts](/getting-started/remote-and-unattended-hosts/).
 
-You must set `catalyst.monitor.linear.botUserId` for the Linear app-actor comms channel — i.e. when the daemon mirrors phase-agent output to Linear and wakes on human replies (the "Linear for Agents" identity that posts comments **as Catalyst**). It's the Linear user UUID of that app actor. This lives in the committed `.catalyst/config.json` — not the secrets file — because the value isn't secret (it appears on every comment the app posts), but it is workspace-specific.
+## Linear app-actor identity (`catalyst.linear.bot.{worker,orchestrator}.botUserId`)
+
+Catalyst posts to Linear as a Linear OAuth **app actor** — the "Linear for Agents" identity that comments **as Catalyst**. Linear OAuth apps are account-level (one app serves every team), so the bot identity and OAuth credentials now live in the **global** `~/.config/catalyst/config.json` under `catalyst.linear.bot`, split into two app actors:
+
+- `catalyst.linear.bot.worker` — the worker app that posts phase-agent mirror comments and mints tokens via `client_credentials`.
+- `catalyst.linear.bot.orchestrator` — the orchestrator app that posts run-level updates.
+
+Each carries a `botUserId` (the Linear user UUID of that app actor). The daemon and orch-monitor read **both** `botUserId`s into a single set so the self-echo / loop-prevention guard suppresses comments and issue events from **either** app actor. These UUIDs aren't secret (they appear on every comment the app posts), but they are account-specific.
 
 ```json
 {
   "catalyst": {
-    "monitor": {
-      "linear": {
-        "teams": ["ACME"],
-        "webhookSecretEnv": "CATALYST_LINEAR_WEBHOOK_SECRET",
-        "botUserId": null
+    "linear": {
+      "bot": {
+        "worker": {
+          "clientId": "...",
+          "clientSecret": "...",
+          "webhookSecret": "...",
+          "accessToken": "...",
+          "botUserId": null
+        },
+        "orchestrator": {
+          "clientId": "...",
+          "clientSecret": "...",
+          "accessToken": "...",
+          "botUserId": null
+        }
       }
     }
   }
@@ -108,30 +136,41 @@ You must set `catalyst.monitor.linear.botUserId` for the Linear app-actor comms 
 
 | Key | What it does |
 | --- | --- |
-| `catalyst.monitor.linear.botUserId` | Linear user UUID of the Catalyst app actor. Required for the Linear app-actor comms channel — when the daemon mirrors phase-agent output to Linear and wakes on human replies; leave `null` otherwise |
+| `catalyst.linear.bot.worker.botUserId` | Linear user UUID of the worker app actor. Suppresses self-echo on the worker's own mirror comments / description updates |
+| `catalyst.linear.bot.orchestrator.botUserId` | Linear user UUID of the orchestrator app actor. Suppresses self-echo on orchestrator-posted updates |
+| `catalyst.linear.bot.worker.{clientId,clientSecret,webhookSecret,accessToken}` | OAuth app-actor credentials for the worker identity. Secrets — keep in the un-committed global config |
+
+### Back-compat (transition period)
+
+Every reader prefers the new global path and falls back to the old location, so a running daemon or webhook receiver keeps working whether the value has been migrated yet:
+
+- **Bot IDs:** `catalyst.linear.bot.{worker,orchestrator}.botUserId` (global) → fall back to `catalyst.monitor.linear.botUserId` (per-repo `.catalyst/config.json`, the legacy single-actor location).
+- **Worker OAuth creds:** `catalyst.linear.bot.worker.{clientId,clientSecret}` (global) → fall back to `catalyst.linear.agent.{clientId,clientSecret}` (per-team `~/.config/catalyst/config-{projectKey}.json`, the legacy location).
+
+The legacy keys remain readable, so you can migrate the values at any time without coordinating a restart.
 
 ### Why it's required
 
-Catalyst's app identity lets it post comments as the app, and a human reply on a ticket can wake a parked worker. To make that work, the system must tell the agent's **own** comments and description updates apart from a human's. Without `botUserId` loaded, it can't:
+Catalyst's app identity lets it post comments as the app, and a human reply on a ticket can wake a parked worker. To make that work, the system must tell the agent's **own** comments and description updates apart from a human's. Without a `botUserId` loaded:
 
 - The agent's own mirror comments get written into the worker inbox as if a human had replied — noise, and a false "human replied" signal.
 - Bot-authored issue events feed back into the event log as write loops.
 
-So `botUserId` is the self-echo and loop-prevention guard for the whole Linear-for-Agents channel. Set it for any workspace that uses the app-actor comms.
+So the `botUserId` set is the self-echo and loop-prevention guard for the whole Linear-for-Agents channel. Set at least the worker `botUserId` for any workspace that uses the app-actor comms.
 
 ### How to obtain it
 
-Query `viewer.id` with the app-actor token. The app OAuth credentials live in the secrets file under `catalyst.linear.agent`:
+Query `viewer.id` with each app-actor token. The app OAuth credentials live in the global secrets file under `catalyst.linear.bot.{worker,orchestrator}` (legacy: `catalyst.linear.agent` in the per-team file):
 
 ```bash
-TOKEN=$(jq -r '.catalyst.linear.agent.accessToken' ~/.config/catalyst/config-{projectKey}.json)
+TOKEN=$(jq -r '.catalyst.linear.bot.worker.accessToken // .catalyst.linear.agent.accessToken' ~/.config/catalyst/config.json)
 BOT_ID=$(curl -s -X POST https://api.linear.app/graphql \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"query{viewer{id name}}"}' | jq -r .data.viewer.id)
 ```
 
-Write `$BOT_ID` into `.catalyst/config.json` under `catalyst.monitor.linear.botUserId`, then restart both readers — they only load it at startup:
+Write `$BOT_ID` into `~/.config/catalyst/config.json` under `catalyst.linear.bot.worker.botUserId` (repeat for the orchestrator actor), then restart both readers — they only load it at startup:
 
 ```bash
 catalyst-monitor stop && catalyst-monitor start

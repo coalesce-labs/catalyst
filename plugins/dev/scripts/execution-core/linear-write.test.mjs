@@ -9,7 +9,9 @@ import {
   removeLabel,
   applyBlockedByRelation,
   applyEstimate,
+  applyAssignee,
   teamOf,
+  classifyLabelFailure,
 } from "./linear-write.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -438,12 +440,13 @@ describe("applyLabel", () => {
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "rate-limited" });
   });
-  test("classifies a cross-team label-UUID stderr as reason:'missing-label' (no per-tick retry storm)", () => {
+  test("CTL-1085: classifies a cross-team label-UUID stderr as reason:'team-mismatch' (unrecoverable, storm-break preserved)", () => {
     // Linear's labels are team-scoped: same name, different UUID per team. When
     // linearis resolves the label in the wrong team's workspace context and
     // sends the cross-team UUID, Linear returns this exact error. It is
     // permanently unrecoverable inside one daemon lifetime (the resolver is
-    // global), so it must classify as missing-label to short-circuit retries.
+    // global), so it classifies as team-mismatch (added to UNRECOVERABLE_LABEL_REASONS)
+    // to short-circuit retries while giving operators a legible distinct reason.
     const exec = () => ({
       code: 1,
       stdout: "",
@@ -451,7 +454,7 @@ describe("applyLabel", () => {
         'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
     });
     const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
-    expect(r).toEqual({ applied: false, reason: "missing-label" });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
   });
   test("CTL-585: any other non-zero exit is reason:'transient'", () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
@@ -469,6 +472,57 @@ describe("applyLabel", () => {
     };
     const r = applyLabel({ ticket: "CTL-1", label: "triaged", exec });
     expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+  test("CTL-834: an exclusive-group conflict stderr → reason:'exclusive-conflict'", () => {
+    // The held-label converger adds `blocked` while `needs-human`/`waiting`
+    // (same exclusive group) is present — Linear rejects with this exact form.
+    const exec = () => ({
+      code: 1,
+      stdout: "",
+      stderr:
+        "GraphQL request failed: LabelIds not exclusive child labels - blocked is in an exclusive group already represented.",
+    });
+    const r = applyLabel({ ticket: "CTL-838", label: "blocked", exec });
+    expect(r).toEqual({ applied: false, reason: "exclusive-conflict" });
+  });
+});
+
+// CTL-834: classifyLabelFailure — stderr → tagged reason. Exported so the new
+// exclusive-conflict mapping (and the existing unrecoverable cases) are pinned
+// directly, independent of applyLabel's read-back wrapper.
+describe("classifyLabelFailure (CTL-834)", () => {
+  test("'not exclusive child' → 'exclusive-conflict'", () => {
+    expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+    expect(classifyLabelFailure("... not exclusive ...")).toBe("exclusive-conflict");
+  });
+  test("existing mappings are unchanged (CTL-1085: incorrect team now team-mismatch)", () => {
+    expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("team-mismatch");
+    expect(classifyLabelFailure("Rate limit exceeded")).toBe("rate-limited");
+    expect(classifyLabelFailure("anything else")).toBe("transient");
+    expect(classifyLabelFailure(undefined)).toBe("transient");
+  });
+  // CTL-1078: auth/scope failures classify as auth-error, not transient
+  test("'400 invalid_scope' → 'auth-error'", () => {
+    expect(classifyLabelFailure("error: 400 invalid_scope")).toBe("auth-error");
+  });
+  test("'forbidden' → 'auth-error'", () => {
+    expect(classifyLabelFailure("forbidden")).toBe("auth-error");
+  });
+  test("auth-error does not steal 'not found' (ordering guard)", () => {
+    expect(classifyLabelFailure('Label "x" not found')).toBe("missing-label");
+    expect(classifyLabelFailure("LabelIds not exclusive child labels")).toBe("exclusive-conflict");
+  });
+  test("CTL-1085: 'incorrect team' → 'team-mismatch' (distinct from missing-label)", () => {
+    expect(classifyLabelFailure("LabelIds for incorrect team")).toBe("team-mismatch");
+  });
+  test("CTL-1085: applyLabel cross-team → reason 'team-mismatch' (still unrecoverable)", () => {
+    const exec = () => ({
+      code: 1, stdout: "",
+      stderr: 'GraphQL request failed: LabelIds for incorrect team - The label \'needs-human\' is not associated with the same team as the issue.',
+    });
+    const r = applyLabel({ ticket: "ADV-1213", label: "needs-human", exec });
+    expect(r).toEqual({ applied: false, reason: "team-mismatch" });
   });
 });
 
@@ -557,11 +611,11 @@ describe("removeLabel (CTL-549)", () => {
     const cmds = [];
     const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
     // ticket has ['blocked','orchestrator']; remove 'blocked' → overwrite with 'orchestrator'
+    // exec stub returns empty stdout so the node read falls back to names (CTL-1085).
     const fetchLabels = () => ["blocked", "orchestrator"];
     const result = await removeLabel("CTL-1", "blocked", { exec, fetchLabels });
     expect(result.removed).toBe(true);
-    expect(cmds).toHaveLength(1);
-    const args = cmds[0].args;
+    const args = cmds.find((c) => c.args[1] === "update").args;
     expect(args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
     expect(args).toContain("--labels");
     expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator");
@@ -577,7 +631,7 @@ describe("removeLabel (CTL-549)", () => {
     const fetchLabels = () => ["needs-human/question", "orchestrator", "bug"];
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(true);
-    const args = cmds[0].args;
+    const args = cmds.find((c) => c.args[1] === "update").args;
     expect(args[args.indexOf("--labels") + 1]).toBe("orchestrator,bug");
     expect(args[args.indexOf("--label-mode") + 1]).toBe("overwrite");
   });
@@ -612,6 +666,27 @@ describe("removeLabel (CTL-549)", () => {
     expect(cmds).toHaveLength(0);
   });
 
+  // CTL-1078: richer readLabels seam — auth-error vs transient classification
+  test("read failure with auth stderr (readLabels) → removed:false, reason:auth-error, no write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: false, labels: null, code: 1, stderr: "400 invalid_scope" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, readLabels });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("auth-error");
+    expect(cmds).toHaveLength(0);
+  });
+
+  test("read failure with non-auth stderr (readLabels) → removed:false, reason:transient, no write", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: false, labels: null, code: 1, stderr: "network timeout" });
+    const result = await removeLabel("CTL-1", "needs-human/question", { exec, readLabels });
+    expect(result.removed).toBe(false);
+    expect(result.reason).toBe("transient");
+    expect(cmds).toHaveLength(0);
+  });
+
   test("returns { removed: false, reason } on non-zero overwrite exit", async () => {
     const exec = () => ({ code: 1, stdout: "", stderr: "not found" });
     const fetchLabels = () => ["needs-human/question", "orchestrator"];
@@ -626,6 +701,97 @@ describe("removeLabel (CTL-549)", () => {
     const result = await removeLabel("CTL-1", "needs-human/question", { exec, fetchLabels });
     expect(result.removed).toBe(false);
     expect(result.reason).toBe("transient");
+  });
+});
+
+// CTL-1085: removeLabel UUID-based overwrite — avoids cross-team name collision.
+describe("removeLabel UUID path (CTL-1085)", () => {
+  test("builds --labels from ticket-native UUIDs when node read succeeds", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => {
+      cmds.push({ cmd, args });
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-frontend", name: "frontend" },
+          { id: "uuid-orch", name: "orchestrator" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    const write = cmds.find((c) => c.args[1] === "update");
+    expect(write.args[write.args.indexOf("--labels") + 1]).toBe("uuid-orch");
+    expect(write.args[write.args.indexOf("--label-mode") + 1]).toBe("overwrite");
+  });
+
+  test("maps multiple remaining names to their UUIDs", async () => {
+    const exec = (cmd, args) => {
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-nh", name: "needs-human" },
+          { id: "uuid-orch", name: "orchestrator" },
+          { id: "uuid-bug", name: "bug" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    let writeArgs;
+    const wrapExec = (cmd, args) => { const r = exec(cmd, args); if (args[1] === "update") writeArgs = args; return r; };
+    const readLabels = () => ({ ok: true, labels: ["needs-human", "orchestrator", "bug"] });
+    const result = await removeLabel("ADV-1", "needs-human", { exec: wrapExec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("uuid-orch,uuid-bug");
+  });
+
+  test("falls back to names when node read returns unparseable stdout", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    const write = cmds.find((c) => c.args[1] === "update");
+    expect(write.args[write.args.indexOf("--labels") + 1]).toBe("orchestrator");
+  });
+
+  test("falls back to names when a remaining name has no matching node", async () => {
+    const exec = (cmd, args) => {
+      if (args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ labels: { nodes: [
+          { id: "uuid-frontend", name: "frontend" },
+        ] } }), stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    let writeArgs;
+    const wrapExec = (cmd, args) => { const r = exec(cmd, args); if (args[1] === "update") writeArgs = args; return r; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const result = await removeLabel("ADV-1", "frontend", { exec: wrapExec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("orchestrator");
+  });
+
+  test("empty remaining still uses --clear-labels (no node read needed)", async () => {
+    const cmds = [];
+    const exec = (cmd, args) => { cmds.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["needs-human"] });
+    const result = await removeLabel("ADV-1", "needs-human", { exec, readLabels });
+    expect(result.removed).toBe(true);
+    expect(cmds.find((c) => c.args[1] === "update").args).toEqual(["issues", "update", "ADV-1", "--clear-labels"]);
+  });
+
+  test("injectable readLabelNodes seam overrides default node reader", async () => {
+    let writeArgs;
+    const exec = (cmd, args) => { if (args[1] === "update") writeArgs = args; return { code: 0, stdout: "", stderr: "" }; };
+    const readLabels = () => ({ ok: true, labels: ["frontend", "orchestrator"] });
+    const readLabelNodes = () => ({ ok: true, nodes: [
+      { id: "uuid-frontend", name: "frontend" },
+      { id: "uuid-orch", name: "orchestrator" },
+    ] });
+    const result = await removeLabel("ADV-1", "frontend", { exec, readLabels, readLabelNodes });
+    expect(result.removed).toBe(true);
+    expect(writeArgs[writeArgs.indexOf("--labels") + 1]).toBe("uuid-orch");
   });
 });
 
@@ -672,10 +838,12 @@ describe("applyBlockedByRelation", () => {
 });
 
 describe("applyEstimate", () => {
+  // CTL-813: fetchLabels is injected in call-counting tests so the
+  // estimate-source:human pre-read doesn't go through the counted exec.
   test("valid estimate, exec returns code:0 → applied:true, correct args", () => {
     const calls = [];
     const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec, fetchLabels: () => [] });
     expect(r).toEqual({ applied: true, reason: null });
     expect(calls).toHaveLength(1);
     expect(calls[0].cmd).toBe("linearis");
@@ -698,12 +866,22 @@ describe("applyEstimate", () => {
     expect(r.reason).toBeTruthy();
   });
 
-  test("invalid estimate 4 → applied:false, reason:invalid-estimate, exec not called", () => {
+  // CTL-954: 4 is now valid (exponential scale). Use 11 (between 10 and 13)
+  // as the canonical "not in any scale" test value.
+  test("invalid estimate 11 → applied:false, reason:invalid-estimate, exec not called", () => {
     const calls = [];
     const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec });
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 11, exec });
     expect(r).toEqual({ applied: false, reason: "invalid-estimate" });
     expect(calls).toHaveLength(0);
+  });
+
+  test("estimate 4 (exponential scale, CTL-954) → accepted, applied:true", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 4, exec, fetchLabels: () => [] });
+    expect(r.applied).toBe(true);
+    expect(calls[0].args).toContain("4");
   });
 
   test("null estimate → applied:false, reason:invalid-estimate, exec not called", () => {
@@ -722,13 +900,187 @@ describe("applyEstimate", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("all valid estimate values (1,3,5,8,13) are accepted", () => {
-    for (const est of [1, 3, 5, 8, 13]) {
+  // CTL-954: all scale values across fibonacci, tShirt, exponential, linear.
+  test("all valid estimate values across all scales are accepted (CTL-954)", () => {
+    // Union: fibonacci={1,2,3,5,8,13} tShirt={1,2,3,5} exp={1,2,4,8,16,32} lin={1..10}
+    for (const est of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 13, 16, 32]) {
       const calls = [];
       const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
-      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec });
+      const r = applyEstimate({ ticket: "CTL-1", estimate: est, exec, fetchLabels: () => [] });
       expect(r.applied).toBe(true);
       expect(calls[0].args).toContain(String(est));
     }
+  });
+
+  // ── CTL-813: estimate-source:human guard ─────────────────────────────────
+  // estimation-methodology.md §6b promises human estimates are never clobbered
+  // (the contract score-tickets --check-labels already honors). applyEstimate
+  // pre-reads the label set and skips the write when the label is present.
+
+  test("ticket labeled estimate-source:human → skipped, update never called", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => ["feature", "estimate-source:human"],
+    });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("human-estimate");
+    expect(r.reason).toBe("skipped-human-estimate");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("ticket with other labels but not the human label → write proceeds", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => ["feature", "estimation"],
+    });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(["issues", "update", "CTL-1", "--estimate", "5"]);
+  });
+
+  test("label pre-read fails (null) → FAIL-OPEN: write proceeds", () => {
+    // Matches the score-tickets --check-labels precedent: a failed label check
+    // warns and proceeds without the filter. The scheduler's estimate write is
+    // one-shot (triage→research advance) — failing closed would silently drop
+    // it forever on any transient read hiccup.
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec, fetchLabels: () => null });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("label pre-read throws → FAIL-OPEN: write proceeds, nothing thrown", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0, stdout: "", stderr: "" }; };
+    const r = applyEstimate({
+      ticket: "CTL-1",
+      estimate: 5,
+      exec,
+      fetchLabels: () => { throw new Error("label boom"); },
+    });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("default fetchLabels wiring: linearis read returns human label via exec → skipped", () => {
+    // No injected fetchLabels — the real fetchTicketLabels path runs through
+    // the injected exec: first call is the `issues read`, and on seeing the
+    // human label no update call follows.
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === "issues" && args[1] === "read") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ labels: { nodes: [{ name: "estimate-source:human" }] } }),
+          stderr: "",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const r = applyEstimate({ ticket: "CTL-1", estimate: 5, exec });
+    expect(r.applied).toBe(false);
+    expect(r.skipped).toBe("human-estimate");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args.slice(0, 2)).toEqual(["issues", "read"]);
+  });
+});
+
+describe("applyAssignee (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  function makeOkExec(calls) {
+    return (cmd, args) => {
+      calls.push({ cmd, args });
+      if (args[0] === "issues" && args[1] === "update") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "issues" && args[1] === "read") {
+        return { code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }), stderr: "" };
+      }
+      return { code: 127, stdout: "", stderr: "unexpected" };
+    };
+  }
+
+  test("shells linearis issues update --assignee <uuid>", () => {
+    const calls = [];
+    applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    expect(calls[0].args.slice(0, 3)).toEqual(["issues", "update", "CTL-1"]);
+    expect(calls[0].args).toContain("--assignee");
+    expect(calls[0].args[calls[0].args.indexOf("--assignee") + 1]).toBe(BOT);
+  });
+
+  test("write exit-0 AND read-back assignee.id matches → applied:true, reason:null", () => {
+    const calls = [];
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec: makeOkExec(calls) });
+    expect(r).toEqual({ applied: true, reason: null });
+    expect(calls[0].args.slice(0, 2)).toEqual(["issues", "update"]);
+    expect(calls[1].args.slice(0, 2)).toEqual(["issues", "read"]);
+  });
+
+  test("write exits non-zero → applied:false, reason:'transient', no read-back exec", () => {
+    const calls = [];
+    const exec = (cmd, args) => {
+      calls.push({ cmd, args });
+      return { code: 1, stdout: "", stderr: "update-failed" };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+    expect(calls).toHaveLength(1);
+  });
+
+  test("write exit-0 BUT read-back assignee null → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: null }), stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("write exit-0 BUT read-back assignee.id differs → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: JSON.stringify({ assignee: { id: "other-uuid" } }), stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("read-back unparseable stdout → applied:false, reason:'verify-failed'", () => {
+    const exec = (_cmd, args) => {
+      if (args[1] === "update") return { code: 0, stdout: "", stderr: "" };
+      if (args[1] === "read") return { code: 0, stdout: "not-json", stderr: "" };
+      return { code: 127 };
+    };
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "verify-failed" });
+  });
+
+  test("never throws — a thrown exec is caught, applied:false reason:'transient'", () => {
+    const exec = () => { throw new Error("exec died"); };
+    expect(() => applyAssignee({ ticket: "CTL-1", userId: BOT, exec })).not.toThrow();
+    const r = applyAssignee({ ticket: "CTL-1", userId: BOT, exec });
+    expect(r).toEqual({ applied: false, reason: "transient" });
+  });
+
+  test("missing userId → applied:false, reason:'invalid-user', zero exec calls", () => {
+    const calls = [];
+    const exec = (cmd, args) => { calls.push({ cmd, args }); return { code: 0 }; };
+    expect(applyAssignee({ ticket: "CTL-1", userId: "", exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(applyAssignee({ ticket: "CTL-1", userId: null, exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(applyAssignee({ ticket: "CTL-1", exec })).toEqual({ applied: false, reason: "invalid-user" });
+    expect(calls).toHaveLength(0);
   });
 });

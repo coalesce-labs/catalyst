@@ -174,6 +174,19 @@ if [ -d ".catalyst" ]; then
 	cp -R .catalyst "$WORKTREE_PATH/"
 fi
 
+# CTL-990: the cp -R above copies the MAIN checkout's working-tree versions of
+# git-TRACKED files (e.g. a locally-modified .claude/config.json) over the
+# freshly-checked-out branch versions — every new worktree then starts with
+# dirty tracked config, and the dispatch-time rebase refuses to start
+# ("you have unstaged changes"), which looped ADV-1326/ADV-1308. Restore
+# tracked paths to the branch state; untracked machine-local files
+# (settings.local.json, …) survive untouched.
+for CFG_DIR in .claude .catalyst; do
+	if [ -d "$WORKTREE_PATH/$CFG_DIR" ]; then
+		git -C "$WORKTREE_PATH" checkout --quiet -- "$CFG_DIR" 2>/dev/null || true
+	fi
+done
+
 # Pre-trust worktree in Claude Code so no trust dialog appears on first launch
 CLAUDE_JSON="$HOME/.claude.json"
 if [ -f "$CLAUDE_JSON" ]; then
@@ -360,17 +373,15 @@ else
 		fi
 	fi
 
-	# 2. Initialize thoughts
+	# 2. Initialize thoughts (CTL-845: vendored layout creator, not the crashing CLI)
 	if command -v humanlayer >/dev/null 2>&1; then
 		THOUGHTS_INIT_EXPECTED=true
-		INIT_CMD="humanlayer thoughts init --directory $THOUGHTS_DIRECTORY"
-		if [ -n "$THOUGHTS_PROFILE" ]; then
-			INIT_CMD="$INIT_CMD --profile $THOUGHTS_PROFILE"
-		fi
-		echo "  Running: $INIT_CMD"
-		if eval "$INIT_CMD" >/dev/null 2>&1; then
+		VENDOR_INIT="${SCRIPT_DIR}/../../../scripts/worktree-thoughts-init.sh"
+		INIT_ARGS=(--directory "$THOUGHTS_DIRECTORY")
+		[ -n "$THOUGHTS_PROFILE" ] && INIT_ARGS+=(--profile "$THOUGHTS_PROFILE")
+		echo "  Running: worktree-thoughts-init.sh ${INIT_ARGS[*]}"
+		if [ -x "$VENDOR_INIT" ] && bash "$VENDOR_INIT" "${INIT_ARGS[@]}" >/dev/null 2>&1; then
 			echo -e "${GREEN}  ✅ Thoughts initialized${NC}"
-			echo "  Running: humanlayer thoughts sync"
 			humanlayer thoughts sync >/dev/null 2>&1 || echo -e "${YELLOW}  ⚠️  Sync warning: run 'humanlayer thoughts sync' manually${NC}"
 			# Verify thoughts/shared/ exists after init+sync
 			if [ ! -d "thoughts/shared" ]; then

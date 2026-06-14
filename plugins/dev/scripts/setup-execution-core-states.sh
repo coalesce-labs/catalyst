@@ -4,7 +4,7 @@
 #
 # For an execution-core repo this script, idempotently:
 #   1. Ensures the contract workflow states exist for the team
-#      (Ready + Research, Plan, Implement, Validate, PR — Triage already exists).
+#      (Todo + Research, Plan, Implement, Validate, PR — Triage already exists).
 #      Missing states are created via raw `workflowStateCreate` GraphQL; on a
 #      permission/transport failure it prints admin-in-app fallback instructions.
 #   2. Writes the execution-core stateMap — the 9-phase -> 5-state collapse —
@@ -30,13 +30,38 @@
 set -uo pipefail
 
 # --- The contract -----------------------------------------------------------
+
+# CTL-722: decide whether to (over)write the stateMap.
+# Detect the legacy default by VALUES: "In Progress" / "In Review" mark the old
+# 8-key template. A map that already satisfies the contract — or any
+# user-customised map without those legacy values — is preserved untouched.
+# Returns 0 (needs write) or 1 (skip).
+statemap_needs_write() {
+  local current="$1"
+  [[ -z $current || $current == "null" || $current == "{}" ]] && return 0
+  # contract satisfied? (all 6 values present) -> skip
+  if jq -e '
+        [to_entries[].value] as $v
+        | (["Todo","Research","Plan","Implement","Validate","PR"]
+           | all(. as $s | $v | index($s)))' <<<"$current" >/dev/null 2>&1; then
+    return 1
+  fi
+  # legacy signature present? -> rewrite
+  if jq -e '[to_entries[].value] | (index("In Progress") or index("In Review"))' \
+        <<<"$current" >/dev/null 2>&1; then
+    return 0
+  fi
+  # non-legacy, non-contract custom map -> preserve
+  return 1
+}
+
 # The execution-core 9-phase -> 5-state collapse map. `todo` maps to the
-# pickable contract state `Ready`; verify+review collapse to `Validate`;
+# pickable contract state `Todo`; verify+review collapse to `Validate`;
 # pr+monitor-merge+monitor-deploy collapse to `PR`.
 build_execution_core_state_map() {
   jq -nc '{
     backlog: "Backlog",
-    todo: "Ready",
+    todo: "Todo",
     triage: "Triage",
     research: "Research",
     planning: "Plan",
@@ -54,7 +79,7 @@ build_execution_core_state_map() {
 # Triage is intentionally excluded — it already exists in every team workflow.
 contract_states() {
   jq -nc '[
-    { name: "Ready",     type: "unstarted" },
+    { name: "Todo",      type: "unstarted" },
     { name: "Research",  type: "unstarted" },
     { name: "Plan",      type: "started"   },
     { name: "Implement", type: "started"   },
@@ -380,7 +405,7 @@ main() {
   # defaults it to "Triage" too, but pin it here so the registry entry is
   # self-describing.
   registry_query=$(jq -nc \
-    '{ status: "Ready", triageStatus: "Triage", project: null, label: null, priority: null }')
+    '{ status: "Todo", triageStatus: "Triage", project: null, label: null, priority: null }')
 
   # --- dry-run: report intent, write nothing ---
   if [[ $dry_run -eq 1 ]]; then
@@ -439,25 +464,34 @@ main() {
   fi
 
   # --- check the Linear app-actor identity (CTL-749) ---
-  # The execution-core daemon reads catalyst.monitor.linear.botUserId at startup
-  # to filter the agent's OWN mirror comments/description-updates out of each
-  # worker's inbox.jsonl (self-echo / write-loop guard). Without it set, the
-  # agent's comments are written back as if a human replied, and bot-authored
-  # issue events feed back into the event log as loops. This is a prerequisite,
-  # not a hard failure here — warn and continue.
-  local bot_id
-  bot_id=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
-  if [[ -z $bot_id ]]; then
-    echo "WARNING: catalyst.monitor.linear.botUserId not set in $config" >&2
-    echo "  execution-core needs it for CTL-749 self-echo filtering of the agent's own" >&2
-    echo "  Linear comments/updates. Obtain it by querying viewer.id with the app-actor" >&2
-    echo "  token from ~/.config/catalyst/config-${project_key}.json, then set it here." >&2
+  # The execution-core daemon reads a SET of bot user UUIDs at startup:
+  #   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.worker.botUserId
+  #        ~/.config/catalyst/config.json  catalyst.linear.bot.orchestrator.botUserId
+  #   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
+  # Without at least one set, the agent's OWN comments/updates are not filtered
+  # out of inbox.jsonl and are treated as human input (false "human replied").
+  # This is a prerequisite, not a hard failure here — warn and continue.
+  local _global_cfg="$HOME/.config/catalyst/config.json"
+  local _bot_worker _bot_orch _bot_layer1
+  _bot_worker=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "$_global_cfg" 2>/dev/null)
+  _bot_orch=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "$_global_cfg" 2>/dev/null)
+  _bot_layer1=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$config" 2>/dev/null)
+  if [[ -z $_bot_worker && -z $_bot_orch && -z $_bot_layer1 ]]; then
+    echo "WARNING: No Linear bot user IDs configured — CTL-749 self-echo guard is inactive" >&2
+    echo "  NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json" >&2
+    echo "  OLD fallback: set catalyst.monitor.linear.botUserId in $config" >&2
   fi
 
-  # --- write the execution-core stateMap (atomic tmp + mv) ---
-  jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
-    "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
-  echo "Wrote execution-core stateMap to $config"
+  # --- write the execution-core stateMap (atomic tmp + mv), only if needed (CTL-722) ---
+  local current_map
+  current_map="$(jq -c '.catalyst.linear.stateMap // {}' "$config" 2>/dev/null || echo '{}')"
+  if statemap_needs_write "$current_map"; then
+    jq --argjson stateMap "$state_map" '.catalyst.linear.stateMap = $stateMap' \
+      "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+    echo "Wrote execution-core stateMap to $config"
+  else
+    echo "stateMap already satisfies the contract or is user-customised — preserved ($config)"
+  fi
 
   # --- refresh the machine-local stateIds cache via resolve-linear-ids.sh --force ---
   # CTL-577: stateIds is cached in ~/.config/catalyst/linear-state-ids.json,

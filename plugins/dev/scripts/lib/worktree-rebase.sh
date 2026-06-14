@@ -28,11 +28,105 @@ _WR_DIR="$(cd "$(dirname "$_WR_SELF")" && pwd)"
 # We keep .catalyst/config.json in this list because it still carries other
 # per-worktree state (e.g. .workflow-context.json regeneration); the .trunk/*
 # paths still emit machine-local files.
+# CTL-990: .claude/config.json (tracked) and .claude/settings.json are copied
+# from the main checkout's working tree by create-worktree.sh and can arrive
+# locally modified — they blocked rebase startup in the ADV-1326/ADV-1308
+# incidents. NOTE: only these EXACT paths are noise; the rest of .claude/
+# (skills/agents/rules) is real committed content and must keep classifying
+# as source (see _is_noise_path).
+# CTL-1076: .claude/scheduled_tasks.lock is a tracked file the Claude Code
+# scheduler DELETES on worker exit (settling debris). The deletion shows in
+# `git diff --name-only` and trips the precheck, but is machine-local noise.
 # shellcheck disable=SC2034
 WORKTREE_NOISE_PATHS=(
   .catalyst/config.json
+  .claude/config.json .claude/settings.json
+  .claude/scheduled_tasks.lock
   .trunk/actions .trunk/logs .trunk/notifications .trunk/out .trunk/tools
 )
+
+# _is_noise_path FILE → 0 when FILE is an exact WORKTREE_NOISE_PATHS entry.
+# Keeps classify_conflicted_files in sync with the stash set without blanket-
+# classifying all of .claude/ as noise.
+_is_noise_path() {
+  local f="$1" p
+  for p in "${WORKTREE_NOISE_PATHS[@]}"; do
+    [[ $f == "$p" ]] && return 0
+  done
+  return 1
+}
+
+# _is_settling_debris_path FILE → 0 when FILE is machine-noise that a dying
+# worker leaves behind and that settles on its own (CTL-1076). Superset of
+# _is_noise_path: also matches untracked build churn that is never real source.
+_is_settling_debris_path() {
+  local f="$1"
+  _is_noise_path "$f" && return 0
+  case "$f" in
+    node_modules/*|*/node_modules/*)                                  return 0 ;;
+    *.log)                                                            return 0 ;;
+    # CTL-1120: orch-monitor vite build outputs are never real source.
+    */orch-monitor/public/assets/*|orch-monitor/public/assets/*)     return 0 ;;
+    */orch-monitor/public/index.html|orch-monitor/public/index.html) return 0 ;;
+  esac
+  return 1
+}
+
+# _collect_precheck_dirt → fill RT_PRECHECK[] with all dirty paths (tracked
+# diff, staged diff, and untracked from porcelain).
+_collect_precheck_dirt() {
+  RT_PRECHECK=()
+  local _pf
+  while IFS= read -r _pf; do
+    [[ -n $_pf ]] && RT_PRECHECK+=("$_pf")
+  done < <({ git diff --name-only; git diff --cached --name-only;
+             git ls-files --others --exclude-standard; } 2>/dev/null | sort -u)
+}
+
+# _precheck_has_real_source → 0 if ANY path in RT_PRECHECK is NOT settling-debris.
+_precheck_has_real_source() {
+  local f
+  for f in "${RT_PRECHECK[@]+"${RT_PRECHECK[@]}"}"; do
+    _is_settling_debris_path "$f" || return 0
+  done
+  return 1
+}
+
+# _grace_reprobe_clears BASE MARKER → 0 if, within the grace window, the tree
+# becomes clean of tracked dirt (settling-debris settled / restashed). Bounded
+# by CATALYST_REBASE_GRACE_TOTAL_S (default 60) at
+# CATALYST_REBASE_GRACE_INTERVAL_S (default 5) intervals. Re-runs
+# noise_stash_push each probe so a freshly-settled noise path gets stashed.
+# With both knobs 0, probes exactly once (test mode).
+_grace_reprobe_clears() {
+  local _base="$1" _marker="$2"
+  local total="${CATALYST_REBASE_GRACE_TOTAL_S:-60}"
+  local interval="${CATALYST_REBASE_GRACE_INTERVAL_S:-5}"
+  local elapsed=0
+  while :; do
+    noise_stash_push >/dev/null 2>&1 || true
+    if git diff --quiet 2>/dev/null && git diff --cached --quiet 2>/dev/null; then
+      return 0
+    fi
+    _collect_precheck_dirt
+    _precheck_has_real_source && return 1   # source appeared mid-window → park now
+    (( elapsed >= total )) && return 1
+    (( interval > 0 )) && sleep "$interval"
+    elapsed=$(( elapsed + interval ))
+    (( interval == 0 )) && return 1          # test mode: one probe only
+  done
+}
+
+# rebase_in_progress → 0 when a rebase is mid-flight (stopped on a conflict),
+# 1 otherwise. Guards `git rebase --continue` (CTL-990): calling --continue
+# with nothing in progress exits non-zero and used to mis-report as
+# {continue_failed, files:[], category:unknown}.
+rebase_in_progress() {
+  local d
+  d="$(git rev-parse --git-path rebase-merge 2>/dev/null)" && [[ -d $d ]] && return 0
+  d="$(git rev-parse --git-path rebase-apply 2>/dev/null)" && [[ -d $d ]] && return 0
+  return 1
+}
 
 # resolve_base_branch → echoes the rebase target branch name (no origin/ prefix).
 resolve_base_branch() {
@@ -50,7 +144,12 @@ noise_stash_push() {
   local present=()
   local p
   for p in "${WORKTREE_NOISE_PATHS[@]}"; do
-    [[ -e $p ]] && present+=("$p")
+    # CTL-1076: include a path if present on disk OR reported changed by git
+    # (a tracked-but-DELETED noise file is absent on disk — `[[ -e ]]` misses it —
+    # yet shows in `git status --porcelain` and blocks the rebase precheck).
+    if [[ -e $p ]] || [[ -n "$(git status --porcelain -- "$p" 2>/dev/null)" ]]; then
+      present+=("$p")
+    fi
   done
   [[ ${#present[@]} -eq 0 ]] && { printf ''; return 0; }
   # Only stash if at least one present noise path is actually dirty/untracked.
@@ -114,7 +213,7 @@ classify_conflicted_files() {
     esac
     if printf '%s' "$f" | grep -qE '(\.test\.|\.spec\.|__test__|_test\.)'; then
       RT_TEST+=("$f")
-    elif printf '%s' "$f" | grep -qE '^(\.catalyst/|\.trunk/)'; then
+    elif printf '%s' "$f" | grep -qE '^(\.catalyst/|\.trunk/)' || _is_noise_path "$f"; then
       RT_NOISE+=("$f")
     else
       RT_SOURCE+=("$f")
@@ -128,8 +227,13 @@ ctl708_escalate() { return 1; }
 
 # _stall_and_return MARKER REASON RC — shared stall helper: abort in-progress
 # rebase, pop the noise stash, emit a stalled event, return the given RC.
+# CTL-990: also exports REBASE_LAST_STALL_REASON so callers (phase-agent-
+# dispatch) can park the signal with the TRUE typed reason instead of
+# hardcoding source_conflict_ctl708_unavailable for every rc=2.
 _stall_and_return() {
   local marker="$1" reason="$2" rc="$3"
+  # shellcheck disable=SC2034  # consumed by the sourcing dispatcher
+  REBASE_LAST_STALL_REASON="$reason"
   git rebase --abort 2>/dev/null || true
   noise_stash_pop "$marker"
   # Build a JSON array from the stalled files for telemetry.
@@ -141,6 +245,9 @@ _stall_and_return() {
     source_conflict_ctl708_unavailable|continue_failed)
       all_stalled=("${RT_SOURCE[@]+"${RT_SOURCE[@]}"}")
       ;;
+    rebase_refused_dirty_tree)
+      all_stalled=("${RT_PRECHECK[@]+"${RT_PRECHECK[@]}"}")
+      ;;
   esac
   local files_json="[]"
   if [[ ${#all_stalled[@]} -gt 0 ]]; then
@@ -150,6 +257,8 @@ _stall_and_return() {
   case "$reason" in
     thoughts_symlink_broken)             category="thoughts" ;;
     source_conflict_ctl708_unavailable)  category="source"   ;;
+    rebase_refused_dirty_tree)           category="precheck" ;;
+    no_rebase_in_progress)               category="internal" ;;
     *)                                   category="unknown"  ;;
   esac
   emit_rebase_conflict_stalled \
@@ -175,6 +284,32 @@ rebase_onto_base_classified() {
   local base="$1" marker
   git fetch --quiet origin "$base" 2>/dev/null || return 1
   marker="$(noise_stash_push)"
+
+  # CTL-990 precheck: git refuses to START a rebase over dirty TRACKED changes.
+  # That is a pre-flight refusal, not a conflict — no unmerged paths exist, so
+  # classify_conflicted_files sees nothing and the old code cascaded into a
+  # bogus `git rebase --continue` → {continue_failed, files:[], category:
+  # unknown}, looping ~1,300 events per ticket.
+  # CTL-1076: a finished phase's settling debris (deleted .claude/scheduled_tasks.lock
+  # already stashed in Phase 1; untracked node_modules/ or *.log churn) must not
+  # blanket-park the next phase. Classify surviving dirt: real source → stall NOW
+  # (it never settles, CTL-1068); all-debris → bounded grace re-probe to let it
+  # settle, then proceed if clean.
+  if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    _collect_precheck_dirt
+    if _precheck_has_real_source; then
+      _stall_and_return "$marker" rebase_refused_dirty_tree 2
+      return
+    fi
+    # All surviving dirt is settling-debris → grace re-probe.
+    if _grace_reprobe_clears "$base" "$marker"; then
+      :   # tree settled (and re-stashed); fall through to the rebase attempt
+    else
+      _collect_precheck_dirt
+      _stall_and_return "$marker" rebase_refused_dirty_tree 2
+      return
+    fi
+  fi
 
   if git rebase --quiet "origin/${base}" 2>/dev/null; then
     noise_stash_pop "$marker"
@@ -225,6 +360,26 @@ rebase_onto_base_classified() {
   if [[ $tc -gt 0 ]]; then
     git checkout --theirs -- "${RT_TEST[@]}"  2>/dev/null
     git add               -- "${RT_TEST[@]}"  2>/dev/null
+  fi
+
+  # CTL-990 guard: never call `git rebase --continue` with nothing in progress
+  # — it exits non-zero and used to mis-report as continue_failed. Reaching
+  # here without a rebase means git refused to START it for a reason the
+  # tracked-only precheck can't see (e.g. an UNTRACKED file the incoming base
+  # would overwrite). Report THAT as the dirty-tree class with the worktree's
+  # dirt listed; no_rebase_in_progress is reserved for a genuinely clean tree.
+  if ! rebase_in_progress; then
+    RT_PRECHECK=()
+    local _gf
+    while IFS= read -r _gf; do
+      [[ -n $_gf ]] && RT_PRECHECK+=("${_gf:3}")
+    done < <(git status --porcelain 2>/dev/null)
+    if [[ ${#RT_PRECHECK[@]} -gt 0 ]]; then
+      _stall_and_return "$marker" rebase_refused_dirty_tree 2
+    else
+      _stall_and_return "$marker" no_rebase_in_progress 2
+    fi
+    return
   fi
 
   if git rebase --continue 2>/dev/null; then

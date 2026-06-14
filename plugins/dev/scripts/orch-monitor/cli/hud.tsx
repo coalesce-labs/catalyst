@@ -34,6 +34,18 @@ import { buildSystemPrompt } from "../../lib/dsl-prompt.mjs";
 import type { CanonicalEvent } from "../lib/canonical-event.ts";
 import { readPluginVersion, formatVersionBlock } from "./lib/version.ts";
 import { loadHudConfig } from "../lib/monitor-config.ts";
+// CTL-919 / HUD1: the HUD reads its node identity through the SAME shared
+// read-model contract the web/iPad client uses. Single-host ⇒ one node (identity
+// no-op); the contract is the typed door HUD2's cluster consolidation builds on.
+import { localHostRef } from "./lib/read-model-cluster.ts";
+// CTL-920 / HUD2: the HUD consumes the shared read-model SSE for its PRIMARY
+// fleet state (the SAME `/api/board/stream` the web/iPad consume — one assembly,
+// many readers) and maps the assembled BoardWorker[] onto the Dashboard's
+// Workers view. When the server is down the hook reports `connected: false` and
+// the HUD falls back to its raw `workers/*.json` scan, so it never goes dark.
+import { useReadModel } from "./hooks/useReadModel.ts";
+import { boardWorkersToSignals } from "./lib/read-model-workers.ts";
+import type { WorkerSignal } from "./lib/worker-signals-reader.ts";
 
 interface AppProps {
   repoFilter: string;
@@ -160,6 +172,28 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
   // CTL-390: plugin version chip. Resolved once at startup — release-please
   // bumps version.txt + commit.txt only between HUD invocations.
   const versionChip = useRef(readPluginVersion()).current;
+
+  // CTL-919 / HUD1: the local node's name via the shared read-model contract.
+  // Resolved once (host identity is stable for the process lifetime). A
+  // single-host fleet shows this one node on the Dashboard's view tabs (identity
+  // no-op); the multi-node HUD groups by host through the same contract.
+  const nodeName = useRef(localHostRef().name).current;
+
+  // CTL-920 / HUD2: subscribe to the shared read-model SSE for primary fleet
+  // state. `connected` ⇒ the read-model is driving the Workers view; otherwise
+  // the Dashboard falls back to its raw-file scan (graceful degrade). This adds
+  // the SSE/fetch client path the HUD never had — and consumes the EXACT stream
+  // the web/iPad consume, so a fix to the BFF assembly reaches all three readers.
+  const readModel = useReadModel();
+  // Map the assembled BoardWorker[] onto the Dashboard's WorkerSignal rows when
+  // connected; null tells the Dashboard to use its raw `workers/*.json` scan.
+  const readModelWorkers = useMemo<WorkerSignal[] | null>(
+    () =>
+      readModel.connected && readModel.payload
+        ? boardWorkersToSignals(readModel.payload.workers, Date.now())
+        : null,
+    [readModel.connected, readModel.payload],
+  );
 
   // CTL-473: hoist the Header `version` literal so the memoized Header can
   // short-circuit. `versionChip` is frozen at mount via useRef, so this memo
@@ -515,6 +549,8 @@ function App({ repoFilter, predicate, sinceTs: initSinceTs }: AppProps) {
             visibleRows={visibleRows}
             cols={innerCols}
             brokerState={brokerState}
+            nodeName={nodeName}
+            readModelWorkers={readModelWorkers}
             onClose={() => setShowDashboard(false)}
           />
         ) : (

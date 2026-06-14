@@ -370,6 +370,41 @@ STATUS_D=$(jq -r '.status' "${TEST_DIR}/glob-d.out")
 assert_eq "2" "$RC_D" "Form D: different-ticket plan file does NOT satisfy CTL-100 gate"
 assert_eq "refused" "$STATUS_D" "Form D: stdout JSON status = refused"
 
+# ─── Test 5c: gate spec is non-empty under macOS system bash (bash 3.2) — CTL-1075
+echo ""
+echo "Test 5c: plan/implement gate specs survive macOS system bash (bash 3.2)"
+fresh_env t5c
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/research"
+mkdir -p "${TEST_DIR}/proj/thoughts/shared/plans"
+
+# plan with NO research doc present → must refuse with a non-empty glob spec.
+(cd "${TEST_DIR}/proj" &&
+	/bin/bash "$DISPATCH" --phase plan --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/sysbash-plan.out" 2>"${TEST_DIR}/sysbash-plan.err")
+RC_PLAN=$?
+STATUS_PLAN=$(jq -r '.status'   "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || echo "")
+ART_PLAN=$(jq -r '.artifact'    "${TEST_DIR}/sysbash-plan.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_PLAN" "5c plan: /bin/bash refuses when research doc absent (exit 2)"
+assert_eq "refused" "$STATUS_PLAN" "5c plan: status=refused under /bin/bash"
+assert_contains "$ART_PLAN" "thoughts/shared/research" "5c plan: artifact spec is the non-empty research glob"
+assert_not_contains "$(cat "${TEST_DIR}/sysbash-plan.err")" "bad substitution" "5c plan: no bad-substitution under /bin/bash"
+
+rm -f "${ORCH_DIR}/workers/CTL-100/phase-plan.json"
+
+# implement with NO plan doc present → must refuse with a non-empty glob spec.
+(cd "${TEST_DIR}/proj" &&
+	/bin/bash "$DISPATCH" --phase implement --ticket CTL-100 \
+		--orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run \
+		>"${TEST_DIR}/sysbash-impl.out" 2>"${TEST_DIR}/sysbash-impl.err")
+RC_IMPL=$?
+STATUS_IMPL=$(jq -r '.status'  "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || echo "")
+ART_IMPL=$(jq -r '.artifact'   "${TEST_DIR}/sysbash-impl.out" 2>/dev/null || echo "")
+assert_eq "2" "$RC_IMPL" "5c implement: /bin/bash refuses when plan doc absent (exit 2)"
+assert_eq "refused" "$STATUS_IMPL" "5c implement: status=refused under /bin/bash"
+assert_contains "$ART_IMPL" "thoughts/shared/plans" "5c implement: artifact spec is the non-empty plan glob"
+assert_not_contains "$(cat "${TEST_DIR}/sysbash-impl.err")" "bad substitution" "5c implement: no bad-substitution under /bin/bash"
+
 # ─── Test 6: dispatcher resolves model from config (default + override paths)
 echo ""
 echo "Test 6: dispatcher resolves model from config (default and override)"
@@ -990,9 +1025,11 @@ seed_local_plan_commit
 (cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
 	--orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1)
 SIGNAL="${WORKER_DIR}/phase-implement.json"
-LOG_PRESENT="no"; [[ -s $CLAUDE_STUB_LOG ]] && LOG_PRESENT="yes"
+LOG_PRESENT="no"
+[[ -s $CLAUDE_STUB_LOG ]] && LOG_PRESENT="yes"
 assert_eq "yes" "$LOG_PRESENT" "clean rebase: claude --bg WAS invoked"
-BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+BASE_PRESENT="no"
+[[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "clean rebase: worktree HEAD now carries the new origin/main commit"
 assert_eq "running" "$(jq -r '.status' "$SIGNAL")" "clean rebase: signal is the normal launched status (not stalled)"
 
@@ -1014,7 +1051,8 @@ ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
 RC29=$?
 SIGNAL="${WORKER_DIR}/phase-implement.json"
 assert_eq "1" "$RC29" "conflict park: dispatcher exits 1"
-CLAUDE_INVOKED="no"; [[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
+CLAUDE_INVOKED="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE_INVOKED="yes"
 assert_eq "no" "$CLAUDE_INVOKED" "conflict park: claude --bg was NOT invoked"
 assert_eq "stalled" "$(jq -r '.status' "$SIGNAL")" "conflict park: signal status = stalled"
 assert_eq "source_conflict_ctl708_unavailable" "$(jq -r '.failureReason' "$SIGNAL")" \
@@ -1096,7 +1134,8 @@ printf '{"committed":false,"dirty":true}\n' >"${GWORK}/.catalyst/config.json"
 assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "noise: dispatch still launched (clean rebase)"
 assert_eq '{"committed":false,"dirty":true}' "$(cat "${GWORK}/.catalyst/config.json")" \
 	"noise: dirty .catalyst/config.json content intact after the rebase"
-BASE_PRESENT="no"; [[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
+BASE_PRESENT="no"
+[[ -f "${GWORK}/upstream.txt" ]] && BASE_PRESENT="yes"
 assert_eq "yes" "$BASE_PRESENT" "noise: rebase still advanced onto the new base"
 
 # ─── Test 34 (CTL-689): machine-level config fallback resolves keys absent from
@@ -1360,7 +1399,7 @@ LOG38="$(cat "$CLAUDE_STUB_LOG" 2>/dev/null || echo "")"
 assert_not_contains "$LOG38" "--resume" "recreate: no --resume-session in claude invocation"
 # New worktree HEAD should differ from original (recreated from origin/main).
 NEW_HEAD="$(cd "$GWORK" && git rev-parse HEAD 2>/dev/null || echo missing)"
-assert_eq "yes" "$([[ "$NEW_HEAD" != "$ORIG_HEAD" ]] && echo yes || echo no)" \
+assert_eq "yes" "$([[ $NEW_HEAD != "$ORIG_HEAD" ]] && echo yes || echo no)" \
 	"recreate: worktree HEAD changed (recreated from origin/main)"
 unset CATALYST_DIR
 unset CATALYST_RECREATE_WORKTREE_DIR
@@ -1419,7 +1458,7 @@ IDEMPOTENT_COUNT=0
 for f in "${TEST_DIR}/c1.out" "${TEST_DIR}/c2.out"; do
 	S=$(jq -r '.status // empty' "$f" 2>/dev/null || echo "")
 	[[ $S == "running" ]] && RUNNING_COUNT=$((RUNNING_COUNT + 1))
-	[[ "$(jq -r '.idempotent // false' "$f" 2>/dev/null || echo false)" == "true" ]] && \
+	[[ "$(jq -r '.idempotent // false' "$f" 2>/dev/null || echo false)" == "true" ]] &&
 		IDEMPOTENT_COUNT=$((IDEMPOTENT_COUNT + 1))
 done
 assert_eq "1" "$RUNNING_COUNT" "exactly one dispatch reports status=running (the winner)"
@@ -1462,7 +1501,127 @@ assert_eq "no" "$([[ -e "${WORKER_DIR}/triage.claim.2" ]] && echo yes || echo no
 	"fresh dispatch did NOT advance to gen 2 (proves target is fixed, not high-water+1)"
 assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo no)" \
 	"loser writes no signal file (bows out before the signal write)"
-assert_eq "no" "$([[ -s "$CLAUDE_STUB_LOG" ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" "loser did NOT spawn claude --bg"
+
+# ─── CTL-837: pre-spawn orphan claim is GC'd; live/young claims still bow out ──
+# A dispatcher that O_EXCL-created <phase>.claim.1 then DIED before writing the
+# signal/spawning leaves a tombstone. Because TARGET_GENERATION is FIXED (CTL-736
+# invariant), every later fresh dispatch recomputes gen=1, re-collides, and bows
+# out as claim-lost forever — the phase wedges. The fix: a fresh dispatch reaps
+# the orphan (no signal + claim older than grace) and proceeds. Single-flight is
+# preserved for any claim that has a signal (live worker) or is young (just-won
+# race still mid-dispatch).
+
+echo ""
+echo "Test 43b (CTL-837): pre-spawn orphan (no signal + claim older than grace) is reaped → dispatch proceeds"
+fresh_env t43b_orphan_reap
+# Seed an orphan claim at the FIXED fresh-dispatch generation (1) with NO signal
+# file, then age it past the 2-minute grace window so it reads as a pre-spawn
+# orphan (the dispatcher died before ever spawning a worker).
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43B=$?
+SIGNAL="${WORKER_DIR}/phase-triage.json"
+assert_eq "0" "$RC43B" "orphan-reap dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
+	"orphan-reap dispatch proceeds to spawn (status=running, NOT claim-lost)"
+assert_eq "yes" "$([[ -f $SIGNAL ]] && echo yes || echo no)" \
+	"orphan-reap dispatch writes the signal file (the wedge is cleared)"
+assert_eq "running" "$(jq -r '.status' "$SIGNAL" 2>/dev/null || echo missing)" \
+	"orphan-reap signal reaches status=running"
+assert_eq "1" "$(jq -r '.generation' "$SIGNAL" 2>/dev/null || echo missing)" \
+	"orphan-reap keeps the FIXED generation 1 (does not advance off high-water mark)"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
+	"orphan-reap dispatch DID spawn claude --bg"
+
+echo ""
+echo "Test 43c (CTL-837): orphan claim WITH a signal present → loser still bows out (single-flight)"
+fresh_env t43c_orphan_with_signal
+# A claim at gen 1 AND a signal file means a live (or in-flight) worker is behind
+# it — even if the claim file itself is old. The signal is written BEFORE spawn,
+# so its presence proves a worker was launched. The dispatch must NOT reap it;
+# it bows out as claim-lost to preserve single-flight.
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+printf '%s\n' '{"ticket":"CTL-100","phase":"triage","status":"running","generation":1,"bg_job_id":"deadbeef"}' \
+	>"${WORKER_DIR}/phase-triage.json"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43C=$?
+# The pre-claim status short-circuit (status=running) handles this BEFORE the
+# claim block — the contract is the same: it must NOT spawn and must NOT reap the
+# claim. Assert on the no-spawn + claim-survival invariant, which holds for both
+# the status short-circuit and the claim-lost branch.
+assert_eq "0" "$RC43C" "claim-with-signal dispatch exits 0 (no-op)"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
+	"claim-with-signal dispatch did NOT spawn a duplicate worker (single-flight)"
+assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"claim-with-signal: orphan-GC did NOT delete a claim that has a live signal"
+assert_eq "true" "$(echo "$STDOUT" | jq -r '.idempotent // false')" \
+	"claim-with-signal dispatch reports idempotent (bows out, no new work)"
+
+echo ""
+echo "Test 43c2 (CTL-837): REVIVE-gen pre-spawn orphan (stalled signal at gen<TARGET + aged claim, no live worker) is reaped → proceeds"
+fresh_env t43c2_revive_orphan
+# A revive: a `stalled` signal at gen 1 falls THROUGH the status short-circuit, so
+# the revive targets generation 2. The gen-2 worker created triage.claim.2 then
+# DIED before writing its own (gen-2) signal — so the only signal on disk is the
+# OLD stalled gen-1 one. The review found the original signal-absent guard wedged
+# this forever (signal-present was wrongly read as a live worker). The fix: the
+# signal's generation (1) < TARGET (2) AND the claim is aged ⇒ a pre-spawn orphan
+# at the revive generation ⇒ reap + re-dispatch gen 2 (NOT claim-lost).
+printf '%s\n' '{"ticket":"CTL-100","phase":"triage","status":"stalled","generation":1}' \
+	>"${WORKER_DIR}/phase-triage.json"
+printf '{"generation":2,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.2"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.2"
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43C2=$?
+assert_eq "0" "$RC43C2" "revive-orphan dispatch exits 0"
+assert_eq "running" "$(echo "$STDOUT" | jq -r '.status')" \
+	"revive-orphan is reaped → dispatch proceeds (status=running, NOT claim-lost)"
+assert_eq "yes" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
+	"revive-orphan dispatch DID spawn claude --bg (the gen-2 wedge is cleared)"
+assert_eq "2" "$(jq -r '.generation' "${WORKER_DIR}/phase-triage.json")" \
+	"revive-orphan: signal rewritten at the revive generation 2 (authoritative source)"
+
+echo ""
+echo "Test 43e (CTL-837): CONCURRENT dispatch on one aged orphan → exactly ONE spawns (atomic reap, single-flight)"
+fresh_env t43e_concurrent_reap
+# Two dispatchers race the SAME aged pre-spawn orphan (no signal, claim > grace).
+# The reap MUST be atomic (rename-to-private): exactly one wins the mv + recreates
+# the claim + spawns; the other's mv fails (source gone) → it bows out claim-lost.
+# A non-atomic rm+create would let BOTH pass the read-only guard and both spawn —
+# the TOCTOU double-spawn the review caught (re-opening the CTL-736 race).
+printf '{"generation":1,"claimedAt":"2020-01-01T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+touch -t 202001010000 "${WORKER_DIR}/triage.claim.1"
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out1" 2>/dev/null &
+"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >"${ORCH_DIR}/cc_out2" 2>/dev/null &
+wait
+RUNNING=$(cat "${ORCH_DIR}/cc_out1" "${ORCH_DIR}/cc_out2" | jq -r '.status' | grep -c '^running$' || true)
+assert_eq "1" "$RUNNING" \
+	"concurrent reap: exactly ONE dispatcher spawns (running); the other bows out (no double-spawn)"
+
+echo ""
+echo "Test 43d (CTL-837): YOUNG orphan claim within grace → loser bows out (don't reap a just-won claim)"
+fresh_env t43d_young_orphan
+# A claim at gen 1 with NO signal but FRESH mtime is a sibling dispatcher that
+# just won the O_EXCL race and is milliseconds from writing its signal. Reaping
+# it would re-open the double-spawn race. The claim is within the grace window
+# (just created → mtime ~now), so the loser must still bow out as claim-lost and
+# must NOT delete the just-won claim.
+printf '{"generation":1,"claimedAt":"2026-05-30T00:00:00Z"}\n' >"${WORKER_DIR}/triage.claim.1"
+# (no touch — leave the claim's mtime at ~now so find -mmin +2 does NOT match)
+STDOUT=$("$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test 2>/dev/null)
+RC43D=$?
+assert_eq "0" "$RC43D" "young-orphan dispatch exits 0"
+assert_eq "claim-lost" "$(echo "$STDOUT" | jq -r '.status')" \
+	"young-orphan dispatch bows out as claim-lost (within grace → don't reap a just-won claim)"
+assert_eq "no" "$([[ -s $CLAUDE_STUB_LOG ]] && echo yes || echo no)" \
+	"young-orphan dispatch did NOT spawn claude --bg"
+assert_eq "yes" "$([[ -e "${WORKER_DIR}/triage.claim.1" ]] && echo yes || echo no)" \
+	"young-orphan claim survives (a just-won claim is not reaped)"
+assert_eq "no" "$([[ -f "${WORKER_DIR}/phase-triage.json" ]] && echo yes || echo no)" \
+	"young-orphan loser writes no signal file"
 
 # ─── Test 44 (CTL-747): 8-pt ticket → plan launches with effort:xhigh + /workflows, no opusplan ───
 echo ""
@@ -1754,6 +1913,221 @@ T58_VALID=$(echo "$SETTINGS_T58" | jq -e . >/dev/null 2>&1 && echo yes || echo n
 assert_eq "false" "$T58_HAS_GEN" "empty CATALYST_GENERATION omitted (no null key)"
 assert_eq "true" "$T58_HAS_ODIR" "CATALYST_ORCHESTRATOR_DIR still present when set"
 assert_eq "yes" "$T58_VALID" "settings JSON valid with a context var omitted"
+
+echo ""
+echo "Test 59 (CTL-703): teardown dispatches with turnCap 15 + phase-monitor-deploy.json prior gate"
+fresh_env t59_teardown
+# teardown's prior artifact is phase-monitor-deploy.json — create it so the gate passes.
+printf '%s\n' '{"ticket":"CTL-100","status":"done","deployUrl":"https://example.com"}' \
+	>"${WORKER_DIR}/phase-monitor-deploy.json"
+"$DISPATCH" --phase teardown --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test >/dev/null 2>&1
+SIGNAL_TD="${WORKER_DIR}/phase-teardown.json"
+if [[ ! -f $SIGNAL_TD ]]; then
+	fail "teardown signal file created: $SIGNAL_TD"
+else
+	pass "teardown signal file created"
+	assert_eq "teardown" "$(jq -r '.phase' "$SIGNAL_TD")" "signal.phase = teardown"
+	assert_eq "opus" "$(jq -r '.model' "$SIGNAL_TD")" "signal.model = opus (default)"
+	assert_eq "15" "$(jq -r '.turnCap' "$SIGNAL_TD")" "signal.turnCap = 15 (teardown default)"
+fi
+
+echo ""
+echo "Test 60 (CTL-703): teardown refuses when phase-monitor-deploy.json (prior artifact) is missing"
+fresh_env t60_teardown
+# No phase-monitor-deploy.json → the prior-artifact gate must refuse (exit 2, no signal).
+"$DISPATCH" --phase teardown --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+	>"${TEST_DIR}/teardown_refused.out" 2>/dev/null
+RC_TD=$?
+assert_eq "2" "$RC_TD" "exit code 2 when teardown's phase-monitor-deploy.json is missing"
+assert_eq "refused" "$(jq -r '.status' "${TEST_DIR}/teardown_refused.out" 2>/dev/null || echo "")" \
+	"teardown stdout JSON status = refused"
+assert_eq "prior_artifact_missing" \
+	"$(jq -r '.reason' "${TEST_DIR}/teardown_refused.out" 2>/dev/null || echo "")" \
+	"teardown stdout JSON reason = prior_artifact_missing"
+[[ -f "${WORKER_DIR}/phase-teardown.json" ]] && SIG_TD_EXISTS="yes" || SIG_TD_EXISTS="no"
+assert_eq "no" "$SIG_TD_EXISTS" "no teardown signal written when refused"
+
+# ─── Test 61 (CTL-990): recreate runs at most ONCE — guard env parks instead ─
+# The ADV-1308 storm: research/plan rc=2 → destroy+recreate → exec $0 → the
+# recreated worktree is dirty again → rc=2 → recreate → exec … an in-process
+# infinite loop no scheduler cooldown can see. With CATALYST_RECREATE_ATTEMPTED
+# already set, the dispatcher must PARK (stalled, exit 1), never re-recreate.
+echo ""
+echo "Test 61 (CTL-990): CATALYST_RECREATE_ATTEMPTED set → source conflict parks, no second recreate"
+fresh_env t61_recreate_guard
+git_worktree_fixture t61
+advance_origin_conflict
+printf '{"ticket":"CTL-100","phase":"triage","status":"done"}\n' >"${WORKER_DIR}/triage.json"
+(
+	cd "$GWORK"
+	printf 'local-edit\n' >shared.txt
+	git add -A && git commit --quiet -m "local conflicting edit"
+)
+ORIG_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main CATALYST_RECREATE_ATTEMPTED=1 \
+	"$DISPATCH" --phase research --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t61.out" 2>/dev/null)
+RC61=$?
+SIGNAL="${WORKER_DIR}/phase-research.json"
+assert_eq "1" "$RC61" "recreate guard: dispatcher exits 1 (parked, not exec-looped)"
+CLAUDE61="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE61="yes"
+assert_eq "no" "$CLAUDE61" "recreate guard: claude --bg was NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "recreate guard: signal status = stalled"
+NOW_HEAD="$(cd "$GWORK" && git rev-parse HEAD)"
+assert_eq "$ORIG_HEAD" "$NOW_HEAD" "recreate guard: worktree NOT destroyed/recreated (HEAD unchanged)"
+
+# ─── Test 62 (CTL-990): pre-flight dirty-tree refusal parks with the TYPED reason ─
+# A tracked dirty non-noise file makes git refuse to start the rebase. The
+# signal's failureReason must carry rebase_refused_dirty_tree — not the old
+# misleading source_conflict_ctl708_unavailable (from a continue_failed cascade).
+echo ""
+echo "Test 62 (CTL-990): dirty tracked file → park with failureReason=rebase_refused_dirty_tree"
+fresh_env t62_precheck_reason
+git_worktree_fixture t62
+advance_origin_clean
+seed_local_plan_commit
+# Dirty a tracked NON-noise file AFTER the local commit (uncommitted edit).
+printf 'uncommitted-dirty-edit\n' >"${GWORK}/shared.txt"
+(cd "$GWORK" && CATALYST_BASE_BRANCH=main "$DISPATCH" --phase implement --ticket CTL-100 \
+	--orch-dir "$ORCH_DIR" --orch-id orch-test >"${TEST_DIR}/t62.out" 2>/dev/null)
+RC62=$?
+SIGNAL="${WORKER_DIR}/phase-implement.json"
+assert_eq "1" "$RC62" "precheck park: dispatcher exits 1"
+CLAUDE62="no"
+[[ -s $CLAUDE_STUB_LOG ]] && CLAUDE62="yes"
+assert_eq "no" "$CLAUDE62" "precheck park: claude --bg was NOT invoked"
+assert_eq "stalled" "$(jq -r '.status' "$SIGNAL" 2>/dev/null)" "precheck park: signal status = stalled"
+assert_eq "rebase_refused_dirty_tree" "$(jq -r '.failureReason' "$SIGNAL" 2>/dev/null)" \
+	"precheck park: signal failureReason = rebase_refused_dirty_tree (typed, not continue_failed cascade)"
+
+# ─── Test 63 (CTL-1008 Phase 3): catalyst.dispatch_mode in OTEL_RESOURCE_ATTRIBUTES ─
+echo ""
+echo "Test 63 (CTL-1008): CATALYST_DISPATCH_MODE → catalyst.dispatch_mode in OTEL attrs"
+fresh_env t63_dispatch_mode
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj",
+    "orchestration": {
+      "dispatchMode": "execution-core"
+    }
+  }
+}
+EOF
+DRY63=$(cd "${TEST_DIR}/proj" &&
+	CATALYST_DISPATCH_MODE=execution-core \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL63="$(echo "$DRY63" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ $OTEL63 == *"catalyst.dispatch_mode=execution-core"* ]]; then
+	pass "catalyst.dispatch_mode=execution-core present when CATALYST_DISPATCH_MODE set"
+else
+	fail "catalyst.dispatch_mode=execution-core MISSING from OTEL attrs: $OTEL63"
+fi
+
+# ─── Test 64 (CTL-1008 Phase 3): dispatch_mode OMITTED when not provided ────
+echo ""
+echo "Test 64 (CTL-1008): catalyst.dispatch_mode OMITTED when neither env nor config sets it"
+fresh_env t64_dispatch_mode_absent
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj"
+  }
+}
+EOF
+DRY64=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL64="$(echo "$DRY64" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ $OTEL64 == *"catalyst.dispatch_mode"* ]]; then
+	fail "catalyst.dispatch_mode should be ABSENT when not configured, but found: $OTEL64"
+else
+	pass "catalyst.dispatch_mode correctly absent when neither env nor config provides it"
+fi
+
+# ─── Test 65 (CTL-1008 Phase 3): dispatch_mode from config (env absent) ────
+echo ""
+echo "Test 65 (CTL-1008): catalyst.dispatch_mode read from config when CATALYST_DISPATCH_MODE unset"
+fresh_env t65_dispatch_mode_config
+cat >"${CONFIG_DIR}/config.json" <<'EOF'
+{
+  "catalyst": {
+    "projectKey": "test-proj",
+    "orchestration": {
+      "dispatchMode": "direct"
+    }
+  }
+}
+EOF
+DRY65=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+OTEL65="$(echo "$DRY65" | jq -r '.env[] | select(startswith("OTEL_RESOURCE_ATTRIBUTES="))')"
+if [[ $OTEL65 == *"catalyst.dispatch_mode=direct"* ]]; then
+	pass "catalyst.dispatch_mode=direct read from config when env var absent"
+else
+	fail "catalyst.dispatch_mode=direct MISSING from OTEL attrs (config-only path): $OTEL65"
+fi
+
+echo ""
+echo "Test 63 (CTL-864): CATALYST_CLUSTER_GENERATION is included in .settings.env when set"
+fresh_env t63
+(cd "${TEST_DIR}/proj" &&
+	CATALYST_CLUSTER_GENERATION=7 \
+		"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+			>/dev/null 2>&1)
+SETTINGS_T63="$(settings_json_from_log)"
+T63_VAL=$(echo "$SETTINGS_T63" | jq -r '.env["CATALYST_CLUSTER_GENERATION"] // empty' 2>/dev/null)
+T63_HAS_GEN=$(echo "$SETTINGS_T63" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T63_VALID=$(echo "$SETTINGS_T63" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "7" "$T63_VAL" "CATALYST_CLUSTER_GENERATION=7 present in .settings.env"
+assert_eq "true" "$T63_HAS_GEN" "CATALYST_GENERATION still present alongside cluster generation"
+assert_eq "yes" "$T63_VALID" "settings JSON valid with CATALYST_CLUSTER_GENERATION set"
+
+echo ""
+echo "Test 64 (CTL-864): CATALYST_CLUSTER_GENERATION is OMITTED from .settings.env when unset"
+fresh_env t64
+(cd "${TEST_DIR}/proj" &&
+	unset CATALYST_CLUSTER_GENERATION 2>/dev/null || true
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_T64="$(settings_json_from_log)"
+T64_HAS=$(echo "$SETTINGS_T64" | jq -r '.env | has("CATALYST_CLUSTER_GENERATION")' 2>/dev/null)
+T64_HAS_GEN=$(echo "$SETTINGS_T64" | jq -r '.env | has("CATALYST_GENERATION")' 2>/dev/null)
+T64_VALID=$(echo "$SETTINGS_T64" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "false" "$T64_HAS" "CATALYST_CLUSTER_GENERATION absent when unset (no null key)"
+assert_eq "true" "$T64_HAS_GEN" "CATALYST_GENERATION still present alongside the absent cluster key"
+assert_eq "yes" "$T64_VALID" "settings JSON valid with CATALYST_CLUSTER_GENERATION absent"
+
+echo ""
+echo "Test 65 (CTL-1105): spawn carries --settings with worktree.bgIsolation = none"
+fresh_env t65
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{ "catalyst": { "projectKey": "test-proj" } }
+EOF
+(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test \
+		>/dev/null 2>&1)
+SETTINGS_T65="$(settings_json_from_log)"
+T65_BG_ISO=$(echo "$SETTINGS_T65" | jq -r '.worktree.bgIsolation // empty' 2>/dev/null)
+assert_eq "none" "$T65_BG_ISO" ".settings.worktree.bgIsolation = none"
+
+echo ""
+echo "Test 66 (CTL-1105): worktree.bgIsolation coexists with telemetry env + statusLine"
+T66_HAS_ENV=$(echo "$SETTINGS_T65" | jq -r '.env | has("CLAUDE_CODE_ENABLE_TELEMETRY")' 2>/dev/null)
+T66_VALID=$(echo "$SETTINGS_T65" | jq -e . >/dev/null 2>&1 && echo yes || echo no)
+assert_eq "true" "$T66_HAS_ENV" "settings still carries the telemetry env block alongside worktree"
+assert_eq "yes" "$T66_VALID" "settings JSON remains valid with worktree key present"
+
+echo ""
+echo "Test 67 (CTL-1105): --dry-run JSON includes worktree.bgIsolation = none"
+fresh_env t67
+cat >"${CONFIG_DIR}/config.json" <<EOF
+{ "catalyst": { "projectKey": "test-proj" } }
+EOF
+DRY_OUT_T67=$(cd "${TEST_DIR}/proj" &&
+	"$DISPATCH" --phase triage --ticket CTL-100 --orch-dir "$ORCH_DIR" --orch-id orch-test --dry-run 2>/dev/null)
+T67_BG_ISO=$(echo "$DRY_OUT_T67" | jq -r '.settings.worktree.bgIsolation // empty' 2>/dev/null)
+assert_eq "none" "$T67_BG_ISO" "dry-run .settings.worktree.bgIsolation = none"
 
 echo ""
 echo "─────────────────────────────────────────────"

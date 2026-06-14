@@ -324,3 +324,36 @@ describe("createBriefingProvider", () => {
     expect(() => provider.stop()).not.toThrow();
   });
 });
+
+describe("createBriefingProvider — claude-cli (--bg subscription) path", () => {
+  const CLI_CONFIG: AiConfig = {
+    enabled: true,
+    provider: "claude-cli",
+    model: "claude-haiku-4-5-20251001",
+  };
+
+  const CLI_JSON_OUTPUT = JSON.stringify({
+    briefing: "All good.",
+    suggestedLabels: { "CTL-10": ["feature"] },
+  });
+
+  it("uses claude-cli path (never fetches) when provider is claude-cli", async () => {
+    let fetched = false;
+    const provider = createBriefingProvider(CLI_CONFIG, {
+      fetcher: () => { fetched = true; throw new Error("should not fetch"); },
+      runClaudeCli: () => Promise.resolve({ text: CLI_JSON_OUTPUT, tokens: 0 }),
+    });
+    const res = await provider.generate(makeSnapshot(), makeLinearTickets());
+    expect(fetched).toBe(false);
+    expect(res?.briefing).toBe("All good.");
+    expect(res?.suggestedLabels["CTL-10"]).toContain("feature");
+  });
+
+  it("degrades to null when claude-cli produces no output", async () => {
+    const provider = createBriefingProvider(CLI_CONFIG, {
+      runClaudeCli: () => Promise.resolve({ text: null, tokens: 0 }),
+    });
+    const res = await provider.generate(makeSnapshot(), makeLinearTickets());
+    expect(res).toBeNull();
+  });
+});

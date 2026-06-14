@@ -12,7 +12,10 @@
 // share ONE liveness / termination / concurrency primitive.
 
 import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { getJobsRoot } from "./config.mjs";
 
 const CLAUDE_BIN = process.env.CATALYST_DISPATCH_CLAUDE_BIN || "claude";
 
@@ -108,11 +111,19 @@ export function cachedListClaudeAgents({
 //       isFresh so the scheduler can gate new-work dispatch on staleness.
 const LIVENESS_TIMEOUT_MS = Number(process.env.CATALYST_LIVENESS_TIMEOUT_MS) || 3_000;
 // Stale threshold for the non-blocking getter (and the scheduler's dispatch gate).
-// 2× the TTL: a snapshot older than this is "stale" and a background refresh is
-// kicked; the scheduler holds NEW-work dispatch while stale (fail-safe — never
-// over-spawn on an unknown/old count). Advancement of in-flight phases is
-// independent of this and continues regardless.
-const LIVENESS_STALE_MS = Number(process.env.CATALYST_LIVENESS_STALE_MS) || 2 * LIVENESS_TTL_MS;
+// A snapshot older than this is "stale" and the scheduler holds NEW-work dispatch
+// (fail-safe — never over-spawn on an unknown/old count). Advancement of in-flight
+// phases is independent of this and continues regardless.
+//
+// CTL-792: default ≥30s. The daemon's liveness warmer keeps the snapshot ~TTL-fresh
+// BETWEEN ticks, but a single SYNCHRONOUS scheduler tick can block the loop for tens
+// of seconds (the perf debt), during which no warmer can refresh — so the snapshot
+// ages WITHIN the tick. A 10s window held new-work forever on every such tick. 30s
+// tolerates that in-tick aging; it stays over-spawn-safe because the warmer (not this
+// threshold) drives refresh frequency, so the count is still ~TTL-accurate. The real
+// fix is a non-blocking tick (orchestrator redesign Stage 2).
+const LIVENESS_STALE_MS =
+  Number(process.env.CATALYST_LIVENESS_STALE_MS) || Math.max(30_000, 2 * LIVENESS_TTL_MS);
 // Backoff: below this many consecutive failures every stale read retries; at/above
 // it, suppress refresh for an exponential window (base × 2^over, capped).
 const LIVENESS_BACKOFF_AFTER = Number(process.env.CATALYST_LIVENESS_BACKOFF_AFTER) || 3;
@@ -133,47 +144,89 @@ function backoffWindowMs(failures) {
 }
 
 // defaultExecFileAsync — the production async reader: execFile wrapped as a
-// promise, bound to an AbortSignal so the timeout path can kill the child.
+// promise, bound to an AbortSignal so the timeout path can kill the child. The
+// returned promise carries a `.child` reference (the ChildProcess) so the
+// deadline (refreshAgents) can ask whether the child has ACTUALLY exited rather
+// than discarding a completed-but-late read as a timeout (CTL-790). Any injected
+// execFileAsync may omit `.child`; the deadline tolerates its absence.
 function defaultExecFileAsync(bin, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) => {
+  let child;
+  const promise = new Promise((resolve, reject) => {
+    child = execFile(bin, args, { encoding: "utf8", ...opts }, (err, stdout) => {
       if (err) reject(err);
       else resolve(stdout);
     });
   });
+  promise.child = child;
+  return promise;
 }
 
 // refreshAgents — perform ONE async, timed, single-flight `claude agents --json`
 // read and update the shared snapshot. Returns the resolved agents array (or the
 // last-good / [] on failure); never rejects. Concurrent callers join the same
 // in-flight promise (anti-stampede). Injectable seams: execFileAsync (the async
-// reader), now (clock), timeoutMs, setTimer/clearTimer (the deadline timer).
+// reader), now (clock), timeoutMs, setTimer/clearTimer (the deadline timer),
+// deferDecision (the phase-deferral primitive — setImmediate in production).
+//
+// CTL-790 — the deadline must NOT race the read with a bare reject-timer. The
+// scheduler tick is synchronous and blocks the Node event loop for many seconds;
+// libuv runs the TIMERS phase BEFORE the POLL phase, so an overdue deadline timer
+// fires before an already-COMPLETED read is delivered, and a `Promise.race` would
+// discard that good snapshot as a "timeout" — the bug that wedged new-work
+// dispatch forever (isFresh never went true). Instead the deadline DEFERS its
+// verdict one phase via `deferDecision` (setImmediate → the CHECK phase, which
+// runs AFTER poll): a read that finished during the block has had its result
+// delivered and `settled` is set, so it wins. Only a child that is GENUINELY
+// still running (exitCode/signalCode both null) — or an injected fake with no
+// `.child` — is aborted and treated as a timeout. This shrinks the discard
+// window to a child mid-flush; the async-tick refactor (CTL roadmap Stage 2)
+// closes it entirely by never blocking the loop > timeoutMs.
 export function refreshAgents({
   execFileAsync = defaultExecFileAsync,
   now = Date.now,
   timeoutMs = LIVENESS_TIMEOUT_MS,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
+  deferDecision = setImmediate,
 } = {}) {
   if (_inflight) return _inflight; // (c) join the in-flight read
   const controller = new AbortController();
   let timer = null;
+  let settled = false; // (b) set the instant the read resolves/rejects
   const run = (async () => {
     try {
-      const out = await Promise.race([
-        // (a) async read, bound to the abort signal for (b).
-        execFileAsync(CLAUDE_BIN, ["agents", "--json"], {
-          encoding: "utf8",
-          signal: controller.signal,
-        }),
-        // (b) deadline: abort the child and reject so we fall back to last-good.
-        new Promise((_, reject) => {
-          timer = setTimer(() => {
-            controller.abort();
-            reject(new Error("claude agents --json timed out"));
-          }, timeoutMs);
-        }),
-      ]);
+      // (a) async read, bound to the abort signal for (b). `.child` (when the
+      // reader exposes it) is the authoritative "has it exited?" signal.
+      const readP = execFileAsync(CLAUDE_BIN, ["agents", "--json"], {
+        encoding: "utf8",
+        signal: controller.signal,
+      });
+      const out = await new Promise((resolve, reject) => {
+        readP.then(
+          (o) => {
+            settled = true;
+            resolve(o);
+          },
+          (e) => {
+            settled = true;
+            reject(e);
+          },
+        );
+        // (b) deadline: defer the verdict past the poll phase so a completed read
+        // wins; abort + reject only a child that is genuinely still running.
+        timer = setTimer(() => {
+          deferDecision(() => {
+            if (settled) return; // read already completed — honor it
+            const child = readP.child;
+            if (!child || (child.exitCode === null && child.signalCode === null)) {
+              controller.abort();
+              reject(new Error("claude agents --json timed out"));
+            }
+            // else: child has exited; its read callback is imminent in poll —
+            // do nothing and let `readP` settle the outer promise.
+          });
+        }, timeoutMs);
+      });
       const parsed = JSON.parse(out);
       if (!Array.isArray(parsed)) throw new Error("claude agents --json: non-array JSON");
       _asyncSnap = { ts: now(), agents: parsed };
@@ -252,6 +305,19 @@ export function agentForShortId(shortId, agents) {
   );
 }
 
+// agentStateForShortId — the matched agent's `.state` string, or null. CTL-932:
+// the snapshot already retains every raw field of `claude agents --json`
+// (agents are stored verbatim, never projected), but nothing READ `.state`
+// before — and `state === "blocked"` is the listing's signature of a worker
+// that registered but never resolved its initial prompt (the wedged-never-
+// started class: all six 2026-06-09 wedges showed kind:"background",
+// status:"idle", state:"blocked"). Null on absent agent / missing field /
+// malformed input — callers treat null as "cannot prove blocked" (no-op).
+export function agentStateForShortId(shortId, agents) {
+  const agent = agentForShortId(shortId, agents);
+  return typeof agent?.state === "string" && agent.state ? agent.state : null;
+}
+
 // isBgJobAlive — true iff a live `claude agents` session matches bgJobId. This
 // replaces the pid-file keep-alive check: a crashed worker disappears from
 // `claude agents`, whereas a live one (busy OR idle between turns) is still
@@ -300,6 +366,56 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
   return agent.status === "idle" ? "idle" : "busy";
 }
 
+// CTL-1055: dead-session liveness filter for the admission-gate count. A
+// `claude agents --json` background session whose ~/.claude/jobs/<shortId>/
+// state.json has reached a terminal lifecycle is registered-but-idle — it holds
+// no real slot and must NOT count against maxParallel, or terminal "ghost"
+// sessions starve dispatch (observed 2026-06-11: 3 live + 5 ghosts = 8 ≥
+// maxParallel 7; five queue heads deferred for hours).
+//
+// TERMINAL_JOB_STATES is kept in LOCK-STEP with the copies in
+// execution-core/recovery.mjs and orch-monitor/lib/board-data.mjs. We cannot
+// import recovery.mjs here — it imports this module (circular dep, CTL-1055
+// research §4) — so the set is duplicated locally, exactly as board-data.mjs does.
+// `blocked` is terminal-for-counting (CTL-768: parked sessions are excluded from
+// capacity) but this path NEVER kills — only the count changes.
+const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+
+// isBgJobDead — PURE verdict over a job-state shape ({ state, firstTerminalAt }),
+// mirroring recovery.jobLifecycle / board-data.bgJobLifecycle:
+//   null            → the job dir is gone → dead.
+//   firstTerminalAt → Claude marked the job terminal → dead.
+//   state ∈ TERMINAL_JOB_STATES → dead.
+//   anything else (incl. unreadable-but-present state.json → null state) → alive.
+export function isBgJobDead(jobState) {
+  if (!jobState) return true;
+  if (jobState.firstTerminalAt || TERMINAL_JOB_STATES.has(jobState.state)) return true;
+  return false;
+}
+
+// defaultStatJobState — synchronous read of ~/.claude/jobs/<shortId>/state.json,
+// returning the { state, firstTerminalAt } slice isBgJobDead needs, or null when
+// the file is missing (dir gone). Sync is intentional and hot-path safe: it is the
+// same statSync/readFileSync read recovery.defaultStatJob already does per worker
+// per tick. An existing-but-unreadable state.json yields { state: null,
+// firstTerminalAt: null } → classified alive (fail-alive: never drop a live worker
+// from the count over a transient mid-write read).
+export function defaultStatJobState(shortId) {
+  const file = join(getJobsRoot(), shortId, "state.json");
+  let raw;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return null; // file/dir missing → worker gone
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return { state: parsed?.state ?? null, firstTerminalAt: parsed?.firstTerminalAt ?? null };
+  } catch {
+    return { state: null, firstTerminalAt: null }; // present but unreadable → alive
+  }
+}
+
 // countBackgroundAgents — number of live sessions with kind === "background".
 // The scheduler's concurrency gate: interactive (human) sessions are unlimited
 // and MUST NOT count against maxParallel, so only `background` agents are
@@ -311,9 +427,59 @@ export function livenessForBgJob(bgJobId, { exec, agents } = {}) {
 // snapshot (getAgentsCached) instead of a synchronous execFileSync. This is the
 // scheduler/autotune hot path — it must NOT spawn a subprocess on the event loop.
 // Tests inject `agents` directly (pure logic) and are unaffected.
-export function countBackgroundAgents({ agents, now } = {}) {
+//
+// CTL-1055: a registered background session counts only if its bg job is alive.
+// Terminal ghost sessions (state ∈ TERMINAL_JOB_STATES or firstTerminalAt set)
+// and dir-gone sessions are excluded so they cannot starve the admission gate.
+// The `statJob` seam (defaulting to defaultStatJobState) is injectable for tests.
+export function countBackgroundAgents({ agents, now, statJob = defaultStatJobState } = {}) {
   const list = agents ?? getAgentsCached(now ? { now } : {}).agents;
-  return list.filter((a) => a?.kind === "background").length;
+  return list.filter((a) => {
+    if (a?.kind !== "background") return false; // unchanged: interactive/unknown excluded
+    // CTL-1055: count only if the bg job is alive.
+    let shortId;
+    try {
+      shortId = shortIdFromSessionId(a.sessionId);
+    } catch {
+      return false; // malformed/absent sessionId → un-probeable → fail-low (don't count)
+    }
+    return !isBgJobDead(statJob(shortId));
+  }).length;
+}
+
+// --- CTL-932: screen capture for wedge escalations -------------------------
+
+// stripAnsi — drop ANSI CSI/OSC escape sequences from a rendered screen buffer
+// so the captured text is grep-able in the event log. Covers CSI (ESC [ … cmd),
+// OSC (ESC ] … BEL / ESC \), and bare two-byte escapes.
+const ANSI_RE =
+  /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]/g;
+function stripAnsi(s) {
+  return String(s).replace(ANSI_RE, "");
+}
+
+// claudeLogs — `claude logs <shortId>`: the session's rendered screen buffer,
+// the ONLY external surface that shows WHY a session is idle (it revealed the
+// "Unknown command: /catalyst-dev:phase-*" banner behind the 2026-06-09
+// fleet-wide wedge). ANSI-stripped and capped so the capture can ride inside
+// an escalation event payload without archaeology — or bloat. shortId MUST be
+// the 8-char form (same contract as claudeStop). Returns {ok, output, error?};
+// never throws.
+const CLAUDE_LOGS_CAP = 8_192;
+export function claudeLogs(shortId, { spawn = spawnSync } = {}) {
+  try {
+    const res = spawn(CLAUDE_BIN, ["logs", shortId], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if ((res.status ?? 0) !== 0) {
+      return { ok: false, output: "", error: res.stderr?.trim() || `claude logs rc=${res.status}` };
+    }
+    const cleaned = stripAnsi(res.stdout ?? "").trim();
+    return { ok: true, output: cleaned.slice(0, CLAUDE_LOGS_CAP) };
+  } catch (err) {
+    return { ok: false, output: "", error: err.message };
+  }
 }
 
 // claudeStop — `claude stop <shortId>`. shortId MUST be the 8-char form

@@ -1,14 +1,14 @@
 :root {
-  --sl-color-accent-low: #1a1a2e;
-  --sl-color-accent: #4f46e5;
-  --sl-color-accent-high: #c7d2fe;
+  --sl-color-accent-low: #3a2218;   /* warm-graphite-brown (dark UI accent-low) */
+  --sl-color-accent: #c15f3c;       /* terracotta (dark-theme verb fill) */
+  --sl-color-accent-high: #f0c9b4;  /* warm paper-tint */
   --sl-font: "Inter", sans-serif;
 }
 
 :root[data-theme="light"] {
-  --sl-color-accent-low: #e0e7ff;
-  --sl-color-accent: #4338ca;
-  --sl-color-accent-high: #1e1b4b;
+  --sl-color-accent-low: #f0c9b4;   /* warm paper-tint */
+  --sl-color-accent: #a9512f;       /* terracotta (light primary — matches app) */
+  --sl-color-accent-high: #3a2218;  /* warm-graphite-brown ink */
 }
 
 .site-title img {
@@ -38,7 +38,7 @@
   }
 }
 
-/* ─── Changelog Styling (Conductor-inspired) ────────────────────────────────
+/* ─── Changelog Styling ──────────────────────────────────────────────────────
  *
  * DOM structure per version entry (from starlight-changelogs):
  *   <h2 id="slug"><a>6.34.0</a></h2>

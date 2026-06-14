@@ -18,6 +18,8 @@ const makeEvent = (overrides: Partial<CanonicalEvent> = {}): CanonicalEvent => (
     "service.name": "test",
     "service.namespace": "catalyst",
     "service.version": "0.0.0",
+    "host.name": "test-host",
+    "host.id": "0000000000000000",
   },
   attributes: { "event.name": "github.pr.merged" },
   body: {},

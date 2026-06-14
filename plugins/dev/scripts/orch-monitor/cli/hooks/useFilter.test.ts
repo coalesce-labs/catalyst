@@ -37,7 +37,7 @@ function applyPipeline(
 const fixture: CanonicalEvent[] = [
   {
     ts: "2026-05-08T14:00:00Z", id: "00000000-0000-4000-8000-000000000001", severityText: "INFO", severityNumber: 9, traceId: "t1", spanId: null,
-    resource: { "service.name": "catalyst.github", "service.namespace": "catalyst", "service.version": "8.2.0" },
+    resource: { "service.name": "catalyst.github", "service.namespace": "catalyst", "service.version": "8.2.0", "host.name": "test-host", "host.id": "0000000000000000" },
     attributes: {
       "event.name": "github.pr.merged",
       "vcs.pr.number": 342,
@@ -50,7 +50,7 @@ const fixture: CanonicalEvent[] = [
   },
   {
     ts: "2026-05-08T13:00:00Z", id: "00000000-0000-4000-8000-000000000002", severityText: "ERROR", severityNumber: 17, traceId: "t1", spanId: null,
-    resource: { "service.name": "catalyst.github", "service.namespace": "catalyst", "service.version": "8.2.0" },
+    resource: { "service.name": "catalyst.github", "service.namespace": "catalyst", "service.version": "8.2.0", "host.name": "test-host", "host.id": "0000000000000000" },
     attributes: {
       "event.name": "github.workflow_run.completed",
       "vcs.pr.number": 343,
@@ -62,7 +62,7 @@ const fixture: CanonicalEvent[] = [
   },
   {
     ts: "2026-05-08T12:00:00Z", id: "00000000-0000-4000-8000-000000000003", severityText: "INFO", severityNumber: 9, traceId: "t2", spanId: null,
-    resource: { "service.name": "catalyst.linear", "service.namespace": "catalyst", "service.version": "8.2.0" },
+    resource: { "service.name": "catalyst.linear", "service.namespace": "catalyst", "service.version": "8.2.0", "host.name": "test-host", "host.id": "0000000000000000" },
     attributes: {
       "event.name": "linear.issue.state_changed",
       "linear.issue.identifier": "ADV-292",

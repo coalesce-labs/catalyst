@@ -5,6 +5,7 @@ import type { BrokerInterest } from "../lib/broker-interests-reader.ts";
 import { readBrokerInterests } from "../lib/broker-interests-reader.ts";
 import type { WorkerSignal } from "../lib/worker-signals-reader.ts";
 import { readWorkerSignals } from "../lib/worker-signals-reader.ts";
+import { selectWorkers } from "../lib/read-model-workers.ts";
 import type { OrchState } from "../lib/orch-state-reader.ts";
 import { readOrchStates } from "../lib/orch-state-reader.ts";
 import type { RunRow } from "../lib/runs-reader.ts";
@@ -31,6 +32,23 @@ interface DashboardProps {
   cols: number;
   brokerState: BrokerState | null;
   onClose: () => void;
+  /**
+   * CTL-919 / HUD1: the local node's name, resolved through the shared
+   * read-model contract (lib/read-model-client → read-model-host.localHostRef).
+   * A single-host fleet shows exactly this one node (the identity no-op) at the
+   * right of the view tabs; the eventual multi-node HUD groups by host through
+   * the SAME contract. Optional/additive — absent ⇒ no node label rendered.
+   */
+  nodeName?: string;
+  /**
+   * CTL-920 / HUD2: the Workers view's PRIMARY state, mapped from the shared
+   * read-model SSE (the SAME assembled BoardWorker[] the web/iPad render). When
+   * non-null the Dashboard renders THESE rows instead of re-deriving them from
+   * raw `workers/*.json` scans — one assembly, many readers. When null the
+   * read-model is unavailable (server down) and the Dashboard falls back to its
+   * raw-file scan so the HUD never goes dark.
+   */
+  readModelWorkers?: WorkerSignal[] | null;
 }
 
 interface DashboardState {
@@ -63,7 +81,14 @@ function rowCount(view: DashboardView, state: DashboardState): number {
   return state.runs.length;
 }
 
-export function Dashboard({ visibleRows, cols, brokerState, onClose }: DashboardProps) {
+export function Dashboard({
+  visibleRows,
+  cols,
+  brokerState,
+  onClose,
+  nodeName,
+  readModelWorkers,
+}: DashboardProps) {
   const [view, setView] = useState<DashboardView>("interests");
   const [data, setData] = useState<DashboardState>(() => readAll());
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -80,8 +105,15 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
     return () => clearInterval(id);
   }, []);
 
+  // CTL-920 / HUD2: prefer the read-model-backed workers (the shared assembled
+  // BoardWorker[] the web/iPad render). When the read-model is unavailable
+  // (server down ⇒ prop is null), fall back to the raw `workers/*.json` scan so
+  // the HUD never goes dark. The em-dash "—" entries the read-model worker slice
+  // omits (PR, worktree) render identically to a raw signal that lacks them.
+  const effectiveWorkers = selectWorkers(readModelWorkers ?? null, data.workers);
+
   const sortedWorkers = useMemo(() => {
-    const arr = [...data.workers];
+    const arr = [...effectiveWorkers];
     const dir = workerSortDir === "asc" ? 1 : -1;
     arr.sort((a, b) => {
       let av: number | string, bv: number | string;
@@ -103,7 +135,7 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
       return 0;
     });
     return arr;
-  }, [data.workers, workerSortKey, workerSortDir]);
+  }, [effectiveWorkers, workerSortKey, workerSortDir]);
 
   const sortedOrchs = useMemo(() => {
     const arr = [...data.orchs];
@@ -241,6 +273,11 @@ export function Dashboard({ visibleRows, cols, brokerState, onClose }: Dashboard
             </Box>
           );
         })}
+        {nodeName ? (
+          <Box flexGrow={1} justifyContent="flex-end">
+            <Text dimColor>{`node: ${nodeName}`}</Text>
+          </Box>
+        ) : null}
       </Box>
       <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="cyan" paddingX={1}>
         {view === "interests" && (

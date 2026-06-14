@@ -5,7 +5,7 @@
 // functions so no real timers, Linear polls, or child processes run — the
 // composition logic is exercised deterministically.
 
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, spyOn } from "bun:test";
 import {
   mkdtempSync,
   rmSync,
@@ -30,9 +30,18 @@ import {
   __getEventPollTimerForTest,
   createCommentInboxWriter,
   createUpdateInboxWriter,
+  readLinearBotUserIds,
+  readLinearBotWriteId,
+  _isBotId,
 } from "./daemon.mjs";
-import { getEventLogPath } from "./config.mjs";
+import { getEventLogPath, log } from "./config.mjs";
 import { upsertProjectEntry } from "./registry.mjs";
+import {
+  recordHoldStop,
+  holdStopCooldownPath,
+  inHoldStopCooldown,
+  clearHoldStopCooldown,
+} from "./scheduler.mjs";
 
 // CATALYST_DIR temp-dir harness — identical shape to enrollment.test.mjs:14-19.
 let catalystDir;
@@ -215,6 +224,46 @@ describe("startDaemon", () => {
     expect(schedulerConfigPath).toBeNull();
   });
 
+  // CTL-1044: the daemon MUST pass an `appendIntentEvent` appender into the
+  // scheduler. Without it, runningOpts.appendIntentEvent is undefined and the
+  // advance-shadow comparator / CTL-936 intent.ineffective / executeEscalations
+  // emitters silently no-op (the bug: zero beliefs.* events ever reached the log
+  // on mini despite the shadow flags being live). This wiring test mirrors the
+  // gateway/configPath wiring tests above: capture the scheduler's opts and
+  // assert the appender is a function that actually lands a line in the unified
+  // event log carrying event.name verbatim + payload intact.
+  test("CTL-1044: passes appendIntentEvent into startScheduler — and it writes to the event log", () => {
+    let captured;
+    startDaemon({
+      recover: () => ({ coldStart: false, workers: {} }),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        captured = o;
+      },
+      watchRegistry: false,
+    });
+    // The seam the advance-shadow comparator (and intent/escalation emitters)
+    // consume must be a real function in production — not null/undefined.
+    expect(typeof captured.appendIntentEvent).toBe("function");
+
+    // Drive exactly the object advance-shadow.mjs:177-180 hands `appendEvent`
+    // and prove it reaches the log (CATALYST_DIR is pinned to this test's tmp
+    // dir by the suite's beforeEach, so getEventLogPath resolves there).
+    const ok = captured.appendIntentEvent({
+      "event.name": "beliefs.advance_shadow.disagree",
+      payload: { ticket: "CTL-1044-IT", procedural: "research", belief: null },
+    });
+    expect(ok).toBe(true);
+
+    const lines = readFileSync(getEventLogPath(), "utf8").split("\n").filter(Boolean);
+    const env = JSON.parse(lines[lines.length - 1]);
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.disagree");
+    expect(env.body.payload.ticket).toBe("CTL-1044-IT");
+    expect(env.body.payload.procedural).toBe("research");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+  });
+
   // CTL-634: one cache instance is created in startDaemon and threaded into
   // BOTH composed boots, so the monitor's write-through and the scheduler's
   // read path share state. Capture each boot's `cache` arg and assert identity.
@@ -378,6 +427,47 @@ describe("startDaemon", () => {
     expect(existsSync(pidFile)).toBe(false);
   });
 
+  // CTL-854: boot-warn when registry is empty — exactly once, names recovery verb
+  test("WARNs once when the registry is empty at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [],
+    });
+    const emptyWarns = warn.mock.calls.filter(
+      (c) => JSON.stringify(c).includes("registry") && JSON.stringify(c).includes("register"),
+    );
+    expect(emptyWarns.length).toBe(1);
+    warn.mockRestore();
+  });
+
+  test("does NOT warn when projects are registered at boot (CTL-854)", () => {
+    const warn = spyOn(log, "warn");
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      stopMonitor: () => {},
+      stopScheduler: () => {},
+      reconcile: () => {},
+      startAutoTuner: () => () => {},
+      watchRegistry: false,
+      listProjects: () => [{ team: "CTL", repoRoot: catalystDir, eligibleQuery: null }],
+    });
+    const emptyWarns = warn.mock.calls.filter((c) => JSON.stringify(c).includes("register"));
+    expect(emptyWarns.length).toBe(0);
+    warn.mockRestore();
+  });
+
   test("reconciles when the registry changes (debounced)", async () => {
     let reconciled = 0;
     startDaemon({
@@ -390,7 +480,7 @@ describe("startDaemon", () => {
       watchRegistry: true,
       debounceMs: 20,
     });
-    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Ready" } });
+    upsertProjectEntry({ team: "DEMO", repoRoot: "/r/d", eligibleQuery: { status: "Todo" } });
     // Poll up to 2s rather than a fixed wait — fs.watch delivery latency plus
     // the debounce timer varies under concurrent full-suite load, so a fixed
     // 60ms wait is flaky. The reconcile only has to fire once.
@@ -508,6 +598,61 @@ describe("startDaemon", () => {
     expect(() => stopDaemon()).not.toThrow();
     expect(stopped).toBe(1);
   });
+
+  // CTL-787: the account-level rate-limit poller is started from startDaemon
+  // (default-on), gated by enableRatelimitPoller, and stopped in stopDaemon —
+  // mirroring the CTL-685 memory-sampler wiring.
+  test("starts the ratelimit-poller when enabled (CTL-787)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableRatelimitPoller: true,
+    });
+    expect(started).toBe(1);
+  });
+
+  test("skips the ratelimit-poller when disabled (CTL-787)", () => {
+    let started = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => {
+        started++;
+        return { stop: () => {} };
+      },
+      enableRatelimitPoller: false,
+    });
+    expect(started).toBe(0);
+  });
+
+  test("stopDaemon stops the ratelimit-poller and swallows a throwing stop() (CTL-787)", () => {
+    let stopped = 0;
+    startDaemon({
+      recover: () => {},
+      startMonitor: () => {},
+      startScheduler: () => {},
+      watchRegistry: false,
+      startRatelimitPoller: () => ({
+        stop: () => {
+          stopped++;
+          throw new Error("simulated poller stop failure");
+        },
+      }),
+      enableRatelimitPoller: true,
+    });
+    // Must not throw even though stop() throws
+    expect(() => stopDaemon()).not.toThrow();
+    expect(stopped).toBe(1);
+  });
 });
 
 // CTL-678 — main()-side resolver: pre-merge Layer-1 (committed seed) under
@@ -575,7 +720,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
         orchestration: {
           executionCore: {
             maxParallel: 4,
-            eligibleQuery: { status: "Ready" },
+            eligibleQuery: { status: "Todo" },
           },
         },
       },
@@ -585,7 +730,7 @@ describe("resolveBootConcurrency (CTL-678)", () => {
     });
     expect(resolveBootConcurrency({ layer1Path, layer2Path })).toEqual({
       maxParallel: 6,
-      eligibleQuery: { status: "Ready" },
+      eligibleQuery: { status: "Todo" },
     });
   });
 });
@@ -1008,7 +1153,7 @@ describe("handleCommentWake (CTL-549)", () => {
         removeLabel: async (ticket, label) => { removed.push({ ticket, label }); dispatchOrder.push("remove"); },
       },
     );
-    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human/question" });
+    expect(removed).toContainEqual({ ticket: "CTL-1", label: "needs-human" }); // CTL-1067 Bug 3
     expect(dispatchOrder.indexOf("remove")).toBeLessThan(dispatchOrder.indexOf("dispatch"));
   });
 
@@ -1082,6 +1227,118 @@ describe("handleCommentWake (CTL-549)", () => {
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0].ticket).toBe("CTL-1");
     expect(dispatched[0].phase).toBe("implement");
+  });
+
+  test("CTL-768: stoppedForHold → dispatch with resumeSession from resolveSession", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push({ p, opts }),
+      removeLabel: async () => {},
+      resolveSession: (bg) => (bg === "held1234" ? "uuid-resume" : null),
+    });
+    expect(dispatched[0].opts.resumeSession).toBe("uuid-resume");
+    expect(dispatched[0].p).toBe("implement");
+  });
+
+  test("CTL-768: stoppedForHold → signal reset to stalled, marker cleared", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    recordHoldStop(orch, "CTL-1", "implement", 1_000);
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: () => {},
+      removeLabel: async () => {},
+      resolveSession: () => "uuid",
+    });
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("stalled");
+    expect(sig.stoppedForHold).toBe(false);     // cleared
+    expect(inHoldStopCooldown(orch, "CTL-1", "implement", 2_000)).toBe(false); // cooldown cleared
+  });
+
+  test("CTL-768: stoppedForHold but resolveSession null → dispatch WITHOUT resume (cold fallback)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        bg_job_id: "held1234", stoppedForHold: true }),
+    );
+    const dispatched = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: () => null,
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+  });
+
+  test("CTL-768: no stoppedForHold → backward-compat (no resume, signal unchanged)", async () => {
+    const orch = tmpOrcDir();
+    const workerDir = join(orch, "workers", "CTL-1");
+    mkdirSync(workerDir, { recursive: true });
+    writeFileSync(
+      join(workerDir, "phase-implement.json"),
+      JSON.stringify({ ticket: "CTL-1", phase: "implement", status: "needs-input",
+        parkedFrom: "implement", bg_job_id: "x" }),
+    );
+    const dispatched = [];
+    const resolveSpy = [];
+    await handleCommentWake({ ticket: "CTL-1" }, {
+      orchDir: orch,
+      dispatch: (d, t, p, opts) => dispatched.push(opts),
+      removeLabel: async () => {},
+      resolveSession: (bg) => { resolveSpy.push(bg); return "x"; },
+    });
+    expect(dispatched[0].resumeSession).toBeUndefined();
+    expect(resolveSpy).toEqual([]);             // resolveSession never called
+    const sig = JSON.parse(readFileSync(join(workerDir, "phase-implement.json"), "utf8"));
+    expect(sig.status).toBe("needs-input");     // not reset
+  });
+
+  test("CTL-1067: a stalled signal is cleared via clearStall, not re-dispatched", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement", generation: 2 });
+    const dispatched = [], clears = [], removed = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      {
+        orchDir: orch,
+        dispatch: (...a) => dispatched.push(a),
+        removeLabel: async (t, l) => removed.push({ ticket: t, label: l }),
+        clearStall: ({ ticket, phase }) => { clears.push({ ticket, phase }); return true; },
+      },
+    );
+    expect(clears).toEqual([{ ticket: "CTL-1", phase: "implement" }]);
+    expect(dispatched).toEqual([]);
+  });
+
+  test("CTL-1067: stalled signal is a no-op when clearStall is not injected", async () => {
+    const orch = tmpOrcDir();
+    writeSignal(orch, "CTL-1", "implement", { status: "stalled", phase: "implement" });
+    const dispatched = [];
+    await handleCommentWake(
+      { ticket: "CTL-1" },
+      { orchDir: orch, dispatch: (...a) => dispatched.push(a), removeLabel: async () => {} },
+    );
+    expect(dispatched).toEqual([]);
   });
 });
 
@@ -1176,6 +1433,178 @@ describe("inbox writer — createUpdateInboxWriter (CTL-749)", () => {
   });
 });
 
+// readLinearBotUserIds — collects bot UUIDs from Layer-2 new path + Layer-1 back-compat
+describe("readLinearBotUserIds", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-ids-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("returns empty set when both paths are absent", () => {
+    const ids = readLinearBotUserIds("/nonexistent/layer1.json", "/nonexistent/layer2.json");
+    expect(ids.size).toBe(0);
+  });
+
+  test("reads worker botUserId from Layer-2 new global path", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { worker: { botUserId: "worker-uuid-1" } } } }
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid-1")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("reads orchestrator botUserId from Layer-2 new global path", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("orch-uuid-1")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("reads both worker and orchestrator botUserIds from Layer-2", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "worker-uuid" },
+            orchestrator: { botUserId: "orch-uuid" },
+          },
+        },
+      },
+    }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.has("worker-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.size).toBe(2);
+  });
+
+  test("reads Layer-1 back-compat path (catalyst.monitor.linear.botUserId)", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "legacy-uuid" } } }
+    }));
+    const ids = readLinearBotUserIds(layer1, null);
+    expect(ids.has("legacy-uuid")).toBe(true);
+    expect(ids.size).toBe(1);
+  });
+
+  test("merges IDs from both layers; deduplicates when same UUID appears in both", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "shared-uuid" } } }
+    }));
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: {
+        linear: {
+          bot: {
+            worker: { botUserId: "shared-uuid" },  // same as layer-1 — should dedup
+            orchestrator: { botUserId: "orch-uuid" },
+          },
+        },
+      },
+    }));
+    const ids = readLinearBotUserIds(layer1, layer2);
+    expect(ids.has("shared-uuid")).toBe(true);
+    expect(ids.has("orch-uuid")).toBe(true);
+    expect(ids.size).toBe(2); // not 3 — deduped
+  });
+
+  test("returns empty set when layer2 has no bot section", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({ catalyst: { linear: {} } }));
+    const ids = readLinearBotUserIds(null, layer2);
+    expect(ids.size).toBe(0);
+  });
+});
+
+// _isBotId — normalises string vs Set so guard callers are consistent
+describe("_isBotId", () => {
+  test("returns false when botUserId is empty string", () => {
+    expect(_isBotId("", "some-id")).toBe(false);
+  });
+  test("returns false when actorId is absent", () => {
+    expect(_isBotId("bot-id", null)).toBe(false);
+    expect(_isBotId("bot-id", undefined)).toBe(false);
+    expect(_isBotId("bot-id", "")).toBe(false);
+  });
+  test("matches a plain string botUserId", () => {
+    expect(_isBotId("bot-id", "bot-id")).toBe(true);
+    expect(_isBotId("bot-id", "human-id")).toBe(false);
+  });
+  test("matches any member of a Set botUserId", () => {
+    const ids = new Set(["worker-id", "orch-id"]);
+    expect(_isBotId(ids, "worker-id")).toBe(true);
+    expect(_isBotId(ids, "orch-id")).toBe(true);
+    expect(_isBotId(ids, "human-id")).toBe(false);
+  });
+  test("returns false for an empty Set", () => {
+    expect(_isBotId(new Set(), "some-id")).toBe(false);
+  });
+});
+
+// inbox writers with Set botUserId
+describe("createCommentInboxWriter — Set<string> botUserId", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "inbox-set-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("skips write when authorId is in the bot Set (worker id)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c1", body: "bot mirror", authorId: "worker-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("skips write when authorId is in the bot Set (orchestrator id)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c2", body: "orch comment", authorId: "orch-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when authorId is NOT in the bot Set (human reply)", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createCommentInboxWriter(tmpDir, ids);
+    writer({ ticket, commentId: "c3", body: "human reply", authorId: "human-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+});
+
+describe("createUpdateInboxWriter — Set<string> botUserId", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "update-set-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("skips write when actorId is in the bot Set", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createUpdateInboxWriter(tmpDir, ids);
+    writer({ ticket, description: "updated", descriptionChanged: true, actorId: "orch-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(false);
+  });
+
+  test("writes when actorId is NOT in the bot Set", () => {
+    const ticket = "CTL-99";
+    mkdirSync(join(tmpDir, "workers", ticket), { recursive: true });
+    const ids = new Set(["worker-id", "orch-id"]);
+    const writer = createUpdateInboxWriter(tmpDir, ids);
+    writer({ ticket, description: "updated", descriptionChanged: true, actorId: "human-id" });
+    expect(existsSync(join(tmpDir, "workers", ticket, "inbox.jsonl"))).toBe(true);
+  });
+});
+
 // CTL-549 + CTL-749: daemon wires onComment (handleCommentWake + inbox writer) and onUpdate
 describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)", () => {
   test("passes onComment and onUpdate callbacks to startMonitor", () => {
@@ -1190,5 +1619,170 @@ describe("daemon wires onComment and onUpdate to monitorFn (CTL-549 + CTL-749)",
     stopDaemon();
     expect(typeof capturedOpts?.onComment).toBe("function");
     expect(typeof capturedOpts?.onUpdate).toBe("function");
+  });
+});
+
+// ─── CTL-823: gateway wiring (the slice's whole point — pin it) ──────────────
+
+describe("CTL-823 gateway wiring", () => {
+  test("injected classifyResolution serves a fresh store hit with ZERO live reads", async () => {
+    const { openBrokerStateDb, closeBrokerStateDb, upsertTicketDescriptor } = await import(
+      "../broker/broker-state.mjs"
+    );
+    // Seed the descriptor store at the path the daemon's default reader
+    // resolves (CATALYST_DIR/filter-state.db — pinned to this test's tmp dir).
+    openBrokerStateDb(join(catalystDir, "filter-state.db"));
+    upsertTicketDescriptor({ ticket: "CTL-GW", state: "Todo", uuid: "u-gw" });
+    closeBrokerStateDb();
+
+    let captured;
+    startDaemon({
+      recover: () => ({}),
+      reconcileBoot: () => {},
+      startMonitor: () => {},
+      startScheduler: (o) => {
+        captured = o;
+      },
+      watchRegistry: false,
+    });
+
+    // The reader is threaded for the scheduler's fetchState injections…
+    expect(captured.gateway).toBeTruthy();
+    // …and the classify wrapper serves the store WITHOUT touching linearis:
+    // an exec that would return a definitive not-found must never be reached.
+    const execCalls = [];
+    const exec = (...args) => {
+      execCalls.push(args);
+      return { code: 0, stdout: JSON.stringify({ error: "Issue not found" }) };
+    };
+    expect(captured.classifyResolution("CTL-GW", { exec })).toBe("exists");
+    expect(execCalls.length).toBe(0);
+
+    // Store MISS falls through to the live read (fail-open) — and the
+    // daemon's reader cannot be dropped by the caller's opts.
+    expect(captured.classifyResolution("CTL-MISSING", { exec })).toBe("not-found");
+    expect(execCalls.length).toBe(1);
+  });
+});
+
+// readLinearBotWriteId — resolves the SINGLE bot UUID to write as assignee (CTL-781).
+describe("readLinearBotWriteId (CTL-781)", () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = mkdtempSync(join(tmpdir(), "bot-write-id-test-")); });
+  afterEach(() => rmSync(tmpDir, { recursive: true, force: true }));
+
+  test("returns catalyst.linear.bot.orchestrator.botUserId from Layer-2 when present", () => {
+    const layer2 = join(tmpDir, "config.json");
+    writeFileSync(layer2, JSON.stringify({
+      catalyst: { linear: { bot: { orchestrator: { botUserId: "orch-uuid-1" } } } }
+    }));
+    expect(readLinearBotWriteId(null, layer2)).toBe("orch-uuid-1");
+  });
+
+  test("falls back to Layer-1 catalyst.monitor.linear.botUserId when Layer-2 absent", () => {
+    const layer1 = join(tmpDir, "layer1.json");
+    writeFileSync(layer1, JSON.stringify({
+      catalyst: { monitor: { linear: { botUserId: "legacy-uuid-1" } } }
+    }));
+    expect(readLinearBotWriteId(layer1, null)).toBe("legacy-uuid-1");
+  });
+
+  test("returns null when neither layer configures an ID (self-assign disabled)", () => {
+    expect(readLinearBotWriteId("/nonexistent/l1.json", "/nonexistent/l2.json")).toBeNull();
+  });
+
+  test("never throws on unreadable/malformed files", () => {
+    const bad = join(tmpDir, "bad.json");
+    writeFileSync(bad, "not-json{{");
+    expect(() => readLinearBotWriteId(bad, bad)).not.toThrow();
+  });
+});
+
+// ── CTL-862: daemon.mjs — CATALYST_CONFIG_FILE propagation + ownership boot-log ──
+//
+// Two independent daemon edits: propagate the resolved config path into process.env
+// so getClusterHosts() resolves the right repo regardless of cwd, and replace the
+// bare boot-log line with one reporting owned-vs-eligible ticket counts.
+describe("CTL-862 — daemon CATALYST_CONFIG_FILE propagation", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("propagates configPath into CATALYST_CONFIG_FILE when unset (CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    delete process.env.CATALYST_CONFIG_FILE;
+    const fakeConfigPath = join(catalystDir, "fake-config.json");
+    try {
+      startDaemon({ ...baseOpts(), configPath: fakeConfigPath });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(fakeConfigPath);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+
+  test("does NOT overwrite CATALYST_CONFIG_FILE already set (||= semantics, CTL-862)", () => {
+    const prev = process.env.CATALYST_CONFIG_FILE;
+    const preExisting = "/pre-set/catalyst/config.json";
+    process.env.CATALYST_CONFIG_FILE = preExisting;
+    try {
+      startDaemon({ ...baseOpts(), configPath: "/new/config.json" });
+      expect(process.env.CATALYST_CONFIG_FILE).toBe(preExisting);
+    } finally {
+      if (prev === undefined) delete process.env.CATALYST_CONFIG_FILE;
+      else process.env.CATALYST_CONFIG_FILE = prev;
+    }
+  });
+});
+
+describe("CTL-862 — daemon boot-log ownership context", () => {
+  const baseOpts = () => ({
+    recover: () => ({}),
+    reconcileBoot: () => {},
+    startMonitor: () => {},
+    startScheduler: () => {},
+    stopMonitor: () => {},
+    stopScheduler: () => {},
+    reconcile: () => {},
+    startAutoTuner: () => () => {},
+    watchRegistry: false,
+    listProjects: () => [],
+  });
+
+  test("boot log carries host/owns/eligible/roster fields (CTL-862)", () => {
+    const infoSpy = spyOn(log, "info");
+    const ROSTER = ["mini", "mac-studio"];
+    const SELF = "mini";
+    const eligible = [{ identifier: "ENG-1" }, { identifier: "ENG-2" }];
+    try {
+      startDaemon({
+        ...baseOpts(),
+        readAllEligible: () => eligible,
+        bootHosts: ROSTER,
+        bootHostName: SELF,
+      });
+      const bootCall = infoSpy.mock.calls.find(
+        (c) => typeof c[1] === "string" && c[1].includes("daemon started")
+      );
+      expect(bootCall).toBeDefined();
+      const obj = bootCall[0];
+      expect(obj.host).toBe(SELF);
+      expect(Array.isArray(obj.roster)).toBe(true);
+      expect(obj.eligible).toBe(eligible.length);
+      expect(typeof obj.owns).toBe("number");
+      expect(obj.owns).toBeGreaterThanOrEqual(0);
+      expect(obj.owns).toBeLessThanOrEqual(eligible.length);
+    } finally {
+      infoSpy.mockRestore();
+    }
   });
 });

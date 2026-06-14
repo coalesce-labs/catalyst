@@ -11,6 +11,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { hostname } from "node:os";
 
 export type Severity = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -78,6 +79,30 @@ export function deriveSpanId(
  */
 export function generateEventId(): string {
   return randomUUID();
+}
+
+/**
+ * Resolve the effective host name.
+ * Mirrors lib/host-identity.sh (bash) and execution-core/lib/host-identity.mjs (MJS).
+ *
+ * Precedence:
+ *   1. explicit override param
+ *   2. CATALYST_HOST_NAME env var
+ *   3. os.hostname() with trailing ".local" stripped
+ */
+export function hostName(opts: { raw?: string; override?: string } = {}): string {
+  const override = opts.override ?? process.env.CATALYST_HOST_NAME;
+  if (override) return override;
+  return (opts.raw ?? hostname()).replace(/\.local$/, "");
+}
+
+/**
+ * Resolve the effective host id: sha256(hostName())[:16].
+ * Same shape as spanId (16 hex chars). Identical across all three runtimes
+ * for the same resolved host.name.
+ */
+export function hostId(opts: { raw?: string; override?: string } = {}): string {
+  return sha256Hex(hostName(opts)).slice(0, 16);
 }
 
 /**

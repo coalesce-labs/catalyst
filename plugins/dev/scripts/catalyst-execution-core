@@ -86,6 +86,16 @@ _neutralize_otel_attrs() {
 	printf '%s' "$out"
 }
 
+# CTL-846: is host:port accepting TCP connections? bash /dev/tcp first, nc fallback.
+# Used to gate mitmproxy proxy vars so a down proxy degrades to direct mode instead of
+# breaking every daemon/worker API call with "connection refused".
+_proxy_listening() {
+	local host="$1" port="$2"
+	(echo >"/dev/tcp/${host}/${port}") 2>/dev/null && return 0
+	command -v nc >/dev/null 2>&1 && nc -z -w 1 "$host" "$port" 2>/dev/null && return 0
+	return 1
+}
+
 cmd_start() {
 	if read_pid >/dev/null 2>&1; then
 		echo "catalyst-execution-core already running (pid $(read_pid))"
@@ -112,6 +122,49 @@ cmd_start() {
 	local _daemon_env="${CATALYST_EXECUTION_CORE_ENV:-${HOME}/.config/catalyst/execution-core.env}"
 	# shellcheck disable=SC1090
 	[[ -f "$_daemon_env" ]] && source "$_daemon_env"
+	# CTL-1084: resolve durable governance flags (Layer-2 + any explicit env override)
+	# and export them so the daemon — and every per-tick gate that reads process.env —
+	# inherits the durable value with no manual re-export ritual. Best-effort: a failure
+	# here must never block launch (flags then fall back to whatever env already holds).
+	local _gov_exports
+	if _gov_exports="$("$runtime" "$SCRIPT_DIR/execution-core/cli/governance-env.mjs" 2>/dev/null)"; then
+		eval "$_gov_exports"
+	fi
+	# CTL-846: if proxy vars were sourced (here or via catalyst-stack --proxy's inline prefix —
+	# both converge on this process) but the proxy endpoint is not listening, strip them and warn
+	# so the daemon starts in direct mode instead of failing every API call with connection refused.
+	local _proxy_url _hp _phost _pport
+	_proxy_url="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+	if [[ -n "$_proxy_url" ]]; then
+		_hp="${_proxy_url#*://}"; _hp="${_hp%%/*}"
+		_phost="${_hp%%:*}"; _pport="${_hp##*:}"
+		[[ "$_pport" == "$_phost" ]] && _pport=80
+		if ! _proxy_listening "$_phost" "$_pport"; then
+			echo "catalyst-execution-core: WARNING proxy ${_phost}:${_pport} not listening — starting daemon in direct mode (proxy vars stripped)" >&2
+			unset HTTPS_PROXY HTTP_PROXY NODE_USE_ENV_PROXY
+		fi
+		unset _proxy_url _hp _phost _pport
+	fi
+	# CTL-785: authenticate the daemon's Linear calls as the Catalyst Orchestrator app-actor
+	# (its own 5000/hr OAuth bucket — isolated from the personal token it would otherwise pin).
+	# Mint a fresh client_credentials token from the creds in the global config. --noproxy keeps
+	# the mint off the audit MITM (curl can't trust its CA); a failed mint leaves the existing
+	# LINEAR_API_TOKEN intact so the daemon still starts. No-op when no orchestrator app is set up.
+	local _g="${HOME}/.config/catalyst/config.json" _ocid _ocsec _otok
+	_ocid=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "$_g" 2>/dev/null)
+	_ocsec=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "$_g" 2>/dev/null)
+	if [[ -n "$_ocid" && -n "$_ocsec" ]]; then
+		_otok=$(curl -s --noproxy '*' -X POST https://api.linear.app/oauth/token \
+			-d grant_type=client_credentials -d "client_id=$_ocid" -d "client_secret=$_ocsec" \
+			-d 'scope=read,write,comments:create' 2>/dev/null | jq -r '.access_token // empty' 2>/dev/null)
+		if [[ -n "$_otok" ]]; then
+			export LINEAR_API_TOKEN="$_otok" LINEAR_API_KEY="$_otok"
+			echo "catalyst-execution-core: authenticated as Catalyst Orchestrator app-actor (isolated 5000/hr bucket)" >&2
+		else
+			echo "catalyst-execution-core: WARNING orchestrator token mint failed — daemon using existing LINEAR_API_TOKEN" >&2
+		fi
+		unset _ocid _ocsec _otok
+	fi
 	nohup "$runtime" "$DAEMON_SCRIPT" --pid-file "$PID_FILE" >"$LOG_FILE" 2>&1 &
 	local server_pid=$!
 	disown "$server_pid" 2>/dev/null || true
@@ -180,19 +233,30 @@ cmd_status() {
 	for arg in "$@"; do
 		[ "$arg" = "--json" ] && want_json=1
 	done
+	# CTL-1095: read drain state (shell out to drain.mjs --json for the inFlightCount).
+	local drain_json draining in_flight_count
+	drain_json=$(exec_runtime_module "drain" --json --status-read 2>/dev/null || echo '{"draining":false,"inFlightCount":0}')
+	draining=$(printf '%s' "$drain_json" | grep -o '"draining":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo false)
+	in_flight_count=$(printf '%s' "$drain_json" | grep -o '"inFlightCount":[^,}]*' | cut -d: -f2 | tr -d ' ' || echo 0)
 	local pid
 	if pid=$(read_pid); then
 		if [ "$want_json" -eq 1 ]; then
-			printf '{"running":true,"pid":%s}\n' "$pid"
+			printf '{"running":true,"pid":%s,"draining":%s,"inFlightCount":%s}\n' "$pid" "$draining" "$in_flight_count"
 		else
 			echo "running (pid $pid)"
+			if [ "$draining" = "true" ]; then
+				echo "draining — ${in_flight_count} tickets to land"
+			fi
 		fi
 		return 0
 	fi
 	if [ "$want_json" -eq 1 ]; then
-		printf '{"running":false,"pid":null}\n'
+		printf '{"running":false,"pid":null,"draining":%s,"inFlightCount":%s}\n' "$draining" "$in_flight_count"
 	else
 		echo "stopped"
+		if [ "$draining" = "true" ]; then
+			echo "draining — ${in_flight_count} tickets to land"
+		fi
 	fi
 }
 
@@ -232,6 +296,55 @@ dispatch_daemon() {
 	esac
 }
 
+# CTL-854: enroll a project in the execution-core registry. Resolves repoRoot
+# from --repo-root → $CATALYST_REPO_ROOT → git rev-parse --show-toplevel.
+# Delegates to registry.mjs upsert (the D9 seam — no new JSON write logic).
+cmd_register() {
+	local team="" repo_root="" eligible_query=""
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--team)      team="$2";           shift 2 ;;
+		--repo-root) repo_root="$2";      shift 2 ;;
+		--eligible-query) eligible_query="$2"; shift 2 ;;
+		*) echo "error: unknown flag: $1" >&2; return 1 ;;
+		esac
+	done
+
+	if [[ -z "$team" ]]; then
+		echo "error: --team is required for register" >&2
+		return 1
+	fi
+
+	# Resolve repoRoot: --repo-root > env > current git repo.
+	if [[ -z "$repo_root" ]]; then
+		repo_root="${CATALYST_REPO_ROOT:-}"
+	fi
+	if [[ -z "$repo_root" ]]; then
+		repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+	fi
+	if [[ -z "$repo_root" ]]; then
+		echo "error: could not resolve repo root — pass --repo-root <path> or run from inside a git repo" >&2
+		return 1
+	fi
+
+	local runtime
+	runtime="$(resolve_runtime)" || return 1
+
+	local registry_mjs="$SCRIPT_DIR/execution-core/registry.mjs"
+	if [[ ! -f "$registry_mjs" ]]; then
+		echo "error: registry.mjs not found: $registry_mjs" >&2
+		return 1
+	fi
+
+	local upsert_args=("$registry_mjs" upsert --team "$team" --repo-root "$repo_root")
+	if [[ -n "$eligible_query" ]]; then
+		upsert_args+=(--eligible-query "$eligible_query")
+	fi
+
+	"$runtime" "${upsert_args[@]}" || return 1
+	echo "registered — the daemon will pick it up on the next reconcile (no restart needed)" >&2
+}
+
 # CTL-649 devex finding #3: a real top-level help block. The audit CLI is read
 # by an AGENT as well as a human, so spell out what each noun does, point at the
 # safe starting point (`tidy --dry-run`), note the universal --json scripting
@@ -245,10 +358,18 @@ Usage: catalyst-execution-core <command> [args]
 
 Commands:
   daemon      manage the long-lived execution-core daemon (start|stop|restart|probe|status)
+  register    enroll a project in the execution-core registry
+              Usage: catalyst-execution-core register --team <TEAM> [--repo-root <path>] [--eligible-query JSON]
+              Resolves repo root from --repo-root, $CATALYST_REPO_ROOT, or git rev-parse --show-toplevel.
   sessions    inventory / reap leaked `claude --bg` sessions (list|show|waiting|prune)
   worktrees   inventory / clean orphaned or merged git worktrees (list|prune)
   branches    inventory / delete merged or orphaned branch refs (list|prune)
   tidy        run sessions → worktrees → branches in the safe order, then prune git admin records
+  governance  show which governance modes the daemon is actually running (--json)
+  drain       toggle node drain mode: refuse new-work admission while draining
+              Usage: catalyst-execution-core drain [--off] [--json]
+              drain         set drain flag — no new tickets admitted; in-flight pipelines finish
+              drain --off   lift drain flag — normal admission resumes
 
 Backcompat: start|stop|restart|probe|status work as top-level aliases for the daemon verbs.
 
@@ -288,11 +409,28 @@ if ! (return 0 2>/dev/null); then
 		shift
 		dispatch_daemon "$@"
 		;;
+	# CTL-854: register a project in the execution-core registry.
+	register)
+		shift
+		cmd_register "$@"
+		;;
 	# CTL-649 audit CLI nouns — each routes to execution-core/cli/<noun>.mjs.
-	sessions | worktrees | branches | tidy)
+	sessions | worktrees | branches | tidy | governance)
 		module="$1"
 		shift
 		exec_runtime_module "$module" "$@"
+		;;
+	# CTL-1095: drain mode toggle.
+	drain)
+		shift
+		exec_runtime_module "drain" "$@"
+		;;
+	# CTL-1084: governance-env-exports emits eval-safe export lines for the four
+	# beliefs flags resolved from durable Layer-2 config. The file is named
+	# governance-env.mjs so the noun→file routing is explicit here.
+	governance-env-exports)
+		shift
+		exec_runtime_module "governance-env" "$@"
 		;;
 	"")
 		# CTL-649 finding #4: no-arg prints help to stderr, exit 1.

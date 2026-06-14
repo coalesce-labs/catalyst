@@ -10,7 +10,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 BF_DIR="${REPO_ROOT}/plugins/dev/scripts/briefing-followup"
-SKILL_MD="${REPO_ROOT}/plugins/legacy/skills/briefing-followup/SKILL.md"
+SKILL_MD="${REPO_ROOT}/plugins/dev/skills/briefing-followup/SKILL.md"
 
 FAILURES=0
 PASSES=0

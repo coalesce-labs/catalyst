@@ -8,7 +8,7 @@ description: |
   `inProgress`. Dispatched as a `claude --bg` job by `phase-agent-dispatch`,
   which invokes it via slash command — hence `user-invocable: true`.
 user-invocable: true
-disable-model-invocation: false  # invocable by model (Skill tool) AND user (slash command)
+disable-model-invocation: false # invocable by model (Skill tool) AND user (slash command)
 allowed-tools:
   - Bash
   - Read
@@ -21,18 +21,19 @@ allowed-tools:
 
 # phase-implement
 
-Phase-agent that owns the implementation half of the legacy `oneshot` cycle —
-this is the biggest single cost line of a worker run, which is why it leaves
-`-p` for `--bg` first (plan §Initiative 1 Phase 3 rationale). The skill body
-is intentionally thin: the canonical `/catalyst-dev:implement-plan` skill
-already handles TDD rhythm, quality gates, agent-team mode, and findings
-collection — phase-implement adds only the phase-agent envelope (signal file,
-comms channel, `/goal` cap, terminal emit) around it.
+Phase-agent that owns the implementation half of the legacy `oneshot` cycle — this is the biggest
+single cost line of a worker run, which is why it leaves `-p` for `--bg` first (plan §Initiative 1
+Phase 3 rationale). The skill body is intentionally thin: the canonical
+`/catalyst-dev:implement-plan` skill already handles TDD rhythm, quality gates, agent-team mode, and
+findings collection — phase-implement adds only the phase-agent envelope (signal file, comms
+channel, `/goal` cap, terminal emit) around it.
 
 ## Prerequisites
 
-- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=implement`, `CATALYST_TICKET` set by [[phase-agent-dispatch]].
-- An approved plan exists at `thoughts/shared/plans/<date>-<ticket-lowercase>.md` — the dispatcher's prior-artifact gate already validates this; this skill re-reads the file.
+- `CATALYST_ORCHESTRATOR_DIR`, `CATALYST_ORCHESTRATOR_ID`, `CATALYST_PHASE=implement`,
+  `CATALYST_TICKET` set by [[phase-agent-dispatch]].
+- An approved plan exists at `thoughts/shared/plans/<date>-<ticket-lowercase>.md` — the dispatcher's
+  prior-artifact gate already validates this; this skill re-reads the file.
 - Current working directory is the ticket's worktree (orchestrator's Phase 2 provisioning).
 
 ## Prelude (template — copy verbatim into the running session)
@@ -150,9 +151,8 @@ echo "phase-implement: plan = ${PLAN_PATH}"
 
 ## /goal condition
 
-Transcript-evaluable so a `/goal` evaluator (which only sees Claude's text
-output, not the filesystem) can decide pass/fail from what the agent prints.
-Plan §"Per-phase /goal conditions":
+Transcript-evaluable so a `/goal` evaluator (which only sees Claude's text output, not the
+filesystem) can decide pass/fail from what the agent prints. Plan §"Per-phase /goal conditions":
 
 ```
 /goal "I have run /catalyst-dev:implement-plan on ${PLAN_PATH} to completion
@@ -163,9 +163,8 @@ Plan §"Per-phase /goal conditions":
 
 ## Phase-specific work
 
-1. Invoke the canonical implementation skill via the Task tool. It owns TDD,
-   quality gates, agent-team mode (`--team`), findings collection, and the
-   per-phase commit cadence:
+1. Invoke the canonical implementation skill via the Task tool. It owns TDD, quality gates,
+   agent-team mode (`--team`), findings collection, and the per-phase commit cadence:
 
    ```
    Use the Task tool to launch /catalyst-dev:implement-plan on PLAN_PATH.
@@ -173,28 +172,24 @@ Plan §"Per-phase /goal conditions":
    in the env. Wait for completion and surface its stdout summary.
    ```
 
-   The canonical skill is responsible for committing each plan phase as a
-   discrete commit AND for running the post-implementation quality gates
-   (`/validate-type-safety`, `/security-review`, code-reviewer agent,
-   pr-test-analyzer agent). phase-implement does NOT add commits or gates of
-   its own. If `implement-plan` exits with errors, the failure-handling
-   block below runs.
+   The canonical skill is responsible for committing each plan phase as a discrete commit AND for
+   running the post-implementation quality gates (`/validate-type-safety`, `/security-review`,
+   code-reviewer agent, pr-test-analyzer agent). phase-implement does NOT add commits or gates of
+   its own. If `implement-plan` exits with errors, the failure-handling block below runs.
 
-2. After the delegated skill returns, print a one-line summary to stdout so
-   the `/goal` evaluator has signal that the work landed:
+2. After the delegated skill returns, print a one-line summary to stdout so the `/goal` evaluator
+   has signal that the work landed:
 
    ```bash
    git diff --stat "$(git merge-base HEAD main)..HEAD"  # base depends on the
                                                         # worktree's tracking
    ```
 
-3. When the broader plan's Phase 4 (CTL-450) introduces dedicated
-   `phase-verify` and `phase-review` agents, this skill will pass
-   `--skip-quality-gates` to implement-plan so those concerns move into their
-   own phase agents (plan §"Phase agents wrap canonical skills"). For the
-   MVP this skill runs the gates inline via implement-plan because no
-   phase-verify exists yet — the cutover is a one-line change to the Task
-   invocation when that phase lands.
+3. When the broader plan's Phase 4 (CTL-450) introduces dedicated `phase-verify` and `phase-review`
+   agents, this skill will pass `--skip-quality-gates` to implement-plan so those concerns move into
+   their own phase agents (plan §"Phase agents wrap canonical skills"). For the MVP this skill runs
+   the gates inline via implement-plan because no phase-verify exists yet — the cutover is a
+   one-line change to the Task invocation when that phase lands.
 
 ### Inbox check (CTL-749)
 
@@ -208,8 +203,8 @@ Before continuing to the End block, check for mid-flight context updates from th
      acknowledging the update (one sentence).
    - **Pause and replan**: the update fundamentally changes scope or invalidates the current
      approach — emit `failed` with `reason: "mid_flight_replan_needed"` via
-     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a
-     comment before exiting.
+     `${PLUGIN_ROOT}/scripts/phase-agent-emit-complete` and post the reason to Linear as a comment
+     before exiting.
 4. After reading, archive processed entries:
    ```bash
    [[ -f "${ORCH_DIR}/workers/${TICKET}/inbox.jsonl" ]] && \
@@ -220,13 +215,14 @@ Before continuing to the End block, check for mid-flight context updates from th
 
 ## End block (terminal emit — copy verbatim)
 
-Mirror the phase output to Linear as a single comment (CTL-632). Re-derives
-the commit list at end-block time (no captured variable upstream), falling
-back to `_base branch unknown_` if neither `origin/main` nor `main` exists.
-Fail-open and idempotent via the per-phase marker file. Uniquely-named
-fence so the e2e test can extract just this block.
+Mirror the phase output to Linear as a single comment (CTL-632). Re-derives the commit list at
+end-block time (no captured variable upstream), falling back to `_base branch unknown_` if neither
+`origin/main` nor `main` exists. Fail-open and idempotent via the per-phase marker file.
+Uniquely-named fence so the e2e test can extract just this block.
 
 ```bash phase-implement-mirror
+# CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+"${PLUGIN_ROOT}/scripts/lib/cluster-fence-guard.sh" --phase "$PHASE" --ticket "$TICKET" || exit 10
 LINEAR_MIRROR_MARKER="${ORCH_DIR}/workers/${TICKET}/.linear-mirror-${PHASE}"
 if [[ ! -e "${LINEAR_MIRROR_MARKER}" ]]; then
   BASE_REF=""
@@ -290,7 +286,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-implement: linear-comment-post failed (continuing)" >&2
@@ -298,17 +294,41 @@ _... (truncated)_"
 fi
 ```
 
-Then the empty-branch self-emit gate (CTL-608). Runs **before** the terminal
-`--status complete` so a worker cannot self-report implement success on an empty
-ticket branch (0 commits ahead of its integration base). This is the ADV-1128
-failure mode: sub-agent commits stranded in nested `.claude/worktrees/agent-*`
-worktrees never reach `refs/heads/<ticket>`, leaving HEAD at base and opening an
-empty PR. Uniquely-named fence so the e2e harness can extract+exercise it; uses
-only POSIX/zsh-safe `git rev-list --count` (no `${VAR,,}` / `shopt`). Fail-open
-(warn + allow) only when the base is unresolvable, mirroring the mirror block's
-`_base branch unknown_` tolerance.
+Then the empty-branch self-emit gate (CTL-608). Runs **before** the terminal `--status complete` so
+a worker cannot self-report implement success on an empty ticket branch (0 commits ahead of its
+integration base). This is the ADV-1128 failure mode: sub-agent commits stranded in nested
+`.claude/worktrees/agent-*` worktrees never reach `refs/heads/<ticket>`, leaving HEAD at base and
+opening an empty PR. The gate now also refuses when HEAD is on a `worktree-*` branch or the
+worktree resolves under `.claude/worktrees/` (CTL-1105) — the stranding case the commits-ahead
+check alone cannot see. Uniquely-named fence so the e2e harness can extract+exercise it; uses only
+POSIX/zsh-safe `git rev-list --count` (no `${VAR,,}` / `shopt`). Fail-open (warn + allow) only when
+the base is unresolvable, mirroring the mirror block's `_base branch unknown_` tolerance.
 
 ```bash phase-implement-empty-branch-gate
+# CTL-1105: stranded-in-transient-worktree guard. Claude Code bgIsolation can
+# migrate a phase worker into .claude/worktrees/<name> on a worktree-* branch;
+# commits there never reach refs/heads/<ticket>. The CTL-608 commits-ahead arm
+# below does NOT catch this (the transient worktree has real commits), so check
+# it explicitly first. Deterministic + local; POSIX/zsh-safe.
+GATE_TOPLEVEL="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+GATE_BRANCH="$(git branch --show-current 2>/dev/null || true)"
+case "${GATE_TOPLEVEL}" in
+  */.claude/worktrees/*) GATE_STRANDED="claude_worktree:${GATE_TOPLEVEL}";;
+  *) GATE_STRANDED="";;
+esac
+case "${GATE_BRANCH}" in
+  worktree-*) GATE_STRANDED="${GATE_STRANDED:-transient_branch:${GATE_BRANCH}}";;
+esac
+if [[ -n "${GATE_STRANDED}" ]]; then
+  echo "phase-implement: stranded in a transient isolation worktree (${GATE_STRANDED}); refusing to emit complete (CTL-1105)" >&2
+  "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+    --phase "$PHASE" --ticket "$TICKET" --status failed \
+    --reason "stranded_transient_worktree:${GATE_STRANDED}"
+  [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" send "$CHANNEL" \
+    "phase-implement failed: stranded in transient worktree (${GATE_STRANDED})" \
+    --as "$TICKET" --type attention --orch "$ORCH_ID" >/dev/null 2>&1 || true
+  exit 1
+fi
 EMPTY_BRANCH_GATE_BASE=""
 if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
   EMPTY_BRANCH_GATE_BASE="origin/main"
@@ -332,12 +352,12 @@ else
 fi
 ```
 
-CTL-709: push the branch and open a draft PR now that commits exist (past the empty-branch gate).
-The draft is fail-open — a push or PR failure prints a warning but does **not** block `--status
-complete`. Phase-pr detects and promotes the draft instead of creating a new PR (avoiding the
-`create-pr` interactive "PR already exists" hang). Gated on `draftPr.enabled` (default `true`)
-so it can be disabled with one config key. Writes `.draftPr={number,url,isDraft}` into the signal
-file so downstream phases can see the PR number without querying GitHub.
+CTL-783: The canonical `implement-plan` skill opens the draft PR at the **first** plan-phase commit
+via the `implement-plan-draft-pr-early` fence (idempotent — later commits just push). This End-block
+fence is the **idempotent backstop**: it fires after all phases complete and is the sole writer of
+`.draftPr` into the signal file. Gated on `draftPr.enabled` (default `true`) so it can be disabled
+with one config key. Phase-pr detects and promotes the draft instead of creating a new PR (avoiding
+the `create-pr` interactive "PR already exists" hang).
 
 ```bash phase-implement-draft-pr
 # CTL-709: open a draft PR + push as soon as we have commits, so CI runs during
@@ -364,10 +384,53 @@ if [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]]; then
 fi
 ```
 
+## Step N — Capture friction (compound loop, CTL-789)
+
+Just before the terminal emit, append **this phase's** friction to the shared per-ticket friction
+log. This is the producer half of the engineering compound loop: `ticket-compound` later harvests
+`thoughts/shared/friction/<TICKET>.md` to turn what hurt this run into durable learnings/ADRs.
+
+REPLACE each `<…>` placeholder below with your real experience from **this** phase (terse, 3–6 lines
+total; `"None."` is a valid answer when the phase was frictionless). `${TICKET}` is already resolved
+upstream — do not re-derive it. This append is **best-effort and off the critical path**: it must
+NEVER fail the phase or block the emit-complete below. (Note this phase emits a signal JSON, not a
+`thoughts/` markdown doc — which is exactly why friction goes to the shared friction LOG; do not
+touch any `*.json` signal file.)
+
+```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## implement · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
+The record header `## implement · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)` is a CROSS-PHASE
+contract: `## <phase> · <TICKET> · <ISO-8601 timestamp>` carrying DATE+TIME+offset (e.g.
+`2026-06-06T14:23:01+0900`). Keep this format byte-identical across all five phases — the per-record
+stamp is what lets the morning briefing / daily review scan and sort "friction since last review";
+never drop to a date-only stamp.
+
+## End block — terminal emit (copy verbatim)
+
 ```bash
 EMIT="${PLUGIN_ROOT}/scripts/phase-agent-emit-complete"
 if [[ -x "$EMIT" ]]; then
   "$EMIT" --phase "$PHASE" --ticket "$TICKET" --status complete
+fi
+# Self-halt after complete to prevent zombie workers (CTL-778 step 2).
+# Read our own bg_job_id from the signal file and ask Claude to stop us.
+# Best-effort: a failed stop is covered by the daemon reaper backstop.
+if [[ -n "${ORCH_DIR:-}" && -f "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" ]]; then
+  _SELF_BG=$(jq -r '.bg_job_id // empty' \
+    "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" 2>/dev/null || true)
+  [[ -n "$_SELF_BG" ]] && claude stop "${_SELF_BG:0:8}" >/dev/null 2>&1 || true
 fi
 [[ -n "$COMMS" && -x "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
 ```
@@ -386,31 +449,28 @@ REASON="${1:-implement-plan exited non-zero}"  # caller-supplied short string
 exit 1
 ```
 
-The orchestrator's Phase 4 monitor receives `phase.implement.failed.${TICKET}`
-via the broker `phase_lifecycle` route (CTL-447) and dispatches one fix-up
-phase agent. A second failure escalates to the user via the `attention` post.
+The orchestrator's Phase 4 monitor receives `phase.implement.failed.${TICKET}` via the broker
+`phase_lifecycle` route (CTL-447) and dispatches one fix-up phase agent. A second failure escalates
+to the user via the `attention` post.
 
 ## Comms discipline
 
 Inherits the contract from [[_phase-agent-template]]:
 
-| Type        | When                                                                                  |
-|-------------|--------------------------------------------------------------------------------------|
-| `info`      | At start; once after `implement-plan` returns. ~1-2 per session. |
+| Type        | When                                                                                                                                     |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `info`      | At start; once after `implement-plan` returns. ~1-2 per session.                                                                         |
 | `attention` | Missing plan, unresolved 3+ test failures, hard error. (Turn caps are enforced daemon-side — CTL-748 — not self-detected by this skill.) |
-| `question`  | Plan ambiguity the agent cannot resolve unilaterally.                                 |
-| `done`      | Emitted by `phase-agent-emit-complete` on success.                                    |
+| `question`  | Plan ambiguity the agent cannot resolve unilaterally.                                                                                    |
+| `done`      | Emitted by `phase-agent-emit-complete` on success.                                                                                       |
 
-Read inbound `directive` / `pause` / `abort` after every Task-tool round-trip
-back from `implement-plan` — the orchestrator may abort the worker while
-implementation is in flight.
+Read inbound `directive` / `pause` / `abort` after every Task-tool round-trip back from
+`implement-plan` — the orchestrator may abort the worker while implementation is in flight.
 
 ## Why this is a thin wrapper
 
-Architectural commitment #3 in the plan: "phase agents are thin wrappers
-around the canonical skills." Improvements to `/catalyst-dev:implement-plan`
-(TDD agent-team mode, findings filing, quality-gate iteration limits)
-propagate to every phase-agent run without code duplication. The phase-agent
-boundary owns only the envelope: signal file, comms, `/goal` cap, terminal
-event emission. See plan §"Phase agents wrap canonical skills" for the full
-delegation table.
+Architectural commitment #3 in the plan: "phase agents are thin wrappers around the canonical
+skills." Improvements to `/catalyst-dev:implement-plan` (TDD agent-team mode, findings filing,
+quality-gate iteration limits) propagate to every phase-agent run without code duplication. The
+phase-agent boundary owns only the envelope: signal file, comms, `/goal` cap, terminal event
+emission. See plan §"Phase agents wrap canonical skills" for the full delegation table.

@@ -1,0 +1,168 @@
+# execution-core-tests.yml
+#
+# Runs the stable execution-core unit-test suite on every PR and push to main
+# that touches the execution-core source tree.
+#
+# REQUIRED-STATUS-CHECK OPERATOR NOTE (CTL-963)
+# -----------------------------------------------
+# After this workflow is merged, a repository admin must mark the job
+#   execution-core-unit-tests
+# as a REQUIRED status check on the main branch ruleset so that the auto-merge
+# floor is enforced.
+#
+# Steps (GitHub UI path):
+#   Settings → Branches → Branch protection rules → main
+#   → "Require status checks to pass before merging"
+#   → Search for and add: "execution-core-unit-tests"
+#
+# Or via gh CLI:
+#   gh api repos/{owner}/{repo}/branches/main/protection \
+#     --method PATCH \
+#     --field required_status_checks='{"strict":true,"contexts":["execution-core-unit-tests"]}'
+#
+# The exact check name is: execution-core-unit-tests
+# (matches the job id below — GitHub derives the check name from the job id)
+
+name: Execution Core Unit Tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "plugins/dev/scripts/execution-core/**"
+      - ".github/workflows/execution-core-tests.yml"
+  push:
+    branches: [main]
+    paths:
+      - "plugins/dev/scripts/execution-core/**"
+      - ".github/workflows/execution-core-tests.yml"
+
+jobs:
+  execution-core-unit-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: plugins/dev/scripts/execution-core
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run stable unit tests
+        # EXCLUDED SUITES — do NOT add these back without fixing the underlying
+        # timing / sandbox incompatibility:
+        #
+        # daemon.test.mjs
+        #   Contains "reconciles when the registry changes (debounced)" which
+        #   uses watchRegistry:true + fs.watch. fs.watch delivery latency under
+        #   CI load makes the debounce window non-deterministic.
+        #   Memory ref: project_execution_core_daemon_flaky_test
+        #
+        # scheduler.test.mjs
+        #   Contains a large suite of "debounced tick" tests (debounceMs seam).
+        #   These drive real timers and fs.watch; flake deterministically under
+        #   concurrent full-suite load in a CI sandbox.
+        #   Memory ref: project_execution_core_daemon_flaky_test
+        #
+        # integration-ctl-587.test.mjs
+        #   "storm repro: many fast ticks × 5 dead workers" times out at the
+        #   bun 5 000 ms default on a loaded CI runner (observed: 16 s locally
+        #   under moderate load). The test drives real setInterval timing.
+        #   Memory ref: project_execution_core_daemon_flaky_test
+        #
+        # monitor.test.mjs
+        #   "CTL-716 burst budget — 7 Triage events drained in ONE pass" times
+        #   out at 9 s locally under load (bun default 5 000 ms). The test
+        #   relies on real-time event-log delivery latency.
+        #   Memory ref: project_execution_core_daemon_flaky_test
+        run: |
+          bun test \
+            beliefs/advance-rules.test.mjs \
+            beliefs/advance-shadow.test.mjs \
+            beliefs/collector-advance.test.mjs \
+            beliefs/collector-relation.test.mjs \
+            beliefs/collector.test.mjs \
+            beliefs/compiler/index.test.mjs \
+            beliefs/compiler-equivalence.test.mjs \
+            beliefs/escalate.test.mjs \
+            beliefs/intent.test.mjs \
+            beliefs/manifest.test.mjs \
+            beliefs/recursive-rules.test.mjs \
+            beliefs/rules.test.mjs \
+            beliefs/schema.test.mjs \
+            beliefs/why.test.mjs \
+            abort-worker.test.mjs \
+            autotune-decision.test.mjs \
+            autotune-lifecycle.test.mjs \
+            autotune-writeback.test.mjs \
+            boot-resume-approval.test.mjs \
+            boot-resume.test.mjs \
+            claim.test.mjs \
+            claude-agents.test.mjs \
+            claude-ids.test.mjs \
+            cluster-claim-sync.test.mjs \
+            cluster-claim.test.mjs \
+            comms-drain.test.mjs \
+            config-pino-fallback.test.mjs \
+            config.test.mjs \
+            diagnostician.test.mjs \
+            dispatch.test.mjs \
+            eligible-set.test.mjs \
+            event-cursor.test.mjs \
+            event-scan.test.mjs \
+            event-tail.test.mjs \
+            gateway-read.test.mjs \
+            halt-on-complete.test.mjs \
+            heartbeat-event.test.mjs \
+            hrw.test.mjs \
+            integration-ctl-701.test.mjs \
+            integration-ctl-705.test.mjs \
+            integration.test.mjs \
+            label-guard.test.mjs \
+            linear-breaker.test.mjs \
+            linear-cache.test.mjs \
+            linear-estimation-method.test.mjs \
+            linear-query.test.mjs \
+            linear-remint.test.mjs \
+            linear-state-write-event.test.mjs \
+            linear-write.test.mjs \
+            memory-event.test.mjs \
+            memory-sampler-signal.test.mjs \
+            memory-sampler.test.mjs \
+            merge-state.test.mjs \
+            orphan-reaper-timer.test.mjs \
+            ratelimit-event.test.mjs \
+            ratelimit-poller.test.mjs \
+            reap-intent.test.mjs \
+            reaper-metrics.test.mjs \
+            reaper.test.mjs \
+            reconcile-health-event.test.mjs \
+            recovery.test.mjs \
+            registry.test.mjs \
+            scan.test.mjs \
+            scheduler-perproject.test.mjs \
+            scheduler-rank.test.mjs \
+            sequencing.test.mjs \
+            session-recency.test.mjs \
+            signal-reader.test.mjs \
+            stale-pr-rescue-timer.test.mjs \
+            stale-pr-rescue.test.mjs \
+            stalled-detector.test.mjs \
+            terminal-state.test.mjs \
+            test-setup.test.mjs \
+            transcript-tail.test.mjs \
+            triage-transition-event.test.mjs \
+            turn-zero-gate.test.mjs \
+            wait-event.test.mjs \
+            wait-state-classifier.test.mjs \
+            wait-watcher.test.mjs \
+            work-done-probes.test.mjs \
+            worktree-refresh-timer.test.mjs \
+            worktree-safety.test.mjs \
+            worktree.test.mjs

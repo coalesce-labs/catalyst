@@ -7,8 +7,16 @@ import {
   runEligibleQuery,
   fetchTicketState,
   fetchTicketLabels,
+  readTicketLabels,
+  readTicketLabelNodes,
   fetchTicketRelations,
+  fetchTicketsBatch,
+  authHeader,
+  buildBatchCurlArgs,
+  isBatchRateLimited,
   classifyTicketResolution,
+  fetchTicketAssignee,
+  isAssigneeClaimable,
 } from "./linear-query.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 
@@ -179,6 +187,24 @@ describe("runEligibleQuery", () => {
     expect(t.relations).toEqual(relations);
     expect(t.inverseRelations).toEqual({ nodes: [] });
   });
+
+  // CTL-878: the eligible/Pass-2 path carries the parent epic id so
+  // buildDependencyEdges can drop a parent→child blocks edge for a Todo child.
+  test("CTL-878: captures the parent epic identifier (nested) for an eligible ticket", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([
+        { identifier: "CTL-863", state: { name: "Todo" }, parent: { identifier: "CTL-859" } },
+      ]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].parent).toBe("CTL-859");
+  });
+
+  test("CTL-878: parent is null when an eligible ticket has no parent (never undefined)", () => {
+    const exec = fakeExec({
+      stdout: ticketsJson([{ identifier: "CTL-1", state: { name: "Todo" } }]),
+    });
+    expect(runEligibleQuery(query, { exec })[0].parent).toBeNull();
+  });
 });
 
 // CTL-565 D5 — fetchTicketState wraps `linearis issues read <id>` to hydrate
@@ -275,6 +301,101 @@ describe("fetchTicketLabels", () => {
   });
 });
 
+// CTL-1078 — readTicketLabels: richer shape { ok, labels, code, stderr }
+describe("readTicketLabels", () => {
+  test("success → { ok: true, labels: [...] }", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-9",
+        labels: { nodes: [{ name: "triaged" }, { name: "needs-human" }] },
+      }),
+      stderr: "",
+    });
+    expect(readTicketLabels("CTL-9", { exec })).toEqual({ ok: true, labels: ["triaged", "needs-human"] });
+  });
+
+  test("non-zero exit → { ok: false, labels: null, code, stderr }", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "400 invalid_scope" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+    expect(result.code).toBe(1);
+    expect(result.stderr).toBe("400 invalid_scope");
+  });
+
+  test("non-JSON stdout → { ok: false, labels: null }", () => {
+    const exec = () => ({ code: 0, stdout: "not-json", stderr: "" });
+    const result = readTicketLabels("CTL-9", { exec });
+    expect(result.ok).toBe(false);
+    expect(result.labels).toBeNull();
+  });
+
+  test("fetchTicketLabels back-compat: returns array on success", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ labels: { nodes: [{ name: "blocked" }] } }),
+      stderr: "",
+    });
+    expect(fetchTicketLabels("CTL-9", { exec })).toEqual(["blocked"]);
+  });
+
+  test("fetchTicketLabels back-compat: returns null on failure", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "boom" });
+    expect(fetchTicketLabels("CTL-9", { exec })).toBeNull();
+  });
+});
+
+// CTL-1085 — readTicketLabelNodes: returns { id, name } nodes (not just names)
+// so removeLabel can build a UUID-based overwrite payload that avoids cross-team
+// name-resolution ambiguity.
+describe("readTicketLabelNodes (CTL-1085)", () => {
+  test("returns { ok: true, nodes: [{id,name}] } on success", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        labels: { nodes: [
+          { id: "b4a67f92-cfce-444d-97b5-61f5575ccbd9", name: "bug" },
+          { id: "62139cba-ed7b-4372-a588-5af63f6c090b", name: "orchestrator" },
+        ] },
+      }),
+      stderr: "",
+    });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(true);
+    expect(r.nodes).toEqual([
+      { id: "b4a67f92-cfce-444d-97b5-61f5575ccbd9", name: "bug" },
+      { id: "62139cba-ed7b-4372-a588-5af63f6c090b", name: "orchestrator" },
+    ]);
+  });
+
+  test("returns { ok: false, nodes: null, stderr } on non-zero exit", () => {
+    const exec = () => ({ code: 1, stdout: "", stderr: "400 invalid_scope" });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(false);
+    expect(r.nodes).toBeNull();
+    expect(r.stderr).toBe("400 invalid_scope");
+  });
+
+  test("returns { ok: false, nodes: null } on unparseable stdout", () => {
+    const exec = () => ({ code: 0, stdout: "", stderr: "" });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(false);
+    expect(r.nodes).toBeNull();
+  });
+
+  test("returns { ok: true, nodes: [] } when ticket has no labels", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({ labels: { nodes: [] } }),
+      stderr: "",
+    });
+    const r = readTicketLabelNodes("CTL-1", { exec });
+    expect(r.ok).toBe(true);
+    expect(r.nodes).toEqual([]);
+  });
+});
+
 // CTL-634 Tier 1 — fetchTicketState consults/populates an opt-in cache. The
 // cache is opt-in so the four tests above (which omit it) are unchanged; a
 // failed read is NEVER cached so the D5 fail-safe re-reads next call.
@@ -352,11 +473,25 @@ describe("fetchTicketRelations (CTL-755)", () => {
     expect(calls[0].args).toEqual(["issues", "read", "ADV-1277"]);
     expect(rel).toEqual({
       state: "Triage",
+      parent: null, // CTL-878: ADV-1277 has no parent → null
       relations: { nodes: [{ type: "blocks", relatedIssue: { identifier: "ADV-1280" } }] },
       inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "ADV-1276" } }] },
       priority: 2,
       labels: ["feature", "orchestrator"],
     });
+  });
+
+  test("CTL-878: carries the parent epic identifier when `linearis issues read` emits it", () => {
+    const exec = () => ({
+      code: 0,
+      stdout: JSON.stringify({
+        identifier: "CTL-863",
+        state: { name: "Todo" },
+        parent: { identifier: "CTL-859" },
+      }),
+      stderr: "",
+    });
+    expect(fetchTicketRelations("CTL-863", { exec }).parent).toBe("CTL-859");
   });
 
   test("parses a blocked-by edge out of inverseRelations.nodes", () => {
@@ -460,6 +595,230 @@ describe("fetchTicketRelations (CTL-755)", () => {
       fetchTicketRelations("CTL-1", { exec });
       expect(calls).toBe(2);
     });
+
+    // CTL-784: read-through. A second fetchTicketRelations WITH a cache hits the
+    // relations store and does NOT exec again (the gap the handoff fixed).
+    test("with a cache, a second call is a read-through hit (no second exec)", () => {
+      const cache = createTicketStateCache({ now: () => 0 });
+      let calls = 0;
+      const exec = () => {
+        calls += 1;
+        return {
+          code: 0,
+          stdout: JSON.stringify({ state: { name: "Triage" }, priority: 2 }),
+          stderr: "",
+        };
+      };
+      expect(fetchTicketRelations("CTL-1", { exec, cache }).state).toBe("Triage");
+      expect(fetchTicketRelations("CTL-1", { exec, cache }).state).toBe("Triage");
+      expect(calls).toBe(1); // second call served from the relations read-through store
+    });
+  });
+});
+
+// CTL-784 — fetchTicketsBatch collapses N per-ticket reads into ONE request. The
+// `exec` seam is injected as `(ids) => nodes[]` so no test shells out to curl.
+describe("fetchTicketsBatch (CTL-784)", () => {
+  // A node in the batched GraphQL shape (same nested shape `linearis issues read`
+  // returns): state{name}, labels{nodes{name}}, relations{nodes{...}}.
+  const node = (identifier, { state = "Triage", priority = 2, labels = [], blockedBy, parent } = {}) => ({
+    identifier,
+    priority,
+    state: { name: state },
+    ...(parent ? { parent: { identifier: parent } } : {}),
+    labels: { nodes: labels.map((name) => ({ name })) },
+    relations: { nodes: [] },
+    inverseRelations: blockedBy
+      ? { nodes: [{ type: "blocks", issue: { identifier: blockedBy } }] }
+      : { nodes: [] },
+  });
+
+  test("resolves a set of identifiers in ONE exec call, keyed by identifier", () => {
+    let calls = 0;
+    const exec = (ids) => {
+      calls += 1;
+      return ids.map((id) => node(id, { state: "Done" }));
+    };
+    const map = fetchTicketsBatch(["CTL-1", "CTL-2", "CTL-3"], { exec });
+    expect(calls).toBe(1); // ONE request for all three
+    expect([...map.keys()].sort()).toEqual(["CTL-1", "CTL-2", "CTL-3"]);
+    expect(map.get("CTL-2").state).toBe("Done");
+  });
+
+  test("normalizes each node to the fetchTicketRelations shape (no identifier key)", () => {
+    const exec = (ids) =>
+      ids.map((id) => node(id, { state: "In Progress", priority: 1, labels: ["blocked"], blockedBy: "CTL-9" }));
+    const desc = fetchTicketsBatch(["CTL-1"], { exec }).get("CTL-1");
+    expect(desc).toEqual({
+      state: "In Progress",
+      parent: null, // CTL-878: no parent on this node → null
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [{ type: "blocks", issue: { identifier: "CTL-9" } }] },
+      priority: 1,
+      labels: ["blocked"],
+    });
+    expect("identifier" in desc).toBe(false); // shape parity with fetchTicketRelations
+  });
+
+  test("CTL-878: carries the parent epic identifier from a batched node", () => {
+    const exec = (ids) => ids.map((id) => node(id, { parent: "CTL-859" }));
+    const desc = fetchTicketsBatch(["CTL-863"], { exec }).get("CTL-863");
+    expect(desc.parent).toBe("CTL-859");
+  });
+
+  test("dedupes identifiers before the exec", () => {
+    let received = null;
+    const exec = (ids) => {
+      received = ids;
+      return ids.map((id) => node(id));
+    };
+    fetchTicketsBatch(["CTL-1", "CTL-1", "CTL-2"], { exec });
+    expect(received.sort()).toEqual(["CTL-1", "CTL-2"]); // deduped
+  });
+
+  test("chunks >250 identifiers into multiple exec calls", () => {
+    const ids = Array.from({ length: 600 }, (_, i) => `CTL-${i + 1}`);
+    const chunkSizes = [];
+    const exec = (chunk) => {
+      chunkSizes.push(chunk.length);
+      return chunk.map((id) => node(id));
+    };
+    const map = fetchTicketsBatch(ids, { exec });
+    expect(chunkSizes).toEqual([250, 250, 100]);
+    expect(map.size).toBe(600);
+  });
+
+  test("an identifier the query does not return is ABSENT (fail-safe hold)", () => {
+    // exec returns only CTL-1; CTL-MISSING (not-found) is dropped by the query.
+    const exec = () => [node("CTL-1")];
+    const map = fetchTicketsBatch(["CTL-1", "CTL-MISSING"], { exec });
+    expect(map.has("CTL-1")).toBe(true);
+    expect(map.has("CTL-MISSING")).toBe(false); // absent → caller fails safe
+  });
+
+  test("a failed batch (exec returns null) leaves all ids absent (fail-safe)", () => {
+    const exec = () => null; // breaker open / network / 429
+    const map = fetchTicketsBatch(["CTL-1", "CTL-2"], { exec });
+    expect(map.size).toBe(0);
+  });
+
+  test("cache-first: cached ids are served from cache, only misses are fetched", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    cache.setRelations("CTL-CACHED", {
+      state: "Backlog",
+      relations: { nodes: [] },
+      inverseRelations: { nodes: [] },
+      priority: 2,
+      labels: [],
+    });
+    let received = null;
+    const exec = (ids) => {
+      received = ids;
+      return ids.map((id) => node(id, { state: "Done" }));
+    };
+    const map = fetchTicketsBatch(["CTL-CACHED", "CTL-FRESH"], { exec, cache });
+    expect(received).toEqual(["CTL-FRESH"]); // only the miss was fetched
+    expect(map.get("CTL-CACHED").state).toBe("Backlog"); // served from cache
+    expect(map.get("CTL-FRESH").state).toBe("Done");
+  });
+
+  test("populates the cache (relations + primed state) on a fetched miss", () => {
+    const cache = createTicketStateCache({ now: () => 0 });
+    const exec = (ids) => ids.map((id) => node(id, { state: "Done" }));
+    fetchTicketsBatch(["CTL-1"], { exec, cache });
+    expect(fetchTicketState("CTL-1", { cache, exec: () => ({ code: 1, stdout: "", stderr: "" }) })).toBe(
+      "Done",
+    ); // state primed → hit, never reaches the failing exec
+    expect(cache.getRelations("CTL-1").state).toBe("Done"); // relations cached
+  });
+
+  test("no exec for an empty / all-cached id set", () => {
+    let calls = 0;
+    const exec = () => {
+      calls += 1;
+      return [];
+    };
+    expect(fetchTicketsBatch([], { exec }).size).toBe(0);
+    expect(fetchTicketsBatch(null, { exec }).size).toBe(0);
+    expect(calls).toBe(0);
+  });
+});
+
+// CTL-784 — the curl-path internals (auth scheme, --cacert gating, RATELIMITED
+// detection) are otherwise only exercised in production (every fetchTicketsBatch
+// test injects a fake exec). These pin them deterministically.
+describe("authHeader (CTL-784)", () => {
+  test("OAuth access token (lin_oauth_) → Bearer scheme", () => {
+    expect(authHeader("lin_oauth_abc123")).toBe("Bearer lin_oauth_abc123");
+  });
+  test("personal API key (lin_api_) → raw (no Bearer)", () => {
+    expect(authHeader("lin_api_xyz")).toBe("lin_api_xyz");
+  });
+  test("empty token → raw empty (no crash)", () => {
+    expect(authHeader("")).toBe("");
+    expect(authHeader()).toBe("");
+  });
+});
+
+describe("buildBatchCurlArgs (CTL-784)", () => {
+  const argFor = (args, flag) => args[args.indexOf(flag) + 1];
+
+  test("posts the named CtlBatchTickets query with the ids as variables, via stdin", () => {
+    const { args, payload } = buildBatchCurlArgs(["CTL-1", "CTL-2"], { token: "lin_api_x" });
+    expect(args).toContain("--data");
+    expect(argFor(args, "--data")).toBe("@-"); // payload via stdin, not argv
+    expect(args[args.indexOf("-X") + 1]).toBe("POST");
+    expect(args).toContain("https://api.linear.app/graphql");
+    const body = JSON.parse(payload);
+    expect(body.query).toContain("query CtlBatchTickets");
+    expect(body.variables).toEqual({ ids: ["CTL-1", "CTL-2"] });
+  });
+
+  test("an OAuth token is sent as Bearer in the Authorization header", () => {
+    const { args } = buildBatchCurlArgs(["CTL-1"], { token: "lin_oauth_tok" });
+    expect(argFor(args, "-H")).toBe("Authorization: Bearer lin_oauth_tok");
+  });
+
+  test("a personal token is sent raw in the Authorization header", () => {
+    const { args } = buildBatchCurlArgs(["CTL-1"], { token: "lin_api_tok" });
+    expect(argFor(args, "-H")).toBe("Authorization: lin_api_tok");
+  });
+
+  test("--cacert is added only when the CA file exists (audit proxy), else omitted", () => {
+    const withCa = buildBatchCurlArgs(["CTL-1"], { token: "t", ca: "/etc/hosts" }).args; // exists
+    expect(withCa).toContain("--cacert");
+    expect(argFor(withCa, "--cacert")).toBe("/etc/hosts");
+    const noCa = buildBatchCurlArgs(["CTL-1"], { token: "t", ca: "/no/such/ca.pem" }).args;
+    expect(noCa).not.toContain("--cacert");
+    const undef = buildBatchCurlArgs(["CTL-1"], { token: "t" }).args;
+    expect(undef).not.toContain("--cacert");
+  });
+});
+
+describe("isBatchRateLimited (CTL-784)", () => {
+  test("detects extensions.code === RATELIMITED (Linear soft/complexity limit, HTTP 400)", () => {
+    expect(isBatchRateLimited([{ message: "Something", extensions: { code: "RATELIMITED" } }])).toBe(true);
+  });
+  test("detects a 'rate limit exceeded' message", () => {
+    expect(isBatchRateLimited([{ message: "Rate limit exceeded. Only 5000 requests…" }])).toBe(true);
+  });
+  test("a non-rate-limit GraphQL error is NOT treated as rate-limited", () => {
+    expect(isBatchRateLimited([{ message: "Authentication required", extensions: { code: "AUTHENTICATION_ERROR" } }])).toBe(false);
+    expect(isBatchRateLimited([])).toBe(false);
+    expect(isBatchRateLimited(undefined)).toBe(false);
+  });
+});
+
+// ── CTL-785: isBatchAuthError re-export contract ──
+// linear-query.mjs re-exports isBatchAuthError from linear-remint.mjs so
+// callers already depending on this module need no direct linear-remint
+// import. Pin the re-export so an accidental removal fails a test.
+describe("isBatchAuthError re-export (CTL-785)", () => {
+  test("is importable from linear-query.mjs and detects AUTHENTICATION_ERROR", async () => {
+    const { isBatchAuthError } = await import("./linear-query.mjs");
+    expect(typeof isBatchAuthError).toBe("function");
+    expect(isBatchAuthError([{ extensions: { code: "AUTHENTICATION_ERROR" } }])).toBe(true);
+    expect(isBatchAuthError([{ extensions: { code: "RATELIMITED" } }])).toBe(false);
   });
 });
 
@@ -532,5 +891,208 @@ describe("classifyTicketResolution (CTL-671)", () => {
     const exec = fakeExec({ code: 0, stdout: "null" });
     classifyTicketResolution("CTL-9", { exec });
     expect(exec.calls[0]).toEqual({ cmd: "linearis", args: ["issues", "read", "CTL-9"] });
+  });
+});
+
+// ─── gateway read-path (CTL-823) ─────────────────────────────────────────────
+
+function fakeGateway(descriptor) {
+  const calls = [];
+  return {
+    calls,
+    getDescriptor(ticket) {
+      calls.push(ticket);
+      return descriptor;
+    },
+  };
+}
+
+const FRESH = () => new Date().toISOString();
+const STALE = () => new Date(Date.now() - 11 * 60_000).toISOString();
+
+describe("classifyTicketResolution — gateway short-circuit (CTL-823)", () => {
+  test("fresh + present + not-removed → exists with ZERO live reads", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-1", removed: false, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-1", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("removed descriptor NEVER short-circuits — exactly one live re-read (fresh-before-quarantine)", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ error: "Issue not found" }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-2", removed: true, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-2", { exec, gateway })).toBe("not-found");
+    expect(exec.calls.length).toBe(1); // the destructive verdict paid a live read
+  });
+
+  test("stale descriptor falls through to the live read", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ identifier: "CTL-3" }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-3", removed: false, updatedAt: STALE() });
+    expect(classifyTicketResolution("CTL-3", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("gateway miss (null) falls through to the live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-4" }) });
+    const gateway = fakeGateway(null);
+    expect(classifyTicketResolution("CTL-4", { exec, gateway })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("a gateway 'exists' hit can never quarantine: only the NOT-quarantine case is served", () => {
+    // mutation guard: if someone makes a removed/absent descriptor return
+    // "not-found" from the store, this test pins the contract that the store
+    // can short-circuit ONLY the exists verdict.
+    const exec = fakeExec({ code: 1, stdout: "" }); // live read unavailable
+    const gateway = fakeGateway({ ticket: "CTL-5", removed: true, updatedAt: FRESH() });
+    expect(classifyTicketResolution("CTL-5", { exec, gateway })).toBe("unknown");
+  });
+
+  test("no gateway param → behavior unchanged", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ identifier: "CTL-6" }) });
+    expect(classifyTicketResolution("CTL-6", { exec })).toBe("exists");
+    expect(exec.calls.length).toBe(1);
+  });
+});
+
+describe("fetchTicketState — gateway read-path (CTL-823)", () => {
+  test("fresh descriptor state serves with zero live reads and warms the cache", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-7", state: "Todo", removed: false, updatedAt: FRESH() });
+    const cache = createTicketStateCache();
+    expect(fetchTicketState("CTL-7", { exec, gateway, cache })).toBe("Todo");
+    expect(exec.calls.length).toBe(0);
+    expect(cache.get("CTL-7")).toBe("Todo"); // in-memory cache warmed from the store
+  });
+
+  test("stale descriptor falls through to live read", () => {
+    const exec = fakeExec({
+      code: 0,
+      stdout: JSON.stringify({ state: { name: "PR" } }),
+    });
+    const gateway = fakeGateway({ ticket: "CTL-8", state: "Todo", removed: false, updatedAt: STALE() });
+    expect(fetchTicketState("CTL-8", { exec, gateway })).toBe("PR");
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("removed or stateless descriptor falls through to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "PR" } }) });
+    const gw1 = fakeGateway({ ticket: "CTL-9", state: "Todo", removed: true, updatedAt: FRESH() });
+    expect(fetchTicketState("CTL-9", { exec, gateway: gw1 })).toBe("PR");
+    const gw2 = fakeGateway({ ticket: "CTL-10", state: null, removed: false, updatedAt: FRESH() });
+    expect(fetchTicketState("CTL-10", { exec, gateway: gw2 })).toBe("PR");
+  });
+
+  test("in-memory cache hit still wins before the gateway is consulted", () => {
+    const gateway = fakeGateway({ ticket: "CTL-11", state: "Todo", removed: false, updatedAt: FRESH() });
+    const cache = createTicketStateCache();
+    cache.set("CTL-11", "Implement");
+    expect(fetchTicketState("CTL-11", { gateway, cache })).toBe("Implement");
+    expect(gateway.calls.length).toBe(0);
+  });
+});
+
+describe("fetchTicketState — gateway state-freshness boundary (CTL-823)", () => {
+  test("59s-old descriptor serves from the store; 61s falls through live", () => {
+    const at = (ms) => new Date(Date.now() - ms).toISOString();
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ state: { name: "PR" } }) });
+    const fresh = fakeGateway({ ticket: "CTL-20", state: "Todo", removed: false, updatedAt: at(59_000) });
+    expect(fetchTicketState("CTL-20", { exec, gateway: fresh })).toBe("Todo");
+    expect(exec.calls.length).toBe(0);
+    const stale = fakeGateway({ ticket: "CTL-21", state: "Todo", removed: false, updatedAt: at(61_000) });
+    expect(fetchTicketState("CTL-21", { exec, gateway: stale })).toBe("PR");
+    expect(exec.calls.length).toBe(1);
+  });
+});
+
+// ─── CTL-781: fetchTicketAssignee + isAssigneeClaimable ─────────────────────
+
+describe("fetchTicketAssignee (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  test("gateway descriptor present + !removed → {known:true, assignee:<uuid>}, zero exec", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-1", assignee: BOT, removed: false, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-1", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("gateway descriptor present with assignee null → {known:true, assignee:null}, zero exec", () => {
+    const exec = fakeExec({ code: 0, stdout: "{}" });
+    const gateway = fakeGateway({ ticket: "CTL-2", assignee: null, removed: false, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-2", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: null });
+    expect(exec.calls.length).toBe(0);
+  });
+
+  test("gateway descriptor removed → falls through to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const gateway = fakeGateway({ ticket: "CTL-3", assignee: BOT, removed: true, updatedAt: FRESH() });
+    const r = fetchTicketAssignee("CTL-3", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("gateway absent/miss (getDescriptor null) → live read parses assignee.id", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const gateway = fakeGateway(null);
+    const r = fetchTicketAssignee("CTL-4", { exec, gateway });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+
+  test("live read: top-level assignee null → {known:true, assignee:null}", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: null }) });
+    const r = fetchTicketAssignee("CTL-5", { exec });
+    expect(r).toEqual({ known: true, assignee: null });
+  });
+
+  test("live read non-zero exit → {known:false}", () => {
+    const exec = fakeExec({ code: 1, stdout: "", stderr: "fail" });
+    const r = fetchTicketAssignee("CTL-6", { exec });
+    expect(r).toEqual({ known: false });
+  });
+
+  test("live read unparseable stdout → {known:false}", () => {
+    const exec = fakeExec({ code: 0, stdout: "not-json" });
+    const r = fetchTicketAssignee("CTL-7", { exec });
+    expect(r).toEqual({ known: false });
+  });
+
+  test("no gateway param at all → straight to live read", () => {
+    const exec = fakeExec({ code: 0, stdout: JSON.stringify({ assignee: { id: BOT } }) });
+    const r = fetchTicketAssignee("CTL-8", { exec });
+    expect(r).toEqual({ known: true, assignee: BOT });
+    expect(exec.calls.length).toBe(1);
+  });
+});
+
+describe("isAssigneeClaimable (CTL-781)", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+
+  test("null assignee → claimable regardless of botUserIds", () => {
+    expect(isAssigneeClaimable(null, new Set([BOT]))).toBe(true);
+    expect(isAssigneeClaimable(null, new Set())).toBe(true);
+    expect(isAssigneeClaimable(null, undefined)).toBe(true);
+  });
+
+  test("assignee in botUserIds Set → claimable", () => {
+    expect(isAssigneeClaimable(BOT, new Set([BOT]))).toBe(true);
+  });
+
+  test("assignee NOT in botUserIds Set → NOT claimable", () => {
+    expect(isAssigneeClaimable("human-uuid", new Set([BOT]))).toBe(false);
+  });
+
+  test("empty botUserIds Set + non-null assignee → NOT claimable", () => {
+    expect(isAssigneeClaimable(BOT, new Set())).toBe(false);
+    expect(isAssigneeClaimable("human-uuid", new Set())).toBe(false);
   });
 });

@@ -309,7 +309,7 @@ echo "test 13: env/args forwarded to claude"
 scratch_setup
 write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
 make_worktree "demo" "T-1"
-run_dispatch --session-id "sess-abc" --worker-command "/catalyst-dev:oneshot" \
+run_dispatch --session-id "sess-abc" --worker-command "/catalyst-legacy:oneshot" \
 	--worker-args "--auto-merge --extra" 2>"${SCRATCH}/err" >/dev/null
 grep -q "ORCH_ID=demo" "$CLAUDE_LOG" && pass "ORCH_ID forwarded" || fail "ORCH_ID forwarded" "log: $(cat "$CLAUDE_LOG")"
 grep -q "ORCH_DIR=${ORCH_DIR}" "$CLAUDE_LOG" && pass "ORCH_DIR forwarded" || fail "ORCH_DIR forwarded"
@@ -389,9 +389,9 @@ echo "test 20 (CTL-208): accepts properly namespaced worker-command"
 scratch_setup
 write_state "demo" 4 '{"wave1Pending": ["T-1"]}'
 make_worktree "demo" "T-1"
-OUT=$(run_dispatch --worker-command "/catalyst-dev:oneshot" 2>"${SCRATCH}/err")
+OUT=$(run_dispatch --worker-command "/catalyst-legacy:oneshot" 2>"${SCRATCH}/err")
 RC=$?
-[ "$RC" = "0" ] && pass "exit 0 on /catalyst-dev:oneshot" || fail "exit 0 on /catalyst-dev:oneshot" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
+[ "$RC" = "0" ] && pass "exit 0 on /catalyst-legacy:oneshot" || fail "exit 0 on /catalyst-legacy:oneshot" "rc=$RC stderr=$(cat "${SCRATCH}/err")"
 [ -f "${ORCH_DIR}/workers/T-1.json" ] && pass "signal created" || fail "signal created"
 scratch_teardown
 

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# catalyst-legacy-skills-moved.test.sh (CTL-726)
+# catalyst-legacy-skills-moved.test.sh (CTL-726; topology updated post-reorg)
+# Only the 4 wave-orchestration skills remain in catalyst-legacy. iterate-plan and
+# briefing-followup moved back to catalyst-dev (general skills) — see
+# catalyst-legacy-topology.test.sh.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-SKILLS=(oneshot orchestrate god setup-orchestrate briefing-followup iterate-plan)
+SKILLS=(oneshot orchestrate god setup-orchestrate)
 fail=0
 assert() { if ! eval "$2"; then echo "FAIL: $1"; fail=1; else echo "ok: $1"; fi; }
 

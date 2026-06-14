@@ -92,7 +92,7 @@ export function CommsChannelDetail({
               "inline-block h-2 w-2 rounded-full",
               live
                 ? "bg-green shadow-[0_0_6px_theme(colors.green)]"
-                : "bg-[#6b7280]",
+                : "bg-muted-foreground/70",
             )}
           />
           <span>{live ? "Live" : "Disconnected"}</span>
@@ -220,7 +220,7 @@ export function CommsChannelDetail({
           </SheetHeader>
           {openMessage && (
             <div className="flex-1 overflow-auto px-4 pb-4">
-              <pre className="whitespace-pre-wrap break-all rounded bg-surface-0 p-3 font-mono text-[11px] text-fg">
+              <pre className="whitespace-pre-wrap break-all rounded bg-surface-subtle p-3 font-mono text-[11px] text-fg">
                 {JSON.stringify(openMessage, null, 2)}
               </pre>
             </div>

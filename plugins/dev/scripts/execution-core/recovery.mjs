@@ -25,20 +25,32 @@ import { homedir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { hostName, hostId } from "./lib/host-identity.mjs";
 import {
   getJobsRoot,
   getEventLogPath,
+  getClusterHosts,
+  getHostName,
+  getLivenessAnchorIssue,
   log,
   BUSY_CEILING_MS,
   REVIVE_MAX_AGE_MS,
+  GHOST_GRACE_MS,
+  HEARTBEAT_GRACE_MS,
+  ZOMBIE_STALE_FLOOR_MS,
+  NEVER_STARTED_MS,
 } from "./config.mjs";
+import { readPeerHeartbeatsSync } from "./cluster-heartbeat-sync.mjs";
+import { HEARTBEAT_EVENT } from "./heartbeat-event.mjs"; // CTL-859: node.heartbeat reader
+import { resolveTicketType, UNKNOWN_TICKET_TYPE } from "./ticket-type.mjs"; // CTL-1023: work-type dimension
 import { phaseIndex, isKnownPhase } from "../lib/phase-fsm.mjs";
 import { readWorkerSignals, TERMINAL, listDispatchedPhases } from "./signal-reader.mjs";
 import { reconcileAll } from "./monitor.mjs";
 import { listProjects } from "./registry.mjs";
 import { emitReapIntent as emitReapIntentDefault } from "./reap-intent.mjs";
-import { claudeStop } from "./claude-agents.mjs";
+import { claudeStop, getAgentsCached, agentForShortId, claudeLogs } from "./claude-agents.mjs";
 import { shortIdFromSessionId } from "./claude-ids.mjs";
+import { findTranscript, defaultProjectsDir } from "./session-recency.mjs";
 import { loadCursor, resolveStartOffset } from "./event-cursor.mjs";
 import {
   WORK_DONE_PROBES,
@@ -46,7 +58,12 @@ import {
   describeProbe,
   defaultProgressMark,
 } from "./work-done-probes.mjs";
-import { defaultDispatch } from "./dispatch.mjs";
+import { STAGE_RANK, NEW_WORK_ENTRY_PHASE } from "../lib/workflow-descriptor.mjs";
+import { ownerForTicket } from "./hrw.mjs";
+import { claimDispatchSync } from "./cluster-claim-sync.mjs";
+import { dispatchTicket, defaultDispatch } from "./dispatch.mjs";
+import { createWorktree } from "./worktree.mjs";
+import { fenceGuard } from "./fence-guard.mjs";
 import { applyLabel as defaultApplyLabel } from "./linear-write.mjs";
 import { linearBreaker } from "./linear-breaker.mjs";
 // CTL-642: the SHARED terminal-state predicate. The recovery short-circuit reuses
@@ -63,47 +80,19 @@ import {
   inEscalationCooldown as defaultInEscalationCooldown,
   recordEscalation as defaultRecordEscalation,
 } from "./label-guard.mjs";
-import { countReviveEvents as defaultCountReviveEvents } from "./event-scan.mjs";
+import { countReviveEvents as defaultCountReviveEvents, hasCompleteEvent } from "./event-scan.mjs";
 
 // phase-agent-emit-complete sits two directories up from execution-core/.
 const EMIT_COMPLETE_BIN = fileURLToPath(
   new URL("../phase-agent-emit-complete", import.meta.url),
 );
 
-// resolvePhaseSessionId — JS port of orchestrate-revive's resolve_phase_session_id
-// (orchestrate-revive:160-177). Resolves a `claude --resume`-compatible session
-// UUID from a dead worker's bg_job_id by reading the job's state.json.
-// Returns null on any miss (no bgJobId, no state.json, no session field).
-// MUST stay in sync with the bash resolver — they read the same on-disk contract
-// and honour the same CATALYST_REVIVE_JOBS_DIR override (NOT getJobsRoot's
-// CATALYST_HEALTHCHECK_JOBS_ROOT) so a test overriding one env var matches bash.
-//
-// Claude Code ≥2.x schema: state.json contains `resumeSessionId` directly.
-// Claude Code <2.x schema: state.json contains `linkScanPath` (path to .jsonl);
-//   the basename minus `.jsonl` is the session UUID. Still supported as fallback.
-export function resolvePhaseSessionId(
-  bgJobId,
-  { jobsDir = process.env.CATALYST_REVIVE_JOBS_DIR || join(homedir(), ".claude", "jobs") } = {},
-) {
-  if (!bgJobId) return null;
-  const stateFile = join(jobsDir, bgJobId, "state.json");
-  if (!existsSync(stateFile)) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(stateFile, "utf8"));
-  } catch {
-    return null;
-  }
-  // New schema (Claude Code ≥2.x): resumeSessionId stored directly.
-  if (typeof parsed?.resumeSessionId === "string" && parsed.resumeSessionId) {
-    return parsed.resumeSessionId;
-  }
-  // Legacy schema: derive UUID from linkScanPath basename.
-  const linkPath = parsed?.linkScanPath;
-  if (typeof linkPath !== "string" || !linkPath.endsWith(".jsonl")) return null;
-  const sid = basename(linkPath, ".jsonl");
-  return sid || null;
-}
+// resolvePhaseSessionId — extracted to session-resolve.mjs (CTL-729) so
+// transcript-silence.mjs can import it without pulling in recovery.mjs's
+// heavy dependency graph. Imported for local use + re-exported for callers.
+import { resolvePhaseSessionId } from "./session-resolve.mjs";
+export { resolvePhaseSessionId };
+import { buildExplanation, coerceExplanation, tierProducer } from "./escalation-explanation.mjs";
 
 // defaultStatJob — stat ~/.claude/jobs/<bgJobId>/state.json. Returns null when
 // the job dir is gone (the worker's process no longer exists), else its mtime,
@@ -114,6 +103,14 @@ export function resolvePhaseSessionId(
 // Claude stamps it the moment a job reaches a terminal lifecycle state, so
 // jobLifecycle can declare death even when the .state string is one we don't
 // enumerate. Null for a live/non-terminal job (and when state.json is unreadable).
+//
+// CTL-932: also parse tempo / detail / needs — the CC supervisor's self-report.
+// On 2026-06-09 every wedged-never-started worker's state.json read
+// state:"working" (alive forever) while tempo:"blocked" + detail:"stuck on a
+// startup dialog" + needs:"open this session to continue setup" sat UNREAD in
+// the same file all day. They are observability fields (logged by the reclaim
+// sweep), deliberately NOT a death trigger — the turn-zero gate keys on the
+// transcript + fresh agents-snapshot state instead.
 export function defaultStatJob(bgJobId) {
   const file = join(getJobsRoot(), bgJobId, "state.json");
   let st;
@@ -124,14 +121,20 @@ export function defaultStatJob(bgJobId) {
   }
   let state = null;
   let firstTerminalAt = null;
+  let tempo = null;
+  let detail = null;
+  let needs = null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8"));
     state = parsed?.state ?? null;
     firstTerminalAt = parsed?.firstTerminalAt ?? null;
+    tempo = parsed?.tempo ?? null;
+    detail = parsed?.detail ?? null;
+    needs = parsed?.needs ?? null;
   } catch {
     /* state.json unreadable — liveness still proven by the dir existing */
   }
-  return { exists: true, mtimeMs: st.mtimeMs, state, firstTerminalAt };
+  return { exists: true, mtimeMs: st.mtimeMs, state, firstTerminalAt, tempo, detail, needs };
 }
 
 // CTL-736 Phase 2 — the authoritative job-lifecycle terminal states. These are
@@ -141,6 +144,26 @@ export function defaultStatJob(bgJobId) {
 // worker-SIGNAL `TERMINAL` set imported from signal-reader.mjs (phase signal
 // status like done/skipped) — do not conflate the two.
 export const TERMINAL_JOB_STATES = new Set(["stopped", "failed", "done", "blocked"]);
+
+// CTL-927 — doc/long-fan-out phases whose forward-progress is an artifact-byte
+// progressMark (research/plan/triage/verify/review — see work-done-probes.mjs). Their
+// `claude --bg` state.json legitimately goes untouched for many minutes during an
+// in-process sub-agent fan-out, so the CTL-868 cold-snapshot mtime zombie-floor (2h)
+// would false-kill a LIVE worker on a host where `claude agents --json` is unreliable
+// (CTL-829, the headless mini) — the proximate trigger of a fleet-wide no-progress
+// storm. These phases use BUSY_CEILING_MS (6h) for the cold-snapshot mtime guess; by
+// then the busy-ceiling escalation (escalateOnce "busy-ceiling-exceeded" → needs-human)
+// already bounds a genuinely-stuck doc worker — escalate, never silent kill.
+// implement/remediate are NOT exempt: their commits/state.json churn make a 2h-stale
+// state.json a true corpse. Keep this set in sync with the artifact-byte progressMark
+// phases in work-done-probes.mjs.
+export const MTIME_ZOMBIE_EXEMPT_PHASES = new Set([
+  "research",
+  "plan",
+  "triage",
+  "verify",
+  "review",
+]);
 
 // jobLifecycle — CTL-736 Phase 2's deterministic, LOCAL death verdict from a
 // `claude --bg` job's state.json, replacing the eventually-consistent `claude
@@ -246,7 +269,12 @@ function defaultEmitComplete({ orchDir, signal }, { spawn = spawnSync } = {}) {
 // revive, escalated, and revive-suppressed audit events (CTL-574 + CTL-587).
 // Shape mirrors lib/canonical-event.sh. Centralizing it here keeps the four
 // per-action helpers tiny and prevents shape drift between actions.
-function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13 }) {
+//
+// CTL-1023: every event carries `catalyst.ticket.type` (work-type dimension).
+// `ticketType` is resolved by the caller from triage.json (resolveTicketType);
+// when omitted it defaults to UNKNOWN_TICKET_TYPE so the attribute is ALWAYS
+// present, never inconsistently missing (the gherkin contract).
+function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtras = {}, severityText = "WARN", severityNumber = 13, ticketType = UNKNOWN_TICKET_TYPE }) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
   return (
     JSON.stringify({
@@ -260,6 +288,8 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
       resource: {
         "service.name": "catalyst.execution-core",
         "service.namespace": "catalyst",
+        "host.name": hostName(),
+        "host.id": hostId(),
       },
       attributes: {
         "event.name": `phase.${phase}.${action}.${ticket}`,
@@ -268,6 +298,7 @@ function buildEventEnvelope({ phase, ticket, orchId, action, reason, payloadExtr
         "event.label": ticket,
         "catalyst.orchestration": orchId ?? ticket,
         "linear.issue.identifier": ticket,
+        "catalyst.ticket.type": ticketType ?? UNKNOWN_TICKET_TYPE,
       },
       body: { payload: { phase, ticket, status: action, reason, ...payloadExtras } },
     }) + "\n"
@@ -309,6 +340,7 @@ export function defaultAppendReclaimEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   death_signal,
   prev_state_json_mtime = null,
   probe_passed = true,
@@ -326,6 +358,7 @@ export function defaultAppendReclaimEvent({
       orchId,
       action: "reclaim",
       reason: "work-done-despite-dead-bg",
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: {
         death_signal,
         prev_state_json_mtime,
@@ -339,6 +372,189 @@ export function defaultAppendReclaimEvent({
       },
     }),
     "reclaim",
+  );
+}
+
+// CTL-868 — defaultAppendOrphanDetectedEvent — phase.<phase>.orphan-detected.<ticket>.
+// Route (B) of the orphan-reconcile sweep: a worker stranded `stalled` with no
+// automatic recovery left (the reclaim sweep has already stopped it + applied
+// needs-human). This canonical event is the OBSERVABILITY complement so the
+// orch-monitor dashboard surfaces the orphan instead of it hiding behind a buried
+// needs-human label. Best-effort (never gates the tick). Exported for the
+// round-trip envelope test.
+export function defaultAppendOrphanDetectedEvent({
+  phase,
+  ticket,
+  orchId,
+  reason = "stalled-no-recovery",
+  stalled_phases = [],
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "orphan-detected",
+      reason,
+      payloadExtras: { stalled_phases },
+    }),
+    "orphan-detected",
+  );
+}
+
+// ─── CTL-932: turn-zero gate primitives ─────────────────────────────────────
+//
+// A wedged-never-started worker registered with CC but never resolved its
+// slash-command prompt ("Unknown command: /catalyst-dev:phase-*") — it idles
+// forever at an empty input prompt holding a concurrency slot while every
+// existing guard reads it "alive" (state.json state:"working"; LISTED in the
+// agents snapshot, so the ghost breaker suppresses). The gate's evidence is
+// the conjunction the 2026-06-09 incident proved: dispatch age past
+// NEVER_STARTED_MS ∧ NO transcript file ∧ FRESH agents-snapshot state
+// "blocked". See thoughts/shared/research/
+// 2026-06-09-execution-core-fable-root-cause-and-architecture.md (A1/A2 +
+// Appendix 2 "minimal turn-zero gate").
+
+// How many stop+replace attempts the gate makes before declaring the
+// environment broken (marketplace wedge, plugin-registration race) and
+// escalating needs-human instead of looping. Replacement N+1 only happens if
+// replacement N ALSO wedged, so 2 ineffective replacements = 3 wedged spawns.
+export const NEVER_STARTED_ATTEMPT_CAP = 2;
+
+// Captures stored in the durable attempt marker are truncated so the marker
+// (and the final escalation payload aggregating all of them) stays bounded.
+const NEVER_STARTED_CAPTURE_CAP = 2_000;
+
+// neverStartedAttemptsPath — the durable per-(ticket, phase) attempt marker,
+// living in the worker dir like the .revive-N / .progress-<phase> crumbs.
+export function neverStartedAttemptsPath(orchDir, ticket, phase) {
+  return join(orchDir, "workers", ticket, `.never-started-${phase}.json`);
+}
+
+// defaultReadNeverStartedAttempts — {count, captures[]}. Fail-open to zero
+// attempts on a missing/corrupt marker (the conservative direction: the gate
+// retries a replacement rather than falsely escalating).
+export function defaultReadNeverStartedAttempts(orchDir, ticket, phase) {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(neverStartedAttemptsPath(orchDir, ticket, phase), "utf8"),
+    );
+    const count = Number.isInteger(parsed?.count) && parsed.count > 0 ? parsed.count : 0;
+    const captures = Array.isArray(parsed?.captures)
+      ? parsed.captures.filter((c) => typeof c === "string")
+      : [];
+    return { count, captures };
+  } catch {
+    return { count: 0, captures: [] };
+  }
+}
+
+// defaultRecordNeverStartedAttempt — increment the durable count and retain the
+// (truncated) screen capture so the final escalation can carry the captures
+// from ALL attempts. Atomic tmp+rename; fail-open (a write failure costs one
+// extra replacement attempt, never a throw out of the reclaim sweep).
+export function defaultRecordNeverStartedAttempt(orchDir, ticket, phase, capture) {
+  try {
+    const prev = defaultReadNeverStartedAttempts(orchDir, ticket, phase);
+    const p = neverStartedAttemptsPath(orchDir, ticket, phase);
+    mkdirSync(dirname(p), { recursive: true });
+    const next = {
+      count: prev.count + 1,
+      captures: [
+        ...prev.captures,
+        String(capture ?? "").slice(0, NEVER_STARTED_CAPTURE_CAP),
+      ],
+      updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    };
+    const tmp = `${p}.tmp.${process.pid}`;
+    writeFileSync(tmp, JSON.stringify(next, null, 2));
+    renameSync(tmp, p);
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker write failed");
+  }
+}
+
+// defaultClearNeverStartedAttempts — unlink the durable per-(ticket, phase)
+// attempt marker once a replacement worker SUCCEEDS (the phase reclaims as
+// work-done, or a revive observes forward progress). Without this the count is
+// sticky forever: a much-later legitimate re-dispatch of the same (ticket, phase)
+// that wedges once on a transient blip would read the stale count>=cap and
+// escalate needs-human with ZERO fresh replacement attempts — contradicting the
+// gate's "retry a replacement rather than falsely escalate" intent. Idempotent
+// (ENOENT is the common, expected case) and fail-open (a stuck marker only costs
+// a too-early escalation on a future wedge, never a throw out of the sweep).
+export function defaultClearNeverStartedAttempts(orchDir, ticket, phase, { rm = rmSync } = {}) {
+  try {
+    rm(neverStartedAttemptsPath(orchDir, ticket, phase), { force: true });
+  } catch (err) {
+    log.warn({ ticket, phase, err: err.message }, "ctl-932: never-started attempt marker clear failed");
+  }
+}
+
+// defaultTranscriptExists — does the session's transcript JSONL exist? A
+// healthy session creates it ~0.3s after its first turn (session-recency.mjs);
+// absence minutes after dispatch means the prompt was never processed — the
+// cleanest never-started detector (research Appendix 2).
+export function defaultTranscriptExists(sessionId, { projectsDir = defaultProjectsDir() } = {}) {
+  if (!sessionId) return false;
+  return findTranscript(sessionId, projectsDir) !== null;
+}
+
+// defaultCaptureWedgeLogs — `claude logs <shortId>`: the rendered screen, the
+// only surface that shows WHY the session idles (the "Unknown command" banner).
+// Captured BEFORE the stop (stopping destroys the buffer) and embedded in the
+// escalation event so the cause is visible without archaeology. Best-effort:
+// "" on any failure.
+export function defaultCaptureWedgeLogs(bgJobId, { logs = claudeLogs } = {}) {
+  if (!bgJobId) return "";
+  let shortId;
+  try {
+    shortId = shortIdFromSessionId(bgJobId);
+  } catch {
+    return "";
+  }
+  const res = logs(shortId);
+  return res?.ok ? res.output : "";
+}
+
+// defaultAppendWedgedNeverStartedEvent —
+// phase.<phase>.wedged-never-started.<TICKET>. The per-attempt escalation
+// event: carries the captured screen (captured_logs), the attempt ordinal, and
+// the state.json/agents-snapshot self-reports the diagnosis keyed on. Audit-
+// only (not in the broker's PHASE_EVENT_PATTERN). Exported for the round-trip
+// envelope test.
+export function defaultAppendWedgedNeverStartedEvent({
+  phase,
+  ticket,
+  orchId,
+  attempt,
+  bg_job_id = null,
+  agents_state = null,
+  tempo = null,
+  detail = null,
+  needs = null,
+  captured_logs = "",
+}) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "wedged-never-started",
+      reason: "no-transcript-and-agents-blocked",
+      payloadExtras: {
+        attempt,
+        bg_job_id,
+        agents_state,
+        tempo,
+        detail,
+        needs,
+        captured_logs,
+        title: `phase ${phase} worker wedged at turn zero (attempt ${attempt})`,
+        body: `Worker for ${ticket} ${phase} registered but never started its first turn (no transcript; agents state=blocked). Stopped and replaced via the revive path. Captured screen:\n\n${captured_logs}`,
+      },
+    }),
+    "wedged-never-started",
   );
 }
 
@@ -357,10 +573,16 @@ export function defaultPostReclaimMirror(
       const helperPath = join(dirname(fileURLToPath(import.meta.url)), "../lib/linear-comment-post.sh");
       return spawnSync(helperPath, [t, bodyText], { encoding: "utf8" });
     },
+    multiHost = false,
   } = {},
 ) {
   const marker = `${orchDir}/workers/${ticket}/.linear-mirror-${phase}`;
   if (exists(marker)) return; // first-writer-wins
+  // CTL-863: zombie guard — a post-takeover paused host must not post a mirror comment.
+  if (!fenceGuard({ ticket, orchDir, multiHost })) {
+    log.warn({ ticket, phase }, "ctl-863: stale fence — suppressing postReclaimMirror comment (zombie guard)");
+    return;
+  }
   const bodyText = [
     "**Phase Reclaim**",
     "",
@@ -377,7 +599,18 @@ export function defaultPostReclaimMirror(
     if (r && r.status === 0) {
       writeMarker(marker);
     } else {
-      log.warn({ ticket, phase }, "reclaim-mirror: linear-comment-post failed (continuing)");
+      // Surface the helper's own diagnostic (e.g. the CTL-835 token-mint HTTP
+      // status / invalid_scope) instead of swallowing it, so a credential or
+      // scope failure is no longer silent. Still fail-open (no throw).
+      const detail = String(r?.stderr ?? "")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .pop();
+      log.warn(
+        { ticket, phase, status: r?.status, detail },
+        "reclaim-mirror: linear-comment-post failed (continuing)",
+      );
     }
   } catch (err) {
     log.warn({ ticket, phase, err: err?.message }, "reclaim-mirror: post threw (continuing)");
@@ -406,6 +639,49 @@ export function defaultAppendBootResumeEvent({ phase, ticket, orchId }) {
   );
 }
 
+// defaultAppendBootResumeGatedEvent — phase.<phase>.boot-resume-gated.<ticket>.
+// CTL-644: emitted once when an expensive phase is gated behind operator approval.
+// Deliberately distinct from boot-resume so the broker ignores it (audit-only,
+// like defaultAppendBootResumeEvent). Exported so boot-resume.mjs imports it as
+// the default appendGatedEvent seam.
+export function defaultAppendBootResumeGatedEvent({ phase, ticket, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume-gated",
+      reason: "cold-start-expensive-phase-awaiting-approval",
+    }),
+    "boot-resume-gated",
+  );
+}
+
+// defaultAppendBootResumePhaseRegressionEvent —
+// phase.<phase>.boot-resume-phase-regression.<ticket>. CTL-1006 Scenario 2:
+// emitted when boot-resume would have re-dispatched an EARLIER phase whose ticket
+// already has a LATER terminal phase signal (e.g. research=stalled while an older
+// triage signal is still `running`). Audit-only — distinct action (broker-ignored,
+// not in PHASE_EVENT_PATTERN) and NOT counted by countReviveEvents (event-scan
+// matches only `phase.implement.revive.<ticket>`), so a regression never consumes
+// the chronic-failure revive budget (the Scenario-4 invariant). Surfaces the
+// regression for operator forensics INSTEAD of spawning a fresh earlier-phase
+// worker. Exported so boot-resume.mjs imports it as the default appender seam and
+// the round-trip test can confirm the envelope shape.
+export function defaultAppendBootResumePhaseRegressionEvent({ phase, ticket, dominantPhase, orchId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({
+      phase,
+      ticket,
+      orchId,
+      action: "boot-resume-phase-regression",
+      reason: "later-terminal-phase-supersedes-resume-candidate",
+      payloadExtras: { dominantPhase },
+    }),
+    "boot-resume-phase-regression",
+  );
+}
+
 // CTL-587: three new audit-only event helpers. The broker's PHASE_EVENT_PATTERN
 // in router.mjs only matches complete|failed|turn-cap-exhausted|skipped, so
 // revive/escalated/revive-suppressed events are deliberately ignored by the
@@ -421,6 +697,7 @@ export function defaultAppendReviveEvent({
   phase,
   ticket,
   orchId,
+  orchDir,
   attempt,
   reason,
   prev_state_json_mtime,
@@ -433,6 +710,7 @@ export function defaultAppendReviveEvent({
       orchId,
       action: "revive",
       reason,
+      ticketType: resolveTicketType(orchDir, ticket), // CTL-1023
       payloadExtras: { attempt, prev_state_json_mtime, prev_bg_job_id },
     }),
     "revive",
@@ -458,7 +736,10 @@ export function defaultAppendYieldFileSkipEvent({ ticket, orchId, filename }) {
   );
 }
 
-function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count }) {
+// CTL-932: `extras` rides into the payload so an escalation can carry evidence
+// (the wedged-never-started cap escalation embeds the screen captures from all
+// attempts). Absent for every pre-existing caller — shape unchanged.
+function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_attempt_count, extras = {} }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase,
@@ -466,7 +747,7 @@ function defaultAppendEscalatedEvent({ phase, ticket, orchId, reason, final_atte
       orchId,
       action: "escalated",
       reason,
-      payloadExtras: { final_attempt_count },
+      payloadExtras: { final_attempt_count, ...extras },
     }),
     "escalated",
   );
@@ -503,6 +784,11 @@ function defaultAppendReviveSuppressedEvent({
 // being dispatched is carried in payload.target_phase so operators can filter.
 // Best-effort like every other audit emitter — return value lets the caller
 // log (no current caller gates on it; matches recordDispatchFailure shape).
+// CTL-1004/CTL-1056 Bug 2: stderr_tail / spawn_error / signal carry the captured
+// dispatch-failure diagnostics (last ~500 chars of the worker's stderr, the
+// spawn error code e.g. ETIMEDOUT, the kill signal e.g. SIGKILL) so the failure
+// is diagnosable from the unified event log. Each is included in payloadExtras
+// only when present (an empty/absent diagnostic produces no key — no noise).
 export function defaultAppendDispatchFailedEvent({
   orchId,
   ticket,
@@ -511,6 +797,9 @@ export function defaultAppendDispatchFailedEvent({
   reason,
   expiresAt,
   consecutiveFailures,
+  stderr_tail,
+  spawn_error,
+  signal,
 }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
@@ -519,7 +808,15 @@ export function defaultAppendDispatchFailedEvent({
       orchId,
       action: "failed",
       reason,
-      payloadExtras: { target_phase, code, ...(expiresAt !== undefined && { expiresAt }), ...(consecutiveFailures !== undefined && { consecutiveFailures }) },
+      payloadExtras: {
+        target_phase,
+        code,
+        ...(expiresAt !== undefined && { expiresAt }),
+        ...(consecutiveFailures !== undefined && { consecutiveFailures }),
+        ...(stderr_tail !== undefined && stderr_tail !== "" && { stderr_tail }),
+        ...(spawn_error !== undefined && spawn_error !== "" && { spawn_error }),
+        ...(signal !== undefined && signal !== null && signal !== "" && { signal }),
+      },
     }),
     "dispatch-failed",
   );
@@ -562,7 +859,7 @@ export function defaultAppendRunawayEvent({ ticket, orchId, count, window_ms }) 
 // defaultAppendDispatchRequestedEvent — phase.dispatch.requested.<TICKET>.
 // Emitted when the scheduler/recovery DECIDES to dispatch a phase, before the
 // `claude --bg` spawn. reason ∈ {new-work, advance, revive}.
-export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_phase, reason }) {
+export function defaultAppendDispatchRequestedEvent({ orchId, orchDir, ticket, target_phase, reason }) {
   return appendEnvelopeBestEffort(
     buildEventEnvelope({
       phase: "dispatch",
@@ -573,6 +870,8 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
       payloadExtras: { target_phase },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: resolves to "unknown" pre-triage (no triage.json yet) — correct.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-requested",
   );
@@ -584,6 +883,7 @@ export function defaultAppendDispatchRequestedEvent({ orchId, ticket, target_pha
 // launched↔complete wall-clock can be computed downstream.
 export function defaultAppendDispatchLaunchedEvent({
   orchId,
+  orchDir,
   ticket,
   target_phase,
   bg_job_id,
@@ -598,6 +898,8 @@ export function defaultAppendDispatchLaunchedEvent({
       payloadExtras: { target_phase, bg_job_id, worktree_path },
       severityText: "INFO",
       severityNumber: 9,
+      // CTL-1023: "unknown" until triage.json lands; full type post-triage.
+      ticketType: resolveTicketType(orchDir, ticket),
     }),
     "dispatch-launched",
   );
@@ -636,6 +938,17 @@ export function defaultAppendResumedAfterPreemptionEvent({ orchId, ticket, phase
       payloadExtras: { resume_session: resumeSession ?? null },
     }),
     "resumed-after-preemption",
+  );
+}
+
+// defaultAppendHeldStoppedEvent — phase.<phase>.held-stopped.<TICKET>. Emitted
+// when the scheduler stops an idle needs-input worker to free its capacity slot
+// (CTL-768). bg_job_id preserved so the revive path resolves --resume. Never throws.
+export function defaultAppendHeldStoppedEvent({ orchId, ticket, phase, bgJobId }) {
+  return appendEnvelopeBestEffort(
+    buildEventEnvelope({ phase, ticket, orchId, action: "held-stopped",
+      payloadExtras: { bg_job_id: bgJobId } }),
+    "held-stopped",
   );
 }
 
@@ -790,6 +1103,58 @@ export function defaultAppendAutotuneGaugeEvent({
   );
 }
 
+// CTL-1044: generic operator-event appender. The scheduler's `appendIntentEvent`
+// seam (scheduler.mjs:4300, threaded into the advance-shadow comparator, CTL-936
+// reconcileIntents, and executeEscalations) consumes a RAW operator-event object:
+//   { "event.name": string, payload: object }
+// This does NOT fit buildEventEnvelope's phase.<phase>.<action>.<ticket> schema
+// (those events are phase-keyed; operator telemetry is name-keyed), so it gets a
+// dedicated envelope builder here. The envelope carries `evt["event.name"]`
+// VERBATIM as attributes["event.name"] and `evt.payload` under body.payload —
+// matching the unified-event-log line shape every other daemon emitter writes
+// (ts/id/observedTs/severity/resource{service.name,namespace,host}/attributes/body).
+// Production wires this at daemon.mjs's schedulerFn({ appendIntentEvent }) call;
+// startScheduler keeps its null default (CTL-936 chose silence for legacy/tests).
+// Best-effort: a malformed evt or an unwriteable log never throws — operator
+// telemetry must never break a tick (the shadow contract). The broker's
+// shouldSkipEvent (broker/router.mjs:1395) does NOT skip beliefs.* names and no
+// handler keys off them, so these land in the log as inert telemetry — no loop.
+export function defaultAppendOperatorEvent(evt) {
+  try {
+    const name = evt?.["event.name"];
+    if (typeof name !== "string" || name.length === 0) return false;
+    const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+    const line =
+      JSON.stringify({
+        ts,
+        id: randomBytes(8).toString("hex"),
+        observedTs: ts,
+        // Operator telemetry (shadow disagreements, intent.ineffective,
+        // escalations) is INFO — it records evidence; it is NOT a daemon-health
+        // warning. Matches the dispatch-lifecycle precedent (CTL-700 Item B).
+        severityText: "INFO",
+        severityNumber: 9,
+        traceId: randomBytes(16).toString("hex"),
+        spanId: randomBytes(8).toString("hex"),
+        resource: {
+          "service.name": "catalyst.execution-core",
+          "service.namespace": "catalyst",
+          "host.name": hostName(),
+          "host.id": hostId(),
+        },
+        attributes: {
+          "event.name": name,
+        },
+        body: { payload: evt?.payload ?? null },
+      }) + "\n";
+    return appendEnvelopeBestEffort(line, "operator-event");
+  } catch {
+    // Best-effort — a serialization failure (e.g. a circular payload) must
+    // never break the tick. The caller's own try/catch is a second backstop.
+    return false;
+  }
+}
+
 // CTL-587 default seams — all overridable for tests, all best-effort for prod.
 
 // defaultReviveDispatch — reset the signal to status: "stalled" first (to bypass
@@ -865,7 +1230,7 @@ export function defaultReviveDispatch(
   // then the verified launch after a clean dispatch. Both best-effort — the
   // default emitters swallow IO errors (appendEnvelopeBestEffort); the revive
   // proceeds regardless of either return value.
-  appendRequested({ orchId, ticket, target_phase: phase, reason: "revive" });
+  appendRequested({ orchId, orchDir, ticket, target_phase: phase, reason: "revive" });
   const res = dispatch(dispatchArgs);
   if (res && res.code === 0) {
     // Re-read the signal the dispatcher just rewrote (status dispatched/running
@@ -878,6 +1243,7 @@ export function defaultReviveDispatch(
     }
     appendLaunched({
       orchId,
+      orchDir,
       ticket,
       target_phase: phase,
       bg_job_id: sig2?.bg_job_id,
@@ -1277,9 +1643,19 @@ function defaultWriteProgressMark(orchDir, ticket, phase, value) {
 //   'inert-stale'         reclaim-eligible + work NOT done + the signal is older
 //                         than reviveMaxAgeMs — an abandoned historical dir, left
 //                         inert (no revive, no escalate). (CTL-735, kept.)
+//   'wedged-redispatched' CTL-932 turn-zero gate: an `alive` worker past
+//                         NEVER_STARTED_MS with NO transcript and a FRESH
+//                         agents-snapshot state of "blocked" never started its
+//                         first turn. Screen captured into the wedged event,
+//                         session stopped, signal flipped through reviveDispatch
+//                         (replacement worker). Durable attempt marker bumped;
+//                         past NEVER_STARTED_ATTEMPT_CAP the gate escalates
+//                         needs-human ('escalated', reason
+//                         wedged-never-started-exhausted) instead of looping.
 //   'escalated' / 'escalation-suppressed'
 //                         an `alive` worker past BUSY_CEILING_MS with no committed
-//                         work (the backstop), behind the CTL-638 cool-down.
+//                         work (the backstop), behind the CTL-638 cool-down — or
+//                         the CTL-932 wedge cap above.
 //   'superseded-noop'     reclaim-eligible BUT the signal's phase precedes the
 //                         ticket's latest-dispatched phase (CTL-606). A reap-intent
 //                         is emitted so the reaper stops the bg.
@@ -1339,6 +1715,37 @@ export function reclaimDeadWorkIfPossible(
     // eventually-consistent `claude agents` snapshot reader (livenessForBgJob),
     // which is no longer consulted by the reclaim/death path at all.
     jobLifecycle: jobLifecycleFn = jobLifecycle,
+    // CTL-809 — GHOST BREAKER seams. agentsSnapshot returns the FRESH `claude
+    // agents` snapshot {agents,isFresh,ageMs}; production reads the warm
+    // getAgentsCached, tests inject a fake. ghostGraceMs is the just-dispatched
+    // grace window. Consulted ONLY to break the jobLifecycle-alive-but-process-gone
+    // tie in the alive branch below, strictly gated on isFresh (CTL-731/657-safe)
+    // and on a worker older than ghostGraceMs (no false-reclaim of a not-yet-
+    // registered fresh spawn — CTL-662-safe; a busy fan-out worker stays LISTED).
+    agentsSnapshot = getAgentsCached,
+    ghostGraceMs = GHOST_GRACE_MS,
+    // CTL-932 — TURN-ZERO GATE seams. A jobLifecycle-alive worker past
+    // neverStartedMs whose session has NO transcript AND whose FRESH agents-
+    // snapshot state is "blocked" never started its first turn: stop it,
+    // capture `claude logs` into the escalation event, and replace it through
+    // the normal revive/redispatch path — bounded by a durable per-(ticket,
+    // phase) attempt marker; past the cap, escalate needs-human instead of
+    // looping. All injectable; production defaults are the real primitives.
+    neverStartedMs = NEVER_STARTED_MS,
+    transcriptExists = defaultTranscriptExists,
+    captureWedgeLogs = defaultCaptureWedgeLogs,
+    appendWedgedEvent = defaultAppendWedgedNeverStartedEvent,
+    readNeverStartedAttempts = defaultReadNeverStartedAttempts,
+    recordNeverStartedAttempt = defaultRecordNeverStartedAttempt,
+    clearNeverStartedAttempts = defaultClearNeverStartedAttempts,
+    wedgeAttemptCap = NEVER_STARTED_ATTEMPT_CAP,
+    // CTL-868 — zombie state.json staleness floor (the GHOST BREAKER's fallback
+    // for when no FRESH `claude agents` snapshot is available, e.g. the headless
+    // mini where CTL-829 makes `claude agents` unreliable). A `working` job whose
+    // state.json mtime is older than this is a corpse and falls through to reclaim.
+    // Subordinate to a fresh snapshot (a LISTED worker is busy, never reclaimed
+    // here regardless of mtime — CTL-662-safe). Injectable; defaults to the const.
+    zombieStaleFloorMs = ZOMBIE_STALE_FLOOR_MS,
     // CTL-735 — revival age ceiling. An absent/idle, work-not-done worker whose
     // signal has not been touched in this long is an abandoned historical dir,
     // not a fresh crash: treated as inert (no revive, no escalate). Injectable for
@@ -1348,6 +1755,12 @@ export function reclaimDeadWorkIfPossible(
     // The SOLE long backstop now that the mtime triggers are gone: a busy worker
     // past it with no committed work is flagged for human, never silent-reclaimed.
     busyCeilingMs = BUSY_CEILING_MS,
+    // CTL-778 — has the worker already emitted phase.<phase>.complete.<ticket>?
+    // THE disambiguator between a done-but-idle alive worker (reclaim) and a busy
+    // fan-out worker (suppress). Defaults to the incremental event-scan query;
+    // tests inject a stub. Production wiring is correct by default since
+    // hasCompleteEvent reads the real event log.
+    completeEventSeen = ({ ticket: t, phase: p }) => hasCompleteEvent({ ticket: t, phase: p }),
     // CTL-658 — resume-session resolver. Maps the dead worker's bg_job_id to a
     // `claude --resume`-compatible UUID (or null) so the revive can continue the
     // dead session instead of re-walking from phase 0. Default reads the real
@@ -1382,6 +1795,13 @@ export function reclaimDeadWorkIfPossible(
     cache,
     prAdapter,
     now = Date.now,
+    // CTL-936: closed-loop intent layer. When a beliefs.db handle is provided,
+    // kill actions record intents with a "session left agents" postcondition and
+    // are suppressed once the intent goes ineffective — stopping the stop-storm
+    // class. Default null → legacy behavior unchanged (all existing tests unaffected).
+    // The intentDb is obtained from beliefs.db (CATALYST_BELIEFS_SHADOW=1 gate);
+    // it is threaded in from the scheduler's reclaimOpts alongside fetchState/cache.
+    intentDb = null,
   } = {},
 ) {
   const klass = classifyWorker(signal, { statJob });
@@ -1403,19 +1823,128 @@ export function reclaimDeadWorkIfPossible(
   const orchId = signal.raw?.orchestrator;
   const prevBgJobId = signal.raw?.bg_job_id ?? null;
 
+  // CTL-936: intent-aware kill helper. Wraps killBgJob with:
+  //   1. isIntentEffective guard — when CATALYST_INTENTS_ENFORCE=1 and the kill
+  //      intent for this (ticket, phase) has already gone ineffective, skip the
+  //      claude stop call (stops the stop-storm after N failed attempts).
+  //   2. recordIntent — record the kill intent the first time we issue the stop
+  //      so the next-tick reconciler can check whether the session left the
+  //      agents listing.
+  // Falls back to plain killBgJob({ bgJobId }) when intentDb is null (all
+  // existing tests are unaffected — intentDb defaults to null).
+  function intentAwareKill({ bgJobId: killBgJobId }) {
+    if (!intentDb || !killBgJobId) {
+      killBgJob({ bgJobId: killBgJobId });
+      return;
+    }
+    const subject = `${ticket}/${phase}`;
+    let maxAttempts = 2;
+    try {
+      const cfgRow = intentDb.query("SELECT value_int FROM cfg WHERE key = 'max_attempts'").get();
+      if (typeof cfgRow?.value_int === "number") maxAttempts = cfgRow.value_int;
+    } catch { /* fall through — use default */ }
+
+    // Enforce: suppress kill when the intent has already gone ineffective.
+    if ((process.env.CATALYST_INTENTS_ENFORCE ?? "0") === "1") {
+      try {
+        const ineffective = intentDb
+          .query(
+            `SELECT 1 FROM intent
+              WHERE kind = 'kill' AND subject = ?
+                AND (outcome = 'ineffective'
+                  OR (outcome IS NULL AND attempts >= ?))
+              LIMIT 1`,
+          )
+          .get(subject, maxAttempts);
+        if (ineffective) {
+          log.warn(
+            { ticket, phase, bgJobId: killBgJobId, subject },
+            "ctl-936: kill intent ineffective — skipping claude stop (stop-storm prevention)",
+          );
+          return;
+        }
+      } catch (err) {
+        log.warn({ err: err?.message }, "ctl-936: isIntentEffective check threw — continuing kill");
+      }
+    }
+
+    // Record the intent if not already open.
+    try {
+      const open = intentDb
+        .query("SELECT 1 FROM intent WHERE kind = 'kill' AND subject = ? AND outcome IS NULL LIMIT 1")
+        .get(subject);
+      if (!open) {
+        const tickRow = intentDb.query("SELECT tick_id FROM tick ORDER BY tick_id DESC LIMIT 1").get();
+        if (tickRow) {
+          // CTL-936 H1: pin bgJobId so resolvePostcondition can distinguish
+          // the targeted session from a newly-revived worker on the same
+          // subject slot (a revive allocates a new bgJobId, so the old kill
+          // intent does not falsely satisfy against it).
+          intentDb.run(
+            `INSERT INTO intent (tick_id, kind, subject, belief_id, postcondition, attempts, outcome)
+             VALUES (?, 'kill', ?, NULL, ?, 0, NULL)`,
+            [tickRow.tick_id, subject, JSON.stringify({ kind: "kill", subject, bgJobId: killBgJobId, sessionNotRegistered: true })],
+          );
+        }
+      }
+    } catch (err) {
+      log.warn({ err: err?.message, ticket, phase }, "ctl-936: recordIntent threw — continuing kill");
+    }
+    killBgJob({ bgJobId: killBgJobId });
+  }
+
   // CTL-587: capture the bg state.json mtime for the revive AUDIT payload only.
   // CTL-662 removed it from every DECISION branch — it is telemetry, not a
   // trigger. Best-effort: a missing job dir (real crash) just leaves it null.
   let prevStateJsonMtime = null;
+  // CTL-932: keep the FULL statJob read so the supervisor's self-report fields
+  // (tempo/detail/needs — previously never read) reach the logs below.
+  let jobStat = null;
   if (signal?.liveness?.value) {
-    const job = statJob(signal.liveness.value);
-    if (job && typeof job.mtimeMs === "number") prevStateJsonMtime = job.mtimeMs;
+    jobStat = statJob(signal.liveness.value);
+    if (jobStat && typeof jobStat.mtimeMs === "number") prevStateJsonMtime = jobStat.mtimeMs;
   }
 
   // CTL-638 — escalation helper (unchanged): wraps appendEscalatedEvent +
   // applyStalledLabel in a per-(ticket, phase) cool-down so the same escalation
   // cannot re-fire within the window (the pre-CTL-638 self-feeding storm).
-  function escalateOnce(reason, finalAttemptCount) {
+  // CTL-932: `extras` (optional) rides evidence into the escalated event
+  // payload (e.g. the wedge screen captures). Cool-down/breaker behaviour is
+  // untouched.
+  // reasonToType — GATE 1: push_rejected_no_workflow_scope is a capability
+  // boundary (MANUAL); all other production reasons → AUTHORIZATION (never MANUAL
+  // for a non-capability reason — D-recovery).
+  function reasonToType(r) {
+    return r === "push_rejected_no_workflow_scope" ? "manual" : "authorization";
+  }
+
+  // reasonToWhyField — maps reason to the correct type-specific "why" field name
+  // and value for the union (why_not_auto for MANUAL, why_asking for AUTHORIZATION).
+  function reasonToWhyField(r, n) {
+    if (r === "push_rejected_no_workflow_scope") {
+      return {
+        field: "why_not_auto",
+        value: "the daemon cannot grant itself an OAuth scope (capability boundary)",
+      };
+    }
+    const text = (() => {
+      switch (r) {
+        case "busy-ceiling-exceeded":
+          return "worker was alive past the busy ceiling with no committed work";
+        case "no-progress":
+          return `no forward progress after ${n} attempt(s) — stop-and-escalate`;
+        case "no-probe-for-phase":
+          return "no probe available for this phase — cannot verify work is done";
+        case "wedged-never-started-exhausted":
+          return `wedged-never-started replacement budget exhausted after ${n} attempt(s)`;
+        default:
+          return `escalation reason: ${r} (after ${n} attempt(s))`;
+      }
+    })();
+    return { field: "why_asking", value: text };
+  }
+
+  function escalateOnce(reason, finalAttemptCount, extras) {
     // CTL-679 — while the Linear breaker is open we are rate-limited; the
     // needs-human apply would 429 and write no marker, re-firing every tick.
     // Defer: skip the audit event + label write entirely (no cool-down record,
@@ -1431,12 +1960,51 @@ export function reclaimDeadWorkIfPossible(
     if (inEscalationCooldownFn(orchDir, ticket, phase, now())) {
       return "escalation-suppressed";
     }
+    // CTL-1130: build a typed-union explanation classified by the three gates.
+    // push_rejected_no_workflow_scope → MANUAL (capability boundary, D-recovery);
+    // all other reasons → AUTHORIZATION (agent can retry with authority).
+    const escType = reasonToType(reason);
+    const whyField = reasonToWhyField(reason, finalAttemptCount);
+    let explanation;
+    const explanationFields = escType === "manual"
+      ? {
+          escalation_type: "manual",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `grant the required capability and re-run ${ticket} ${phase}, or push manually?`,
+          blocked_capability: extras?.blockedCapability ?? "required OAuth scope or credential unavailable",
+          instructions: extras?.instructions ?? ["check CATALYST_WORKFLOW_GITHUB_TOKEN"],
+          remediation_then_retry: `re-run ${ticket} ${phase} after granting the capability`,
+          why_not_auto: whyField.value,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        }
+      : {
+          escalation_type: "authorization",
+          problem: `${phase} escalated after ${finalAttemptCount} attempt(s): ${reason}`,
+          call_to_action: extras?.call_to_action ?? `authorize ${ticket} ${phase} to retry or change approach?`,
+          recommendation: `retry ${ticket} ${phase} after investigating ${reason}`,
+          risk: `continued retries risk wasting budget; ${finalAttemptCount} attempt(s) already made`,
+          why_asking: whyField.value,
+          could_higher_tier_resolve: tierProducer(extras?.model ?? signal?.raw?.model),
+          authorize_label: `retry ${ticket} ${phase}`,
+          observed: { final_attempt_count: finalAttemptCount, ...(extras?.observed ?? {}) },
+          attempts: extras?.attempts ?? [],
+        };
+    try {
+      explanation = buildExplanation(explanationFields);
+    } catch {
+      // CTL-1130: degrade with the full assembled fields (not just { problem })
+      // so observed/recommendation/risk (or the manual capability fields) survive.
+      explanation = coerceExplanation(explanationFields, { ticket, phase, canExecute: escType !== "manual" });
+    }
+    const enrichedExtras = { ...(extras ?? {}), explanation };
     appendEscalatedEvent({
       phase,
       ticket,
       orchId,
       reason,
       final_attempt_count: finalAttemptCount,
+      extras: enrichedExtras,
     });
     applyStalledLabel({ orchDir, ticket });
     recordEscalationFn(orchDir, ticket, phase, reason, now());
@@ -1474,6 +2042,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal: "terminal-short-circuit",
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: false,
@@ -1524,7 +2093,195 @@ export function reclaimDeadWorkIfPossible(
   //    human (escalateOnce), never a silent reclaim-and-advance. (CTL-736
   //    Phase 3 generalizes this ceiling into the progress probe.)
   if (lifecycle === "alive") {
+    // CTL-778 step 3 — alive-but-idle reconcile. An alive worker that has ALREADY
+    // emitted phase.<phase>.complete AND whose work-done probe passes is done, not
+    // busy: flip the stuck `running` signal to `done` from the on-disk artifact and
+    // stop the idle worker. Gated on the complete EVENT (not the probe alone) so a
+    // busy in-process fan-out worker — which never emitted complete — is untouched
+    // (CTL-662/736/809-safe). Mirrors the dead-worker branch (B) below.
+    if (
+      hasProbe(phase) &&
+      completeEventSeen({ ticket, phase }) &&
+      probes[phase]({ ticket, repoRoot, orchDir })
+    ) {
+      if (prevBgJobId) {
+        emitReapIntent("phase.reclaim.reap-requested", {
+          ticket,
+          phase,
+          bgJobId: prevBgJobId,
+          worktreePath: signal.raw?.worktreePath,
+          reason: "ctl-778-alive-probe-reclaim",
+        }).catch(() => {});
+      }
+      appendEvent({
+        phase,
+        ticket,
+        orchId,
+        orchDir,
+        death_signal: "alive-probe-done",
+        prev_state_json_mtime: null,
+        probe_passed: true,
+        probe_checked: describeProbe(phase),
+        completion_origin: "alive-probe-reclaim",
+        reclaimed_bg_job_id: prevBgJobId,
+        stopped_bg_job_ids: [],
+        title: `phase ${phase} reclaimed (alive worker probe done)`,
+        body: `Daemon reclaimed alive ${phase} worker for ${ticket}: still alive but complete event + probe verified work done. bg_job_id=${prevBgJobId ?? "?"}.`,
+      });
+      const r = emitComplete({ orchDir, signal });
+      if (r.code !== 0) {
+        log.warn(
+          { ticket, phase, code: r.code, stderr: r.stderr },
+          "ctl-778 alive-probe-reclaim: emit-complete failed; will retry next tick",
+        );
+        return "reclaim-failed";
+      }
+      postReclaimMirror({
+        orchDir,
+        ticket,
+        phase,
+        deathSignal: "alive-probe-done",
+        probeChecked: describeProbe(phase),
+        reclaimedBgJobId: prevBgJobId,
+      });
+      log.info({ ticket, phase }, "ctl-778: alive-but-idle worker reclaimed (complete event + probe)");
+      return "reclaimed";
+    }
+
     const startedAtMs = Date.parse(signal.raw?.startedAt ?? "");
+
+    // ── CTL-932 — TURN-ZERO GATE. A worker can register with CC but never
+    // resolve its slash-command prompt ("Unknown command:
+    // /catalyst-dev:phase-*"): it idles forever at an empty input prompt. Every
+    // other guard is blind to this class — state.json stays state:"working"
+    // (jobLifecycle alive forever), the session IS listed (ghost breaker
+    // suppresses), and the 6h busy-ceiling is label-only. Evidence conjunction
+    // (all three required; any doubt → fall through, no-op):
+    //   1. dispatch age > neverStartedMs (default 120s; a healthy session
+    //      creates its transcript ~0.3s after the first turn);
+    //   2. NO transcript file for the session (the cleanest wedge detector);
+    //   3. FRESH agents-snapshot state === "blocked" (the listing's signature
+    //      of registered-but-prompt-never-resolved).
+    // INVARIANT: the committed-work probe runs BEFORE any kill — a worker with
+    // committed work is never touched here (existing paths own it). Dead
+    // workers never reach this branch (lifecycle === "alive" only), and a
+    // worker WITH a transcript falls through untouched.
+    if (
+      prevBgJobId &&
+      Number.isFinite(startedAtMs) &&
+      now() - startedAtMs > neverStartedMs
+    ) {
+      let wedgeShortId = null;
+      try {
+        wedgeShortId = shortIdFromSessionId(prevBgJobId);
+      } catch {
+        wedgeShortId = null; // malformed bg_job_id → cannot prove → no-op
+      }
+      if (wedgeShortId) {
+        const snap = agentsSnapshot();
+        const agent = snap?.isFresh ? agentForShortId(wedgeShortId, snap.agents) : null;
+        if (agent && agent.state === "blocked") {
+          const sessionId = resolveSession(prevBgJobId);
+          if (!transcriptExists(sessionId)) {
+            // Committed-work probe BEFORE any kill (the invariant): committed
+            // work means this is NOT a never-started worker — leave it to the
+            // existing alive-branch paths.
+            const workCommitted = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
+            if (!workCommitted) {
+              // Capture the rendered screen BEFORE stopping (stop destroys it)
+              // so the escalation event shows the cause without archaeology.
+              const captured = captureWedgeLogs(prevBgJobId);
+              const attempts = readNeverStartedAttempts(orchDir, ticket, phase);
+              if (attempts.count >= wedgeAttemptCap) {
+                // Replacements keep wedging — the environment is broken
+                // (marketplace wedge / plugin-registration race). Stop the
+                // corpse (it holds a slot) and page a human with the screen
+                // captures from ALL attempts instead of looping.
+                //
+                // CTL-932 fix: make this corpse terminally NOT-revivable before
+                // returning. Without the next two steps the kill alone is not
+                // enough — next tick the stopped worker reads `dead`, branch (C)
+                // runs, and its no-progress gate (currentProgress 0 > stored -1
+                // on a never-observed phase) PASSES, reviving a futile 4th
+                // worker that re-wedges and re-escalates. Pre-seed the progress
+                // high-water mark to the worker's current (zero) progress so
+                // branch (C) reads `0 <= 0` and STOPS via its own terminal
+                // no-progress path — the exact mechanism the sibling stop uses,
+                // no new state. needs-human is already applied by escalateOnce,
+                // so that terminal stop's escalation is cool-down-suppressed; net
+                // = zero post-escalation respawns.
+                const exhaustedProgress = progressMark({ ticket, phase, repoRoot, orchDir });
+                writeProgressMark(orchDir, ticket, phase, exhaustedProgress);
+                // Reap-intent BEFORE the inline kill (the authoritative backup if
+                // the inline stop fails), mirroring the no-progress + gate-
+                // redispatch stop paths which both pair emitReapIntent + kill.
+                emitReapIntent("phase.terminal.reap-requested", {
+                  ticket,
+                  phase,
+                  bgJobId: prevBgJobId,
+                  worktreePath: signal.raw?.worktreePath,
+                  reason: "ctl-932-wedged-never-started-exhausted",
+                }).catch(() => {});
+                intentAwareKill({ bgJobId: prevBgJobId });
+                log.warn(
+                  { ticket, phase, prevBgJobId, attempts: attempts.count, exhaustedProgress, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+                  "ctl-932: wedged-never-started replacement budget exhausted — escalating needs-human (not looping)",
+                );
+                return escalateOnce("wedged-never-started-exhausted", attempts.count, {
+                  bg_job_id: prevBgJobId,
+                  captured_logs_all_attempts: [
+                    ...attempts.captures,
+                    String(captured ?? "").slice(0, 2_000),
+                  ],
+                });
+              }
+              const attempt = attempts.count + 1;
+              appendWedgedEvent({
+                phase,
+                ticket,
+                orchId,
+                attempt,
+                bg_job_id: prevBgJobId,
+                agents_state: agent.state,
+                tempo: jobStat?.tempo ?? null,
+                detail: jobStat?.detail ?? null,
+                needs: jobStat?.needs ?? null,
+                captured_logs: captured,
+              });
+              recordNeverStartedAttempt(orchDir, ticket, phase, captured);
+              // Stop the wedged session (reap-intent for the reaper + inline
+              // best-effort stop, mirroring the no-progress STOP path), then
+              // flip the signal through the normal revive/redispatch path
+              // (reset-to-stalled + fresh dispatch, gen+1). Backoff is
+              // structural: the replacement's fresh startedAt keeps the gate
+              // silent for another neverStartedMs window.
+              emitReapIntent("phase.terminal.reap-requested", {
+                ticket,
+                phase,
+                bgJobId: prevBgJobId,
+                worktreePath: signal.raw?.worktreePath,
+                reason: "ctl-932-wedged-never-started",
+              }).catch(() => {});
+              intentAwareKill({ bgJobId: prevBgJobId });
+              const dr = reviveDispatch({ orchDir, ticket, phase, resumeSession: null, attempt: attempt + 1 });
+              if (dr.code === 0) {
+                log.warn(
+                  { ticket, phase, prevBgJobId, attempt, ageMs: now() - startedAtMs, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+                  "ctl-932: wedged-never-started worker stopped and replaced (no transcript + agents blocked)",
+                );
+              } else {
+                log.warn(
+                  { ticket, phase, attempt, code: dr.code, stderr: dr.stderr },
+                  "ctl-932: wedged replacement dispatch failed; will retry next tick",
+                );
+              }
+              return "wedged-redispatched";
+            }
+          }
+        }
+      }
+    }
+
     if (Number.isFinite(startedAtMs) && now() - startedAtMs > busyCeilingMs) {
       const workDone = hasProbe(phase) && probes[phase]({ ticket, repoRoot, orchDir });
       if (!workDone) {
@@ -1535,8 +2292,81 @@ export function reclaimDeadWorkIfPossible(
         return escalateOnce("busy-ceiling-exceeded", 0);
       }
     }
-    log.info({ ticket, phase, prevBgJobId }, "ctl-736: alive worker — reclaim suppressed");
-    return "alive-suppressed";
+    // CTL-809 — GHOST BREAKER. jobLifecycle reads ONLY the local state.json, which
+    // on CC 2.x is never rewritten terminal for a crashed/wedged --bg worker — so a
+    // corpse stuck at state:"working" (e.g. wedged on the bypass-permissions startup
+    // dialog) reads "alive" forever and is suppressed every tick. Cross-check the
+    // now-reliable (CTL-790/792) `claude agents` snapshot: a worker ABSENT from a
+    // FRESH snapshot, past the just-dispatched grace window, is genuinely gone — so
+    // fall through to the reclaim-eligible path below instead of suppressing forever.
+    //   • CTL-662-safe: a busy in-process sub-agent fan-out worker is STILL LISTED in
+    //     `claude agents` (active/idle), never absent → never reclaimed here.
+    //   • CTL-731/657-safe: STRICTLY gated on snap.isFresh — a stale/cold snapshot
+    //     skips the cross-check and suppresses exactly as before (no cold storm).
+    //   • just-spawned-safe: ghostGraceMs gate (reusing startedAtMs parsed above)
+    //     keeps a worker that has not yet registered in `claude agents` from being
+    //     false-reclaimed.
+    let ghostAbsent = false;
+    if (Number.isFinite(startedAtMs) && now() - startedAtMs > ghostGraceMs) {
+      let shortId = null;
+      if (prevBgJobId) {
+        try {
+          shortId = shortIdFromSessionId(prevBgJobId);
+        } catch {
+          shortId = null; // malformed bg_job_id → unresolvable → suppress (no throw)
+        }
+      }
+      if (shortId) {
+        const snap = agentsSnapshot();
+        if (snap?.isFresh) {
+          // CTL-809: a FRESH snapshot is authoritative — absent = ghost (reclaim),
+          // present = busy in-process fan-out (suppress, CTL-662). mtime is NOT
+          // consulted on this path: the snapshot is the better liveness signal.
+          if (agentForShortId(shortId, snap.agents) === null) {
+            ghostAbsent = true;
+            log.warn(
+              { ticket, phase, prevBgJobId, snapshotAgeMs: snap.ageMs },
+              "ctl-809: jobLifecycle-alive but ABSENT from fresh claude-agents snapshot — treating as dead (ghost breaker)",
+            );
+          }
+        } else {
+          // CTL-868: no FRESH snapshot to consult (CTL-829: `claude agents --json`
+          // is unreliable headless on the mini, so it is stale/cold here). Fall back
+          // to the state.json mtime floor: a `working` job whose state.json has not
+          // been rewritten in zombieStaleFloorMs is a corpse (Claude rewrites it far
+          // more often than 2h during real work). The high floor keeps an in-process
+          // fan-out safe (CTL-662), and this branch only runs when the fresh-agents
+          // cross-check cannot — so it never overrides a fresh "present" verdict.
+          const job = statJob(prevBgJobId);
+          // CTL-927: doc/long-fan-out phases keep state.json untouched during a
+          // multi-minute sub-agent fan-out, so the 2h mtime guess would false-kill a
+          // live worker on this cold-snapshot branch. Give them the 6h busy ceiling
+          // (the busy-ceiling escalation above already routes a genuinely-stuck doc
+          // worker to needs-human at 6h — escalate, never silent kill).
+          const mtimeFloorMs = MTIME_ZOMBIE_EXEMPT_PHASES.has(phase)
+            ? busyCeilingMs
+            : zombieStaleFloorMs;
+          if (job && Number.isFinite(job.mtimeMs) && now() - job.mtimeMs > mtimeFloorMs) {
+            ghostAbsent = true;
+            log.warn(
+              { ticket, phase, prevBgJobId, staleForMs: now() - job.mtimeMs, mtimeFloorMs },
+              "ctl-868: jobLifecycle-alive but state.json mtime stale beyond zombie floor (no fresh agents snapshot) — treating as dead (zombie breaker)",
+            );
+          }
+        }
+      }
+    }
+    if (!ghostAbsent) {
+      // CTL-932: surface the supervisor's self-report (tempo/detail/needs) —
+      // the fields that contained the 2026-06-09 diagnosis but were never read.
+      log.info(
+        { ticket, phase, prevBgJobId, tempo: jobStat?.tempo, detail: jobStat?.detail, needs: jobStat?.needs },
+        "ctl-736: alive worker — reclaim suppressed",
+      );
+      return "alive-suppressed";
+    }
+    // ghostAbsent → fall through to the dead-eligible reclaim path below (supersede
+    // guard → no-probe escalate (A) / probe-done reclaim (B) / revive).
   }
 
   // ── dead-terminal | dead-gone share the reclaim-eligible path below.
@@ -1639,6 +2469,7 @@ export function reclaimDeadWorkIfPossible(
       phase,
       ticket,
       orchId,
+      orchDir,
       death_signal,
       prev_state_json_mtime: prevStateJsonMtime,
       probe_passed: true,
@@ -1667,6 +2498,11 @@ export function reclaimDeadWorkIfPossible(
       probeChecked: probe_checked,
       reclaimedBgJobId: prevBgJobId,
     });
+    // CTL-932 fix #3: the phase SUCCEEDED (work committed) — clear any stale
+    // never-started attempt marker so a much-later legitimate re-dispatch of the
+    // same (ticket, phase) starts the wedge budget fresh instead of inheriting a
+    // count>=cap that would escalate on the first transient blip.
+    clearNeverStartedAttempts(orchDir, ticket, phase);
     log.info({ ticket, phase }, "reclaim-dead-work: dead worker reclaimed (work was committed)");
     return "reclaimed";
   }
@@ -1749,7 +2585,7 @@ export function reclaimDeadWorkIfPossible(
         worktreePath: signal.raw?.worktreePath,
         reason: "ctl-736-no-progress-stopped",
       }).catch(() => {});
-      killBgJob({ bgJobId: prevBgJobId });
+      intentAwareKill({ bgJobId: prevBgJobId });
     }
     log.warn(
       { ticket, phase, prevBgJobId, currentProgress, lastProgress },
@@ -1763,6 +2599,11 @@ export function reclaimDeadWorkIfPossible(
   }
   // Forward progress was made → record the new high-water mark and revive below.
   writeProgressMark(orchDir, ticket, phase, currentProgress);
+  // CTL-932 fix #3: forward progress proves a replacement actually started and
+  // is producing work — clear any never-started attempt marker so a much-later
+  // wedge of the same (ticket, phase) earns a fresh replacement budget rather
+  // than inheriting a stale count>=cap and escalating with zero retries.
+  clearNeverStartedAttempts(orchDir, ticket, phase);
 
   // Attempt number for the revive audit + `.revive-N.applied` marker. This is now
   // TELEMETRY ONLY (no longer a budget gate — the progress gate bounds retries).
@@ -1809,7 +2650,7 @@ export function reclaimDeadWorkIfPossible(
       worktreePath: signal.raw?.worktreePath,
       prevStateJsonMtime,
     }).catch(() => {});
-    killBgJob({ bgJobId: prevBgJobId });
+    intentAwareKill({ bgJobId: prevBgJobId });
   }
 
   const attempt = priorRevives + 1;
@@ -1826,6 +2667,7 @@ export function reclaimDeadWorkIfPossible(
     phase,
     ticket,
     orchId,
+    orchDir,
     attempt,
     reason: "work-not-done-after-stale-bg",
     prev_state_json_mtime: prevStateJsonMtime,
@@ -1913,4 +2755,292 @@ export function recoverStartup({ orchDir, exec, statJob, detectCold = detectCold
     workers,
     coldStart,
   };
+}
+
+// readClusterHeartbeats — CTL-859. Scan the unified event log for
+// `node.heartbeat` events and return the most-recent ISO timestamp seen for
+// each host: { [hostName]: lastSeenISO }. DORMANT for now — no caller consumes
+// this in PR1; later PRs (takeover/healing) use it to decide "dead" = no
+// heartbeat for a generous grace window (see the design doc: 5–10 min).
+//
+// Reads the host name from the event payload (body.payload["host.name"]),
+// falling back to the resource block (resource["host.name"]). Best-effort:
+// missing log, unreadable file, and malformed lines are skipped, never thrown.
+// `logPath` is injectable for tests; defaults to the same getEventLogPath()
+// every emitter uses.
+export function readClusterHeartbeats({
+  logPath = getEventLogPath(),
+  roster = getClusterHosts(),
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
+  const lastSeen = {};
+  let raw;
+  try {
+    raw = readFileSync(logPath, "utf8");
+  } catch {
+    // no event log yet — continue to peer merge below if multi-host
+  }
+  if (raw) {
+    for (const line of raw.split("\n")) {
+      if (!line) continue;
+      if (!line.includes(HEARTBEAT_EVENT)) continue; // cheap pre-filter
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue; // partial/garbage line
+      }
+      if (evt?.attributes?.["event.name"] !== HEARTBEAT_EVENT) continue;
+      const host =
+        evt?.body?.payload?.["host.name"] ?? evt?.resource?.["host.name"];
+      const ts = evt?.ts;
+      if (typeof host !== "string" || host.length === 0) continue;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // Keep the latest ts per host (ISO-8601 sorts lexicographically).
+      if (!lastSeen[host] || ts > lastSeen[host]) lastSeen[host] = ts;
+    }
+  }
+
+  // CTL-1090: multi-host cross-host merge. Single-host (roster<=1) ⇒ exact no-op.
+  if (Array.isArray(roster) && roster.length > 1 && anchorIssue) {
+    let peers = {};
+    try {
+      peers = readPeers(anchorIssue) ?? {};
+    } catch {
+      peers = {}; // fail-open: a Linear hiccup must never break liveness
+    }
+    for (const [host, rec] of Object.entries(peers)) {
+      const ts = rec?.last_seen;
+      if (typeof ts !== "string" || ts.length === 0) continue;
+      // CTL-1090 review hardening: a peer's last_seen is untrusted input. Reject
+      // anything Date.parse can't read so a garbage value (e.g. "zzz") — which
+      // would sort ABOVE real ISO strings lexicographically and then make the host
+      // look forever-alive once deadHosts does Date.parse(seen) (NaN < cutoff is
+      // false) — can never poison the merge.
+      const peerMs = Date.parse(ts);
+      if (!Number.isFinite(peerMs)) continue; // unparseable → drop (fail-open)
+      // Keep the freshest ts per host. Compare NUMERICALLY (Date.parse), not
+      // lexicographically: the local event log carries second-precision ts
+      // ("…02Z", heartbeat-event.mjs strips millis) while peers publish
+      // millisecond ISO ("…02.500Z"), and "…02.500Z" < "…02Z" as strings — a
+      // lexicographic compare would discard a genuinely newer peer ts.
+      const cur = lastSeen[host];
+      if (!cur || peerMs > Date.parse(cur)) lastSeen[host] = ts;
+    }
+  }
+
+  return lastSeen;
+}
+
+// phaseAlreadyComplete — true when the unified event log already contains a
+// `phase.<phase>.complete.<ticket>` event. The resume path checks this before
+// re-dispatching so a survivor never re-emits a completion the dead host already
+// emitted (dedup). Best-effort: a missing/unreadable log ⇒ false; never throws.
+export function phaseAlreadyComplete(
+  ticket,
+  phase,
+  { readLog = () => readFileSync(getEventLogPath(), "utf8") } = {},
+) {
+  const needle = `phase.${phase}.complete.${ticket}`;
+  let raw;
+  try {
+    raw = readLog();
+  } catch {
+    return false;
+  }
+  for (const line of raw.split("\n")) {
+    if (!line || !line.includes(needle)) continue;
+    try {
+      if (JSON.parse(line)?.attributes?.["event.name"] === needle) return true;
+    } catch {
+      // partial/malformed line — skip
+    }
+  }
+  return false;
+}
+
+// RESUME_PHASE_ORDER — the linear pipeline phases in forward order, derived from
+// STAGE_RANK (ancillary `remediate` excluded). Reverse-walked by inferResumePhase.
+const RESUME_PHASE_ORDER = Object.entries(STAGE_RANK)
+  .filter(([id]) => id !== "remediate")
+  .sort((a, b) => a[1] - b[1])
+  .map(([id]) => id);
+
+// deadHosts — given last-seen heartbeats, the roster, a grace window, and now,
+// return roster hosts whose newest heartbeat is older than (nowMs - graceMs).
+// A host ABSENT from lastSeen is NOT flagged dead: with per-host local logs the
+// survivor may simply never have seen it (Open Question 1). Conservative: unknown ⇒ alive.
+export function deadHosts({ lastSeen, roster, graceMs, nowMs }) {
+  const cutoff = nowMs - graceMs;
+  return roster.filter((h) => {
+    const seen = lastSeen[h];
+    if (!seen) return false; // never seen here ⇒ not our call to make
+    return Date.parse(seen) < cutoff; // last heartbeat older than grace ⇒ dead
+  });
+}
+
+// survivingRoster — roster minus the dead hosts. Pure; never mutates the input
+// (dead hosts stay in committed hosts.json; this is a transient in-memory subset).
+export function survivingRoster(roster, dead) {
+  const deadSet = new Set(dead);
+  return roster.filter((h) => !deadSet.has(h));
+}
+
+// inferResumePhase — walk the pipeline in REVERSE; the first probe that returns
+// true is the last completed phase, so resume at the phase after it. Returns the
+// entry phase when nothing is done, and null when every phase is complete (terminal).
+// The `probes` option accepts the same (ticket, opts) signature as WORK_DONE_PROBES;
+// tests inject uniform `async () => bool` fakes.
+export async function inferResumePhase(ticket, { probes = WORK_DONE_PROBES, cwd } = {}) {
+  for (let i = RESUME_PHASE_ORDER.length - 1; i >= 0; i--) {
+    const phase = RESUME_PHASE_ORDER[i];
+    const probe = probes[phase];
+    if (typeof probe !== "function") continue;
+    if (await probe(ticket, { cwd })) {
+      const next = RESUME_PHASE_ORDER[i + 1];
+      return next ?? null; // last phase done ⇒ terminal
+    }
+  }
+  return NEW_WORK_ENTRY_PHASE; // nothing done ⇒ start at entry
+}
+
+// defaultOwnedTicketsForHost — return the in-flight tickets for a dead host.
+// Primary path (CTL-1090): read the dead host's published `in_flight_tickets`
+// from the cross-host liveness channel (one Linear read = liveness + tickets).
+// Fallback: scan the local worker signal directory for non-terminal signals
+// dispatched from the dead host (the original local-only behavior, unchanged).
+// `anchorIssue`/`readPeers` are injectable for unit tests.
+function defaultOwnedTicketsForHost(deadHost, {
+  orchDir,
+  anchorIssue = getLivenessAnchorIssue(),
+  readPeers = (anchor) => readPeerHeartbeatsSync({ anchorIssue: anchor }),
+} = {}) {
+  if (anchorIssue) {
+    try {
+      const peerMap = readPeers(anchorIssue);
+      const rec = peerMap?.[deadHost];
+      if (Array.isArray(rec?.in_flight_tickets) && rec.in_flight_tickets.length > 0) {
+        return [...new Set(rec.in_flight_tickets)];
+      }
+    } catch { /* fail-open → local scan */ }
+  }
+  // Fallback: local signal scan (original behavior; also runs when anchor unset).
+  const signals = readWorkerSignals(orchDir);
+  const tickets = new Set();
+  for (const sig of signals) {
+    if (!sig.raw?.host?.name || sig.raw.host.name !== deadHost) continue;
+    // Only include non-terminal tickets — terminal ones are already done.
+    if (TERMINAL.has(sig.status)) continue;
+    tickets.add(sig.ticket);
+  }
+  return [...tickets];
+}
+
+// reclaimDeadHostWork — takeover sweep (CTL-863, Part A).
+//
+// When a host goes silent (heartbeat silence > graceMs), surviving hosts detect it,
+// re-own its tickets via HRW over the surviving roster, claim (gen+1) via CAS, infer
+// the last-completed phase from durable artifacts, and dispatch the next phase —
+// skipping any phase already present in the event log.
+//
+// SINGLE-HOST INSTALLS ARE AN EXACT NO-OP: the function short-circuits immediately
+// when `roster.length <= 1`. Every new behavior is gated on multiHost.
+//
+// All collaborators are injectable for unit tests (no network, fs, or subprocess
+// in tests — they inject fakes for every seam).
+export async function reclaimDeadHostWork(
+  { orchDir },
+  {
+    readHeartbeats = () => readClusterHeartbeats({}),
+    roster = getClusterHosts(),
+    self = getHostName(),
+    graceMs = HEARTBEAT_GRACE_MS,
+    nowMs = Date.now(),
+    ownedTicketsForHost = (deadHost) => defaultOwnedTicketsForHost(deadHost, { orchDir }),
+    ownerForTicket: ownerFn = ownerForTicket,
+    claim = (ticket, phase) => claimDispatchSync({ ticket, hostName: self, phase }),
+    inferResume = (ticket, cwd) => inferResumePhase(ticket, { cwd }),
+    alreadyComplete = (ticket, phase) => phaseAlreadyComplete(ticket, phase),
+    rebuildWorktree = (ticket) => {
+      const result = defaultRebuildWorktree(ticket, { orchDir });
+      return result;
+    },
+    thoughtsPull = (cwd) => defaultThoughtsPull(cwd),
+    dispatch = (od, ticket, phase, cwd) =>
+      dispatchTicket(od, ticket, phase, { dispatch: defaultDispatch }),
+  } = {},
+) {
+  const taken = [];
+
+  // Single-host no-op (every new behavior gated on multiHost).
+  if (!Array.isArray(roster) || roster.length <= 1) return { taken };
+
+  const lastSeen = readHeartbeats();
+  const dead = deadHosts({ lastSeen, roster, graceMs, nowMs });
+  if (dead.length === 0) return { taken };
+
+  const survivors = survivingRoster(roster, dead);
+
+  for (const deadHost of dead) {
+    const tickets = ownedTicketsForHost(deadHost) ?? [];
+    for (const ticket of tickets) {
+      // HRW check: are we the new owner over the surviving roster?
+      if (ownerFn(ticket, survivors) !== self) continue;
+
+      // Soft-CAS claim: bump generation to take ownership.
+      const claimRes = claim(ticket, NEW_WORK_ENTRY_PHASE);
+      if (!claimRes?.won) continue;
+
+      // Rebuild the worktree on the ticket branch.
+      const wt = rebuildWorktree(ticket);
+      if (!wt?.ok) continue;
+
+      // CTL-866: refresh thoughts/ before the artifact probes read it, so a
+      // takeover host sees the dead host's pushed research/plan docs.
+      // Fail-open: a failed pull must not abort reclaim (worst case the probe
+      // re-dispatches, the prior behavior).
+      try { thoughtsPull(wt.cwd); } catch { /* fail-open */ }
+
+      // Infer the next phase to dispatch from durable artifacts.
+      const phase = await inferResume(ticket, wt.cwd);
+      if (!phase) continue; // terminal — nothing to resume
+
+      // Dedup: skip if the dead host already emitted this phase's complete event.
+      if (alreadyComplete(ticket, phase)) continue;
+
+      const r = dispatch(orchDir, ticket, phase, wt.cwd);
+      if (r?.code === 0) {
+        taken.push({ ticket, phase, generation: claimRes.generation });
+      }
+    }
+  }
+
+  return { taken };
+}
+
+// defaultThoughtsPull — refresh the thoughts/ git repo inside the rebuilt
+// worktree before artifact probes read it. Best-effort; `humanlayer thoughts
+// sync` is the available primitive (no `thoughts pull` subcommand exists).
+// Returns { ok }. Never throws (caller also guards).
+function defaultThoughtsPull(cwd) {
+  try {
+    const res = spawnSync("humanlayer", ["thoughts", "sync"], { cwd, stdio: "ignore" });
+    return { ok: res.status === 0 };
+  } catch {
+    return { ok: false };
+  }
+}
+
+// defaultRebuildWorktree — fetch the ticket branch and add/reuse the worktree.
+// Best-effort; returns { ok, cwd }. Fail-open: errors produce { ok: false, cwd: null }.
+function defaultRebuildWorktree(ticket, { orchDir }) {
+  try {
+    const repoRoot = join(orchDir, "..", "..");
+    const res = createWorktree({ ticket, repoRoot });
+    if (res?.code === 0 && res.worktreePath) return { ok: true, cwd: res.worktreePath };
+    return { ok: false, cwd: null };
+  } catch {
+    return { ok: false, cwd: null };
+  }
 }

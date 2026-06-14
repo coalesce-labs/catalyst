@@ -9,37 +9,35 @@ version: 1.0.0
 
 # phase-monitor-deploy
 
-Greenfield phase agent shipped in CTL-451 (Initiative 1 Phase 5). Runs after `phase-pr`
-has merged the PR. Subscribes to GitHub `deployment_status` events on the merge commit
-SHA, then delegates canary verification to `/canary` (gstack) once the deploy reaches a
-terminal state.
+Greenfield phase agent shipped in CTL-451 (Initiative 1 Phase 5). Runs after `phase-pr` has merged
+the PR. Subscribes to GitHub `deployment_status` events on the merge commit SHA, then delegates
+canary verification to `/canary` (gstack) once the deploy reaches a terminal state.
 
-Optimized for Haiku — the body is purely procedural shell. The model context is only used
-to gate the `/canary` skill invocation (which itself decides how aggressively to probe
-the live URL).
+Optimized for Haiku — the body is purely procedural shell. The model context is only used to gate
+the `/canary` skill invocation (which itself decides how aggressively to probe the live URL).
 
 ## Inputs
 
 Environment:
+
 - `TICKET` — Linear identifier (e.g. `CTL-451`). Required.
-- `WORKER_DIR` — directory containing `phase-monitor-merge.json` (read,
-  primary input) and where `phase-monitor-deploy.json` (write) lands. Defaults
-  to `${ORCH_DIR}/workers/${TICKET}` if set, else `$(pwd)`.
-- `PHASE_DEPLOY_TIMEOUT_SEC` — seconds to wait for a `deployment_status` event matching
-  the merge SHA. Default `1800` (30 minutes). Setting to a small value is the
-  documented way to skip deploy verification in test/dev environments.
-- `PHASE_DEPLOY_ENV` — GitHub Deployment environment name to match (default
-  `production`). Set per-project as needed.
+- `WORKER_DIR` — directory containing `phase-monitor-merge.json` (read, primary input) and where
+  `phase-monitor-deploy.json` (write) lands. Defaults to `${ORCH_DIR}/workers/${TICKET}` if set,
+  else `$(pwd)`.
+- `PHASE_DEPLOY_TIMEOUT_SEC` — seconds to wait for a `deployment_status` event matching the merge
+  SHA. Default `1800` (30 minutes). Setting to a small value is the documented way to skip deploy
+  verification in test/dev environments.
+- `PHASE_DEPLOY_ENV` — GitHub Deployment environment name to match (default `production`). Set
+  per-project as needed.
 - `PHASE_CANARY_CMD` — command line used to invoke the canary skill. Default
-  `claude --model haiku -p /canary --output-format json`. Test runners override this with
-  a stub that emits a fixture canary result.
+  `claude --model haiku -p /canary --output-format json`. Test runners override this with a stub
+  that emits a fixture canary result.
 - `CATALYST_ORCHESTRATOR_ID`, `CATALYST_SESSION_ID` — used for event trace/span id derivation.
 
-`gh` CLI on `$PATH`, authenticated against the GitHub repo, is required only
-when `phase-monitor-merge.json` exists but `.pr.mergeCommitSha` is empty (the
-REST fallback path). In the common case (where `phase-monitor-merge` recorded
-the SHA successfully), `gh` is not invoked. The fallback also reads PR number
-from `phase-pr.json`.
+`gh` CLI on `$PATH`, authenticated against the GitHub repo, is required only when
+`phase-monitor-merge.json` exists but `.pr.mergeCommitSha` is empty (the REST fallback path). In the
+common case (where `phase-monitor-merge` recorded the SHA successfully), `gh` is not invoked. The
+fallback also reads PR number from `phase-pr.json`.
 
 ## phase-monitor-merge.json contract (input shape)
 
@@ -53,10 +51,9 @@ from `phase-pr.json`.
 }
 ```
 
-The skill reads `.pr.mergeCommitSha` only; everything else is informational.
-The file is written by [[phase-monitor-merge]] after `gh pr merge --squash`
-confirms via REST (`gh api repos/<owner>/<repo>/pulls/<num>` returns
-`.merged == true`).
+The skill reads `.pr.mergeCommitSha` only; everything else is informational. The file is written by
+[[phase-monitor-merge]] after `gh pr merge --squash` confirms via REST
+(`gh api repos/<owner>/<repo>/pulls/<num>` returns `.merged == true`).
 
 ## /goal
 
@@ -72,12 +69,11 @@ confirms via REST (`gh api repos/<owner>/<repo>/pulls/<num>` returns
        deploy event is a skip, not a failure)."
 ```
 
-CTL-656: monitor-deploy is **not** a passive watch — its goal is that the deploy
-*actually succeeded*, so the `/goal` evaluator keeps the agent driving toward a
-green canary, including a remediation attempt on a failed deploy, instead of
-emitting `failed`/`skipped` and walking away on the first terminal signal. The
-timeout path is the one legitimate early exit. (Production mode only; the CI
-bash body below remains self-sufficient and deterministic.)
+CTL-656: monitor-deploy is **not** a passive watch — its goal is that the deploy _actually
+succeeded_, so the `/goal` evaluator keeps the agent driving toward a green canary, including a
+remediation attempt on a failed deploy, instead of emitting `failed`/`skipped` and walking away on
+the first terminal signal. The timeout path is the one legitimate early exit. (Production mode only;
+the CI bash body below remains self-sufficient and deterministic.)
 
 ## Body
 
@@ -316,9 +312,11 @@ EOF
     [[ -n "${MIRROR_FOOTER}" ]] && MIRROR_BODY="${MIRROR_BODY}
 ${MIRROR_FOOTER}"
   fi
+  # CTL-864: cross-host fence — bow out if a takeover superseded us. No-op single-host.
+  "${__PM_REPO_ROOT}/plugins/dev/scripts/lib/cluster-fence-guard.sh" --phase "${CATALYST_PHASE:-monitor-deploy}" --ticket "$TICKET" || exit 10
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-monitor-deploy: linear-comment-post failed (continuing)" >&2
@@ -340,13 +338,12 @@ exit 1
 
 ## What an Opus-mode invocation adds
 
-Haiku is the default. If the orchestrator routes this to an Opus agent (e.g., for a
-high-stakes deploy where the canary is borderline), the agent should:
+Haiku is the default. If the orchestrator routes this to an Opus agent (e.g., for a high-stakes
+deploy where the canary is borderline), the agent should:
 
 1. Run the bash body to drive the deploy event wait + canary invocation.
-2. Read `canary-output.json` and decide whether the canary result is materially actionable
-   beyond the binary `status` field (e.g., performance regressions worth flagging).
+2. Read `canary-output.json` and decide whether the canary result is materially actionable beyond
+   the binary `status` field (e.g., performance regressions worth flagging).
 3. Optionally extend the comment posted by a later phase agent with model-grade insight.
 
-The bash body alone is enough to drive the state machine. Opus-mode add-ons are pure
-upside.
+The bash body alone is enough to drive the state machine. Opus-mode add-ons are pure upside.

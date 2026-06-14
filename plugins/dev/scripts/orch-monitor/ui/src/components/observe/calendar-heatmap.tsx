@@ -1,0 +1,35 @@
+// calendar-heatmap.tsx — a PURE Tailwind CSS-grid heatmap (NOT Recharts). Used
+// for Telemetry P5 (worker × time) and DevOps P6 (ship-day weekday × hour).
+// Each cell is a div whose opacity encodes its value on a 5-level ramp over a
+// single color token (var(--chart-1) by default). No axes, no SVG, no charting
+// library — just a grid of divs.
+//
+// The value → opacity-bucket mapping is extracted into a PURE exported function
+// (heatmapBucket) so it is unit-testable in isolation (observe-kit.test.ts).
+
+
+
+// 5-level opacity ramp. Bucket 0 = "empty / silence" (near-transparent), 4 = max.
+export const HEATMAP_OPACITY_RAMP = [0.06, 0.28, 0.5, 0.72, 1] as const;
+export const HEATMAP_BUCKETS = HEATMAP_OPACITY_RAMP.length; // 5
+
+/**
+ * PURE value → bucket index [0..4] mapping for the 5-level opacity ramp.
+ *
+ * - value <= 0 (or max <= 0)        → bucket 0 (silence / no activity)
+ * - otherwise the value is scaled by `max` into one of the 4 non-zero buckets,
+ *   so the busiest cell(s) land in the top bucket and everything proportionally
+ *   below. We use ceil over a half-open scale so any positive value gets at
+ *   least bucket 1 (a single event is visible, never silently dropped to 0).
+ *
+ * Returns an integer in [0, HEATMAP_BUCKETS - 1].
+ */
+export function heatmapBucket(value: number, max: number): number {
+  if (!(value > 0) || !(max > 0)) return 0;
+  if (value >= max) return HEATMAP_BUCKETS - 1; // 4
+  // Map (0, max) → buckets {1, 2, 3} (4 is reserved for value >= max).
+  const topNonMax = HEATMAP_BUCKETS - 1; // 4
+  const bucket = Math.ceil((value / max) * (topNonMax - 1)); // (value/max)*3, ceil → 1..3
+  return Math.min(Math.max(bucket, 1), topNonMax - 1);
+}
+

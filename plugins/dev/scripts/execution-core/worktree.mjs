@@ -59,12 +59,15 @@ export function parseWorktreeForBranch(porcelain, ticket) {
   return null;
 }
 
-// teardownWorktree — remove a ticket's worktree. The path is resolved from
-// `git worktree list --porcelain` (the worktree on branch refs/heads/<ticket>)
-// rather than reconstructed, so it is correct regardless of projectKey /
-// worktreeDir config. Returns true when the worktree is gone — removed now, or
-// already absent (the idempotent end state); false only when git could not
-// list or could not remove. Never throws.
+// teardownWorktree — the RAW worktree remover (resolve path by branch, then
+// `git worktree remove`). CTL-791: it is **no longer `--force`** — a plain remove
+// refuses on a dirty/locked tree rather than yanking uncommitted/untracked work.
+// It performs NO evidence gating; callers MUST funnel terminal removals through
+// `safeTeardownWorktree` (worktree-safety.mjs), which checks GitHub-merged + clean
+// + no-live-session + orchestrator-provenance and archives first. This export
+// stays only as that gate's injected `removeWorktree` seam. Returns true when the
+// worktree is gone (removed now, or already absent); false on a list/remove
+// failure (incl. a `git worktree remove` refusal — which is the SAFE direction).
 export function teardownWorktree({ repoRoot, ticket } = {}, { spawn = spawnSync } = {}) {
   if (!repoRoot || !ticket) return false;
   const list = spawn("git", ["-C", repoRoot, "worktree", "list", "--porcelain"], {
@@ -73,7 +76,7 @@ export function teardownWorktree({ repoRoot, ticket } = {}, { spawn = spawnSync 
   if (list.error || (list.status ?? 1) !== 0) return false; // cannot list — retry later
   const path = parseWorktreeForBranch(list.stdout ?? "", ticket);
   if (!path) return true; // no worktree for this ticket — already torn down
-  const rm = spawn("git", ["-C", repoRoot, "worktree", "remove", "--force", path], {
+  const rm = spawn("git", ["-C", repoRoot, "worktree", "remove", path], {
     encoding: "utf8",
   });
   return !rm.error && (rm.status ?? 1) === 0;

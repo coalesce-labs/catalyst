@@ -48,10 +48,15 @@ prompt: |
     1. Resolve target date and output path.
     2. Gather sources (Linear, GitHub, Granola, Drive, Calendar) in parallel.
     3. Compute decisions (ADR drift via CTL-459's adr-drift.sh, blocked PRs,
-       judgment-call tickets).
-    4. Render `thoughts/briefings/<date>.md` with validated YAML frontmatter.
-    5. Fan-out to Slack DM, Slack channel, Notion, and a Loom script file.
-    6. End the session.
+       judgment-call tickets, pending compound ADR proposals) plus the
+       compound digests — friction + learnings since last briefing (CTL-789).
+    4. Gather "today" incl. retro signals: the latest ticket-retro's open
+       watch-items from thoughts/shared/retros/ticket/ (CTL-814 / CTL-831).
+    5. Render `thoughts/briefings/<date>.md` with validated YAML frontmatter
+       ("Plan today" carries the Retro signals sub-section), then append the
+       Friction / Learnings digest body sections.
+    6. Fan-out to Slack DM, Slack channel, Notion, and a Loom script file.
+    7. End the session.
 
   Write-back is handled by the base agent's startup ritual:
     - §1a clones the thoughts repo writable at `/workspace/thoughts-writable/`
@@ -64,6 +69,10 @@ prompt: |
   Success criteria:
     - `thoughts/briefings/<YYYY-MM-DD>.md` exists in the writable clone.
     - The frontmatter validates (the skill calls validate-frontmatter.sh).
+    - "Plan today" includes the Retro signals sub-section (open watch-items
+      from the latest thoughts/shared/retros/ticket/ retro; `_no data_` when
+      none) and the body carries the two compound digests ("Friction since
+      last briefing", "Learnings since last briefing"; `_none_` when empty).
     - Push to `routines/briefings` succeeds.
     - The `output_status` block on the briefing markdown reflects each
       destination's outcome (skipped, sent, or failed — never silent).

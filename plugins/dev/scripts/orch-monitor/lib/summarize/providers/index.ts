@@ -3,6 +3,7 @@ import type { ProviderName } from "../config";
 import { anthropicProvider } from "./anthropic";
 import { openaiProvider } from "./openai";
 import { grokProvider } from "./grok";
+import { claudeCliProvider } from "./claude-cli";
 
 export type { AiFetcher } from "../../ai-briefing";
 
@@ -33,6 +34,8 @@ export function getProvider(name: ProviderName): SummarizeProvider {
       return openaiProvider;
     case "grok":
       return grokProvider;
+    case "claude-cli":
+      return claudeCliProvider;
   }
 }
 

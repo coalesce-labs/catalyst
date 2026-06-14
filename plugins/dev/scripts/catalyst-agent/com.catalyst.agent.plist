@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent template for catalyst-agent (macOS) — CTL-812.
+
+  This is a TEMPLATE. install.sh substitutes the REPLACE_WITH_* tokens for
+  real values before copying it into ~/Library/LaunchAgents/. Run
+  `node catalyst-agent.mjs --install` for the manual instructions.
+
+  StartInterval (seconds) drives the launchd-side cadence. The agent itself runs
+  with --once: launchd re-launches it every interval, the process samples each
+  enabled domain once, then exits 0. Keep StartInterval >= the agent's
+  CATALYST_AGENT_INTERVAL_MS floor (180s) so we never hammer the usage endpoint.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.catalyst.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE_WITH_NODE</string>
+    <string>REPLACE_WITH_AGENT</string>
+    <string>--once</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>REPLACE_WITH_PATH</string>
+    <key>HOME</key>
+    <string>REPLACE_WITH_HOME</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>REPLACE_WITH_HOME/catalyst/catalyst-agent.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>REPLACE_WITH_HOME/catalyst/catalyst-agent.log</string>
+</dict>
+</plist>

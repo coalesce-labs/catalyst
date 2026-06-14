@@ -2,6 +2,22 @@ import type { KnipConfig } from "knip";
 
 const config: KnipConfig = {
   ignoreExportsUsedInFile: true,
+  // Tags: honour @ignore JSDoc annotation on exports (e.g. DetailBody, contract types).
+  tags: ["-ignore"],
+  // Unused files (dead code from prior tickets — pending cleanup):
+  ignoreFiles: [
+    "ui/src/components/layout/sidebar.tsx",
+    "ui/src/components/workspace-switcher.tsx",
+    // CTL-1100: shared governance building blocks shipped ahead of their
+    // consuming pages. Per the plan's scope boundary ("No Process / Execution /
+    // Rulebook surfaces — those are CTL-1101 / CTL-1102 / CTL-1103, which this
+    // ticket BLOCKS. We ship the shared building blocks, not the pages."), these
+    // have no consumer until those follow-up tickets land. Remove each entry as
+    // its consuming page wires the component in.
+    "ui/src/components/governance/derivation-tree.tsx",
+    "ui/src/components/governance/governance-flags-chip.tsx",
+    "ui/src/components/governance/journey-strip.tsx",
+  ],
   workspaces: {
     ".": {
       entry: [
@@ -9,6 +25,7 @@ const config: KnipConfig = {
         "catalyst-session.ts",
         "analyze-events.ts",
         "cli/hud.tsx",
+        "bin/gen-attribute-audit.ts",
       ],
       project: ["**/*.{ts,tsx}", "!ui/**", "!public/**"],
     },
@@ -19,6 +36,9 @@ const config: KnipConfig = {
         "tailwindcss",
         "tw-animate-css",
         "class-variance-authority",
+        // CTL-1003: loaded via `@plugin "@tailwindcss/typography"` in app.css —
+        // knip doesn't parse CSS @plugin imports, so it can't see the usage.
+        "@tailwindcss/typography",
       ],
     },
   },

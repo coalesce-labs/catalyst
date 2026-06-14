@@ -48,6 +48,15 @@ This workspace has no build process - it's markdown files and bash scripts.
 - **Agents are documentarians** — Never suggest improvements unless asked
 - **Preserve context** — Save to thoughts/, not just memory
 
+## Knowledge Store
+
+- `thoughts/shared/learnings/` — past problem→solution entries (grep by component/tags/problem_type).
+  Search before implementing or debugging in a known area. Curated by `/catalyst-dev:ticket-compound`.
+- `thoughts/shared/CONCEPTS.md` — shared domain vocabulary (reclaim, revive-budget, orphan, signal ownership…).
+- `thoughts/shared/retros/` — the compound-loop outputs, written automatically at every merge
+  (CTL-831): `ticket/<date>.md` cross-ticket retros with watch-items (`/catalyst-dev:ticket-retro`);
+  `estimate/<YYYY-WW>-compound-log.md` per-PR estimation actuals (`/catalyst-dev:compound-estimate`).
+
 ## Commit Conventions
 
 - `feat(dev): add new skill` — catalyst-dev minor bump
@@ -97,11 +106,12 @@ Code to reload. Changes are distributed via the Claude Code plugin marketplace.
 
 ## Orchestration
 
-Catalyst orchestrators (`/catalyst-dev:orchestrate`) ship work as **phase-agent workers** — one
-short-lived `claude --bg` job per phase, walking a 9-phase pipeline (triage → research → plan →
-implement → verify → review → pr → monitor-merge → monitor-deploy). Legacy `oneshot-legacy` mode
-(one long-lived `claude -p /catalyst-dev:oneshot` per ticket) is preserved as a fallback. The
-mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
+Catalyst's **execution-core daemon** ships work as **phase-agent workers** — one short-lived
+`claude --bg` job per phase, walking a 9-phase pipeline (triage → research → plan → implement →
+verify → review → pr → monitor-merge → monitor-deploy). The legacy wave-orchestration model —
+`/catalyst-legacy:orchestrate` and `oneshot-legacy` mode (one long-lived `claude -p
+/catalyst-legacy:oneshot` per ticket) — is preserved in the **catalyst-legacy** plugin as a
+fallback. The mode is selected by `.catalyst/config.json → catalyst.orchestration.dispatchMode`.
 
 Cross-process communication is built on a **single unified event log** at
 `~/catalyst/events/YYYY-MM.jsonl`. Workers, the phase dispatcher, the broker, the webhook

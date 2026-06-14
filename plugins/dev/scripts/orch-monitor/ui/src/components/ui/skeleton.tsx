@@ -1,7 +1,16 @@
+import type * as React from "react";
 import { cn } from "@/lib/utils";
 
-function Skeleton({ className }: { className?: string }) {
-  return <div className={cn("animate-shimmer rounded bg-surface-3", className)} />;
+// CTL-891: exported so the shadcn `sidebar` primitive's SidebarMenuSkeleton can
+// reuse the same shimmer skeleton. `style` / `data-*` passthrough lets the
+// sidebar drive its --skeleton-width and data-sidebar slots.
+export function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
+  return (
+    <div
+      className={cn("animate-shimmer rounded bg-surface-3", className)}
+      {...props}
+    />
+  );
 }
 
 function SkeletonKpiStrip() {

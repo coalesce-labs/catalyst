@@ -1,0 +1,754 @@
+// intent.test.mjs — CTL-936: closed-loop intent layer.
+//
+// TDD: all tests here DEFINE the contract before the implementation.
+// Frozen time (now is a passed constant, never Date.now()), injected fakes,
+// in-memory beliefs.db via openBeliefsDb.
+//
+// Test coverage:
+//   1. recordIntent — inserts with correct schema
+//   2. hasOpenIntent — open/satisfied/absent discrimination
+//   3. resolvePostcondition (via reconcileIntents) — all four kinds
+//   4. reconcileIntents marks satisfied when world changed
+//   5. reconcileIntents increments attempts + retries when not satisfied
+//   6. reconcileIntents CAPS the channel at maxAttempts (the R11 keystone,
+//      CTL-962): simulate the 8h kill-storm and prove it stops retrying after 2
+//      attempts, leaves outcome NULL (so R11/R12 derive next tick), caps attempts
+//      at maxAttempts, and emits NO event (escalate.mjs owns paging)
+//   7. mirror read-back mismatch → retry then satisfied on convergence
+//   8. label failure → channel caps, reconciler emits nothing (CTL-962)
+//   9. terminal-Done exempt (mirror kind)
+//  10. isIntentEffective guard
+//  11. getMaxAttempts reads cfg or defaults
+
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+import { openBeliefsDb } from "./schema.mjs";
+import {
+  recordIntent,
+  hasOpenIntent,
+  reconcileIntents,
+  isIntentEffective,
+  getMaxAttempts,
+} from "./intent.mjs";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+const NOW = 1_781_030_108_000; // 2026-06-09T18:35:08Z (frozen)
+const TICKET = "CTL-722";
+const PHASE = "implement";
+const SUBJECT_KILL = `${TICKET}/${PHASE}`;
+const SHORT_ID = "bg-abc123";
+const SESSION_ID = "5ad5c1ff-1111-2222-3333-444455556666";
+
+// ── Scratch dirs (cleanup) ────────────────────────────────────────────────────
+const tmps = [];
+function scratch() {
+  const d = mkdtempSync(join(tmpdir(), "ctl936-intent-"));
+  tmps.push(d);
+  return d;
+}
+
+let db;
+beforeEach(() => {
+  db = openBeliefsDb({ path: join(scratch(), "beliefs.db") });
+  // Insert a tick so intent.tick_id FK is valid
+  db.run("INSERT INTO tick (tick_id, now_ms, host) VALUES (1, ?, 'test-host')", [NOW]);
+});
+afterEach(() => {
+  try {
+    db.close();
+  } catch {
+    /* already closed */
+  }
+  while (tmps.length) {
+    try {
+      rmSync(tmps.pop(), { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+});
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function allIntents() {
+  return db.query("SELECT * FROM intent ORDER BY intent_id").all();
+}
+
+// Build a world snapshot that says the kill target is still registered (session
+// still in agents listing → postcondition NOT satisfied)
+function worldStillRegistered() {
+  const m = new Map();
+  m.set(SUBJECT_KILL, { session_id: SESSION_ID, short_id: SHORT_ID });
+  return { agentsBySubject: m };
+}
+
+// Build a world snapshot where the session is gone (kill satisfied)
+function worldSessionGone() {
+  const m = new Map(); // subject absent → null
+  return { agentsBySubject: m };
+}
+
+// ── 1. recordIntent inserts correct schema ────────────────────────────────────
+describe("recordIntent", () => {
+  test("inserts with correct fields and open outcome", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+    expect(typeof id).toBe("number");
+    const row = db.query("SELECT * FROM intent WHERE intent_id = ?").get(id);
+    expect(row.tick_id).toBe(1);
+    expect(row.kind).toBe("kill");
+    expect(row.subject).toBe(SUBJECT_KILL);
+    expect(row.outcome).toBeNull();
+    expect(row.attempts).toBe(0);
+    const pc = JSON.parse(row.postcondition);
+    expect(pc.kind).toBe("kill");
+    expect(pc.subject).toBe(SUBJECT_KILL);
+  });
+
+  test("records beliefId when provided", () => {
+    // Insert a stub belief
+    db.run(
+      "INSERT INTO belief (tick_id, stratum, name, subject, rule_id, source_fact_ids) VALUES (1, 1, 'test', 'CTL-722/implement', 'R1', '[]')",
+    );
+    const beliefId = db.query("SELECT last_insert_rowid() AS id").get().id;
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+      beliefId,
+    });
+    const row = db.query("SELECT belief_id FROM intent WHERE intent_id = ?").get(id);
+    expect(row.belief_id).toBe(beliefId);
+  });
+});
+
+// ── 2. hasOpenIntent ──────────────────────────────────────────────────────────
+describe("hasOpenIntent", () => {
+  test("returns false when no intent exists", () => {
+    expect(hasOpenIntent(db, "kill", SUBJECT_KILL)).toBe(false);
+  });
+
+  test("returns true for an open intent", () => {
+    recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    expect(hasOpenIntent(db, "kill", SUBJECT_KILL)).toBe(true);
+  });
+
+  test("returns false when the intent is satisfied", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    db.run("UPDATE intent SET outcome = 'satisfied' WHERE intent_id = ?", [id]);
+    expect(hasOpenIntent(db, "kill", SUBJECT_KILL)).toBe(false);
+  });
+
+  test("returns false when the intent is ineffective", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    db.run("UPDATE intent SET outcome = 'ineffective' WHERE intent_id = ?", [id]);
+    expect(hasOpenIntent(db, "kill", SUBJECT_KILL)).toBe(false);
+  });
+});
+
+// ── 3. reconcileIntents marks satisfied when world changed ────────────────────
+describe("reconcileIntents — satisfied path", () => {
+  test("kill intent satisfied when session leaves agents listing", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+
+    const result = reconcileIntents(db, 1, worldSessionGone(), { maxAttempts: 2, enforce: false });
+    expect(result.satisfied).toBe(1);
+    expect(result.retried).toBe(0);
+    expect(result.ineffective).toBe(0);
+
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+
+  test("mirror intent satisfied when Linear state matches wantState", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "mirror",
+      subject: TICKET,
+      postcondition: { kind: "mirror", subject: TICKET, wantState: "Implement" },
+    });
+
+    const linearMap = new Map([[TICKET, "Implement"]]);
+    const result = reconcileIntents(
+      db,
+      1,
+      { linearStateByTicket: linearMap },
+      { maxAttempts: 2, enforce: false },
+    );
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+
+  test("label intent satisfied when label is present on ticket", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "label",
+      subject: TICKET,
+      postcondition: { kind: "label", subject: TICKET, label: "needs-human", present: true },
+    });
+
+    const labelsMap = new Map([[TICKET, new Set(["needs-human", "orchestrator"])]]);
+    const result = reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: labelsMap },
+      { maxAttempts: 2, enforce: false },
+    );
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+});
+
+// ── 4. reconcileIntents increments attempts when unsatisfied ──────────────────
+describe("reconcileIntents — retry path", () => {
+  test("increments attempts on each unsatisfied tick (below maxAttempts)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+
+    // First tick: still registered → retry
+    reconcileIntents(db, 1, worldStillRegistered(), { maxAttempts: 3, enforce: false });
+    const r1 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(r1.attempts).toBe(1);
+    expect(r1.outcome).toBeNull(); // still open
+
+    // Second tick: still registered → retry again
+    reconcileIntents(db, 1, worldStillRegistered(), { maxAttempts: 3, enforce: false });
+    const r2 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(r2.attempts).toBe(2);
+    expect(r2.outcome).toBeNull();
+  });
+
+  test("satisfied after retry — outcome flips on convergence", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+
+    // Tick 1: not satisfied (session still listed)
+    reconcileIntents(db, 1, worldStillRegistered(), { maxAttempts: 3, enforce: false });
+    // Tick 2: satisfied (session gone)
+    const result = reconcileIntents(db, 1, worldSessionGone(), { maxAttempts: 3, enforce: false });
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome, attempts FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+    expect(row.attempts).toBe(1); // incremented once, then satisfied
+  });
+});
+
+// ── 5. THE KEYSTONE: kill-storm simulation (CTL-962 semantics) ────────────────
+// Simulate the 8h stop-storm scenario: daemon issues `claude stop` N times
+// against a session that never leaves the agents listing. After maxAttempts the
+// reconciler STOPS retrying — but CTL-962 says it must NOT decide the outcome:
+// outcome STAYS NULL and attempts plateau at maxAttempts so R11/R12 can derive
+// next tick and escalate.mjs (not the reconciler) pages. NO event is emitted
+// from reconcileIntents in either mode.
+describe("reconcileIntents — channel capped, outcome stays NULL (stop-storm keystone)", () => {
+  test("caps attempts at maxAttempts, leaves outcome NULL, emits NO event (enforce=true)", () => {
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+
+    // Tick 1: attempt 1 — session still listed, below maxAttempts=2 → retry
+    const r1 = reconcileIntents(db, 1, worldStillRegistered(), {
+      maxAttempts: 2,
+      enforce: true,
+      appendEvent,
+      now: NOW,
+    });
+    expect(r1.retried).toBe(1);
+    expect(r1.ineffective).toBe(0);
+    expect(events).toHaveLength(0); // reconciler NEVER emits (CTL-962)
+    const after1 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after1.attempts).toBe(1);
+    expect(after1.outcome).toBeNull();
+
+    // Tick 2: attempt 2 — still listed, reaches the cap → counted ineffective,
+    // outcome STAYS NULL (the reconciler no longer flips it), NO event emitted.
+    const r2 = reconcileIntents(db, 1, worldStillRegistered(), {
+      maxAttempts: 2,
+      enforce: true,
+      appendEvent,
+      now: NOW,
+    });
+    expect(r2.ineffective).toBe(1);
+    expect(r2.retried).toBe(0);
+    expect(events).toHaveLength(0); // still no event — escalate.mjs owns paging
+
+    const after2 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after2.attempts).toBe(2); // plateaued at maxAttempts
+    expect(after2.outcome).toBeNull(); // R11 keystone: outcome left NULL
+
+    // Tick 3: intent still open-and-capped. The storm is broken (NO third stop
+    // issued — capped branch does not re-issue), attempts do NOT exceed the cap,
+    // and outcome STAYS NULL so R11/R12 keep matching until escalate.mjs flips it.
+    const r3 = reconcileIntents(db, 1, worldStillRegistered(), {
+      maxAttempts: 2,
+      enforce: true,
+      appendEvent,
+      now: NOW,
+    });
+    expect(r3.satisfied).toBe(0);
+    expect(r3.retried).toBe(0);
+    expect(r3.ineffective).toBe(1); // still counted as capped, not retried
+    expect(events).toHaveLength(0);
+
+    const after3 = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after3.attempts).toBe(2); // NEVER exceeds the cap
+    expect(after3.outcome).toBeNull(); // still NULL — waiting on escalate.mjs
+  });
+
+  test("shadow mode: caps attempts, leaves outcome NULL, NO appendEvent (enforce=false)", () => {
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL, sessionNotRegistered: true },
+    });
+
+    // Run twice to exhaust attempts
+    reconcileIntents(db, 1, worldStillRegistered(), { maxAttempts: 2, enforce: false, appendEvent });
+    const r2 = reconcileIntents(db, 1, worldStillRegistered(), {
+      maxAttempts: 2,
+      enforce: false,
+      appendEvent,
+    });
+    expect(r2.ineffective).toBe(1);
+    expect(events).toHaveLength(0); // reconciler never emits
+
+    const after = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(after.attempts).toBe(2);
+    expect(after.outcome).toBeNull(); // CTL-962: outcome NOT flipped
+  });
+});
+
+// ── 6. mirror read-back mismatch → retry then satisfied ───────────────────────
+describe("mirror intent lifecycle", () => {
+  test("retries on mismatch, satisfied on convergence", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "mirror",
+      subject: TICKET,
+      postcondition: { kind: "mirror", subject: TICKET, wantState: "Implement" },
+    });
+
+    // Tick 1: Linear still says "Todo" → retry
+    const r1 = reconcileIntents(
+      db,
+      1,
+      { linearStateByTicket: new Map([[TICKET, "Todo"]]) },
+      { maxAttempts: 3, enforce: false },
+    );
+    expect(r1.retried).toBe(1);
+
+    // Tick 2: Linear now says "Implement" → satisfied
+    const r2 = reconcileIntents(
+      db,
+      1,
+      { linearStateByTicket: new Map([[TICKET, "Implement"]]) },
+      { maxAttempts: 3, enforce: false },
+    );
+    expect(r2.satisfied).toBe(1);
+
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+
+  test("terminal Done is exempt — treated as satisfied (no backward write)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "mirror",
+      subject: TICKET,
+      postcondition: { kind: "mirror", subject: TICKET, wantState: "Implement" },
+    });
+
+    // Linear shows "Done" → exempt, postcondition is satisfied (no re-write)
+    const result = reconcileIntents(
+      db,
+      1,
+      { linearStateByTicket: new Map([[TICKET, "Done"]]) },
+      { maxAttempts: 2, enforce: false },
+    );
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+});
+
+// ── 7. label failure → channel caps, reconciler never emits (CTL-962) ─────────
+// Pre-CTL-962 the reconciler emitted an intent.ineffective event when a label
+// write stayed unsatisfied at the cap. CTL-962 moves ALL escalation/paging to
+// escalate.mjs, so the reconciler now only caps the channel: it leaves outcome
+// NULL and emits NO event, in BOTH enforce and shadow mode.
+describe("label intent — channel caps, reconciler emits nothing", () => {
+  test("caps the channel, leaves outcome NULL, emits NO event (enforce=true)", () => {
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "label",
+      subject: TICKET,
+      postcondition: { kind: "label", subject: TICKET, label: "needs-human", present: true },
+    });
+
+    // Tick 1: label not on ticket → retry
+    const r1 = reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: new Map([[TICKET, new Set()]]) },
+      { maxAttempts: 2, enforce: true, appendEvent },
+    );
+    expect(r1.retried).toBe(1);
+    expect(events).toHaveLength(0);
+
+    // Tick 2: still not on ticket → reaches the cap → counted ineffective,
+    // outcome STAYS NULL, NO event (escalate.mjs owns paging).
+    const r2 = reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: new Map([[TICKET, new Set()]]) },
+      { maxAttempts: 2, enforce: true, appendEvent },
+    );
+    expect(r2.ineffective).toBe(1);
+    expect(events).toHaveLength(0);
+
+    const row = db.query("SELECT attempts, outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.attempts).toBe(2);
+    expect(row.outcome).toBeNull();
+  });
+
+  test("shadow mode also emits nothing and leaves outcome NULL (enforce=false)", () => {
+    const events = [];
+    const appendEvent = (evt) => events.push(evt);
+
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "label",
+      subject: TICKET,
+      postcondition: { kind: "label", subject: TICKET, label: "needs-human", present: true },
+    });
+
+    reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: new Map([[TICKET, new Set()]]) },
+      { maxAttempts: 2, enforce: false, appendEvent },
+    );
+    reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: new Map([[TICKET, new Set()]]) },
+      { maxAttempts: 2, enforce: false, appendEvent },
+    );
+    // Shadow: event NOT emitted
+    expect(events).toHaveLength(0);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
+  });
+});
+
+// ── 8. isIntentEffective guard ────────────────────────────────────────────────
+describe("isIntentEffective", () => {
+  test("returns true when no intent exists (channel viable)", () => {
+    expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(true);
+  });
+
+  test("returns true when intent is open and below maxAttempts", () => {
+    recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(true);
+  });
+
+  test("returns false when intent outcome='ineffective'", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    db.run("UPDATE intent SET outcome = 'ineffective' WHERE intent_id = ?", [id]);
+    expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(false);
+  });
+
+  test("returns false when intent outcome='escalated' (CTL-962: still suppress re-issuance)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "wake-diagnostician",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "wake-diag", subject: SUBJECT_KILL },
+    });
+    // escalate.mjs flips a capped intent to 'escalated' after paging once.
+    db.run("UPDATE intent SET attempts = 2, outcome = 'escalated' WHERE intent_id = ?", [id]);
+    expect(isIntentEffective(db, "wake-diagnostician", SUBJECT_KILL, { maxAttempts: 2 })).toBe(false);
+  });
+
+  test("returns false when intent is open but attempts >= maxAttempts (in-flight ineffective)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    db.run("UPDATE intent SET attempts = 2 WHERE intent_id = ?", [id]);
+    expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(false);
+  });
+
+  test("returns true when intent is satisfied (channel worked, no suppression needed)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    db.run("UPDATE intent SET outcome = 'satisfied' WHERE intent_id = ?", [id]);
+    expect(isIntentEffective(db, "kill", SUBJECT_KILL, { maxAttempts: 2 })).toBe(true);
+  });
+});
+
+// ── 9. getMaxAttempts ─────────────────────────────────────────────────────────
+describe("getMaxAttempts", () => {
+  test("reads from cfg when present", () => {
+    db.run("INSERT OR REPLACE INTO cfg (key, value_int) VALUES ('max_attempts', 5)");
+    expect(getMaxAttempts(db)).toBe(5);
+  });
+
+  test("defaults to 2 when cfg row absent", () => {
+    db.run("DELETE FROM cfg WHERE key = 'max_attempts'");
+    expect(getMaxAttempts(db)).toBe(2);
+  });
+});
+
+// ── 10. Multiple intents — only open ones are reconciled ─────────────────────
+describe("reconcileIntents — multi-intent isolation", () => {
+  test("satisfied intent is not re-evaluated in subsequent ticks", () => {
+    const id1 = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: "CTL-001/implement",
+      postcondition: { kind: "kill", subject: "CTL-001/implement" },
+    });
+    const id2 = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: "CTL-002/implement",
+      postcondition: { kind: "kill", subject: "CTL-002/implement" },
+    });
+
+    // Satisfy id1
+    db.run("UPDATE intent SET outcome = 'satisfied' WHERE intent_id = ?", [id1]);
+
+    // Only id2 is open; worldSessionGone → both subjects absent → id2 satisfies
+    const result = reconcileIntents(db, 1, worldSessionGone(), { maxAttempts: 2, enforce: false });
+    expect(result.satisfied).toBe(1); // only id2
+    expect(result.retried).toBe(0);
+  });
+
+  test("different kinds for same subject are independent", () => {
+    const kill_id = recordIntent(db, {
+      tickId: 1,
+      kind: "kill",
+      subject: SUBJECT_KILL,
+      postcondition: { kind: "kill", subject: SUBJECT_KILL },
+    });
+    const mirror_id = recordIntent(db, {
+      tickId: 1,
+      kind: "mirror",
+      subject: TICKET,
+      postcondition: { kind: "mirror", subject: TICKET, wantState: "Implement" },
+    });
+
+    // kill: session gone → satisfied; mirror: Linear still "Todo" → retry
+    const result = reconcileIntents(
+      db,
+      1,
+      {
+        agentsBySubject: new Map(), // no sessions
+        linearStateByTicket: new Map([[TICKET, "Todo"]]),
+      },
+      { maxAttempts: 3, enforce: false },
+    );
+    expect(result.satisfied).toBe(1);
+    expect(result.retried).toBe(1);
+
+    const k = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(kill_id);
+    expect(k.outcome).toBe("satisfied");
+    const m = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(mirror_id);
+    expect(m.outcome).toBeNull();
+  });
+});
+
+// ── 11. label intent with unreadable labels (null) stays open ─────────────────
+describe("unreadable world facts", () => {
+  test("mirror: null linearState → intent stays open (retry)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "mirror",
+      subject: TICKET,
+      postcondition: { kind: "mirror", subject: TICKET, wantState: "Implement" },
+    });
+
+    // linearCache returned null this tick
+    const result = reconcileIntents(
+      db,
+      1,
+      { linearStateByTicket: new Map([[TICKET, null]]) },
+      { maxAttempts: 3, enforce: false },
+    );
+    expect(result.retried).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
+  });
+
+  test("label: ticket absent from labelsByTicket → intent stays open", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "label",
+      subject: TICKET,
+      postcondition: { kind: "label", subject: TICKET, label: "needs-human", present: true },
+    });
+
+    const result = reconcileIntents(
+      db,
+      1,
+      { labelsByTicket: new Map() }, // TICKET absent
+      { maxAttempts: 3, enforce: false },
+    );
+    expect(result.retried).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
+  });
+});
+
+// ── CTL-1064: unstuck-sweep postcondition ────────────────────────────────────
+// Uses the outer `db` + `beforeEach`/`afterEach` already wired at the top of
+// this file — no nested setup needed. Each test inserts its own intent; the
+// outer beforeEach provides a fresh db + tick_id=1 for each test.
+describe("unstuck-sweep intent postcondition (CTL-1064)", () => {
+  test("signalStatus not 'stalled' or 'failed' → satisfied", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "running"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBe("satisfied");
+  });
+
+  test("signalStatus 'stalled' → not satisfied, retried", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "stalled"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+    const row = db.query("SELECT outcome FROM intent WHERE intent_id = ?").get(id);
+    expect(row.outcome).toBeNull();
+  });
+
+  test("signalStatus 'failed' → not satisfied, retried", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "failed"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("subject absent from signalStatusBySubject → unreadable, intent stays open (retry)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    // subject absent from map → .get() returns undefined → null → retry
+    const result = reconcileIntents(db, 1, { signalStatusBySubject: new Map() }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("signalStatusBySubject absent from worldSnapshot → intent stays open (retry)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    // No signalStatusBySubject key at all in worldSnapshot.
+    const result = reconcileIntents(db, 1, {}, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(0);
+    expect(result.retried).toBe(1);
+  });
+
+  test("status 'done' → satisfied (not stalled, not failed)", () => {
+    const id = recordIntent(db, {
+      tickId: 1,
+      kind: "unstuck-sweep",
+      subject: "CTL-X/implement",
+      postcondition: { kind: "unstuck-sweep", subject: "CTL-X/implement" },
+    });
+    const signalStatusBySubject = new Map([["CTL-X/implement", "done"]]);
+    const result = reconcileIntents(db, 1, { signalStatusBySubject }, { maxAttempts: 3 });
+    expect(result.satisfied).toBe(1);
+  });
+});

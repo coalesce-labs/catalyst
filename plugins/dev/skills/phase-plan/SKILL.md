@@ -84,30 +84,18 @@ jq --arg ts "$TS" --arg sid "${CATALYST_SESSION_ID:-}" '
 ' "$SIGNAL_FILE" > "$TMP" \
   && mv "$TMP" "$SIGNAL_FILE"
 
-# Prior-phase artifact: the research document. Dispatcher gates this via glob;
-# we re-read it here so we can fail loudly on race. Two-step match (CTL-494)
-# mirrors the dispatcher: lowercase-tail form first, wider *${TICKET}*.md
-# fallback with nocaseglob to also accept the canonical create-plan
-# filename convention (uppercase ticket + descriptive suffix).
-shopt -s nullglob
-RESEARCH_MATCHES=( thoughts/shared/research/*-${TICKET,,}.md )
-if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
-  RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
-  if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
-    shopt -s nocaseglob
-    RESEARCH_MATCHES=( thoughts/shared/research/*${TICKET}*.md )
-    shopt -u nocaseglob
-  fi
-fi
-shopt -u nullglob
-if [[ ${#RESEARCH_MATCHES[@]} -eq 0 ]]; then
+# Prior-phase artifact: the research document. Dispatcher gates this via
+# match_thoughts_artifact (lib/phase-artifact-gate.sh, CTL-1081); re-read
+# here so we can fail loudly on race.
+source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"
+RESEARCH_DOC="$(match_thoughts_artifact thoughts/shared/research "$TICKET" | tail -1 || true)"
+if [[ -z "$RESEARCH_DOC" || ! -f "$RESEARCH_DOC" ]]; then
   echo "phase-plan: research document missing for $TICKET" >&2
   "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
     --phase "$PHASE" --ticket "$TICKET" --status failed \
     --reason "prior_artifact_missing:research_doc"
   exit 1
 fi
-RESEARCH_DOC="${RESEARCH_MATCHES[-1]}"
 ```
 
 <!-- Linear status is written by the coordinator (CTL-558): the execution-core
@@ -131,34 +119,35 @@ The body of [[create-plan]] is the single source of truth.
 Phase agents run inside `claude --bg` — there is no interactive user. Pass the
 research document as the input and operate non-interactively:
 
-1. Read `$RESEARCH_DOC` to understand the problem.
-2. Invoke `/catalyst-dev:create-plan` against the research document. When that skill
+1. Read `$RESEARCH_DOC` to understand the problem. While reading, skim any
+   `## Relevant Past Learnings` section the research phase surfaced, and any
+   directly-matching entries under `thoughts/shared/learnings/`, and let those
+   prior problem→solution notes inform the plan (the heavy grep lens lives in
+   phase-research — don't re-run it here).
+2. Assert the `thoughts/` root belongs to this project before writing (CTL-1081):
+   ```bash
+   bash "${PLUGIN_ROOT}/scripts/lib/assert-thoughts-project.sh" || {
+     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+       --phase "$PHASE" --ticket "$TICKET" --status failed \
+       --reason "wrong_project_thoughts_root"
+     exit 1
+   }
+   ```
+3. Invoke `/catalyst-dev:create-plan` against the research document. When that skill
    asks for clarifications, answer from the research document; if the research
    document is silent on a point, default to the most conservative reasonable choice
    and record the assumption in the plan's "Open questions" section.
-3. Confirm the artifact exists. Two-step match (CTL-494) — try lowercase-tail
-   first, then the wider `*${TICKET}*.md` pattern with `nocaseglob` fallback
-   so canonical create-plan filenames (uppercase ticket + descriptive
-   suffix) are accepted alongside the phase-plan prose convention:
+4. Confirm the artifact exists using the shared matcher (CTL-1081):
    ```bash
-   shopt -s nullglob
-   PLAN_MATCHES=( thoughts/shared/plans/*-${TICKET,,}.md )
-   if [[ ${#PLAN_MATCHES[@]} -eq 0 ]]; then
-     PLAN_MATCHES=( thoughts/shared/plans/*${TICKET}*.md )
-     if [[ ${#PLAN_MATCHES[@]} -eq 0 ]]; then
-       shopt -s nocaseglob
-       PLAN_MATCHES=( thoughts/shared/plans/*${TICKET}*.md )
-       shopt -u nocaseglob
-     fi
-   fi
-   shopt -u nullglob
-   [[ ${#PLAN_MATCHES[@]} -gt 0 ]] || {
+   # source already called above in the prelude (idempotent guard in the lib).
+   source "${PLUGIN_ROOT}/scripts/lib/phase-artifact-gate.sh"
+   PLAN_DOC="$(match_thoughts_artifact thoughts/shared/plans "$TICKET" | tail -1 || true)"
+   [[ -n "$PLAN_DOC" && -f "$PLAN_DOC" ]] || {
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
        --phase "$PHASE" --ticket "$TICKET" --status failed \
        --reason "plan_doc_not_written"
      exit 1
    }
-   PLAN_DOC="${PLAN_MATCHES[-1]}"
    ```
 
 If [[create-plan]] runs into a question it cannot resolve from the research
@@ -226,7 +215,7 @@ EOF
 ${MIRROR_FOOTER}"
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-plan: linear-comment-post failed (continuing)" >&2
@@ -234,9 +223,48 @@ ${MIRROR_FOOTER}"
 fi
 ```
 
+## Step — Capture friction (compound loop, CTL-789)
+
+Before emitting completion, append **your** friction from this plan phase to the
+shared per-ticket friction log. This is the producer side of the compound loop —
+`ticket-compound` harvests these records later. Replace each `<…>` placeholder
+below with your real experience this phase (3–6 lines, terse; `None.` is a valid
+answer when the phase was frictionless). `${TICKET}` is already resolved in the
+Prelude — do not re-derive it. This append is best-effort: it must **never** fail
+the phase, so it stays off the critical path and runs immediately before
+emit-complete.
+
 ```bash
+# --- Compound-engineering friction capture (CTL-789, Slice 1). Off critical path; NEVER block emit. ---
+FRICTION_LOG="thoughts/shared/friction/${TICKET}.md"
+mkdir -p "$(dirname "$FRICTION_LOG")"
+[ -f "$FRICTION_LOG" ] || printf '# Friction log — %s\n' "${TICKET}" > "$FRICTION_LOG"
+cat >> "$FRICTION_LOG" <<EOF
+
+## plan · ${TICKET} · $(date +%Y-%m-%dT%H:%M:%S%z)
+- **Backtracks / redone work:** <where you backtracked or redid work this phase — or "None.">
+- **Missing / wrong / hard-to-find context:** <context that was absent, stale, or hard to locate — or "None.">
+- **If I'd known:** <the ADR / guidance / past learning that would have saved this — the compounding signal — or "None.">
+EOF
+```
+
+```bash
+# CTL-866: multi-host thoughts-sync gate. Single-host → exact no-op. Multi-host
+# → commit+push the plan artifact before any other host can read the
+# completion event; on sync failure the gate emits `failed` and we stop here.
+"${PLUGIN_ROOT}/scripts/lib/thoughts-sync-gate.sh" --phase "$PHASE" --ticket "$TICKET" || exit 11
+
 "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
   --phase "$PHASE" --ticket "$TICKET" --status complete
+
+# Self-halt after complete to prevent zombie workers (CTL-778 step 2).
+# Read our own bg_job_id from the signal file and ask Claude to stop us.
+# Best-effort: a failed stop is covered by the daemon reaper backstop.
+if [[ -n "${ORCH_DIR:-}" && -f "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" ]]; then
+  _SELF_BG=$(jq -r '.bg_job_id // empty' \
+    "${ORCH_DIR}/workers/${TICKET}/phase-${PHASE}.json" 2>/dev/null || true)
+  [[ -n "$_SELF_BG" ]] && claude stop "${_SELF_BG:0:8}" >/dev/null 2>&1 || true
+fi
 
 [[ -n "$COMMS" ]] && "$COMMS" done "$CHANNEL" --as "$TICKET" >/dev/null 2>&1 || true
 ```

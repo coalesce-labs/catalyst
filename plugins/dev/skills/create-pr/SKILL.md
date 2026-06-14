@@ -121,39 +121,45 @@ fi
 
 ### 7. Generate PR title from branch and ticket
 
+PR titles follow `<type>(<scope>): <ticket> ...` so active work is identifiable from GitHub
+alone. Prefer the first commit subject (it carries type/scope per commit conventions); inject
+the ticket via `draft_pr_title`. Branch-derived title remains the no-commit fallback.
+
 ```bash
-# Branch format examples:
-# - ENG-123-implement-pr-lifecycle → "ENG-123: implement pr lifecycle"
-# - feature-add-validation → "add validation"
-
-# Extract description from branch name
-if [[ "$ticket" ]]; then
-    # Remove ticket prefix from branch
-    desc=$(echo "$branch" | sed "s/^$ticket-//")
-    # Convert kebab-case to spaces
-    desc=$(echo "$desc" | tr '-' ' ')
-    # Capitalize first word
-    desc="$(tr '[:lower:]' '[:upper:]' <<< ${desc:0:1})${desc:1}"
-
-    title="$ticket: $desc"
+# CTL-783: PR titles follow `<type>(<scope>): <ticket> ...` convention.
+# Prefer first commit subject; branch-derived title is the no-commit fallback.
+source "${CLAUDE_PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
+commit_subj=$(git log --no-merges --format='%s' "origin/${base}..HEAD" 2>/dev/null | tail -1)
+if [[ -n "$commit_subj" ]]; then
+    title="$(draft_pr_title "$ticket" "$commit_subj")"
 else
-    # No ticket in branch
-    desc=$(echo "$branch" | tr '-' ' ')
-    desc="$(tr '[:lower:]' '[:upper:]' <<< ${desc:0:1})${desc:1}"
-    title="$desc"
+    # Branch-derived fallback (no commits or base unreachable)
+    if [[ "$ticket" ]]; then
+        desc=$(echo "$branch" | sed "s/^$ticket-//")
+        desc=$(echo "$desc" | tr '-' ' ')
+        title="$ticket: $desc"
+    else
+        desc=$(echo "$branch" | tr '-' ' ')
+        title="$desc"
+    fi
 fi
 ```
 
 ### 8. Push branch
 
 ```bash
-# Check if branch has upstream
-if ! git rev-parse --abbrev-ref --symbolic-full-name @{u} 2>/dev/null; then
-    # No upstream, push with -u
-    git push -u origin HEAD
-else
-    # Has upstream, check if up-to-date
-    git push
+# Push current HEAD and verify origin == HEAD. On a non-fast-forward (branch
+# rebased/amended after a prior push), retry with --force-with-lease so the PR
+# never points at a stale commit (CTL-1051).
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if ! git push -u origin HEAD; then
+    echo "create-pr: fast-forward push failed; retrying with --force-with-lease" >&2
+    git push --force-with-lease -u origin HEAD
+fi
+git fetch --quiet origin "$BRANCH" || true
+if [[ "$(git rev-parse "origin/${BRANCH}")" != "$(git rev-parse HEAD)" ]]; then
+    echo "create-pr: post-push verify failed — origin/${BRANCH} != HEAD" >&2
+    exit 1
 fi
 ```
 

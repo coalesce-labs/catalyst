@@ -4,7 +4,7 @@
 # Closing ritual for the AI-native estimation feedback loop (CTL-159). At PR
 # merge, this helper writes a structured entry to:
 #
-#   <thoughts-dir>/shared/pm/metrics/<YYYY-WW>-compound-log.md
+#   <thoughts-dir>/shared/retros/estimate/<YYYY-WW>-compound-log.md
 #
 # One file per ISO week, one entry per merged PR. Fields follow the
 # CTL-159 schema: linear.key, pr_number, merged_at, estimate_at_start,
@@ -13,6 +13,19 @@
 # Commands:
 #   iso-week <iso-timestamp>
 #       Print YYYY-WW for the given UTC timestamp. Exits non-zero on bad input.
+#
+#   read [--thoughts-dir <path>] [--week <YYYY-WW>]
+#       Emit every compound-log entry as JSON Lines (one object per entry):
+#       week, linear_key, pr_number, merged_at, estimate_at_start,
+#       estimate_actual, cost_usd, wall_time_hours, what_worked,
+#       what_surprised_me. Empty/absent store → no output, exit 0 (CTL-813:
+#       consumers fail open).
+#
+#   aggregate [--thoughts-dir <path>]
+#       Reduce all entries to a single JSON object for the corpus-refresh
+#       join: { entries, tickets: {<KEY>: <latest entry by merged_at>},
+#       calibration: { count, exact, mean_signed_delta, median_abs_delta } }.
+#       median_abs_delta is the lower median. Empty store → zeroed object.
 #
 #   write <ticket-id> [options]
 #       Append an entry for <ticket-id>. Options:
@@ -295,7 +308,7 @@ cmd_write() {
   # 7. Compute target week file from mergedAt (NOT today).
   local week outfile
   week=$(iso_week_of "$merged_at") || fatal "write: could not derive ISO week from mergedAt: $merged_at"
-  outfile="${thoughts_dir}/shared/pm/metrics/${week}-compound-log.md"
+  outfile="${thoughts_dir}/shared/retros/estimate/${week}-compound-log.md"
 
   # 8. Dry-run: print entry only.
   local entry
@@ -326,14 +339,137 @@ cmd_write() {
   echo "entry: ${ticket} — #${pr} — ${merged_at}"
 }
 
+# ─── subcommand: read (CTL-813) ─────────────────────────────────────────────
+#
+# Parse every <thoughts-dir>/shared/retros/estimate/*-compound-log.md and emit one
+# JSON object per entry (JSON Lines). The yaml blocks are flat key: value
+# pairs written by render_entry, so an awk field-splitter is sufficient — the
+# only escaping in play is the \" that render_entry applies to free text.
+# Empty/absent store is SILENT SUCCESS: consumers (refresh-corpus join,
+# ticket-retro) fail open on an empty log.
+
+cmd_read() {
+  local thoughts_dir="./thoughts"
+  local week_filter=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thoughts-dir) thoughts_dir="$2"; shift 2 ;;
+      --week)         week_filter="$2"; shift 2 ;;
+      *) fatal "read: unknown flag: $1" ;;
+    esac
+  done
+
+  local metrics_dir="${thoughts_dir}/shared/retros/estimate"
+  [ -d "$metrics_dir" ] || return 0
+
+  command -v jq >/dev/null 2>&1 || fatal "read: jq is required"
+
+  local f base week
+  for f in "$metrics_dir"/*-compound-log.md; do
+    [ -e "$f" ] || continue   # nullglob-safe: literal pattern when no match
+    base="$(basename "$f")"
+    week="${base%-compound-log.md}"
+    if [ -n "$week_filter" ] && [ "$week" != "$week_filter" ]; then
+      continue
+    fi
+    # awk → one TAB-separated record per yaml block (tabs in text mapped to
+    # spaces; outer quotes stripped; \" unescaped), then jq types the fields.
+    awk -v week="$week" '
+      function val(line,   v) {
+        v = line
+        sub(/^[a-z_]+:[ ]*/, "", v)
+        gsub(/\t/, " ", v)
+        return v
+      }
+      function unquote(v) {
+        if (v ~ /^".*"$/) { v = substr(v, 2, length(v) - 2); gsub(/\\"/, "\"", v) }
+        return v
+      }
+      /^```yaml$/ { in_yaml = 1; lk=pr=ma=es=ea=cu=wh=ww=ws=""; next }
+      /^```$/ {
+        if (in_yaml && lk != "") {
+          printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", \
+            week, lk, pr, ma, es, ea, cu, wh, ww, ws
+        }
+        in_yaml = 0; next
+      }
+      in_yaml && /^linear_key:/        { lk = val($0) }
+      in_yaml && /^pr_number:/         { pr = val($0) }
+      in_yaml && /^merged_at:/         { ma = val($0) }
+      in_yaml && /^estimate_at_start:/ { es = val($0) }
+      in_yaml && /^estimate_actual:/   { ea = val($0) }
+      in_yaml && /^cost_usd:/          { cu = val($0) }
+      in_yaml && /^wall_time_hours:/   { wh = val($0) }
+      in_yaml && /^what_worked:/       { ww = unquote(val($0)) }
+      in_yaml && /^what_surprised_me:/ { ws = unquote(val($0)) }
+    ' "$f" | jq -R -c 'split("\t") | {
+        week: .[0],
+        linear_key: .[1],
+        pr_number: (.[2] | tonumber? // null),
+        merged_at: .[3],
+        estimate_at_start: (.[4] | tonumber? // null),
+        estimate_actual: (.[5] | tonumber? // null),
+        cost_usd: (.[6] | tonumber? // null),
+        wall_time_hours: (.[7] | tonumber? // null),
+        what_worked: .[8],
+        what_surprised_me: .[9]
+      }'
+  done
+}
+
+# ─── subcommand: aggregate (CTL-813) ────────────────────────────────────────
+#
+# Reduce the read stream to the shape the corpus-refresh join consumes:
+# per-ticket LATEST entry (by merged_at — a re-merged follow-up PR supersedes
+# the first re-score) + calibration stats over ALL entries.
+
+cmd_aggregate() {
+  local thoughts_dir="./thoughts"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --thoughts-dir) thoughts_dir="$2"; shift 2 ;;
+      *) fatal "aggregate: unknown flag: $1" ;;
+    esac
+  done
+
+  command -v jq >/dev/null 2>&1 || fatal "aggregate: jq is required"
+
+  cmd_read --thoughts-dir "$thoughts_dir" | jq -s '
+    {
+      entries: length,
+      tickets: (
+        group_by(.linear_key)
+        | map({ key: .[0].linear_key, value: (sort_by(.merged_at) | last) })
+        | from_entries
+      ),
+      calibration: (
+        [ .[] | select(.estimate_at_start != null and .estimate_actual != null) ] as $c
+        | ($c | map(.estimate_actual - .estimate_at_start)) as $d
+        | {
+            count: ($c | length),
+            exact: ([ $d[] | select(. == 0) ] | length),
+            mean_signed_delta:
+              (if ($d | length) > 0 then (($d | add) / ($d | length)) else null end),
+            median_abs_delta:
+              (if ($d | length) > 0
+               then (($d | map(if . < 0 then -. else . end) | sort) as $a
+                     | $a[(($a | length - 1) / 2) | floor])
+               else null end)
+          }
+      )
+    }'
+}
+
 # ─── main ───────────────────────────────────────────────────────────────────
 
 usage() {
-  sed -n '2,35p' "$0" | sed 's|^# \{0,1\}||'
+  sed -n '2,50p' "$0" | sed 's|^# \{0,1\}||'
 }
 
 case "${1:-}" in
   iso-week)  shift; cmd_iso_week "$@" ;;
+  read)      shift; cmd_read "$@" ;;
+  aggregate) shift; cmd_aggregate "$@" ;;
   write)     shift; cmd_write "$@" ;;
   -h|--help|help|"") usage ;;
   *) fatal "unknown subcommand: ${1}" ;;

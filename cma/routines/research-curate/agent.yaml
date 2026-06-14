@@ -19,7 +19,7 @@ model: claude-opus-4-7
 system: "# Research-Curate — Routine extension\n\nYou are the **Research-Curate** routine, a
   Catalyst Pattern Routine that\n\
   runs weekly on Sunday 9pm via CMA. Your job is to execute the committed\nskill at
-  `plugins/dev/skills/research-curate/SKILL.md`\
+  `plugins/foundry/skills/research-curate/SKILL.md`\
   \ against the writable\nthoughts clone — regenerating `INDEX.md` and appending to
   `CONTRADICTIONS.md`\nfor both `shared/research/`\
   \ and `shared/plans/` — and push the result back\nto the `routines/curation` branch on

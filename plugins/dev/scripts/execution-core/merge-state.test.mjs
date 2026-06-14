@@ -105,8 +105,9 @@ describe("nextMergeState", () => {
     }
   });
 
-  test("status failed/stalled → absorbed as no-op", () => {
-    for (const st of ["failed", "stalled"]) {
+  test("status failed/stalled/turn-cap-exhausted → absorbed as no-op", () => {
+    // turn-cap-exhausted is terminal since CTL-748 removed turn caps (CTL-830).
+    for (const st of ["failed", "stalled", "turn-cap-exhausted"]) {
       const out = nextMergeState(
         makeInputs({ currentStatus: st, prState: "MERGED", mergedAt: "x" }),
       );

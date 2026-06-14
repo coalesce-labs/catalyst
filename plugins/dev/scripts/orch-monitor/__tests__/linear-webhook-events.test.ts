@@ -19,6 +19,26 @@ function issuePayload(overrides: Record<string, unknown> = {}): unknown {
 }
 
 describe("parseLinearWebhookEvent — Issue", () => {
+  it("extracts issueId from data.id (CTL-822 — all a remove carries)", () => {
+    const ev = parseLinearWebhookEvent("Issue", issuePayload());
+    expect(ev.kind).toBe("issue");
+    if (ev.kind !== "issue") return;
+    expect(ev.issueId).toBe("issue-uuid-1");
+  });
+
+  it("remove with ONLY data.id still yields issueId (no identifier)", () => {
+    const ev = parseLinearWebhookEvent("Issue", {
+      action: "remove",
+      type: "Issue",
+      data: { id: "removed-uuid-9" },
+    });
+    expect(ev.kind).toBe("issue");
+    if (ev.kind !== "issue") return;
+    expect(ev.topic).toBe("linear.issue.removed");
+    expect(ev.issueId).toBe("removed-uuid-9");
+    expect(ev.ticket).toBeNull();
+  });
+
   it("Issue create → linear.issue.created", () => {
     const ev = parseLinearWebhookEvent(
       "Issue",
@@ -226,6 +246,143 @@ describe("parseLinearWebhookEvent — Issue", () => {
     );
     if (ev.kind !== "issue") throw new Error("expected issue kind");
     expect(ev.toLabels).toEqual([]);
+  });
+
+  // CTL-1031 — Linear WEBHOOK payloads serialize `data.labels` as a FLAT ARRAY
+  // of label objects `[{id, name, color}]` (NOT the GraphQL `{nodes:[…]}` shape
+  // the API returns). The pre-CTL-1031 parser only accepted `{nodes}`, so every
+  // real webhook label-change parsed to toLabels:null and the broker fold never
+  // fired. parseLabelNames must accept BOTH shapes.
+
+  it("CTL-1031: extracts toLabels from a flat array (Linear WEBHOOK shape)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { labelIds: ["old-1"] },
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: [
+            { id: "l1", name: "blocked", color: "#eb5757" },
+            { id: "l2", name: "p0", color: "#5e6ad2" },
+          ],
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toEqual(["blocked", "p0"]);
+  });
+
+  it("CTL-1031: empty flat array → [] (genuine empty set CLEARS labels, not null)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: [],
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    // [] is distinct from null: router treats [] as "clear the set",
+    // null as "unknown — keep stored value".
+    expect(ev.toLabels).toEqual([]);
+    expect(ev.toLabels).not.toBeNull();
+  });
+
+  it("CTL-1031: flat array of non-objects (strings/numbers) → null (malformed)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: ["blocked", "p0", 42],
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toBeNull();
+  });
+
+  it("CTL-1031: flat array of objects WITHOUT a usable name → null (malformed)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: [{ id: "l1", color: "#fff" }, { id: "l2" }],
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toBeNull();
+  });
+
+  it("CTL-1031: flat array mixing valid + malformed objects → null (no partial set)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: [{ id: "l1", name: "blocked" }, { id: "l2" }],
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    // A partial parse would silently shrink the label set and could
+    // mis-clear `blocked`. Reject the whole malformed array → null (unknown).
+    expect(ev.toLabels).toBeNull();
+  });
+
+  it("CTL-1031: {nodes} API shape STILL parses (no regression)", () => {
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+          labels: { nodes: [{ id: "l1", name: "bug" }] },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toEqual(["bug"]);
+  });
+
+  it("CTL-1031: only updatedFrom.labelIds (ids, no names, no data.labels) → null", () => {
+    // Webhooks can carry ONLY labelIds in updatedFrom with no resolvable
+    // names. IDs alone cannot become names in the parse path → null (unknown),
+    // never a fabricated/empty set. (Known residual: documented in PR body.)
+    const ev = parseLinearWebhookEvent(
+      "Issue",
+      issuePayload({
+        updatedFrom: { labelIds: ["3b65acf5-eedf-4f6a-9a34-76ed169598f4"] },
+        data: {
+          id: "issue-uuid-1",
+          identifier: "CTL-210",
+          title: "Build event bus",
+          team: { id: "team-uuid", key: "CTL", name: "Catalyst" },
+        },
+      })
+    );
+    if (ev.kind !== "issue") throw new Error("expected issue kind");
+    expect(ev.toLabels).toBeNull();
   });
 
   it("extracts toProject (name) and toProjectId from data.project", () => {

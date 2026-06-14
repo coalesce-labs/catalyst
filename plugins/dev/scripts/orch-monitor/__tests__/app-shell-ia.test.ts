@@ -1,0 +1,372 @@
+// app-shell-ia.test.ts — CTL-893 / SHELL3 acceptance guards.
+//
+// Encodes the four SHELL3 Gherkin scenarios (OPERATE/OBSERVE two-tier nav IA,
+// the chevron brand mark + collapsing wordmark, and the footer theme toggle).
+// `bun test` has no DOM, so — matching app-shell.test.ts (CTL-891) — the
+// structural scenarios are asserted by static source analysis (read the .tsx as
+// text and assert the load-bearing wiring) and the pure theme core (lib/theme.ts)
+// is unit-tested directly.
+import { describe, it, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import {
+  THEMES,
+  THEME_LABEL,
+  THEME_STORAGE_KEY,
+  DEFAULT_THEME,
+  nextTheme,
+  readStoredTheme,
+  applyTheme,
+} from "../ui/src/lib/theme";
+import {
+  BRANDS,
+  DEFAULT_BRAND,
+  BRAND_STORAGE_KEY,
+} from "../ui/src/lib/brand";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const UI_SRC = join(HERE, "..", "ui", "src");
+const REPO_ROOT = join(HERE, "..", "..", "..", "..", "..");
+const read = (rel: string) => readFileSync(join(UI_SRC, rel), "utf8");
+
+const sidebarSrc = read("components/app-sidebar.tsx");
+const logoSrc = read("components/catalyst-logo.tsx");
+const cssSrc = read("app.css");
+const markSvg = readFileSync(
+  join(REPO_ROOT, "assets", "brand-v2", "mark.svg"),
+  "utf8",
+);
+
+/** Strip JS/JSX comments so CLASSNAME / token assertions can't be tripped by prose. */
+function stripComments(src: string): string {
+  return src
+    .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+}
+
+const sidebarCode = stripComments(sidebarSrc);
+
+// ── Scenario: OPERATE is the always-visible primary tier ─────────────────────
+describe("OPERATE is the always-visible primary tier (CTL-893)", () => {
+  it("the OPERATE group lists Inbox, Tickets, Workers in nav order", () => {
+    // CTL-930: labels renamed Home→Inbox, Board→Tickets; array renamed OPERATE_ITEMS.
+    // CTL-1054: Queue surface renamed to Dispatch in all nav labels.
+    // CTL-1016: the Dispatch (queue) surface is retired — its control tower folded
+    // into Workers — so OPERATE is now the three surfaces Inbox / Tickets / Workers.
+    // OBSERVE is declared before OPERATE_ITEMS in source (observe first, items after).
+    const operateBlock = sidebarSrc.slice(
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
+    );
+    const order = ["Inbox", "Tickets", "Workers"].map((l) =>
+      operateBlock.indexOf(`"${l}"`),
+    );
+    for (const i of order) expect(i).toBeGreaterThan(-1);
+    // strictly increasing — declared in nav order
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(sidebarCode).toMatch(/Operate/);
+  });
+
+  it("Overall is the FIRST section and is itself collapsible (CTL-1034)", () => {
+    // CTL-1034 §1: EVERY top-level section now collapses — including Overall, which
+    // was previously a plain always-expanded SidebarGroup. Overall keeps its
+    // SidebarGroupLabel heading ("Overall") but the label is now `asChild` over a
+    // CollapsibleTrigger, and the whole group is wrapped in a Collapsible. The
+    // ">Overall<" heading text node must still be the FIRST section in source —
+    // before the per-project groups and Observe.
+    // The "Overall" heading text node sits inside the CollapsibleTrigger (tolerant
+    // of the JSX newline between the trigger open-tag and the text).
+    const overallMatch = /<CollapsibleTrigger[^>]*>\s*Overall\b/.exec(sidebarSrc);
+    expect(overallMatch).not.toBeNull();
+    const overallHeadingIdx = overallMatch ? overallMatch.index : -1;
+    // Overall opens before the Projects heading and the Observe block.
+    const projectsHeadingIdx = sidebarSrc.indexOf(">Projects<");
+    const observeBlockIdx = sidebarSrc.indexOf("OBSERVE — collapsible");
+    expect(overallHeadingIdx).toBeLessThan(projectsHeadingIdx);
+    expect(overallHeadingIdx).toBeLessThan(observeBlockIdx);
+    // Overall persists its open-state via the dedicated nav-store atom.
+    expect(sidebarSrc).toContain("navOverallOpenAtom");
+  });
+
+  it("Tickets is a first-class top-tier OPERATE item, not buried under OBSERVE", () => {
+    // CTL-930: Board renamed to Tickets; OPERATE_ITEMS declared after OBSERVE in source.
+    const operateBlock = sidebarSrc.slice(
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
+    );
+    const observeBlock = sidebarSrc.slice(
+      sidebarSrc.indexOf("const OBSERVE"),
+      sidebarSrc.indexOf("const OPERATE_ITEMS"),
+    );
+    expect(operateBlock).toContain('"Tickets"');
+    expect(observeBlock).not.toContain('"Tickets"');
+  });
+});
+
+// ── Scenario: OBSERVE is a recessed collapsible go-deeper tier ───────────────
+describe("OBSERVE is a recessed collapsible go-deeper tier (CTL-893)", () => {
+  it("OBSERVE lists Telemetry, Utilization, FinOps, Fleet Ops", () => {
+    const observeBlock = sidebarSrc.slice(
+      sidebarSrc.indexOf("const OBSERVE"),
+      sidebarSrc.indexOf("function ", sidebarSrc.indexOf("const OBSERVE")),
+    );
+    for (const label of ["Telemetry", "Utilization", "FinOps", "Fleet Ops"]) {
+      expect(observeBlock).toContain(`"${label}"`);
+    }
+  });
+
+  it("OBSERVE renders inside a Collapsible whose header is a plain CollapsibleTrigger button", () => {
+    expect(sidebarSrc).toContain("<Collapsible");
+    expect(sidebarSrc).toContain("CollapsibleTrigger");
+    // The base-ui gotcha: the trigger must NOT be a render-prop of SidebarGroupLabel.
+    expect(sidebarSrc).not.toContain("render={<SidebarGroupLabel");
+    expect(sidebarCode).toMatch(/Observe/);
+  });
+
+  it("not-yet-shipped OBSERVE items are disabled 'soon' placeholders (future routes, no content)", () => {
+    // OBS-5: the OBSERVE group is split into live items (clickable surfaces with a
+    // content shell) and "soon" placeholders. Telemetry ships its shell first, so
+    // it leaves the disabled set; the remaining four stay disabled + carry 'soon'.
+    const observeRender = sidebarSrc.slice(sidebarSrc.indexOf("OBSERVE_SOON.map"));
+    expect(observeRender).toContain("disabled");
+    expect(observeRender.toLowerCase()).toContain("soon");
+    // The live Telemetry item is NOT a disabled 'soon' placeholder — it navigates.
+    const liveDecl = sidebarSrc.slice(
+      sidebarSrc.indexOf("OBSERVE_LIVE"),
+      sidebarSrc.indexOf("OBSERVE_SOON"),
+    );
+    expect(liveDecl).toContain('"Telemetry"');
+  });
+
+  it("OBSERVE is collapsible with a persisted, default-open state (CTL-1034)", () => {
+    // CTL-1034 §1: every section (incl. Observe) collapses and PERSISTS its
+    // open-state across reloads via an atomWithStorage atom — the ephemeral
+    // useState(false) that defaulted Observe collapsed is gone. All sections now
+    // default OPEN; collapsing is an explicit operator gesture.
+    // OBS-5: the Collapsible still force-opens when a live OBSERVE surface is active
+    // (open={observeOpen || observeContainsActive}) so the selected item is never
+    // hidden inside a collapsed group.
+    expect(sidebarSrc).toContain("navObserveOpenAtom");
+    expect(sidebarSrc).not.toMatch(/useState\(\s*false\s*\)/);
+    expect(sidebarSrc).toMatch(/open=\{observeOpen/);
+  });
+});
+
+// ── Scenario: Brand header collapses gracefully ──────────────────────────────
+describe("brand header collapses gracefully (CTL-893)", () => {
+  it("the brand mark is the inline chevron from assets/brand-v2/mark.svg (inherits currentColor)", () => {
+    // It must be the real inline SVG component, NOT an <img src=favicon>.
+    expect(sidebarSrc).toContain("CatalystLogo");
+    expect(sidebarSrc).toContain("@/components/catalyst-logo");
+    expect(logoSrc).toContain('stroke="currentColor"');
+    // Faithful to the brand mark: both chevron paths are ported.
+    expect(logoSrc).toContain("M 8 44 L 32 20 L 56 44");
+    expect(markSvg).toContain("M 8 44 L 32 20 L 56 44");
+    expect(logoSrc).toContain("M 18 52 L 32 36 L 46 52");
+  });
+
+  it("the header no longer uses the old <img favicon> brand", () => {
+    expect(sidebarCode).not.toContain("favicon.svg");
+  });
+
+  it("the wordmark hides on icon-collapse but the chevron mark stays", () => {
+    // The header renders the chevron mark followed by a "Catalyst" wordmark span
+    // that carries the icon-collapse hide class. Match across whitespace/newlines.
+    const header = sidebarSrc.slice(
+      sidebarSrc.indexOf("<SidebarHeader"),
+      sidebarSrc.indexOf("</SidebarHeader>"),
+    );
+    expect(header).toContain("CatalystLogo");
+    // The wordmark text node, tolerant of the JSX newline before </span>.
+    expect(header).toMatch(/>\s*Catalyst\s*<\/span>/);
+    // …and that wordmark span hides on icon-collapse (the mark does not).
+    expect(header).toContain("group-data-[collapsible=icon]:hidden");
+  });
+
+  it("the footer's bottom item is Settings; the theme toggle moved into Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the footer keeps ONLY Settings as its bottom item — the Warm-light
+    // toggle is relocated into the Settings surface (Theme → Appearance). So the footer
+    // block still references Settings, but no longer wires a theme toggle (toggleTheme).
+    const footerBlock = sidebarSrc.slice(sidebarSrc.indexOf("<SidebarFooter"));
+    expect(footerBlock).toContain("Settings");
+    expect(footerBlock).not.toContain("toggleTheme");
+    // The toggle still exists as a control — in the Settings surface, not the sidebar.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("Appearance");
+  });
+});
+
+// ── Scenario: Theme toggle flips calm-dark and warm-light ────────────────────
+describe("theme toggle flips calm-dark and warm-light (CTL-893)", () => {
+  it("the theme control is wired to the real theme system (useTheme) in Settings (CTL-1052)", () => {
+    // CTL-1052 §5: the theme control moved from the sidebar footer into the Settings
+    // surface (Theme → Appearance). It must still bind the REAL theme system (useTheme
+    // from @/lib/theme), not a re-implementation — now in settings-surface.tsx.
+    const settingsSrc = read("components/settings-surface.tsx");
+    expect(settingsSrc).toContain("useTheme");
+    expect(settingsSrc).toContain("@/lib/theme");
+    // The Appearance field reads `theme` and writes via the hook's setTheme.
+    expect(settingsSrc).toMatch(/onChange=\{\(v\)\s*=>\s*setTheme\(v\)\}/);
+    // The sidebar no longer owns the toggle.
+    expect(sidebarSrc).not.toContain("toggleTheme");
+  });
+
+  it("declares exactly the two themes calm-dark + warm-light", () => {
+    expect([...THEMES]).toEqual(["dark", "light"]);
+    expect(THEME_LABEL.dark.toLowerCase()).toContain("dark");
+    expect(THEME_LABEL.light.toLowerCase()).toContain("light");
+  });
+
+  it("defaults to calm-dark and reads a stored preference, ignoring junk", () => {
+    expect(DEFAULT_THEME).toBe("dark");
+    expect(readStoredTheme(null)).toBe("dark");
+    expect(readStoredTheme({ getItem: () => null })).toBe("dark");
+    expect(readStoredTheme({ getItem: () => "light" })).toBe("light");
+    expect(readStoredTheme({ getItem: () => "dark" })).toBe("dark");
+    expect(readStoredTheme({ getItem: () => "neon" })).toBe("dark");
+    expect(THEME_STORAGE_KEY).toBe("catalyst:theme");
+  });
+
+  it("nextTheme is a pure two-state flip", () => {
+    expect(nextTheme("dark")).toBe("light");
+    expect(nextTheme("light")).toBe("dark");
+  });
+
+  it("applyTheme adds `dark` for calm-dark and removes it for warm-light", () => {
+    const added: string[] = [];
+    const removed: string[] = [];
+    const root = {
+      classList: {
+        add: (c: string) => added.push(c),
+        remove: (c: string) => removed.push(c),
+      },
+    };
+    applyTheme("dark", root);
+    applyTheme("light", root);
+    expect(added).toContain("dark");
+    expect(removed).toContain("dark");
+    // no-op when there is no root (SSR / no DOM)
+    expect(() => applyTheme("dark", null)).not.toThrow();
+  });
+
+  it("app.css ships a warm-light token block that the toggle reveals when `dark` is absent", () => {
+    // The light theme must actually exist in CSS — a `.dark` override block plus
+    // light `:root` defaults — so removing `dark` from <html> visibly switches.
+    expect(cssSrc).toContain(".dark");
+    // The light defaults differ from the dark surface (proves a real second theme).
+    expect(cssSrc).toMatch(/warm-light|light theme|CTL-893/i);
+  });
+});
+
+// Sanity: every theme has a label.
+describe("theme metadata is exhaustive (CTL-893)", () => {
+  it("every theme is labelled", () => {
+    for (const t of THEMES) expect(THEME_LABEL[t]).toBeTruthy();
+  });
+});
+
+// ── CTL-1099: the orthogonal BRAND axis (Warm / Slate) ───────────────────────
+describe("brand axis is the second, orthogonal theme dimension (CTL-1099)", () => {
+  it("declares exactly the two brands warm + slate, default warm, pinned key", () => {
+    expect([...BRANDS]).toEqual(["warm", "slate"]);
+    expect(DEFAULT_BRAND).toBe("warm");
+    expect(BRAND_STORAGE_KEY).toBe("catalyst:brand");
+  });
+
+  it("the Settings surface + the shell both wire the brand hook (useBrand)", () => {
+    const settingsSrc = read("components/settings-surface.tsx");
+    const shellSrc = read("components/app-shell.tsx");
+    expect(settingsSrc).toContain("useBrand");
+    expect(shellSrc).toContain("useBrand");
+  });
+});
+
+// ── CTL-1101: REASON is a third collapsible section (Process + Rulebook) ──────
+describe("REASON is a third collapsible tier in the sidebar (CTL-1101)", () => {
+  it("sidebar source contains the REASON collapsible marker", () => {
+    expect(sidebarSrc).toContain("REASON — collapsible");
+  });
+
+  it("REASON lists Process and Rulebook items", () => {
+    const reasonIdx = sidebarSrc.indexOf("REASON — collapsible");
+    expect(reasonIdx).toBeGreaterThan(-1);
+    const reasonBlock = sidebarSrc.slice(reasonIdx);
+    const observeIdx = reasonBlock.indexOf("OBSERVE — collapsible");
+    const reasonSection = observeIdx > -1 ? reasonBlock.slice(0, observeIdx) : reasonBlock;
+    expect(reasonSection).toContain('"Process"');
+    expect(reasonSection).toContain('"Rulebook"');
+  });
+
+  it("REASON open-state is persisted via navReasonOpenAtom, not useState (CTL-1101)", () => {
+    expect(sidebarSrc).toContain("navReasonOpenAtom");
+    expect(sidebarSrc).not.toMatch(/useState\(\s*false\s*\)/);
+  });
+
+  it("REASON sits between the per-project repos block and the OBSERVE block", () => {
+    const reposMapIdx = sidebarSrc.indexOf("repos.map");
+    const reasonIdx = sidebarSrc.indexOf("REASON — collapsible");
+    const observeIdx = sidebarSrc.indexOf("OBSERVE — collapsible");
+    expect(reposMapIdx).toBeLessThan(reasonIdx);
+    expect(reasonIdx).toBeLessThan(observeIdx);
+  });
+});
+
+// ── CTL-977: left-nav restyle v2 ─────────────────────────────────────────────
+describe("left-nav restyle v2 (CTL-977)", () => {
+  /** Strip JS/JSX comments so class/token assertions cannot be tripped by prose. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\{\s*\/\*[\s\S]*?\*\/\s*\}/g, "")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  }
+  const code = stripComments(sidebarSrc);
+
+  it("no uppercase class on group/section trigger labels (CTL-977)", () => {
+    // The GROUP_TRIGGER_BASE constant must NOT include the `uppercase` Tailwind class.
+    // Search the stripped code for the trigger base definition.
+    const triggerBaseIdx = code.indexOf("GROUP_TRIGGER_BASE");
+    expect(triggerBaseIdx).toBeGreaterThan(-1);
+    // Find the end of the GROUP_TRIGGER_BASE assignment (next `);`)
+    const triggerBaseEnd = code.indexOf(");", triggerBaseIdx);
+    const triggerBase = code.slice(triggerBaseIdx, triggerBaseEnd);
+    expect(triggerBase).not.toMatch(/\buppercase\b/);
+  });
+
+  it("collapsible group chevron sits ADJACENT to the label, not floated to the far edge (CTL-1052)", () => {
+    // CTL-1052 §3 OVERRIDES the CTL-977 → CTL-1034 ml-auto right-align convention:
+    // the twistie now sits immediately after the label text (spaced by the trigger's
+    // gap-*), NOT pinned to the right edge. So NO ChevronRightIcon className may carry
+    // ml-auto (the right-edge claim) any more — and none may use a left-margin mr-*
+    // either. The collapsed-section signal dot keeps the right edge (ml-auto lives in
+    // SectionSignalDot), but the chevron itself is label-adjacent.
+    const chevronIdx = code.indexOf("ChevronRightIcon");
+    expect(chevronIdx).toBeGreaterThan(-1);
+    let idx = 0;
+    while (true) {
+      const pos = code.indexOf("ChevronRightIcon", idx);
+      if (pos === -1) break;
+      // Find the enclosing className string (next quoted string after the tag).
+      const classStart = code.indexOf('"', pos);
+      if (classStart === -1) break;
+      const classEnd = code.indexOf('"', classStart + 1);
+      const classStr = code.slice(classStart + 1, classEnd);
+      // Chevron is label-adjacent: neither right-floated (ml-auto) nor left-margined.
+      expect(classStr).not.toContain("ml-auto");
+      expect(classStr).not.toMatch(/^mr-[0-9]/);
+      idx = pos + 1;
+    }
+    // The right-edge ml-auto now belongs to the trailing section signal dot only.
+    expect(sidebarCode).toContain("ml-auto");
+  });
+
+  it("active item gets sidebar-primary accent color class (CTL-977)", () => {
+    // The renderOperateItem function must apply sidebar-primary (accent) to active items.
+    const renderFn = sidebarSrc.slice(
+      sidebarSrc.indexOf("function renderOperateItem"),
+      sidebarSrc.indexOf("function groupContainsActive"),
+    );
+    expect(renderFn).toContain("sidebar-primary");
+  });
+});

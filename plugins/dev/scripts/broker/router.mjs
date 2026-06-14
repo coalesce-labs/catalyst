@@ -12,9 +12,11 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import {
   log,
   getEventLogPath,
+  isSentinelLeak,
   GROQ_API_KEY,
   GROQ_ENDPOINT,
   GROQ_EXTRA_HEADERS,
@@ -57,16 +59,26 @@ import {
   markAgentDone,
   getAgentsByTicket,
   upsertTicketState,
+  upsertTicketDescriptor,
+  markTicketRemovedByUuid,
+  upsertTicketFence,
+  setTicketHeldSince,
+  clearTicketHeldSince,
   upsertWaitingSession,
   clearWaitingSession,
 } from "./broker-state.mjs";
 import { sessionLiveness } from "./session-liveness.mjs";
+import { handlePluginRefreshEvent, resolveRepoFullName } from "./plugin-refresh.mjs";
+import { handleStackReloadEvent } from "./stack-reload.mjs";
+import { getLastByteOffset } from "./tailer.mjs";
 import {
   severityNumber,
   deriveTraceId,
   deriveSpanId,
   generateEventId,
   synthesizeEventId,
+  hostName,
+  hostId,
 } from "../orch-monitor/lib/canonical-event-shared.ts";
 
 // Identity-stable aliases for the shared maps — the router mutates these; the
@@ -79,6 +91,76 @@ const orchestratorStatusMap = getOrchestratorStatusMap();
 
 // CTL-352: empty-interests degraded threshold (5-minute startup grace).
 const DEGRADED_THRESHOLD_MS = 5 * 60 * 1000;
+
+// CTL-993: merge-to-main plugin-checkout refresh wiring. The broker module lives
+// at <repo>/plugins/dev/scripts/broker/router.mjs, so the repo .catalyst config
+// (which carries feedback.githubRepo) is four levels up. The machine config path
+// matches lib/plugin-dirs.sh's resolution (CATALYST_MACHINE_CONFIG override).
+const __REPO_CONFIG_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "..",
+  ".catalyst",
+  "config.json"
+);
+function __machineConfigPath() {
+  const xdg = process.env.XDG_CONFIG_HOME || `${process.env.HOME ?? ""}/.config`;
+  return resolve(process.env.CATALYST_MACHINE_CONFIG || `${xdg}/catalyst/config.json`);
+}
+// Resolved once per daemon lifetime — the repo identity does not change while
+// the broker runs, and the file walk should not repeat on every event.
+let __repoFullNameCached;
+function __repoFullName() {
+  if (__repoFullNameCached === undefined) {
+    try {
+      __repoFullNameCached = resolveRepoFullName({
+        machineConfigPath: __machineConfigPath(),
+        repoConfigPath: __REPO_CONFIG_PATH,
+      });
+    } catch {
+      __repoFullNameCached = null;
+    }
+  }
+  return __repoFullNameCached;
+}
+// The broker's own HEAD at boot (the code it is actually running). Lets the
+// refresh emit restart_needed when the checkout advances past it. Best-effort —
+// null when not in a checkout (skew simply not flagged). CTL-669 model.
+// __loadedCommitRoot pairs it with the broker's own checkout toplevel so
+// restart_needed only fires for THAT checkout — not for an unrelated
+// pluginDirs checkout that happens to advance.
+let __loadedCommitCached;
+let __loadedCommitRootCached;
+function __loadedCommit() {
+  if (__loadedCommitCached === undefined) {
+    try {
+      __loadedCommitCached = execFileSync(
+        "git",
+        ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "HEAD"],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      __loadedCommitCached = null;
+    }
+  }
+  return __loadedCommitCached;
+}
+function __loadedCommitRoot() {
+  if (__loadedCommitRootCached === undefined) {
+    try {
+      __loadedCommitRootCached = execFileSync(
+        "git",
+        ["-C", dirname(fileURLToPath(import.meta.url)), "rev-parse", "--show-toplevel"],
+        { encoding: "utf8" }
+      ).trim();
+    } catch {
+      __loadedCommitRootCached = null;
+    }
+  }
+  return __loadedCommitRootCached;
+}
 
 // === Emission ===
 // Canonical envelope helpers. Primitives (sha256Hex, severityNumber,
@@ -181,6 +263,8 @@ export function buildCanonicalEnvelope(legacy) {
       "service.name": "catalyst.broker",
       "service.namespace": "catalyst",
       "service.version": pluginVersion(),
+      "host.name": hostName(),
+      "host.id": hostId(),
     },
     attributes,
     body: { payload: legacy.detail ?? null },
@@ -189,6 +273,12 @@ export function buildCanonicalEnvelope(legacy) {
 
 export function appendEvent(event) {
   const logPath = getEventLogPath();
+  if (isSentinelLeak(event, logPath)) {
+    process.stderr.write(
+      `[catalyst] dropped sentinel(orch-test) event from default prod log: ${getEventName(event)}\n`
+    );
+    return;
+  }
   mkdirSync(dirname(logPath), { recursive: true });
   const canonical = buildCanonicalEnvelope(event);
   appendFileSync(logPath, JSON.stringify(canonical) + "\n");
@@ -888,6 +978,132 @@ const TICKET_LIFECYCLE_ALL_WAKE_ON = [
   "comment_added",
 ];
 
+// CTL-923 (BFF11): held-indicator labels, the same literals the scheduler
+// applies (execution-core/scheduler.mjs HELD_LABEL_BLOCKED / HELD_LABEL_WAITING)
+// and the board reads (orch-monitor/lib/board-data.mjs heldFor). When either
+// label enters a ticket's set the broker stamps held_since so the read-model can
+// render a real hold duration from the durable cache. Copied (not imported) so
+// the lightweight broker fold takes no scheduler/board dependency — kept in
+// lock-step by the unit test that asserts these match board-data's literals.
+const HELD_LABELS = ["blocked", "waiting"];
+const isHeld = (labels) =>
+  Array.isArray(labels) && labels.some((l) => HELD_LABELS.includes(l));
+
+// foldLinearIssueDescriptor — CTL-822 (Gateway L1 child b): write-through of
+// every linear.issue.* event into the durable descriptor store (CTL-821).
+// KEY-PRESENCE semantics deliberately: a webhook's issue data is a full
+// snapshot, so toAssigneeId:null means UNASSIGNED (clear), and toLabels []
+// means explicitly-empty while null means "labels absent from payload"
+// (unknown → keep). Every non-remove issue event proves existence, so it also
+// clears any stale removed flag (Linear unarchive arrives as `update`).
+// `remove` payloads carry ONLY the entityId UUID → resolve via the CTL-821
+// UUID→identifier index; an unresolvable remove with no identifier is left
+// for the reconcile backstop (child e).
+function foldLinearIssueDescriptor(name, detail, eventTicket) {
+  if (typeof name !== "string" || !name.startsWith("linear.issue.")) return;
+  try {
+    const uuid = detail.issueId ?? null;
+    if (name === "linear.issue.removed") {
+      if (uuid) {
+        const hit = markTicketRemovedByUuid(uuid);
+        if (!hit && eventTicket) {
+          upsertTicketDescriptor({ ticket: eventTicket, uuid, removed: true });
+        }
+      } else if (eventTicket) {
+        upsertTicketDescriptor({ ticket: eventTicket, removed: true });
+      }
+      return;
+    }
+    if (!eventTicket) return;
+    const descriptor = { ticket: eventTicket, removed: false };
+    if (detail.toState != null) descriptor.state = detail.toState;
+    if (detail.toPriority !== undefined && detail.toPriority !== null) {
+      descriptor.priority = detail.toPriority;
+    }
+    // CTL-957: project Linear estimate (numeric story points) into ticket_state
+    // so the read-model can serve real points without a live API call.
+    // KEY-PRESENCE: absent = keep stored value; explicit null = clear.
+    if ("toEstimate" in detail) {
+      const v = detail.toEstimate;
+      descriptor.estimate = typeof v === "number" ? v : null;
+    }
+    if ("toAssigneeId" in detail) {
+      const v = detail.toAssigneeId ?? null;
+      // Linear sends partial issue payloads (data.assignee can be omitted on
+      // an ASSIGNED issue), and the emitter always includes the key. So a
+      // null only CLEARS when the unassignment is evidenced: an assignee
+      // change topic/updatedFrom, or a create (born unassigned). Otherwise
+      // null is "unknown" → keep. Non-null always sets.
+      const changeEvidenced =
+        v !== null ||
+        name === "linear.issue.assignee_changed" ||
+        detail.action === "create" ||
+        (Array.isArray(detail.updatedFromKeys) && detail.updatedFromKeys.includes("assigneeId"));
+      if (changeEvidenced) descriptor.assignee = v;
+    }
+    if (detail.toLabels != null) descriptor.labels = detail.toLabels;
+    if (uuid) descriptor.uuid = uuid;
+    upsertTicketDescriptor(descriptor);
+
+    // CTL-923 (BFF11): held_since capture. The label-set snapshot drives the
+    // held-duration clock — when blocked/waiting enters the set we stamp the
+    // applied-at (sticky: first hold start survives), when it leaves we clear.
+    // `detail.heldSince` lets an emitter thread an exact applied-at; otherwise
+    // setTicketHeldSince falls back to now (first observation). A null toLabels
+    // (labels absent from the payload) is "unknown" → leave held_since alone.
+    if (detail.toLabels != null) {
+      if (isHeld(detail.toLabels)) {
+        setTicketHeldSince(eventTicket, detail.heldSince ?? null);
+      } else {
+        clearTicketHeldSince(eventTicket);
+      }
+    }
+
+    // CTL-923 (BFF11): fence projection. cluster-claim.mjs records the
+    // catalyst://fence/<TICKET> attachment (owner_host/catalyst_generation/
+    // phase/claimed_at); when an event carries that metadata under `toFence`
+    // (key-presence, same convention as toLabels/toState) we project it into
+    // ticket_state so the read-model groups by node from the durable cache
+    // rather than a forbidden live attachment fetch. Key-presence: prefer the
+    // `toFence` key when present (even an explicit null, which CLEARS), else the
+    // `fence` alias; absent from both → undefined → leave the projection alone.
+    const fence = "toFence" in detail ? detail.toFence : detail.fence;
+    foldFenceMetadata(eventTicket, fence);
+  } catch {
+    /* DB not opened, or a UNIQUE-uuid violation from a buggy upstream — the
+       routing path must never die on a descriptor write */
+  }
+}
+
+// foldFenceMetadata — project a fence-attachment metadata object (the shape
+// cluster-claim.mjs::parseClaimMetadata produces: owner_host, generation, phase,
+// claimed_at) into ticket_state. Accepts both the wire key (catalyst_generation)
+// and the parsed key (generation). A null `fence` clears the projection (a
+// release/takeover that drops the owner); undefined leaves it untouched.
+function foldFenceMetadata(ticket, fence) {
+  if (!ticket || fence === undefined) return;
+  if (fence === null) {
+    upsertTicketFence({
+      ticket,
+      ownerHost: null,
+      generation: null,
+      phase: null,
+      claimedAt: null,
+    });
+    return;
+  }
+  if (typeof fence !== "object") return;
+  const genRaw = fence.generation ?? fence.catalyst_generation;
+  const generation = genRaw == null ? null : Number(genRaw);
+  upsertTicketFence({
+    ticket,
+    ownerHost: fence.owner_host ?? fence.ownerHost ?? null,
+    generation: Number.isFinite(generation) ? generation : null,
+    phase: fence.phase ?? null,
+    claimedAt: fence.claimed_at ?? fence.claimedAt ?? null,
+  });
+}
+
 export function tryTicketLifecycleRoute(event, interestsMap) {
   const matches = [];
   // CTL-357: read event name + payload via the canonical-aware helpers so
@@ -1574,6 +1790,43 @@ export function processEvent(event) {
   // returns, so existing routing below is untouched).
   projectWorkerStateEvent(event);
 
+  // CTL-993: on a merge-to-main of the configured repo, ff-only pull the
+  // pluginDirs checkout so fixes go live within seconds. Non-consuming
+  // side-channel like projectWorkerStateEvent — runs ABOVE the shouldSkipEvent /
+  // interests.size gates because GitHub merge events arrive whether or not any
+  // orchestration is active. handlePluginRefreshEvent never throws and the
+  // events it emits carry resource["service.name"]=catalyst.broker, which
+  // shouldSkipEvent drops on re-ingest (no self-wake loop).
+  const __refreshResults = handlePluginRefreshEvent({
+    event,
+    repoFullName: __repoFullName(),
+    machineConfigPath: __machineConfigPath(),
+    repoConfigPath: __REPO_CONFIG_PATH,
+    emitFn: appendEvent,
+    loadedCommit: __loadedCommit(),
+    loadedCommitRoot: __loadedCommitRoot(),
+  });
+  // CTL-1077: act on the refresh — reload the running stack when the checkout advanced.
+  // logPath MUST be threaded through: the broker self-reload handoff records it so the
+  // successor's resolveBootByteOffset can confirm it resumes the same month file. Omitting
+  // it writes logPath:"" into the handoff, which never matches the real path on boot, so the
+  // successor silently reseeds to EOF and drops events appended during the restart gap —
+  // defeating the gap-free handoff entirely.
+  //
+  // CTL-1077 remediate (M5): pass getByteOffsetFn (the live accessor), not an
+  // eagerly-evaluated currentByteOffset. The handoff is written ~30 s later when
+  // the debounce fires; capturing the offset HERE at processEvent time would make
+  // the successor resume from a low-water mark and re-process ~30 s of events
+  // (double-firing non-idempotent handlers). The accessor is evaluated at
+  // handoff-write time so the successor resumes from the true tail position.
+  handleStackReloadEvent({
+    results: __refreshResults,
+    loadedCommitRoot: __loadedCommitRoot(),
+    emitFn: appendEvent,
+    getByteOffsetFn: getLastByteOffset,
+    logPath: getEventLogPath(),
+  });
+
   if (name === "filter.register") {
     handleRegister(event);
     return;
@@ -1631,6 +1884,23 @@ export function processEvent(event) {
   }
 
   if (shouldSkipEvent(event)) return;
+
+  // CTL-822: durable descriptor write-through. MUST run for every
+  // linear.issue.* event REGARDLESS of registered interests — webhooks arrive
+  // whether or not any orchestration is active, and the descriptor store is
+  // CTL-823's source of truth. Mirrors the projectWorkerStateEvent model
+  // (folds live ABOVE the `if (!interests.size) return` gate; the verify
+  // panel caught that placing this inside tryTicketLifecycleRoute silently
+  // starved the store during idle periods).
+  if (typeof name === "string" && name.startsWith("linear.issue.")) {
+    const foldDetail = getEventPayload(event);
+    const foldTicket =
+      event.attributes?.["linear.issue.identifier"] ??
+      foldDetail.ticket ??
+      foldDetail.identifier ??
+      null;
+    foldLinearIssueDescriptor(name, foldDetail, foldTicket);
+  }
 
   if (name === "heartbeat") {
     const sourceId = event.worker ?? event.session ?? event.orchestrator;

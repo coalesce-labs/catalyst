@@ -30,6 +30,8 @@ import {
   defaultAppendPreemptedEvent,
   defaultAppendResumedAfterPreemptionEvent,
   defaultAppendRunawayEvent,
+  defaultAppendOrphanDetectedEvent,
+  defaultAppendHeldStoppedEvent,
   readBootEpoch,
   readDaemonEpoch,
   defaultReadRuntimeEpoch,
@@ -37,10 +39,15 @@ import {
   readBootSince,
   readExecCoreBootEpoch,
   clearProgressMarks,
+  // CTL-1006
+  defaultAppendBootResumePhaseRegressionEvent,
+  // CTL-1044
+  defaultAppendOperatorEvent,
 } from "./recovery.mjs";
 import { saveCursor } from "./event-cursor.mjs";
 import { dropProject } from "./eligible-set.mjs";
 import { existsSync, appendFileSync, chmodSync } from "node:fs";
+import { WORK_DONE_PROBES } from "./work-done-probes.mjs";
 
 let orchDir;
 
@@ -83,28 +90,24 @@ const bgSignal = (status, bgJobId) => ({
 // --- classifyWorker — pure given statJob ----------------------------------
 
 describe("classifyWorker", () => {
-  test("terminal status (done/failed/stalled/skipped) → 'terminal' (CTL-701)", () => {
-    for (const status of ["done", "failed", "stalled", "skipped"]) {
+  test("terminal status (done/failed/stalled/skipped/turn-cap-exhausted) → 'terminal' (CTL-830)", () => {
+    for (const status of ["done", "failed", "stalled", "skipped", "turn-cap-exhausted"]) {
       expect(
         classifyWorker(bgSignal(status, "job-x"), { statJob: () => null }),
       ).toBe("terminal");
     }
   });
 
-  test("turn-cap-exhausted is NOT terminal — classified by liveness (CTL-701)", () => {
-    // Live bg job → "running"
-    const live = classifyWorker(
-      bgSignal("turn-cap-exhausted", "alive"),
-      { statJob: () => ({ mtimeMs: Date.now() }) },
-    );
-    expect(live).toBe("running");
-
-    // Dead bg job → "dead" (reclaim-eligible)
-    const dead = classifyWorker(
-      bgSignal("turn-cap-exhausted", "gone"),
-      { statJob: () => null },
-    );
-    expect(dead).toBe("dead");
+  test("turn-cap-exhausted IS terminal — CTL-748 removed turn caps (CTL-830)", () => {
+    // Liveness is irrelevant: terminal short-circuits before the liveness probe.
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "alive"), {
+        statJob: () => ({ mtimeMs: Date.now() }),
+      }),
+    ).toBe("terminal");
+    expect(
+      classifyWorker(bgSignal("turn-cap-exhausted", "gone"), { statJob: () => null }),
+    ).toBe("terminal");
   });
 
   test("non-terminal status + bg job dir present → 'running' (re-attached)", () => {
@@ -619,11 +622,12 @@ describe("reclaimDeadWorkIfPossible — monitor-deploy (CTL-701)", () => {
   });
 });
 
-// CTL-701 Phase 2: reclaim/revive for turn-cap-exhausted
-describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
+// CTL-830: turn-cap-exhausted is terminal since CTL-748 removed turn caps —
+// reclaim/revive no longer apply (terminal short-circuits to noop).
+describe("reclaimDeadWorkIfPossible — turn-cap-exhausted is terminal (CTL-830)", () => {
   const orch = "/orch";
 
-  test("reclaims turn-cap-exhausted/dead with commits ahead (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no reclaim probe, no emit", () => {
     const probe = recorder(true);
     const emit = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
@@ -634,12 +638,12 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       postReclaimMirror: () => {},
       liveness: () => "absent",
     });
-    expect(r).toBe("reclaimed");
-    expect(probe.calls.length).toBe(1);
-    expect(emit.calls.length).toBe(1);
+    expect(r).toBe("noop");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
   });
 
-  test("revives turn-cap-exhausted/dead with --resume when no work done (CTL-701)", () => {
+  test("turn-cap-exhausted short-circuits to noop — no revive dispatch", () => {
     const reviveDispatch = recorder({ code: 0 });
     const r = reclaimDeadWorkIfPossible(orch, implementSignal({ status: "turn-cap-exhausted" }), {
       statJob: () => null,
@@ -656,9 +660,8 @@ describe("reclaimDeadWorkIfPossible — turn-cap-exhausted (CTL-701)", () => {
       resolveSession: () => "uuid-resume",
       liveness: () => "absent",
     });
-    expect(r).toBe("revived");
-    expect(reviveDispatch.calls.length).toBe(1);
-    expect(reviveDispatch.calls[0][0].resumeSession).toBe("uuid-resume");
+    expect(r).toBe("noop");
+    expect(reviveDispatch.calls.length).toBe(0);
   });
 });
 
@@ -841,6 +844,316 @@ describe("reclaimDeadWorkIfPossible", () => {
     });
     expect(r).toBe("alive-suppressed");
     expect(emit.calls.length).toBe(0);
+  });
+
+  // CTL-809 — GHOST BREAKER. jobLifecycle reports a crashed/wedged --bg worker
+  // "alive" forever (CC 2.x never flips its state.json terminal). The alive branch
+  // cross-checks a FRESH `claude agents` snapshot: absent-from-fresh + past grace =
+  // genuinely dead → fall through to reclaim. Strictly gated to preserve CTL-662
+  // (busy fan-out stays listed) and CTL-731/657 (stale snapshot never reclaims).
+  const GHOST_GRACE = 60_000;
+  const STARTED = "2026-06-06T00:00:00Z";
+  const STARTED_MS = Date.parse(STARTED);
+
+  test("CTL-809: alive worker ABSENT from a FRESH snapshot, past grace, work done → ghost-breaker reclaims", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const appendEvent = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }), // jobLifecycle → alive
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent,
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      // FRESH snapshot, our worker absent (only an unrelated agent present)
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "deadbeef-1111-2222-3333-444444444444" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000, // > grace, < busy ceiling
+    });
+    expect(r).toBe("reclaimed");
+    expect(probe.calls.length).toBe(1);
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-809: alive worker PRESENT in a FRESH snapshot (busy fan-out) → still alive-suppressed (CTL-662)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      // our worker's shortId IS in the fresh snapshot → busy, not a ghost
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker absent but snapshot STALE/cold → still alive-suppressed (CTL-731/657, no cold storm)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // cold
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker absent from a FRESH snapshot but WITHIN grace → suppress (just-spawned-safe)", () => {
+    const emit = recorder({ code: 0 });
+    let snapCalls = 0;
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => {
+        snapCalls++;
+        return { agents: [], isFresh: true, ageMs: 1 };
+      },
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 30_000, // 30s < 60s grace
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(snapCalls).toBe(0); // within grace → snapshot never consulted
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: alive worker PAST busy-ceiling with work done but PRESENT in a fresh snapshot → still suppressed (busy-ceiling × ghost-breaker)", () => {
+    // The dangerous intersection: past busy-ceiling with workDone:true skips the
+    // escalation and reaches the ghost-breaker. A worker still LISTED in a fresh
+    // snapshot is a live busy worker and must NEVER be reclaimed (CTL-662).
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) }, // workDone → skips busy-ceiling escalate
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }], // PRESENT
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      busyCeilingMs: 1, // tiny → now() is far past it
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-809: malformed bg_job_id → ghost-breaker suppresses without throwing (snapshot not consulted)", () => {
+    const emit = recorder({ code: 0 });
+    let snapCalls = 0;
+    const sig = implementSignal({ bgJobId: "zzzzzzzz", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => {
+        snapCalls++;
+        return { agents: [], isFresh: true, ageMs: 1 };
+      },
+      ghostGraceMs: GHOST_GRACE,
+      now: () => STARTED_MS + 5 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed"); // shortIdFromSessionId throws → caught → suppress
+    expect(snapCalls).toBe(0);
+  });
+
+  // CTL-868 — ZOMBIE BREAKER. The CTL-809 ghost-breaker only fires on a FRESH
+  // `claude agents` snapshot; on a headless host that snapshot is unreliable
+  // (CTL-829), so a corpse stuck at state:"working" stays alive-suppressed and
+  // starves a slot forever. When no fresh snapshot is available, the alive branch
+  // falls back to a state.json mtime staleness floor. These prove the breaker fires
+  // for a genuine zombie yet never overrides a fresh "present" verdict (CTL-662).
+  const ZOMBIE_FLOOR = 2 * 60 * 60_000;
+
+  test("CTL-868: alive worker, state.json mtime past the zombie floor, NO fresh snapshot, work done → reclaimed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      // state=working (jobLifecycle → alive) but state.json untouched for 3h → corpse
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h past mtime > 2h floor, < 6h busy ceiling
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-868: alive worker mtime past the floor but PRESENT in a FRESH snapshot → still suppressed (CTL-662, fresh-present wins over mtime)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }), // 3h stale
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      // a FRESH snapshot lists the worker → busy fan-out, NOT a zombie (mtime ignored)
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-868: alive worker, mtime WITHIN the zombie floor, no fresh snapshot → still suppressed", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "807b77bd", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      now: () => STARTED_MS + 30 * 60_000, // 30min stale < 2h floor
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  // CTL-927 — DOC-PHASE ZOMBIE-FLOOR EXEMPTION. The CTL-868 cold-snapshot mtime
+  // floor fires only when no FRESH `claude agents` snapshot exists (CTL-829, the
+  // headless mini). For long-fan-out doc phases (research/plan/triage/verify/review)
+  // the worker's state.json legitimately ages during a multi-minute in-process
+  // sub-agent fan-out, so the 2h mtime guess false-kills a LIVE worker → the observed
+  // fleet-wide no-progress storm. Doc phases use BUSY_CEILING_MS (6h) instead, where
+  // the busy-ceiling escalation routes to needs-human (escalate, never silent kill).
+  // implement/remediate keep the 2h floor.
+  const BUSY_CEILING = 6 * 60 * 60_000;
+  const docSignal = (phase, { bgJobId = "807b77bd", startedAt = STARTED } = {}) => ({
+    ticket: "CTL-9",
+    phase,
+    status: "running",
+    liveness: { kind: "bg", value: bgJobId },
+    signalPath: `/x/CTL-9/phase-${phase}.json`,
+    raw: {
+      ticket: "CTL-9",
+      phase,
+      orchestrator: "CTL-9",
+      status: "running",
+      bg_job_id: bgJobId,
+      catalystSessionId: "sess_CTL-9_abc",
+      startedAt,
+    },
+  });
+
+  test("CTL-927: research worker, state.json mtime 3h stale, NO fresh snapshot → alive-suppressed (doc phase exempt from the 2h zombie floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      // state=working (jobLifecycle → alive); state.json untouched 3h (sub-agent fan-out)
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) }, // research doc not written yet (artifact-bytes = 0)
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {}, // hermetic — no linearis spawn
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }), // mini: stale/cold (CTL-829)
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR, // 2h
+      busyCeilingMs: BUSY_CEILING, // 6h
+      now: () => STARTED_MS + 3 * 60 * 60_000, // 3h: past the 2h floor, under the 6h ceiling
+    });
+    expect(r).toBe("alive-suppressed"); // pre-fix: the 2h zombie-floor wrongly reclaims it
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: implement worker, mtime 3h stale, NO fresh snapshot, work done → still reclaimed (implement keeps the 2h floor)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("implement"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { implement: recorder(true) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [], isFresh: false, ageMs: Infinity }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("CTL-927 regression: research worker mtime 3h stale but PRESENT in a FRESH snapshot → alive-suppressed (fresh-present still wins; ghost-breaker unchanged)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: recorder(false) },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "807b77bd-0000-0000-0000-000000000000" }],
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-927 regression: research worker ABSENT from a FRESH snapshot, past grace, work done → ghost-breaker still reclaims (doc exemption only relaxes the COLD path)", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, docSignal("research"), {
+      statJob: () => ({ exists: true, state: "working", mtimeMs: STARTED_MS }),
+      probes: { research: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({
+        agents: [{ sessionId: "deadbeef-1111-2222-3333-444444444444" }], // our worker absent
+        isFresh: true,
+        ageMs: 1_000,
+      }),
+      ghostGraceMs: GHOST_GRACE,
+      zombieStaleFloorMs: ZOMBIE_FLOOR,
+      busyCeilingMs: BUSY_CEILING,
+      now: () => STARTED_MS + 3 * 60 * 60_000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
   });
 
   test("'noop' for an unknown signal (no bg_job_id)", () => {
@@ -2509,6 +2822,42 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.severityNumber).toBe(9);
   });
 
+  // CTL-1023: the work-type dimension rides on every dispatch lifecycle event.
+  // Resolved from workers/<ticket>/triage.json .classification; "unknown" when
+  // no triage.json exists yet (the pre-triage first dispatch).
+  test("CTL-1023: dispatch-requested carries catalyst.ticket.type from triage.json", () => {
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl1023-disp-"));
+    mkdirSync(join(orchDir, "workers", "CTL-TT-1"), { recursive: true });
+    writeFileSync(
+      join(orchDir, "workers", "CTL-TT-1", "triage.json"),
+      JSON.stringify({ classification: "bug" }),
+    );
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir,
+      ticket: "CTL-TT-1",
+      target_phase: "implement",
+      reason: "advance",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("bug");
+    rmSync(orchDir, { recursive: true, force: true });
+  });
+
+  test("CTL-1023: dispatch-requested defaults catalyst.ticket.type to 'unknown' pre-triage", () => {
+    const ok = defaultAppendDispatchRequestedEvent({
+      orchId: "orch-tt",
+      orchDir: undefined,
+      ticket: "CTL-TT-2",
+      target_phase: "triage",
+      reason: "new-work",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["catalyst.ticket.type"]).toBe("unknown");
+  });
+
   test("defaultAppendRunawayEvent writes a runaway envelope (CTL-671)", () => {
     const ok = defaultAppendRunawayEvent({
       ticket: "CTL-9",
@@ -2527,6 +2876,61 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     // CTL-700 (Item B): regression-lock — abnormal events keep WARN
     expect(env.severityText).toBe("WARN");
     expect(env.attributes["catalyst.orchestration"]).toBe("orch-rw");
+  });
+
+  test("CTL-868: defaultAppendOrphanDetectedEvent writes a phase.<phase>.orphan-detected.<ticket> envelope", () => {
+    const ok = defaultAppendOrphanDetectedEvent({
+      phase: "implement",
+      ticket: "CTL-OD-1",
+      orchId: "orch-od",
+      reason: "stalled-no-recovery",
+      stalled_phases: ["implement", "verify"],
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // The real builder output (not a spy) — guards the event.name convention and
+    // the stalled_phases payload the orch-monitor dashboard consumes.
+    expect(env.attributes["event.name"]).toBe("phase.implement.orphan-detected.CTL-OD-1");
+    expect(env.attributes["event.action"]).toBe("orphan-detected");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("orphan-detected");
+    expect(env.body.payload.reason).toBe("stalled-no-recovery");
+    expect(env.body.payload.stalled_phases).toEqual(["implement", "verify"]);
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-od");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent writes a phase.<phase>.held-stopped.<ticket> envelope", () => {
+    // Exercises the REAL emitter (not the scheduler's stub seam): guards the
+    // buildEventEnvelope output — event.name convention, action, and the
+    // bg_job_id payload the revive --resume path + HUD/audit consumers read.
+    const ok = defaultAppendHeldStoppedEvent({
+      orchId: "orch-hs",
+      ticket: "CTL-HS-1",
+      phase: "implement",
+      bgJobId: "deadbeef",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("phase.implement.held-stopped.CTL-HS-1");
+    expect(env.attributes["event.action"]).toBe("held-stopped");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("held-stopped");
+    expect(env.body.payload.bg_job_id).toBe("deadbeef");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-hs");
+  });
+
+  test("CTL-768: defaultAppendHeldStoppedEvent is fail-open — returns falsy, never throws, on an unwriteable log dir", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-hs");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendHeldStoppedEvent({
+        orchId: "orch-hs",
+        ticket: "CTL-HS-FAIL",
+        phase: "implement",
+        bgJobId: "deadbeef",
+      }),
+    ).toBe(false);
   });
 
   test("both helpers are fail-open: return false when the log dir is unwriteable", () => {
@@ -2581,6 +2985,164 @@ describe("dispatch lifecycle event envelopes (CTL-660)", () => {
     expect(env.body.payload.load_per_core).toBe(0.3);
     expect(env.body.payload.mem_free_pct).toBe(42.5);
     expect(env.body.payload.decision_reason).toBe("converge-to-setpoint");
+  });
+});
+
+// CTL-1044: the generic operator-event appender. This is the PRODUCTION default
+// for the scheduler's `appendIntentEvent` seam (advance-shadow disagree/tick,
+// CTL-936 intent.ineffective, executeEscalations). The seam contract is a RAW
+// `{ "event.name": string, payload: object }` object that does NOT fit
+// buildEventEnvelope's phase/action schema — so this helper wraps it in a valid
+// unified-event-log envelope, carrying event.name VERBATIM and payload intact.
+describe("defaultAppendOperatorEvent (CTL-1044)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1044-op-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes a parseable envelope carrying event.name verbatim and payload intact", () => {
+    // Exactly the object the advance-shadow comparator hands the seam
+    // (advance-shadow.mjs:177-180): the disagree event.
+    const disagreement = {
+      ticket: "CTL-9",
+      procedural: "research",
+      belief: null,
+      procedural_exhausted: false,
+      belief_exhausted: false,
+      signals: { triage: "done" },
+      differingInput: { verdict: null, remediateCycleCount: 0 },
+    };
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.disagree",
+      payload: disagreement,
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    // event.name is preserved VERBATIM — NOT mangled into phase.<phase>.<action>.
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.disagree");
+    // payload survives the round-trip byte-for-byte.
+    expect(env.body.payload).toEqual(disagreement);
+    // Same resource/service fields every other daemon emitter stamps.
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.resource["service.namespace"]).toBe("catalyst");
+    expect(env.resource["host.name"]).toBeTruthy();
+    expect(env.resource["host.id"]).toBeTruthy();
+    // Required envelope scaffold the log reader/otel-forward depend on.
+    expect(typeof env.id).toBe("string");
+    expect(env.id.length).toBeGreaterThan(0);
+    expect(env.ts).toBeTruthy();
+    expect(env.severityText).toBe("INFO");
+    expect(env.severityNumber).toBe(9);
+  });
+
+  test("writes the tick-summary event with its agree/disagree counts", () => {
+    const ok = defaultAppendOperatorEvent({
+      "event.name": "beliefs.advance_shadow.tick",
+      payload: { agree: 3, disagree: 1 },
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe("beliefs.advance_shadow.tick");
+    expect(env.body.payload).toEqual({ agree: 3, disagree: 1 });
+  });
+
+  test("is best-effort: returns false (never throws) on a malformed event with no event.name", () => {
+    expect(defaultAppendOperatorEvent({ payload: { x: 1 } })).toBe(false);
+    expect(defaultAppendOperatorEvent(null)).toBe(false);
+    expect(defaultAppendOperatorEvent({})).toBe(false);
+  });
+
+  test("is fail-open: returns false (never throws) when the log dir is unwriteable", () => {
+    const filePath = join(envCatalystDir, "not-a-dir-op");
+    writeFileSync(filePath, "x");
+    process.env.CATALYST_DIR = join(filePath, "nested");
+    expect(
+      defaultAppendOperatorEvent({
+        "event.name": "beliefs.advance_shadow.disagree",
+        payload: { ticket: "CTL-FAIL" },
+      }),
+    ).toBe(false);
+  });
+});
+
+// CTL-1006 Scenario 2: boot-resume phase-regression audit envelope. Emitted when
+// boot-resume would have re-dispatched an EARLIER phase whose ticket already has
+// a LATER terminal phase signal — surfaces the regression for forensics INSTEAD
+// of spawning a fresh earlier-phase worker. Audit-only: distinct action
+// (broker-ignored) + NOT counted by countReviveEvents (the Scenario-4 invariant —
+// a regression must never consume the chronic-failure revive budget).
+describe("boot-resume phase-regression event envelope (CTL-1006)", () => {
+  let envCatalystDir;
+  let prevCatalystDir;
+  beforeEach(() => {
+    prevCatalystDir = process.env.CATALYST_DIR;
+    envCatalystDir = mkdtempSync(join(tmpdir(), "ctl1006-pr-"));
+    process.env.CATALYST_DIR = envCatalystDir;
+    mkdirSync(join(envCatalystDir, "events"), { recursive: true });
+  });
+  afterEach(() => {
+    if (prevCatalystDir === undefined) delete process.env.CATALYST_DIR;
+    else process.env.CATALYST_DIR = prevCatalystDir;
+    rmSync(envCatalystDir, { recursive: true, force: true });
+  });
+
+  function readBackEnvelope() {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    const lines = readFileSync(join(envCatalystDir, "events", `${ym}.jsonl`), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    return JSON.parse(lines[lines.length - 1]);
+  }
+
+  test("writes phase.<phase>.boot-resume-phase-regression.<ticket> with dominantPhase payload", () => {
+    const ok = defaultAppendBootResumePhaseRegressionEvent({
+      phase: "triage",
+      ticket: "CTL-997",
+      dominantPhase: "research",
+      orchId: "orch-1006",
+    });
+    expect(ok).toBe(true);
+    const env = readBackEnvelope();
+    expect(env.attributes["event.name"]).toBe(
+      "phase.triage.boot-resume-phase-regression.CTL-997"
+    );
+    expect(env.attributes["event.action"]).toBe("boot-resume-phase-regression");
+    expect(env.resource["service.name"]).toBe("catalyst.execution-core");
+    expect(env.body.payload.status).toBe("boot-resume-phase-regression");
+    expect(env.body.payload.dominantPhase).toBe("research");
+    expect(env.attributes["catalyst.orchestration"]).toBe("orch-1006");
+  });
+
+  test("Scenario-4 invariant: NOT counted by countReviveEvents (revive budget preserved)", async () => {
+    const { countReviveEvents } = await import("./event-scan.mjs");
+    // Use the implement phase so the event.name collides with the implement-only
+    // revive shape if the action were mis-named — countReviveEvents must still 0.
+    defaultAppendBootResumePhaseRegressionEvent({
+      phase: "implement",
+      ticket: "CTL-RG-1006",
+      dominantPhase: "verify",
+      orchId: "orch-1006",
+    });
+    expect(countReviveEvents({ ticket: "CTL-RG-1006" })).toBe(0);
   });
 });
 
@@ -3461,5 +4023,835 @@ describe("defaultReviveDispatch — CTL-761 attempt passthrough", () => {
       { dispatch },
     );
     expect("attempt" in dispatch.calls[0][0]).toBe(false);
+  });
+});
+
+// --- CTL-663: partial-commit implement is resumed, not reclaimed ------------
+// These tests lock the regression class discovered in CTL-661: a dead implement
+// worker whose worktree has fewer commits than its plan has phases must be
+// REVIVED (branch C), never RECLAIMED-AS-DONE (branch B). Uses the REAL
+// implementProbe wired with fake git/fs seams through the `probes` injection.
+
+describe("reclaimDeadWorkIfPossible — CTL-663 partial-commit implement is resumed, not reclaimed", () => {
+  const orch = "/orch-663"; // hermetic fake orchDir (no disk writes succeed)
+
+  // Local helpers (duplicated from work-done-probes.test.mjs for test clarity).
+  function porcelainFor663(ticket, wt) {
+    return [
+      "worktree /repo",
+      "HEAD abcdef0",
+      "branch refs/heads/main",
+      "",
+      `worktree ${wt}`,
+      "HEAD 1234567",
+      `branch refs/heads/${ticket}`,
+      "",
+    ].join("\n");
+  }
+  function makeRunGit663(responses) {
+    return (args) => {
+      const key = args.join(" ");
+      if (responses[key]) return responses[key];
+      for (const [k, v] of Object.entries(responses)) {
+        if (key.endsWith(k)) return v;
+      }
+      return { code: 1, stdout: "", stderr: `fake runGit: no match for ${key}` };
+    };
+  }
+
+  // Five-phase plan fixture (>200 bytes, 5 ## Phase headers).
+  const FIVE_PHASE_PLAN_BODY_663 = `# Plan: CTL-9
+
+${"Overview and context for the five-phase implementation plan. ".repeat(5)}
+
+## Phase 1: Setup
+
+Establish the foundation and initial scaffolding.
+
+## Phase 2: Core Logic
+
+Implement the main business logic and algorithms.
+
+## Phase 3: Integration
+
+Wire up all components and integration points.
+
+## Phase 4: Tests
+
+Write comprehensive test coverage for all paths.
+
+## Phase 5: Cleanup
+
+Final polish, documentation, and code cleanup.
+
+### Success Criteria
+- [ ] All five phases land as discrete commits on the branch
+`;
+
+  // Minimal seam set for the revive/reclaim paths; override via the spread.
+  function makeSeams663(extra = {}) {
+    return {
+      repoRoot: "/repo",
+      emitComplete: recorder({ code: 0 }),
+      appendEvent: recorder(undefined),
+      appendReviveEvent: recorder(undefined),
+      appendEscalatedEvent: recorder(undefined),
+      appendReviveSuppressedEvent: recorder(undefined),
+      reviveDispatch: recorder({ code: 0 }),
+      applyStalledLabel: recorder({ applied: true }),
+      killBgJob: recorder(undefined),
+      countReviveEvents: recorder(0),
+      writeReviveMarker: recorder(undefined),
+      resolveSession: () => null,
+      postReclaimMirror: recorder(undefined),
+      listTicketPhases: () => ["implement"],
+      inEscalationCooldownFn: () => false,
+      recordEscalationFn: recorder(undefined),
+      emitReapIntent: () => Promise.resolve(),
+      readBootSince: () => undefined,
+      breaker: { isOpen: () => false },
+      now: () => 1_000_000,
+      progressMark: () => 1,      // 1 commit ahead → has forward progress
+      readProgressMark: () => 0,  // watermark 0 → progress advanced
+      writeProgressMark: recorder(undefined),
+      ...extra,
+    };
+  }
+
+  // Factory: real implementProbe with fake git/fs at a given commit count.
+  function makeRealProbe(commitCount) {
+    const wt = "/wt/CTL-9";
+    return (args) =>
+      WORK_DONE_PROBES.implement(args, {
+        runGit: makeRunGit663({
+          "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor663("CTL-9", wt), stderr: "" },
+          [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: `${commitCount}\n`, stderr: "" },
+          [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+        }),
+        listArtifacts: () => ["2026-06-07-ctl-9.md"],
+        readArtifact: () => FIVE_PHASE_PLAN_BODY_663,
+      });
+  }
+
+  test("dead worker, 1-of-5 commits → 'revived' (branch C), emitComplete NEVER called", () => {
+    const emit = recorder({ code: 0 });
+    const reviveDispatch = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: makeRealProbe(1) },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+      reviveDispatch,
+    }));
+    expect(r).toBe("revived");
+    expect(emit.calls.length).toBe(0);
+    expect(reviveDispatch.calls.length).toBe(1);
+  });
+
+  test("dead worker, 5-of-5 commits → 'reclaimed' (branch B still works at true completion)", () => {
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: makeRealProbe(5) },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+    }));
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+
+  test("dead worker, 1 commit, NO plan doc → 'reclaimed' (backward-compatible planless path)", () => {
+    const wt = "/wt/CTL-9";
+    const emit = recorder({ code: 0 });
+    const noPlanProbe = (args) =>
+      WORK_DONE_PROBES.implement(args, {
+        runGit: makeRunGit663({
+          "-C /repo worktree list --porcelain": { code: 0, stdout: porcelainFor663("CTL-9", wt), stderr: "" },
+          [`-C ${wt} rev-list --count origin/main..HEAD`]: { code: 0, stdout: "1\n", stderr: "" },
+          [`-C ${wt} status --porcelain`]: { code: 0, stdout: "", stderr: "" },
+        }),
+        listArtifacts: () => [], // no plan doc → gate skipped
+        readArtifact: () => "",
+      });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), makeSeams663({
+      probes: { implement: noPlanProbe },
+      jobLifecycle: () => "dead-gone",
+      emitComplete: emit,
+    }));
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+  });
+});
+
+// ─── CTL-1090: readClusterHeartbeats cross-host merge ────────────────────────
+
+import { readClusterHeartbeats } from "./recovery.mjs";
+
+const makeHbLine = (host, ts) =>
+  JSON.stringify({
+    ts,
+    attributes: { "event.name": "node.heartbeat" },
+    body: { payload: { "host.name": host } },
+  });
+
+describe("readClusterHeartbeats — cross-host peer merge (CTL-1090)", () => {
+  let tmpDir;
+  let logPath;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "ctl1090-hb-"));
+    logPath = join(tmpDir, "events.jsonl");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("multi-host: merges injected peer timestamps over the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+  });
+
+  test("peer entry never clobbers a FRESHER local timestamp for the same host", () => {
+    const localTs = "2026-06-13T01:05:00Z";
+    const peerTs = "2026-06-13T00:50:00Z";
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(localTs); // local fresher wins
+  });
+
+  test("single-host (roster<=1): peer reader is NEVER called — exact no-op", () => {
+    const readPeers = () => { throw new Error("must not be called single-host"); };
+    expect(() =>
+      readClusterHeartbeats({
+        logPath: join(tmpDir, "absent.jsonl"),
+        roster: ["mini"],
+        anchorIssue: "CTL-9999",
+        readPeers,
+      }),
+    ).not.toThrow();
+  });
+
+  test("peer-read failure is swallowed — returns the local map", () => {
+    writeFileSync(logPath, makeHbLine("mini", "2026-06-13T01:00:00Z") + "\n");
+    const readPeers = () => { throw new Error("Linear down"); };
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe("2026-06-13T01:00:00Z");
+    expect(result.laptop).toBeUndefined();
+  });
+
+  test("no anchorIssue → no peer read, local map only", () => {
+    const readPeers = () => { throw new Error("must not be called"); };
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: null,
+      readPeers,
+    });
+    expect(result).toEqual({});
+  });
+
+  test("missing log file with multi-host + anchor → returns peers only", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "2026-06-13T00:55:00Z", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBe("2026-06-13T00:55:00Z");
+    expect(result.mini).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: a peer's last_seen is untrusted. An unparseable
+  // value must never enter the merged map — otherwise it sorts above real ISO
+  // strings and (via deadHosts' Date.parse → NaN) makes the host look
+  // forever-alive, silently defeating takeover.
+  test("garbage peer last_seen is dropped, never poisons the merge", () => {
+    const readPeers = () => ({
+      laptop: { host: "laptop", last_seen: "zzz-not-a-date", in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath: join(tmpDir, "absent.jsonl"),
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.laptop).toBeUndefined();
+  });
+
+  // CTL-1090 review hardening: local ts is second-precision (millis stripped),
+  // peers publish millisecond ISO. A genuinely newer peer ts within the same
+  // second must win — a lexicographic compare would wrongly discard it because
+  // "…00.500Z" < "…00Z".
+  test("mixed-precision: a newer millisecond peer ts beats a second-precision local ts", () => {
+    const localTs = "2026-06-13T01:00:00Z";        // second precision (from event log)
+    const peerTs = "2026-06-13T01:00:00.500Z";     // 500ms later, same second
+    writeFileSync(logPath, makeHbLine("mini", localTs) + "\n");
+    const readPeers = () => ({
+      mini: { host: "mini", last_seen: peerTs, in_flight_tickets: [] },
+    });
+    const result = readClusterHeartbeats({
+      logPath,
+      roster: ["mini", "laptop"],
+      anchorIssue: "CTL-9999",
+      readPeers,
+    });
+    expect(result.mini).toBe(peerTs); // newer peer wins under numeric compare
+  });
+});
+
+// ─── CTL-1090: deadHosts flags a stale peer (pure function, no change needed) ─
+
+describe("deadHosts — flags a stale peer in merged lastSeen (CTL-1090)", () => {
+  test("a peer with an aged last_seen is flagged dead", () => {
+    const now = Date.parse("2026-06-13T02:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-13T01:59:30Z",   // 30s ago — alive
+      laptop: "2026-06-13T01:40:00Z", // 20m ago — dead (past 10m grace)
+    };
+    // deadHosts is imported below; use the already-imported version
+    const { deadHosts: dh } = { deadHosts };
+    expect(dh({ lastSeen, roster: ["mini", "laptop"], graceMs: 600_000, nowMs: now }))
+      .toEqual(["laptop"]);
+  });
+});
+
+// ─── CTL-1090: reclaimDeadHostWork respects injected ownedTicketsForHost ──────
+// defaultOwnedTicketsForHost is internal; its peer-ticket logic is covered by the
+// reclaimDeadHostWork seam (ownedTicketsForHost option). The injectable seam is the
+// correct test surface (same pattern used for all other collaborators).
+
+describe("reclaimDeadHostWork — peer in_flight_tickets seam (CTL-1090)", () => {
+  const nowISO1090 = () => new Date().toISOString();
+  const oldISO1090 = () => new Date(Date.now() - 20 * 60_000).toISOString();
+
+  test("ownedTicketsForHost returning peer tickets results in dispatch", async () => {
+    const dispatched = [];
+    await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        readHeartbeats: () => ({ mini: nowISO1090(), laptop: oldISO1090() }),
+        roster: ["mini", "laptop"],
+        self: "mini",
+        graceMs: 600_000,
+        nowMs: Date.now(),
+        ownedTicketsForHost: () => ["CTL-7", "CTL-8"],
+        ownerForTicket: () => "mini",
+        claim: () => ({ won: true, generation: 1 }),
+        inferResume: async () => "implement",
+        alreadyComplete: () => false,
+        rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-7" }),
+        thoughtsPull: () => ({ ok: true }),
+        dispatch: (od, ticket) => { dispatched.push(ticket); return { code: 0 }; },
+      },
+    );
+    expect(dispatched.sort()).toEqual(["CTL-7", "CTL-8"]);
+  });
+
+  test("single-host roster: exact no-op regardless of injected seams", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      {
+        roster: ["mini"],
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      },
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+});
+
+// ─── CTL-863: deadHosts, survivingRoster, inferResumePhase ───────────────────
+
+import { deadHosts, survivingRoster, inferResumePhase } from "./recovery.mjs";
+
+describe("deadHosts — grace-window evaluation (CTL-863)", () => {
+  test("flags hosts past the grace window, keeps fresh ones", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const lastSeen = {
+      mini: "2026-06-08T19:59:30Z",        // 30s ago — alive
+      "mac-studio": "2026-06-08T19:40:00Z", // 20m ago — dead
+    };
+    const dead = deadHosts({ lastSeen, roster: ["mini", "mac-studio"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual(["mac-studio"]);
+  });
+
+  test("a host absent from lastSeen is not flagged dead (no cross-host visibility)", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const dead = deadHosts({
+      lastSeen: { mini: "2026-06-08T19:59:55Z" },
+      roster: ["mini", "ghost"],
+      graceMs: 600_000,
+      nowMs: now,
+    });
+    expect(dead).toEqual([]);
+  });
+
+  test("empty roster returns empty dead list", () => {
+    const dead = deadHosts({ lastSeen: {}, roster: [], graceMs: 600_000, nowMs: Date.now() });
+    expect(dead).toEqual([]);
+  });
+
+  test("host exactly at the grace boundary (equal) is NOT dead", () => {
+    const now = Date.parse("2026-06-08T20:00:00Z");
+    const cutoff = now - 600_000; // exactly at boundary
+    const lastSeen = { mini: new Date(cutoff).toISOString() };
+    const dead = deadHosts({ lastSeen, roster: ["mini"], graceMs: 600_000, nowMs: now });
+    expect(dead).toEqual([]);
+  });
+});
+
+describe("survivingRoster — in-memory dead-host removal (CTL-863)", () => {
+  test("removes dead hosts without mutating the roster", () => {
+    const roster = ["mini", "mac-studio", "laptop"];
+    const survivors = survivingRoster(roster, ["mac-studio"]);
+    expect(survivors).toEqual(["mini", "laptop"]);
+    expect(roster).toEqual(["mini", "mac-studio", "laptop"]); // unchanged
+  });
+
+  test("empty dead list returns a copy of the full roster", () => {
+    const roster = ["mini", "mac-studio"];
+    expect(survivingRoster(roster, [])).toEqual(["mini", "mac-studio"]);
+  });
+
+  test("all dead → empty survivors", () => {
+    expect(survivingRoster(["mini"], ["mini"])).toEqual([]);
+  });
+});
+
+describe("inferResumePhase — reverse-order probe walk (CTL-863)", () => {
+  // CTL-703 (on main at merge): `teardown` is the descriptor's TERMINAL_PHASE,
+  // appended after monitor-deploy. inferResumePhase derives its walk order from
+  // STAGE_RANK, so the full phase set the probes must cover now ends in teardown
+  // (otherwise "all done" resumes at the unprobed teardown instead of terminating).
+  const allPhases = [
+    "triage", "research", "plan", "implement", "verify", "review",
+    "pr", "monitor-merge", "monitor-deploy", "teardown",
+  ];
+
+  test("plan done, implement not → resume at implement", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => {
+      const done = ["triage", "research", "plan"].includes(p);
+      return [p, async () => done];
+    }));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("implement");
+  });
+
+  test("nothing done → resume at entry phase (research)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => false]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+
+  test("all done → null (terminal; nothing to resume)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => true]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBeNull();
+  });
+
+  test("monitor-merge done, monitor-deploy not → resume at monitor-deploy", async () => {
+    const done = new Set(["triage","research","plan","implement","verify","review","pr","monitor-merge"]);
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => done.has(p)]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("monitor-deploy");
+  });
+
+  test("only triage done → resume at research (entry phase)", async () => {
+    const probes = Object.fromEntries(allPhases.map((p) => [p, async () => p === "triage"]));
+    const next = await inferResumePhase("CTL-900", { probes, cwd: "/wt" });
+    expect(next).toBe("research");
+  });
+});
+
+// ─── CTL-863: phaseAlreadyComplete ───────────────────────────────────────────
+
+import { phaseAlreadyComplete } from "./recovery.mjs";
+
+describe("phaseAlreadyComplete — event-log dedup (CTL-863)", () => {
+  test("true when a matching complete event is in the log", () => {
+    const lines = [
+      JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } }),
+    ].join("\n");
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+
+  test("false when no matching event (different ticket)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-999" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false when no matching event (different phase)", () => {
+    const lines = JSON.stringify({ attributes: { "event.name": "phase.plan.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(false);
+  });
+
+  test("false on missing/unreadable log (never throws)", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", {
+      readLog: () => { throw new Error("no file"); },
+    })).toBe(false);
+  });
+
+  test("false when log is empty", () => {
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => "" })).toBe(false);
+  });
+
+  test("handles malformed JSON lines gracefully", () => {
+    const lines = "not-json\n" + JSON.stringify({ attributes: { "event.name": "phase.research.complete.CTL-900" } });
+    expect(phaseAlreadyComplete("CTL-900", "research", { readLog: () => lines })).toBe(true);
+  });
+});
+
+// ─── CTL-863: reclaimDeadHostWork ────────────────────────────────────────────
+
+import { reclaimDeadHostWork } from "./recovery.mjs";
+
+const nowISO = () => new Date().toISOString();
+const oldISO = () => new Date(Date.now() - 20 * 60_000).toISOString(); // 20m ago
+
+const makeBaseDeps = (overrides = {}) => ({
+  readHeartbeats: () => ({ mini: nowISO(), dead: oldISO() }),
+  roster: ["mini", "dead"],
+  self: "mini",
+  graceMs: 600_000,
+  nowMs: Date.now(),
+  ownedTicketsForHost: () => ["CTL-900"],
+  ownerForTicket: () => "mini",
+  claim: () => ({ won: true, generation: 5 }),
+  inferResume: async () => "implement",
+  alreadyComplete: () => false,
+  rebuildWorktree: () => ({ ok: true, cwd: "/wt/CTL-900" }),
+  dispatch: () => ({ code: 0 }),
+  ...overrides,
+});
+
+describe("reclaimDeadHostWork — takeover sweep (CTL-863)", () => {
+  test("single-host roster → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ roster: ["mini"], dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("dead host owns a ticket we re-own → claim+infer+rebuild+dispatch, taken has entry", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({ dispatch: () => { dispatched = true; return { code: 0 }; } }),
+    );
+    expect(dispatched).toBe(true);
+    expect(r.taken).toEqual([{ ticket: "CTL-900", phase: "implement", generation: 5 }]);
+  });
+
+  test("HRW says another survivor owns it → skip (no claim, no dispatch)", async () => {
+    let claimed = false;
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownerForTicket: () => "other-host",
+        claim: () => { claimed = true; return { won: true, generation: 5 }; },
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(claimed).toBe(false);
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("lost claim (another survivor won the read-back) → no dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        claim: () => ({ won: false, generation: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferred phase already complete in the log → dedup, skip dispatch", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        alreadyComplete: () => true,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("inferResume returns null (terminal) → nothing to resume", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        inferResume: async () => null,
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("no dead hosts → no-op (no dispatch)", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        readHeartbeats: () => ({ mini: nowISO(), dead: nowISO() }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("rebuildWorktree fails → skip dispatch for that ticket", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        rebuildWorktree: () => ({ ok: false, cwd: null }),
+        dispatch: () => { dispatched = true; return { code: 0 }; },
+      }),
+    );
+    expect(dispatched).toBe(false);
+    expect(r.taken).toEqual([]);
+  });
+
+  test("multiple tickets owned by dead host: processes all in taken", async () => {
+    const dispatches = [];
+    const r = await reclaimDeadHostWork(
+      { orchDir: "/o" },
+      makeBaseDeps({
+        ownedTicketsForHost: () => ["CTL-900", "CTL-901"],
+        dispatch: (od, t) => { dispatches.push(t); return { code: 0 }; },
+      }),
+    );
+    expect(dispatches.sort()).toEqual(["CTL-900", "CTL-901"]);
+    expect(r.taken).toHaveLength(2);
+  });
+});
+
+// ─── CTL-866: thoughtsPull seam in reclaimDeadHostWork ───────────────────────
+
+describe("reclaimDeadHostWork — thoughtsPull seam (CTL-866)", () => {
+  test("CTL-866: thoughtsPull runs after rebuildWorktree and before inferResume", async () => {
+    const order = [];
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => { order.push("rebuild"); return { ok: true, cwd: "/wt/CTL-900" }; },
+      thoughtsPull: (cwd) => { order.push(`pull:${cwd}`); return { ok: true }; },
+      inferResume: async () => { order.push("infer"); return "implement"; },
+    }));
+    expect(order).toEqual(["rebuild", "pull:/wt/CTL-900", "infer"]);
+  });
+
+  test("CTL-866: thoughtsPull failure is fail-open — reclaim still dispatches", async () => {
+    let dispatched = false;
+    const r = await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      thoughtsPull: () => { throw new Error("pull boom"); },
+      dispatch: () => { dispatched = true; return { code: 0 }; },
+    }));
+    expect(dispatched).toBe(true);
+    expect(r.taken).toHaveLength(1);
+  });
+
+  test("CTL-866: single-host roster → no thoughtsPull (whole fn short-circuits)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      roster: ["mini"],
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+
+  test("CTL-866: rebuildWorktree failure → thoughtsPull NOT called (skipped with the ticket)", async () => {
+    let pulled = false;
+    await reclaimDeadHostWork({ orchDir: "/o" }, makeBaseDeps({
+      rebuildWorktree: () => ({ ok: false, cwd: null }),
+      thoughtsPull: () => { pulled = true; return { ok: true }; },
+    }));
+    expect(pulled).toBe(false);
+  });
+});
+
+// CTL-778 Step 3 — alive-probe-reclaim: an alive worker that has emitted
+// phase.<phase>.complete AND whose probe passes is reconciled without waiting
+// for it to die. The completeEventSeen seam is the precise disambiguator
+// between "done-but-idle" (reclaim) and "busy fan-out" (suppress).
+describe("reclaimDeadWorkIfPossible — CTL-778 alive-probe-reclaim", () => {
+  const orch = "/orch";
+  const STARTED = "2026-06-08T00:00:00Z";
+
+  test("CTL-778: alive + complete event seen + probe done → reclaimed", () => {
+    const emit = recorder({ code: 0 });
+    const reap = recorder(Promise.resolve());
+    const appendEvent = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }), // jobLifecycle → alive
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      emitReapIntent: reap,
+      appendEvent,
+      postReclaimMirror: () => {},
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaimed");
+    expect(emit.calls.length).toBe(1);
+    expect(reap.calls[0][0]).toBe("phase.reclaim.reap-requested");
+    expect(appendEvent.calls.length).toBe(1);
+  });
+
+  test("CTL-778: alive + probe done but NO complete event → still alive-suppressed", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: probe },
+      completeEventSeen: () => false, // gate closed
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event seen but probe NOT done → alive-suppressed (no false flip)", () => {
+    const emit = recorder({ code: 0 });
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(false) },
+      completeEventSeen: () => true,
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(emit.calls.length).toBe(0);
+  });
+
+  test("CTL-778: alive + complete event + probe done but emitComplete fails → reclaim-failed, no mirror", () => {
+    const mirror = recorder(undefined);
+    const sig = implementSignal({ bgJobId: "abc12345", startedAt: STARTED });
+    const r = reclaimDeadWorkIfPossible(orch, sig, {
+      statJob: () => ({ exists: true, state: "working" }),
+      probes: { implement: recorder(true) },
+      completeEventSeen: () => true,
+      emitComplete: recorder({ code: 1 }),
+      emitReapIntent: recorder(Promise.resolve()),
+      appendEvent: recorder(undefined),
+      postReclaimMirror: mirror,
+      agentsSnapshot: () => ({ agents: [{ sessionId: "abc12345-0000-0000-0000-000000000000" }], isFresh: true, ageMs: 0 }),
+      now: () => Date.parse(STARTED) + 1000,
+    });
+    expect(r).toBe("reclaim-failed");
+    expect(mirror.calls.length).toBe(0);
+  });
+
+  // Regression: the existing CTL-736 test (no completeEventSeen injected → seam defaults
+  // to a fn that returns false from an empty/absent log) must still pass unchanged.
+  test("CTL-736 regression: alive worker without complete event is still alive-suppressed, probe never called", () => {
+    const probe = recorder(true);
+    const emit = recorder({ code: 0 });
+    const r = reclaimDeadWorkIfPossible(orch, implementSignal(), {
+      statJob: () => ({ exists: true, mtimeMs: 1_000, state: "working" }),
+      probes: { implement: probe },
+      emitComplete: emit,
+      appendEvent: recorder(undefined),
+      now: () => 1_000 + 60 * 60 * 1000,
+      // completeEventSeen NOT injected — defaults to hasCompleteEvent({path}) → false (empty log)
+    });
+    expect(r).toBe("alive-suppressed");
+    expect(probe.calls.length).toBe(0);
+    expect(emit.calls.length).toBe(0);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// CTL-1065: escalateOnce carries a valid structured explanation
+// ──────────────────────────────────────────────────────────────────────────
+import { validateExplanation } from "./escalation-explanation.mjs";
+
+describe("CTL-1065: reclaimDeadWorkIfPossible escalated event carries explanation", () => {
+  const orch = mkdtempSync(join(tmpdir(), "ctl1065-reclaim-"));
+  afterEach(() => { try { rmSync(orch, { recursive: true, force: true }); } catch { /* */ } });
+
+  function impl1065(extra = {}) {
+    mkdirSync(join(orch, "workers", "CTL-65"), { recursive: true });
+    return {
+      ticket: "CTL-65", phase: "implement", status: "running",
+      startedAt: new Date(0).toISOString(),
+      liveness: { kind: "bg", value: "abcd1234" },
+      raw: { bg_job_id: "abcd1234", generation: 1, startedAt: new Date(0).toISOString() },
+      ...extra,
+    };
+  }
+
+  test("busy-ceiling escalation carries a valid explanation alongside reason", () => {
+    const captured = [];
+    const appendEscalatedEvent = (obj) => captured.push(obj);
+    reclaimDeadWorkIfPossible(
+      orch,
+      impl1065(),
+      {
+        statJob: () => ({ mtimeMs: Date.now(), exists: true }),
+        jobLifecycle: () => "alive",
+        busyCeilingMs: 1,
+        now: () => 10_000,
+        probes: { implement: () => false },
+        appendEscalatedEvent,
+        applyStalledLabel: recorder({ applied: true }),
+        inEscalationCooldownFn: () => false,
+        recordEscalationFn: () => {},
+        breaker: { isOpen: () => false },
+      },
+    );
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    const call = captured[0];
+    expect(call.reason).toBe("busy-ceiling-exceeded"); // unchanged
+    const expl = call.extras?.explanation;
+    expect(expl).toBeTruthy();
+    expect(validateExplanation(expl).valid).toBe(true);
   });
 });

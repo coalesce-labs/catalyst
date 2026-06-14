@@ -1,0 +1,5 @@
+# CTL-1120: vite build outputs are produced at build time (out-of-repo dist in
+# production via MONITOR_UI_DIST_DIR; temp dir in tests). Do NOT commit them —
+# tracking them dirties every worktree on rebuild and stalls phase dispatch.
+public/assets/
+public/index.html

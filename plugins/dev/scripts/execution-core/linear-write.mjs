@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { linearKeyForPhase, TERMINAL_LINEAR_KEY } from "../lib/phase-fsm.mjs";
 import { getProjectConfig } from "./registry.mjs";
 import { log } from "./config.mjs";
-import { fetchTicketLabels, fetchTicketState } from "./linear-query.mjs";
+import { fetchTicketLabels, readTicketLabels, readTicketLabelNodes, fetchTicketState } from "./linear-query.mjs";
 import { withBreaker } from "./linear-breaker.mjs";
+import { withAuthRemint, isAuthError } from "./linear-remint.mjs";
 // CTL-758: the SHARED Linear terminal-state predicate ({Done,Canceled} — its OWN
 // set, NOT TERMINAL_LINEAR_KEY which is the transition KEY "done"). Gates the
 // backward-write guard below.
@@ -34,7 +35,9 @@ function rawExec(cmd, args) {
 // the status-write path (which shells linear-transition.sh, itself a Linear
 // read+write) short-circuits without spawning while the breaker is open. Shared
 // singleton with linear-query.mjs: one 429 on any path pauses every path.
-const defaultExec = withBreaker(rawExec);
+// CTL-785: withAuthRemint interposes under the breaker — an open breaker still
+// short-circuits before any spawn (including the remint retry).
+const defaultExec = withBreaker(withAuthRemint(rawExec));
 
 // teamOf — the Linear team key is the identifier prefix: "CTL-558" → "CTL".
 export function teamOf(ticket) {
@@ -191,14 +194,19 @@ export function applyTerminalDone({ ticket, resolveRepoRoot, exec, cache }) {
 //                     Unrecoverable inside one daemon lifetime — callers
 //                     (scheduler.labelOnce) write a .skipped marker and do not
 //                     retry it this run.
+//   "exclusive-conflict" — CTL-834: the label is in an exclusive group whose
+//                     sibling is already on the ticket. Unrecoverable while the
+//                     sibling is present — callers back off (labelOnce writes
+//                     .skipped; convergeHeldLabel arms a cool-down).
 //   "rate-limited"  — Linear write rate-cap hit; retry next tick.
 //   "verify-failed" — write exited 0 but the read-back is missing the label
 //                     (the silent-success case) OR the read-back exec failed;
 //                     retry next tick.
 //   "transient"     — every other failure (network, spawn error, unknown
 //                     stderr, exec threw); retry next tick.
-// All reasons except "missing-label" are retryable next tick: labelOnce only
-// writes its .applied marker when applied: true, so a failure naturally retries.
+// Unrecoverable reasons ("missing-label", "exclusive-conflict") are NOT retried;
+// every other reason is retryable next tick (labelOnce only writes its .applied
+// marker when applied: true, so a failure naturally retries).
 export function applyLabel({ ticket, label, exec = defaultExec }) {
   try {
     const writeRes = exec("linearis", [
@@ -249,38 +257,63 @@ export function applyLabel({ ticket, label, exec = defaultExec }) {
 // This keeps the write inside linearis and preserves the issue's other labels.
 //
 // Idempotent: if the label is already absent we return { removed: true } without
-// a write. A failed read (fetchLabels returns non-array) is { removed: false,
-// reason: 'transient' } so the caller retries. Mirrors applyLabel's shape for
-// logging + failure classification. Never throws.
+// a write. A failed read is { removed: false, reason } where reason is
+// "auth-error" when the read's stderr matches isAuthError, otherwise "transient".
+// CTL-1078: injectable readLabels seam (defaults to readTicketLabels) returns the
+// richer { ok, labels, code, stderr } shape so the auth-vs-transient distinction
+// can be made. fetchLabels is accepted for back-compat (old test stubs). Never throws.
 export async function removeLabel(
   ticket,
   label,
-  { exec = defaultExec, fetchLabels = fetchTicketLabels } = {}
+  { exec = defaultExec, fetchLabels = null, readLabels = null, readLabelNodes = readTicketLabelNodes } = {}
 ) {
+  // Resolve the reader: prefer readLabels (richer), wrap legacy fetchLabels,
+  // or default to readTicketLabels.
+  const reader = readLabels
+    ?? (fetchLabels
+      ? (t, opts) => {
+          const arr = fetchLabels(t, opts);
+          return arr === null
+            ? { ok: false, labels: null, code: 1, stderr: "" }
+            : { ok: true, labels: arr };
+        }
+      : readTicketLabels);
   try {
-    const current = fetchLabels(ticket, { exec });
-    if (!Array.isArray(current)) {
-      // Read failed (linearis non-zero / non-JSON) — cannot safely overwrite
-      // without knowing the current set, so retry next tick.
-      log.warn({ ticket, label, reason: "transient" }, "removeLabel: read failed");
-      return { removed: false, reason: "transient" };
+    const readResult = reader(ticket, { exec });
+    if (!readResult.ok) {
+      const reason = isAuthError(readResult.stderr ?? "") ? "auth-error" : "transient";
+      log.warn({ ticket, label, reason, stderr: readResult.stderr }, "removeLabel: read failed");
+      return { removed: false, reason };
     }
+    const current = readResult.labels;
     if (!current.includes(label)) {
       // Idempotent: the label is already gone, no write needed.
       return { removed: true };
     }
     const remaining = current.filter((l) => l !== label);
-    const res = remaining.length
-      ? exec("linearis", [
-          "issues",
-          "update",
-          ticket,
-          "--labels",
-          remaining.join(","),
-          "--label-mode",
-          "overwrite",
-        ])
-      : exec("linearis", ["issues", "update", ticket, "--clear-labels"]);
+    let res;
+    if (remaining.length) {
+      // CTL-1085: prefer ticket-native UUIDs to avoid cross-team name resolution.
+      // Fall back to names when the node read is unavailable or any remaining
+      // name has no matching node (preserves prior behavior + back-compat).
+      let labelArg = remaining.join(",");
+      try {
+        const nodeRead = readLabelNodes(ticket, { exec });
+        if (nodeRead?.ok && Array.isArray(nodeRead.nodes)) {
+          const ids = remaining.map(
+            (name) => nodeRead.nodes.find((n) => n.name === name)?.id
+          );
+          if (ids.length && ids.every((id) => typeof id === "string" && id.length)) {
+            labelArg = ids.join(",");
+          }
+        }
+      } catch {
+        // node read threw → keep the name-based labelArg
+      }
+      res = exec("linearis", ["issues", "update", ticket, "--labels", labelArg, "--label-mode", "overwrite"]);
+    } else {
+      res = exec("linearis", ["issues", "update", ticket, "--clear-labels"]);
+    }
     if ((res.code ?? res.status ?? 0) !== 0) {
       const reason = classifyLabelFailure(res.stderr ?? "");
       log.warn({ ticket, label, reason, stderr: res.stderr }, "removeLabel: write failed");
@@ -353,20 +386,61 @@ export function applyTriageStatus({
   }
 }
 
-// ALLOWED_ESTIMATE_POINTS — the Fibonacci-derived points scale used by the
-// reference-class lookup tool (CTL-751). Only these values are accepted by
-// applyEstimate; anything else is rejected without calling linearis.
-const ALLOWED_ESTIMATE_POINTS = new Set([1, 3, 5, 8, 13]);
+// ALLOWED_ESTIMATE_POINTS — union of all valid point values across every
+// estimation method Linear supports: fibonacci, tShirt, exponential, and
+// linear (CTL-751, CTL-954). Zero is intentionally excluded — Linear's
+// allowZero flag gates whether 0 is a legal input for a given team, but the
+// scheduler never writes 0 (the scope→estimate map starts at xs=1 for all
+// non-tShirt methods).  Any value not in this set is rejected without calling
+// linearis, guarding against garbage writes.
+const ALLOWED_ESTIMATE_POINTS = new Set([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // linear + overlapping scales
+  13,                              // fibonacci max
+  16, 32,                          // exponential extended
+]);
+
+// HUMAN_ESTIMATE_LABEL — tickets carrying this label have a hand-set estimate
+// that machine write-backs must never clobber (estimation-methodology.md §6b).
+// Same label score-tickets.ts --check-labels honors (its HUMAN_LABEL const).
+const HUMAN_ESTIMATE_LABEL = "estimate-source:human";
 
 // applyEstimate — write a numeric estimate to a ticket's Linear estimate field
 // (CTL-751). Best-effort, never throws; mirrors applyLabel shape (try/catch,
 // log.warn, tagged return). No read-back (the estimate field is not subject to
 // the label silent-success gap; a verifying read-back can be added as follow-up).
-export function applyEstimate({ ticket, estimate, exec = defaultExec }) {
+//
+// CTL-813 — estimate-source:human guard. Pre-reads the ticket's labels and
+// SKIPS the write when HUMAN_ESTIMATE_LABEL is present, honoring the
+// methodology contract that human estimates are never machine-overwritten.
+// FAIL-OPEN on an unreadable label set (null / throw): proceeding matches the
+// score-tickets --check-labels precedent ("label check failed; proceeding
+// without filter") — the scheduler's estimate write is one-shot (fires once on
+// the triage→research advance), so failing closed would silently drop it
+// forever on any transient read hiccup.
+export function applyEstimate({ ticket, estimate, exec = defaultExec, fetchLabels = fetchTicketLabels }) {
   if (!ALLOWED_ESTIMATE_POINTS.has(estimate)) {
     return { applied: false, reason: "invalid-estimate" };
   }
   try {
+    let labels = null;
+    try {
+      labels = fetchLabels(ticket, { exec });
+    } catch {
+      /* fail-open — treated as unreadable below */
+    }
+    if (Array.isArray(labels) && labels.includes(HUMAN_ESTIMATE_LABEL)) {
+      log.info(
+        { ticket, estimate, label: HUMAN_ESTIMATE_LABEL },
+        "linear-write: estimate write skipped — ticket carries a human estimate"
+      );
+      return { applied: false, skipped: "human-estimate", reason: "skipped-human-estimate" };
+    }
+    if (!Array.isArray(labels)) {
+      log.warn(
+        { ticket, estimate },
+        "linear-write: estimate label pre-read failed — proceeding without human-estimate guard (fail-open)"
+      );
+    }
     const res = exec("linearis", ["issues", "update", ticket, "--estimate", String(estimate)]);
     if (res.code !== 0) {
       log.warn(
@@ -380,6 +454,48 @@ export function applyEstimate({ ticket, estimate, exec = defaultExec }) {
     log.warn(
       { ticket, estimate, reason: "transient", err: err.message },
       "linear-write: estimate write threw — swallowed"
+    );
+    return { applied: false, reason: "transient" };
+  }
+}
+
+// applyAssignee — write the Catalyst bot as the Linear assignee on a claimed
+// ticket (CTL-781). Mirrors applyLabel: try/catch, log.warn, tagged
+// {applied, reason} return, CTL-587-style read-back so applied:true means a
+// follow-up read confirmed the assignee landed. Never throws.
+// reason values: null | "invalid-user" | "transient" | "verify-failed".
+export function applyAssignee({ ticket, userId, exec = defaultExec }) {
+  if (typeof userId !== "string" || userId.length === 0) {
+    return { applied: false, reason: "invalid-user" };
+  }
+  try {
+    const writeRes = exec("linearis", ["issues", "update", ticket, "--assignee", userId]);
+    if (writeRes.code !== 0) {
+      log.warn(
+        { ticket, userId, code: writeRes.code, stderr: writeRes.stderr },
+        "linear-write: assignee write failed (exit non-zero)"
+      );
+      return { applied: false, reason: "transient" };
+    }
+    const readRes = exec("linearis", ["issues", "read", ticket]);
+    let actual = null;
+    try {
+      actual = JSON.parse(readRes.stdout ?? "")?.assignee?.id ?? null;
+    } catch {
+      /* unparseable read-back — falls through to verify-failed */
+    }
+    if (readRes.code !== 0 || actual !== userId) {
+      log.warn(
+        { ticket, userId, readback: actual },
+        "linear-write: assignee write exit-0 but read-back mismatch (silent-success gap)"
+      );
+      return { applied: false, reason: "verify-failed" };
+    }
+    return { applied: true, reason: null };
+  } catch (err) {
+    log.warn(
+      { ticket, userId, reason: "transient", err: err.message },
+      "linear-write: assignee write threw — swallowed"
     );
     return { applied: false, reason: "transient" };
   }
@@ -416,16 +532,24 @@ export function applyBlockedByRelation({ ticket, blockedBy, exec = defaultExec }
 //   - "Rate limit": linearis CLI surfaced an HTTP 429 (CTL-679 trigger).
 //   - "incorrect team": Linear's labels are team-scoped (different UUIDs per
 //     team for the same name). linearis resolved the label name in the wrong
-//     team's workspace context and sent the cross-team UUID, which Linear
-//     rejects. Permanent within one daemon lifetime (the resolver is global) —
-//     classified as missing-label so labelOnce writes the .skipped marker and
-//     stops the per-tick retry storm. (Observed on ADV tickets when the daemon
-//     orchestrates a team whose labels share names with the resolver's default
-//     team but have different UUIDs.)
-function classifyLabelFailure(stderr) {
+//     team's workspace context and sent the cross-team UUID. CTL-1085: now its
+//     own "team-mismatch" reason (previously "missing-label") — both are in
+//     UNRECOVERABLE_LABEL_REASONS so the applyLabel storm-break is preserved,
+//     while operators can distinguish "label absent" from "name resolved to
+//     wrong team". (Observed on ADV tickets whose label names share strings with
+//     CTL-team label names.)
+//   - "not exclusive child" (CTL-834): the label belongs to an EXCLUSIVE Linear
+//     label group and a SIBLING from that group is already on the ticket, so the
+//     add can never land while the sibling is present. Its own unrecoverable
+//     reason ("exclusive-conflict") so callers back off instead of re-issuing it
+//     every ~22s tick (observed: 218 fails / 44 min on the held-label converger —
+//     CTL-838 blocked↔needs-human, ADV-1295 blocked↔waiting).
+export function classifyLabelFailure(stderr) {
   const s = String(stderr ?? "");
   if (s.includes("not found")) return "missing-label";
-  if (s.includes("incorrect team")) return "missing-label";
+  if (s.includes("incorrect team")) return "team-mismatch"; // CTL-1085 (was missing-label)
+  if (s.includes("not exclusive")) return "exclusive-conflict";
   if (s.includes("Rate limit")) return "rate-limited";
+  if (isAuthError(s)) return "auth-error";
   return "transient";
 }

@@ -10,8 +10,98 @@ import {
   type SessionState,
 } from "./lib/state-reader";
 import { readSessionStore } from "./lib/session-store";
+import { readReconcileHealth } from "./lib/reconcile-health-reader"; // CTL-867
 import type { BoardPayload } from "./lib/board-data.mjs";
 import { createBoardSnapshotManager } from "./lib/board-snapshot.mjs";
+// CTL-896 (SHELL6): the dedicated nav-signal projection — worker count, queue
+// depth, board anomaly, and the local daemon-health dot — derived off the SAME
+// reactive board snapshot the board SSE already pushes (never a per-request
+// scan), with the daemon health layered from the local node.heartbeat liveness.
+import { deriveNavSignal } from "./lib/nav-signal.mjs";
+import type { NavSignal, DaemonHealth } from "./lib/nav-signal.mjs";
+// CTL-898 (SHELL8): the footer health dot generalizes into a PER-NODE cluster-
+// health indicator + node filter. The /api/cluster routes assemble the BFF2
+// cluster view (cluster-view.mjs) off the SAME reactive board snapshot, then
+// project it to the tiny per-node footer signal (cluster-signal.mjs). Single-host
+// is an exact identity no-op (one node — the local daemon).
+import { createClusterEntity } from "./lib/cluster-view.mjs";
+import type { ClusterView } from "./lib/cluster-view.mjs";
+import { deriveClusterSignal } from "./lib/cluster-signal.mjs";
+import type { ClusterSignal } from "./lib/cluster-signal.mjs";
+// CTL-886 (BFF4): run→worker identity — surface every phase-*.json signal as a
+// queryable run entity (/api/ticket-runs/<id>) + serve one signal verbatim
+// (/api/ec-worker/<ticket>/<phase>). Pure file-reads of resident signals — no
+// live Linear/GitHub call per request.
+import {
+  assembleTicketRuns,
+  readPhaseSignalVerbatim,
+} from "./lib/ticket-runs.mjs";
+// CTL-1100: FSM descriptor endpoint. Confirmed bun:sqlite-free (no computed
+// specifier needed — plain static import is safe for Vite/esbuild graph).
+import { buildFsmDescriptor } from "../lib/fsm-descriptor.mjs";
+// CTL-1100: belief store query functions (pure, db-injected). belief-store-queries.mjs
+// has no static bun:sqlite import — plain static import is safe for Vite/esbuild graph.
+import {
+  beliefSummary,
+  beliefRates,
+  beliefRecent,
+  beliefCfg,
+} from "./lib/belief-store-queries.mjs";
+// CTL-1100: journey assembler (bun:sqlite-free — plain static import safe).
+import { assembleJourney } from "./lib/journey.mjs";
+// CTL-887 (BFF5): the live transcript tail for execution-core workers. The
+// legacy /api/worker-stream reads the Plane-B runs/ tree (empty for EC); this
+// is the EC equivalent — tails ~/.claude/projects/*/<sessionId>.jsonl and
+// emits typed StreamEvents over SSE for the worker [● live] tab + reasoning
+// rows + footer counters + the ticket active-node live tail.
+import {
+  resolveTranscriptPath,
+  TranscriptTail,
+} from "./lib/ec-worker-stream.mjs";
+// CTL-885 (BFF3): the cross-node live-tail SSE FAN-IN. The /api/ec-worker-stream
+// route is made node-aware: single-host (hosts.json absent/len 1) is an EXACT
+// identity no-op (tail the LOCAL transcript, zero added latency, no owner
+// resolution, no remote hop); multi-host multiplexes the OWNING node's per-host
+// stream keyed by host.name (never a shared/merged log). The owner is resolved
+// from BFF2/BFF10's per-worker host:{name,id} carried on the board snapshot.
+import {
+  readClusterRoster,
+  resolveTailRoute,
+  resolvePeerBaseUrl,
+  proxyRemoteTail,
+} from "./lib/cross-node-stream.mjs";
+// CTL-938: the live SCREEN tail — the PRE-transcript wedge window. `claude logs
+// <shortId>` dumps a bg session's rendered screen buffer (the only surface that
+// shows WHY a session idles before any transcript exists — e.g. the
+// "Unknown command: /catalyst-dev:phase-plan" wedge). No follow flag exists, so
+// /api/ec-worker-screen/<shortId> polls every SCREEN_POLL_MS, ANSI-normalizes,
+// diffs, and pushes only CHANGED full-screen frames over SSE.
+import {
+  ScreenPoller,
+  deriveScreenShortId,
+  SCREEN_POLL_MS,
+} from "./lib/ec-worker-screen.mjs";
+import type { ScreenLogsExec } from "./lib/ec-worker-screen.mjs";
+import { hostName } from "./lib/canonical-event-shared.ts";
+// CTL-890 (BFF8): the read-model's ONE destructive endpoint (design P10) —
+// POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
+// behind a typed confirm + a fence-aware guard (single-host no-op pass;
+// multi-host rejects a stale/partitioned generation). Optimistic rollback is a
+// UI-side timer; the endpoint returns the verbatim shortId+ticket+phase identity
+// the client needs to mark `stopping` and arm that timer.
+import { stopWorker, type StopWorkerResult } from "./lib/stop-worker.mjs";
+// CTL-924 (BFF12): the read-model's SECOND write endpoint (HOME5's Answer /
+// Unblock verb) — POST /api/ticket/<ticket>/respond records the operator's
+// response, clears the needs-human marker, and emits the resume event that
+// drives CTL-876's loop (the daemon re-dispatches the parked worker). Shares
+// BFF8's typed-confirm + fence-aware scaffolding (single-host no-op pass;
+// multi-host rejects a stale/partitioned generation). Optimistic rollback is a
+// UI-side timer; the endpoint returns the verbatim ticket+phase identity the
+// client needs to mark the row `resuming` and arm that timer.
+import {
+  respondTicket,
+  type RespondTicketResult,
+} from "./lib/respond-ticket.mjs";
 import { queryHistory, queryStats, compareSessions } from "./lib/history-store";
 import {
   listArchivedOrchestrators,
@@ -45,11 +135,15 @@ import {
   type PrStatusFetcher,
 } from "./lib/pr-status";
 import {
-  createLinearFetcher,
+  createCacheBackedLinearFetcher,
   type LinearFetcher,
   type LinearTicket,
 } from "./lib/linear";
 import type { BriefingProvider } from "./lib/ai-briefing";
+import type { InboxSummaryProvider } from "./lib/inbox-summary";
+import { createInboxSummaryProvider } from "./lib/inbox-summary";
+import { collectInboxItemState } from "./lib/inbox-state";
+import { loadAiConfig } from "./lib/ai-config";
 import type { SummarizeHandler } from "./lib/summarize";
 import { createSummarizeHandler } from "./lib/summarize";
 import { loadSummarizeConfig, type SummarizeConfig, type ProviderName } from "./lib/summarize/config";
@@ -105,6 +199,8 @@ import { loadOtelConfig } from "./lib/otel-config";
 import { loadWebhookConfig } from "./lib/webhook-config";
 import { detectProjectKey } from "./lib/project-key";
 import { loadMonitorConfig } from "./lib/monitor-config";
+// CTL-961: per-repo favicon auto-detection via GitHub API + disk cache.
+import { fetchRepoIcon } from "./lib/repo-icon-fetcher";
 import {
   createPrometheusFetcher,
   type PrometheusFetcher,
@@ -114,14 +210,45 @@ import {
   createOtelHealthChecker,
   type OtelHealthChecker,
 } from "./lib/otel-health";
+// CTL-1050: the service-health registry (one severity model, shared with CTL-1039).
+import {
+  createServiceHealthMonitor,
+  type ServiceHealthMonitor,
+  type ServiceHealthConfig,
+} from "./lib/service-health-monitor";
+import {
+  createServiceHealthEmitter,
+  type ServiceHealthEmitter,
+} from "./lib/service-health-emitter";
+import { buildCanonicalEvent } from "./lib/canonical-event";
 import {
   costByTicket,
+  costByTaskType,
+  costByDimension,
+  isCostDimension,
   tokensByType,
   cacheHitRate,
   costRateByModel,
   toolUsageByName,
+  modelLatency,
+  toolLatency,
   apiErrors,
+  apiErrorCounts,
+  recentTail,
+  eventsHeatmap,
   costValidation,
+  costToday,
+  costSeries,
+  cacheSavings,
+  costAtHour,
+  activeTimeRatio,
+  workerHistoryBySession,
+  isValidCcSessionId,
+  workerBurnSeries,
+  ticketTelemetrySeries,
+  isValidLinearKey,
+  costByWorkType,
+  throughputByWorkType,
 } from "./lib/otel-queries";
 import {
   openDb,
@@ -143,8 +270,67 @@ import {
   isValidChannelName,
   type CommsReader,
 } from "./lib/comms-reader";
+// CTL-889 (P8/P9/P12): cache-backed Linear detail / artifacts / search readers.
+// All three read EXCLUSIVELY from durable caches (filter-state.db ticket_state +
+// the local thoughts tree) and NEVER do a synchronous live Linear call per
+// request — the rate-limit win, consistent with the BFF1 (CTL-883) decision.
+import { readTicketDetail } from "./lib/ticket-detail-reader.mjs";
+import { readTicketArtifacts, readTicketArtifactContent } from "./lib/ticket-artifacts-reader.mjs";
+// CTL-974 pattern: supplemental cached Linear {title, description} fetch for the
+// ticket-detail page. Board title is stale-sourced and the durable cache has no
+// description column, so both must be live-fetched (cached, TTL'd, fail-open).
+import {
+  fillTitleDescriptionFallback,
+  _clearTitleDescCache,
+} from "./lib/linear-title-description-fallback.mjs";
+import { readTicketSearch } from "./lib/ticket-search-reader.mjs";
 
 type BunServer = ReturnType<typeof Bun.serve>;
+
+// CTL-942: detail-page deep links. The /ticket/$id and /worker/$id routes are
+// SPA routes — a hard navigation / refresh / shared link must be answered with
+// the app HTML (index.html, see CTL-989) for the route to render at all. Scope
+// is deliberately tight: exactly one non-empty path segment after /ticket or
+// /worker, and the segment must not look like an asset (no "." extension) so a
+// mistyped asset URL keeps 404ing instead of receiving html. /api/* and /events*
+// can never match (the ^/(ticket|worker)/ prefix excludes them by construction).
+//
+// CTL-959: /dep-graph is also a deep-linkable SPA route.
+export function isDetailDeepLinkPath(pathname: string): boolean {
+  if (pathname === "/dep-graph") return true;
+  const m = /^\/(ticket|worker)\/([^/]+)$/.exec(pathname);
+  return m != null && !m[2].includes(".");
+}
+
+// CTL-989: the SINGLE unified TanStack Router is mounted from index.html and
+// owns EVERY app route — every surface is now a real path. `isAppRoute`
+// generalizes `isDetailDeepLinkPath` into the full SPA-fallback predicate: a
+// hard navigation / refresh / shared link to ANY app route must be answered with
+// index.html (the unified router boots, reads the URL, and lands on the right
+// surface/detail page). The flat surface paths are an explicit allowlist; the
+// detail/dep-graph paths reuse isDetailDeepLinkPath. /api/*, /events*, /public/*,
+// /assets/*, /mockups/* and any asset-looking segment are excluded (they are
+// served by their own handlers; this predicate only matches clean app paths).
+const APP_SURFACE_PATHS: ReadonlySet<string> = new Set([
+  "/",
+  "/index.html",
+  "/board",
+  "/workers",
+  "/dispatch",
+  "/queue",
+  "/telemetry",
+  "/utilization",
+  "/finops",
+  "/fleetops",
+  "/devops",
+  "/settings",
+  "/process",
+  "/rules",
+]);
+export function isAppRoute(pathname: string): boolean {
+  if (APP_SURFACE_PATHS.has(pathname)) return true;
+  return isDetailDeepLinkPath(pathname);
+}
 
 export interface CreateServerOptions {
   port?: number;
@@ -163,16 +349,70 @@ export interface CreateServerOptions {
   dbPath?: string | null;
   sqlitePollIntervalMs?: number;
   briefingProvider?: BriefingProvider | null;
+  /** CTL-1042: per-inbox-item AI summary provider (GET /api/inbox/:ticket/summary). */
+  inboxSummaryProvider?: InboxSummaryProvider | null;
   summarizeHandler?: SummarizeHandler | null;
   summarizeConfig?: SummarizeConfig;
   prometheusUrl?: string | null;
   lokiUrl?: string | null;
+  /** CTL-1050: Grafana base URL for the service-health registry probe (null ⇒
+   *  the grafana entry renders unknown/grey, never red). */
+  grafanaUrl?: string | null;
+  /** CTL-1050: OTel collector health_check endpoint (null ⇒ the collector entry
+   *  falls back to telemetry-ingest event-recency). */
+  collectorHealthUrl?: string | null;
   prometheusFetcher?: PrometheusFetcher | null;
   lokiFetcher?: LokiFetcher | null;
   otelHealthChecker?: OtelHealthChecker | null;
+  /** CTL-1050: inject a pre-built service-health monitor (tests). Production
+   *  builds one from config + CATALYST_DIR. */
+  serviceHealthMonitor?: ServiceHealthMonitor | null;
   previewFetcher?: PreviewFetcher | null;
   previewRefreshMs?: number;
   annotationsDbPath?: string;
+  /**
+   * CTL-1100: override for beliefs.db used by governance read endpoints.
+   * Production resolves via defaultBeliefsDbPath(process.env); tests inject
+   * a seeded temp path so routes don't read the live beliefs store.
+   */
+  beliefStoreDbPath?: string;
+  /**
+   * Override for the broker's durable filter-state.db (ticket_state cache) used
+   * by the cache-backed Linear detail/search routes (CTL-889, P8/P12). Defaults
+   * to `${catalystDir}/filter-state.db` — the broker's own default. Tests point
+   * this at a seeded temp DB so the routes don't read the live broker cache.
+   */
+  filterStateDbPath?: string;
+  /**
+   * CTL-896 (SHELL6): override for the local daemon-health reader that feeds the
+   * footer health dot in the nav-signal projection (/api/nav, /api/nav/stream).
+   * Production lazily resolves the local node's last `node.heartbeat` (recovery
+   * .readClusterHeartbeats) and classifies it via node-liveness — the single-host
+   * identity no-op (the one local daemon's own heartbeat IS the health). Tests
+   * inject a deterministic status so the routes don't read the live event log.
+   */
+  daemonHealthReader?: (() => DaemonHealth | Promise<DaemonHealth>) | null;
+  /**
+   * CTL-898 (SHELL8): override for the per-node cluster-health reader that feeds
+   * the footer's generalized per-node indicator + node filter (/api/cluster,
+   * /api/cluster/stream). Given the board snapshot it returns the assembled
+   * ClusterView (cluster-view.mjs::assembleClusterView), projected to the tiny
+   * footer signal by deriveClusterSignal. Production lazily resolves the roster
+   * (config.getClusterHosts) + heartbeats (recovery.readClusterHeartbeats) — the
+   * single-host identity no-op yields ONE node (the local daemon). Tests inject a
+   * deterministic ClusterView so the routes don't read the live event log/roster.
+   */
+  clusterReader?: ((board: BoardPayload) => ClusterView | Promise<ClusterView>) | null;
+  /**
+   * CTL-938: override for the `claude logs <shortId>` runner that feeds the
+   * live SCREEN SSE (/api/ec-worker-screen/<shortId>) — the pre-transcript
+   * wedge window. Production spawns the real claude CLI (defaultClaudeLogsExec);
+   * tests inject a scripted fake so no subprocess is ever forked.
+   */
+  screenLogsExec?: ScreenLogsExec | null;
+  /** CTL-938: screen poll cadence override (default SCREEN_POLL_MS ≈ 2s). Tests
+   *  shrink it so the SSE assertions don't wait multiple seconds per frame. */
+  screenPollMs?: number;
   terminal?: boolean;
   renderOptions?: RenderOptions;
   commsReader?: CommsReader | null;
@@ -207,8 +447,8 @@ export interface CreateServerOptions {
     linearSecrets: Array<{ key: string; secret: string }>;
     /** smee.io channel URL for Linear delivery. Empty = no tunnel. CTL-242. */
     smeeChannel?: string;
-    /** Linear bot user UUID for loop prevention. CTL-263. */
-    botUserId?: string;
+    /** Linear bot user UUIDs for loop prevention (set of worker + orchestrator app-actor UUIDs). CTL-263. */
+    botUserIds?: ReadonlySet<string>;
     /** Linear team→repo map (CTL-362). When set, the handler stamps
      * `attributes["vcs.repository.name"]` on issue/comment/cycle envelopes for
      * teams that appear here so the HUD's REPO column populates for Linear
@@ -411,6 +651,17 @@ const ALLOWED_PUBLIC_EXTENSIONS = new Set([
   ".ico",
 ]);
 
+// CTL-1088: choose the served public dir. Prefer the out-of-repo dist the wrapper
+// built into (MONITOR_PUBLIC_DIR); fall back to the committed bundle when the env
+// var is unset/empty or points at a missing dir (cold-start path).
+export function resolvePublicDir(
+  envDir: string | undefined,
+  fallback: string,
+): string {
+  if (envDir && envDir.length > 0 && existsSync(envDir)) return envDir;
+  return fallback;
+}
+
 function resolveSafeStaticPath(
   publicDir: string,
   relative: string,
@@ -489,6 +740,27 @@ function contentTypeForExt(ext: string): string {
   }
 }
 
+// OBS-7: a Loki query that returns null is NOT necessarily "Loki unavailable".
+// loki.ts collapses both a failed /ready probe AND a non-2xx query response (e.g. a
+// LogQL 400) to null. Distinguish them honestly so a query error is never
+// mislabeled as the backend being down: if the probe passed (isAvailable), Loki is
+// reachable and the null is a query/backend error → 502 "degraded"; only an actual
+// unreachable backend is 503 "unavailable". Either way the ChartCard renders an
+// honest error state — we never suppress the error or fabricate empty data.
+function otelDegradedResponse(loki: LokiFetcher, route: string): Response {
+  if (loki.isAvailable()) {
+    return Response.json(
+      {
+        error: "Loki query failed",
+        detail: `The ${route} query returned no usable result though Loki is reachable (query or backend error).`,
+        degraded: true,
+      },
+      { status: 502 },
+    );
+  }
+  return Response.json({ error: "Loki unavailable" }, { status: 503 });
+}
+
 export function createServer(opts: CreateServerOptions): BunServer {
   const {
     port = DEFAULT_PORT,
@@ -497,7 +769,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     catalystDir: catalystDirOpt,
     runsDir = null,
     startWatcher = true,
-    publicDir = join(import.meta.dir, "public"),
+    publicDir = resolvePublicDir(
+      process.env.MONITOR_PUBLIC_DIR,
+      join(import.meta.dir, "public"),
+    ),
     pidFile,
     prStatusFetcher,
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,
@@ -506,19 +781,29 @@ export function createServer(opts: CreateServerOptions): BunServer {
     dbPath = null,
     sqlitePollIntervalMs,
     briefingProvider: briefingProviderOpt,
+    inboxSummaryProvider: inboxSummaryProviderOpt,
     summarizeHandler: summarizeHandlerOpt,
     summarizeConfig: summarizeConfigOpt,
     prometheusUrl,
     lokiUrl,
+    grafanaUrl = null,
+    collectorHealthUrl = null,
     prometheusFetcher: promFetcherOpt,
     lokiFetcher: lokiFetcherOpt,
     otelHealthChecker: otelHealthCheckerOpt,
+    serviceHealthMonitor: serviceHealthMonitorOpt,
     previewFetcher: previewFetcherOpt,
     previewRefreshMs = PREVIEW_REFRESH_MS,
     annotationsDbPath,
+    filterStateDbPath,
+    beliefStoreDbPath,
     commsReader: commsReaderOpt,
     webhookConfig,
     linearWebhookConfig,
+    daemonHealthReader: daemonHealthReaderOpt,
+    clusterReader: clusterReaderOpt,
+    screenLogsExec: screenLogsExecOpt,
+    screenPollMs = SCREEN_POLL_MS,
   } = opts;
 
   const buildOpts: BuildSnapshotOptions = { dbPath, runsDir };
@@ -526,6 +811,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
   const CATALYST_DIR =
     catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
   const annDbPath = annotationsDbPath ?? `${CATALYST_DIR}/annotations.db`;
+  // CTL-889: the broker's durable ticket_state cache the detail/search routes
+  // read (filter-state.db). Defaults to the broker's own default path.
+  const filterStateDb = filterStateDbPath ?? `${CATALYST_DIR}/filter-state.db`;
   try {
     openDb(annDbPath);
   } catch (err) {
@@ -534,6 +822,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
       { cause: err },
     );
   }
+
+  // CTL-1100: in-process LRU cache for /api/beliefs/rates (keyed by max tick_id,
+  // cap RATES_LRU_CAP=64; beliefs are insert-only so the cached value per max tick
+  // is invariant). One cache per server lifetime.
+  const beliefRatesCache = new Map<number | null, unknown>();
+
+  // CTL-1100: resolve the beliefs.db path for governance read endpoints.
+  // Per-request resolution inside handlers — never at module top level — so a
+  // server started before beliefs.db exists picks it up later without restart.
+  const govDbPath = (): string => {
+    if (beliefStoreDbPath) return beliefStoreDbPath;
+    const govDeps = governanceDepsPromise; // best-effort sync peek (may be null)
+    void govDeps; // suppress unused warning — govDbPath resolves via env below
+    // Inline the same precedence as defaultBeliefsDbPath to avoid a dependency cycle.
+    if (process.env.CATALYST_BELIEFS_DB) return process.env.CATALYST_BELIEFS_DB;
+    const cDir = catalystDirOpt ?? process.env.CATALYST_DIR ?? `${process.env.HOME}/catalyst`;
+    return `${cDir}/beliefs.db`;
+  };
 
   // Forward reference: the webhook handler is constructed below but
   // the prFetcher's freshness filter needs to call into it. We hold a mutable
@@ -549,14 +855,24 @@ export function createServer(opts: CreateServerOptions): BunServer {
         }));
   let lastPrRefresh = 0;
 
+  // BFF9 / CTL-921: the LinearFetcher behind /api/linear + /api/briefing reads
+  // from the broker's durable filter-state.db ticket_state (via readLinearCache)
+  // instead of polling `linearis issues read` live. This retires the second
+  // surviving live-Linear path (the first, board-data.mjs::linearInfo, was
+  // retired by BFF1/CTL-883) so NO request path spawns linearis or counts
+  // against the 2500/hr cap. Cache-backed by construction: an OPEN linear-breaker
+  // can never be tripped from here.
   const linear: LinearFetcher | null =
     linearFetcher === null
       ? null
-      : (linearFetcher ?? createLinearFetcher());
+      : (linearFetcher ?? createCacheBackedLinearFetcher());
   let linearStarted = false;
 
   const briefingProvider: BriefingProvider | null =
     briefingProviderOpt === null ? null : (briefingProviderOpt ?? null);
+
+  const inboxSummaryProvider: InboxSummaryProvider | null =
+    inboxSummaryProviderOpt === null ? null : (inboxSummaryProviderOpt ?? null);
 
   const summarizeHandler: SummarizeHandler | null =
     summarizeHandlerOpt === null ? null : (summarizeHandlerOpt ?? null);
@@ -574,11 +890,63 @@ export function createServer(opts: CreateServerOptions): BunServer {
       ? null
       : (lokiFetcherOpt ?? (lokiUrl ? createLokiFetcher({ baseUrl: lokiUrl }) : null));
 
+  // CTL-1050: the service-health registry monitor — ONE severity model shared by
+  // the Fleet Ops strip, the outage emitter, the inbox decoration, AND the
+  // otel-health checker below. Targets read from config (NEVER hardcoded hosts).
+  const serviceHealthConfig: ServiceHealthConfig = {
+    lokiUrl: lokiUrl ?? null,
+    prometheusUrl: prometheusUrl ?? null,
+    grafanaUrl: grafanaUrl ?? null,
+    collectorHealthUrl: collectorHealthUrl ?? null,
+    webhookConfigured: webhookConfig !== null && webhookConfig !== undefined,
+  };
+  // The outage emitter appends a canonical envelope on enter-down / sustained
+  // recovery (CTL-1050 §3.1). Shares the CATALYST_DIR event log.
+  const serviceHealthEventLog: EventLogWriter = createEventLogWriter({
+    catalystDir: CATALYST_DIR,
+    logger: { warn: (m) => console.warn(m), error: (m) => console.error(m) },
+  });
+  const serviceHealthEmitter: ServiceHealthEmitter = createServiceHealthEmitter({
+    append: (t) => {
+      void serviceHealthEventLog.append(
+        buildCanonicalEvent({
+          ts: new Date().toISOString(),
+          severityText: t.severityText,
+          traceId: null,
+          spanId: null,
+          resource: { "service.name": "monitor" },
+          attributes: {
+            "event.name": "catalyst.service.health",
+            "event.entity": "service",
+            "event.action": t.action,
+            "event.label": t.serviceId,
+          },
+          body: { message: t.body },
+        }),
+      );
+    },
+  });
+  const serviceHealth: ServiceHealthMonitor =
+    serviceHealthMonitorOpt ??
+    createServiceHealthMonitor({
+      config: serviceHealthConfig,
+      catalystDir: CATALYST_DIR,
+      onTick: (snap) => serviceHealthEmitter.observe(snap.services),
+    });
+
   const otelHealth: OtelHealthChecker =
     otelHealthCheckerOpt ??
     createOtelHealthChecker({
       prometheusUrl: prometheusUrl ?? null,
       lokiUrl: lokiUrl ?? null,
+      // The single severity model: reachable + severity come from the registry.
+      severityTracker: {
+        lokiSeverity: () =>
+          serviceHealth.snapshot().services.find((s) => s.id === "loki")?.severity ?? null,
+        prometheusSeverity: () =>
+          serviceHealth.snapshot().services.find((s) => s.id === "prometheus")?.severity ??
+          null,
+      },
     });
 
   const previewFetcher: PreviewFetcher | null =
@@ -707,7 +1075,7 @@ export function createServer(opts: CreateServerOptions): BunServer {
     });
     linearWebhookHandler = createLinearWebhookHandler({
       linearSecrets: linearWebhookConfig?.linearSecrets ?? [],
-      botUserId: linearWebhookConfig?.botUserId,
+      botUserIds: linearWebhookConfig?.botUserIds,
       linearTeams: linearWebhookConfig?.linearTeams ?? [],
       eventLog: linearEventLog,
       emit: (type, data) => emit(type, data),
@@ -724,6 +1092,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           event.ticket !== null
         ) {
           await linear.invalidate(event.ticket);
+        }
+        // CTL-974 pattern: an issue edit changes the live title/description, so
+        // drop that ticket's supplemental cache entry — the next
+        // /api/linear-ticket request re-fetches it in seconds instead of
+        // waiting out the 5-min TTL. Comment/reaction events don't change those
+        // fields, so they skip it. Best-effort; never throws.
+        if (event.kind === "issue" && event.ticket !== null) {
+          _clearTitleDescCache(event.ticket);
         }
       },
       logger: {
@@ -769,6 +1145,15 @@ export function createServer(opts: CreateServerOptions): BunServer {
         linearRefreshMs,
       );
     }
+    // CTL-867: surface per-team reconcile health (last successful eligible
+    // refresh age + the `alerting` flag) so the dashboard can show a team whose
+    // eligibleQuery is failing persistently — its eligible set frozen stale,
+    // silently starving. Best-effort: the reader never throws (missing dir →
+    // empty map). Omitted entirely when no team has a marker yet.
+    const reconcileHealth = readReconcileHealth(CATALYST_DIR);
+    if (Object.keys(reconcileHealth).length > 0) {
+      snap.reconcileHealth = reconcileHealth;
+    }
     return snap;
   }
 
@@ -782,6 +1167,185 @@ export function createServer(opts: CreateServerOptions): BunServer {
   // (/api/board/stream) — replaces per-tab polling of /api/board. Subscriber-
   // gated, so it does zero work when no board tab is open.
   const boardSnapshot = createBoardSnapshotManager();
+
+  // CTL-896 (SHELL6): the local daemon-health reader for the footer health dot.
+  //
+  // SINGLE-HOST IDENTITY NO-OP: the read-model classifies the ONE local daemon's
+  // own `node.heartbeat` freshness (live/degraded/offline → healthy/degraded/
+  // offline). The heavy execution-core deps (recovery.readClusterHeartbeats reads
+  // the local event log; config.getHostName names the local node) are imported
+  // LAZILY via computed specifiers — the same dependency-hygiene guard cluster-
+  // view.mjs uses so esbuild can't pull pino/bun:sqlite into any browser bundle —
+  // and resolved ONCE under Bun. Every step is best-effort: an import or read
+  // failure degrades to "offline" rather than throwing out of a nav request
+  // (the read-model never fabricates health for a daemon it cannot hear).
+  let daemonDepsPromise: Promise<{
+    readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string>;
+    getHostName: () => string;
+    deriveDaemonHealth: typeof import("./lib/nav-signal.mjs").deriveDaemonHealth;
+  } | null> | null = null;
+  const loadDaemonDeps = () => {
+    if (!daemonDepsPromise) {
+      daemonDepsPromise = (async () => {
+        try {
+          const recoveryMod = ["..", "execution-core", "recovery.mjs"].join("/");
+          const configMod = ["..", "execution-core", "config.mjs"].join("/");
+          const [recovery, config, navSignal] = await Promise.all([
+            import(recoveryMod) as Promise<{ readClusterHeartbeats: (opts: { logPath?: string }) => Record<string, string> }>,
+            import(configMod) as Promise<{ getHostName: () => string }>,
+            import("./lib/nav-signal.mjs"),
+          ]);
+          return {
+            readClusterHeartbeats: recovery.readClusterHeartbeats,
+            getHostName: config.getHostName,
+            deriveDaemonHealth: navSignal.deriveDaemonHealth,
+          };
+        } catch {
+          return null; // execution-core unavailable → degrade to offline
+        }
+      })();
+    }
+    return daemonDepsPromise;
+  };
+
+  // loadGovernanceDeps — memoized loader for governance read endpoints.
+  // Imports lib/governance-reader.mjs + execution-core/beliefs/why.mjs +
+  // execution-core/beliefs/rules.mjs via computed specifiers so bun:sqlite
+  // never reaches the Vite/esbuild browser bundle (CTL-883 VITE-GRAPH GUARD).
+  // Returns null on any import failure — all callers degrade gracefully.
+  // DO NOT inline the specifiers to string literals (see governance-reader.mjs header).
+  let governanceDepsPromise: Promise<{
+    openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+    withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+    defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+    isGovernanceEvent: (name: string) => boolean;
+    traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+    latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+    RULE_MANIFEST: unknown;
+    RULES_SHA: string;
+  } | null> | null = null;
+  const loadGovernanceDeps = () => {
+    if (!governanceDepsPromise) {
+      governanceDepsPromise = (async () => {
+        try {
+          const readerMod = ["./lib/governance-reader.mjs"].join("");
+          const whyMod = ["../execution-core/beliefs/why.mjs"].join("");
+          const rulesMod = ["../execution-core/beliefs/rules.mjs"].join("");
+          // Structural casts (not `typeof import(specifier)`) keep the computed
+          // specifiers erased at build — preserving the VITE-GRAPH GUARD — while
+          // typing the destructure so the no-unsafe-* lint rules pass without
+          // authoring .d.mts for the execution-core modules. Mirrors loadDaemonDeps
+          // (server.ts ~1188). CTL-1100 phase-review remediation.
+          const [reader, why, rules] = await Promise.all([
+            import(readerMod) as Promise<{
+              openBeliefsDbRO: (p: string) => Promise<import("bun:sqlite").Database | null>;
+              withBeliefsDbRO: <T>(p: string, fn: (db: import("bun:sqlite").Database) => T, fallback: T) => Promise<T>;
+              defaultBeliefsDbPath: (env?: NodeJS.ProcessEnv) => string;
+              isGovernanceEvent: (name: string) => boolean;
+            }>,
+            import(whyMod) as Promise<{
+              traceTicket: (db: import("bun:sqlite").Database, ticket: string, opts?: { tickId?: number | null }) => unknown;
+              latestTickForTicket: (db: import("bun:sqlite").Database, ticket: string) => number | null;
+            }>,
+            import(rulesMod) as Promise<{
+              RULE_MANIFEST: unknown;
+              RULES_SHA: string;
+            }>,
+          ]);
+          return {
+            openBeliefsDbRO: reader.openBeliefsDbRO,
+            withBeliefsDbRO: reader.withBeliefsDbRO,
+            defaultBeliefsDbPath: reader.defaultBeliefsDbPath,
+            isGovernanceEvent: reader.isGovernanceEvent,
+            traceTicket: why.traceTicket,
+            latestTickForTicket: why.latestTickForTicket,
+            RULE_MANIFEST: rules.RULE_MANIFEST,
+            RULES_SHA: rules.RULES_SHA,
+          };
+        } catch {
+          return null; // execution-core unavailable → degrade
+        }
+      })();
+    }
+    return governanceDepsPromise;
+  };
+
+  // Route-insertion anchor for CTL-1100 governance read endpoints.
+  // New /api/fsm/*, /api/beliefs/*, /api/governance, /api/journey/:ticket
+  // routes insert between the /api/beliefs/stream branch and the 404 fallthrough.
+  // Re-locate this anchor by grep after each insertion — cited line numbers shift.
+
+  const productionDaemonHealth = async (): Promise<DaemonHealth> => {
+    try {
+      const deps = await loadDaemonDeps();
+      if (!deps) return "offline";
+      // Let recovery.readClusterHeartbeats resolve the canonical current-month
+      // event-log path itself (config.getEventLogPath, UTC YYYY-MM) so the read
+      // path matches exactly what the daemon writes — no format drift here.
+      const lastSeen = deps.readClusterHeartbeats({});
+      return deps.deriveDaemonHealth(lastSeen, deps.getHostName());
+    } catch {
+      return "offline";
+    }
+  };
+  const readDaemonHealth: () => Promise<DaemonHealth> =
+    daemonHealthReaderOpt != null
+      ? async () => daemonHealthReaderOpt()
+      : productionDaemonHealth;
+
+  // assembleNavSignal — project the four nav signals off the board snapshot the
+  // read-model already computed, layering the local daemon health. One board read
+  // (the shared, reactively-cached snapshot) + one heartbeat classify; NO
+  // synchronous per-request scan of the source signal files.
+  const assembleNavSignal = async (board: BoardPayload): Promise<NavSignal> =>
+    deriveNavSignal(board, { daemon: await readDaemonHealth() });
+
+  // CTL-898 (SHELL8): the per-node cluster-health projection for the footer +
+  // node filter. The cluster VIEW (owner_host grouping + heartbeat liveness
+  // overlay) is assembled off the SAME shared board snapshot via the BFF2
+  // read-model entity — it spawns nothing and degrades to the single-host
+  // identity no-op when the execution-core roster/recovery deps are unavailable.
+  // The view is then projected to the tiny footer signal. Tests inject
+  // `clusterReaderOpt` so the routes don't touch the live event log/roster.
+  const clusterEntity = createClusterEntity();
+  const readClusterView = async (board: BoardPayload): Promise<ClusterView> => {
+    if (clusterReaderOpt != null) return clusterReaderOpt(board);
+    return clusterEntity.project(board);
+  };
+  const assembleClusterSignal = async (
+    board: BoardPayload,
+  ): Promise<ClusterSignal> => {
+    try {
+      return deriveClusterSignal(await readClusterView(board));
+    } catch (err) {
+      // Never throw out of a cluster request — degrade to the empty single-host
+      // signal (the footer keeps its muted/unknown dot) rather than 500.
+      console.error(`[server] cluster signal assemble failed:`, err);
+      return deriveClusterSignal(null);
+    }
+  };
+
+  // CTL-1050 §3.2: decorate the board payload with the current `down` service
+  // outages so the inbox renders the awareness item from LIVE state (no broker
+  // change, no event-log read-back for the UI). One entry per service currently
+  // `down`; recovery resolves the row by simply dropping it from the next
+  // snapshot. PURE projection off the in-memory registry snapshot.
+  const decorateBoard = (board: BoardPayload | null): BoardPayload | null => {
+    if (board === null) return board;
+    const snap = serviceHealth.snapshot();
+    const outages = snap.services
+      .filter((s) => s.severity === "down")
+      .map((s) => ({
+        id: s.id,
+        label: s.label,
+        downSince: s.downSince,
+        detail: s.detail,
+      }));
+    return {
+      ...board,
+      serviceHealth: { generatedAt: snap.generatedAt, outages },
+    } as BoardPayload;
+  };
 
   const unsubscribers: Array<() => void> = [];
   for (const eventType of BUS_BROADCAST_EVENTS) {
@@ -930,6 +1494,27 @@ export function createServer(opts: CreateServerOptions): BunServer {
         if (url.pathname === "/api/config") {
           const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
           return Response.json(cfg);
+        }
+
+        // CTL-961: /api/repo-icon/<repoShortName> — auto-detect favicon from GitHub.
+        // Reads the owner/repo from the monitor config repoOwners map, probes common
+        // icon paths via `gh api`, caches the result for 7 days, returns a data URL.
+        // Fail-open: returns { found: false } (204) when not configured or not found.
+        if (url.pathname.startsWith("/api/repo-icon/")) {
+          // CTL-979: normalize to lowercase so /api/repo-icon/adva resolves "Adva" vcsRepo keys.
+          const repoKey = url.pathname.slice("/api/repo-icon/".length).trim().toLowerCase();
+          if (!repoKey || repoKey.includes("/")) {
+            return new Response("Bad repo key", { status: 400 });
+          }
+          const cfg = loadMonitorConfig(`${process.cwd()}/.catalyst/config.json`);
+          const ownerRepo = cfg.repoOwners[repoKey];
+          if (!ownerRepo) {
+            return Response.json({ found: false }, { status: 204 });
+          }
+          const cacheDir = join(CATALYST_DIR, "repo-icon-cache");
+          const result = await fetchRepoIcon(ownerRepo, cacheDir);
+          if (!result.found) return Response.json({ found: false }, { status: 204 });
+          return Response.json(result);
         }
 
         if (url.pathname === "/api/analytics") {
@@ -1389,6 +1974,169 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ ticket: ticketParam, subSteps });
         }
 
+        // CTL-889 (P8): cache-backed Linear ticket detail — description (null,
+        // not cached), labels[], the relation graph (forward + reverse
+        // blocks/related edges), assignee, and held classification. Read from
+        // filter-state.db ticket_state, NEVER a live `linearis` call. 404 when
+        // the ticket has no descriptor row.
+        const ticketDetailMatch = url.pathname.match(
+          /^\/api\/ticket-detail\/([^/]+)$/,
+        );
+        if (ticketDetailMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketDetailMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const detail = await readTicketDetail(ticket, {
+            dbPath: filterStateDb,
+          });
+          if (!detail) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json(detail);
+        }
+
+        // CTL-974 pattern: supplemental cached live Linear {title, description}
+        // fetch for the ticket-detail page. Separate from /api/ticket-detail to
+        // keep its 404-on-no-descriptor contract intact. The board title is
+        // stale-sourced (triage summary can win) and the durable cache has no
+        // description column, so BOTH the real title and the markdown
+        // description are live-fetched from Linear here — cached, TTL'd (5 min),
+        // batched, fail-open, NEVER spawning linearis on a request path.
+        // ALWAYS 200: an absent description is honest-empty, not an error.
+        const linearTicketMatch = url.pathname.match(
+          /^\/api\/linear-ticket\/([^/]+)$/,
+        );
+        if (linearTicketMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(linearTicketMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const map = await fillTitleDescriptionFallback([ticket]);
+          const entry = map[ticket] ?? { title: null, description: null, labels: null, relations: null, state: null, priority: null, project: null, estimate: null };
+          const available =
+            entry.title !== null || entry.description !== null;
+          return Response.json({
+            id: ticket,
+            title: entry.title,
+            description: entry.description,
+            labels: entry.labels ?? null,
+            relations: entry.relations ?? null,
+            state: entry.state ?? null,
+            priority: entry.priority ?? null,
+            project: entry.project ?? null,
+            estimate: entry.estimate ?? null,
+            source: available ? "linear-live" : "unavailable",
+          });
+        }
+
+        // CTL-889 (P9): a ticket's research/plan thoughts artifacts for the
+        // spine 📄 links — repo-root-relative paths + a peek preview, read from
+        // the LOCAL thoughts tree. Surfaces the CTL-866 cross-node eventual-
+        // consistency caveat (artifacts authored on another node appear only
+        // after a thoughts-sync push).
+        const ticketArtifactsMatch = url.pathname.match(
+          /^\/api\/ticket-artifacts\/([^/]+)$/,
+        );
+        if (ticketArtifactsMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketArtifactsMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const artifacts = await readTicketArtifacts(ticket);
+          return Response.json(artifacts);
+        }
+
+        // CTL-1042: serve a ticket's research/plan artifact CONTENT by kind for
+        // the reading-pane deep-dive pills. The list route above is anchored at
+        // the ticket segment ($), so it never matches this two-segment path;
+        // this opens the actual markdown the pill links to (without it the pill
+        // hit the SPA/404 fallback). The served file path is resolved by our own
+        // glob over the local thoughts tree — not attacker-supplied — but we
+        // still validate both URL segments defensively.
+        const ticketArtifactByKindMatch = url.pathname.match(
+          /^\/api\/ticket-artifacts\/([^/]+)\/([^/]+)$/,
+        );
+        if (ticketArtifactByKindMatch) {
+          let ticket: string;
+          let kind: string;
+          try {
+            ticket = decodeURIComponent(ticketArtifactByKindMatch[1]);
+            kind = decodeURIComponent(ticketArtifactByKindMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            ticket.includes("..") ||
+            ticket.includes("/") ||
+            ticket.includes("\0")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (kind !== "research" && kind !== "plan") {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const doc = await readTicketArtifactContent(ticket, kind);
+          if (!doc) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return new Response(doc.content, {
+            headers: { "Content-Type": "text/markdown; charset=utf-8" },
+          });
+        }
+
+        // CTL-889 (P12): cache-backed fuzzy ticket search for the ⌘K palette's
+        // "Search all tickets in Linear" action. Fuzzy-matches the durable
+        // ticket_state cache — NO per-keystroke live Linear API call. An empty
+        // ?q= returns an empty result set (the palette renders the row idle).
+        if (url.pathname === "/api/search") {
+          const q = url.searchParams.get("q") ?? "";
+          const limitRaw = url.searchParams.get("limit");
+          const parsedLimit = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+          const limit = Number.isFinite(parsedLimit)
+            ? Math.max(1, Math.min(parsedLimit, 100))
+            : 20;
+          if (q.trim() === "") {
+            return Response.json({
+              query: q,
+              results: [],
+              source: "filter-state.db",
+            });
+          }
+          const result = await readTicketSearch(q, {
+            dbPath: filterStateDb,
+            limit,
+          });
+          return Response.json(result);
+        }
+
         if (url.pathname === "/api/briefing") {
           if (!briefingProvider) {
             return Response.json({ enabled: false });
@@ -1411,6 +2159,23 @@ export function createServer(opts: CreateServerOptions): BunServer {
             suggestedLabels: result.suggestedLabels,
             generatedAt: result.generatedAt,
           });
+        }
+
+        // CTL-1042: per-inbox-item AI summary — lazy, on operator select.
+        const inboxSummaryMatch =
+          req.method === "GET" && url.pathname.match(/^\/api\/inbox\/([^/]+)\/summary$/);
+        if (inboxSummaryMatch) {
+          let ticket: string;
+          try { ticket = decodeURIComponent(inboxSummaryMatch[1]); }
+          catch { return new Response("Bad Request", { status: 400 }); }
+          if (ticket.includes("..") || ticket.includes("/") || ticket.includes("\0")) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!inboxSummaryProvider) return Response.json({ enabled: false });
+          const phase = url.searchParams.get("phase") ?? undefined;
+          const result = await inboxSummaryProvider.generate(ticket, phase);
+          if (!result) return Response.json({ enabled: true, ask: null, summary: null, options: null, blocker: null });
+          return Response.json({ enabled: true, ...result });
         }
 
         if (url.pathname === "/api/briefing/activity") {
@@ -1470,6 +2235,14 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(health);
         }
 
+        // CTL-1050: the service-health registry snapshot — every stack service's
+        // shared up|degraded|down|unknown severity, last-checked, target/source
+        // for the Fleet Ops strip hover. The registry reads ONLY the monitor's own
+        // probes/event-recency, so Fleet Ops stays Prometheus/Loki-FREE.
+        if (url.pathname === "/api/health/services") {
+          return Response.json(serviceHealth.snapshot());
+        }
+
         if (url.pathname === "/api/otel/cost") {
           if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "1h";
@@ -1492,10 +2265,143 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json({ data: result });
         }
 
+        // OBS-9 (FINOPS P-B): cost by pipeline stage. Routes the EXISTING (but
+        // previously unrouted) `costByTaskType` — `sum by (task_type)(increase(
+        // cost[r]))` — with the OBS-9 zero-series filter applied at the query layer
+        // so the by-stage bar never renders the ~5 exact-0 phases. 503 when
+        // Prometheus is not configured (the P-B ChartCard degrades via the ladder).
+        if (url.pathname === "/api/otel/cost-by-stage") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costByTaskType(prom, range);
+          return Response.json({ data: result });
+        }
+
+        // OBS-11 (FINOPS P-D): cost by model / agent. Groups the cost counter by a
+        // WHITELISTED native dimension (`model` or `agent_name` — never interpolated
+        // from input, so no PromQL injection) with the OBS-9 zero-series filter
+        // applied so the ranked bar never shows the exact-0 models/agents an
+        // increase() window carries. `dim` defaults to model; an unknown dim → 400
+        // (honest, never a silently-empty bar). 503 when Prometheus is off.
+        if (url.pathname === "/api/otel/cost-by-dim") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const dim = url.searchParams.get("dim") ?? "model";
+          if (!isCostDimension(dim)) {
+            return Response.json({ error: "unknown dimension" }, { status: 400 });
+          }
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costByDimension(prom, dim, range);
+          return Response.json({ data: result });
+        }
+
+        // CTL-1040 (FINOPS): cost grouped by work type. Board-backed — groups the SAME
+        // signal-file costs the expensive-tickets table shows (BoardTicket.costUSD) by
+        // BoardTicket.type. Prometheus carries no catalyst_ticket_type label, so this
+        // is the honest current-state source (UI carries a "data since 2026-06-11"
+        // caption). Always 200 — no Prometheus dependency.
+        if (url.pathname === "/api/otel/cost-by-work-type") {
+          const board = await boardSnapshot.getLatest();
+          const tickets = (board?.tickets ?? []).map((t) => ({ type: t.type, costUSD: t.costUSD }));
+          return Response.json({ data: costByWorkType(tickets) });
+        }
+
+        // CTL-1040 (UTILIZATION): throughput grouped by work type. Loki-backed —
+        // counts phase.teardown.complete.* events per catalyst_ticket_type over the
+        // window. 503 when Loki is not configured (the ChartCard degrades via the ladder).
+        if (url.pathname === "/api/otel/throughput-by-work-type") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await throughputByWorkType(loki, range);
+          if (result === null) return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS HERO): the today-vs-7d dollar band. todayUsd (spend since
+        // local midnight) + avg7dUsd (the prior 7 FULL days' mean baseline) + the
+        // delta fraction + a linear EOD projection — all off the cost counter, no
+        // new plumbing. The partial current day is EXCLUDED from the 7d baseline so
+        // "is today normal?" compares like-for-like. 503 when Prometheus is absent.
+        if (url.pathname === "/api/otel/cost-today") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const result = await costToday(prom);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS P-A): hourly spend-over-time bars + spike flags. A
+        // query_range of `sum(increase(cost[1h]))` stepped at 1h over the window;
+        // each point carries `isSpike` (spend > max(2× median, μ+2σ) — the P-A
+        // `--chart-4` dot). 503 when Prometheus is absent; an honest `[]` for a
+        // quiet stack (the ChartCard empty state, never a fabricated bar).
+        if (url.pathname === "/api/otel/cost-series") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await costSeries(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-9 (FINOPS HERO-C, THE HEADLINE): cache-ROI $. Σ_model cacheRead_tokens
+        // × (input_price − cache_read_price) from a per-model price book — the real
+        // dollars the 99.8%-hit-rate prompt cache saved — plus the "(Nx)" multiplier
+        // (savings / actual spend). 503 when Prometheus is absent.
+        if (url.pathname === "/api/otel/cache-savings") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "24h";
+          const result = await cacheSavings(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-10 (FINOPS P-A drill): cost at a single spiking hour. Clicking a
+        // spiking bar in the spend-over-time chart re-queries THAT hour's by-ticket
+        // + by-model split (the "one re-query with the hour window"). `hour` is the
+        // clicked bar's epoch-SECOND timestamp; the query anchors a 1h `increase()`
+        // window to it via PromQL `offset`. Both maps are zero-filtered. 503 when
+        // Prometheus is absent; 400 when `hour` is missing/non-numeric (never a
+        // fabricated empty drill).
+        if (url.pathname === "/api/otel/cost-at-hour") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const hourParam = url.searchParams.get("hour");
+          const hour = hourParam !== null ? Number(hourParam) : NaN;
+          if (!Number.isFinite(hour) || hour <= 0) {
+            return Response.json({ error: "hour (epoch seconds) required" }, { status: 400 });
+          }
+          const result = await costAtHour(prom, hour);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
         if (url.pathname === "/api/otel/tools") {
           if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
           const range = url.searchParams.get("range") ?? "1h";
           const result = await toolUsageByName(loki, range);
+          return Response.json({ data: result });
+        }
+
+        // OBS-7 (TELEMETRY P3): per-tool p50/p95 latency, the half /api/otel/tools
+        // (counts only) is missing so the panel can sort by TOTAL TIME (count × p95)
+        // rather than chattiness. unwrap duration_ms on tool_result by tool_name
+        // (toolLatency in otel-queries.ts). 503 when Loki is not configured; an
+        // empty stream is an HONEST 200 with `data:{}` (counts-only fallback).
+        if (url.pathname === "/api/otel/tool-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await toolLatency(loki, range);
+          if (result === null) {
+            // null means the queryRange came back null. Distinguish HONESTLY: if the
+            // /ready probe passed, Loki IS reachable and this is a QUERY/backend
+            // error (e.g. a LogQL 400), NOT "Loki unavailable" — don't mislabel it.
+            return otelDegradedResponse(loki, "tool-latency");
+          }
           return Response.json({ data: result });
         }
 
@@ -1504,7 +2410,95 @@ export function createServer(opts: CreateServerOptions): BunServer {
           const range = url.searchParams.get("range") ?? "1h";
           const rawLimit = parseInt(url.searchParams.get("limit") ?? "50", 10);
           const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, rawLimit), 500) : 50;
-          const result = await apiErrors(loki, range, limit);
+          // CTL-1039: alongside the panel's error rows, carry the proportional
+          // counts WITH EXPLICIT WINDOWS (15m + today) the hero reads to pick
+          // NOTED vs ERRORING. Backward-compatible: `data` stays the row array.
+          const [result, counts] = await Promise.all([
+            apiErrors(loki, range, limit),
+            apiErrorCounts(loki),
+          ]);
+          return Response.json({ data: result, counts });
+        }
+
+        // OBS-16 (UTILIZATION P_active): fleet-wide active-time ratio. A single
+        // Prometheus read of `sum(rate(claude_code_active_time_seconds_total[range]))`
+        // — the active seconds-per-second across the fleet (≈ slots' worth of
+        // wall-clock genuinely computing). The UI divides this by config.inFlight
+        // (busy-slot capacity it already holds) to render "X% computing / Y%
+        // waiting". 503 when Prometheus is absent (the P_active ChartCard degrades
+        // via the [prom] ladder); an idle fleet is an HONEST 200 with
+        // `data:{activeSecondsPerSecond:0}` (the genuine low read, never a
+        // fabricated number).
+        if (url.pathname === "/api/otel/active-time") {
+          if (!prom) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await activeTimeRatio(prom, range);
+          if (result === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-7 (TELEMETRY P4): per-model api_request latency (p50/p95) + error%,
+        // read off the SAME claude-code Loki stream as the tail/errors — NOT a new
+        // Prometheus dependency. The LogQL unwraps `duration_ms` on api_request and
+        // aggregates with quantile_over_time by model (modelLatency in
+        // otel-queries.ts). 503 when Loki is not configured (the P4 ChartCard
+        // degrades via the ladder); an empty stream is an HONEST 200 with `data:[]`
+        // (the card's "no data in range" state, NOT an error).
+        if (url.pathname === "/api/otel/model-latency") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "1h";
+          const result = await modelLatency(loki, range);
+          if (result === null) {
+            // null means the queryRange came back null. Surface it HONESTLY: a
+            // passing /ready probe means Loki is reachable and this is a query/
+            // backend error (degraded), NOT a fabricated empty or a false
+            // "Loki unavailable".
+            return otelDegradedResponse(loki, "model-latency");
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-6 (TELEMETRY): the fleet-wide grouped live tail + freshness. ONE
+        // newest-first scan of the claude-code Loki stream (same pipe as the
+        // per-session history, minus the session filter). The hero reads
+        // `freshnessMs` (age of the newest line) to pick FLOWING vs QUIET; the P1
+        // panel groups `rows` by worker client-side. 503 when Loki is not
+        // configured (the surface degrades via the ChartCard ladder). An empty
+        // stream is an HONEST 200 with `freshnessMs:null` (QUIET, not an error).
+        if (url.pathname === "/api/otel/tail") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "15m";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "300", 10);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(1, rawLimit), 1000)
+            : 300;
+          const result = await recentTail(loki, range, limit);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: result });
+        }
+
+        // OBS-8 (TELEMETRY P5): events/min heatmap, workers × time. ONE metric
+        // query over the claude-code Loki stream — `count_over_time` of every line
+        // per `session_id` in 15m buckets (eventsHeatmap in otel-queries.ts). The
+        // payload is {buckets, cells}; the UI joins cells[].sessionId to board
+        // worker names and renders a row for EVERY running worker (silent ones
+        // included) so an early stall — a `running` worker with dark recent cells —
+        // is visible. 503 when Loki is not configured (the P5 ChartCard degrades via
+        // the ladder, but its board-sourced row headers still render per design
+        // §3.1); a reachable-but-quiet stream is an HONEST 200 with empty cells.
+        if (url.pathname === "/api/otel/events-heatmap") {
+          if (!loki) return Response.json({ error: "OTel not configured" }, { status: 503 });
+          const range = url.searchParams.get("range") ?? "6h";
+          const result = await eventsHeatmap(loki, range);
+          if (result === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
           return Response.json({ data: result });
         }
 
@@ -1520,6 +2514,106 @@ export function createServer(opts: CreateServerOptions): BunServer {
           }
           const result = await costValidation(prom, signalCosts, range);
           return Response.json({ data: result });
+        }
+
+        // CTL-914 (DETAIL3): the worker-page [history] tail. Queries the
+        // `claude-code` Loki stream for ONE run's transcript by its CC session
+        // UUID — REAL today, no plumbing — so a dead worker's tail is readable
+        // hours later (why the worker page is never empty). The filter is a
+        // `| session_id=\`UUID\`` STRUCTURED-METADATA pipe inside
+        // workerHistoryBySession (a `{session_id=}` label matcher returns 0).
+        // sessionId is UUID-validated before it ever reaches the LogQL, so the
+        // pipe can never be an injection vector. 503 when Loki is not configured
+        // (the UI degrades to the resident-data page), 400 on a bad id.
+        const ecWorkerHistoryMatch = url.pathname.match(
+          /^\/api\/ec-worker-history\/([^/]+)$/,
+        );
+        if (ecWorkerHistoryMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(ecWorkerHistoryMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidCcSessionId(sessionId)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!loki) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "24h";
+          const rawLimit = parseInt(url.searchParams.get("limit") ?? "500", 10);
+          const limit = Number.isFinite(rawLimit)
+            ? Math.min(Math.max(1, rawLimit), 2000)
+            : 500;
+          const rows = await workerHistoryBySession(loki, sessionId, range, limit);
+          if (rows === null) {
+            // Loki probe failed mid-flight — honest 503, not a fabricated empty.
+            return Response.json({ error: "Loki unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: rows });
+        }
+
+        // CTL-917 (DETAIL6): the worker Burn Strip's REAL Prometheus sparklines.
+        // Four query_range series keyed on the CC session UUID (cost / tokens /
+        // tokens-by-type / active-seconds) — no new plumbing, the same already-
+        // emitting OTEL pipeline the `/api/otel/*` routes read. The UUID is
+        // UUID-validated before it reaches the PromQL `{session_id=…}` matcher,
+        // so the matcher can never be an injection vector. 503 when Prometheus is
+        // not configured (the UI falls back to the resident BoardWorker scalar),
+        // 400 on a bad id.
+        const otelBurnMatch = url.pathname.match(
+          /^\/api\/otel\/burn\/([^/]+)$/,
+        );
+        if (otelBurnMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(otelBurnMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidCcSessionId(sessionId)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!prom) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "1h";
+          const series = await workerBurnSeries(prom, sessionId, range);
+          if (series === null) {
+            // Prometheus probe failed mid-flight — honest 503, never a fake series.
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: series });
+        }
+
+        // CTL-917 (DETAIL6): the ticket telemetry strip's REAL Prometheus
+        // sparklines keyed on the Linear key (total cost / tokens-by-type +
+        // cost-by-phase `sum by(task_type)` + cost-by-model `sum by(model)`).
+        // commits/LoC stay git-sourced (NEEDS-PLUMBING) so they are NOT queried
+        // here. The linear_key is validated before it reaches the PromQL matcher.
+        const otelTicketTelemetryMatch = url.pathname.match(
+          /^\/api\/otel\/ticket-telemetry\/([^/]+)$/,
+        );
+        if (otelTicketTelemetryMatch) {
+          let linearKey: string;
+          try {
+            linearKey = decodeURIComponent(otelTicketTelemetryMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!isValidLinearKey(linearKey)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!prom) {
+            return Response.json({ error: "OTel not configured" }, { status: 503 });
+          }
+          const range = url.searchParams.get("range") ?? "1h";
+          const series = await ticketTelemetrySeries(prom, linearKey, range);
+          if (series === null) {
+            return Response.json({ error: "Prometheus unavailable" }, { status: 503 });
+          }
+          return Response.json({ data: series });
         }
 
         if (url.pathname === "/api/annotations") {
@@ -1709,17 +2803,42 @@ export function createServer(opts: CreateServerOptions): BunServer {
           return Response.json(detail);
         }
 
-        // CTL-730: the CTL-727 Worker/Ticket board is the default monitor page.
-        // The old orchestrator-centric dashboard moves to /legacy during the
-        // transition (index.html still built + served, just not at root).
+        // CTL-989: the app shell (index.html → main.tsx → the unified TanStack
+        // Router → AppShell layout) is the SINGLE canonical entry. It hosts every
+        // surface (Home/Tickets/Workers/Queue/Observe) AND every detail page
+        // inside the shared AppShell chrome — so `/` serves the shell. The legacy
+        // standalone board.html bundle is RETIRED; `/board` is now just the
+        // Tickets surface route, served by this same index.html (see the unified
+        // SPA fallback below).
         if (url.pathname === "/" || url.pathname === "/index.html") {
-          const file = Bun.file(join(publicDir, "board.html"));
+          const file = Bun.file(join(publicDir, "index.html"));
           if (await file.exists()) {
             return new Response(file, {
               headers: { "Content-Type": "text/html; charset=utf-8" },
             });
           }
-          return new Response("board.html not found", { status: 500 });
+          return new Response("index.html not found", { status: 500 });
+        }
+
+        // CTL-989: the unified SPA fallback. EVERY app route — the flat surface
+        // paths (/board, /workers, /queue, /telemetry, /utilization, /finops,
+        // /fleetops, /devops, /settings) AND the detail/dep-graph deep links
+        // (/ticket/$id, /worker/$id, /dep-graph) — is served by the ONE TanStack
+        // Router mounted from index.html. A hard navigation / refresh / shared
+        // link to any of them serves index.html; the router boots, reads the URL,
+        // and lands on the right surface or detail page. (`/` and `/index.html`
+        // are handled by the dedicated block above; `/legacy` + `/history` keep
+        // their own handlers below.) Vite emits absolute /assets/* paths, so the
+        // nested /ticket/$id pathname is safe. GET-only: a POST to an app path is
+        // not the SPA entry.
+        if (req.method === "GET" && isAppRoute(url.pathname)) {
+          const file = Bun.file(join(publicDir, "index.html"));
+          if (await file.exists()) {
+            return new Response(file, {
+              headers: { "Content-Type": "text/html; charset=utf-8" },
+            });
+          }
+          return new Response("index.html not found", { status: 500 });
         }
 
         if (
@@ -1806,8 +2925,550 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        // CTL-1100: GET /api/journey/:ticket — chronological hop timeline + gates + verdict.
+        // bun:sqlite-free (assembleJourney uses sqlite3 binary via ticket-runs.mjs).
+        // Mirrors ticketRunsMatch guard for input validation.
+        const journeyMatch = url.pathname.match(/^\/api\/journey\/([^/]+)$/);
+        if (journeyMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(journeyMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          return Response.json(await assembleJourney(ticket, {
+            orchDir: wtDir,
+            workersDir: `${wtDir}/workers`,
+            dbPath: dbPath ?? undefined,
+          }));
+        }
+
+        // CTL-886 (BFF4) keystone P2: a ticket's full run history. One run entity
+        // per phase-*.json signal under ~/catalyst/execution-core/workers/<id>/
+        // (model, bg_job_id, attempt, generation, status, timestamps, host{},
+        // pr{} when present). FINISHED runs (no live BoardWorker) included by
+        // construction — we read the on-disk signals, not the live-agent list.
+        // Per-phase cost is JOINED from catalyst.db, never invented onto the
+        // signal. Pure file reads — no live Linear/GitHub call.
+        const ticketRunsMatch = url.pathname.match(/^\/api\/ticket-runs\/([^/]+)$/);
+        if (ticketRunsMatch) {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ticketRunsMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          return Response.json(await assembleTicketRuns(ticket));
+        }
+
+        // CTL-890 (BFF8) P10: the redesign's ONE destructive endpoint, gated last.
+        // POST /api/ec-worker/<ticket>/stop wraps the flaky `claude stop <shortId>`
+        // (pid-file absent on CC 2.1.152). Matched BEFORE the GET verbatim route
+        // and gated on POST so a stop request is never confused with the
+        // signal reader (and "stop" is not a valid phase, so a GET here 404s
+        // harmlessly). Contract (design §3.4):
+        //   • TYPED CONFIRM — body.confirm must equal the ticket id exactly.
+        //   • TARGET RUN    — body.phase selects which run (its phase-<phase>.json
+        //     signal carries the bg_job_id → shortId). The response echoes the
+        //     exact shortId+ticket+phase so the UI shows what it is killing.
+        //   • FENCE-AWARE   — single-host (hosts.json absent/len 1) is a no-op
+        //     pass; multi-host rejects a verified-stale generation (a partitioned
+        //     node) and refuses on an unconfirmable fence.
+        //   • OPTIMISTIC ROLLBACK is a UI-side ~10s timer; on success we return the
+        //     identity + a `stopping` status the client marks optimistically.
+        const ecStopMatch = url.pathname.match(
+          /^\/api\/ec-worker\/([^/]+)\/stop$/,
+        );
+        if (ecStopMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(ecStopMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const phase = typeof body.phase === "string" ? body.phase : "";
+          if (!/^[a-z][a-z-]*$/.test(phase)) {
+            return Response.json(
+              { error: "phase is required and must be a valid phase name" },
+              { status: 400 },
+            );
+          }
+          const result: StopWorkerResult = await stopWorker({
+            ticket,
+            phase,
+            confirm: body.confirm,
+          });
+          switch (result.status) {
+            case "not_found":
+              return Response.json(
+                { status: "not_found", error: `no run signal for ${ticket}:${phase}` },
+                { status: 404 },
+              );
+            case "confirm_mismatch":
+              return Response.json(
+                {
+                  status: "confirm_mismatch",
+                  error: "typed confirmation did not match the ticket id",
+                  expected: result.expected,
+                },
+                { status: 400 },
+              );
+            case "no_session":
+              return Response.json(result, { status: 409 });
+            case "fenced":
+              // A stale-generation node is fenced out — the worker is NOT killed.
+              return Response.json(
+                {
+                  ...result,
+                  error: "stop rejected: this node's generation is stale (fenced out)",
+                },
+                { status: 409 },
+              );
+            case "fence_indeterminate":
+              return Response.json(
+                {
+                  ...result,
+                  error: "stop rejected: fence could not be confirmed",
+                },
+                { status: 409 },
+              );
+            case "stop_failed":
+              return Response.json(result, { status: 502 });
+            case "stopping":
+              // Kill issued; the UI marks the worker `stopping` and arms its ~10s
+              // optimistic-rollback timer against the next board frame.
+              return Response.json(result, { status: 200 });
+          }
+        }
+
+        // CTL-924 (BFF12): the read-model's SECOND write endpoint — HOME5's Inbox
+        // `Answer / Unblock` verb. POST /api/ticket/<ticket>/respond records the
+        // operator's answer/unblock note, clears the `.linear-label-needs-human`
+        // marker, and emits ONE `linear.comment.created` event into the unified
+        // log — the daemon's handleCommentWake (CTL-549) consumes it, strips the
+        // held label, and re-dispatches the parked worker (CTL-876's resume loop).
+        // Contract mirrors BFF8's stop route:
+        //   • TYPED CONFIRM — body.confirm must equal the ticket id exactly.
+        //   • FENCE-AWARE   — single-host (hosts.json absent/len 1) is a no-op
+        //     pass; multi-host rejects a verified-stale generation (a partitioned
+        //     node) and refuses on an unconfirmable fence. NOTHING is mutated on
+        //     a fence rejection.
+        //   • OPTIMISTIC ROLLBACK is a UI-side timer; on success we return the
+        //     ticket+phase identity + a `resuming` status the client marks
+        //     optimistically (the held row should clear within the window).
+        const respondMatch = url.pathname.match(
+          /^\/api\/ticket\/([^/]+)\/respond$/,
+        );
+        if (respondMatch && req.method === "POST") {
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(respondMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          let body: Record<string, unknown>;
+          try {
+            body = (await req.json()) as Record<string, unknown>;
+          } catch {
+            return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+          }
+          const response = typeof body.response === "string" ? body.response : "";
+          const result: RespondTicketResult = respondTicket({
+            ticket,
+            response,
+            confirm: body.confirm,
+          });
+          switch (result.status) {
+            case "not_held":
+              return Response.json(
+                {
+                  status: "not_held",
+                  error: `no parked (needs-input) run for ${ticket} to answer/unblock`,
+                },
+                { status: 404 },
+              );
+            case "confirm_mismatch":
+              return Response.json(
+                {
+                  status: "confirm_mismatch",
+                  error: "typed confirmation did not match the ticket id",
+                  expected: result.expected,
+                },
+                { status: 400 },
+              );
+            case "fenced":
+              // A stale-generation node is fenced out — nothing was mutated.
+              return Response.json(
+                {
+                  ...result,
+                  error: "respond rejected: this node's generation is stale (fenced out)",
+                },
+                { status: 409 },
+              );
+            case "fence_indeterminate":
+              return Response.json(
+                {
+                  ...result,
+                  error: "respond rejected: fence could not be confirmed",
+                },
+                { status: 409 },
+              );
+            case "resuming":
+              // Response recorded + marker cleared + resume event emitted; the UI
+              // marks the row `resuming` and arms its optimistic-rollback timer.
+              return Response.json(result, { status: 200 });
+          }
+        }
+
+        // CTL-886 (BFF4) companion P3: one phase signal served VERBATIM — the raw
+        // phase-<phase>.json contents (model, bg_job_id, generation, status,
+        // timestamps, host, pr) untransformed, for the worker header / PHASE
+        // TIMESTAMPS / SIGNAL panel. 404 when the phase has no signal on disk.
+        const ecWorkerMatch = url.pathname.match(
+          /^\/api\/ec-worker\/([^/]+)\/([^/]+)$/,
+        );
+        if (ecWorkerMatch) {
+          let ticket: string;
+          let phase: string;
+          try {
+            ticket = decodeURIComponent(ecWorkerMatch[1]);
+            phase = decodeURIComponent(ecWorkerMatch[2]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          if (
+            !/^[A-Za-z]+-\d+$/.test(ticket) ||
+            !/^[a-z][a-z-]*$/.test(phase)
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+          const signal = await readPhaseSignalVerbatim(ticket, phase);
+          if (!signal) {
+            return new Response("Not Found", { status: 404 });
+          }
+          return Response.json(signal);
+        }
+
+        // CTL-887 (BFF5) + CTL-885 (BFF3): the live transcript tail, made
+        // NODE-AWARE. BFF5 resolves a CC session UUID to its
+        // ~/.claude/projects/<dir>/<sessionId>.jsonl path and streams typed
+        // StreamEvents over SSE as the file grows (the EC equivalent of the
+        // legacy /api/worker-stream, which is empty for execution-core workers).
+        // BFF3 wraps that host-local tail in the cross-node FAN-IN: the UI
+        // subscribes ONCE and the read-model multiplexes the OWNING node's
+        // per-host stream keyed by host.name.
+        //   • SINGLE-HOST (hosts.json absent/len 1): an EXACT identity no-op —
+        //     tail the LOCAL transcript with zero added latency, no owner
+        //     resolution, no remote hop (resolveTailRoute → { mode: "local" }).
+        //   • MULTI-HOST, owner is a DIFFERENT node: proxy that peer's
+        //     /api/ec-worker-stream/<sessionId> through unchanged (never a
+        //     shared/merged log — only the one owner's per-host stream).
+        const ecWorkerStreamMatch = url.pathname.match(
+          /^\/api\/ec-worker-stream\/([^/]+)$/,
+        );
+        if (ecWorkerStreamMatch) {
+          let sessionId: string;
+          try {
+            sessionId = decodeURIComponent(ecWorkerStreamMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // A CC session id is a UUID — reject anything else so no arbitrary
+          // path ever reaches the filesystem.
+          if (
+            !/^[0-9a-fA-F-]{8,64}$/.test(sessionId) ||
+            sessionId.includes("..") ||
+            sessionId.includes("/")
+          ) {
+            return new Response("Bad Request", { status: 400 });
+          }
+
+          // ── BFF3 fan-in routing (single-host = identity no-op) ──────────────
+          // Read the committed roster ONCE. SINGLE-HOST is the identity no-op:
+          // resolveTailRoute short-circuits to { mode: "local" } before any
+          // owner resolution, so we never even read the board snapshot — zero
+          // added latency. Only the MULTI-HOST branch resolves the owner: we
+          // read the board snapshot's per-worker host:{name,id} (BFF2/BFF10) —
+          // never a live attachment fetch, never a merged log — and pass a
+          // synchronous lookup over that resolved worker list. `hostBaseUrl` is
+          // the cross-node transport seam: no production roster→URL source
+          // exists yet (single-node MVP), so a multi-host owner with no
+          // resolvable base URL is reported unroutable (a 404) rather than
+          // mis-tailed to the wrong node's local file.
+          const roster = readClusterRoster();
+          const workers =
+            roster.length > 1 ? ((await boardSnapshot.getLatest())?.workers ?? []) : [];
+          const route = resolveTailRoute({
+            sessionId,
+            roster,
+            selfHost: hostName(),
+            ownerHostForSession: (sid) =>
+              workers.find((w) => w.sessionId === sid)?.host?.name ?? null,
+            hostBaseUrl: (host) => resolvePeerBaseUrl(host),
+          });
+          if (route.mode === "remote") {
+            // MULTI-HOST: fan in the owning node's per-host stream, keyed by
+            // host.name, by proxying its SSE body straight through (no re-frame
+            // — the client's StreamEventRow renderer consumes the peer's frames
+            // unchanged). A down/unreachable peer → 502 (never a wrong tail).
+            const abort = new AbortController();
+            const body = await proxyRemoteTail({ url: route.url, signal: abort.signal });
+            if (!body) {
+              return new Response("Bad Gateway", { status: 502 });
+            }
+            const proxied = new ReadableStream<Uint8Array>({
+              async start(controller) {
+                const reader = body.getReader();
+                try {
+                  for (;;) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    if (value) controller.enqueue(value);
+                  }
+                  controller.close();
+                } catch {
+                  // upstream torn down (peer closed / client aborted) — end the
+                  // proxied stream cleanly rather than leaking the reader.
+                  try {
+                    controller.close();
+                  } catch {
+                    /* already closed */
+                  }
+                }
+              },
+              cancel() {
+                // client disconnected → abort the upstream subscription so no
+                // per-host connection leaks.
+                abort.abort();
+              },
+            });
+            return new Response(proxied, {
+              headers: {
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                Connection: "keep-alive",
+                "Access-Control-Allow-Origin": "*",
+              },
+            });
+          }
+          if (route.mode === "unroutable") {
+            // MULTI-HOST: owner is a different node we can't reach (no transport
+            // address). 404 rather than blindly tailing THIS host's transcript
+            // (which would show the wrong node's session).
+            return new Response("Not Found", { status: 404 });
+          }
+          // route.mode === "local": the identity no-op — tail the LOCAL
+          // transcript exactly as the non-cluster BFF5 path does.
+          const transcriptPath = await resolveTranscriptPath(sessionId);
+          if (!transcriptPath) {
+            return new Response("Not Found", { status: 404 });
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const tail = new TranscriptTail(transcriptPath);
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const pump = () => {
+                if (inFlight || closed) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const events = await tail.poll();
+                    if (closed) return;
+                    for (const ev of events) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: stream-event\ndata: ${JSON.stringify(ev)}\n\n`,
+                        ),
+                      );
+                    }
+                  } catch {
+                    // client likely went away mid-enqueue; stop pumping
+                    closed = true;
+                    if (timer) clearInterval(timer);
+                    timer = null;
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              // Open frame so a cold connection paints the tail immediately,
+              // then poll for growth on a fixed cadence.
+              controller.enqueue(
+                encoder.encode(
+                  `event: open\ndata: ${JSON.stringify({ sessionId })}\n\n`,
+                ),
+              );
+              pump();
+              timer = setInterval(pump, 750);
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-938: the live SCREEN SSE — the PRE-transcript wedge window. Given
+        // a worker's bg shortId (or full job UUID), poll `claude logs <shortId>`
+        // every screenPollMs, ANSI-normalize, diff against the last snapshot,
+        // and push only CHANGED frames (each carrying the FULL screen, never a
+        // delta — frames are droppable, so a slow client just paints the latest
+        // one). Terminal outcomes close the stream: session gone → `gone`
+        // event, claude CLI unusable → `unavailable` event. The FIRST poll runs
+        // before the SSE handshake so a dead session is an HTTP status (404 /
+        // 503), not an empty stream the client must time out on.
+        const ecWorkerScreenMatch = url.pathname.match(
+          /^\/api\/ec-worker-screen\/([^/]+)$/,
+        );
+        if (ecWorkerScreenMatch) {
+          let rawId: string;
+          try {
+            rawId = decodeURIComponent(ecWorkerScreenMatch[1]);
+          } catch {
+            return new Response("Bad Request", { status: 400 });
+          }
+          // `claude logs` only accepts the 8-char short form; deriveScreenShortId
+          // also truncates a full job UUID. null = malformed → nothing ever
+          // reaches the exec fn (no arbitrary string ever hits a subprocess).
+          const screenShortId = deriveScreenShortId(rawId);
+          if (!screenShortId) {
+            return new Response("Bad Request", { status: 400 });
+          }
+
+          const poller = new ScreenPoller(screenShortId, {
+            exec: screenLogsExecOpt ?? undefined,
+          });
+          const first = await poller.poll();
+          if (first.kind === "gone") {
+            return new Response("Not Found", { status: 404 });
+          }
+          if (first.kind === "unavailable") {
+            return new Response("Service Unavailable", { status: 503 });
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const close = () => {
+                if (closed) return;
+                closed = true;
+                if (timer) clearInterval(timer);
+                timer = null;
+                try {
+                  controller.close();
+                } catch {
+                  /* already closed */
+                }
+              };
+              const emit = (event: string, data: unknown) => {
+                if (closed) return;
+                try {
+                  controller.enqueue(
+                    encoder.encode(
+                      `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`,
+                    ),
+                  );
+                } catch {
+                  // client went away mid-enqueue — stop polling immediately
+                  close();
+                }
+              };
+              emit("open", { shortId: screenShortId });
+              if (first.kind === "frame") {
+                emit("screen", { screen: first.screen, ts: Date.now() });
+              }
+              // Backpressure: skip the tick while a poll is in flight (a slow
+              // `claude logs` never queues a pile-up — intermediate frames are
+              // simply never produced; the next completed poll diffs against
+              // the latest screen).
+              const pump = () => {
+                if (inFlight || closed) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const res = await poller.poll();
+                    if (closed) return;
+                    if (res.kind === "frame") {
+                      emit("screen", { screen: res.screen, ts: Date.now() });
+                    } else if (res.kind === "gone") {
+                      emit("gone", { reason: res.reason });
+                      close();
+                    } else if (res.kind === "unavailable") {
+                      emit("unavailable", { reason: res.reason });
+                      close();
+                    }
+                    // "unchanged" → nothing on the wire (change-driven); the
+                    // client derives the frozen-screen age from its own clock.
+                  } catch {
+                    close();
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              timer = setInterval(pump, screenPollMs);
+              // Interval cleanup on client abort — Bun fires req.signal when
+              // the EventSource disconnects, in addition to stream cancel().
+              // CTL-967 SIDE-AC: guard against req.signal already being aborted
+              // at registration time (race between stream setup and client
+              // disconnect) — call close() immediately rather than leaking the
+              // interval.
+              if (req.signal.aborted) {
+                close();
+              } else {
+                req.signal.addEventListener("abort", close);
+              }
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
         if (url.pathname === "/api/board") {
-          return Response.json(await boardSnapshot.getLatest());
+          return Response.json(decorateBoard(await boardSnapshot.getLatest()));
         }
 
         // CTL-733: SSE push of the shared board snapshot. The client (Board.tsx /
@@ -1823,7 +3484,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
             if (closed) return;
             try {
               controller.enqueue(
-                encoder.encode(`event: board\ndata: ${JSON.stringify(snap)}\n\n`),
+                encoder.encode(
+                  `event: board\ndata: ${JSON.stringify(decorateBoard(snap))}\n\n`,
+                ),
               );
             } catch {
               // client went away between recompute and enqueue
@@ -1857,6 +3520,384 @@ export function createServer(opts: CreateServerOptions): BunServer {
           });
         }
 
+        // CTL-896 (SHELL6): the nav-signal projection — worker count, queue depth,
+        // board anomaly, and the daemon-health dot — as a single one-shot read for
+        // the warm paint + the SSE reconcile. Derived off the SAME shared board
+        // snapshot the board endpoints serve plus the local daemon health; NEVER a
+        // synchronous per-request scan of the source signal files.
+        if (url.pathname === "/api/nav") {
+          return Response.json(
+            await assembleNavSignal(await boardSnapshot.getLatest()),
+          );
+        }
+
+        // CTL-896 (SHELL6): SSE push of the nav signal. The rail opens ONE of these
+        // and receives a `nav` event on connect and on every reactive board
+        // recompute — the live badges update without a page reload and WITHOUT
+        // per-tab polling of the source files (Gherkin: "Live without thrash").
+        if (url.pathname === "/api/nav/stream") {
+          let unsubscribe: (() => void) | null = null;
+          let closed = false;
+          const sendNav = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            signal: NavSignal,
+          ) => {
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(`event: nav\ndata: ${JSON.stringify(signal)}\n\n`),
+              );
+            } catch {
+              unsubscribe?.();
+              unsubscribe = null;
+            }
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // subscribe first so no recompute is missed between bootstrap +
+              // subscribe; each board frame is projected into a nav signal (the
+              // daemon health is re-read per frame so the dot tracks heartbeats).
+              unsubscribe = boardSnapshot.subscribe((snap) => {
+                void assembleNavSignal(snap).then((signal) =>
+                  sendNav(controller, signal),
+                );
+              });
+              try {
+                sendNav(
+                  controller,
+                  await assembleNavSignal(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(`[server] nav stream initial signal failed:`, err);
+              }
+            },
+            cancel() {
+              closed = true;
+              unsubscribe?.();
+              unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-898 (SHELL8): the per-node cluster-health signal — one {host,status}
+        // per running node + the single-host flag — as a one-shot read for the
+        // footer's warm paint + the SSE reconcile. Projected off the SAME shared
+        // board snapshot the board/nav endpoints serve plus the cluster view's
+        // owner_host grouping + heartbeat liveness; NEVER a per-request scan.
+        // Single-host is the exact identity no-op (one node, the local daemon).
+        if (url.pathname === "/api/cluster") {
+          return Response.json(
+            await assembleClusterSignal(await boardSnapshot.getLatest()),
+          );
+        }
+
+        // CTL-898 (SHELL8): SSE push of the cluster signal. The footer opens ONE
+        // of these and receives a `cluster` event on connect and on every reactive
+        // board recompute — a node going dark past its grace window flips its dot
+        // to offline WITHOUT a page reload and WITHOUT per-tab polling of the
+        // source files (Gherkin: "A node going dark is reflected").
+        if (url.pathname === "/api/cluster/stream") {
+          let unsubscribe: (() => void) | null = null;
+          let closed = false;
+          const sendCluster = (
+            controller: ReadableStreamDefaultController<Uint8Array>,
+            signal: ClusterSignal,
+          ) => {
+            if (closed) return;
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  `event: cluster\ndata: ${JSON.stringify(signal)}\n\n`,
+                ),
+              );
+            } catch {
+              unsubscribe?.();
+              unsubscribe = null;
+            }
+          };
+          const stream = new ReadableStream<Uint8Array>({
+            async start(controller) {
+              // subscribe first so no recompute is missed between bootstrap +
+              // subscribe; each board frame is projected into a cluster signal
+              // (the heartbeat liveness is re-classified per frame so a node going
+              // dark surfaces without a reload).
+              unsubscribe = boardSnapshot.subscribe((snap) => {
+                void assembleClusterSignal(snap).then((signal) =>
+                  sendCluster(controller, signal),
+                );
+              });
+              try {
+                sendCluster(
+                  controller,
+                  await assembleClusterSignal(await boardSnapshot.getLatest()),
+                );
+              } catch (err) {
+                console.error(
+                  `[server] cluster stream initial signal failed:`,
+                  err,
+                );
+              }
+            },
+            cancel() {
+              closed = true;
+              unsubscribe?.();
+              unsubscribe = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // CTL-967 (N5): read-only SSE feed of new belief rows from
+        // ~/catalyst/beliefs.db, tailed by a BeliefTail cursor. Each SSE
+        // event carries a single belief row (joined with tick.ts_ms/host) in
+        // the FiringFeed shape the Rules Explorer expects. The BeliefTail
+        // module is imported via a COMPUTED specifier so bun:sqlite never
+        // enters the vite/esbuild graph (same guard as linear-cache-reader).
+        // Graceful degradation: if beliefs.db is absent (shadow off), the
+        // endpoint emits only an `open` frame and stays alive — no crash.
+        if (url.pathname === "/api/beliefs/stream") {
+          // COMPUTED specifier — DO NOT inline to a literal (see belief-reader.mjs
+          // header and the CTL-883/vite-config-bun-sqlite trap notes).
+          const beliefReaderModule = [".", "lib", "belief-reader.mjs"].join("/");
+          let tail: {
+            poll(): Promise<unknown[]>;
+            close(): void;
+          } | null = null;
+          try {
+            const mod = await import(beliefReaderModule) as {
+              BeliefTail: new (opts?: { dbPath?: string; pageSize?: number }) => {
+                poll(): Promise<unknown[]>;
+                close(): void;
+              };
+            };
+            tail = new mod.BeliefTail();
+          } catch {
+            // module or bun:sqlite unavailable — degrade to null tail
+            tail = null;
+          }
+
+          let timer: ReturnType<typeof setInterval> | null = null;
+          let inFlight = false;
+          let closed = false;
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const close = () => {
+                if (closed) return;
+                closed = true;
+                if (timer) clearInterval(timer);
+                timer = null;
+                tail?.close();
+                tail = null;
+                try {
+                  controller.close();
+                } catch {
+                  /* already closed */
+                }
+              };
+              // Open frame so the client knows the connection is live even
+              // when beliefs.db is absent or the db has no new rows yet.
+              try {
+                controller.enqueue(
+                  encoder.encode(`event: open\ndata: ${JSON.stringify({ source: "beliefs" })}\n\n`),
+                );
+              } catch {
+                closed = true;
+                return;
+              }
+              const pump = () => {
+                if (inFlight || closed || !tail) return;
+                inFlight = true;
+                void (async () => {
+                  try {
+                    const rows = await tail.poll();
+                    if (closed) return;
+                    for (const row of rows) {
+                      controller.enqueue(
+                        encoder.encode(
+                          `event: belief\ndata: ${JSON.stringify(row)}\n\n`,
+                        ),
+                      );
+                    }
+                  } catch {
+                    // client likely went away mid-enqueue; stop pumping
+                    close();
+                  } finally {
+                    inFlight = false;
+                  }
+                })();
+              };
+              pump();
+              timer = setInterval(pump, 1000);
+              // Cleanup on client abort. Guard against already-aborted signal
+              // (same pattern as the screen SSE endpoint — CTL-967 SIDE-AC).
+              if (req.signal.aborted) {
+                close();
+              } else {
+                req.signal.addEventListener("abort", close);
+              }
+            },
+            cancel() {
+              closed = true;
+              if (timer) clearInterval(timer);
+              timer = null;
+              tail?.close();
+              tail = null;
+            },
+          });
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              Connection: "keep-alive",
+              "Access-Control-Allow-Origin": "*",
+            },
+          });
+        }
+
+        // ── CTL-1100 governance read endpoints ──────────────────────────────
+        // Inserted between the /api/beliefs/stream block and the 404 fallthrough.
+        // Re-locate by grep after each insertion — line numbers shift.
+
+        // GET /api/cluster/governance — per-host governance snapshot from the
+        // heartbeat event log (CTL-1104). Separate from /api/governance (local
+        // config snapshot, CTL-1100) — see plan §open-question 3. DO NOT inline
+        // the specifier (VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/cluster/governance") {
+          const govSpecifier = ["./lib/cluster-governance.mjs"].join("");
+          try {
+            const { readClusterGovernance } = await import(govSpecifier) as {
+              readClusterGovernance: () => Record<string, unknown>;
+            };
+            return Response.json(readClusterGovernance());
+          } catch {
+            return Response.json({ singleHost: true, nodes: [], generatedAt: "" });
+          }
+        }
+
+        // GET /api/governance — current daemon governance config snapshot.
+        // DO NOT inline the specifier (computed import, VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/governance") {
+          const configSpecifier = ["../execution-core/config.mjs"].join("");
+          try {
+            const { readGovernanceConfig } = await import(configSpecifier) as {
+              readGovernanceConfig: (env?: NodeJS.ProcessEnv) => Record<string, unknown>;
+            };
+            return Response.json({ available: true, ...readGovernanceConfig() });
+          } catch {
+            return Response.json({ available: false });
+          }
+        }
+
+        if (url.pathname === "/api/fsm/descriptor") {
+          return Response.json(await buildFsmDescriptor());
+        }
+
+        // GET /api/beliefs/rules — served from frozen RULE_MANIFEST; no db required.
+        if (url.pathname === "/api/beliefs/rules") {
+          const govDeps = await loadGovernanceDeps();
+          const manifest = govDeps?.RULE_MANIFEST ?? null;
+          if (!manifest) return Response.json({ rules: [], strata: [] });
+          return Response.json(manifest);
+        }
+
+        // GET /api/beliefs/summary — latest-tick aggregate per belief name.
+        if (url.pathname === "/api/beliefs/summary") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ tickId: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefSummary(db), { tickId: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/rates — full belief counts per rule_id per tick (LRU cached).
+        if (url.pathname === "/api/beliefs/rates") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ maxTick: null, rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRates(db, beliefRatesCache), { maxTick: null, rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/recent — newest-first belief rows, limit param.
+        if (url.pathname === "/api/beliefs/recent") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          const limitParam = url.searchParams.get("limit");
+          const limit = limitParam ? Math.max(1, parseInt(limitParam, 10) || 50) : undefined;
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefRecent(db, { limit }), { rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/cfg — static config rows from the beliefs store.
+        if (url.pathname === "/api/beliefs/cfg") {
+          const dbPath = govDbPath();
+          const govDeps = await loadGovernanceDeps();
+          if (!govDeps) return Response.json({ rows: [] });
+          return Response.json(
+            await govDeps.withBeliefsDbRO(dbPath, (db) => beliefCfg(db), { rows: [] })
+          );
+        }
+
+        // GET /api/beliefs/why?ticket=<ticket>[&tick=<tickId>]
+        // HTTP wrapper over traceTicket() — same resolver as `catalyst why`.
+        // Input validation (ticket required, /^[A-Za-z]+-\d+$/, tick must be
+        // integer) happens BEFORE any db touch so traversal attempts are
+        // rejected before reaching the db. Degrades to 200+empty trace when
+        // beliefs.db absent or unreadable (no 500).
+        // NOTE: DO NOT inline the specifier — computed import required (CTL-883).
+        if (url.pathname === "/api/beliefs/why") {
+          const rawTicket = url.searchParams.get("ticket");
+          if (!rawTicket) return new Response("ticket required", { status: 400 });
+          let ticket: string;
+          try {
+            ticket = decodeURIComponent(rawTicket);
+          } catch {
+            return new Response("invalid ticket encoding", { status: 400 });
+          }
+          if (!/^[A-Za-z]+-\d+$/.test(ticket)) {
+            return new Response("invalid ticket format", { status: 400 });
+          }
+          const rawTick = url.searchParams.get("tick");
+          let tickId: number | undefined;
+          if (rawTick != null) {
+            const parsed = parseInt(rawTick, 10);
+            if (!Number.isInteger(parsed) || String(parsed) !== rawTick.trim()) {
+              return new Response("tick must be an integer", { status: 400 });
+            }
+            tickId = parsed;
+          }
+          // DO NOT inline this specifier (VITE-GRAPH GUARD, CTL-883).
+          const whyMod = ["./lib/belief-why.mjs"].join("");
+          try {
+            const { traceTicketJson } = await import(whyMod) as {
+              traceTicketJson: (opts: { ticket: string; tickId?: number; dbPath: string }) => Promise<unknown>;
+            };
+            const trace = await traceTicketJson({ ticket, tickId, dbPath: govDbPath() });
+            return Response.json(trace);
+          } catch {
+            return Response.json({ ticket, tickId: null, beliefs: [] });
+          }
+        }
+
         return new Response("Not Found", { status: 404 });
       } catch (err) {
         console.error(`[server] fetch handler error:`, err);
@@ -1867,6 +3908,9 @@ export function createServer(opts: CreateServerOptions): BunServer {
 
   if (startWatcher) {
     watcher = startWatching(wtDir, { dbPath, sqlitePollIntervalMs, runsDir });
+    // CTL-1050: start the service-health registry poller (30s tick). Off in
+    // tests (startWatcher=false) so they drive `tick()` deterministically.
+    serviceHealth.start();
   }
 
   if (webhookConfig && webhookHandler) {
@@ -1956,10 +4000,12 @@ export function createServer(opts: CreateServerOptions): BunServer {
     for (const u of unsubscribers) u();
     watcher?.stop();
     boardSnapshot.stop();
+    serviceHealth.stop();
     prFetcher?.stop();
     previewFetcher?.stop();
     linear?.stop();
     briefingProvider?.stop();
+    inboxSummaryProvider?.stop();
     void webhookTunnel?.stop();
     void linearWebhookTunnel?.stop();
     closeDb();
@@ -2064,7 +4110,7 @@ if (import.meta.main) {
       ? {
           linearSecrets: fullWebhookConfig.linearSecrets,
           smeeChannel: fullWebhookConfig.linearSmeeChannel,
-          botUserId: fullWebhookConfig.linearBotUserId || undefined,
+          botUserIds: fullWebhookConfig.linearBotUserIds.size > 0 ? fullWebhookConfig.linearBotUserIds : undefined,
           linearTeams: fullWebhookConfig.linearTeams,
         }
       : null;
@@ -2074,6 +4120,7 @@ if (import.meta.main) {
       anthropic: getProvider("anthropic"),
       openai: getProvider("openai"),
       grok: getProvider("grok"),
+      "claude-cli": getProvider("claude-cli"),
     };
     summarizeHandler = createSummarizeHandler({
       config: summarizeCfg,
@@ -2087,6 +4134,27 @@ if (import.meta.main) {
     });
   }
 
+  // CTL-1042: per-inbox-item AI summary provider, built from the same two-layer
+  // config as the briefing provider (project .catalyst/config.json + secrets).
+  const aiCfg = loadAiConfig(
+    `${process.cwd()}/.catalyst/config.json`,
+    `${process.env.HOME ?? ""}/.config/catalyst/config-${detectProjectKey(process.cwd())}.json`,
+  );
+  const inboxSummaryProvider: InboxSummaryProvider | null = aiCfg.enabled
+    ? createInboxSummaryProvider(aiCfg, {
+        // The provider still accepts a `phase` on generate(), but collection is
+        // intentionally NOT phase-scoped: the cache key derives the phase from
+        // the held signal independently, so threading it here would be
+        // redundant. The closure drops the unused arg rather than imply it acts.
+        collectState: (ticket) =>
+          collectInboxItemState(ticket, {
+            workersDir: `${CATALYST_DIR}/execution-core/workers`,
+            projectsDir: `${process.env.HOME ?? ""}/.claude/projects`,
+            title: null,
+          }),
+      })
+    : null;
+
   if (terminalOnly) {
     const handle = startTerminalOnly(WT_DIR, renderOpts, RUNS_DIR);
     for (const sig of ["SIGINT", "SIGTERM"] as const) {
@@ -2097,18 +4165,26 @@ if (import.meta.main) {
       });
     }
   } else {
+    const PUBLIC_DIR = resolvePublicDir(
+      process.env.MONITOR_PUBLIC_DIR,
+      join(import.meta.dir, "public"),
+    );
     const srv = createServer({
       port: PORT,
       wtDir: WT_DIR,
       runsDir: RUNS_DIR,
       dbPath: DB_PATH,
       pidFile: pidFilePath,
+      publicDir: PUBLIC_DIR,
       prometheusUrl: otelCfg.enabled ? otelCfg.prometheusUrl : null,
       lokiUrl: otelCfg.enabled ? otelCfg.lokiUrl : null,
+      grafanaUrl: otelCfg.enabled ? otelCfg.grafanaUrl : null,
+      collectorHealthUrl: otelCfg.enabled ? otelCfg.collectorHealthUrl : null,
       terminal: useTerminal,
       renderOptions: renderOpts,
       summarizeHandler,
       summarizeConfig: summarizeCfg,
+      inboxSummaryProvider,
       webhookConfig,
       linearWebhookConfig,
     });

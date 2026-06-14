@@ -5,7 +5,12 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readWorkerSignals, listDispatchedPhases, byActivePhase } from "./signal-reader.mjs";
+import {
+  readWorkerSignals,
+  readAllPhaseSignals,
+  listDispatchedPhases,
+  byActivePhase,
+} from "./signal-reader.mjs";
 
 let orchDir;
 
@@ -306,22 +311,21 @@ describe("listDispatchedPhases", () => {
   });
 });
 
-// CTL-701 Phase 2: byActivePhase — turn-cap-exhausted is NOT terminal
-describe("byActivePhase — turn-cap-exhausted (CTL-701)", () => {
-  test("turn-cap-exhausted sorts before done regardless of updatedAt", () => {
-    const tce = {
-      phase: "implement",
-      status: "turn-cap-exhausted",
-      updatedAt: "2026-05-28T10:00:00Z",
-    };
-    const done = {
-      phase: "monitor-deploy",
-      status: "done",
-      updatedAt: "2026-05-28T12:00:00Z",
-    };
+// CTL-830: turn-cap-exhausted is terminal since CTL-748 — it no longer
+// shadows in-flight phases, and ties with other terminals break on updatedAt.
+describe("byActivePhase — turn-cap-exhausted is terminal (CTL-830)", () => {
+  test("a running phase sorts before turn-cap-exhausted", () => {
+    const tce = { phase: "implement", status: "turn-cap-exhausted", updatedAt: "2026-05-28T12:00:00Z" };
+    const running = { phase: "monitor-deploy", status: "running", updatedAt: "2026-05-28T10:00:00Z" };
+    const sorted = [tce, running].sort(byActivePhase);
+    expect(sorted[0].status).toBe("running");
+  });
+
+  test("turn-cap-exhausted vs done tiebreaks on most-recent updatedAt", () => {
+    const tce = { phase: "implement", status: "turn-cap-exhausted", updatedAt: "2026-05-28T10:00:00Z" };
+    const done = { phase: "monitor-deploy", status: "done", updatedAt: "2026-05-28T12:00:00Z" };
     const sorted = [tce, done].sort(byActivePhase);
-    expect(sorted[0].status).toBe("turn-cap-exhausted");
-    expect(sorted[1].status).toBe("done");
+    expect(sorted[0].status).toBe("done"); // newer updatedAt wins among terminals
   });
 });
 
@@ -371,5 +375,65 @@ describe("yield-tombstone exclusion (CTL-702)", () => {
     writeFileSync(join(dir, "phase-plan-yield-20260528T050740Z.json"), JSON.stringify({}));
     const sigs = readWorkerSignals(orchDir);
     expect(sigs.find((s) => s.ticket === "CTL-702C")).toBeUndefined();
+  });
+});
+
+// CTL-934: readAllPhaseSignals — per-file fan-out (every phase signal, not just
+// the active one). The belief rules join obs_signal(T, P, …) per phase, so the
+// fact collector needs to observe superseded/terminal sibling phases.
+describe("readAllPhaseSignals (CTL-934)", () => {
+  test("returns EVERY nested phase signal for a ticket, not just the active one", () => {
+    writeNested("CTL-50", "research", {
+      bg_job_id: "aaa1",
+      status: "done",
+      updatedAt: "2026-06-09T01:00:00Z",
+    });
+    writeNested("CTL-50", "plan", {
+      bg_job_id: "bbb2",
+      status: "done",
+      updatedAt: "2026-06-09T02:00:00Z",
+    });
+    writeNested("CTL-50", "implement", {
+      bg_job_id: "ccc3",
+      status: "running",
+      updatedAt: "2026-06-09T03:00:00Z",
+    });
+
+    // readWorkerSignals collapses to ONE active-phase row…
+    const active = readWorkerSignals(orchDir).filter((s) => s.ticket === "CTL-50");
+    expect(active).toHaveLength(1);
+    expect(active[0].phase).toBe("implement");
+
+    // …readAllPhaseSignals keeps all three (the superseded siblings included).
+    const all = readAllPhaseSignals(orchDir).filter((s) => s.ticket === "CTL-50");
+    expect(all.map((s) => s.phase).sort()).toEqual(["implement", "plan", "research"]);
+    const byPhase = Object.fromEntries(all.map((s) => [s.phase, s]));
+    expect(byPhase.research.status).toBe("done");
+    expect(byPhase.research.liveness).toEqual({ kind: "bg", value: "aaa1" });
+    expect(byPhase.implement.liveness).toEqual({ kind: "bg", value: "ccc3" });
+  });
+
+  test("flat (legacy oneshot) signals appear exactly once, like readWorkerSignals", () => {
+    writeFlat("CTL-51", { pid: 999, status: "running", phase: 4 });
+    const all = readAllPhaseSignals(orchDir).filter((s) => s.ticket === "CTL-51");
+    expect(all).toHaveLength(1);
+    expect(all[0].layout).toBe("flat");
+    expect(all[0].liveness).toEqual({ kind: "pid", value: 999 });
+  });
+
+  test("excludes artifacts and yield tombstones, like the active reader", () => {
+    const dir = join(workersDir(), "CTL-52");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "phase-plan.json"), JSON.stringify({ ticket: "CTL-52", phase: "plan", status: "done" }));
+    writeFileSync(join(dir, "verify.json"), JSON.stringify({ findings: [] }));
+    writeFileSync(join(dir, "triage.json"), JSON.stringify({}));
+    writeFileSync(join(dir, "phase-plan-yield-20260601T000000Z.json"), JSON.stringify({}));
+    const all = readAllPhaseSignals(orchDir).filter((s) => s.ticket === "CTL-52");
+    expect(all.map((s) => s.phase)).toEqual(["plan"]);
+  });
+
+  test("no workers/ dir → []", () => {
+    rmSync(join(orchDir, "workers"), { recursive: true, force: true });
+    expect(readAllPhaseSignals(orchDir)).toEqual([]);
   });
 });

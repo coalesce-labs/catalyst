@@ -20,7 +20,7 @@ setup_source() {
   mkdir -p "$src"
   for f in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-forward \
            catalyst-session.sh catalyst-state.sh catalyst-statusline.sh catalyst-db.sh \
-           catalyst-monitor.sh catalyst-thoughts.sh catalyst-claude.sh; do
+           catalyst-monitor.sh catalyst-thoughts.sh catalyst-claude.sh catalyst-stack; do
     echo '#!/usr/bin/env bash' > "$src/$f"
     echo "echo stub-$f" >> "$src/$f"
     chmod +x "$src/$f"
@@ -105,7 +105,7 @@ run "install creates bin dir" bash -c "
 
 for cli in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-forward \
            catalyst-session catalyst-state catalyst-statusline catalyst-db \
-           catalyst-monitor catalyst-thoughts catalyst-claude; do
+           catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack; do
   run "installs symlink: $cli" bash -c "
     [[ -L '$BIN1/$cli' ]]
   "
@@ -114,6 +114,23 @@ for cli in catalyst-comms catalyst-events catalyst-execution-core catalyst-otel-
     [[ -e \"\$target\" ]]
   "
 done
+
+# ── CTL-847: catalyst-stack fresh-install contract — installed link is runnable ─
+# Replace the stub with the real catalyst-stack + its lib dependency so --version
+# exercises the genuine version path (catalyst-stack:38-51). The symlink
+# $BIN1/catalyst-stack already points to $SRC1/catalyst-stack — no reinstall needed.
+cp "$REPO_ROOT/plugins/dev/scripts/catalyst-stack" "$SRC1/catalyst-stack"
+mkdir -p "$SRC1/lib"
+cp "$REPO_ROOT/plugins/dev/scripts/lib/catalyst-version.sh" "$SRC1/lib/catalyst-version.sh"
+
+run "catalyst-stack installed entry is executable" bash -c "
+  [[ -x '$BIN1/catalyst-stack' ]]
+"
+
+run "catalyst-stack installed entry invokes end-to-end (--version)" bash -c "
+  out=\$('$BIN1/catalyst-stack' --version 2>&1) || { echo \"exit nonzero: \$out\"; exit 1; }
+  [[ -n \"\$out\" ]]
+"
 
 # ── 4. .sh suffix stripped on link name ─────────────────────────────────────
 run "catalyst-session points at catalyst-session.sh" bash -c "
@@ -131,9 +148,9 @@ run "second run does not error" bash -c "
   CATALYST_CLI_SOURCE='$SRC1' CATALYST_CLI_BIN_DIR='$BIN1' $INSTALL_CLI --force >/dev/null 2>&1
 "
 
-run "second run leaves 11 symlinks" bash -c "
+run "second run leaves 12 symlinks" bash -c "
   count=\$(find '$BIN1' -maxdepth 1 -type l | wc -l | tr -d ' ')
-  [[ \"\$count\" = '11' ]]
+  [[ \"\$count\" = '12' ]]
 "
 
 # ── 7. re-point on source move — symlinks point at new location ────────────
@@ -558,6 +575,14 @@ run "wrapper-mode: -V short form works" bash -c "
 run "wrapper-mode: non-version args still forwarded to underlying CLI" bash -c "
   out=\$(HOME='$HOME29' '$BIN29/catalyst-events' run)
   echo \"\$out\" | grep -qF 'stub real'
+"
+# CTL-1000: with no pluginDirs configured, the wrapper resolves cache and does
+# NOT emit a degradation warning (cache is the legitimate default, not a fault).
+run "wrapper-mode: no pluginDirs → source: cache, no WARN" bash -c "
+  out=\$(HOME='$HOME29' XDG_CONFIG_HOME='$HOME29/.config-empty' \
+        '$BIN29/catalyst-events' --version 2>'$SCRATCH/out29v.err')
+  echo \"\$out\" | grep -qF 'source: cache' \\
+    && ! grep -q 'WARN' '$SCRATCH/out29v.err'
 "
 
 # ── Summary ────────────────────────────────────────────────────────────────

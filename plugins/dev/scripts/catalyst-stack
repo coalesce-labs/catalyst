@@ -1,0 +1,515 @@
+#!/usr/bin/env bash
+# catalyst-stack — bring the catalyst stack up (or down) on this host.
+#
+# Order on start: mitmproxy → broker → monitor → execution-core
+#               (broker → monitor → exec-core is the dependency order;
+#                mitmproxy is independent + first so the proxy env vars
+#                set below have somewhere to forward to)
+# Order on stop: reverse.
+#
+# Idempotent. If a service is already up, it is logged and left alone.
+#
+# Usage:
+#   catalyst-stack start [--proxy] [--hotpatch] [--yes]
+#   catalyst-stack stop
+#   catalyst-stack restart [--proxy] [--hotpatch] [--yes]
+#   catalyst-stack status
+#   catalyst-stack hotpatch [--legacy-rsync]
+#   catalyst-stack parity
+#
+# --proxy:
+#   Opt-in to mitmproxy and set HTTPS_PROXY / NODE_USE_ENV_PROXY /
+#   NODE_EXTRA_CA_CERTS for the daemon. Installs mitmproxy via brew if absent.
+#   You only need this when you want Linear-traffic capture at
+#   ~/catalyst/linear-proxy.jsonl.
+#
+# --no-proxy:
+#   Accepted for backward compatibility; a no-op (proxy is already off by default).
+#
+# hotpatch / --hotpatch (CTL-940):
+#   ff-only pull of the per-host plugin checkout(s) resolved from pluginDirs
+#   (lib/plugin-dirs.sh: env > repo config > machine config). Refuses dirty or
+#   diverged checkouts. Emits a node.checkout.updated event recording old/new
+#   commits. The deprecated marketplace-cache rsync survives only behind
+#   'catalyst-stack hotpatch --legacy-rsync'. 'start/restart --hotpatch' runs
+#   the checkout pull first, then starts/restarts.
+#
+# parity (CTL-941):
+#   Node freshness + setup-drift report for the per-host plugin checkout:
+#   pluginDirs configured, paths exist and are git checkouts, plugin manifest
+#   parses, working tree clean, remote daemon-fetchable (no ssh), checkout at
+#   origin/main. Exit code = number of drift findings (0 = clean).
+#
+# --yes:
+#   Non-interactive — auto-approve brew install of mitmproxy under --proxy.
+
+set -uo pipefail
+
+# CTL-390: --version handling (early, before any arg parsing).
+case "${1:-}" in
+  --version|-V)
+    _CV_SRC="${BASH_SOURCE[0]}"
+    while [[ -L "$_CV_SRC" ]]; do
+      _CV_D="$(cd -P "$(dirname "$_CV_SRC")" && pwd)" && _CV_SRC="$(readlink "$_CV_SRC")"
+      [[ "$_CV_SRC" != /* ]] && _CV_SRC="$_CV_D/$_CV_SRC"
+    done
+    _CV_DIR="$(cd -P "$(dirname "$_CV_SRC")" && pwd)"
+    [[ -f "${_CV_DIR}/lib/catalyst-version.sh" ]] && . "${_CV_DIR}/lib/catalyst-version.sh" \
+      && catalyst_print_version "catalyst-stack" "${BASH_SOURCE[0]}" && exit 0
+    echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
+    exit 1
+    ;;
+esac
+
+# ─── SCRIPT_DIR (symlink-walking) ────────────────────────────────────────────
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L "$_SRC" ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
+
+# ─── Proxy env (used only under --proxy) ─────────────────────────────────────
+PROXY_HOST="http://127.0.0.1:8080"
+MITM_CA="${HOME}/.mitmproxy/mitmproxy-ca-cert.pem"
+MITM_ADDON="${HOME}/catalyst/mitm_linear_addon.py"
+MITM_LOG="${HOME}/catalyst/mitm.log"
+
+# ─── Helpers ────────────────────────────────────────────────────────────────
+log()  { printf '[catalyst-stack] %s\n' "$*"; }
+warn() { printf '[catalyst-stack] WARN: %s\n' "$*" >&2; }
+fail() { printf '[catalyst-stack] ERROR: %s\n' "$*" >&2; exit 1; }
+
+pid_alive() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+# Single source of truth for resolving the per-host plugin checkout (CTL-940).
+# shellcheck source=lib/plugin-dirs.sh
+[[ -f "${SCRIPT_DIR}/lib/plugin-dirs.sh" ]] || fail "missing lib/plugin-dirs.sh next to catalyst-stack"
+. "${SCRIPT_DIR}/lib/plugin-dirs.sh"
+
+mitm_pid() { pgrep -f "mitmdump -s.*mitm_linear_addon" 2>/dev/null | head -1; }
+
+# ─── Service start/stop primitives ──────────────────────────────────────────
+ensure_proxy_deps() {
+  if ! command -v mitmdump >/dev/null 2>&1; then
+    if [[ "${ASSUME_YES:-no}" == "yes" ]]; then
+      brew install mitmproxy || return 1
+    else
+      read -r -p "mitmproxy not found. Install via 'brew install mitmproxy'? [y/N] " ans
+      [[ "$ans" =~ ^[Yy]$ ]] || { warn "mitmproxy required for --proxy"; return 1; }
+      command -v brew >/dev/null 2>&1 || { warn "brew not found"; return 1; }
+      brew install mitmproxy || return 1
+    fi
+  fi
+  if [[ ! -f "$MITM_CA" ]]; then
+    log "generating mitmproxy CA cert…"
+    ( nohup mitmdump --listen-port 8081 >/dev/null 2>&1 & sleep 2; kill %1 2>/dev/null ) || true
+    [[ -f "$MITM_CA" ]] || { warn "CA cert still missing at $MITM_CA"; return 1; }
+  fi
+  if [[ ! -f "$MITM_ADDON" ]]; then
+    local vendored="${SCRIPT_DIR}/mitm_linear_addon.py"
+    [[ -f "$vendored" ]] && { mkdir -p "$(dirname "$MITM_ADDON")"; cp "$vendored" "$MITM_ADDON"; } \
+      || { warn "vendored addon missing at $vendored"; return 1; }
+  fi
+}
+
+start_mitmproxy() {
+  local pid; pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "mitmproxy already running (pid $pid)"
+    return 0
+  fi
+  if [[ ! -f "$MITM_ADDON" ]]; then
+    warn "mitmproxy addon missing at $MITM_ADDON — skipping"
+    return 1
+  fi
+  if [[ ! -f "$MITM_CA" ]]; then
+    warn "mitmproxy CA cert missing at $MITM_CA — run 'mitmproxy' once to generate it, then re-run"
+    return 1
+  fi
+  log "starting mitmproxy (addon: $MITM_ADDON, log: $MITM_LOG)"
+  nohup mitmdump -s "$MITM_ADDON" --listen-port 8080 >"$MITM_LOG" 2>&1 &
+  disown $! 2>/dev/null || true
+  sleep 2
+  pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "  → mitmproxy started (pid $pid)"
+  else
+    warn "mitmproxy failed to start — see $MITM_LOG"
+    return 1
+  fi
+}
+
+stop_mitmproxy() {
+  local pid; pid="$(mitm_pid)"
+  if pid_alive "$pid"; then
+    log "stopping mitmproxy (pid $pid)"
+    kill "$pid" 2>/dev/null
+    sleep 1
+    pid_alive "$pid" && kill -9 "$pid" 2>/dev/null || true
+  else
+    log "mitmproxy not running"
+  fi
+}
+
+start_broker()   { catalyst-broker start 2>&1 | sed 's/^/  /'; }
+stop_broker()    { catalyst-broker stop  2>&1 | sed 's/^/  /'; }
+start_monitor()  { catalyst-monitor start 2>&1 | sed 's/^/  /'; }
+stop_monitor()   { catalyst-monitor stop  2>&1 | sed 's/^/  /'; }
+start_forward()  { catalyst-monitor forward-start 2>&1 | sed 's/^/  /'; }
+stop_forward()   { catalyst-monitor forward-stop  2>&1 | sed 's/^/  /'; }
+
+start_daemon() {
+  local use_proxy="$1"
+  if catalyst-execution-core status 2>&1 | grep -q "^running"; then
+    log "execution-core already running ($(catalyst-execution-core status 2>&1 | head -1))"
+    return 0
+  fi
+  log "starting execution-core daemon (proxy=$use_proxy)"
+  if [[ "$use_proxy" == "yes" ]]; then
+    if [[ ! -f "$MITM_CA" ]]; then
+      warn "proxy requested but CA cert missing — daemon will fall back to no-proxy mode."
+      use_proxy="no"
+    fi
+  fi
+  if [[ "$use_proxy" == "yes" ]]; then
+    # NO_PROXY keeps Claude/Anthropic API calls direct so a dead mitmdump cannot
+    # kill worker sessions (CTL-946 safety guard — one line, not an allowlist).
+    HTTPS_PROXY="$PROXY_HOST" \
+    NODE_USE_ENV_PROXY=1 \
+    NODE_EXTRA_CA_CERTS="$MITM_CA" \
+    NO_PROXY="api.anthropic.com,.anthropic.com,statsig.anthropic.com,sentry.io,.sentry.io" \
+      catalyst-execution-core start 2>&1 | sed 's/^/  /'
+  else
+    catalyst-execution-core start 2>&1 | sed 's/^/  /'
+  fi
+}
+
+stop_daemon() { catalyst-execution-core stop 2>&1 | sed 's/^/  /'; }
+
+# ─── Hotpatch (CTL-940: one-checkout nodes) ─────────────────────────────────
+# The daemon, script wrappers, and dispatched workers all run from the
+# pluginDirs checkout, so updating a node is a single ff-only pull of that
+# checkout. The marketplace plugin cache is never written on this path.
+
+# _emit_checkout_updated CHECKOUT OLD_SHA NEW_SHA — best-effort telemetry
+# (CTL-941: the update is logged + evented with old and new commits).
+# Never fails the hotpatch.
+_emit_checkout_updated() {
+  local checkout="$1" old="$2" new="$3"
+  (
+    set +e
+    # shellcheck source=lib/canonical-event.sh
+    source "${SCRIPT_DIR}/lib/canonical-event.sh" 2>/dev/null || exit 0
+    command -v jq >/dev/null 2>&1 || exit 0
+    local events_dir="${CATALYST_DIR:-$HOME/catalyst}/events"
+    mkdir -p "$events_dir" 2>/dev/null || exit 0
+    build_canonical_line \
+      --ts "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+      --severity INFO \
+      --service catalyst.stack \
+      --event-name node.checkout.updated \
+      --entity checkout --action updated \
+      --label "$checkout" \
+      --message "plugin checkout updated ${old:0:8} → ${new:0:8}" \
+      --payload-json "$(jq -nc --arg c "$checkout" --arg o "$old" --arg n "$new" \
+        '{checkout:$c, old_commit:$o, new_commit:$n}')" \
+      >> "${events_dir}/$(date -u +%Y-%m).jsonl"
+  ) || true
+}
+
+# _hotpatch_checkout CHECKOUT_ROOT — ff-only update of one checkout.
+_hotpatch_checkout() {
+  local root="$1"
+  if [[ -n "$(git -C "$root" status --porcelain 2>/dev/null)" ]]; then
+    fail "checkout is dirty — refusing to pull: $root (commit/stash local changes, then retry)"
+  fi
+  GIT_TERMINAL_PROMPT=0 git -C "$root" fetch -q origin main \
+    || fail "git fetch origin main failed in $root"
+  local ahead behind
+  ahead="$(git -C "$root" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)"
+  behind="$(git -C "$root" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
+  if [[ "$ahead" -gt 0 ]]; then
+    fail "checkout has diverged — $ahead local commit(s) ahead of origin/main in $root; refusing ff-only pull"
+  fi
+  if [[ "$behind" -eq 0 ]]; then
+    log "hotpatch: $root already up to date ($(git -C "$root" rev-parse --short HEAD))"
+    return 0
+  fi
+  local old new
+  old="$(git -C "$root" rev-parse HEAD)"
+  git -C "$root" pull --ff-only -q origin main \
+    || fail "git pull --ff-only failed in $root — resolve manually then retry"
+  new="$(git -C "$root" rev-parse HEAD)"
+  log "hotpatch: $root updated ${old:0:8} → ${new:0:8} (was behind by $behind)"
+  _emit_checkout_updated "$root" "$old" "$new"
+}
+
+cmd_hotpatch() {
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --legacy-rsync) cmd_hotpatch_legacy; return $? ;;
+      *) fail "unknown hotpatch arg: $arg (try: --legacy-rsync)" ;;
+    esac
+  done
+
+  resolve_plugin_dirs
+  if [[ -z "$RESOLVED_PLUGIN_DIRS" ]]; then
+    fail "no pluginDirs configured — set .catalyst.orchestration.pluginDirs in a repo .catalyst/config.json or $(plugin_dirs_machine_config_path) (or export CATALYST_PLUGIN_DIRS)"
+  fi
+  log "hotpatch: pluginDirs (${RESOLVED_PLUGIN_DIRS_SOURCE}): ${RESOLVED_PLUGIN_DIRS}"
+
+  local seen=" " pd root
+  IFS=':' read -r -a _HOTPATCH_PDS <<<"$RESOLVED_PLUGIN_DIRS"
+  for pd in "${_HOTPATCH_PDS[@]}"; do
+    [[ -z "$pd" ]] && continue
+    root="$(plugin_checkout_root "$pd")"
+    [[ -n "$root" ]] || fail "pluginDirs entry is not inside a git checkout: $pd"
+    case "$seen" in *" $root "*) continue ;; esac
+    seen="${seen}${root} "
+    _hotpatch_checkout "$root"
+  done
+}
+
+# BEGIN LEGACY RSYNC (deprecated — delete once every node is one-checkout)
+_resolve_cache_dir() {
+  local cache="${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"
+  ls -d "${cache}"/[0-9]*.*.*/ 2>/dev/null | sort -V | tail -1 | sed 's|/$||'
+}
+
+cmd_hotpatch_legacy() {
+  warn "hotpatch --legacy-rsync is DEPRECATED: it rsyncs into the marketplace plugin cache instead of updating the pluginDirs checkout. Migrate this node to one-checkout (CTL-940) and drop the flag."
+  local repo="${CATALYST_REPO_DIR:-${HOME}/code-repos/github/coalesce-labs/catalyst}"
+  [[ -d "$repo/.git" ]] || fail "catalyst repo not found at $repo (set CATALYST_REPO_DIR)"
+  log "hotpatch(legacy): ff-pull main in $repo"
+  git -C "$repo" pull --ff-only origin main || fail "git pull --ff-only failed — resolve manually then retry"
+  local dest; dest="$(_resolve_cache_dir)"
+  [[ -n "$dest" ]] || fail "could not resolve plugin cache version dir under ${HOME}/.claude/plugins/cache/catalyst/catalyst-dev"
+  log "hotpatch(legacy): rsync plugins/dev/ → ${dest}/"
+  rsync -ac --exclude=node_modules --exclude=.orphaned_at \
+    "$repo/plugins/dev/" "${dest}/"
+}
+# END LEGACY RSYNC
+
+# ─── Parity (CTL-941: node freshness + setup drift) ─────────────────────────
+PARITY_DRIFT=0
+drift() { printf '[catalyst-stack] DRIFT: %s\n' "$*"; PARITY_DRIFT=$((PARITY_DRIFT+1)); }
+
+# _parity_check_dir PLUGIN_DIR — run all drift checks for one pluginDirs entry.
+_parity_check_dir() {
+  local pd="$1"
+  if [[ ! -d "$pd" ]]; then
+    drift "pluginDirs entry does not exist: $pd (referenced via ${RESOLVED_PLUGIN_DIRS_SOURCE})"
+    return
+  fi
+  local root
+  root="$(plugin_checkout_root "$pd")"
+  if [[ -z "$root" ]]; then
+    drift "pluginDirs entry is not inside a git checkout: $pd"
+    return
+  fi
+  log "parity: checking $pd (checkout: $root)"
+
+  # Structural health (CTL-992): the checkout must be a pristine, standalone,
+  # main-only checkout. plugin_source_health surfaces these as typed lines; we
+  # consume the two NEW structural conditions here (LINKED_WORKTREE, OFF_MAIN).
+  # MISSING / NOT_A_CHECKOUT are already handled above; DIRTY stays inline below.
+  local _hline _htok _harg1 _harg2
+  while IFS= read -r _hline; do
+    [[ -z "$_hline" ]] && continue
+    _htok="${_hline%% *}"
+    _harg1="${_hline#"$_htok" }"
+    case "$_htok" in
+      LINKED_WORKTREE)
+        drift "pluginDirs checkout is a linked worktree, not a pristine main checkout: ${_harg1} — run setup-plugin-source.sh"
+        ;;
+      OFF_MAIN)
+        _harg2="${_harg1##* }"
+        _harg1="${_harg1% *}"
+        drift "pluginDirs checkout is on branch ${_harg2}, not main: ${_harg1} — run setup-plugin-source.sh"
+        ;;
+    esac
+  done < <(plugin_source_health "$pd")
+
+  # Manifest must parse — a gutted/corrupt plugin dir wedges workers.
+  local manifest="${pd}/.claude-plugin/plugin.json"
+  if [[ ! -f "$manifest" ]]; then
+    drift "plugin manifest missing: $manifest"
+  elif command -v jq >/dev/null 2>&1 && ! jq -e . "$manifest" >/dev/null 2>&1; then
+    drift "plugin manifest unparseable: $manifest"
+  fi
+
+  # Working tree must be clean (a dirty checkout blocks the ff-only auto-pull).
+  local dirty
+  dirty="$(git -C "$root" status --porcelain 2>/dev/null)"
+  if [[ -n "$dirty" ]]; then
+    drift "dirty working tree in $root:"
+    printf '%s\n' "$dirty" | sed 's/^/    /'
+  fi
+
+  # Remote must be fetchable from daemon contexts (no ssh-agent there).
+  local url
+  url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+  if [[ -z "$url" ]]; then
+    drift "no origin remote in $root — freshness cannot be checked"
+    return
+  fi
+  case "$url" in
+    git@*|ssh://*)
+      drift "origin remote uses ssh ($url) — unauthable from daemon contexts; switch to https"
+      return
+      ;;
+  esac
+
+  # Freshness vs origin/main.
+  if ! GIT_TERMINAL_PROMPT=0 git -C "$root" fetch -q origin main 2>/dev/null; then
+    drift "git fetch origin main failed in $root"
+    return
+  fi
+  local ahead behind
+  ahead="$(git -C "$root" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)"
+  behind="$(git -C "$root" rev-list --count HEAD..origin/main 2>/dev/null || echo 0)"
+  [[ "$behind" -gt 0 ]] && drift "checkout is behind origin/main by $behind commit(s) in $root — run 'catalyst-stack hotpatch'"
+  [[ "$ahead" -gt 0 ]] && drift "checkout is ahead of origin/main by $ahead local commit(s) in $root"
+  if [[ "$behind" -eq 0 && "$ahead" -eq 0 ]]; then
+    log "parity: $root at origin/main ($(git -C "$root" rev-parse --short HEAD))"
+  fi
+}
+
+cmd_parity() {
+  local mcfg; mcfg="$(plugin_dirs_machine_config_path)"
+  resolve_plugin_dirs
+  log "parity: pluginDirs source: ${RESOLVED_PLUGIN_DIRS_SOURCE}"
+  local mset="unset"
+  [[ -n "$(__plugin_dirs_from_file "$mcfg")" ]] && mset="set"
+  log "parity: machine config (${mcfg}): pluginDirs ${mset}"
+
+  if [[ -z "$RESOLVED_PLUGIN_DIRS" ]]; then
+    drift "pluginDirs not configured anywhere — set .catalyst.orchestration.pluginDirs in a repo .catalyst/config.json or ${mcfg} (or export CATALYST_PLUGIN_DIRS)"
+    exit 1
+  fi
+
+  local pd
+  IFS=':' read -r -a _PARITY_PDS <<<"$RESOLVED_PLUGIN_DIRS"
+  for pd in "${_PARITY_PDS[@]}"; do
+    [[ -z "$pd" ]] && continue
+    _parity_check_dir "$pd"
+  done
+
+  if [[ "$PARITY_DRIFT" -eq 0 ]]; then
+    log "parity: OK — no drift"
+  else
+    log "parity: $PARITY_DRIFT drift finding(s)"
+  fi
+  exit "$PARITY_DRIFT"
+}
+
+# ─── Top-level commands ─────────────────────────────────────────────────────
+cmd_start() {
+  local use_proxy="no"
+  local hotpatch="no"
+  ASSUME_YES="${ASSUME_YES:-no}"
+  for arg in "$@"; do
+    case "$arg" in
+      --proxy)    use_proxy="yes" ;;
+      --no-proxy) : ;;
+      --hotpatch) hotpatch="yes" ;;
+      --yes)      ASSUME_YES="yes" ;;
+      *) fail "unknown arg: $arg" ;;
+    esac
+  done
+
+  if [[ "$hotpatch" == "yes" ]]; then
+    if catalyst-execution-core status 2>&1 | grep -q "^running"; then
+      fail "stack is running — use 'catalyst-stack restart --hotpatch'"
+    fi
+    cmd_hotpatch
+  fi
+
+  if [[ "$use_proxy" == "yes" ]]; then
+    ensure_proxy_deps || fail "proxy preflight failed"
+    start_mitmproxy || warn "continuing without mitmproxy (Linear traffic won't be logged)"
+  fi
+  # CTL-1084: known-good start order is monitor → broker → execution-core
+  # (encoded here instead of operator memory; daemon always last).
+  start_monitor
+  start_broker
+  start_daemon "$use_proxy"
+  start_forward
+
+  log ""
+  log "stack up — current state:"
+  cmd_status
+}
+
+cmd_stop() {
+  stop_daemon
+  stop_forward
+  stop_monitor
+  stop_broker
+  stop_mitmproxy
+}
+
+cmd_restart() {
+  local hotpatch="no"
+  for a in "$@"; do [[ "$a" == "--hotpatch" ]] && hotpatch="yes"; done
+  cmd_stop
+  if [[ "$hotpatch" == "yes" ]]; then
+    cmd_hotpatch
+  fi
+  sleep 1
+  # Pass through all flags except --hotpatch (already applied above)
+  local start_args=()
+  for a in "$@"; do [[ "$a" != "--hotpatch" ]] && start_args+=("$a"); done
+  cmd_start "${start_args[@]+"${start_args[@]}"}"
+}
+
+# CTL-1084: read the latest node.boot payload from the unified event log.
+# Returns the JSON payload object on stdout (compact), empty on failure.
+latest_boot_event() {
+  local ym
+  ym="$(date +%Y-%m)"
+  local log_path="${CATALYST_DIR:-$HOME/catalyst}/events/${ym}.jsonl"
+  [[ -f "$log_path" ]] || return 0
+  grep '"event\.name":"node\.boot"' "$log_path" 2>/dev/null | tail -1 \
+    | jq -c '.body.payload // empty' 2>/dev/null || true
+}
+
+cmd_status() {
+  local mp; mp="$(mitm_pid)"
+  if pid_alive "$mp"; then echo "  mitmproxy        running  pid=$mp"; else echo "  mitmproxy        stopped"; fi
+  echo -n "  broker           "; catalyst-broker status 2>&1 | head -1
+  echo -n "  monitor          "; catalyst-monitor status 2>&1 | head -1
+  echo -n "  execution-core   "; catalyst-execution-core status 2>&1 | head -1
+  echo -n "  otel-forward     "; catalyst-monitor forward-status 2>&1 | head -1
+
+  # CTL-1084: governance section from the last node.boot event.
+  local boot_json
+  boot_json="$(latest_boot_event 2>/dev/null || true)"
+  if [[ -n "$boot_json" ]]; then
+    echo ""
+    echo "  governance (effective, last boot):"
+    echo "$boot_json" | jq -r '
+      "    plugin_version  \(.plugin_version)",
+      "    adopted_workers \(.adopted_workers)  zombies_cleared \(.zombies_cleared)  rewalk \(.rewalk_dispatched)/\(.rewalk_planned)",
+      (.effective_flags | to_entries[] | "    \(.key)  \(.value | if type=="object" then .mode else . end)"),
+      (.flag_sources | to_entries[] | select(.value=="env-override") | "    ⚠ \(.key) is an ENV OVERRIDE (durable config differs)")
+    ' 2>/dev/null || true
+  fi
+}
+
+# ─── Dispatch ───────────────────────────────────────────────────────────────
+case "${1:-}" in
+  start)    shift; cmd_start "$@" ;;
+  stop)     cmd_stop ;;
+  restart)  shift; cmd_restart "$@" ;;
+  hotpatch) shift; cmd_hotpatch "$@" ;;
+  parity)   shift; cmd_parity "$@" ;;
+  status|"") cmd_status ;;
+  -h|--help)
+    sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) fail "unknown command: $1 (try: start | stop | restart | status | hotpatch | parity)" ;;
+esac

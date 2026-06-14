@@ -120,7 +120,7 @@
                     "description": "A CSS color string (e.g. '#4A90E2', 'blue')."
                   },
                   "examples": [
-                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/conductor": "#E24A4A" }
+                    { "coalesce-labs/catalyst": "#4A90E2", "coalesce-labs/adva": "#E24A4A" }
                   ]
                 }
               }
@@ -168,7 +168,7 @@
               "type": "string",
               "enum": ["phase-agents", "oneshot-legacy"],
               "default": "phase-agents",
-              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
+              "description": "Selects the orchestration strategy. 'phase-agents' runs one short-lived claude --bg job per pipeline phase (triage→research→plan→implement→verify→review→pr→monitor-merge→monitor-deploy→teardown). 'oneshot-legacy' runs a single long-lived claude -p /catalyst-legacy:oneshot job per ticket. Default is 'phase-agents'."
             },
             "executionCore": {
               "type": "object",
@@ -247,7 +247,8 @@
                       "review": "sonnet",
                       "pr": "sonnet",
                       "monitor-merge": "sonnet",
-                      "monitor-deploy": "sonnet"
+                      "monitor-deploy": "sonnet",
+                      "teardown": "sonnet"
                     }
                   ]
                 },
@@ -268,7 +269,8 @@
                       "review": 40,
                       "pr": 10,
                       "monitor-merge": 20,
-                      "monitor-deploy": 20
+                      "monitor-deploy": 20,
+                      "teardown": 15
                     }
                   ]
                 }

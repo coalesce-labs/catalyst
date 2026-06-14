@@ -28,8 +28,14 @@ fi
 
 # 2. humanlayer thoughts — mirrors the pattern used across all project tabs.
 #    $HUMANLAYER_PROFILE / $HUMANLAYER_DIRECTORY come from the shell env.
+#    CTL-845: use vendored init to avoid ERR_INVALID_ARG_TYPE crash in humanlayer v0.17.2-npm.
 if command -v humanlayer >/dev/null 2>&1; then
-  yes | humanlayer thoughts init --profile "$HUMANLAYER_PROFILE" --directory "$HUMANLAYER_DIRECTORY" 2>/dev/null
+  VENDOR_INIT="${SCRIPT_DIR}/../../../scripts/worktree-thoughts-init.sh"
+  if [[ -x "$VENDOR_INIT" ]]; then
+    bash "$VENDOR_INIT" --profile "$HUMANLAYER_PROFILE" --directory "$HUMANLAYER_DIRECTORY" 2>/dev/null
+  else
+    yes | humanlayer thoughts init --profile "$HUMANLAYER_PROFILE" --directory "$HUMANLAYER_DIRECTORY" 2>/dev/null
+  fi
   humanlayer thoughts sync
 fi
 

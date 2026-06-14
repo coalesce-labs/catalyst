@@ -4,6 +4,7 @@
 // seams) so nothing shells out to the real `claude`.
 
 import { describe, test, expect, beforeEach } from "bun:test";
+import { execFile } from "node:child_process";
 import {
   listClaudeAgents,
   listClaudeAgentsResult,
@@ -16,6 +17,8 @@ import {
   livenessForBgJob,
   countBackgroundAgents,
   claudeStop,
+  isBgJobDead,
+  defaultStatJobState,
 } from "./claude-agents.mjs";
 
 const agents = [
@@ -238,9 +241,38 @@ describe("livenessForBgJob", () => {
     ).toBe("idle"));
 });
 
+// --- CTL-1055: dead-session liveness classifier (Phase 1) -------------------
+
+describe("isBgJobDead (dead-session liveness classifier)", () => {
+  test("null job state (dir gone) → dead", () => {
+    expect(isBgJobDead(null)).toBe(true);
+  });
+  test("terminal state values → dead", () => {
+    for (const state of ["stopped", "failed", "done", "blocked"]) {
+      expect(isBgJobDead({ state, firstTerminalAt: null })).toBe(true);
+    }
+  });
+  test("firstTerminalAt set → dead even if state reads non-terminal", () => {
+    expect(isBgJobDead({ state: "working", firstTerminalAt: "2026-06-11T17:00:00Z" })).toBe(true);
+  });
+  test("working / non-terminal, no firstTerminalAt → alive", () => {
+    expect(isBgJobDead({ state: "working", firstTerminalAt: null })).toBe(false);
+  });
+  test("unreadable-but-present state.json (null state, dir exists) → alive (fail-alive)", () => {
+    expect(isBgJobDead({ state: null, firstTerminalAt: null })).toBe(false);
+  });
+});
+
+// defaultStatJobState is tested indirectly via the injected-statJob seam in
+// Phase 2 — its filesystem I/O is kept out of unit tests by design.
+
 describe("countBackgroundAgents", () => {
+  // A statJob stub that reports every probed session as alive, so the pre-existing
+  // kind-filter assertions stay meaningful without touching the real jobs root.
+  const allAlive = () => ({ state: "working", firstTerminalAt: null });
+
   test("counts only kind==='background' (interactive sessions are excluded)", () => {
-    expect(countBackgroundAgents({ agents })).toBe(2);
+    expect(countBackgroundAgents({ agents, statJob: allAlive })).toBe(2);
   });
 
   test("does NOT count an absent/unknown kind (fail-low so it can't starve dispatch)", () => {
@@ -249,11 +281,56 @@ describe("countBackgroundAgents", () => {
       { sessionId: "bbbbbbbb-0000-0000-0000-000000000000" }, // no kind
       { sessionId: "cccccccc-0000-0000-0000-000000000000", kind: "interactive" },
     ];
-    expect(countBackgroundAgents({ agents: mixed })).toBe(1);
+    expect(countBackgroundAgents({ agents: mixed, statJob: allAlive })).toBe(1);
   });
 
   test("0 for an empty fleet", () => {
-    expect(countBackgroundAgents({ agents: [] })).toBe(0);
+    expect(countBackgroundAgents({ agents: [], statJob: allAlive })).toBe(0);
+  });
+
+  // --- CTL-1055: dead-session exclusion ---
+  // shortIdFromSessionId requires a hex-prefixed UUID (/^[0-9a-f]{8}-/).
+  const bg = (id) => ({ sessionId: `${id}-0000-0000-0000-000000000000`, kind: "background" });
+
+  test("excludes a terminal (done) background session", () => {
+    const statJob = (shortId) =>
+      shortId === "aaaaaaaa"
+        ? { state: "done", firstTerminalAt: null }
+        : { state: "working", firstTerminalAt: null };
+    expect(countBackgroundAgents({ agents: [bg("aaaaaaaa"), bg("bbbbbbbb")], statJob })).toBe(1);
+  });
+
+  test("excludes a blocked/parked session (CTL-768: out of capacity, not killed)", () => {
+    const statJob = () => ({ state: "blocked", firstTerminalAt: null });
+    expect(countBackgroundAgents({ agents: [bg("aaaaaaaa")], statJob })).toBe(0);
+  });
+
+  test("counts a live (working, no firstTerminalAt) session", () => {
+    const statJob = () => ({ state: "working", firstTerminalAt: null });
+    expect(countBackgroundAgents({ agents: [bg("aaaaaaaa")], statJob })).toBe(1);
+  });
+
+  test("excludes a session whose job dir is gone (statJob → null)", () => {
+    const statJob = () => null;
+    expect(countBackgroundAgents({ agents: [bg("aaaaaaaa")], statJob })).toBe(0);
+  });
+
+  test("excludes a background agent with a malformed sessionId (fail-low, never probed)", () => {
+    const statJob = () => ({ state: "working", firstTerminalAt: null });
+    const malformed = [{ sessionId: "", kind: "background" }];
+    expect(countBackgroundAgents({ agents: malformed, statJob })).toBe(0);
+  });
+
+  test("3 live + 5 terminal ghosts → 3 (the live repro)", () => {
+    // Use hex-only IDs (shortIdFromSessionId requires /^[0-9a-f]{8}-/).
+    const live = ["a1111111", "a2222222", "a3333333"].map(bg);
+    const ghosts = ["b1111111", "b2222222", "b3333333", "b4444444", "b5555555"].map(bg);
+    const liveSet = new Set(["a1111111", "a2222222", "a3333333"]);
+    const statJob = (shortId) =>
+      liveSet.has(shortId)
+        ? { state: "working", firstTerminalAt: null }
+        : { state: "done", firstTerminalAt: null };
+    expect(countBackgroundAgents({ agents: [...live, ...ghosts], statJob })).toBe(3);
   });
 });
 
@@ -383,6 +460,109 @@ describe("refreshAgents + getAgentsCached (Phase 00 hardened liveness read)", ()
     expect(await p).toEqual([]);
   });
 
+  test("(b/CTL-790) a read that COMPLETES before the deferred deadline verdict is HONORED, not discarded", async () => {
+    // The production stall in miniature: the deadline fires, but the read already
+    // settled (child exited). The deferred verdict must keep the good snapshot
+    // rather than discard it as a timeout (the bug that wedged dispatch forever).
+    let resolveRead = null;
+    const child = { exitCode: null, signalCode: null };
+    const reader = () => {
+      const pr = new Promise((res) => {
+        resolveRead = res;
+      });
+      pr.child = child;
+      return pr;
+    };
+    let timeoutCb = null;
+    let deferredCb = null;
+    const p = refreshAgents({
+      execFileAsync: reader,
+      now: () => 1000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+      deferDecision: (cb) => {
+        deferredCb = cb;
+      },
+    });
+    // Read completes (child exits) BEFORE the deferred verdict runs.
+    child.exitCode = 0;
+    resolveRead(JSON.stringify(agents));
+    await Promise.resolve(); // let the read's .then mark `settled`
+    timeoutCb(); // deadline fires → schedules the deferred verdict
+    deferredCb(); // verdict runs AFTER the read settled → must no-op
+    expect(await p).toEqual(agents); // NOT discarded
+    const snap = getAgentsCached({ now: () => 1000 });
+    expect(snap.populated).toBe(true);
+    expect(snap.isFresh).toBe(true);
+  });
+
+  test("(b/CTL-790) a GENUINELY-running read (child not exited) IS aborted at the deadline", async () => {
+    await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
+    const child = { exitCode: null, signalCode: null }; // still running
+    let capturedSignal = null;
+    const hanging = (_bin, _args, opts) => {
+      capturedSignal = opts.signal;
+      const pr = new Promise(() => {}); // never resolves
+      pr.child = child;
+      return pr;
+    };
+    let timeoutCb = null;
+    const p = refreshAgents({
+      execFileAsync: hanging,
+      now: () => 5000,
+      timeoutMs: 3000,
+      setTimer: (cb) => {
+        timeoutCb = cb;
+        return 1;
+      },
+      clearTimer: () => {},
+      deferDecision: (cb) => cb(), // run the verdict synchronously
+    });
+    timeoutCb();
+    const result = await p;
+    expect(capturedSignal?.aborted).toBe(true); // still running → aborted, not leaked
+    expect(result).toEqual(agents); // served last-good
+  });
+
+  test("(b/CTL-790) INTEGRATION: a real read completing during a synchronous loop-block survives (libuv timers-before-poll)", async () => {
+    // The exact production trap: a real subprocess finishes in ms, but a
+    // synchronous scheduler tick busy-blocks the event loop > timeoutMs. The old
+    // `Promise.race` discarded the completed read as a timeout; the deferred
+    // verdict keeps it.
+    const sample = [
+      { sessionId: "aaaaaaaa-bbbb-cccc-dddd-000000000001", status: "idle", kind: "background" },
+    ];
+    const realReader = (_bin, _args, opts) => {
+      let child;
+      const pr = new Promise((res, rej) => {
+        child = execFile(
+          "sh",
+          ["-c", `printf '%s' '${JSON.stringify(sample)}'`],
+          opts,
+          (err, stdout) => (err ? rej(err) : res(stdout)),
+        );
+      });
+      pr.child = child;
+      return pr;
+    };
+    const p = refreshAgents({ execFileAsync: realReader, timeoutMs: 100, now: () => 1000 });
+    const end = Date.now() + 300; // block the loop > timeoutMs while the child finishes
+    while (Date.now() < end) {
+      /* busy-wait: starve the event loop, exactly like the synchronous tick */
+    }
+    await p;
+    const snap = getAgentsCached({ now: () => 1000 });
+    expect(snap.populated).toBe(true);
+    expect(snap.isFresh).toBe(true);
+    expect(snap.agents.length).toBe(1);
+    // statJob: allAlive so the warm-snapshot path test is not tied to real job dirs.
+    expect(countBackgroundAgents({ now: () => 1000, statJob: () => ({ state: "working", firstTerminalAt: null }) })).toBe(1);
+  });
+
   test("(d) backoff: after the failure threshold, getAgentsCached does NOT fire a new refresh until the window elapses", async () => {
     // Drive 3 consecutive failures at a fixed clock so the backoff window is
     // deterministic. Each await lets the single-flight latch clear.
@@ -451,6 +631,8 @@ describe("refreshAgents + getAgentsCached (Phase 00 hardened liveness read)", ()
   test("countBackgroundAgents sources from the warm snapshot (no exec) when agents not injected", async () => {
     await refreshAgents({ execFileAsync: async () => JSON.stringify(agents), now: () => 1000 });
     // now === snapshot ts → fresh → getAgentsCached does not fire a refresher.
-    expect(countBackgroundAgents({ now: () => 1000 })).toBe(2);
+    // statJob: allAlive so this test exercises the warm-snapshot path without
+    // depending on real ~/.claude/jobs/ state (CTL-1055: default statJob does fs I/O).
+    expect(countBackgroundAgents({ now: () => 1000, statJob: () => ({ state: "working", firstTerminalAt: null }) })).toBe(2);
   });
 });

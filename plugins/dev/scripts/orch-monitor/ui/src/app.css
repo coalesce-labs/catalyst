@@ -1,23 +1,78 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * CTL-1033 — CANONICAL TOKEN SYSTEM.
+ * This file (ui/src/app.css, both themes) + ui/src/board/board-tokens.ts (the `C`
+ * object, dark inline-style consumers) ARE the orch-monitor design-token source of
+ * truth. `packages/tokens` (@catalyst/tokens) has ZERO app consumers and a divergent
+ * brand direction; it is informational only (see CTL-1033 §8 — retire-and-refill
+ * later, do not wire). The semantic surface ladder below (--surface-chrome/canvas/
+ * subtle/card/elevated/hover) is the ONE scaffolded set every route shell consumes;
+ * the --surface-0..4 / --background / --card / --popover / --sidebar vars are aliases
+ * onto it. Card lift (the embossing cure) rides on --shadow-card / --shadow-elevated.
+ * Contract tests: ui/src/elevation-ladder.test.ts + ui/src/surface-contract.test.ts.
+ * ───────────────────────────────────────────────────────────────────────────── */
+/* CTL-1003 §A2: Tailwind typography for the Linear-style prose reading column
+   (.ticket-desc carries `prose prose-invert`; .ticket-desc unlayered rules below
+   map the plugin's --tw-prose-invert-* vars to the app tokens + keep the existing
+   code-chip/pre/hljs/ticket-ref overrides winning). */
+@plugin "@tailwindcss/typography";
+
 @theme inline {
-  --color-surface-0: #0b0d10;
-  --color-surface-1: #111318;
-  --color-surface-2: #16191f;
-  --color-surface-3: #1c2028;
-  --color-surface-4: #232a33;
-  --color-border: #262d36;
-  --color-border-subtle: #1e242c;
-  --color-fg: #e6e9ef;
-  --color-muted: #8a93a1;
-  --color-accent: #4ea1ff;
-  --color-green: #39d07a;
-  --color-red: #ef5d5d;
-  --color-yellow: #eabc3b;
-  --color-blue: #4ea1ff;
+  /* CTL-1013: elevation surfaces are now theme-aware aliases of per-theme CSS vars
+     (defined in :root / .dark below) so `bg-surface-*` / `text-fg` / `text-muted` /
+     `border-*` utilities flip with the theme. This fixes the dark elevation ladder
+     (chrome darkest → content → cards) AND makes warm-light coherent in one
+     mechanism. Accent colors stay literal — they are not elevation surfaces. */
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-surface-4: var(--surface-4);
+  /* CTL-1033: semantic-named aliases of the per-theme ladder so route shells use
+     `bg-surface-canvas` / `bg-surface-subtle` / `bg-surface-card` etc. by ROLE.
+     These mirror the --color-surface-0..4 numeric aliases (same per-theme vars). */
+  --color-surface-chrome: var(--surface-chrome);
+  --color-surface-canvas: var(--surface-canvas);
+  --color-surface-subtle: var(--surface-subtle);
+  --color-surface-card: var(--surface-card);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border-strong);
+  --color-border-subtle: var(--border-subtle);
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  /* CTL-1099: accent is now a per-theme/brand var (was the literal blue #5e9ee8),
+     so text-accent + every var(--color-accent) consumer (md-content links,
+     ticket-ref pills, blockquote borders, prose-invert links) flips with the
+     brand axis: terracotta in warm (light + dark), Linear-blue in slate. */
+  --color-accent: var(--accent);
+  --color-green: #41bd7d;
+  --color-red: #e36b6b;
+  --color-yellow: #d9a843;
+  --color-blue: #5e9ee8;
+  --color-purple: #a98ee3;
+  /* LIVE is reserved for the in-loop signal — NOT used as a theme accent. */
+  --color-live: #53cde2;
+  /* Soft semantic pill classes (lib/formatters.ts). */
+  --color-red-soft: #f0a8a8;
+  --color-yellow-soft: #e9d08e;
+  --color-green-soft: #9ce3bd;
+  --color-blue-soft: #aecdf2;
+  --color-purple-soft: #cdb4f0;
+
+  /* OBS-1: shadcn chart color utilities — categorical series palette.
+     Aliased to the --chart-1..6 tokens defined in :root and .dark below. */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-chart-6: var(--chart-6);
 
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Source Serif Pro", Georgia, serif;
 
   /* shadcn/ui semantic color utilities — aliased to existing tokens via :root */
   --color-background: var(--background);
@@ -36,6 +91,18 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 
+  /* CTL-891 / SHELL1: shadcn `sidebar` primitive tokens, bridged to the
+     orch-monitor surface system below (reconciles the prototype's base-nova
+     drift onto this ui's new-york tokens). */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -45,28 +112,260 @@
 /* shadcn/ui semantic tokens mapped to orch-monitor surface system.
    shadcn treats muted/accent as background-role tokens; our muted/accent
    tokens remain unchanged and continue to resolve text color utilities
-   (text-muted, text-accent) through the @theme inline block above. */
+   (text-muted, text-accent) through the @theme inline block above.
+
+   CTL-893 / SHELL3 — two themes now exist. `:root` is the WARM-LIGHT theme
+   (the default the footer toggle reveals when the `dark` class is absent); the
+   `.dark` block below restores the original CALM-DARK surfaces. The app still
+   boots calm-dark — board.html ships `class="dark"` and lib/theme.ts defaults to
+   applying `dark` — so this adds the light theme WITHOUT regressing the dark
+   default. Removing `dark` from <html> (the toggle) switches to warm light. */
 :root {
-  --background: var(--color-surface-0);
+  /* Warm-light surfaces — a paper-warm neutral ramp, not pure white, so the
+     light theme reads "warm" rather than clinical. */
+  --color-light-surface-0: #faf7f2;
+  --color-light-surface-1: #f3efe7;
+  --color-light-surface-2: #ece7dd;
+  --color-light-surface-3: #e3ddd1;
+  --color-light-surface-4: #d8d1c2;
+  --color-light-border: #ddd5c7;
+  --color-light-fg: #2b2722;
+  --color-light-muted: #76705f;
+  --color-light-accent: #a9512f; /* CTL-1071: terracotta accent (warm-light only) */
+  /* CTL-1099: --accent is the per-brand accent var --color-accent now resolves to
+     (@theme inline). On warm-light it IS the terracotta light accent; this also
+     corrects text-accent, which previously resolved to a stray blue in :root. */
+  --accent: var(--color-light-accent);
+
+  /* CTL-1033: warm-light SEMANTIC ladder (same upward direction as dark):
+     chrome darkest-tinted → canvas → subtle → card → elevated (lightest paper).
+     Light elevation continues to ride on SHADOWS, not lightness — the steps are
+     tiny by design. --surface-hover is a darker interaction tint (EXEMPT from the
+     monotonic ladder order). --surface-3 stays the literal #ece7dd inset tint
+     (raised-inset pills/code) — an inset, exempt from the ladder. */
+  --surface-chrome: #ece7dd; /* chrome (sidebar/nav/footer), visibly tinted */
+  --surface-canvas: #faf7f2; /* content canvas */
+  --surface-subtle: #fcfaf5; /* lane bands / zebra / inset wells (NEW) */
+  --surface-card: #fffdf9; /* cards / panels — raised warm paper */
+  --surface-elevated: #ffffff; /* popovers / palette / dropdowns / modals (NEW) */
+  --surface-hover: #d8d1c2; /* hover / tracks — darker interaction tint (EXEMPT) */
+  /* Numeric aliases onto the semantic ladder (back-compat for --surface-N call
+     sites). --surface-3 is an inset tint (#ece7dd), NOT --surface-elevated. */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: #ece7dd; /* raised-inset (code blocks, pills) — tinted chips, EXEMPT */
+  --surface-4: #d8d1c2; /* hover / tracks (literal, EXEMPT) */
+  --border-strong: #ddd5c7;
+  /* CTL-1148: selected toggle-chip fill — light themes use the paper "tinted
+     chips" surface, NOT the full-chroma accent (which reads as a dark blob). */
+  --toggle-selected-bg: var(--surface-3);
+  --toggle-selected-fg: var(--fg);
+  --border-subtle: #e7e1d4; /* hairline card edge on paper */
+  --fg: #2b2722;
+  --fg-muted: #76705f;
+
+  /* CTL-1033: light card lift — soft warm shadows (no inset highlight; light
+     elevation reads via shadow + the bright card paper, not a top edge). */
+  --shadow-card: 0 1px 3px rgba(43, 39, 34, 0.08);
+  --shadow-elevated: 0 8px 24px rgba(43, 39, 34, 0.16);
+
+  --background: var(--surface-1);
+  --foreground: var(--color-light-fg);
+  --card: var(--surface-2);
+  --card-foreground: var(--color-light-fg);
+  --popover: var(--surface-2);
+  --popover-foreground: var(--color-light-fg);
+  --primary: var(--color-light-accent);
+  --primary-foreground: #ffffff;
+  --secondary: var(--color-light-surface-3);
+  --secondary-foreground: var(--color-light-fg);
+  --muted-foreground: var(--color-light-muted);
+  --accent-foreground: var(--color-light-fg);
+  /* Pin --destructive to a stable value independent of the dark red retune so the
+     warm-light theme's destructive color doesn't follow the Phase 4 red change. */
+  --destructive: #ef5d5d;
+  --input: var(--color-light-border);
+  --ring: var(--color-light-accent);
+  --radius: 0.5rem;
+
+  /* OBS-1: categorical chart palette (shared across both themes). */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #3aa6b9; /* CTL-1071: deep teal — distinct from reserved LIVE #53cde2 */
+  --chart-6: #a98ee3;
+
+  --sidebar: var(--surface-0); /* CTL-1013: chrome visibly tinted (#ece7dd) */
+  --sidebar-foreground: var(--color-light-fg);
+  --sidebar-primary: var(--color-light-accent);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--color-light-surface-3);
+  --sidebar-accent-foreground: var(--color-light-fg);
+  --sidebar-border: var(--color-light-border);
+  --sidebar-ring: var(--color-light-accent);
+}
+
+/* CTL-1099 — base `.dark` is now the WARM-DARK theme (the boot default, FOUC-free:
+   no data-theme attribute needed). Charcoal ramp extracted VERBATIM from
+   mockups/governance-rulebook-v2-textbook.html :root (sidebar-bg #11100e → hairline
+   #34312a), remapped onto the app's semantic surface ladder. Accent is TERRACOTTA
+   (#d28e63), NOT the textbook's amber clay #e8ad4a. The prior calm-dark
+   blue-graphite identity (CTL-893 / SHELL3) moves verbatim to
+   `.dark[data-theme="slate"]` (the slate brand override, appended below). */
+.dark {
+  /* warm-charcoal semantic elevation ladder (monotonic, +luminance each step) */
+  --surface-chrome: #11100e; /* chrome (sidebar/nav/footer) — anchor (textbook --sidebar-bg) */
+  --surface-canvas: #161513; /* content shell (textbook --canvas) */
+  --surface-subtle: #1b1a17; /* lane bands / zebra / inset wells (textbook --panel) */
+  --surface-card: #1e1d1a; /* cards / panels (textbook --surface) */
+  --surface-elevated: #242220; /* popovers / palette / dropdowns (textbook --surface-2) */
+  --surface-hover: #2e2c27; /* hover fills / scrollbar thumbs (textbook --border) — interaction, EXEMPT */
+  /* Numeric aliases onto the semantic ladder (back-compat for --surface-N + the
+     shadcn bridge below). --surface-3 → elevated, --surface-4 → hover. */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: var(--surface-elevated);
+  --surface-4: var(--surface-hover);
+  /* warm hairline borders (textbook --border / --border-soft family). Keep the
+     alpha-white form so card edges read on the charcoal ramp like the prior dark. */
+  --border-strong: rgba(255, 255, 255, 0.11); /* inputs, interactive outlines */
+  --border-subtle: rgba(255, 255, 255, 0.07); /* card edges, in-card hairlines */
+  --fg: #e9e5dc; /* textbook --ink */
+  --fg-muted: #a39d91; /* textbook --ink-dim */
+  /* warm-dark accent — terracotta (NOT amber). Drives --primary/--ring/--sidebar-primary. */
+  --accent: #d28e63;
+  /* CTL-1148: dark themes keep the accent fill (was data-[state=on]:bg-accent).
+     Slate-dark inherits this and resolves --accent to its own blue. */
+  --toggle-selected-bg: var(--accent);
+  --toggle-selected-fg: var(--accent-foreground);
+
+  /* CTL-1033: dark card lift — soft ambient outer shadow + inset top-edge highlight
+     (the standard Stripe/Linear/Vercel combo, the single best embossing cure). Card
+     bg is the PRIMARY lift (lightness); the shadow is the secondary signal. UNCHANGED. */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
+  --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
+
+  --background: var(--surface-1); /* CTL-1013: canvas lightens one step (was s0) */
   --foreground: var(--color-fg);
-  --card: var(--color-surface-1);
+  --card: var(--surface-2); /* CTL-1013: cards one step above canvas (was s1) */
   --card-foreground: var(--color-fg);
-  --popover: var(--color-surface-2);
+  --popover: var(--surface-3); /* CTL-1013: popovers float above cards (was s2) */
   --popover-foreground: var(--color-fg);
   --primary: var(--color-accent);
-  --primary-foreground: var(--color-surface-0);
-  --secondary: var(--color-surface-3);
+  --primary-foreground: var(--surface-0);
+  --secondary: var(--surface-3);
   --secondary-foreground: var(--color-fg);
   --muted-foreground: var(--color-muted);
   --accent-foreground: var(--color-fg);
   --destructive: var(--color-red);
-  --input: var(--color-border);
+  --input: var(--border-strong);
   --ring: var(--color-accent);
-  --radius: 0.5rem;
+
+  /* OBS-1: categorical chart palette (same values as :root — the palette is
+     theme-invariant; status color is reserved for health, not series). UNCHANGED. */
+  --chart-1: #4ea1ff;
+  --chart-2: #39d07a;
+  --chart-3: #eabc3b;
+  --chart-4: #ef5d5d;
+  --chart-5: #3aa6b9; /* CTL-1071: deep teal — distinct from reserved LIVE #53cde2 */
+  --chart-6: #a98ee3;
+
+  /* CTL-1013: sidebar/nav is the DARKEST chrome (surface-0); the SidebarInset
+     (background) now sits one step LIGHTER as the content canvas — surfaces stack
+     upward like Linear (was inverted: rail lighter than content). */
+  --sidebar: var(--surface-0); /* chrome darkens to the base shade */
+  --sidebar-foreground: var(--color-fg);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--surface-0);
+  --sidebar-accent: var(--surface-2); /* gentler active-item lift on the darker rail */
+  --sidebar-accent-foreground: var(--color-fg);
+  --sidebar-border: var(--border-subtle); /* seam already separated by luminance */
+  --sidebar-ring: var(--color-accent);
+}
+
+/* ── CTL-1099 :root[data-theme="slate"] = SLATE-LIGHT. The pre-CTL-1071
+   blue-on-paper light identity. Reuses warm-light's paper-warm neutral surface ramp
+   VERBATIM (inherited from :root above) and ONLY overrides the accent family to
+   Linear blue #1f6feb. Placed AFTER :root so it wins on specificity-equal
+   (:root[data-theme] is higher specificity than :root anyway). Must NOT redefine any
+   --color-{green,red,yellow,live} or --chart-* (semantic-invariant contract). ── */
+:root[data-theme="slate"] {
+  --accent: #1f6feb; /* drives text-accent + all var(--color-accent) */
+  --primary: #1f6feb;
+  --ring: #1f6feb;
+  --sidebar-primary: #1f6feb;
+  --sidebar-ring: #1f6feb;
+  --input: var(--color-light-border); /* unchanged; restated for clarity */
+  /* surfaces (--surface-*, --fg, --border-*, --background, --card, --popover,
+     --secondary, --destructive, --chart-*) all INHERIT from :root unchanged —
+     slate only forks the accent. Do NOT restate the surface ramp. */
+}
+
+/* ── CTL-1099 .dark[data-theme="slate"] = SLATE-DARK. The CURRENT/old calm-dark
+   blue-graphite identity (CTL-893 / SHELL3, CTL-1033 ladder) moved VERBATIM. The
+   blue accent #5e9ee8 flows through --primary/--ring/--sidebar-primary via
+   var(--color-accent) = var(--accent). Must NOT redefine any --color-{green,red,
+   yellow,live} or --chart-* beyond the historical --chart-5 already shared. ── */
+.dark[data-theme="slate"] {
+  --surface-chrome: #0e1116; /* chrome (sidebar/nav/footer) — anchor */
+  --surface-canvas: #181d24; /* every route's content shell */
+  --surface-subtle: #20262f; /* lane bands, zebra, column-header chips, inset wells */
+  --surface-card: #2b333d; /* cards / panels */
+  --surface-elevated: #39424f; /* popovers, command palette, dropdowns, modals */
+  --surface-hover: #434d5b; /* hover fills, scrollbar thumbs/tracks (interaction) */
+  --surface-0: var(--surface-chrome);
+  --surface-1: var(--surface-canvas);
+  --surface-2: var(--surface-card);
+  --surface-3: var(--surface-elevated);
+  --surface-4: var(--surface-hover);
+  --border-strong: rgba(255, 255, 255, 0.11);
+  --border-subtle: rgba(255, 255, 255, 0.07);
+  --fg: #edf1f7;
+  --fg-muted: #9ba6b5;
+  --accent: #5e9ee8; /* slate-dark accent — Linear-graphite blue */
+  --shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 1px 4px rgba(0, 0, 0, 0.35);
+  --shadow-elevated: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.45);
+  --background: var(--surface-1);
+  --foreground: var(--color-fg);
+  --card: var(--surface-2);
+  --card-foreground: var(--color-fg);
+  --popover: var(--surface-3);
+  --popover-foreground: var(--color-fg);
+  --primary: var(--color-accent);
+  --primary-foreground: var(--surface-0);
+  --secondary: var(--surface-3);
+  --secondary-foreground: var(--color-fg);
+  --muted-foreground: var(--color-muted);
+  --accent-foreground: var(--color-fg);
+  --destructive: var(--color-red);
+  --input: var(--border-strong);
+  --ring: var(--color-accent);
+  --sidebar: var(--surface-0);
+  --sidebar-foreground: var(--color-fg);
+  --sidebar-primary: var(--color-accent);
+  --sidebar-primary-foreground: var(--surface-0);
+  --sidebar-accent: var(--surface-2);
+  --sidebar-accent-foreground: var(--color-fg);
+  --sidebar-border: var(--border-subtle);
+  --sidebar-ring: var(--color-accent);
 }
 
 * {
   box-sizing: border-box;
+}
+
+/* CTL-1033: card-lift utility classes (the embossing cure). `.shadow-card` is the
+   canonical card lift; `.shadow-elevated` is the popover/palette tier. They read the
+   per-theme --shadow-card / --shadow-elevated vars (:root / .dark) so the lift flips
+   with the theme (inset top-highlight + ambient in dark; soft warm shadow in light). */
+.shadow-card {
+  box-shadow: var(--shadow-card);
+}
+.shadow-elevated {
+  box-shadow: var(--shadow-elevated);
 }
 
 body {
@@ -201,6 +500,45 @@ body {
   animation: drawer-in 0.2s ease-out both;
 }
 
+/* CTL-930 Phase 4: hoisted live-signal keyframes.
+   Previously lived inside Board.tsx PULSE_CSS (only loaded on board surfaces).
+   Now in app.css so every surface (AppFooter, detail pages) gets the animation. */
+
+/* Live card ring (TicketCard / WorkerCard .catalyst-live) */
+@keyframes catalystLiveRing {
+  0%, 100% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.30), 0 2px 10px rgba(0, 0, 0, 0.35);
+  }
+  50% {
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.55), 0 2px 12px rgba(0, 0, 0, 0.35), 0 0 12px rgba(83, 205, 226, 0.10);
+  }
+}
+.catalyst-live {
+  animation: catalystLiveRing 2.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live {
+    animation: none;
+    /* Constant 2px left-edge so liveness reads with animation off. */
+    box-shadow: inset 2px 0 0 0 rgba(83, 205, 226, 0.85), inset 0 0 0 1px rgba(83, 205, 226, 0.45);
+  }
+}
+
+/* Live status dot (.catalyst-live-dot) — used in LaneHeader, AppFooter, column headers */
+@keyframes catalystLivePing {
+  0% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0.6); }
+  70% { box-shadow: 0 0 0 6px rgba(83, 205, 226, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(83, 205, 226, 0); }
+}
+.catalyst-live-dot {
+  animation: catalystLivePing 1.9s infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .catalyst-live-dot {
+    animation: none;
+  }
+}
+
 /* Markdown rendered content */
 .md-content {
   color: var(--color-fg);
@@ -254,7 +592,14 @@ body {
   border: 1px solid var(--color-border);
   border-radius: 5px;
   padding: 12px;
+  /* CTL-1048: a code block scrolls HORIZONTALLY only. Setting overflow-x:auto with
+   * overflow-y left at its initial `visible` makes the browser COMPUTE overflow-y
+   * to `auto` (the CSS "visible-becomes-auto" rule when the other axis is scrollable)
+   * — which can make a tall code block capture vertical wheel and trap the page
+   * scroll. Pinning overflow-y:hidden keeps vertical wheel passing THROUGH to the
+   * shared detail scroller while the block still scrolls left/right. */
   overflow-x: auto;
+  overflow-y: hidden;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -286,4 +631,218 @@ body {
 }
 .md-content th {
   background: var(--color-surface-3);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .no-scrollbar — hide the scrollbar while KEEPING scroll (CTL-1003 §A2). The
+ * reading column + the floating rail use this so the Linear-calm surface has no
+ * visible scrollbar chrome (scrolling still works via wheel/trackpad/keys).
+ * ────────────────────────────────────────────────────────────────────────── */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .cat-overlay-scroll — CTL-1036: the ONE shared overlay-scrollbar behaviour.
+ * Hidden at rest; a slim overlay thumb appears WHILE scrolling and fades ~1s
+ * after the gesture ends. The reveal is driven by the `cat-scrolling` marker
+ * class, which lib/overlay-scroll.ts's single global listener toggles. Overlay,
+ * NOT a gutter — the bar never takes layout width, so its appearance/disappearance
+ * causes no reflow. Applied to every scroller (board canvas, lanes, detail prose,
+ * control tower, OBSERVE panels) — one definition, no per-component copies.
+ *
+ * Firefox has no per-element overlay-while-scrolling primitive, so it stays
+ * permanently bar-less here (scrollbar-width: none) — scrolling is unharmed; only
+ * the transient thumb is a WebKit nicety.
+ * ────────────────────────────────────────────────────────────────────────── */
+.cat-overlay-scroll {
+  scrollbar-width: none; /* Firefox: no chrome at rest (no overlay primitive) */
+  -ms-overflow-style: none;
+}
+.cat-overlay-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.cat-overlay-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+/* At rest: the thumb is fully transparent (overlay, no chrome). The track keeps
+ * its width so revealing the thumb shifts no layout. */
+.cat-overlay-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+  transition: background-color 0.35s ease;
+}
+/* While scrolling (marker class present) OR on hover: reveal the slim thumb. */
+.cat-overlay-scroll.cat-scrolling::-webkit-scrollbar-thumb,
+.cat-overlay-scroll:hover::-webkit-scrollbar-thumb {
+  background-color: var(--color-border);
+}
+.cat-overlay-scroll.cat-scrolling:hover::-webkit-scrollbar-thumb {
+  background-color: var(--color-muted);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * .ticket-desc — the Linear-style ticket DESCRIPTION reading column (CTL-974
+ * client pass). Composes ON TOP of .md-content (reuses its table rules; the
+ * description div carries BOTH classes) and overrides the rest to match Linear:
+ * a capped ~680px reading measure, large semibold section headings WITHOUT the
+ * .md-content underline, inline-code chips, themed hljs code blocks, and
+ * internal ticket-ref pills. All colours via @theme tokens (light + dark
+ * inherit the token values). --color-live (cyan) stays RESERVED for live
+ * signals — the description never uses it.
+ * ────────────────────────────────────────────────────────────────────────── */
+.ticket-desc {
+  max-width: 680px;
+  color: var(--color-fg);
+  font-size: 15px;
+  line-height: 1.6;
+  /* CTL-1003 §A2: map the @tailwindcss/typography prose-invert vars to the app
+     tokens so `prose prose-invert` inherits the Linear-calm palette. The
+     unlayered .ticket-desc rules below still beat the layered plugin utilities,
+     so the existing code-chip / pre / hljs / ticket-ref overrides keep winning. */
+  --tw-prose-invert-body: var(--color-fg);
+  --tw-prose-invert-headings: var(--color-fg);
+  --tw-prose-invert-bold: var(--color-fg);
+  --tw-prose-invert-code: var(--color-fg);
+  --tw-prose-invert-links: var(--color-accent);
+  --tw-prose-invert-quotes: var(--color-muted);
+  --tw-prose-invert-counters: var(--color-muted);
+  --tw-prose-invert-bullets: var(--color-muted);
+  --tw-prose-invert-quote-borders: var(--color-border);
+  --tw-prose-invert-hr: var(--color-border);
+  --tw-prose-invert-th-borders: var(--color-border);
+  --tw-prose-invert-td-borders: var(--color-border);
+  --tw-prose-invert-pre-bg: var(--color-surface-1);
+  --tw-prose-invert-pre-code: var(--color-fg);
+}
+.ticket-desc p {
+  margin: 0.7em 0;
+}
+/* section headings: semibold, NO underline (Linear), generous top rhythm */
+.ticket-desc h1,
+.ticket-desc h2 {
+  font-family: var(--font-serif); /* CTL-1071: serif voice on reading surfaces */
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.4em 0 0.5em;
+  border: 0;
+  padding: 0;
+  line-height: 1.3;
+}
+.ticket-desc h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-fg);
+  margin: 1.2em 0 0.4em;
+}
+.ticket-desc strong {
+  font-weight: 600;
+  color: var(--color-fg);
+}
+.ticket-desc ul,
+.ticket-desc ol {
+  margin: 0.6em 0;
+  padding-left: 1.5em;
+}
+.ticket-desc li {
+  margin: 0.3em 0;
+}
+/* inline code CHIP (mono, subtle rounded bg) — only OUTSIDE <pre> */
+.ticket-desc :not(pre) > code {
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-subtle);
+  color: var(--color-fg);
+}
+/* code BLOCK — rounded, bordered, themed */
+.ticket-desc pre {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0.9em 0;
+  overflow-x: auto;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.ticket-desc pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--color-fg);
+}
+/* hljs token theme → app tokens (no vendor stylesheet imported) */
+.ticket-desc .hljs-keyword,
+.ticket-desc .hljs-built_in {
+  color: var(--color-purple);
+}
+.ticket-desc .hljs-string,
+.ticket-desc .hljs-regexp {
+  color: var(--color-green-soft);
+}
+.ticket-desc .hljs-title,
+.ticket-desc .hljs-title.function_ {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-number,
+.ticket-desc .hljs-literal {
+  color: var(--color-yellow-soft);
+}
+.ticket-desc .hljs-comment {
+  color: var(--color-muted);
+  font-style: italic;
+}
+.ticket-desc .hljs-attr,
+.ticket-desc .hljs-property {
+  color: var(--color-blue-soft);
+}
+.ticket-desc .hljs-addition {
+  color: var(--color-green);
+}
+.ticket-desc .hljs-deletion {
+  color: var(--color-red);
+}
+/* ticket-ref PILL → /ticket/<id> (SPA) */
+.ticket-desc a.ticket-ref-pill {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  line-height: 1.3;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ticket-desc a.ticket-ref-pill:hover {
+  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
+}
+.ticket-desc a:not(.ticket-ref-pill) {
+  color: var(--color-accent);
+}
+.ticket-desc blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 14px;
+  margin: 0.8em 0;
+  color: var(--color-muted);
+}
+
+/* CTL-1015: /queue control-tower row hover — soft s1 fill, calm (no border flash).
+   The dispatches-next / bucket rows keep their inline background; this only sets
+   the hover state, so a highlighted row's tint and the hover blend gracefully. */
+.cat-queue-row:hover {
+  background: var(--surface-subtle);
 }

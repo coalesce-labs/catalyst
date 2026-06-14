@@ -44,6 +44,9 @@ TOOLS=(
     "git:Git"
     "jq:jq"
     "sqlite3:SQLite"
+    "node:Node.js"
+    "npm:npm"
+    "bun:Bun runtime"
     "gh:GitHub CLI"
     "humanlayer:HumanLayer CLI"
     "linearis:Linearis CLI"
@@ -63,9 +66,9 @@ header "Optional Tools"
 OPT_TOOLS=(
     "agent-browser:agent-browser"
     "sentry-cli:Sentry CLI"
-    "bun:Bun runtime"
     "direnv:direnv"
     "smee:smee-client (webhook tunnel)"
+    "mitmproxy:mitmproxy (optional — only needed for catalyst-stack --proxy)"
 )
 
 for spec in "${OPT_TOOLS[@]}"; do
@@ -82,7 +85,7 @@ done
 header "Catalyst CLI Install"
 
 CLI_BIN_DIR="${CATALYST_CLI_BIN_DIR:-$HOME/.catalyst/bin}"
-CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude)
+CLI_NAMES=(catalyst-broker catalyst-comms catalyst-events catalyst-execution-core catalyst-filter catalyst-otel-forward catalyst-transitions catalyst-why catalyst-session catalyst-state catalyst-statusline catalyst-db catalyst-monitor catalyst-thoughts catalyst-claude catalyst-stack)
 
 if [[ -d "$CLI_BIN_DIR" ]]; then
     pass "Bin dir exists: $CLI_BIN_DIR"
@@ -318,17 +321,41 @@ warn "Linear 'magic words' auto-move must be OFF (Settings → Team → Workflow
 info "It races the execution-core daemon (CTL-758 backward-write). Disable it in the Linear UI."
 info "Git-automation state moves (start→PR, merge→Done) are reconciled by setup-execution-core-states.sh."
 
-# botUserId (CTL-749) is the Linear app-actor user UUID. It is read from the
-# project's Layer-1 .catalyst/config.json ($CONFIG_PATH) — the SAME place the
-# execution-core daemon and orch-monitor read it — NOT the Layer-2 home config.
+# botUserId (CTL-749) — the execution-core daemon now reads a SET from two sources:
+#   NEW: ~/.config/catalyst/config.json  catalyst.linear.bot.{worker,orchestrator}.botUserId
+#   OLD: .catalyst/config.json           catalyst.monitor.linear.botUserId (back-compat)
+# Check both; pass if either is set.
+_GLOBAL_WORKER_BOT=$(jq -r '.catalyst.linear.bot.worker.botUserId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_GLOBAL_ORCH_BOT=$(jq -r '.catalyst.linear.bot.orchestrator.botUserId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_LAYER1_BOT=""
 if [[ -n "$CONFIG_PATH" && -f "$CONFIG_PATH" ]]; then
-    bot_id=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$CONFIG_PATH" 2>/dev/null)
-    if [[ -z "$bot_id" ]]; then
-        warn "catalyst.monitor.linear.botUserId missing in $CONFIG_PATH — execution-core comms won't filter bot self-echo (the agent's own Linear comments look like human replies)"
-        info "Set it: query the Catalyst app-actor viewer.id (app token in ~/.config/catalyst/config-\${projectKey}.json → catalyst.linear.agent.accessToken) and write catalyst.monitor.linear.botUserId; see /catalyst-dev:setup-catalyst"
-    else
-        pass "Linear app-actor identity: ${bot_id:0:8}…"
-    fi
+    _LAYER1_BOT=$(jq -r '.catalyst.monitor.linear.botUserId // empty' "$CONFIG_PATH" 2>/dev/null)
+fi
+if [[ -n "$_GLOBAL_WORKER_BOT" || -n "$_GLOBAL_ORCH_BOT" || -n "$_LAYER1_BOT" ]]; then
+    _bot_ids=""
+    [[ -n "$_GLOBAL_WORKER_BOT" ]] && _bot_ids="${_GLOBAL_WORKER_BOT:0:8}… (worker)"
+    [[ -n "$_GLOBAL_ORCH_BOT" ]] && _bot_ids="${_bot_ids:+$_bot_ids, }${_GLOBAL_ORCH_BOT:0:8}… (orchestrator)"
+    [[ -n "$_LAYER1_BOT" ]] && _bot_ids="${_bot_ids:+$_bot_ids, }${_LAYER1_BOT:0:8}… (layer-1 legacy)"
+    pass "Linear app-actor identity: $_bot_ids"
+else
+    warn "No Linear bot user IDs configured — execution-core comms won't filter bot self-echo"
+    info "NEW: set catalyst.linear.bot.worker.botUserId in ~/.config/catalyst/config.json"
+    info "OLD fallback: set catalyst.monitor.linear.botUserId in .catalyst/config.json; see /catalyst-foundry:setup-catalyst"
+fi
+
+# Orchestrator Linear OAuth app (CTL-785) — the daemon mints its app-actor token
+# from these creds at start; absent/partial creds silently fall back to the
+# personal LINEAR_API_TOKEN (re-pinning the shared 2,500/hr bucket).
+_ORCH_CID=$(jq -r '.catalyst.linear.bot.orchestrator.clientId // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+_ORCH_CSEC=$(jq -r '.catalyst.linear.bot.orchestrator.clientSecret // empty' "${CATALYST_CONFIG}/config.json" 2>/dev/null)
+if [[ -n "$_ORCH_CID" && -n "$_ORCH_CSEC" ]]; then
+    pass "Orchestrator Linear app credentials configured (clientId ${_ORCH_CID:0:8}…)"
+elif [[ -n "$_ORCH_CID" || -n "$_ORCH_CSEC" ]]; then
+    warn "Orchestrator Linear app credentials incomplete — need BOTH clientId and clientSecret"
+    info "Set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
+else
+    warn "Orchestrator Linear app not configured — daemon will fall back to the personal LINEAR_API_TOKEN (CTL-785)"
+    info "Create a 'Catalyst Orchestrator' OAuth app in Linear, then set catalyst.linear.bot.orchestrator.{clientId,clientSecret} in ${CATALYST_CONFIG}/config.json"
 fi
 
 # ─── 7. OTel Observability Stack (optional) ────────────────────────────────
@@ -571,6 +598,105 @@ else
             pass "NODE_USE_ENV_PROXY=1 (Node fetch will honor the proxy)"
         fi
     fi
+fi
+
+# ─── 7d. Proxy leak into interactive shells (CTL-869, CTL-846 regression class) ──
+#
+# The mitmproxy HTTP(S)_PROXY in execution-core.env is DAEMON-launch-scoped only:
+# catalyst-execution-core cmd_start sources the file right before nohup'ing the
+# daemon, so the proxy lives only in the daemon's process tree. If instead a shell
+# profile (~/.zshrc, ~/.zshenv, ~/.zprofile, ~/.bashrc, ~/.bash_profile, ~/.profile)
+# `source`s execution-core.env — or exports HTTP(S)_PROXY directly — the proxy
+# leaks into EVERY interactive shell. A fresh terminal then routes all traffic
+# (including interactive `claude`) through mitmproxy, and when the proxy is down
+# every API call dies with "connection refused". This check catches that leak and
+# prints the exact one-line removal. No repo script writes such a line — it is
+# always a hand-edit — so the fix is to delete it from the profile, never to widen
+# the daemon env's reach.
+header "Proxy Leak Into Interactive Shells (CTL-869)"
+
+# de_proxy is set in section 7c only when the daemon env file exists; default it
+# here so the messages below are safe under `set -u` when the file is absent.
+de_proxy="${de_proxy:-(the daemon proxy)}"
+leak_found=""
+# (a) Any profile that sources the daemon env file directly leaks every export in
+#     it (proxy + CA) into interactive shells. The grep ignores commented lines.
+PROFILE_CANDIDATES=(
+    "$HOME/.zshenv"
+    "$HOME/.zprofile"
+    "$HOME/.zshrc"
+    "$HOME/.bash_profile"
+    "$HOME/.bashrc"
+    "$HOME/.profile"
+)
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    # Match a non-comment line that sources execution-core.env (with or without
+    # the `source`/`.` builtin spelled out, quoted or not).
+    if grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*(source|\.)[[:space:]]+.*execution-core\.env' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof sources the DAEMON-only env file into every interactive shell (line ${leak_line%%:*})"
+        info "This leaks HTTP(S)_PROXY=$de_proxy into all terminals — fresh shells get 'connection refused' when mitmproxy is down (CTL-846 regression class)"
+        info "REMOVE this line from $prof:"
+        info "    ${leak_line#*:}"
+        info "The daemon already sources this file itself at launch (catalyst-execution-core cmd_start) — the proxy stays daemon-scoped without it."
+    fi
+done
+
+# (b) A profile may also export HTTP(S)_PROXY directly (not via the env file).
+#     Flag any non-comment proxy export in a profile.
+for prof in "${PROFILE_CANDIDATES[@]}"; do
+    [[ -f "$prof" ]] || continue
+    if grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+        | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; then
+        leak_found="yes"
+        leak_line=$(grep -nE '^[[:space:]]*export[[:space:]]+(HTTPS?_PROXY|ALL_PROXY)=' "$prof" 2>/dev/null \
+            | grep -vE '^[0-9]+:[[:space:]]*#' | head -1)
+        fail "$prof exports a proxy var into every interactive shell (line ${leak_line%%:*})"
+        info "REMOVE: ${leak_line#*:}"
+        info "Proxy belongs ONLY in the daemon launch env (execution-core.env, sourced by catalyst-execution-core at start), never in a shell profile."
+    fi
+done
+
+# (c) Live check: this very (interactive) shell already has a proxy set. This is
+#     only a *leak* worth hard-failing on if the proxy is the catalyst mitmproxy
+#     audit proxy (matching the daemon env's de_proxy, or the conventional
+#     mitmproxy host:port) — a developer behind a legitimate corporate proxy
+#     (HTTPS_PROXY=http://corp-proxy:…) must NOT get a false-positive failure
+#     (and an untrue "routes through mitmproxy" claim) that flips the whole
+#     health check non-zero. So: fail only on a confirmed mitmproxy match,
+#     otherwise emit an informational note. (CTL-869)
+live_proxy="${HTTPS_PROXY:-${HTTP_PROXY:-}}"
+if [[ -n "$live_proxy" ]]; then
+    # de_proxy is the daemon env's configured proxy when the env file exists; it
+    # is the literal placeholder "(the daemon proxy)" otherwise (set at line ~620
+    # under set -u). Treat the live proxy as the catalyst mitmproxy when it equals
+    # that real de_proxy, or when it points at the conventional mitmproxy host:port
+    # (127.0.0.1:8080 / localhost:8080), the default this repo's tooling uses.
+    is_catalyst_proxy=""
+    if [[ "$de_proxy" != "(the daemon proxy)" && "$live_proxy" == "$de_proxy" ]]; then
+        is_catalyst_proxy="yes"
+    elif [[ "$live_proxy" == *"127.0.0.1:8080"* || "$live_proxy" == *"localhost:8080"* ]]; then
+        is_catalyst_proxy="yes"
+    fi
+
+    if [[ -n "$is_catalyst_proxy" ]]; then
+        leak_found="yes"
+        fail "HTTP(S)_PROXY is set in THIS shell ($live_proxy) — interactive processes (incl. claude) route through the catalyst mitmproxy"
+        info "If mitmproxy is down, every API call here fails with 'connection refused'. Find and remove the export/source from your shell profile (see above), then open a fresh terminal."
+    else
+        # An unrelated proxy (e.g. a corporate HTTP proxy). Do NOT hard-fail the
+        # whole health check on it; just note it in case it is in fact a down
+        # catalyst audit proxy under a non-default address.
+        info "A proxy is set in this shell ($live_proxy) — if it is the catalyst mitmproxy audit proxy and it is down, interactive claude calls will fail with connection refused. If it is an unrelated (e.g. corporate) proxy, this is fine."
+    fi
+fi
+
+if [[ -z "$leak_found" ]]; then
+    pass "No proxy leak into interactive shells (proxy stays daemon-launch-scoped)"
 fi
 
 # ─── 8. direnv ──────────────────────────────────────────────────────────────

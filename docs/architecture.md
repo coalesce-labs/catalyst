@@ -91,7 +91,7 @@ orchestrators and workers write to via `catalyst-state.sh` (lock-protected).
 - **execution-core/registry.json**: For `dispatchMode: execution-core` teams, the central
   `team → repoRoot → eligibleQuery` registry. The Linear-state contract that drives the
   execution-core daemon is **setup-tooling-owned** (design decision D8): `setup-catalyst.sh`
-  ensures the contract workflow states, writes the 9-phase → 5-state collapse `stateMap`, and
+  ensures the contract workflow states, writes the 10-phase → 5-state collapse `stateMap`, and
   upserts each team's registry entry. The execution-core daemon reads the registry directly
   (D4); the per-repo enrollment records CTL-554 wrote under `execution-core/projects/` and the
   `/orchestrate` enroll step they relied on were retired in CTL-582. All access flows through the
@@ -222,8 +222,8 @@ state — comms is observability and cross-worker coordination. See
 ## Phase-Agent Communication
 
 Orchestrators dispatched in `dispatchMode = "phase-agents"` spawn one short-lived `claude --bg`
-job per phase, walking the 9-phase pipeline (triage → research → plan → implement → verify →
-review → pr → monitor-merge → monitor-deploy — see `docs/orchestrator-overview.md`). Phase
+job per phase, walking the 10-phase pipeline (triage → research → plan → implement → verify →
+review → pr → monitor-merge → monitor-deploy → teardown — see `docs/orchestrator-overview.md`). Phase
 agents do **not** message each other directly. They communicate by **appending typed events to a
 single shared JSONL log** at `~/catalyst/events/YYYY-MM.jsonl`. The orchestrator wakes on those
 events via the broker (`filter.wake.<ORCH_NAME>`), advances the ticket through the canonical
@@ -270,11 +270,50 @@ The rebase is otherwise unchanged from CTL-667:
 
 - **Fresh-only.** A resume dispatch (`--resume-session` set, CTL-658) skips it — the resumed
   session assumes the prior tree.
-- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`
+- **Build-phase-only.** `triage`/`pr`/`remediate` and the `monitor-merge`/`monitor-deploy`/`teardown`
   phases are exempt. The build-phase set is `is_rebase_phase` in `lib/phase-sequence.sh`.
 - **Local-only.** It never pushes and never touches the open PR; machine-local noise
   (`.catalyst/config.json`, `.trunk/*`) is stashed across the rebase.
 - **Transient fetch failure → proceed un-rebased.** A flaky `git fetch` (rc=1) is non-fatal.
+
+### PR as the durable work record (CTL-783)
+
+During an orchestrated implement phase the draft PR is the **off-disk record of active work**,
+visible in GitHub and survives daemon restarts:
+
+| Signal | Meaning |
+|--------|---------|
+| Branch exists, no PR | Worker not yet past first commit |
+| Draft PR open | Implementing (phase-implement in progress) |
+| PR ready (not draft) | In review (phase-pr promoted it) |
+| PR merged | Done |
+
+**Branch naming**: branches come from Linear's `branchName` field (`ryan/<ticket>-slug`); the
+daemon's `create-worktree.sh` never overrides this.
+
+**PR title convention**: `<type>(<scope>): <ticket> ...` (e.g.
+`feat(dev): CTL-783 draft-PR-early first-commit open`). Both `draft_pr_ensure` and
+`create-pr/SKILL.md` Step 7 route through `draft_pr_title` (in
+`plugins/dev/scripts/lib/draft-pr.sh`) which injects the ticket after the conventional prefix
+without fabricating type or scope.
+
+**Lifecycle**:
+
+1. `implement-plan/SKILL.md` runs the `implement-plan-draft-pr-early` fence after **each**
+   plan-phase commit — `draft_pr_push` + `draft_pr_ensure` (idempotent). First call opens the
+   draft PR; later calls just push. Interactive `/implement-plan` runs are gated out by
+   `[[ -n "${CATALYST_PHASE:-}" ]]`.
+2. `phase-implement/SKILL.md` End block runs the `phase-implement-draft-pr` fence as the
+   **idempotent backstop** after all phases complete; this is also the **sole writer** of
+   `.draftPr={number,url,isDraft}` into the phase signal file.
+3. `phase-pr/SKILL.md` calls `draft_pr_promote` to flip the draft PR to ready instead of
+   creating a new PR (avoids the `create-pr` interactive "PR already exists" hang).
+
+**Config**: `orchestration.draftPr.enabled` (default `true`) — set `false` to create the PR
+only at the pr phase (End-block backstop still runs; `draft_pr_push` becomes the only push).
+
+**Deferred**: letting the scheduler read `.draftPr` draft-state as a secondary advancement
+signal (currently phase advancement is driven by signal `status === "done"` only).
 
 ### Runaway-loop guards (CTL-671)
 

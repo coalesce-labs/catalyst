@@ -37,11 +37,12 @@ export interface LinearWebhookHandlerDeps {
    */
   onAccept?: (event: LinearWebhookEvent) => void | Promise<void>;
   /**
-   * Linear user UUID for the catalyst bot. Issue events where the actor matches
-   * this value are suppressed before reaching the event log (loop prevention).
-   * Empty or absent = no suppression.
+   * Linear bot user UUIDs for loop prevention. Issue events where the actor
+   * matches any ID in the set are suppressed before reaching the event log.
+   * Accepts either a ReadonlySet<string> (new) or a plain string (legacy, for
+   * callers that haven't migrated yet). Absent / empty = no suppression.
    */
-  botUserId?: string;
+  botUserIds?: ReadonlySet<string> | string;
   /** Cap for the in-memory delivery-ID dedup set. Default 1000. */
   idempotencyMax?: number;
   logger?: LinearWebhookLogger;
@@ -124,6 +125,7 @@ export function buildLinearEventLogEnvelope(
       if (event.ticket !== null) attrs["linear.issue.identifier"] = event.ticket;
       if (event.teamKey !== null) attrs["linear.team.key"] = event.teamKey;
       if (event.actorId !== null) attrs["linear.actor.id"] = event.actorId;
+      if (event.issueId !== null) attrs["linear.issue.id"] = event.issueId; // CTL-822
       const repo = lookupRepo(event.teamKey);
       if (repo !== undefined) attrs["vcs.repository.name"] = repo;
       return canonical({
@@ -139,6 +141,7 @@ export function buildLinearEventLogEnvelope(
           action: event.action,
           ticket: event.ticket,
           teamKey: event.teamKey,
+          issueId: event.issueId, // CTL-822 — the only key a `remove` payload carries
           updatedFromKeys: event.updatedFromKeys,
           actorId: event.actorId,
           actorName: event.actorName,
@@ -154,6 +157,7 @@ export function buildLinearEventLogEnvelope(
           previousFromValues: event.previousFromValues,
           description: event.description,           // CTL-749
           descriptionChanged: event.descriptionChanged, // CTL-749
+          toEstimate: event.toEstimate,            // CTL-957
         },
       });
     }
@@ -371,13 +375,16 @@ export function createLinearWebhookHandler(deps: LinearWebhookHandlerDeps): Line
 
     const event = parseLinearWebhookEvent(eventName, payload);
 
-    // Bot-skip: suppress issue events authored by the catalyst bot to prevent
-    // write loops.
+    // Bot-skip: suppress issue events authored by any known catalyst bot actor
+    // to prevent write loops. botUserIds accepts ReadonlySet<string> or string.
+    const _isBotActor = (ids: ReadonlySet<string> | string | undefined, id: string | null): boolean => {
+      if (!ids || !id) return false;
+      if (typeof ids === "string") return ids === id;
+      return ids.has(id);
+    };
     if (
       event.kind === "issue" &&
-      deps.botUserId &&
-      deps.botUserId.length > 0 &&
-      event.actorId === deps.botUserId
+      _isBotActor(deps.botUserIds, event.actorId)
     ) {
       logger.info?.(
         `[linear-webhook] suppressed bot-authored issue event for ${event.ticket ?? "unknown"}`

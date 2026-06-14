@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# catalyst-why — explain why the daemon believes a worker is alive, stuck, or
+# dead (CTL-934). Renders the §5 belief→rule→source-facts trace for a ticket
+# from the belief store: for the latest tick that observed the ticket, every
+# belief about it, the rule that fired, and each source fact with its timestamp
+# and raw values. Today's hours of log archaeology become one query.
+#
+# Reads the shadow belief store at
+# ${CATALYST_BELIEFS_DB:-${CATALYST_DIR:-$HOME/catalyst}/beliefs.db} — read-only;
+# never writes. Shadow mode (CATALYST_BELIEFS_SHADOW=1 on the daemon) must have
+# been on for there to be anything to explain.
+#
+# Usage:
+#   catalyst why <ticket> [--tick N] [--json]
+#   catalyst-why <ticket> [--tick N] [--json]
+#
+# Modeled on catalyst-execution-core's runtime resolution (bun, then node).
+
+set -uo pipefail
+
+# CTL-390-style --version handling (early, before arg parsing).
+case "${1:-}" in
+  --version | -V)
+    _CV_SRC="${BASH_SOURCE[0]}"
+    while [[ -L $_CV_SRC ]]; do
+      _CV_D="$(cd -P "$(dirname "$_CV_SRC")" && pwd)" && _CV_SRC="$(readlink "$_CV_SRC")"
+      [[ $_CV_SRC != /* ]] && _CV_SRC="$_CV_D/$_CV_SRC"
+    done
+    _CV_DIR="$(cd -P "$(dirname "$_CV_SRC")" && pwd)"
+    [[ -f "${_CV_DIR}/lib/catalyst-version.sh" ]] && . "${_CV_DIR}/lib/catalyst-version.sh" \
+      && catalyst_print_version "catalyst-why" "${BASH_SOURCE[0]}" && exit 0
+    echo "error: catalyst-version helper missing at ${_CV_DIR}/lib/catalyst-version.sh" >&2
+    exit 1
+    ;;
+esac
+
+# Resolve this script's directory through symlinks.
+_SRC="${BASH_SOURCE[0]}"
+while [[ -L $_SRC ]]; do _SRC="$(readlink "$_SRC")"; done
+SCRIPT_DIR="$(cd "$(dirname "$_SRC")" && pwd)"
+unset _SRC
+
+WHY_SCRIPT="${SCRIPT_DIR}/execution-core/beliefs/why.mjs"
+
+resolve_runtime() {
+  if [[ -n "${CATALYST_WHY_RUNTIME-}" ]]; then echo "$CATALYST_WHY_RUNTIME"; return 0; fi
+  if command -v bun &>/dev/null; then echo "bun"; return 0; fi
+  if command -v node &>/dev/null; then echo "node"; return 0; fi
+  echo "error: neither bun nor node found on PATH" >&2
+  return 1
+}
+
+if [[ ! -f $WHY_SCRIPT ]]; then
+  echo "error: why trace module not found: $WHY_SCRIPT" >&2
+  exit 1
+fi
+
+runtime="$(resolve_runtime)" || exit 1
+exec "$runtime" "$WHY_SCRIPT" "$@"

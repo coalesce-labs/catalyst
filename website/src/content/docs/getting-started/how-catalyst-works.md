@@ -7,7 +7,7 @@ sidebar:
 
 Here is the whole idea: you describe the work, autonomous agents build and ship it, and you watch it happen on your Linear board. You stay away from the keyboard for the run itself.
 
-Linear is the issue tracker Catalyst works from. (An issue, or "ticket," is one unit of work.) A background program called the **executor** watches your board and does the rest.
+Linear is the issue tracker Catalyst works from. (An issue, or "ticket," is one unit of work.) A background scheduler — the **execution-core** daemon (part of the Catalyst service stack: broker, monitor, execution-core) — watches your board and does the rest.
 
 ## The loop, in four steps
 
@@ -28,7 +28,7 @@ You don't run a command. The executor sees the ticket and starts — within seco
 The ticket walks a fixed set of steps, one at a time:
 
 ```
-triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy
+triage → research → plan → implement → verify → review → pr → monitor-merge → monitor-deploy → teardown
 ```
 
 What each step does:
@@ -41,6 +41,7 @@ What each step does:
 - **pr** — opens a pull request (a "PR" — the GitHub request to merge your code)
 - **monitor-merge** — answers automated review bots, fixes failing CI (continuous integration — the automated checks), and merges once GitHub says the PR is clean
 - **monitor-deploy** — watches the deploy after merge
+- **teardown** — posts the final summary comment to the ticket, moves it to Done, and removes the working copy of the repo
 
 Every step posts a comment to the ticket and moves the card across your board. You just follow along.
 

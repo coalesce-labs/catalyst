@@ -25,6 +25,10 @@ __CATALYST_CANONICAL_SOURCED=1
 # Portable self-path: BASH_SOURCE under bash, prompt-expansion %x under zsh (CTL-618).
 __CE_SELF="${BASH_SOURCE[0]:-${(%):-%x}}"
 __CE_LIB_DIR="$(cd "$(dirname "$__CE_SELF")" && pwd)"
+
+# CTL-852: source host-identity primitives (catalyst_host_name, catalyst_host_id).
+# shellcheck source=lib/host-identity.sh
+source "${__CE_LIB_DIR}/host-identity.sh"
 __CE_PLUGIN_JSON="${__CE_LIB_DIR}/../../.claude-plugin/plugin.json"
 __CE_VERSION_CACHED=""
 
@@ -161,6 +165,10 @@ synthesize_event_id() {
 #   --claude-ratelimit-7d-sonnet-pct N  claude.ratelimit.seven_day_sonnet_pct (integer, CTL-763)
 #   --phase-attempt N        phase.attempt (integer, CTL-761)
 #   --phase-revive-count N   phase.revive_count (integer, CTL-761)
+#   --ticket-type TYPE       catalyst.ticket.type (CTL-1023 work-type dimension;
+#                            bug|feature|chore|refactor|docs|test). Defaults to
+#                            "unknown" when omitted/empty so the attribute is
+#                            CONSISTENTLY present, never sometimes-missing.
 build_canonical_line() {
   local ts="" severity="" service="" event_name=""
   local trace_id="" span_id=""
@@ -179,6 +187,9 @@ build_canonical_line() {
   local claude_rl_7d_opus="" claude_rl_7d_sonnet=""
   # CTL-761: dispatch attempt + revive count (typed int attributes).
   local phase_attempt="" phase_revive_count=""
+  # CTL-1023: work-type dimension (catalyst.ticket.type). Default "unknown" so the
+  # attribute is consistently present even when the caller cannot resolve a type.
+  local ticket_type=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -217,6 +228,7 @@ build_canonical_line() {
       --claude-ratelimit-7d-sonnet-pct) claude_rl_7d_sonnet="$2"; shift 2 ;;
       --phase-attempt)       phase_attempt="$2"; shift 2 ;;
       --phase-revive-count)  phase_revive_count="$2"; shift 2 ;;
+      --ticket-type)         ticket_type="$2"; shift 2 ;;
       *) echo "build_canonical_line: unknown flag: $1" >&2; return 1 ;;
     esac
   done
@@ -226,6 +238,9 @@ build_canonical_line() {
   [[ -n "$service"    ]] || { echo "build_canonical_line: --service required" >&2; return 1; }
   [[ -n "$event_name" ]] || { echo "build_canonical_line: --event-name required" >&2; return 1; }
   [[ -n "$service_version" ]] || service_version="$(plugin_version)"
+  # CTL-1023: the work-type dimension is ALWAYS present — fall back to "unknown"
+  # so consumers can group by it without coping with a sometimes-missing key.
+  [[ -n "$ticket_type" ]] || ticket_type="unknown"
 
   # CTL-636: promote orchestration context into the resource block. Existing
   # callers already pass --orch / --linear-ticket (which land in attributes);
@@ -239,9 +254,11 @@ build_canonical_line() {
       | grep -oE 'project=[^,]+' | head -1 | cut -d= -f2- || true)"
   fi
 
-  local sev_num event_id
+  local sev_num event_id host_name host_id_val
   sev_num="$(severity_number "$severity")"
   event_id="$(generate_event_id)"
+  host_name="$(catalyst_host_name)"
+  host_id_val="$(catalyst_host_id)"
 
   jq -nc \
     --arg ts "$ts" \
@@ -252,6 +269,8 @@ build_canonical_line() {
     --arg span_id "$span_id" \
     --arg svc_name "$service" \
     --arg svc_ver "$service_version" \
+    --arg host_name "$host_name" \
+    --arg host_id "$host_id_val" \
     --arg event_name "$event_name" \
     --arg entity "$entity" \
     --arg action "$action" \
@@ -281,6 +300,7 @@ build_canonical_line() {
     --arg claude_rl_7d_sonnet "$claude_rl_7d_sonnet" \
     --arg phase_attempt "$phase_attempt" \
     --arg phase_revive_count "$phase_revive_count" \
+    --arg ticket_type "$ticket_type" \
     '{
       ts: $ts,
       id: $id,
@@ -293,7 +313,9 @@ build_canonical_line() {
         {
           "service.name": $svc_name,
           "service.namespace": "catalyst",
-          "service.version": $svc_ver
+          "service.version": $svc_ver,
+          "host.name": $host_name,
+          "host.id": $host_id
         }
         + (if $project    == "" then {} else { "project": $project } end)
         + (if $linear_key == "" then {} else { "linear.key": $linear_key } end)
@@ -324,12 +346,32 @@ build_canonical_line() {
         + (if $claude_rl_7d_sonnet == "" then {} else { "claude.ratelimit.seven_day_sonnet_pct": ($claude_rl_7d_sonnet | tonumber) } end)
         + (if $phase_attempt == "" then {} else { "phase.attempt": ($phase_attempt | tonumber) } end)
         + (if $phase_revive_count == "" then {} else { "phase.revive_count": ($phase_revive_count | tonumber) } end)
+        + { "catalyst.ticket.type": $ticket_type }
       ),
       body: (
         (if $message == "" then {} else { message: $message } end)
         + { payload: $payload }
       )
     }'
+}
+
+# _canonical_is_sentinel_leak BASE_DIR LINE
+# Returns 0 (true) if LINE is a sentinel-stamped event aimed at the default
+# production events dir (BASE_DIR resolves to $HOME/catalyst/events). Parity
+# with JS isSentinelLeak in broker/config.mjs (CTL-1086).
+_canonical_is_sentinel_leak() {
+  local base_dir="$1" line="$2"
+  local orch sentinels default_dir
+  # Parity with JS isSentinelLeak: canonical `.resource["catalyst.orchestration"]`
+  # first, then the legacy top-level `.orchestrator` field.
+  orch="$(printf '%s' "$line" | jq -r '.resource["catalyst.orchestration"] // .orchestrator // empty' 2>/dev/null)"
+  [[ -n "$orch" ]] || return 1
+  sentinels="orch-test ${CATALYST_SENTINEL_ORCHIDS:-}"
+  case " $sentinels " in *" $orch "*) ;; *) return 1 ;; esac
+  default_dir="${HOME}/catalyst/events"
+  # Compare resolved real paths so symlinks/trailing slashes don't fool the check.
+  [[ "$(cd "$base_dir" 2>/dev/null && pwd -P || echo "$base_dir")" == \
+     "$(cd "$default_dir" 2>/dev/null && pwd -P || echo "$default_dir")" ]]
 }
 
 # canonical_jsonl_append BASE_DIR LINE
@@ -340,6 +382,11 @@ build_canonical_line() {
 canonical_jsonl_append() {
   local base_dir="$1" line="$2"
   [[ -n "$base_dir" ]] || return 0
+  # CTL-1086: drop sentinel(orch-test) events aimed at the default prod log.
+  if _canonical_is_sentinel_leak "$base_dir" "$line"; then
+    printf '[catalyst] dropped sentinel(orch-test) event from default prod log\n' >&2
+    return 0
+  fi
   mkdir -p "$base_dir" 2>/dev/null || return 0
   local month_file
   month_file="${base_dir}/$(date -u +%Y-%m).jsonl"

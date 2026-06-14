@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync, existsSync, statSync } from "fs";
 import { join, basename } from "path";
+import { hostName } from "./canonical-event-shared"; // CTL-859: host attribution
 import { checkProcessAlive } from "./liveness";
 import { parseOutputJson, analyticsPath, type WorkerAnalytics } from "./output-parser";
 import { readWorkerActivity, type WorkerActivity } from "./stream-reader";
@@ -158,6 +159,38 @@ export interface MonitorSnapshot {
   orchestrators: OrchestratorState[];
   sessions: SessionState[];
   sessionStoreAvailable: boolean;
+  /**
+   * CTL-859: the host that produced this snapshot, resolved via the shared
+   * host-identity primitive (CATALYST_HOST_NAME env, else os.hostname() minus
+   * ".local") — the same resolution as execution-core's getHostName() and the
+   * resource["host.name"] stamped on canonical events. Optional/additive so a
+   * future cluster dashboard can attribute snapshots by host; existing
+   * single-host consumers ignore it.
+   */
+  hostName?: string;
+  /**
+   * CTL-867: per-team reconcile health, keyed by Linear team. Surfaces each
+   * team's "last successful eligible refresh age" (lastSuccessTs/ageMs) plus the
+   * consecutive-failure count and the `alerting` flag the execution-core monitor
+   * sets once a team's eligibleQuery has failed persistently (its eligible set is
+   * frozen stale — silent starvation). Optional/additive: populated by server.ts
+   * from the execution-core reconcile-health markers; absent on snapshots built
+   * by consumers that do not read them.
+   */
+  reconcileHealth?: Record<string, TeamReconcileHealth>;
+}
+
+/**
+ * CTL-867 — per-team reconcile-health view surfaced in the snapshot. Mirrors the
+ * marker the execution-core monitor writes; see lib/reconcile-health-reader.ts.
+ */
+export interface TeamReconcileHealth {
+  team: string;
+  lastSuccessTs: string | null;
+  ageMs: number | null;
+  consecutiveFailures: number;
+  alerting: boolean;
+  updatedAt: string | null;
 }
 
 export interface BuildSnapshotOptions {
@@ -688,6 +721,7 @@ export function buildSnapshot(
     orchestrators,
     sessions,
     sessionStoreAvailable: storeAvailable,
+    hostName: hostName(), // CTL-859: attribute the snapshot to its producing host
   };
 }
 

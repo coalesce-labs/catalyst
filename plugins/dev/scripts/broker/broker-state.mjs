@@ -31,6 +31,9 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
   mkdirSync(dirname(dbPath), { recursive: true });
   db = new Database(dbPath, { create: true });
   db.run("PRAGMA journal_mode=WAL");
+  // CTL-821: don't fail instantly on transient WAL contention (live broker +
+  // orch-monitor + test drivers can hold handles on the same file).
+  db.run("PRAGMA busy_timeout = 5000");
 
   // Legacy filter_state table (CTL-284) — still needed for PR↔deploy correlation.
   db.run(`
@@ -96,6 +99,59 @@ export function openBrokerStateDb(dbPath = DEFAULT_DB_PATH) {
       pr_number    INTEGER,
       updated_at   TEXT NOT NULL
     )
+  `);
+  // CTL-821 (Gateway L1 child a): grow ticket_state into the full Linear-truth
+  // descriptor — additive ALTERs in try/catch (the CTL-402 pattern), so an
+  // existing live filter-state.db migrates in place with zero data loss and a
+  // re-open is a no-op. `removed_at` is the removed flag (null = present);
+  // `uuid` carries the Linear entityId so a `remove` webhook (whose payload
+  // has ONLY the UUID, never the CTL-123 identifier) can be resolved.
+  // CTL-923 (BFF11): project the cluster-claim fence attachment
+  // (catalyst://fence/<TICKET> metadata owner_host/catalyst_generation/phase/
+  // claimed_at — cluster-claim.mjs) into ticket_state so the read-model groups
+  // by node and shows hold duration from the DURABLE cache, never a live
+  // per-request attachment fetch (which BFF1 forbids). `held_since` carries the
+  // applied-at of the held labels (blocked/waiting) so the duration feature —
+  // punted by HOME3/DETAIL2/BFF7 with no owner — resolves here. Same additive
+  // try/catch ALTER, so a live filter-state.db migrates in place, null-valued.
+  for (const col of [
+    "relations TEXT",
+    "labels TEXT",
+    "priority INTEGER",
+    "estimate INTEGER",
+    "resolution TEXT",
+    "assignee TEXT",
+    "uuid TEXT",
+    "removed_at TEXT",
+    "owner_host TEXT",
+    "catalyst_generation INTEGER",
+    "fence_phase TEXT",
+    "claimed_at TEXT",
+    "held_since TEXT",
+  ]) {
+    try {
+      db.run(`ALTER TABLE ticket_state ADD COLUMN ${col}`);
+    } catch {
+      /* already exists */
+    }
+  }
+  // Node-grouping read path: the read-model bulk-reads ticket_state and groups
+  // by owner_host. The partial index keeps that grouping scan off a full table
+  // walk once the fleet is multi-node (single-node: trivially small, free).
+  db.run(`
+    CREATE INDEX IF NOT EXISTS idx_ticket_state_owner_host
+      ON ticket_state(owner_host)
+      WHERE owner_host IS NOT NULL
+  `);
+  // UNIQUE so a buggy upstream writing one entityId onto two identifiers fails
+  // loud instead of silently shadowing a row in the remove-webhook resolution.
+  // Drop-then-create migrates any interim non-unique version of this index;
+  // ticket_state is small (hundreds of rows) so the per-boot rebuild is ~ms.
+  db.run(`DROP INDEX IF EXISTS idx_ticket_state_uuid`);
+  db.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_state_uuid
+      ON ticket_state(uuid)
+      WHERE uuid IS NOT NULL
   `);
 
   // CTL-403: waiting_sessions tracks active wait-for loops so the watchdog can
@@ -458,6 +514,236 @@ export function getTicketState(ticket) {
     prNumber: row.pr_number,
     updatedAt: row.updated_at,
   };
+}
+
+// ─── ticket descriptor helpers (CTL-821, Gateway L1 child a) ─────────────────
+
+// Descriptor field → column map. Internal constant — the dynamic SQL below
+// only ever interpolates these fixed column names, never caller input.
+const DESCRIPTOR_COLUMNS = {
+  state: "linear_state",
+  prNumber: "pr_number",
+  relations: "relations",
+  labels: "labels",
+  priority: "priority",
+  estimate: "estimate",
+  resolution: "resolution",
+  assignee: "assignee",
+  uuid: "uuid",
+};
+
+// upsertTicketDescriptor — KEY-PRESENCE semantics (not COALESCE): a field
+// ABSENT from the input keeps its stored value; a field present with an
+// explicit null CLEARS it. This is load-bearing for the Assignment layer —
+// a Linear unassign webhook carries assignee:null and MUST be expressible
+// (back-off-when-human-assignee-removed keys off it). Webhook write-through
+// callers should pass exactly the fields the webhook carried.
+//
+// relations/labels must be arrays/objects (stored as JSON text); passing a
+// pre-stringified JSON string throws — silent double-encoding would hand
+// child (b) a string where readers expect an array.
+//
+// `removed` is tri-state: true stamps removed_at (sticky — the FIRST removal
+// timestamp survives duplicates), false clears it (Linear archive→unarchive
+// arrives as `update`), undefined leaves it untouched. The whole upsert runs
+// in one transaction so concurrent WAL readers (orch-monitor, the child-c
+// read API) never observe the row between the insert and the removed stamp.
+export function upsertTicketDescriptor(input = {}) {
+  const { ticket, removed } = input;
+  if (!ticket) return;
+  const cols = [];
+  const vals = [];
+  for (const [field, col] of Object.entries(DESCRIPTOR_COLUMNS)) {
+    if (!(field in input) || input[field] === undefined) continue; // absent → keep
+    let v = input[field];
+    if ((field === "relations" || field === "labels") && v !== null) {
+      if (typeof v === "string") {
+        throw new TypeError(
+          `upsertTicketDescriptor: ${field} must be an array/object, not a pre-stringified JSON string`
+        );
+      }
+      v = JSON.stringify(v);
+    }
+    cols.push(col);
+    vals.push(v);
+  }
+  const d = ensure();
+  const ts = nowIso();
+  d.transaction(() => {
+    const insertCols = ["ticket", ...cols, "updated_at"];
+    const placeholders = insertCols.map(() => "?").join(", ");
+    const setClauses = [
+      ...cols.map((c) => `${c} = excluded.${c}`),
+      "updated_at = excluded.updated_at",
+    ];
+    d.run(
+      `INSERT INTO ticket_state (${insertCols.join(", ")})
+       VALUES (${placeholders})
+       ON CONFLICT(ticket) DO UPDATE SET ${setClauses.join(", ")}`,
+      [ticket, ...vals, ts]
+    );
+    if (removed === true) {
+      d.run(`UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?) WHERE ticket = ?`, [
+        ts,
+        ticket,
+      ]);
+    } else if (removed === false) {
+      d.run(`UPDATE ticket_state SET removed_at = NULL WHERE ticket = ?`, [ticket]);
+    }
+  })();
+}
+
+function rowToTicketDescriptor(row) {
+  const parse = (s) => {
+    if (s === null || s === undefined) return null;
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
+  };
+  return {
+    ticket: row.ticket,
+    state: row.linear_state,
+    prNumber: row.pr_number,
+    relations: parse(row.relations),
+    labels: parse(row.labels),
+    priority: row.priority ?? null,
+    estimate: typeof row.estimate === "number" ? row.estimate : null,
+    resolution: row.resolution ?? null,
+    assignee: row.assignee ?? null,
+    uuid: row.uuid ?? null,
+    removed: row.removed_at != null,
+    removedAt: row.removed_at ?? null,
+    // CTL-923 (BFF11): fence projection + held-since, surfaced so the
+    // read-model groups by ownerHost and renders a real hold duration straight
+    // from the durable cache. All null when no fence attachment / held label
+    // has been observed — consumers render the field dim, never fabricated.
+    ownerHost: row.owner_host ?? null,
+    generation: row.catalyst_generation ?? null,
+    fencePhase: row.fence_phase ?? null,
+    claimedAt: row.claimed_at ?? null,
+    heldSince: row.held_since ?? null,
+    updatedAt: row.updated_at,
+  };
+}
+
+export function getTicketDescriptor(ticket) {
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE ticket = ?`).get(ticket);
+  return row ? rowToTicketDescriptor(row) : null;
+}
+
+// getAllTicketDescriptors — bulk read of the whole ticket_state cache in ONE
+// query (CTL-883). The orch-monitor read-model enriches every board ticket from
+// the durable Linear cache; doing that per-ticket would re-prepare/execute a
+// SELECT N times, so it consumes this single pass instead. Removed rows are
+// excluded by default (the board never wants tombstoned tickets); pass
+// `{ includeRemoved: true }` for the reconcile/debug paths that need them.
+export function getAllTicketDescriptors({ includeRemoved = false } = {}) {
+  const sql = includeRemoved
+    ? `SELECT * FROM ticket_state ORDER BY ticket`
+    : `SELECT * FROM ticket_state WHERE removed_at IS NULL ORDER BY ticket`;
+  return ensure().prepare(sql).all().map(rowToTicketDescriptor);
+}
+
+// getTicketDescriptorByUuid — the UUID→identifier index lookup. Linear's
+// `remove` webhook payload carries only the entityId UUID; this resolves it to
+// the descriptor row populated by earlier create/update webhooks.
+export function getTicketDescriptorByUuid(uuid) {
+  if (!uuid) return null;
+  const row = ensure().prepare(`SELECT * FROM ticket_state WHERE uuid = ?`).get(uuid);
+  return row ? rowToTicketDescriptor(row) : null;
+}
+
+// markTicketRemovedByUuid — the `remove`-webhook write path: resolve the UUID,
+// stamp removed_at (sticky — a duplicate remove keeps the first timestamp).
+// Returns the resolved identifier, or null when the UUID was never indexed
+// (the reconcile backstop, child e, owns that gap).
+export function markTicketRemovedByUuid(uuid) {
+  if (!uuid) return null;
+  const row = ensure().prepare(`SELECT ticket FROM ticket_state WHERE uuid = ?`).get(uuid);
+  if (!row) return null;
+  const ts = nowIso();
+  ensure().run(
+    `UPDATE ticket_state SET removed_at = COALESCE(removed_at, ?), updated_at = ? WHERE ticket = ?`,
+    [ts, ts, row.ticket]
+  );
+  return { ticket: row.ticket };
+}
+
+// ─── fence projection + held-since helpers (CTL-923, BFF11) ──────────────────
+
+// Fence field → column map. Internal constant — the dynamic SQL below only ever
+// interpolates these fixed column names, never caller input (mirrors the
+// DESCRIPTOR_COLUMNS guard above).
+const FENCE_COLUMNS = {
+  ownerHost: "owner_host",
+  generation: "catalyst_generation",
+  phase: "fence_phase",
+  claimedAt: "claimed_at",
+};
+
+// upsertTicketFence — project the cluster-claim fence attachment metadata
+// (owner_host, catalyst_generation, phase, claimed_at) into ticket_state. Same
+// KEY-PRESENCE semantics as upsertTicketDescriptor: a field ABSENT from the
+// input keeps its stored value; a field present with an explicit null CLEARS it
+// — so a takeover that drops the owner (or a release) is expressible. The row is
+// created if absent so a fence can land before any other webhook for the ticket.
+// Webhook write-through callers should pass exactly the fields the fence carried.
+export function upsertTicketFence(input = {}) {
+  const { ticket } = input;
+  if (!ticket) return;
+  const cols = [];
+  const vals = [];
+  for (const [field, col] of Object.entries(FENCE_COLUMNS)) {
+    if (!(field in input) || input[field] === undefined) continue; // absent → keep
+    cols.push(col);
+    vals.push(input[field]);
+  }
+  if (cols.length === 0) return; // nothing to project
+  const insertCols = ["ticket", ...cols, "updated_at"];
+  const placeholders = insertCols.map(() => "?").join(", ");
+  const setClauses = [
+    ...cols.map((c) => `${c} = excluded.${c}`),
+    "updated_at = excluded.updated_at",
+  ];
+  ensure().run(
+    `INSERT INTO ticket_state (${insertCols.join(", ")})
+     VALUES (${placeholders})
+     ON CONFLICT(ticket) DO UPDATE SET ${setClauses.join(", ")}`,
+    [ticket, ...vals, nowIso()]
+  );
+}
+
+// setTicketHeldSince — stamp the held-label applied-at timestamp. STICKY: the
+// FIRST observed held timestamp survives duplicate held-label webhooks (the
+// duration must measure from when the hold STARTED, not the latest webhook). A
+// missing `heldSince` falls back to now() — the moment the broker first observed
+// the held label. The row is created if absent. Idempotent: re-applying the held
+// label while held_since is already set is a no-op on the timestamp.
+export function setTicketHeldSince(ticket, heldSince) {
+  if (!ticket) return;
+  const ts = heldSince ?? nowIso();
+  ensure().run(
+    `INSERT INTO ticket_state (ticket, held_since, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(ticket) DO UPDATE SET
+       held_since = COALESCE(ticket_state.held_since, excluded.held_since),
+       updated_at = excluded.updated_at`,
+    [ticket, ts, nowIso()]
+  );
+}
+
+// clearTicketHeldSince — null the held-since timestamp when the held labels
+// leave the ticket (pickup/unblock clears BOTH blocked/waiting labels). The next
+// hold re-stamps a fresh start via setTicketHeldSince. No-op when the row is
+// absent or already clear.
+export function clearTicketHeldSince(ticket) {
+  if (!ticket) return;
+  ensure().run(
+    `UPDATE ticket_state SET held_since = NULL, updated_at = ? WHERE ticket = ?`,
+    [nowIso(), ticket]
+  );
 }
 
 // ─── worker_state helpers (CTL-532) ──────────────────────────────────────────

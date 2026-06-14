@@ -8,15 +8,21 @@ import type { BriefingProvider } from "../lib/ai-briefing";
 import type { MonitorSnapshot } from "../lib/state-reader";
 import type { LinearTicket } from "../lib/linear";
 import { createPreviewFetcher } from "../lib/preview-status";
+import { ensureTestDist } from "./helpers/test-dist";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
 let tmpDir: string;
+let wtDir: string;
+let prevMonitorPublicDir: string | undefined;
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "orch-monitor-test-"));
-  const wtDir = join(tmpDir, "wt");
+  wtDir = join(tmpDir, "wt");
   mkdirSync(wtDir, { recursive: true });
+
+  prevMonitorPublicDir = process.env.MONITOR_PUBLIC_DIR;
+  process.env.MONITOR_PUBLIC_DIR = ensureTestDist();
 
   const orchDir = join(wtDir, "orch-test");
   mkdirSync(join(orchDir, "workers"), { recursive: true });
@@ -49,10 +55,12 @@ beforeAll(() => {
   const annotationsDbPath = join(tmpDir, "annotations.db");
   server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath });
   baseUrl = `http://localhost:${server.port}`;
-});
+}, 60_000);
 
 afterAll(() => {
   void server?.stop(true);
+  if (prevMonitorPublicDir === undefined) delete process.env.MONITOR_PUBLIC_DIR;
+  else process.env.MONITOR_PUBLIC_DIR = prevMonitorPublicDir;
   if (tmpDir) {
     try {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -63,14 +71,34 @@ afterAll(() => {
 });
 
 describe("SSE server", () => {
-  // CTL-730: the CTL-727 Worker/Ticket board is the default page at /.
-  it("should serve the board (board.html) at /", async () => {
+  // CTL-892 / SHELL2: the app shell (index.html → App → AppShell) is now the
+  // canonical root. The shell hosts the dense board as the "board" surface inside
+  // the shared SidebarInset, so `/` serves the shell (id="root"), NOT the
+  // shell-less board page (which CTL-730 served here before SHELL2).
+  it("should serve the app shell (index.html) at /", async () => {
     const res = await fetch(`${baseUrl}/`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     const body = await res.text();
     expect(body.toLowerCase()).toContain("<!doctype html");
-    expect(body).toContain("board-root");
+    expect(body).toContain('id="root"');
+    // The board's standalone mount point is NOT the root any more.
+    expect(body).not.toContain("board-root");
+  });
+
+  // CTL-989: the standalone board.html bundle is retired. /board is now a normal
+  // surface path of the ONE unified router (index.html → main.tsx → AppShell
+  // layout + the Tickets surface route), so it serves the app shell (id="root"),
+  // NOT the old shell-less #board-root page.
+  it("should serve the unified app shell (index.html) at /board", async () => {
+    const res = await fetch(`${baseUrl}/board`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("<!doctype html");
+    expect(body).toContain('id="root"');
+    // The retired board bundle's standalone mount point is gone.
+    expect(body).not.toContain("board-root");
   });
 
   // CTL-730: the legacy orchestrator dashboard moves to /legacy.
@@ -435,6 +463,35 @@ describe("OTel API endpoints", () => {
     const res = await fetch(`${baseUrl}/api/otel/cost-rate`);
     expect(res.status).toBe(503);
   });
+
+  // OBS-9: the four new FinOps routes follow the same "503 when Prometheus is not
+  // configured" contract so the FinOps surface degrades via the ChartCard ladder.
+  it("returns 503 for /api/otel/cost-by-stage when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-by-stage`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-today when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-today`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cost-series when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-series`);
+    expect(res.status).toBe(503);
+  });
+
+  it("returns 503 for /api/otel/cache-savings when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cache-savings`);
+    expect(res.status).toBe(503);
+  });
+
+  // OBS-10: the spike-drill route. Same 503-when-unconfigured contract; it also
+  // 503s before reading `hour` (the not-configured guard runs first).
+  it("returns 503 for /api/otel/cost-at-hour when not configured", async () => {
+    const res = await fetch(`${baseUrl}/api/otel/cost-at-hour?hour=1781000000`);
+    expect(res.status).toBe(503);
+  });
 });
 
 describe("OTel health endpoint (/api/health/otel)", () => {
@@ -766,9 +823,12 @@ describe("React UI legacy dashboard (/legacy)", () => {
   it("serves built CSS asset", async () => {
     const res = await fetch(`${baseUrl}/legacy`);
     const html = await res.text();
-    // The entry's stylesheet is emitted under the `app-` chunk (the bundled CSS
-    // chunk name), or `index-` on a legacy single-entry build. (CTL-754 rebuild.)
-    const match = html.match(/href="(\/assets\/(?:app|index)-[^"]+\.css)"/);
+    // The entry's stylesheet is emitted under the entry-keyed CSS chunk. CTL-989
+    // unified to a SINGLE entry keyed `main`, so the stylesheet is `main-<hash>.css`
+    // (matching the `main-<hash>.js` entry chunk). Accept the historical `app-`
+    // (multi-entry bundled CSS) and `index-` (legacy single-entry) prefixes too so
+    // an older build artifact doesn't re-break this. (CTL-754 / CTL-989 rebuild.)
+    const match = html.match(/href="(\/assets\/(?:main|app|index)-[^"]+\.css)"/);
     expect(match).toBeTruthy();
     if (match) {
       const cssRes = await fetch(`${baseUrl}${match[1]}`);
@@ -2054,6 +2114,36 @@ describe("/api/ticket-substeps (CTL-753)", () => {
     } finally {
       void substepServer.stop(true);
       rmSync(substepTmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// CTL-1120: default publicDir honors MONITOR_PUBLIC_DIR when opts.publicDir is omitted.
+describe("publicDir resolution", () => {
+  it("default publicDir honors MONITOR_PUBLIC_DIR when opts.publicDir is omitted", async () => {
+    const envDist = mkdtempSync(join(tmpdir(), "orch-monitor-distenv-"));
+    writeFileSync(
+      join(envDist, "index.html"),
+      '<!doctype html><html><body><div id="env-test-root"></div></body></html>',
+    );
+    const prev = process.env.MONITOR_PUBLIC_DIR;
+    process.env.MONITOR_PUBLIC_DIR = envDist;
+    let s: ReturnType<typeof createServer> | undefined;
+    try {
+      s = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmpdir(), `ann-env-test.db`),
+      });
+      const res = await fetch(`http://localhost:${s.port}/`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('id="env-test-root"');
+    } finally {
+      void s?.stop(true);
+      if (prev === undefined) delete process.env.MONITOR_PUBLIC_DIR;
+      else process.env.MONITOR_PUBLIC_DIR = prev;
+      rmSync(envDist, { recursive: true, force: true });
     }
   });
 });

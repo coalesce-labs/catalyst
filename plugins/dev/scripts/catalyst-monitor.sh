@@ -43,6 +43,9 @@ done
 SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 SERVER_SCRIPT="${MONITOR_SERVER_SCRIPT:-$SCRIPT_DIR/orch-monitor/server.ts}"
 MONITOR_DIR="$(cd "$(dirname "$SERVER_SCRIPT")" && pwd)"
+# CTL-1088: default out-of-repo dist dir for the vite build (single definition
+# used by both bootstrap and cmd_start).
+MONITOR_UI_DIST_DIR="${MONITOR_UI_DIST_DIR:-$CATALYST_DIR/monitor-ui-dist}"
 FORWARD_PID_FILE="${CATALYST_DIR}/otel-forward.pid"
 FORWARD_LOG="${CATALYST_DIR}/otel-forward.log"
 FORWARD_SCRIPT="${SCRIPT_DIR}/otel-forward/index.ts"
@@ -162,11 +165,16 @@ bootstrap() {
   fi
 
   if [[ ! -d "$CATALYST_DIR" ]]; then
-    errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-dev:setup-catalyst first")
+    errors+=("Catalyst directory missing: $CATALYST_DIR — run /catalyst-foundry:setup-catalyst first")
   fi
 
-  if [[ ! -d "$CATALYST_DIR/wt" ]]; then
-    errors+=("Worktree directory missing: $CATALYST_DIR/wt/ — run /catalyst-dev:setup-catalyst first")
+  # CTL-841: a missing wt/ dir is a fresh-host normal, not a fatal error. A daemon
+  # start script should mkdir -p its own runtime dirs and start, rather than dead-end
+  # a headless-host operator at an interactive Claude skill. Self-heal instead of
+  # hard-failing. (cmd_start also runs `mkdir -p "$CATALYST_DIR/wt"`, but bootstrap's
+  # `return 1` made that line unreachable — proving the auto-create was always intended.)
+  if [[ ! -d "$CATALYST_DIR/wt" ]] && [[ -d "$CATALYST_DIR" ]]; then
+    mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
   fi
 
   if [[ ${#errors[@]} -gt 0 ]]; then
@@ -180,7 +188,7 @@ bootstrap() {
   local db_file="${CATALYST_DB_FILE:-$CATALYST_DIR/catalyst.db}"
   if [[ ! -f "$db_file" ]]; then
     echo "Warning: Session database not found ($db_file) — session history will be empty"
-    echo "  Run /catalyst-dev:setup-catalyst to initialize"
+    echo "  Run /catalyst-foundry:setup-catalyst to initialize"
   fi
 
   if [[ -d "$MONITOR_DIR" ]]; then
@@ -194,9 +202,47 @@ bootstrap() {
       (cd "$MONITOR_DIR/ui" && bun install --frozen-lockfile 2>/dev/null || bun install)
     fi
 
-    if [[ -d "$MONITOR_DIR/ui" && ! -d "$MONITOR_DIR/ui/dist" ]]; then
-      echo "Building orch-monitor frontend..."
-      (cd "$MONITOR_DIR/ui" && bunx vite build)
+    if [[ -d "$MONITOR_DIR/ui" ]]; then
+      mkdir -p "$MONITOR_UI_DIST_DIR"
+      export MONITOR_UI_DIST_DIR
+
+      # CTL-1088: dist lives out-of-repo; first build happens when index.html is absent.
+      # CTL-1118: also rebuild when the UI source has advanced past the last-built
+      # commit. We record the SHA of the last commit touching ui/ next to the dist and
+      # rebuild on mismatch — this covers EVERY restart path (broker hot-reload and
+      # manual restart) with no broker-side plumbing. Escape hatch: MONITOR_FORCE_BUILD=1.
+      ui_source_sha="$(git -C "$MONITOR_DIR" log -1 --format='%H' -- ui/ 2>/dev/null || true)"
+      built_sha_file="$MONITOR_UI_DIST_DIR/.source-sha"
+      built_sha=""
+      [[ -f "$built_sha_file" ]] && built_sha="$(cat "$built_sha_file" 2>/dev/null || true)"
+
+      rebuild_reason=""
+      if [[ "${MONITOR_FORCE_BUILD:-}" == "1" ]]; then
+        rebuild_reason="MONITOR_FORCE_BUILD=1"
+      elif [[ ! -f "$MONITOR_UI_DIST_DIR/index.html" ]]; then
+        rebuild_reason="no built index.html"
+      elif [[ -n "$ui_source_sha" && "$ui_source_sha" != "$built_sha" ]]; then
+        rebuild_reason="ui source changed (${built_sha:-none} → $ui_source_sha)"
+      fi
+
+      if [[ -n "$rebuild_reason" ]]; then
+        echo "Building orch-monitor frontend → $MONITOR_UI_DIST_DIR ($rebuild_reason) ..."
+        if (cd "$MONITOR_DIR/ui" && bunx vite build); then
+          # Record the built source SHA ONLY on success so a failed build retries next start.
+          [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
+        else
+          echo "warning: orch-monitor vite build failed — serving previous dist (will retry next restart)" >&2
+        fi
+      fi
+
+      # Complete the dist: copy non-vite static assets so the out-of-repo dir is a
+      # full served root (server uses one publicDir for everything). Idempotent.
+      for _asset in history.html favicon.ico favicon.svg; do
+        [[ -f "$MONITOR_DIR/public/$_asset" ]] && cp -f "$MONITOR_DIR/public/$_asset" "$MONITOR_UI_DIST_DIR/" 2>/dev/null || true
+      done
+      for _dir in vendor mockups; do
+        [[ -d "$MONITOR_DIR/public/$_dir" ]] && cp -R "$MONITOR_DIR/public/$_dir" "$MONITOR_UI_DIST_DIR/" 2>/dev/null || true
+      done
     fi
   fi
 }
@@ -222,7 +268,9 @@ cmd_start() {
   mkdir -p "$(dirname "$PID_FILE")" 2>/dev/null || true
   mkdir -p "$CATALYST_DIR/wt" 2>/dev/null || true
 
-  MONITOR_PORT="$PORT" nohup bun run "$SERVER_SCRIPT" --pid-file "$PID_FILE" \
+  MONITOR_PORT="$PORT" \
+  MONITOR_PUBLIC_DIR="${MONITOR_UI_DIST_DIR}" \
+  nohup bun run "$SERVER_SCRIPT" --pid-file "$PID_FILE" \
     > "$CATALYST_DIR/monitor.log" 2>&1 &
   local server_pid=$!
   disown "$server_pid" 2>/dev/null || true

@@ -1,4 +1,4 @@
-// linear-cache.mjs — in-process TTL cache for single-ticket Linear state reads
+// linear-cache.mjs — in-process TTL cache for single-ticket Linear reads
 // (CTL-634 Tier 1). One instance is created by startDaemon and shared by the
 // scheduler's out-of-set blocker hydration (read path) and the monitor's
 // state_changed handler (write-through). Cuts `linearis issues read` calls the
@@ -9,14 +9,37 @@
 // null/undefined value — a failed `linearis issues read` must stay un-cached so
 // the D5 fail-safe sentinel (UNFETCHED_BLOCKER_STATE) is never poisoned and a
 // recovered blocker is re-read promptly.
+//
+// CTL-784: two stores in one instance.
+//   1. `entries` — string STATE keyed by identifier (the original CTL-634 cache).
+//      Written-through by the monitor on every state_changed; read by
+//      fetchTicketState. The `get`/`set`/`invalidate`/`stats` contract is
+//      UNCHANGED — `set` stores only a string and has no side effect on the
+//      relations store, so a setRelations() priming a state never trips an
+//      invalidation, and the monitor write-through stays byte-for-byte.
+//   2. `relationsEntries` — the FULL relation descriptor
+//      ({ state, parent, relations, inverseRelations, priority, labels }) keyed by
+//      identifier, with its own TTL. This is the read-through store
+//      fetchTicketsBatch / fetchTicketRelations populate and consult so the
+//      admission pool's per-tick relation reads collapse to one batched query
+//      per TTL window. getRelations OVERLAYS the freshest state from `entries`
+//      (the monitor keeps it current) onto the cached descriptor, so a cached
+//      edge set is returned with up-to-date state even when only the state
+//      changed — edges (rarely-changing) carry the ≤TTL staleness, state does
+//      not. Storing the descriptor in a SEPARATE map is required: writing an
+//      object under an `entries` key would return an object to fetchTicketState's
+//      string-typed terminal-state checks and silently corrupt them.
 
 // Default 60 s TTL; env-overridable to match the SCHEDULER_*_MS env idiom.
 const DEFAULT_TTL_MS = Number(process.env.LINEAR_STATE_CACHE_TTL_MS) || 60_000;
 
 export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS } = {}) {
   const entries = new Map(); // identifier -> { state, expiresAt }
+  const relationsEntries = new Map(); // identifier -> { desc, expiresAt } (CTL-784)
   let hits = 0;
   let misses = 0;
+  let relHits = 0;
+  let relMisses = 0;
 
   function get(identifier) {
     const entry = entries.get(identifier);
@@ -35,8 +58,39 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS 
     entries.set(identifier, { state, expiresAt: now() + ttlMs });
   }
 
+  // getRelations — CTL-784 read-through for the full relation descriptor. TTL is
+  // governed by the relations entry (the edges); the state field is OVERLAID
+  // from the live state cache when present (the monitor write-through keeps it
+  // fresh) so a cached descriptor never returns a stale state. Returns undefined
+  // on a cold/expired miss so fetchTicketsBatch treats it as a fetch.
+  function getRelations(identifier) {
+    const entry = relationsEntries.get(identifier);
+    if (entry && entry.expiresAt > now()) {
+      relHits += 1;
+      const stateEntry = entries.get(identifier);
+      const freshState =
+        stateEntry && stateEntry.expiresAt > now() ? stateEntry.state : entry.desc.state;
+      return { ...entry.desc, state: freshState };
+    }
+    if (entry) relationsEntries.delete(identifier); // expired — drop eagerly
+    relMisses += 1;
+    return undefined;
+  }
+
+  // setRelations — CTL-784. Store the full descriptor (edges + state + priority +
+  // labels) AND prime the string-state cache via set() so a subsequent
+  // fetchTicketState(id, { cache }) is a hit. set() has no side effect on
+  // relationsEntries, so priming the state never evicts the descriptor we just
+  // wrote. A null descriptor is never cached (fail-safe, mirrors set()).
+  function setRelations(identifier, desc) {
+    if (desc == null) return;
+    relationsEntries.set(identifier, { desc, expiresAt: now() + ttlMs });
+    set(identifier, desc.state); // prime state (set() null-guards desc.state)
+  }
+
   function invalidate(identifier) {
     entries.delete(identifier);
+    relationsEntries.delete(identifier);
   }
 
   function stats() {
@@ -44,5 +98,13 @@ export function createTicketStateCache({ now = Date.now, ttlMs = DEFAULT_TTL_MS 
     return { hits, misses, hitRate: total === 0 ? 0 : hits / total };
   }
 
-  return { get, set, invalidate, stats };
+  // relationsStats — CTL-784 per-tick observability for the relation read-through
+  // store, kept separate from stats() so the CTL-634 stats() contract (and its
+  // tests) stay byte-identical.
+  function relationsStats() {
+    const total = relHits + relMisses;
+    return { hits: relHits, misses: relMisses, hitRate: total === 0 ? 0 : relHits / total };
+  }
+
+  return { get, set, getRelations, setRelations, invalidate, stats, relationsStats };
 }

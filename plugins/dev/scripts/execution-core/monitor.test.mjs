@@ -6,7 +6,9 @@
 // per-repo enrollment records are gone.
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync } from "node:fs";
+import { ownerForTicket } from "./hrw.mjs"; // CTL-862: HRW owner computation for ownership-filter tests
+import { readClusterGeneration } from "./scheduler.mjs"; // CTL-1028: persistence assertion
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, appendFileSync, statSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -30,6 +32,12 @@ import { setProjectEligible, getEligibleSet, dropProject } from "./eligible-set.
 import { loadCursor, saveCursor } from "./event-cursor.mjs";
 import { createTicketStateCache } from "./linear-cache.mjs";
 import { fetchTicketState } from "./linear-query.mjs";
+import {
+  getReconcileHealth,
+  readReconcileHealthMarkers,
+  recordReconcileFailure,
+  __resetReconcileHealthForTests,
+} from "./reconcile-health.mjs";
 
 let catalystDir;
 let prevCatalystDir;
@@ -196,6 +204,161 @@ describe("reconcileProject", () => {
     writeFileSync(join(projDir, "sentinel"), "x");
     expect(() => reconcileProject("ENG", { exec })).not.toThrow();
     rmSync(projDir, { recursive: true, force: true });
+  });
+});
+
+// --- CTL-867: per-team reconcile-health escalation --------------------------
+//
+// A team whose eligibleQuery errors every poll (e.g. its status references a
+// removed Linear state) freezes its eligible projection stale for hours while
+// the daemon looks healthy — invisible starvation. reconcileProject now records
+// per-team reconcile health and, after N consecutive failures, escalates a
+// canonical monitor.reconcile.failing.<TEAM> event onto the unified event log;
+// a recovering poll clears the alert.
+
+describe("reconcileProject — CTL-867 reconcile-health escalation", () => {
+  const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+  test("a reconcile that throws N consecutive times emits the failing alert exactly once", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    // First two failures: under the default threshold (3) → no alert yet.
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(2);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+
+    // Third consecutive failure crosses the threshold → exactly one alert.
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ team: "ENG", action: "failing", consecutiveFailures: 3 });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+
+    // Further failures do NOT re-fire the alert (latched until recovery).
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events).toHaveLength(1);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(5);
+  });
+
+  test("a recovering query clears the alert and resets the counter (emits a recovery event)", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    // Drive past the threshold so the team is alerting.
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(getReconcileHealth("ENG").alerting).toBe(true);
+    expect(events).toHaveLength(1);
+
+    // A successful poll: counter resets, alert clears, recovery event fires.
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent });
+    const health = getReconcileHealth("ENG");
+    expect(health.consecutiveFailures).toBe(0);
+    expect(health.alerting).toBe(false);
+    expect(health.lastSuccessTs).toBeTruthy();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ team: "ENG", action: "recovered" });
+    // The successful poll also rebuilt the eligible set (no longer frozen stale).
+    expect(getEligibleSet("ENG").map((t) => t.identifier)).toEqual(["ENG-1"]);
+  });
+
+  test("a single transient failure under the threshold never alerts; recovery emits nothing", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    reconcileProject("ENG", { exec: throwingExec, appendHealthEvent }); // 1 failure
+    const goodExec = execReturning({ ENG: [node("ENG-1")] });
+    reconcileProject("ENG", { exec: goodExec, appendHealthEvent }); // recovers before alert
+
+    // No alert was ever raised, so the recovery must NOT emit a spurious clear.
+    expect(events).toHaveLength(0);
+    expect(getReconcileHealth("ENG").consecutiveFailures).toBe(0);
+    expect(getReconcileHealth("ENG").alerting).toBe(false);
+  });
+
+  test("a new streak after a recovery re-alerts (alert is per-streak, not once-ever)", () => {
+    enroll("ENG", { status: "Ready" });
+    const events = [];
+    const appendHealthEvent = (e) => events.push(e);
+
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+    // failing(1) + recovered(1) so far.
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(1);
+
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    expect(events.filter((e) => e.action === "failing")).toHaveLength(2);
+  });
+
+  test("each call persists a per-team health marker the orch-monitor server reads", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+
+    const markers = readReconcileHealthMarkers();
+    expect(markers.ENG).toBeDefined();
+    expect(markers.ENG.lastSuccessTs).toBeTruthy();
+    expect(markers.ENG.alerting).toBe(false);
+    expect(markers.ENG.consecutiveFailures).toBe(0);
+
+    // After persistent failures the marker reflects the alert + frozen lastSuccessTs.
+    const priorTs = markers.ENG.lastSuccessTs;
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+    const failed = readReconcileHealthMarkers();
+    expect(failed.ENG.alerting).toBe(true);
+    expect(failed.ENG.consecutiveFailures).toBe(3);
+    expect(failed.ENG.lastSuccessTs).toBe(priorTs); // unchanged — eligible set is frozen stale
+  });
+
+  // CTL-867 cross-restart fix: the in-memory health map is empty on every process
+  // start. Without rehydration, the first post-restart failure for a team that has
+  // been failing for hours would seed a FRESH entry and writeHealthMarker would
+  // OVERWRITE the truthful disk marker — resetting consecutiveFailures to 1,
+  // dropping the real lastSuccessTs to null, and clearing the alerting latch. That
+  // is the exact starvation scenario CTL-867 targets, so it must survive a restart.
+  test("a daemon restart rehydrates per-team health from the disk marker (preserves lastSuccessTs + alerting, increments the failure count)", () => {
+    enroll("ENG", { status: "Ready" });
+    const appendHealthEvent = () => {};
+    const throwingExec = () => ({ code: 1, stdout: "", stderr: "removed-state: Ready" });
+
+    // Establish a truthful marker: one success (stamps a real lastSuccessTs), then
+    // drive past the threshold so the team is alerting with N consecutive failures.
+    reconcileProject("ENG", { exec: execReturning({ ENG: [node("ENG-1")] }), appendHealthEvent });
+    const staleSuccessTs = readReconcileHealthMarkers().ENG.lastSuccessTs;
+    expect(staleSuccessTs).toBeTruthy();
+    for (let i = 0; i < 3; i++) reconcileProject("ENG", { exec: throwingExec, appendHealthEvent });
+
+    const beforeRestart = readReconcileHealthMarkers().ENG;
+    expect(beforeRestart.alerting).toBe(true);
+    expect(beforeRestart.consecutiveFailures).toBe(3);
+    expect(beforeRestart.lastSuccessTs).toBe(staleSuccessTs);
+
+    // Simulate a daemon RESTART: the in-memory map is cleared, but the disk marker
+    // (the durable starvation truth) persists in the per-test reconcile-health dir.
+    __resetReconcileHealthForTests();
+    expect(getReconcileHealth("ENG")).toBeNull(); // confirm the in-memory map is empty
+
+    // ONE more failure after the restart. The seed must come from the disk marker,
+    // not fresh defaults — so the count increments to N+1, lastSuccessTs is the
+    // preserved stale timestamp (NOT null), and the alerting latch stays set.
+    recordReconcileFailure("ENG", "removed-state: Ready");
+
+    const afterRestart = readReconcileHealthMarkers().ENG;
+    expect(afterRestart.consecutiveFailures).toBe(4); // N+1, not reset to 1
+    expect(afterRestart.lastSuccessTs).toBe(staleSuccessTs); // preserved, not nulled
+    expect(afterRestart.alerting).toBe(true); // latch survives the restart
+
+    // The in-memory entry now mirrors the rehydrated-then-incremented state.
+    const inMem = getReconcileHealth("ENG");
+    expect(inMem.consecutiveFailures).toBe(4);
+    expect(inMem.lastSuccessTs).toBe(staleSuccessTs);
+    expect(inMem.alerting).toBe(true);
   });
 });
 
@@ -1507,5 +1670,409 @@ describe("handleIssueUpdatedEvent — onUpdate seam (CTL-749)", () => {
     expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(onUpdate.mock.calls[0][0]).toMatchObject({ identifier: "ENG-20", descriptionChanged: true });
     stopMonitor();
+  });
+});
+
+// ── CTL-781: respect-assignment + self-assign in dispatchTriage + sweep ──────
+
+describe("dispatchTriage — CTL-781 respect-assignment + self-assign", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+  const orchDir = "/orch-781";
+
+  function toTriageEvent(ticket) {
+    return {
+      event: "linear.issue.state_changed",
+      detail: { ticket, teamKey: "ENG", toState: "Triage" },
+    };
+  }
+
+  test("→Triage for a human-assigned ticket → NO dispatch, budget not decremented", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyAssignee = mock(() => ({ applied: true, reason: null }));
+    const fetchAssignee = () => ({ known: true, assignee: HUMAN });
+    handleStateChangedEvent(toTriageEvent("ENG-H1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(applyAssignee).not.toHaveBeenCalled();
+  });
+
+  test("→Triage for an unassigned ticket → dispatch fires AND applyAssignee called with botWriteId", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
+    const appendEvent = mock(() => {});
+    const applyAssignee = mock(() => ({ applied: true, reason: null }));
+    const fetchAssignee = () => ({ known: true, assignee: null });
+    handleStateChangedEvent(toTriageEvent("ENG-N1"), {
+      dispatch,
+      orchDir,
+      applyTriageStatus,
+      appendEvent,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(applyAssignee).toHaveBeenCalledTimes(1);
+    expect(applyAssignee.mock.calls[0][0]).toMatchObject({ ticket: "ENG-N1", userId: BOT });
+  });
+
+  test("→Triage for a bot-assigned ticket → dispatch fires (re-claim of own ticket OK)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = () => ({ known: true, assignee: BOT });
+    handleStateChangedEvent(toTriageEvent("ENG-B1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  test("assignee unknown (no gateway, live read fails) → dispatch SKIPPED this event (sweep retries)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = () => ({ known: false });
+    handleStateChangedEvent(toTriageEvent("ENG-U1"), {
+      dispatch,
+      orchDir,
+      botUserIds: new Set([BOT]),
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("no botUserIds threaded → gate skipped, dispatches as today (all existing tests unchanged)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const fetchAssignee = mock(() => ({ known: true, assignee: HUMAN }));
+    handleStateChangedEvent(toTriageEvent("ENG-ND1"), {
+      dispatch,
+      orchDir,
+      fetchAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(fetchAssignee).not.toHaveBeenCalled();
+  });
+
+  test("applyAssignee absent/failing → dispatch still completes, applyTriageStatus + appendEvent unaffected", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const applyTriageStatus = mock(() => ({ applied: true, verified: true, from_state: "Todo", to_state: "Triage", reason: null }));
+    const appendEvent = mock(() => {});
+    const applyAssignee = mock(() => ({ applied: false, reason: "transient" }));
+    const fetchAssignee = () => ({ known: true, assignee: null });
+    handleStateChangedEvent(toTriageEvent("ENG-FA1"), {
+      dispatch,
+      orchDir,
+      applyTriageStatus,
+      appendEvent,
+      botUserIds: new Set([BOT]),
+      botWriteId: BOT,
+      fetchAssignee,
+      applyAssignee,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(applyTriageStatus).toHaveBeenCalledTimes(1);
+    expect(appendEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sweepMissingTriage — CTL-781 threading", () => {
+  const BOT = "ff78d890-7906-4c22-b2f5-020bd150c790";
+  const HUMAN = "11111111-1111-1111-1111-111111111111";
+
+  test("sweep passes botUserIds/botWriteId/gateway through to dispatchTriage (human-assigned eligible ticket skipped)", () => {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [{ identifier: "ENG-SW1", state: "Todo", priority: 2, project: null }]);
+    const orchDir = mkdtempSync(join(tmpdir(), "sw-orch-"));
+    try {
+      const dispatch = mock(() => ({ code: 0 }));
+      const fetchAssignee = mock(() => ({ known: true, assignee: HUMAN }));
+      sweepMissingTriage({
+        orchDir,
+        dispatch,
+        botUserIds: new Set([BOT]),
+        fetchAssignee,
+        readMaxParallelFn: () => 5,
+        liveBackgroundCount: () => 0,
+      });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(fetchAssignee).toHaveBeenCalledWith("ENG-SW1", expect.anything());
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── CTL-862: HRW ownership filter + claim-on-dispatch (monitor dispatchTriage) ──
+//
+// Mirrors scheduler.test.mjs:7092-7206 but drives dispatchTriage through the
+// exported handleStateChangedEvent (→Triage branch) and sweepMissingTriage,
+// since dispatchTriage is not exported. The entry phase asserted in the claim
+// payload is "triage" (not "research" as in the scheduler). Safe-by-construction:
+// a single-host roster is an exact no-op until a 2nd host joins.
+describe("CTL-862 — HRW ownership + claim-on-dispatch (monitor dispatchTriage)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "ENG-1";
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+  const OTHER = ROSTER.find((h) => h !== OWNER);
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  const fakeOrchDir = "/fake-orch-862";
+
+  test("single-host roster is an exact no-op: claim NEVER attempted, dispatch proceeds", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(claimDispatch.calls).toHaveLength(0);
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+  });
+
+  test("CTL-1057: single-host roster with a NON-matching hostName is still a no-op — dispatch proceeds, no claim", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ["mini"],                   // roster entry...
+      hostName: "RyansMini250233.rozich", // ...does NOT match resolved host
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    // With the ungated filter this fails: dispatch is skipped because
+    // ownedBy("ENG-1", ["mini"], "RyansMini250233.rozich") === false.
+    expect(dispatch).toHaveBeenCalledWith({ orchDir: fakeOrchDir, ticket: TICKET, phase: "triage" });
+    expect(claimDispatch.calls).toHaveLength(0); // single-host never touches Linear
+  });
+
+  test("multi-host: a ticket OWNED by this host is dispatched + claim ran with phase 'triage'", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toEqual({ ticket: TICKET, hostName: OWNER, phase: "triage" });
+  });
+
+  test("multi-host: a ticket owned by ANOTHER host is filtered — no claim, no dispatch", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OTHER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(claimDispatch.calls).toHaveLength(0);
+  });
+
+  test("multi-host: a LOST claim defers — no dispatch, no triage status write", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: 2 });
+    const applyTriageStatus = mock(() => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }));
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: fakeOrchDir,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus,
+      appendEvent: () => {},
+    });
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(applyTriageStatus).not.toHaveBeenCalled();
+  });
+
+  test("sweepMissingTriage path: OWNED ticket is dispatched + claim ran with phase 'triage'", () => {
+    enroll("ENG", { status: "Ready" });
+    setProjectEligible("ENG", [{ identifier: TICKET, state: "Todo", priority: 1, project: null }]);
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 1 });
+    sweepMissingTriage({
+      orchDir: fakeOrchDir,
+      dispatch,
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+      readMaxParallelFn: () => 5,
+      liveBackgroundCount: () => 0,
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(claimDispatch.calls).toHaveLength(1);
+    expect(claimDispatch.calls[0]).toMatchObject({ ticket: TICKET, phase: "triage" });
+  });
+});
+
+// ── CTL-1028: triage forwards + persists cluster generation (monitor dispatchTriage) ──
+//
+// Mirrors the CTL-864 scheduler tests but drives dispatchTriage through the
+// exported handleStateChangedEvent (→Triage branch), since dispatchTriage is not
+// exported. The CTL-862 single-host exact-args assertion doubles as a regression
+// guard that single-host remains a true no-op after this change.
+describe("CTL-1028 — triage forwards + persists cluster generation (monitor dispatchTriage)", () => {
+  const ROSTER = ["mini", "mac-studio"];
+  const TICKET = "ENG-1";
+  const OWNER = ownerForTicket(TICKET, ROSTER);
+
+  const triageEvent = () => ({
+    event: "linear.issue.state_changed",
+    detail: { ticket: TICKET, teamKey: "ENG", toState: "Triage" },
+  });
+
+  const recordClaim = (verdict) => {
+    const calls = [];
+    const fn = (arg) => { calls.push(arg); return verdict; };
+    fn.calls = calls;
+    return fn;
+  };
+
+  test("multi-host won claim forwards claim.generation as clusterGeneration", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: true, generation: 7 });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: "/fake-orch-1028",
+      hosts: ROSTER,
+      hostName: OWNER,
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect(dispatch.mock.calls[0][0].clusterGeneration).toBe(7);
+  });
+
+  test("single-host passes NO clusterGeneration key (exact no-op)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    const claimDispatch = recordClaim({ won: false, generation: null });
+    handleStateChangedEvent(triageEvent(), {
+      dispatch,
+      orchDir: "/fake-orch-1028",
+      hosts: ["solo"],
+      hostName: "solo",
+      claimDispatch,
+      applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+      appendEvent: () => {},
+    });
+    expect("clusterGeneration" in dispatch.mock.calls[0][0]).toBe(false);
+  });
+
+  test("won multi-host claim persists cluster-generation.json", () => {
+    enroll("ENG", { status: "Ready" });
+    const orchDir = mkdtempSync(join(tmpdir(), "ctl-1028-persist-"));
+    try {
+      // dispatch stub creates the worker dir (mirrors dispatchCreatesDir in scheduler.test.mjs)
+      // so writeClusterGeneration's tmp+rename succeeds.
+      const dispatch = mock((args) => {
+        mkdirSync(join(orchDir, "workers", args.ticket), { recursive: true });
+        return { code: 0 };
+      });
+      const claimDispatch = recordClaim({ won: true, generation: 7 });
+      handleStateChangedEvent(triageEvent(), {
+        dispatch,
+        orchDir,
+        hosts: ROSTER,
+        hostName: OWNER,
+        claimDispatch,
+        applyTriageStatus: () => ({ applied: false, verified: false, from_state: null, to_state: null, reason: null }),
+        appendEvent: () => {},
+      });
+      expect(readClusterGeneration(orchDir, TICKET)).toBe(7);
+    } finally {
+      rmSync(orchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("dispatchTriage — drain gate (CTL-1095)", () => {
+  const orchDir = "/orch-1095-drain";
+
+  function toTriageEvent(ticket) {
+    return {
+      event: "linear.issue.state_changed",
+      detail: { ticket, teamKey: "ENG", toState: "Triage" },
+    };
+  }
+
+  test("dispatchTriage returns false and does not dispatch while draining", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-DR1"), {
+      dispatch,
+      orchDir,
+      isDraining: () => true,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test("dispatchTriage dispatches normally when not draining (regression guard)", () => {
+    enroll("ENG", { status: "Ready" });
+    const dispatch = mock(() => ({ code: 0 }));
+    handleStateChangedEvent(toTriageEvent("ENG-DR2"), {
+      dispatch,
+      orchDir,
+      isDraining: () => false,
+      triageBudget: { remaining: 5 },
+    });
+    expect(dispatch).toHaveBeenCalledTimes(1);
   });
 });

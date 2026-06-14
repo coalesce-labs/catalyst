@@ -465,6 +465,23 @@ EOF
 humanlayer thoughts sync
 ```
 
+### 12b. Compound closing ritual (CTL-189 / CTL-813 / CTL-831)
+
+Two learning steps run for every merged ticket, in order:
+
+1. **Estimation actuals** — invoke `/catalyst-dev:compound-estimate $ticket_id`. It prompts for
+   the post-merge re-score (CTL-746 scale: XS=1 S=3 M=5 L=8 XL=13) plus two short reflections,
+   appends the weekly compound-log entry (`thoughts/shared/retros/estimate/`), and offers a
+   corpus refresh when the reference-class corpus is stale. That entry is what
+   `refresh-corpus.sh` feeds back into `reference-class-corpus.json` as human ground truth —
+   skipping it is how the loop falls open again.
+2. **Cross-ticket retro** — invoke `/catalyst-dev:ticket-retro` (no arguments). It regenerates
+   `thoughts/shared/retros/ticket/<today>.md` over the since-last-retro window (same-day re-runs
+   are cumulative) and refreshes the watch-items the morning briefing surfaces.
+
+**Off the critical path**: if the user declines, the ticket was never estimated, or either skill
+errors, log one line and continue — never block the merge ritual on them.
+
 ### 13. Detect Deployments and Report Success
 
 After branch cleanup, check if the merge triggered any deployment workflows:

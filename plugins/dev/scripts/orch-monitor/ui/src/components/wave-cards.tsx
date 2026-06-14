@@ -38,14 +38,14 @@ function waveAccent(wave: Wave, workers: Record<string, WorkerState>): WaveAccen
 }
 
 const ACCENT_CLASS: Record<WaveAccent, string> = {
-  merged: "border-[#8a63d2]/60 bg-[#3a2a52]/25 hover:border-[#8a63d2]",
+  merged: "border-purple/20 bg-purple/10 hover:border-purple",
   blocked: "border-yellow/50 bg-yellow/10 hover:border-yellow",
   conflict: "border-red/50 bg-red/10 hover:border-red",
   neutral: "border-border bg-surface-3 hover:border-accent/50",
 };
 
 const ACCENT_SELECTED: Record<WaveAccent, string> = {
-  merged: "border-[#8a63d2] bg-[#3a2a52]/35",
+  merged: "border-purple bg-purple/15",
   blocked: "border-yellow bg-yellow/15",
   conflict: "border-red bg-red/15",
   neutral: "border-accent bg-surface-3",

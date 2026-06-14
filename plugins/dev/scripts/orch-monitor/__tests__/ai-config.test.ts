@@ -168,4 +168,22 @@ describe("loadAiConfig", () => {
     const cfg = loadAiConfig(projectPath, join(tmpRoot, "missing.json"));
     expect(cfg.enabled).toBe(false);
   });
+
+  it("enables claude-cli provider with no gateway or apiKey in secrets", () => {
+    const projectPath = join(tmpRoot, "project.json");
+    const secretsPath = join(tmpRoot, "secrets.json");
+    writeFileSync(projectPath, JSON.stringify({ catalyst: { ai: { enabled: true } } }));
+    writeFileSync(secretsPath, JSON.stringify({ ai: { provider: "claude-cli" } }));
+    const cfg = loadAiConfig(projectPath, secretsPath);
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.provider).toBe("claude-cli");
+  });
+
+  it("still disables non-claude-cli providers without a gateway/apiKey", () => {
+    const projectPath = join(tmpRoot, "project.json");
+    const secretsPath = join(tmpRoot, "secrets.json");
+    writeFileSync(projectPath, JSON.stringify({ catalyst: { ai: { enabled: true } } }));
+    writeFileSync(secretsPath, JSON.stringify({ ai: { provider: "anthropic" } }));
+    expect(loadAiConfig(projectPath, secretsPath).enabled).toBe(false);
+  });
 });
