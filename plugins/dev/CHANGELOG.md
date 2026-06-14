@@ -1,5 +1,28 @@
 # Changelog
 
+## [12.8.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.7.0...catalyst-dev-v12.8.0) (2026-06-14)
+
+
+### Features
+
+* **dev:** checkout-lag alarm on persistent refresh failure (CTL-1106 Phase 2) — ([70fe374](https://github.com/coalesce-labs/catalyst/commit/70fe37498fd4d1bdc4b633337136fa2082689e18))
+* **dev:** CTL-1099 — Warm/Slate brand theme system (warm default, Settings picker, semantic-invariant) ([#1944](https://github.com/coalesce-labs/catalyst/issues/1944)) ([e93ae79](https://github.com/coalesce-labs/catalyst/commit/e93ae79087db269a61ea21a80eedee3816aebfab))
+* **dev:** CTL-1102 — Execution tab (model layer + useJourney hook + full UI) ([#1965](https://github.com/coalesce-labs/catalyst/issues/1965)) ([e336115](https://github.com/coalesce-labs/catalyst/commit/e3361151e94ae392c8d69af44e341c07b3c2bbaf))
+* **dev:** CTL-1103 — Governance Rulebook textbook surface ([#1972](https://github.com/coalesce-labs/catalyst/issues/1972)) ([fa27e59](https://github.com/coalesce-labs/catalyst/commit/fa27e59b379b0446d3ce9f1851543ee8a55078b9))
+* **dev:** CTL-1106 — self-healing plugin-checkout refresh + checkout-lag alarm ([#1949](https://github.com/coalesce-labs/catalyst/issues/1949)) ([70fe374](https://github.com/coalesce-labs/catalyst/commit/70fe37498fd4d1bdc4b633337136fa2082689e18))
+* **dev:** CTL-1108 — populate humanQuestion for remediate-cycle-cap-exhausted escalations ([#1952](https://github.com/coalesce-labs/catalyst/issues/1952)) ([cdb1058](https://github.com/coalesce-labs/catalyst/commit/cdb1058526072f9cc4b7e20d1b3b9a9ab928368e))
+* **dev:** CTL-1110 — escalated ticket detail pane CTA-led explanation card ([#1957](https://github.com/coalesce-labs/catalyst/issues/1957)) ([86aeea0](https://github.com/coalesce-labs/catalyst/commit/86aeea084f837af7ffe8f5e2ea4375d5759941c4))
+* **dev:** CTL-1120 — prevent orch-monitor build artifacts from dirtying worktree ([#1974](https://github.com/coalesce-labs/catalyst/issues/1974)) ([405f6a2](https://github.com/coalesce-labs/catalyst/commit/405f6a2ef9fdd4aa16fb875bdd6af3d91f3e0d7a))
+
+
+### Bug Fixes
+
+* **dev:** CTL-1107 — guard empty start_args array in cmd_restart under bash 3.2 ([#1976](https://github.com/coalesce-labs/catalyst/issues/1976)) ([a23bc61](https://github.com/coalesce-labs/catalyst/commit/a23bc61fde5895af631723d996f4cbdc0905b145))
+* **dev:** CTL-1111 — _find_layer2_config drift warning + phase skill stderr pass-through ([#1969](https://github.com/coalesce-labs/catalyst/issues/1969)) ([15cb905](https://github.com/coalesce-labs/catalyst/commit/15cb9055e64b8925b93526b741fe6ea2d5e70c92))
+* **dev:** CTL-1118 — SHA-aware rebuild guard for catalyst-monitor hot-reload ([#1968](https://github.com/coalesce-labs/catalyst/issues/1968)) ([88afded](https://github.com/coalesce-labs/catalyst/commit/88afdedbee04bc349aa2546f53bc6566d01cea0b))
+* **dev:** CTL-1119 — workflow-scope push handling for phase agents ([#1975](https://github.com/coalesce-labs/catalyst/issues/1975)) ([72e4feb](https://github.com/coalesce-labs/catalyst/commit/72e4feb6e5b12161d150ec81822bb5a3dd332671))
+* **dev:** self-healing plugin-checkout refresh (CTL-1106 Phase 1) — fetch+reset --hard ([70fe374](https://github.com/coalesce-labs/catalyst/commit/70fe37498fd4d1bdc4b633337136fa2082689e18))
+
 ## [12.7.0](https://github.com/coalesce-labs/catalyst/compare/catalyst-dev-v12.6.0...catalyst-dev-v12.7.0) (2026-06-13)
 
 
