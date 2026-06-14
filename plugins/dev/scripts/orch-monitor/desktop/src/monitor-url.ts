@@ -19,9 +19,24 @@ export type MonitorUrlEnv = Record<string, string | undefined>;
  *   2. DEFAULT_MONITOR_URL ("http://mini.rozich.com:7400/").
  *
  * The returned value always ends in exactly one "/".
+ *
+ * A non-empty but malformed CATALYST_MONITOR_URL throws here — at the TS layer,
+ * naming the offending value — rather than being passed through to crash the
+ * Rust window builder with an unattributed `url.parse().expect()` panic
+ * (CTL-1112 verify finding: failure displacement).
  */
 export function resolveMonitorUrl(env: MonitorUrlEnv): string {
   const explicit = (env.CATALYST_MONITOR_URL ?? "").trim();
   if (!explicit) return DEFAULT_MONITOR_URL;
-  return `${explicit.replace(/\/+$/, "")}/`;
+  const normalized = `${explicit.replace(/\/+$/, "")}/`;
+  try {
+    // Parse to validate the override and return the canonical href; an
+    // absolute URL round-trips unchanged (the trailing slash is preserved).
+    return new URL(normalized).href;
+  } catch {
+    throw new Error(
+      `CATALYST_MONITOR_URL is not a valid URL: ${JSON.stringify(explicit)} ` +
+        `(expected an absolute URL like "http://localhost:7400")`,
+    );
+  }
 }

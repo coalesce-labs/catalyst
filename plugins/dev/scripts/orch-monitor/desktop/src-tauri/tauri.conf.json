@@ -10,15 +10,6 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "orch-monitor",
-        "width": 1400,
-        "height": 900,
-        "decorations": false,
-        "resizable": true
-      }
-    ],
     "security": {
       "csp": null
     }

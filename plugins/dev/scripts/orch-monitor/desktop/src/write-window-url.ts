@@ -13,5 +13,5 @@ export async function writeWindowUrl(env: MonitorUrlEnv, outPath: string): Promi
 
 if (import.meta.main) {
   const url = await writeWindowUrl(process.env, DEFAULT_OUT);
-  console.log(`[orch-monitor desktop] window URL → ${url}`);
+  console.info(`[orch-monitor desktop] window URL → ${url}`);
 }

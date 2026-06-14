@@ -25,4 +25,10 @@ describe("resolveMonitorUrl (CTL-1112)", () => {
     expect(resolveMonitorUrl({ CATALYST_MONITOR_URL: "" })).toBe(DEFAULT_MONITOR_URL);
     expect(resolveMonitorUrl({ CATALYST_MONITOR_URL: "   " })).toBe(DEFAULT_MONITOR_URL);
   });
+
+  it("throws a value-naming error on a non-empty malformed override", () => {
+    // Reported at the TS layer rather than displaced into the Rust
+    // url.parse().expect() panic (CTL-1112 verify finding).
+    expect(() => resolveMonitorUrl({ CATALYST_MONITOR_URL: "garbage" })).toThrow(/garbage/);
+  });
 });
