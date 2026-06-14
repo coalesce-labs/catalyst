@@ -1065,6 +1065,76 @@ install_git_stub_workflow_scope_reject_both "$P8C_BIN" "$P8C_LOG"
 ) || true
 assert_eq "3" "$(cat "${SCRATCH}/p8c.exit" 2>/dev/null)" "8c: no token + workflow rejection → rc=3 (escalation)"
 
+# ─── Suite 9: CTL-1119 remediate — SKILL.md capture-then-compare semantics ─────
+echo ""
+echo "Suite 9: phase-pr capture-then-compare (VERIFIED_SHA vs PR_HEAD_OID)"
+#
+# Regression guard for the 2>&1 bug: phase-pr/SKILL.md does
+#   VERIFIED_SHA="$(draft_pr_push_verify)"     # stdout ONLY
+#   ...
+#   [[ -n "$PR_HEAD_OID" && "$PR_HEAD_OID" != "$VERIFIED_SHA" ]] && fail
+# On any RETRY path (force-with-lease or token-routed), draft_pr_push_verify
+# prints _draft_pr_warn lines to STDERR before the SHA to STDOUT. Capturing with
+# 2>&1 folds the warnings in, making VERIFIED_SHA multi-line so the guard always
+# trips with a FALSE stale_ref_push_verify_failed. Suites 6–8 only assert rc and
+# stdout-with-2>/dev/null; none reproduces the caller's capture+compare — the
+# exact gap that let the regression land. This suite closes it.
+
+# 9a: force-with-lease retry — stdout-only capture equals a clean single-line SHA;
+#     the PR_HEAD_OID guard does NOT trip; the warning is NOT folded into the value.
+echo "9a: force-with-lease retry → VERIFIED_SHA is clean single-line SHA; guard not tripped"
+new_fixture pv-capture
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1   # commit A on origin
+  git commit --quiet --amend -m "feat: amended work commit"             # diverge → force-with-lease retry
+  source "$DRAFT_PR_LIB"
+  set +e
+  # Capture EXACTLY as phase-pr/SKILL.md does: stdout only, stderr flows away.
+  VERIFIED_SHA="$(draft_pr_push_verify 2>/dev/null)"; rc=$?
+  set -e
+  echo "$rc" > "${SCRATCH}/pv-cap.exit"
+  printf '%s' "$VERIFIED_SHA" > "${SCRATCH}/pv-cap.verified"
+  git rev-parse HEAD > "${SCRATCH}/pv-cap.head"
+) || true
+CAP_RC="$(cat "${SCRATCH}/pv-cap.exit" 2>/dev/null)"
+CAP_VERIFIED="$(cat "${SCRATCH}/pv-cap.verified" 2>/dev/null)"
+CAP_HEAD="$(cat "${SCRATCH}/pv-cap.head" 2>/dev/null)"
+assert_eq "0" "$CAP_RC" "9a: push_verify returns 0 on force-with-lease retry"
+# Clean: exactly the HEAD sha, single line, no warning text folded in.
+assert_eq "$CAP_HEAD" "$CAP_VERIFIED" "9a: VERIFIED_SHA == clean HEAD sha (no stderr folded in)"
+assert_not_contains "$CAP_VERIFIED" "draft-pr:" "9a: VERIFIED_SHA carries no _draft_pr_warn line"
+CAP_LINES="$(printf '%s' "$CAP_VERIFIED" | grep -c '' 2>/dev/null || echo 0)"
+assert_eq "1" "$CAP_LINES" "9a: VERIFIED_SHA is a single line"
+# The SKILL.md guard: PR_HEAD_OID (clean gh SHA) vs VERIFIED_SHA must MATCH → no false fail.
+if [[ -n "$CAP_HEAD" && "$CAP_HEAD" != "$CAP_VERIFIED" ]]; then
+  fail "9a: PR_HEAD_OID != VERIFIED_SHA guard would FALSELY trip (the 2>&1 regression)"
+else
+  pass "9a: PR_HEAD_OID == VERIFIED_SHA — guard does not falsely trip"
+fi
+
+# 9b: prove the test is meaningful — the OLD 2>&1 capture WOULD be multi-line on
+#     this same retry path (so 9a's single-line assertion actually has teeth).
+echo "9b: 2>&1 capture (the old buggy form) folds the warning in → multi-line"
+new_fixture pv-capture-bug
+(
+  cd "$WORK"
+  git -c core.hooksPath=/dev/null push -u origin HEAD >/dev/null 2>&1
+  git commit --quiet --amend -m "feat: amended work commit"
+  source "$DRAFT_PR_LIB"
+  set +e
+  BUGGY_SHA="$(draft_pr_push_verify 2>&1)"        # the regressed redirection
+  set -e
+  printf '%s' "$BUGGY_SHA" > "${SCRATCH}/pv-bug.verified"
+) || true
+BUG_VERIFIED="$(cat "${SCRATCH}/pv-bug.verified" 2>/dev/null)"
+BUG_LINES="$(printf '%s' "$BUG_VERIFIED" | grep -c '' 2>/dev/null || echo 0)"
+if [[ "$BUG_LINES" -gt 1 ]] || [[ "$BUG_VERIFIED" == *"draft-pr:"* ]]; then
+  pass "9b: 2>&1 form is multi-line / carries warning (confirms 9a guards a real bug)"
+else
+  fail "9b: expected 2>&1 capture to fold stderr in — got '$BUG_VERIFIED'"
+fi
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "─────────────────────────────────────────────"

@@ -188,7 +188,12 @@ if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   # missing 'workflow' OAuth scope; escalate with an actionable human_question.
   VERIFIED_SHA=""
   PUSH_VERIFY_RC=0
-  VERIFIED_SHA="$(draft_pr_push_verify 2>&1)" || PUSH_VERIFY_RC=$?
+  # CTL-1119 remediate: capture stdout ONLY (the verified SHA). draft_pr_push_verify
+  # writes diagnostic _draft_pr_warn lines to stderr on every retry path (force-with-lease
+  # AND the token-routed push); folding them in with 2>&1 made VERIFIED_SHA multi-line, so
+  # the PR_HEAD_OID != VERIFIED_SHA guard below always tripped and falsely failed the phase
+  # with stale_ref_push_verify_failed. No redirect: stderr flows to the worker log.
+  VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
   if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
     echo "phase-pr: push rejected — missing 'workflow' OAuth scope on existing PR path" >&2
     if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
@@ -274,7 +279,10 @@ itself.
    [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
    VERIFIED_SHA=""
    PUSH_VERIFY_RC=0
-   VERIFIED_SHA="$(draft_pr_push_verify 2>&1)" || PUSH_VERIFY_RC=$?
+   # CTL-1119 remediate: capture stdout ONLY (the verified SHA) — see the existing-PR path
+   # above. 2>&1 folded draft_pr_push_verify's stderr warnings into VERIFIED_SHA on retry
+   # paths, breaking the PR_HEAD_OID comparison with a false stale_ref_push_verify_failed.
+   VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
    if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
      echo "phase-pr: push rejected — missing 'workflow' OAuth scope on create-pr path" >&2
      if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
