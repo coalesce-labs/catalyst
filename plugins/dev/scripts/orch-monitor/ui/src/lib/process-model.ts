@@ -98,6 +98,9 @@ export interface FsmDescriptor {
   transitions: EdgeObject[];
   descriptorSha: string | null;
   rulesSha: string | null;
+  // Added by CTL-1101 Phase 4 — additive, may be absent on older descriptors.
+  phaseLinearKey?: Record<string, string | null>;
+  terminalLinearKey?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -127,6 +130,64 @@ const SELF_LOOP_KINDS = new Set<string>(["revive", "turn-cap"]);
 /** Falls back to DETOUR for unknown kinds (never throws). */
 export function edgeGroup(kind: string): TaxonomyGroup {
   return EDGE_TAXONOMY[kind as EdgeKind] ?? "DETOUR";
+}
+
+// ── Phase 4: Linear-mirror helpers ────────────────────────────────────────────
+
+// Maps the 6 non-null Linear stateMap keys to the 5 display state names.
+// Collapses verifying+reviewing → "Validate" (two keys share one state).
+// Source: phase-fsm.mjs:61-71 (the canonical stateMap).
+const LINEAR_STATE: Record<string, string> = {
+  research: "Research",
+  planning: "Plan",
+  inProgress: "Implement",
+  verifying: "Validate",
+  reviewing: "Validate",
+  inReview: "PR",
+  remediating: "Remediate",
+};
+
+/** Map a Linear stateMap key (or null) to its display state name. */
+export function linearStateForKey(k: string | null): string | null {
+  if (k === null) return null;
+  return LINEAR_STATE[k] ?? k;
+}
+
+export interface LinearMirrorRow {
+  step: string;
+  linearKey: string | null;
+  linearState: string | null;
+}
+
+export interface LinearMirrorCounts {
+  steps: number;
+  keys: number;
+  states: number;
+}
+
+/** Build the step → linearKey → linearState mapping for all phases + ancillary. */
+export function linearMirrorRows(d: FsmDescriptor): LinearMirrorRow[] {
+  const phaseKey = d.phaseLinearKey ?? {};
+  return [...d.phases, ...d.ancillaryPhases].map((step) => ({
+    step,
+    linearKey: phaseKey[step] ?? null,
+    linearState: linearStateForKey(phaseKey[step] ?? null),
+  }));
+}
+
+/** Derive the 10 → 6 → 5 count summary over d.phases only (never literal). */
+export function linearMirrorCounts(d: FsmDescriptor): LinearMirrorCounts {
+  const phaseKey = d.phaseLinearKey ?? {};
+  const steps = d.phases.length;
+  const nonNullKeys = d.phases.map((p) => phaseKey[p]).filter((k): k is string => k !== null && k !== undefined);
+  const keys = new Set(nonNullKeys).size;
+  const states = new Set(nonNullKeys.map(linearStateForKey).filter(Boolean)).size;
+  return { steps, keys, states };
+}
+
+/** True iff prevSha is non-null and differs from cur (session-scoped change detection). */
+export function shaChanged(prevSha: string | null, cur: string): boolean {
+  return prevSha !== null && prevSha !== cur;
 }
 
 // ── Layout constants ──────────────────────────────────────────────────────────

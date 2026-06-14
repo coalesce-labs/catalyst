@@ -240,9 +240,10 @@ const NODE_TYPES: NodeTypes = {
 export interface ProcessSurfaceProps {
   model: ProcessModel;
   children?: React.ReactNode;
+  onEdgeClick?: (from: string, to: string) => void;
 }
 
-export function ProcessSurface({ model, children }: ProcessSurfaceProps) {
+export function ProcessSurface({ model, children, onEdgeClick }: ProcessSurfaceProps) {
   const rfNodes = useMemo<Node[]>(
     () =>
       model.nodes.map((n) => ({
@@ -282,6 +283,7 @@ export function ProcessSurface({ model, children }: ProcessSurfaceProps) {
           colorMode="dark"
           style={{ background: C.s1 }}
           proOptions={{ hideAttribution: false }}
+          onEdgeClick={onEdgeClick ? (_, edge) => onEdgeClick(edge.source, edge.target) : undefined}
         >
           <Background color={C.borderSubtle} variant={BackgroundVariant.Dots} gap={20} size={1} />
           <Controls style={{ background: C.s2, border: `1px solid ${C.border}` }} />

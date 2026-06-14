@@ -1,5 +1,5 @@
-// source-sheet.tsx — CTL-1100 Phase 6: controlled Sheet showing rule/edge source.
-// Resolves guardText, datalog, SQL from manifest or descriptor transitions[].
+// source-sheet.tsx — CTL-1100 Phase 6 + CTL-1101 Phase 4: controlled Sheet showing rule/edge source.
+// Resolves guardText, datalog, sourceRef, SQL from manifest or descriptor transitions[].
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../ui/sheet";
 import {
   resolveRuleSource,
@@ -8,6 +8,7 @@ import {
   type FsmDescriptorLike,
   type SourceTarget,
 } from "./source-target";
+import { edgeGroup, TAXONOMY_COLOR } from "../../lib/process-model";
 
 interface SourceSheetProps {
   open: boolean;
@@ -21,7 +22,10 @@ export function SourceSheet({ open, onClose, target, manifest, descriptor }: Sou
   let guardText: string | null = null;
   let datalog: string | null = null;
   let sql: string | null = null;
+  let sourceRef: string | null = null;
   let title = "";
+  let groupLabel: string | null = null;
+  let groupColor: string | null = null;
 
   if (target?.kind === "rule" && manifest) {
     title = `Rule ${target.rule_id}`;
@@ -34,18 +38,44 @@ export function SourceSheet({ open, onClose, target, manifest, descriptor }: Sou
     const info = resolveEdgeSource(descriptor, target);
     guardText = info.guardText;
     datalog = info.datalog;
+    sourceRef = info.sourceRef;
+    const edge = descriptor.transitions.find((t) => t.from === target.from && t.to === target.to);
+    if (edge?.kind) {
+      const group = edgeGroup(edge.kind);
+      groupLabel = group;
+      groupColor = TAXONOMY_COLOR[group] ?? null;
+    }
   }
 
   return (
     <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <SheetContent side="right" className="w-[420px] sm:w-[540px]">
         <SheetHeader>
-          <SheetTitle>{title}</SheetTitle>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <SheetTitle style={{ flex: 1 }}>{title}</SheetTitle>
+            {groupLabel && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 600,
+                  letterSpacing: "0.07em",
+                  textTransform: "uppercase",
+                  color: groupColor ?? undefined,
+                  border: `1px solid ${groupColor ?? "currentColor"}`,
+                  borderRadius: 3,
+                  padding: "1px 6px",
+                }}
+              >
+                {groupLabel}
+              </span>
+            )}
+          </div>
         </SheetHeader>
         <div className="mt-4 space-y-4 text-sm">
           <Section label="Guard" content={guardText} />
           <Section label="Datalog" content={datalog} mono />
           {sql && <Section label="SQL" content={sql} mono />}
+          {sourceRef && <Section label="Source" content={sourceRef} mono />}
         </div>
       </SheetContent>
     </Sheet>

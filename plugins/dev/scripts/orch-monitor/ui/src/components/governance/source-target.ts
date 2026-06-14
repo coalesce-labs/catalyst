@@ -36,6 +36,7 @@ export interface SourceInfo {
   guardText: string | null;
   datalog: string | null;
   sql: string | null;
+  sourceRef: string | null;
 }
 
 /** Resolve source info for a rule by rule_id. Returns null when not found. */
@@ -46,6 +47,7 @@ export function resolveRuleSource(manifest: RuleManifest, target: SourceTarget &
     guardText: rule.guardText ?? null,
     datalog: rule.datalog ?? null,
     sql: rule.sql ?? null,
+    sourceRef: null, // rules have no sourceRef
   };
 }
 
@@ -58,5 +60,6 @@ export function resolveEdgeSource(descriptor: FsmDescriptorLike, target: SourceT
     guardText: edge?.guardText ?? null,
     datalog: edge?.datalog ?? null,
     sql: null, // edges have no SQL
+    sourceRef: edge?.sourceRef ?? null,
   };
 }

@@ -1,15 +1,21 @@
-// process-route.tsx — REASON › Process surface (CTL-1101 Phase 3).
+// process-route.tsx — REASON › Process surface (CTL-1101 Phase 3 + Phase 4).
 // Fetches /api/fsm/descriptor once, builds the pure model, renders the RF canvas.
-import { useEffect, useRef, useState } from "react";
+// Phase 4 adds SourceSheet (edge-click popover), ProcessRail (legend/facts/mirror), and MachineFooter.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { C } from "../../board/board-tokens";
 import { buildProcessModel, type ProcessModel, type FsmDescriptor } from "../../lib/process-model";
 import { ProcessSurface } from "../../board/process-canvas";
+import { ProcessRail } from "../governance/process-rail";
+import { SourceSheet } from "../governance/source-sheet";
+import type { SourceTarget } from "../governance/source-target";
 
 export function ProcessRoute() {
   const [model, setModel] = useState<ProcessModel | null>(null);
+  const [descriptor, setDescriptor] = useState<FsmDescriptor | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Phase 4 reads prevShaRef to flash the "machine changed" chip.
   const prevShaRef = useRef<string | null>(null);
+  const [sheetTarget, setSheetTarget] = useState<SourceTarget | null>(null);
+  const [sheetOpen, setSheetOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -18,10 +24,10 @@ export function ProcessRoute() {
         if (!r.ok) throw new Error(`/api/fsm/descriptor ${r.status}`);
         return r.json() as Promise<FsmDescriptor>;
       })
-      .then((descriptor) => {
+      .then((d) => {
         if (!alive) return;
-        prevShaRef.current = descriptor.descriptorSha ?? null;
-        setModel(buildProcessModel(descriptor));
+        setDescriptor(d);
+        setModel(buildProcessModel(d));
       })
       .catch((err: unknown) => {
         if (!alive) return;
@@ -30,6 +36,23 @@ export function ProcessRoute() {
     return () => {
       alive = false;
     };
+  }, []);
+
+  // Track prevSha after first load (session-scoped; not state so it doesn't re-render).
+  useEffect(() => {
+    if (descriptor?.descriptorSha && prevShaRef.current === null) {
+      prevShaRef.current = descriptor.descriptorSha;
+    }
+  }, [descriptor]);
+
+  const handleEdgeClick = useCallback((from: string, to: string) => {
+    setSheetTarget({ kind: "edge", from, to });
+    setSheetOpen(true);
+  }, []);
+
+  const handleOpenSource = useCallback((target: { kind: "edge"; from: string; to: string }) => {
+    setSheetTarget(target);
+    setSheetOpen(true);
   }, []);
 
   return (
@@ -58,14 +81,29 @@ export function ProcessRoute() {
           <div style={{ padding: 24, color: C.red, fontSize: 13 }}>
             Failed to load descriptor: {error}
           </div>
-        ) : !model ? (
+        ) : !model || !descriptor ? (
           <div style={{ padding: 24, color: C.fgMuted, fontSize: 13 }}>
             Loading process map…
           </div>
         ) : (
-          <ProcessSurface model={model} />
+          <ProcessSurface model={model} onEdgeClick={handleEdgeClick}>
+            <ProcessRail
+              descriptor={descriptor}
+              descriptorSha={descriptor.descriptorSha ?? null}
+              prevSha={prevShaRef.current}
+              onOpenSource={handleOpenSource}
+            />
+          </ProcessSurface>
         )}
       </div>
+
+      <SourceSheet
+        open={sheetOpen}
+        onClose={() => setSheetOpen(false)}
+        target={sheetTarget}
+        manifest={null}
+        descriptor={descriptor}
+      />
     </div>
   );
 }
