@@ -65,6 +65,9 @@ export interface BoardWorker {
    *  that the job needs user input / a permission grant). false otherwise.
    *  Optional so existing BoardWorker fixtures stay valid without back-fill. */
   waitingOnUser?: boolean;
+  /** CTL-1129: the daemon's Claude account email (from `claude auth status --json`).
+   *  null when the board-data layer could not resolve it. Optional for back-compat. */
+  ownerAccount?: string | null;
 }
 
 export interface BoardPhaseCost {
@@ -241,6 +244,10 @@ export interface BoardPayload {
   /** CTL-1050: server-decorated current service outages (down only). Absent when
    *  the registry has not resolved any down entry. */
   serviceHealth?: BoardServiceHealth;
+  /** CTL-1129: the operator identity — the orch-monitor host's Claude account email
+   *  (from `claude auth status --json`), for the View-in-Claude account-mismatch check.
+   *  null when unresolved. Optional so `ContractPayloadFitsUiView` stays assignable. */
+  daemonAccount?: string | null;
 }
 
 export const PHASE_ORDER: string[];

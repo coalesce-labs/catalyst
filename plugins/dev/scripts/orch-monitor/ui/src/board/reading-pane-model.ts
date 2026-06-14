@@ -53,6 +53,9 @@ export interface ViewInClaude {
   /** https://claude.ai/code/<sessionId> — the agent's Claude Code session. */
   href: string;
   sessionId: string;
+  /** CTL-1129: the session owner's Claude account email (BoardWorker.ownerAccount),
+   *  or null when unknown. Drives the account-mismatch warning. */
+  ownerAccount: string | null;
 }
 
 /**
@@ -74,7 +77,36 @@ export function viewInClaudeFor(
   );
   const sessionId = worker?.sessionId;
   if (sessionId == null || sessionId === "") return null;
-  return { href: `https://claude.ai/code/${sessionId}`, sessionId };
+  return {
+    href: `https://claude.ai/code/${sessionId}`,
+    sessionId,
+    ownerAccount: worker?.ownerAccount ?? null,
+  };
+}
+
+/** CTL-1129: the account-mismatch view-model for the View-in-Claude pill. `mismatch`
+ *  is true ONLY when both accounts are known AND differ (fail-open: a null on either
+ *  side never warns). `resumeCommand` is ALWAYS offered — the escape hatch that runs
+ *  as the daemon identity, independent of the warning. */
+export interface AccountMismatch {
+  mismatch: boolean;
+  ownerAccount: string | null;
+  resumeCommand: string;
+}
+
+export function accountMismatchFor(
+  link: ViewInClaude,
+  operatorAccount: string | null | undefined,
+): AccountMismatch {
+  const owner = link.ownerAccount;
+  const operator = operatorAccount ?? null;
+  const mismatch =
+    owner != null && owner !== "" && operator != null && operator !== "" && owner !== operator;
+  return {
+    mismatch,
+    ownerAccount: owner,
+    resumeCommand: `claude --resume ${link.sessionId}`,
+  };
 }
 
 /**

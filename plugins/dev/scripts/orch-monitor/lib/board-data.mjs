@@ -339,6 +339,33 @@ async function liveAgents() {
   }
 }
 
+// CTL-1129: pure JSON→email so the parse is unit-testable without spawning `claude`.
+// Fail-open: any malformed/loggedOut/missing-email input yields null, never throws.
+export function parseAccountEmail(stdout) {
+  try {
+    const j = JSON.parse(stdout);
+    const email = typeof j?.email === "string" ? j.email : "";
+    return email !== "" ? email : null;
+  } catch {
+    return null;
+  }
+}
+
+// ── daemon Claude account via `claude auth status --json` ───────────────────
+// The authoritative daemon-identity source — reads the OAuth credential and
+// returns the account email WITHOUT exposing the token. Same fail-open shape as
+// liveAgents(): null on any error/timeout (the View-in-Claude check fails open).
+async function daemonAccount() {
+  try {
+    const { stdout } = await execFileP("claude", ["auth", "status", "--json"], {
+      encoding: "utf8", timeout: 8000, maxBuffer: 1 * 1024 * 1024,
+    });
+    return parseAccountEmail(stdout);
+  } catch {
+    return null;
+  }
+}
+
 // "o-CTL-680:CTL-680:verify:1" → {orch, ticket, phase, cont}; also "CTL-680 verify"
 function parseAgentName(name = "") {
   let m = /^o-([^:]+):([^:]+):([^:]+):(\d+)$/.exec(name);
@@ -1036,9 +1063,10 @@ async function loadDispatchCooldowns(now) {
 
 // ── main assembly ───────────────────────────────────────────────────────────
 export async function assembleBoard() {
-  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns] = await Promise.all([
+  const [agents, costs, phaseCostsByTicket, eligible, linfo, mp, catalystSessByUuid, cooldowns,
+         daemonEmail] = await Promise.all([
     liveAgents(), costByTicket(), costByPhase(), loadEligible(), linearInfo(), maxParallel(),
-    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()),
+    catalystSessionByCcUuid(), loadDispatchCooldowns(Date.now()), daemonAccount(),
   ]);
   const eligibleIndex = Object.fromEntries(eligible.map((e) => [e.id, e]));
 
@@ -1104,6 +1132,10 @@ export async function assembleBoard() {
       // classification so the operator sees a distinct "waiting on you" group
       // rather than having it silently merge into the zombie corpse bucket.
       waitingOnUser: isBgJobWaitingOnUser(jobState),
+      // CTL-1129: the daemon's Claude account that owns this agent session — drives the
+      // View-in-Claude account-mismatch warning. Daemon-global (claude auth status), not
+      // per-agent (claude agents --json has no account field). null when unresolved.
+      ownerAccount: daemonEmail,
     };
   }));
   // CTL-928: a worker whose durable bg job is dead is NOT in flight. Partition
@@ -1380,6 +1412,9 @@ export async function assembleBoard() {
     workers: workers.sort((a, b) => (a.runtimeMs ?? 0) - (b.runtimeMs ?? 0)),
     tickets,
     queue,
+    // CTL-1129: the operator identity for the View-in-Claude mismatch check (same
+    // claude-account source as each worker's ownerAccount; single-host ⇒ they match).
+    daemonAccount: daemonEmail,
   };
 }
 

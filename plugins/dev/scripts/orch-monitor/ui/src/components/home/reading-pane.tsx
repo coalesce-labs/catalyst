@@ -51,6 +51,7 @@ import { isNeedsYouSection, type InboxRow } from "@/board/home-inbox";
 import { isDoneStatus, isPhase, phaseIndexOf, PHASE_LABEL } from "@/board/phase-model";
 import {
   aboutBlockFor,
+  accountMismatchFor,
   accentFor,
   askFor,
   blockerFor,
@@ -379,6 +380,7 @@ export function ReadingPane({
   workers,
   onAct,
   respondStatus = "idle",
+  operatorAccount = null,
 }: {
   row: InboxRow | null;
   /** The resident read-model workers — the View-in-Claude session id is the
@@ -390,11 +392,16 @@ export function ReadingPane({
   onAct?: (id: string) => void;
   /** CTL-903 (HOME5): the optimistic write status for the selected row. */
   respondStatus?: RespondRowStatus;
+  /** CTL-1129: the operator identity (payload.daemonAccount) — compared against the
+   *  session owner to decide the View-in-Claude mismatch warning. null ⇒ fail open. */
+  operatorAccount?: string | null;
 }) {
   if (!row) return <NothingSelected />;
 
   const needsYou = isNeedsYouSection(row.section);
   const viewInClaude = viewInClaudeFor(row, workers ?? []);
+  // CTL-1129: account-mismatch view-model — null when there's no session to link.
+  const mismatchInfo = viewInClaude ? accountMismatchFor(viewInClaude, operatorAccount) : null;
 
   // CTL-1042: lazy AI summary fetch — triggered only for needs-you items on select.
   const summaryState = useInboxSummary(row.id, row.ticket.phase, needsYou);
@@ -435,41 +442,75 @@ export function ReadingPane({
             <h1 className="mt-1 text-[18px] leading-snug text-fg">{row.title}</h1>
           </div>
 
-          {/* Action pills: View-in-Claude (CTL-1041) + research/plan artifact links (CTL-1042). */}
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {viewInClaude && (
-              <Button
-                asChild
-                variant="outline"
-                size="sm"
-                data-view-in-claude={viewInClaude.sessionId}
+          {/* Action pills: View-in-Claude (CTL-1041) + research/plan artifact links (CTL-1042).
+              CTL-1129: the pill block is now a column so the amber mismatch warning
+              sits below the pill row without displacing surrounding layout. */}
+          <div className="flex shrink-0 flex-col items-end gap-1.5">
+            <div className="flex flex-wrap items-center gap-2">
+              {viewInClaude && (
+                <Button
+                  asChild
+                  variant="outline"
+                  size="sm"
+                  data-view-in-claude={viewInClaude.sessionId}
+                >
+                  <a
+                    href={viewInClaude.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title="Open this agent's Claude Code session in a new tab"
+                  >
+                    <ClaudeMark className="size-3.5" />
+                    View in Claude
+                    {viewInClaude.ownerAccount && (
+                      <span className="ml-1 text-[10px] text-muted opacity-75">
+                        {viewInClaude.ownerAccount}
+                      </span>
+                    )}
+                    <ExternalLinkIcon className="size-3.5" />
+                  </a>
+                </Button>
+              )}
+              {docArtifacts.map((a) => (
+                <Button key={a.kind} asChild variant="outline" size="sm">
+                  <a
+                    href={artifactHref(row.id, a.kind)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`Open ${a.kind} doc`}
+                    data-artifact-link={a.kind}
+                  >
+                    {a.kind === "research" ? "Research" : "Plan"}
+                    <ExternalLinkIcon className="size-3.5" />
+                  </a>
+                </Button>
+              ))}
+            </div>
+            {mismatchInfo?.mismatch && (
+              <div
+                data-account-mismatch
+                className="flex flex-col gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px]"
               >
-                <a
-                  href={viewInClaude.href}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Open this agent's Claude Code session in a new tab"
-                >
-                  <ClaudeMark className="size-3.5" />
-                  View in Claude
-                  <ExternalLinkIcon className="size-3.5" />
-                </a>
-              </Button>
+                <div className="font-medium text-amber-600 dark:text-amber-400">
+                  Account mismatch — session owned by{" "}
+                  <span className="font-mono">{mismatchInfo.ownerAccount}</span>
+                </div>
+                <div className="flex items-center gap-2 text-muted">
+                  <span>Run on the daemon host:</span>
+                  <code data-resume-command className="rounded bg-muted/40 px-1 font-mono">
+                    {mismatchInfo.resumeCommand}
+                  </code>
+                  <button
+                    type="button"
+                    className="ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10px] hover:bg-muted/60"
+                    onClick={() => void navigator.clipboard.writeText(mismatchInfo.resumeCommand)}
+                    title="Copy to clipboard"
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
             )}
-            {docArtifacts.map((a) => (
-              <Button key={a.kind} asChild variant="outline" size="sm">
-                <a
-                  href={artifactHref(row.id, a.kind)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title={`Open ${a.kind} doc`}
-                  data-artifact-link={a.kind}
-                >
-                  {a.kind === "research" ? "Research" : "Plan"}
-                  <ExternalLinkIcon className="size-3.5" />
-                </a>
-              </Button>
-            ))}
           </div>
         </div>
 

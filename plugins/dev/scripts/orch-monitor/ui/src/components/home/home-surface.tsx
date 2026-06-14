@@ -334,6 +334,7 @@ export function HomeSurface() {
               workers={payload?.workers ?? []}
               onAct={onAct}
               respondStatus={selectedRow ? statusFor(selectedRow.id) : "idle"}
+              operatorAccount={payload?.daemonAccount ?? null}
             />
           )
         }
