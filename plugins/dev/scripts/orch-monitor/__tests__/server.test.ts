@@ -8,15 +8,21 @@ import type { BriefingProvider } from "../lib/ai-briefing";
 import type { MonitorSnapshot } from "../lib/state-reader";
 import type { LinearTicket } from "../lib/linear";
 import { createPreviewFetcher } from "../lib/preview-status";
+import { ensureTestDist } from "./helpers/test-dist";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
 let tmpDir: string;
+let wtDir: string;
+let prevMonitorPublicDir: string | undefined;
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "orch-monitor-test-"));
-  const wtDir = join(tmpDir, "wt");
+  wtDir = join(tmpDir, "wt");
   mkdirSync(wtDir, { recursive: true });
+
+  prevMonitorPublicDir = process.env.MONITOR_PUBLIC_DIR;
+  process.env.MONITOR_PUBLIC_DIR = ensureTestDist();
 
   const orchDir = join(wtDir, "orch-test");
   mkdirSync(join(orchDir, "workers"), { recursive: true });
@@ -49,10 +55,12 @@ beforeAll(() => {
   const annotationsDbPath = join(tmpDir, "annotations.db");
   server = createServer({ port: 0, wtDir, startWatcher: false, annotationsDbPath });
   baseUrl = `http://localhost:${server.port}`;
-});
+}, 60_000);
 
 afterAll(() => {
   void server?.stop(true);
+  if (prevMonitorPublicDir === undefined) delete process.env.MONITOR_PUBLIC_DIR;
+  else process.env.MONITOR_PUBLIC_DIR = prevMonitorPublicDir;
   if (tmpDir) {
     try {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -2106,6 +2114,36 @@ describe("/api/ticket-substeps (CTL-753)", () => {
     } finally {
       void substepServer.stop(true);
       rmSync(substepTmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// CTL-1120: default publicDir honors MONITOR_PUBLIC_DIR when opts.publicDir is omitted.
+describe("publicDir resolution", () => {
+  it("default publicDir honors MONITOR_PUBLIC_DIR when opts.publicDir is omitted", async () => {
+    const envDist = mkdtempSync(join(tmpdir(), "orch-monitor-distenv-"));
+    writeFileSync(
+      join(envDist, "index.html"),
+      '<!doctype html><html><body><div id="env-test-root"></div></body></html>',
+    );
+    const prev = process.env.MONITOR_PUBLIC_DIR;
+    process.env.MONITOR_PUBLIC_DIR = envDist;
+    let s: ReturnType<typeof createServer> | undefined;
+    try {
+      s = createServer({
+        port: 0,
+        wtDir,
+        startWatcher: false,
+        annotationsDbPath: join(tmpdir(), `ann-env-test.db`),
+      });
+      const res = await fetch(`http://localhost:${s.port}/`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toContain('id="env-test-root"');
+    } finally {
+      void s?.stop(true);
+      if (prev === undefined) delete process.env.MONITOR_PUBLIC_DIR;
+      else process.env.MONITOR_PUBLIC_DIR = prev;
+      rmSync(envDist, { recursive: true, force: true });
     }
   });
 });

@@ -3,14 +3,19 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { createServer } from "../server";
+import { ensureTestDist } from "./helpers/test-dist";
 
 let server: ReturnType<typeof createServer>;
 let baseUrl: string;
 let tmpDir: string;
 let html: string;
+let prevMonitorPublicDir: string | undefined;
 
 beforeAll(async () => {
   tmpDir = mkdtempSync(join(tmpdir(), "orch-monitor-ui-test-"));
+
+  prevMonitorPublicDir = process.env.MONITOR_PUBLIC_DIR;
+  process.env.MONITOR_PUBLIC_DIR = ensureTestDist();
   const wtDir = join(tmpDir, "wt");
   mkdirSync(wtDir, { recursive: true });
 
@@ -58,10 +63,12 @@ beforeAll(async () => {
   // / now serves the CTL-727 board.
   const res = await fetch(`${baseUrl}/legacy`);
   html = await res.text();
-});
+}, 60_000);
 
 afterAll(() => {
   void server?.stop(true);
+  if (prevMonitorPublicDir === undefined) delete process.env.MONITOR_PUBLIC_DIR;
+  else process.env.MONITOR_PUBLIC_DIR = prevMonitorPublicDir;
   if (tmpDir) {
     try {
       rmSync(tmpDir, { recursive: true, force: true });
