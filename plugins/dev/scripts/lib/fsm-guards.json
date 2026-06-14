@@ -40,5 +40,11 @@
     "datalog": null,
     "sourceRef": "plugins/dev/scripts/lib/phase-fsm.mjs:194-196",
     "classification": "turn-cap"
+  },
+  "*->advance": {
+    "guardText": "deps ✓ ∧ admission — phase signal done ∨ dep-skipped, gates satisfied",
+    "datalog": "advance_to(Next, T) :- phase_done(Cur, T), next_phase(Cur, Next), admission_ok(T).",
+    "sourceRef": "plugins/dev/scripts/execution-core/scheduler.mjs#deriveAdvancement",
+    "classification": "advance"
   }
 }
