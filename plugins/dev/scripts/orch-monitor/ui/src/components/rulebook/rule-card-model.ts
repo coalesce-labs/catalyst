@@ -1,4 +1,4 @@
-// rule-card.ts — CTL-1103 Phase 3: pure tab-data helper for RuleCard.
+// rule-card-model.ts — CTL-1103 Phase 3: pure tab-data helper for RuleCard.
 // Exported for tests; imported by rule-card.tsx.
 import type { RuleArm, RuleManifestRule } from "../../lib/rulebook-model";
 

@@ -75,6 +75,16 @@ describe("countFiringByRule", () => {
     expect(counts.has("R10a")).toBe(false);
     expect(counts.has("R10b")).toBe(false);
   });
+
+  it("counts distinct subjects, not frames, when arms share a subject", () => {
+    // R10a and R10b both fire on the same subject — that is ONE firing subject
+    // for logical R10, not two.
+    const store = makeStore([
+      { rule_id: "R10a", subject: "CTL-1/plan" },
+      { rule_id: "R10b", subject: "CTL-1/plan" },
+    ]);
+    expect(countFiringByRule(store).get("R10")).toBe(1);
+  });
 });
 
 // ── subjectsForRule ───────────────────────────────────────────────────────────
@@ -102,6 +112,14 @@ describe("subjectsForRule", () => {
     const subjects = subjectsForRule(store, "R10");
     expect(subjects).toContain("CTL-1/plan");
     expect(subjects).toContain("CTL-2/plan");
+  });
+
+  it("dedups subjects shared across arms (no duplicate React keys)", () => {
+    const store = makeStore([
+      { rule_id: "R10a", subject: "CTL-1/plan" },
+      { rule_id: "R10b", subject: "CTL-1/plan" },
+    ]);
+    expect(subjectsForRule(store, "R10")).toEqual(["CTL-1/plan"]);
   });
 
   it("returns empty array from empty store", () => {
