@@ -185,17 +185,22 @@ sweep_signals() {
       continue
     fi
 
-    # CTL-1065: build structured explanation via CLI shim (always exits 0).
+    # CTL-1130: build typed DECISION explanation via CLI shim (always exits 0).
+    # GATE 1 passes (re-dispatch is possible); no single dominant option → DECISION.
     local sig_ticket sig_phase
     sig_ticket="$(jq -r '.ticket // empty' "$f" 2>/dev/null)"
     sig_phase="$(jq -r '.phase // empty' "$f" 2>/dev/null)"
     local expl_json
     expl_json="$(node "${SCRIPT_DIR}/execution-core/escalation-explain.mjs" \
       --ticket "$sig_ticket" --phase "$sig_phase" \
-      --what-failed "orphan-sweep found a stale phase signal for ${sig_ticket}/${sig_phase}" \
+      --type decision \
+      --problem "orphan-sweep found a stale phase signal for ${sig_ticket}/${sig_phase}: bg job ${bg_job_id} is gone but the signal was never finalized" \
+      --call-to-action "re-dispatch ${sig_ticket}/${sig_phase}, or mark it abandoned?" \
+      --options "$(jq -nc --arg t "${sig_ticket}" --arg p "${sig_phase}" \
+        '[{"label":"re-dispatch \($t)/\($p)","tradeoff":"may re-hit the same failure if root cause unresolved"},{"label":"mark abandoned","tradeoff":"loses any partial work that was not committed"}]' \
+        2>/dev/null || echo '[{"label":"re-dispatch","tradeoff":"may fail again"},{"label":"abandon","tradeoff":"lose progress"}]')" \
+      --why-you "re-dispatch vs abandon is a priority call the orchestrator cannot compute without human context" \
       --observed "$(jq -nc --arg job "$bg_job_id" '{bgJobId:$job,staleMarker:"orphan-sweep-stale"}' 2>/dev/null || echo '{}')" \
-      --why-gave-up "the bg job is gone but the signal was never finalized" \
-      --human-question "re-dispatch ${sig_ticket}/${sig_phase}, or mark it abandoned?" \
       2>/dev/null || echo '{}')"
     # CTL-1065: guard on a prior line — `${expl_json:-{}}` is a bash trap: the
     # parser closes the expansion at the FIRST `}`, so a non-empty value like

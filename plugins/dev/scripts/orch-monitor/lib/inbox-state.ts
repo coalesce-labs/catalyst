@@ -43,7 +43,7 @@ export interface InboxItemState {
    *  null when the transcript is absent or unreadable. */
   transcriptTail: string | null;
   bgJobId: string | null;
-  /** CTL-1065: structured escalation question from signal.explanation.human_question.
+  /** CTL-1130: typed-union call_to_action from signal.explanation.call_to_action.
    *  null when no explanation is present or the field is absent (back-compat). */
   humanQuestion: string | null;
 }
@@ -248,7 +248,7 @@ export function collectInboxItemState(
 
   const expl = isRecord(signal.explanation) ? signal.explanation : null;
   const humanQuestion =
-    expl !== null && typeof expl.human_question === "string" ? expl.human_question : null;
+    expl !== null && typeof expl.call_to_action === "string" ? expl.call_to_action : null;
 
   return Promise.resolve({
     ticket,

@@ -531,12 +531,12 @@ describe("MULTI-TICK LADDER — R4 → R10 → R11 → R12 in real tick order, p
 });
 
 // ──────────────────────────────────────────────────────────────────────────
-// CTL-1065: structured explanation in escalate.human events
+// CTL-1130: typed-union explanation in escalate.human events
 // ──────────────────────────────────────────────────────────────────────────
 import { validateExplanation } from "../escalation-explanation.mjs";
 
-describe("CTL-1065: executeEscalations emits structured explanation", () => {
-  test("page emits escalate.human with a valid explanation when evidenceBySubject provided", () => {
+describe("CTL-1130: executeEscalations emits typed-union explanation", () => {
+  test("R12 page emits a typed-union explanation (authorization by default)", () => {
     seedCfg("max_attempts", 2);
     const tickId = insertTick(NOW);
     const subject = "CTL-7/implement";
@@ -562,13 +562,80 @@ describe("CTL-1065: executeEscalations emits structured explanation", () => {
 
     const ev = events.find((e) => e["event.name"] === "escalate.human");
     expect(ev).toBeTruthy();
-    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
-    expect(ev.payload.explanation.observed.bgJobId).toBe("ab12ef34");
-    // backward compat: why still present
+    const expl = ev.payload.explanation;
+    expect(validateExplanation(expl).valid).toBe(true);
+    expect(["manual", "authorization", "decision"]).toContain(expl.escalation_type);
+    // observed passthrough: bgJobId must survive (D1)
+    expect(expl.observed?.bgJobId).toBe("ab12ef34");
+    // why still present on the event payload (backward compat)
     expect(ev.payload.why).toBe("stalled-alive");
   });
 
-  test("missing evidence still pages with a coerced explanation", () => {
+  test("page builds MANUAL when evidence carries canExecute:false + blockedCapability", () => {
+    seedCfg("max_attempts", 2);
+    const tickId = insertTick(NOW);
+    const subject = "CTL-7/pr";
+    insertEscalateHuman(tickId, subject, "push-rejected");
+    insertWakeIntent(tickId, subject, { attempts: 1, outcome: null });
+
+    const events = [];
+    executeEscalations(db, tickId, {
+      orchDir: scratch(),
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => true,
+      evidenceBySubject: {
+        "CTL-7/pr": {
+          canExecute: false,
+          blockedCapability: "host token lacks workflow OAuth scope",
+          logsOutput: "push rejected: missing workflow scope",
+          jobState: {},
+        },
+      },
+    });
+
+    const ev = events.find((e) => e["event.name"] === "escalate.human");
+    expect(ev).toBeTruthy();
+    expect(ev.payload.explanation.escalation_type).toBe("manual");
+    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
+  });
+
+  test("page builds DECISION when evidence carries escalation_type:'decision'", () => {
+    seedCfg("max_attempts", 2);
+    const tickId = insertTick(NOW);
+    const subject = "CTL-7/implement";
+    insertEscalateHuman(tickId, subject, "stalled-alive");
+    insertWakeIntent(tickId, subject, { attempts: 2, outcome: null });
+
+    const events = [];
+    executeEscalations(db, tickId, {
+      orchDir: scratch(),
+      writeStatus: { applyLabel: () => ({ applied: true }) },
+      appendEvent: (e) => events.push(e),
+      enforce: true,
+      labelOnceFn: () => true,
+      evidenceBySubject: {
+        "CTL-7/implement": {
+          escalation_type: "decision",
+          options: [
+            { label: "re-dispatch", tradeoff: "may fail again" },
+            { label: "abandon", tradeoff: "lose progress" },
+          ],
+          why_you: "priority call the scheduler cannot compute",
+          logsOutput: "dispatch exhausted",
+          jobState: {},
+        },
+      },
+    });
+
+    const ev = events.find((e) => e["event.name"] === "escalate.human");
+    expect(ev).toBeTruthy();
+    expect(ev.payload.explanation.escalation_type).toBe("decision");
+    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
+  });
+
+  test("missing evidence degrades to a valid DECISION (never manual)", () => {
     seedCfg("max_attempts", 2);
     const tickId = insertTick(NOW);
     const subject = "CTL-7/implement";
@@ -587,7 +654,9 @@ describe("CTL-1065: executeEscalations emits structured explanation", () => {
 
     const ev = events.find((e) => e["event.name"] === "escalate.human");
     expect(ev).toBeTruthy();
-    expect(validateExplanation(ev.payload.explanation).valid).toBe(true);
-    expect(ev.payload.explanation.human_question).toContain("CTL-7");
+    const expl = ev.payload.explanation;
+    expect(validateExplanation(expl).valid).toBe(true);
+    expect(expl.escalation_type).not.toBe("manual");
+    expect(expl.call_to_action).toContain("CTL-7");
   });
 });

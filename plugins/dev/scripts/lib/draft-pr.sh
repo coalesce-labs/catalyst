@@ -17,8 +17,8 @@
 #
 # Reserved return codes:
 #   3 — draft_pr_push_verify: push rejected for missing 'workflow' OAuth scope and no
-#       CATALYST_WORKFLOW_GITHUB_TOKEN fallback. Callers translate this into a structured
-#       human_question escalation. (CTL-1119)
+#       CATALYST_WORKFLOW_GITHUB_TOKEN fallback. Callers translate this into a MANUAL
+#       explanation.call_to_action escalation. (CTL-1119/CTL-1130)
 
 _draft_pr_warn() {
   printf 'draft-pr: %s\n' "$*" >&2
@@ -221,7 +221,7 @@ draft_pr_promote() {
 #   - First attempt: plain push (fast-forward). CTL-693 hook suppression.
 #   - Workflow-scope rejection (rc=3): when CATALYST_WORKFLOW_GITHUB_TOKEN is
 #     configured, retries through that credential transparently. When unset,
-#     returns 3 so callers can escalate with a structured human_question. (CTL-1119)
+#     returns 3 so callers can escalate with a MANUAL explanation.call_to_action. (CTL-1119/CTL-1130)
 #   - Non-fast-forward (branch rebased/amended after a prior push): retry with
 #     --force-with-lease (mirrors the BEHIND handler in phase-monitor-merge).
 #   - Verify: git fetch the branch, compare origin/<branch> to local HEAD.

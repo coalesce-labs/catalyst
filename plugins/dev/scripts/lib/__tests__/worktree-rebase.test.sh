@@ -749,18 +749,21 @@ echo "26. mixed orch-monitor artifact + real source → rc 2 (exclusive-artifact
 assert_eq "2" "$(cat "$SCRATCH/t26.rc")" "mixed source + orch-monitor artifact → rc 2"
 
 # ── 27. escalation-explain.mjs threads observed.dirtyFiles through unchanged ─
-echo "27. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1076 Phase 3)"
-echo "25. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1076 Phase 3)"
+echo "27. escalation-explain.mjs round-trips observed.dirtyFiles (CTL-1130, D1 passthrough)"
 EXPLAIN_MJS="${SCRIPT_DIR}/../../execution-core/escalation-explain.mjs"
 if [[ -f "$EXPLAIN_MJS" ]] && command -v node >/dev/null 2>&1; then
   OBS='{"rebaseRc":2,"stallReason":"rebase_refused_dirty_tree","dirtyFiles":["shared.txt"]}'
   EXPL_OUT="$(node "$EXPLAIN_MJS" \
     --ticket CTL-1076 --phase plan \
-    --what-failed "x" --why-gave-up "y" --human-question "z" \
+    --type decision \
+    --problem "rebase refused dirty tree: shared.txt has uncommitted changes" \
+    --call-to-action "resolve shared.txt by hand or discard the local edit and re-run?" \
+    --options '[{"label":"resolve","tradeoff":"manual merge work"},{"label":"discard","tradeoff":"lose local change to shared.txt"}]' \
+    --why-you "conflict resolution is a judgment call the agent cannot make unilaterally" \
     --observed "$OBS" 2>/dev/null || echo '{}')"
   assert_eq "shared.txt" \
     "$(printf '%s' "$EXPL_OUT" | jq -r '.observed.dirtyFiles[0]' 2>/dev/null)" \
-    "escalation-explain: observed.dirtyFiles[0] passes through unchanged"
+    "escalation-explain: observed.dirtyFiles[0] passes through unchanged (D1)"
 else
   echo "  SKIP: escalation-explain.mjs or node not available"
 fi
