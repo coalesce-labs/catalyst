@@ -30,10 +30,15 @@ import { HostMatrix } from "@/components/observe/host-matrix";
 import { StuckDeadReap } from "@/components/observe/stuck-dead-reap";
 import { fleetHero, reapList } from "@/components/observe/fleetops-kit";
 import { ServiceHealthStrip } from "@/components/observe/service-health-strip";
+import { GovernanceModesStrip } from "@/components/observe/governance-modes-strip";
 import type {
   ServiceHealthSnapshotView,
   ServiceStatusView,
 } from "@/components/observe/service-health-kit";
+import {
+  isClusterGovernanceSignal,
+  type ClusterGovernanceNode,
+} from "@/lib/governance-model";
 
 /** A zero-capacity board config stand-in for first paint (before /api/board lands)
  *  — renders an honest 0/0 rather than NaN. */
@@ -63,6 +68,11 @@ export function FleetOpsSurface() {
   // fetch failure so the strip renders the honest grey line (never green).
   const [services, setServices] = useState<ServiceStatusView[] | null>(null);
   const [servicesUnavailable, setServicesUnavailable] = useState<boolean>(false);
+  // CTL-1104: per-host governance snapshot for the GOVERNANCE strip. null until
+  // the first /api/cluster/governance lands; `governanceUnavailable` flips on
+  // failure so the strip renders the honest grey line (never fabricates green).
+  const [governanceNodes, setGovernanceNodes] = useState<ClusterGovernanceNode[] | null>(null);
+  const [governanceUnavailable, setGovernanceUnavailable] = useState<boolean>(false);
   // Ticks every refresh so the board-freshness (broker) cell + reap idle ages
   // recompute against a current `now` without a per-cell timer.
   const [now, setNow] = useState<number>(() => Date.now());
@@ -122,14 +132,36 @@ export function FleetOpsSurface() {
       }
     }
 
+    // CTL-1104: per-host governance snapshot from the heartbeat event log.
+    async function loadGovernance() {
+      try {
+        const resp = await fetch("/api/cluster/governance");
+        if (!resp.ok || !alive) {
+          if (alive) setGovernanceUnavailable(true);
+          return;
+        }
+        const body = await resp.json();
+        if (alive && isClusterGovernanceSignal(body)) {
+          setGovernanceNodes(body.nodes);
+          setGovernanceUnavailable(false);
+        } else if (alive) {
+          setGovernanceUnavailable(true);
+        }
+      } catch {
+        if (alive) setGovernanceUnavailable(true);
+      }
+    }
+
     void loadCluster();
     void loadBoard();
     void loadServices();
+    void loadGovernance();
     const id = setInterval(() => {
       setNow(Date.now());
       void loadCluster();
       void loadBoard();
       void loadServices();
+      void loadGovernance();
     }, REFRESH_MS);
     return () => {
       alive = false;
@@ -180,6 +212,15 @@ export function FleetOpsSurface() {
       <ServiceHealthStrip
         services={services}
         unavailable={servicesUnavailable}
+        now={now}
+      />
+
+      {/* CTL-1104 GOVERNANCE STRIP — full-width shrink-0 block (not inside the
+          grid wrapper — ChartCard flex-collapse rule). One row per roster host:
+          host name + mode chips + age label + stale marker. */}
+      <GovernanceModesStrip
+        nodes={governanceNodes}
+        unavailable={governanceUnavailable}
         now={now}
       />
 

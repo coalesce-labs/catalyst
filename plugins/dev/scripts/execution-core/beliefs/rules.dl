@@ -2,6 +2,7 @@
 
 extern R3 progress_evidence
 stratum 1
+@description The most recent positive evidence of work, taken as the max over heartbeat, transcript, and signal timestamps.
 @feeds R5
 @feeds R6
 @severity info
@@ -42,6 +43,7 @@ GROUP BY e.subject"""
 
 rule R1 session_registered
 stratum 1
+@description The signal's background job shows up in the live agents listing — the session is registered.
 @severity info
 @since 2026-06-09
 @ticket CTL-933
@@ -61,6 +63,7 @@ value: json_object('session_id', a.session_id, 'short_id', a.short_id)
 
 rule R2 turn_started
 stratum 1
+@description The session has produced a transcript, so its prompt actually became a running turn.
 @feeds R4
 @severity info
 @since 2026-06-09
@@ -76,6 +79,7 @@ value: json_object('session_id', a.session_id, 'bytes', tr.bytes)
 
 extern R7 worker_dead
 stratum 1
+@description Claude's own durable verdict that the worker is dead — the job is gone or in a terminal state.
 @feeds R4
 @feeds R5
 @feeds R6
@@ -104,6 +108,7 @@ WHERE t.tick_id = :tick
 
 rule R4 wedged_never_started
 stratum 2
+@description A running phase whose session registered but never started a turn within never_started_ms — a never-started wedge.
 @feeds R10
 @cfg never_started_ms
 @severity warn
@@ -130,6 +135,7 @@ subject: s.ticket || '/' || s.phase
 
 extern R5 lease_valid
 stratum 2
+@description The phase has progress evidence inside its freshness window, so its lease is still valid.
 @feeds R6
 @cfg lease_window_doc_ms
 @cfg lease_window_build_ms
@@ -156,6 +162,7 @@ WHERE t.tick_id = :tick
 
 extern R6 lease_expired
 stratum 2
+@description A running phase with no valid lease and not dead — its lease has expired (stalled-alive).
 @feeds R10
 @severity warn
 @since 2026-06-09
@@ -174,6 +181,7 @@ WHERE t.tick_id = :tick
 
 extern R9 board_drift
 stratum 2
+@description The Linear board state disagrees with what the running phase is actually doing — board drift.
 @severity warn
 @since 2026-06-09
 @ticket CTL-933
@@ -204,6 +212,7 @@ WHERE t.tick_id = :tick
 
 extern R8 free_slots
 stratum 3
+@description Free capacity for a host: parallel slots and session slots not currently consumed by valid leases.
 @cfg max_parallel
 @cfg session_cap
 @severity info
@@ -239,6 +248,7 @@ WHERE t.tick_id = :tick"""
 
 extern R10a wake_diagnostician
 stratum 4
+@description Wake the diagnostician for a never-started wedge (no cooldown intent in the window).
 @feeds R11
 @feeds R12
 @cfg diag_cooldown_ms
@@ -261,6 +271,7 @@ WHERE t.tick_id = :tick
 
 extern R10b wake_diagnostician_stalled_alive
 stratum 4
+@description Wake the diagnostician for a stalled-alive phase whose job is still in the working state.
 @feeds R11
 @feeds R12
 @cfg diag_cooldown_ms
@@ -288,6 +299,7 @@ WHERE t.tick_id = :tick
 
 extern R11 action_ineffective
 stratum 4
+@description An intent has exhausted its max_attempts with no outcome — the action proved ineffective.
 @feeds R12
 @cfg max_attempts
 @severity warn
@@ -305,6 +317,7 @@ WHERE t.tick_id = :tick"""
 
 extern R12 escalate_human
 stratum 4
+@description The diagnostician was woken and the action was ineffective, so the work escalates to a human.
 @severity error
 @since 2026-06-09
 @ticket CTL-933
@@ -323,6 +336,7 @@ WHERE t.tick_id = :tick"""
 
 extern R13 blocker_rank
 stratum 5
+@description A ticket's transitive blocker count, computed over the full dependency closure.
 @severity info
 @since 2026-06-09
 @ticket CTL-965
@@ -359,6 +373,7 @@ GROUP BY cl.dependent"""
 
 extern R14 cycle_detected
 stratum 5
+@description A dependency cycle exists (A blocks B blocks A) in the relations graph.
 @severity error
 @since 2026-06-09
 @ticket CTL-965
@@ -401,6 +416,7 @@ FROM self_cycle sc"""
 
 extern R15 ready
 stratum 5
+@description A ticket is in an eligible state with every blocker done — it is ready to start.
 @cfg eligible_state
 @severity info
 @since 2026-06-09
@@ -441,6 +457,7 @@ WHERE t.tick_id = :tick
 
 extern R16 advance_to
 stratum 6
+@description The predicted next phase: the normal FSM edge, or the verify-to-remediate detour when verification fails.
 @severity info
 @since 2026-06-09
 @ticket CTL-966
@@ -518,6 +535,7 @@ SELECT ls.tick_id, 6, 'advance_to', ls.ticket,
 
 extern R17 cycle_exhausted
 stratum 6
+@description The remediate count has reached its cap — no more retries; the cycle is exhausted.
 @severity error
 @since 2026-06-09
 @ticket CTL-966

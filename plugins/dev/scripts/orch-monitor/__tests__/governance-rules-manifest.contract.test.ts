@@ -90,3 +90,24 @@ describe("GET /api/beliefs/rules — anti-stub guards", () => {
     expect(hasSql).toBe(true);
   });
 });
+
+// ─── 3. Rulebook copy fields (CTL-1103) ─────────────────────────────────────
+
+describe("GET /api/beliefs/rules — Rulebook copy fields (CTL-1103)", () => {
+  it("every rule has a non-empty plain-English description", async () => {
+    const body = await fetchRules() as { rules: Array<{ rule_id: string; description?: string }> };
+    for (const r of body.rules) {
+      expect(typeof r.description, `${r.rule_id} description must be a string`).toBe("string");
+      expect(r.description!.length, `${r.rule_id} description must be non-empty`).toBeGreaterThan(0);
+    }
+  });
+
+  it("manifest carries a top-level preface with problem and datalog_primer", async () => {
+    const body = await fetchRules() as { preface?: { problem?: string; datalog_primer?: string } };
+    expect(body.preface).toBeDefined();
+    expect(typeof body.preface!.problem).toBe("string");
+    expect(body.preface!.problem!.length).toBeGreaterThan(0);
+    expect(typeof body.preface!.datalog_primer).toBe("string");
+    expect(body.preface!.datalog_primer!.length).toBeGreaterThan(0);
+  });
+});

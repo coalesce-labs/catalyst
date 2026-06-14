@@ -42,6 +42,7 @@ export type SurfaceContentKind =
   | "finops"
   | "utilization"
   | "fleetops"
+  | "rulebook"
   | "dashboard";
 
 /**
@@ -67,6 +68,8 @@ export function surfaceContentKind(surface: Surface): SurfaceContentKind {
   // remaining surface (devops) stays on the dashboard fall-through (nav-disabled
   // "soon") until its own OBS ticket lands.
   if (surface === "fleetops") return "fleetops";
+  // CTL-1103: Rulebook is the first REASON surface.
+  if (surface === "rulebook") return "rulebook";
   return "dashboard";
 }
 

@@ -60,6 +60,7 @@ import { TicketPhaseStepper } from "./ticket-phase-stepper";
 import { PriorityIcon, ScopeChip } from "@/board/Board";
 import { EmptyState } from "./ui/empty-state";
 import { Radio } from "lucide-react";
+import { ExecutionTab } from "./execution-tab";
 
 // CTL-974: the markdown DESCRIPTION renderer is lazy-loaded so its heavy engine
 // (marked-highlight + highlight.js) code-splits OUT of the board entry chunk
@@ -955,6 +956,12 @@ export function TicketDetailPage({
               <ActivitySection ticketId={ticket?.id ?? id} />
             </div>
           </TabsContent>
+
+          {/* Execution: the record of what happened — NOW card, narrative, Gantt,
+              artifacts, exceptions & decisions, hop log (CTL-1102). */}
+          <TabsContent value="execution">
+            <ExecutionTab ticket={ticket} id={id} artifacts={artifacts} />
+          </TabsContent>
         </PillTabs>
       </div>
     </div>
@@ -968,10 +975,11 @@ function TAB_IS_VALID(tab: string): tab is "spec" | DetailTab {
   return tab === "spec" || (TAB_VALUES as readonly string[]).includes(tab);
 }
 
-/** The visible tab set (Spec default · Lifecycle · Cost · Activity). */
+/** The visible tab set (Spec default · Lifecycle · Cost · Activity · Execution). */
 const TAB_DEFS: PillTab[] = [
   { value: "spec", label: "Spec" },
   { value: "lifecycle", label: "Lifecycle" },
   { value: "cost", label: "Cost" },
   { value: "activity", label: "Activity" },
+  { value: "execution", label: "Execution" },
 ];

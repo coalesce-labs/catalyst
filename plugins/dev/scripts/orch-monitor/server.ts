@@ -769,7 +769,10 @@ export function createServer(opts: CreateServerOptions): BunServer {
     catalystDir: catalystDirOpt,
     runsDir = null,
     startWatcher = true,
-    publicDir = join(import.meta.dir, "public"),
+    publicDir = resolvePublicDir(
+      process.env.MONITOR_PUBLIC_DIR,
+      join(import.meta.dir, "public"),
+    ),
     pidFile,
     prStatusFetcher,
     prStatusRefreshMs = PR_STATUS_REFRESH_MS,
@@ -3769,6 +3772,22 @@ export function createServer(opts: CreateServerOptions): BunServer {
         // ── CTL-1100 governance read endpoints ──────────────────────────────
         // Inserted between the /api/beliefs/stream block and the 404 fallthrough.
         // Re-locate by grep after each insertion — line numbers shift.
+
+        // GET /api/cluster/governance — per-host governance snapshot from the
+        // heartbeat event log (CTL-1104). Separate from /api/governance (local
+        // config snapshot, CTL-1100) — see plan §open-question 3. DO NOT inline
+        // the specifier (VITE-GRAPH GUARD, CTL-883).
+        if (url.pathname === "/api/cluster/governance") {
+          const govSpecifier = ["./lib/cluster-governance.mjs"].join("");
+          try {
+            const { readClusterGovernance } = await import(govSpecifier) as {
+              readClusterGovernance: () => Record<string, unknown>;
+            };
+            return Response.json(readClusterGovernance());
+          } catch {
+            return Response.json({ singleHost: true, nodes: [], generatedAt: "" });
+          }
+        }
 
         // GET /api/governance — current daemon governance config snapshot.
         // DO NOT inline the specifier (computed import, VITE-GRAPH GUARD, CTL-883).

@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useAtom } from "jotai";
 import {
   ActivityIcon,
-  BookOpenTextIcon,
+  BookOpenIcon,
   ChevronRightIcon,
   CodeIcon,
   GaugeIcon,
@@ -194,10 +194,10 @@ const OBSERVE_SOON = [
   { label: "DevOps", icon: CodeIcon },
 ] as const;
 
-// ── REASON items — Process FSM map + Rulebook ─────────────────────────────────
-const REASON_ITEMS: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
+// ── REASON items — Process FSM map (CTL-1101) + Rulebook (CTL-1103) ──────────
+const REASON_LIVE: Array<{ surface: Surface; label: string; icon: typeof InboxIcon }> = [
   { surface: "process", label: "Process", icon: WorkflowIcon },
-  { surface: "rulebook", label: "Rulebook", icon: BookOpenTextIcon },
+  { surface: "rulebook", label: "Rulebook", icon: BookOpenIcon },
 ];
 
 // ── OPERATE items per scope ───────────────────────────────────────────────────
@@ -313,7 +313,7 @@ export function AppSidebar() {
   }
 
   // CTL-1101: force REASON open while a REASON surface is active.
-  const reasonContainsActive = REASON_ITEMS.some(
+  const reasonContainsActive = REASON_LIVE.some(
     (item) => item.surface === surface,
   );
   // OBS-5: force the OBSERVE group open while a live OBSERVE surface is active.
@@ -685,7 +685,7 @@ export function AppSidebar() {
             <CollapsibleContent>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {REASON_ITEMS.map((item) => {
+                  {REASON_LIVE.map((item) => {
                     const active = surface === item.surface;
                     const kb = surfaceKeybinding(item.surface);
                     return (
@@ -786,6 +786,7 @@ export function AppSidebar() {
             </CollapsibleContent>
           </SidebarGroup>
         </Collapsible>
+
       </SidebarContent>
 
       {/* ── FOOTER: node filter (multi-host only) + Settings ──────────────── */}

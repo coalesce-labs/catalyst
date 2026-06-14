@@ -42,6 +42,12 @@ _find_layer2_config() {
     fi
     dir="$(dirname "$dir")"
   done
+  # CTL-1111: no projectKey found anywhere in the ancestry. Make the drift LOUD
+  # instead of silently aliasing to the global config — name what's missing so an
+  # operator can see why the per-team config-<key>.json was not consulted. Still
+  # return the global path so branch 1 (global bot.worker) back-compat keeps
+  # working. Warning goes to stderr; stdout remains the resolved path.
+  echo "linear-comment-post: no projectKey in any .catalyst/config.json from $PWD upward — per-team config-<key>.json NOT resolved; falling back to global config.json" >&2
   echo "$HOME/.config/catalyst/config.json"
 }
 

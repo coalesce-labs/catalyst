@@ -90,15 +90,15 @@ const DashboardSurface = lazy(() =>
     default: m.DashboardSurface,
   })),
 );
+const RulebookSurface = lazy(() =>
+  import("./components/rulebook/rulebook-surface").then((m) => ({
+    default: m.RulebookSurface,
+  })),
+);
 
 const ProcessRoute = lazy(() =>
   import("./components/reason/process-route").then((m) => ({
     default: m.ProcessRoute,
-  })),
-);
-const RulebookStub = lazy(() =>
-  import("./components/reason/rulebook-stub").then((m) => ({
-    default: m.RulebookStub,
   })),
 );
 
@@ -259,7 +259,7 @@ const devopsRoute = createRoute({
   ),
 });
 
-// CTL-1101: REASON surfaces — Process (FSM machine map) + Rulebook
+// CTL-1101: REASON surface — Process (FSM machine map)
 const processRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/process",
@@ -275,7 +275,7 @@ const rulebookRoute = createRoute({
   path: "/rules",
   component: () => (
     <S>
-      <RulebookStub />
+      <RulebookSurface />
     </S>
   ),
 });

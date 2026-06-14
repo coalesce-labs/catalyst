@@ -184,7 +184,29 @@ if [[ -n "$EXISTING_PR_NUMBER" ]]; then
   # BEFORE announcing the promoted PR — remediation/rebase may have advanced
   # local HEAD past the draft's pushed commit. Fail-closed: a stale ref is a
   # phase FAILURE, not a silent complete.
-  if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
+  # CTL-1119: rc=3 from draft_pr_push_verify means the push was rejected for
+  # missing 'workflow' OAuth scope; escalate with an actionable human_question.
+  VERIFIED_SHA=""
+  PUSH_VERIFY_RC=0
+  # CTL-1119 remediate: capture stdout ONLY (the verified SHA). draft_pr_push_verify
+  # writes diagnostic _draft_pr_warn lines to stderr on every retry path (force-with-lease
+  # AND the token-routed push); folding them in with 2>&1 made VERIFIED_SHA multi-line, so
+  # the PR_HEAD_OID != VERIFIED_SHA guard below always tripped and falsely failed the phase
+  # with stale_ref_push_verify_failed. No redirect: stderr flows to the worker log.
+  VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
+  if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
+    echo "phase-pr: push rejected — missing 'workflow' OAuth scope on existing PR path" >&2
+    if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
+      # shellcheck source=/dev/null
+      source "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh"
+      _escalate_workflow_scope_push
+    else
+      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+        --phase "$PHASE" --ticket "$TICKET" --status failed \
+        --reason "push_rejected_no_workflow_scope"
+    fi
+    exit 1
+  elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
     echo "phase-pr: push-verify failed for #${EXISTING_PR_NUMBER} (stale ref)" >&2
     "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
       --phase "$PHASE" --ticket "$TICKET" --status failed \
@@ -253,8 +275,27 @@ itself.
 
    ```bash
    # CTL-1051: ensure create-pr's push left origin == HEAD and the PR points at it.
+   # CTL-1119: rc=3 means the push was rejected for missing 'workflow' OAuth scope.
    [[ -r "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh" ]] && source "${PLUGIN_ROOT}/scripts/lib/draft-pr.sh"
-   if ! VERIFIED_SHA="$(draft_pr_push_verify)"; then
+   VERIFIED_SHA=""
+   PUSH_VERIFY_RC=0
+   # CTL-1119 remediate: capture stdout ONLY (the verified SHA) — see the existing-PR path
+   # above. 2>&1 folded draft_pr_push_verify's stderr warnings into VERIFIED_SHA on retry
+   # paths, breaking the PR_HEAD_OID comparison with a false stale_ref_push_verify_failed.
+   VERIFIED_SHA="$(draft_pr_push_verify)" || PUSH_VERIFY_RC=$?
+   if [[ "$PUSH_VERIFY_RC" -eq 3 ]]; then
+     echo "phase-pr: push rejected — missing 'workflow' OAuth scope on create-pr path" >&2
+     if [[ -r "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh" ]]; then
+       # shellcheck source=/dev/null
+       source "${PLUGIN_ROOT}/scripts/lib/escalate-workflow-scope.sh"
+       _escalate_workflow_scope_push
+     else
+       "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
+         --phase "$PHASE" --ticket "$TICKET" --status failed \
+         --reason "push_rejected_no_workflow_scope"
+     fi
+     exit 1
+   elif [[ "$PUSH_VERIFY_RC" -ne 0 ]]; then
      echo "phase-pr: post-create-pr push-verify failed (stale ref)" >&2
      "${PLUGIN_ROOT}/scripts/phase-agent-emit-complete" \
        --phase "$PHASE" --ticket "$TICKET" --status failed \
@@ -355,7 +396,7 @@ _... (truncated)_"
   fi
   COMMENT_POST="${CATALYST_COMMENT_POST_HELPER:-${PLUGIN_ROOT}/scripts/lib/linear-comment-post.sh}"
   if [[ ! -x "$COMMENT_POST" ]]; then COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"; fi
-  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+  if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-pr: linear-comment-post failed (continuing)" >&2

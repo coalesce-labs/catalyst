@@ -1,1 +1,0 @@
-import{j as e,b3 as c,m as n}from"./main-CDimo8xK.js";function i({message:s,icon:t=c,className:a}){return e.jsxs("div",{className:n("flex flex-col items-center justify-center gap-2 py-12 text-muted",a),children:[e.jsx(t,{className:"h-8 w-8 opacity-40"}),e.jsx("span",{className:"text-[13px]",children:s})]})}export{i as E};
