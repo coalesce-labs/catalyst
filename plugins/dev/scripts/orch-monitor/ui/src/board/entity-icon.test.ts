@@ -1,11 +1,22 @@
 import { describe, it, expect } from "bun:test";
-import { resolveEntityIcon, liveBadgeKind, groupIconSrc, laneIconSrc } from "./entity-icon";
+import { resolveEntityIcon, liveBadgeKind, groupIconSrc, laneIconSrc, rowFaviconSrc } from "./entity-icon";
 import type { RepoIconMap } from "@/hooks/use-repo-icons";
 
 const ICONS: RepoIconMap = {
   catalyst: { autoDataUrl: "data:image/png;base64,AAA", override: null, candidates: [], selectedPath: null },
   adva: { autoDataUrl: null, override: null, candidates: [], selectedPath: null },
 };
+
+describe("rowFaviconSrc", () => {
+  it("returns the repo favicon when discovered", () =>
+    expect(rowFaviconSrc("catalyst", ICONS)).toBe("data:image/png;base64,AAA"));
+  it("returns null when the repo has no favicon (→ StatusIcon fallback)", () =>
+    expect(rowFaviconSrc("adva", ICONS)).toBeNull());
+  it("returns null for null/empty repo (fail-open)", () => {
+    expect(rowFaviconSrc(null, ICONS)).toBeNull();
+    expect(rowFaviconSrc("", ICONS)).toBeNull();
+  });
+});
 
 describe("resolveEntityIcon", () => {
   it("returns the autoDataUrl when the repo has one", () => {
