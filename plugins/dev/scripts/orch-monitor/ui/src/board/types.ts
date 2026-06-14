@@ -24,6 +24,10 @@ export type BoardActiveState = "active" | "stuck" | "dead" | null;
 // marker) | null. needs-human wins. DISTINCT from `held` (admission-gate pair).
 export type BoardAttention = "waiting-on-you" | "needs-human" | null;
 
+/** CTL-1158: GitHub PR merge state; mirrors lib/board-data.d.mts PrMergeStateStatus. */
+export type PrMergeStateStatus =
+  | "CLEAN" | "BLOCKED" | "DIRTY" | "BEHIND" | "UNSTABLE" | "HAS_HOOKS" | "UNKNOWN";
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so the
  *  node-aware surfaces (BOARD3 host swimlanes, SURF1 worker node group, SURF2
  *  queue node column) can attribute/group by host. Mirrors the server's
@@ -118,6 +122,10 @@ export interface BoardTicket {
   phaseCosts: Record<string, BoardPhaseCost> | null;
   phaseSummary: BoardPhaseTiming[];
   pr: number | null;
+  /** CTL-1158: the PR's GitHub merge state; null when no PR / no cache entry. */
+  mergeStateStatus?: PrMergeStateStatus | null;
+  /** CTL-1158: operator CTA when the PR is stuck (DIRTY/BLOCKED/UNSTABLE ≥ 300 s). */
+  prStuckReason?: string | null;
   updatedAt: string;
   subSteps?: WorkflowSubStep[];
   /** CTL-755 held indicator from the ticket's Linear labels: the admission gate

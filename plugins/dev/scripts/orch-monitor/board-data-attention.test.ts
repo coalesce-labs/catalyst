@@ -128,4 +128,49 @@ describe("deriveAttention (CTL-729) — the single needs-attention bucket", () =
     expect(r.attention).toBe("waiting-on-you");
     expect(r.attentionSince).toBeNull();
   });
+
+  // CTL-1158: PR-stuck attention signal
+  it("a stuck PR (prStuck) → attention 'needs-human' anchored at prStuckSince", () => {
+    const r = deriveAttention({
+      waitingOnUser: false,
+      labels: [],
+      needsHumanMarker: false,
+      prStuck: true,
+      prStuckSince: "2026-06-14T10:00:00Z",
+    });
+    expect(r.attention).toBe("needs-human");
+    expect(r.attentionSince).toBe("2026-06-14T10:00:00Z");
+  });
+
+  it("an explicit needs-human label OUTRANKS prStuck for the anchor (label stamp wins)", () => {
+    const r = deriveAttention({
+      waitingOnUser: false,
+      labels: ["needs-human"],
+      needsHumanMarker: false,
+      needsHumanSince: "2026-06-14T09:00:00Z",
+      prStuck: true,
+      prStuckSince: "2026-06-14T10:00:00Z",
+    });
+    expect(r.attention).toBe("needs-human");
+    expect(r.attentionSince).toBe("2026-06-14T09:00:00Z");
+  });
+
+  it("prStuck OUTRANKS a live waiting-on-you bg job (escalation precedence)", () => {
+    const r = deriveAttention({
+      waitingOnUser: true,
+      labels: [],
+      needsHumanMarker: false,
+      waitingSince: "2026-06-14T08:00:00Z",
+      prStuck: true,
+      prStuckSince: "2026-06-14T10:00:00Z",
+    });
+    expect(r.attention).toBe("needs-human");
+    expect(r.attentionSince).toBe("2026-06-14T10:00:00Z");
+  });
+
+  it("prStuck:false leaves existing behavior unchanged (back-compat)", () => {
+    const r = deriveAttention({ waitingOnUser: false, labels: [], needsHumanMarker: false });
+    expect(r.attention).toBeNull();
+    expect(r.attentionSince).toBeNull();
+  });
 });

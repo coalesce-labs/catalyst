@@ -17,6 +17,10 @@ export type BoardActiveState = "active" | "stuck" | "dead" | null;
 // admission-gate blocked/waiting pair).
 export type BoardAttention = "waiting-on-you" | "needs-human" | null;
 
+/** CTL-1158: GitHub PR merge state from the PrStatusFetcher cache. */
+export type PrMergeStateStatus =
+  | "CLEAN" | "BLOCKED" | "DIRTY" | "BEHIND" | "UNSTABLE" | "HAS_HOOKS" | "UNKNOWN";
+
 /** CTL-922 (BFF10): a node's stable identity stamped on every board entity so
  *  the node-aware surfaces can attribute/group by host. `name` is the
  *  configurable host name (CATALYST_HOST_NAME / os.hostname() minus ".local");
@@ -119,6 +123,12 @@ export interface BoardTicket {
   phaseCosts: Record<string, BoardPhaseCost> | null;
   phaseSummary: BoardPhaseTiming[];
   pr: number | null;
+  /** CTL-1158: the PR's GitHub merge state (from the PrStatusFetcher cache);
+   *  null when no PR / no cache entry. */
+  mergeStateStatus?: PrMergeStateStatus | null;
+  /** CTL-1158: the operator CTA when the PR has been DIRTY/BLOCKED/UNSTABLE
+   *  ≥ 300 s; null otherwise. Mirrored into humanQuestion as the inbox sub-label. */
+  prStuckReason?: string | null;
   updatedAt: string;
   /** CTL-755 held indicator from the ticket's Linear labels. */
   held: "blocked" | "waiting" | null;
@@ -266,14 +276,31 @@ export const ATTENTION_LABEL_NEEDS_INPUT: string;
 /** CTL-729: PURE classifier for the single needs-attention bucket. needs-human
  *  (a needs-human/needs-input label OR the host-local marker) WINS over
  *  waiting-on-you (a live worker's blocked bg job). The anchor follows the winning
- *  reason; null when that reason carries no durable stamp (never fabricated). */
+ *  reason; null when that reason carries no durable stamp (never fabricated).
+ *  CTL-1158: also accepts prStuck/prStuckSince for the PR-stuck signal. */
 export function deriveAttention(opts?: {
   waitingOnUser?: boolean;
   labels?: unknown;
   needsHumanMarker?: boolean;
   waitingSince?: string | null;
   needsHumanSince?: string | null;
+  prStuck?: boolean;
+  prStuckSince?: string | null;
 }): { attention: BoardAttention; attentionSince: string | null };
+
+/** CTL-1158: returns true when the PR has been in a real-blocker merge state
+ *  (DIRTY/BLOCKED/UNSTABLE) for ≥ 300 s, anchored to prPhaseStartedAt. */
+export function isPrStuck(
+  prStatus: { mergeStateStatus: string; state?: string } | null | undefined,
+  prPhaseStartedAt: string | null | undefined,
+  now: number,
+): boolean;
+
+/** CTL-1158: operator CTA string for a stuck PR; null when not a blocker state. */
+export function prStuckReason(
+  mergeStateStatus: string | null | undefined,
+  prNumber: number | null | undefined,
+): string | null;
 
 /** CTL-928: a single ticket's lane on the queue board (live | between-phases |
  *  recent-done). Honors the terminal-intermediate vs pipeline-done distinction. */
@@ -378,7 +405,10 @@ export function mergeTitleFallback(
   nullTitleIds: string[],
   fetched: Record<string, { title?: string | null } | undefined>,
 ): Record<string, { title?: string | null } & Record<string, unknown>>;
-export function assembleBoard(): Promise<BoardPayload>;
+export function assembleBoard(opts?: {
+  /** CTL-1158: inject the PrStatusFetcher cache getter for the PR-stuck signal. */
+  getPrStatus?: ((repo: string, number: number) => { mergeStateStatus: string; state?: string } | null) | null;
+}): Promise<BoardPayload>;
 /** CTL-922 (BFF10): build a {name,id} HostRef from a bare host name (id =
  *  sha256(name)[:16]); null for a null/empty name. */
 export function hostRefFromName(name: unknown): BoardHostRef | null;
