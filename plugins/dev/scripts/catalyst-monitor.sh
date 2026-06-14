@@ -206,12 +206,33 @@ bootstrap() {
       mkdir -p "$MONITOR_UI_DIST_DIR"
       export MONITOR_UI_DIST_DIR
 
-      # CTL-1088: build only when the out-of-repo dist has no built index.html yet.
-      # The old guard (`! -d ui/dist`) was always true — vite never wrote there.
-      # Force a rebuild with MONITOR_FORCE_BUILD=1.
-      if [[ "${MONITOR_FORCE_BUILD:-}" == "1" || ! -f "$MONITOR_UI_DIST_DIR/index.html" ]]; then
-        echo "Building orch-monitor frontend → $MONITOR_UI_DIST_DIR ..."
-        (cd "$MONITOR_DIR/ui" && bunx vite build)
+      # CTL-1088: dist lives out-of-repo; first build happens when index.html is absent.
+      # CTL-1118: also rebuild when the UI source has advanced past the last-built
+      # commit. We record the SHA of the last commit touching ui/ next to the dist and
+      # rebuild on mismatch — this covers EVERY restart path (broker hot-reload and
+      # manual restart) with no broker-side plumbing. Escape hatch: MONITOR_FORCE_BUILD=1.
+      ui_source_sha="$(git -C "$MONITOR_DIR" log -1 --format='%H' -- ui/ 2>/dev/null || true)"
+      built_sha_file="$MONITOR_UI_DIST_DIR/.source-sha"
+      built_sha=""
+      [[ -f "$built_sha_file" ]] && built_sha="$(cat "$built_sha_file" 2>/dev/null || true)"
+
+      rebuild_reason=""
+      if [[ "${MONITOR_FORCE_BUILD:-}" == "1" ]]; then
+        rebuild_reason="MONITOR_FORCE_BUILD=1"
+      elif [[ ! -f "$MONITOR_UI_DIST_DIR/index.html" ]]; then
+        rebuild_reason="no built index.html"
+      elif [[ -n "$ui_source_sha" && "$ui_source_sha" != "$built_sha" ]]; then
+        rebuild_reason="ui source changed (${built_sha:-none} → $ui_source_sha)"
+      fi
+
+      if [[ -n "$rebuild_reason" ]]; then
+        echo "Building orch-monitor frontend → $MONITOR_UI_DIST_DIR ($rebuild_reason) ..."
+        if (cd "$MONITOR_DIR/ui" && bunx vite build); then
+          # Record the built source SHA ONLY on success so a failed build retries next start.
+          [[ -n "$ui_source_sha" ]] && printf '%s\n' "$ui_source_sha" > "$built_sha_file"
+        else
+          echo "warning: orch-monitor vite build failed — serving previous dist (will retry next restart)" >&2
+        fi
       fi
 
       # Complete the dist: copy non-vite static assets so the out-of-repo dir is a

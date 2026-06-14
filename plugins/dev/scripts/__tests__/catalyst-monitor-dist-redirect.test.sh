@@ -52,11 +52,16 @@ make_sandbox() {
   # Stub binaries dir
   mkdir -p "$root/bin"
 
-  # Stub vite: writes marker files into $MONITOR_UI_DIST_DIR
+  # Stub vite: writes marker files into $MONITOR_UI_DIST_DIR.
+  # Honor STUB_VITE_FAIL=1 to exit non-zero without writing (Phase 2, Test 10).
   cat > "$root/bin/vite" <<'VITE'
 #!/usr/bin/env bash
 # Stub vite build — writes markers into $MONITOR_UI_DIST_DIR
 if [[ "${1:-}" == "build" ]]; then
+  if [[ "${STUB_VITE_FAIL:-}" == "1" ]]; then
+    echo "stub vite: forced failure" >&2
+    exit 1
+  fi
   DIST="${MONITOR_UI_DIST_DIR:-/tmp/stub-dist-missing}"
   mkdir -p "$DIST/assets"
   echo "stub-index" > "$DIST/index.html"
@@ -79,6 +84,21 @@ BUNX
 exit 0
 SQ
   chmod +x "$root/bin/sqlite3"
+
+  # Stub git: for any `log` subcommand, print the contents of $STUB_GIT_SHA_FILE
+  # (empty/absent → empty output). All other git subcommands succeed silently.
+  # CTL-1118: lets tests control the "current UI source SHA" without a real repo.
+  cat > "$root/bin/git" <<'GIT'
+#!/usr/bin/env bash
+for a in "$@"; do
+  if [[ "$a" == "log" ]]; then
+    cat "${STUB_GIT_SHA_FILE:-}" 2>/dev/null || true
+    exit 0
+  fi
+done
+exit 0
+GIT
+  chmod +x "$root/bin/git"
 
   echo "$root"
 }
@@ -262,6 +282,198 @@ if [[ -f "$ENV_CAPTURE" ]]; then
   fi
 else
   fail "stub bun did not capture env (cmd_start may not have launched the server)"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 7: UI source SHA advanced → rebuild triggered ──────────────────────
+echo ""
+echo "Test 7: UI source SHA advanced → rebuild triggered even though index.html exists"
+ROOT="$(make_sandbox)"
+mkdir -p "$ROOT/dist"
+echo "already-built" > "$ROOT/dist/index.html"
+echo "sha-A" > "$ROOT/dist/.source-sha"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+echo "sha-B" > "$STUB_GIT_SHA_FILE"
+VITE_RAN_FILE="$ROOT/vite-ran-7"
+cat > "$ROOT/bin/vite" <<VITE7
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "build" ]]; then
+  touch "$VITE_RAN_FILE"
+  DIST="\${MONITOR_UI_DIST_DIR:-/tmp/stub-dist-missing}"
+  mkdir -p "\$DIST/assets"
+  echo "rebuilt" > "\$DIST/index.html"
+fi
+VITE7
+chmod +x "$ROOT/bin/vite"
+cat > "$ROOT/bin/bunx" <<BUNX7
+#!/usr/bin/env bash
+shift
+exec "$ROOT/bin/vite" "\$@"
+BUNX7
+chmod +x "$ROOT/bin/bunx"
+STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" run_bootstrap "$ROOT" >/dev/null 2>&1
+if [[ -f "$VITE_RAN_FILE" ]]; then
+  pass "stub vite re-run when UI source SHA advanced (sha-A → sha-B)"
+else
+  fail "stub vite NOT re-run on SHA mismatch — SHA-aware guard not implemented"
+fi
+if [[ -f "$ROOT/dist/.source-sha" ]]; then
+  WRITTEN_SHA="$(cat "$ROOT/dist/.source-sha")"
+  if [[ "$WRITTEN_SHA" == "sha-B" ]]; then
+    pass "dist/.source-sha updated to new SHA (sha-B) after rebuild"
+  else
+    fail "dist/.source-sha has wrong value: $WRITTEN_SHA (expected sha-B)"
+  fi
+else
+  fail "dist/.source-sha not written after rebuild"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 8: UI source SHA unchanged → rebuild skipped ───────────────────────
+echo ""
+echo "Test 8: UI source SHA unchanged → rebuild skipped"
+ROOT="$(make_sandbox)"
+mkdir -p "$ROOT/dist"
+echo "already-built" > "$ROOT/dist/index.html"
+echo "sha-A" > "$ROOT/dist/.source-sha"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+echo "sha-A" > "$STUB_GIT_SHA_FILE"
+VITE_RAN_FILE="$ROOT/vite-ran-8"
+cat > "$ROOT/bin/vite" <<VITE8
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "build" ]]; then
+  touch "$VITE_RAN_FILE"
+fi
+VITE8
+chmod +x "$ROOT/bin/vite"
+cat > "$ROOT/bin/bunx" <<BUNX8
+#!/usr/bin/env bash
+shift
+exec "$ROOT/bin/vite" "\$@"
+BUNX8
+chmod +x "$ROOT/bin/bunx"
+STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" run_bootstrap "$ROOT" >/dev/null 2>&1
+if [[ ! -f "$VITE_RAN_FILE" ]]; then
+  pass "stub vite NOT re-run when SHA unchanged (sha-A == sha-A)"
+else
+  fail "stub vite was re-run despite SHA unchanged"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 9: first start records .source-sha ─────────────────────────────────
+echo ""
+echo "Test 9: first start records .source-sha when dist is empty"
+ROOT="$(make_sandbox)"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+echo "sha-A" > "$STUB_GIT_SHA_FILE"
+STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" run_bootstrap "$ROOT" >/dev/null 2>&1
+if [[ -f "$ROOT/dist/.source-sha" ]]; then
+  WRITTEN_SHA="$(cat "$ROOT/dist/.source-sha")"
+  if [[ "$WRITTEN_SHA" == "sha-A" ]]; then
+    pass "dist/.source-sha written with correct SHA (sha-A) on first build"
+  else
+    fail "dist/.source-sha has wrong value: $WRITTEN_SHA (expected sha-A)"
+  fi
+else
+  fail "dist/.source-sha not written after first build"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 10: build failure does NOT advance .source-sha ─────────────────────
+echo ""
+echo "Test 10: build failure does NOT advance .source-sha (retry preserved)"
+ROOT="$(make_sandbox)"
+mkdir -p "$ROOT/dist"
+echo "already-built" > "$ROOT/dist/index.html"
+echo "sha-A" > "$ROOT/dist/.source-sha"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+echo "sha-B" > "$STUB_GIT_SHA_FILE"
+cat > "$ROOT/bin/vite" <<'VITE10'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "build" ]]; then
+  if [[ "${STUB_VITE_FAIL:-}" == "1" ]]; then
+    echo "stub vite: forced failure" >&2
+    exit 1
+  fi
+  DIST="${MONITOR_UI_DIST_DIR:-/tmp/stub-dist-missing}"
+  mkdir -p "$DIST"
+  echo "rebuilt" > "$DIST/index.html"
+fi
+VITE10
+chmod +x "$ROOT/bin/vite"
+cat > "$ROOT/bin/bunx" <<BUNX10
+#!/usr/bin/env bash
+shift
+exec "$ROOT/bin/vite" "\$@"
+BUNX10
+chmod +x "$ROOT/bin/bunx"
+OUT10="$(STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" STUB_VITE_FAIL=1 run_bootstrap "$ROOT")"
+RC10="${OUT10##*rc=}"
+if [[ "$RC10" == "0" ]]; then
+  pass "bootstrap exits 0 even when vite build fails (serve stale)"
+else
+  fail "bootstrap returned non-zero on build failure (rc=$RC10) — should serve stale"
+fi
+if [[ -f "$ROOT/dist/.source-sha" ]]; then
+  REMAINING_SHA="$(cat "$ROOT/dist/.source-sha")"
+  if [[ "$REMAINING_SHA" == "sha-A" ]]; then
+    pass "dist/.source-sha still sha-A after failed build (retry preserved)"
+  else
+    fail "dist/.source-sha advanced to $REMAINING_SHA despite build failure (expected sha-A)"
+  fi
+else
+  fail "dist/.source-sha disappeared after failed build"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 11: git unavailable / empty SHA → falls back to index.html-only guard
+echo ""
+echo "Test 11: git returns empty SHA → no spurious rebuild (index.html exists)"
+ROOT="$(make_sandbox)"
+mkdir -p "$ROOT/dist"
+echo "already-built" > "$ROOT/dist/index.html"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+# Empty control file → git stub prints nothing → ui_source_sha=""
+: > "$STUB_GIT_SHA_FILE"
+VITE_RAN_FILE="$ROOT/vite-ran-11"
+cat > "$ROOT/bin/vite" <<VITE11
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "build" ]]; then
+  touch "$VITE_RAN_FILE"
+fi
+VITE11
+chmod +x "$ROOT/bin/vite"
+cat > "$ROOT/bin/bunx" <<BUNX11
+#!/usr/bin/env bash
+shift
+exec "$ROOT/bin/vite" "\$@"
+BUNX11
+chmod +x "$ROOT/bin/bunx"
+STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" run_bootstrap "$ROOT" >/dev/null 2>&1
+if [[ ! -f "$VITE_RAN_FILE" ]]; then
+  pass "no spurious rebuild when git SHA is empty and index.html exists"
+else
+  fail "spurious rebuild triggered with empty git SHA (guard should fall back to index.html check)"
+fi
+rm -rf "$ROOT"
+
+# ─── Test 12: git unavailable on first start → still builds ──────────────────
+echo ""
+echo "Test 12: git returns empty SHA on first start → build still triggered (index.html missing)"
+ROOT="$(make_sandbox)"
+STUB_GIT_SHA_FILE="$ROOT/.stub-ui-sha"
+# Empty control file → empty git SHA; dist is empty (first start)
+: > "$STUB_GIT_SHA_FILE"
+STUB_GIT_SHA_FILE="$STUB_GIT_SHA_FILE" run_bootstrap "$ROOT" >/dev/null 2>&1
+if [[ -f "$ROOT/dist/index.html" ]]; then
+  pass "first-start build still fires with empty git SHA (index.html missing path)"
+else
+  fail "first-start build did not fire with empty git SHA"
+fi
+if [[ ! -f "$ROOT/dist/.source-sha" ]]; then
+  pass "dist/.source-sha NOT written when git SHA is empty (guarded write)"
+else
+  fail "dist/.source-sha written despite empty git SHA (should be skipped)"
 fi
 rm -rf "$ROOT"
 
