@@ -318,7 +318,7 @@ ${MIRROR_FOOTER}"
     COMMENT_POST="$(command -v linear-comment-post.sh 2>/dev/null || true)"
   fi
   if [[ -n "$COMMENT_POST" && -x "$COMMENT_POST" ]] && \
-     "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null 2>&1; then
+     "$COMMENT_POST" "${TICKET}" "${MIRROR_BODY}" >/dev/null; then
     : > "${LINEAR_MIRROR_MARKER}"
   else
     echo "phase-teardown: linear-comment-post failed (continuing)" >&2

@@ -264,6 +264,69 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# --- Test 13 (CTL-1111): projectKey-absent path emits a loud warning AND still
+#     posts via branch 1 (global bot.worker). The warning must name the missing
+#     projectKey and go to stderr; it must NOT corrupt the resolved path. ---
+NOKEY_HOME="${TMPDIR_TEST}/home-nokey"
+mkdir -p "${NOKEY_HOME}/.config/catalyst" "${NOKEY_HOME}/work/sub"
+# Global config carries bot.worker so the post still succeeds (branch 1 wins).
+printf '%s' '{"catalyst":{"linear":{"bot":{"worker":{"clientId":"nk-cid","clientSecret":"nk-csec"}}}}}' \
+  >"${NOKEY_HOME}/.config/catalyst/config.json"
+unset CATALYST_LINEAR_AGENT_CLIENT_ID CATALYST_LINEAR_AGENT_CLIENT_SECRET 2>/dev/null || true
+# Reinstate success curl stub for this test.
+cat >"${BIN_DIR}/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+ARGS_STR="$*"
+if printf '%s' "$ARGS_STR" | grep -q "oauth/token"; then
+  printf '{"access_token":"test_token","token_type":"Bearer"}'
+elif printf '%s' "$ARGS_STR" | grep -q "commentCreate"; then
+  printf '{"data":{"commentCreate":{"success":true}}}'
+else
+  printf '{"data":{"issues":{"nodes":[{"id":"issue-uuid-123"}]}}}'
+fi
+exit 0
+CURLEOF
+chmod +x "${BIN_DIR}/curl"
+NK_STDERR="$(PATH="${BIN_DIR}:$PATH" env HOME="${NOKEY_HOME}" \
+  bash -c "cd '${NOKEY_HOME}/work/sub' && bash '$HELPER' CTL-550 body" 2>&1 1>/dev/null || true)"
+NK_EXIT=0
+PATH="${BIN_DIR}:$PATH" env HOME="${NOKEY_HOME}" \
+  bash -c "cd '${NOKEY_HOME}/work/sub' && bash '$HELPER' CTL-550 body" >/dev/null 2>/dev/null || NK_EXIT=$?
+if printf '%s' "$NK_STDERR" | grep -qi "no projectKey"; then
+  echo "PASS: projectKey-absent path emits a loud warning naming the missing key"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: projectKey-absent path emitted no warning (stderr: ${NK_STDERR})"
+  FAIL=$((FAIL+1))
+fi
+if [[ "$NK_EXIT" -eq 0 ]]; then
+  echo "PASS: projectKey-absent path still posts via global bot.worker (back-compat)"
+  PASS=$((PASS+1))
+else
+  echo "FAIL: projectKey-absent path broke back-compat post (exit $NK_EXIT)"
+  FAIL=$((FAIL+1))
+fi
+
+# --- Test 14 (CTL-1111): projectKey-PRESENT path must NOT emit the drift warning
+#     (guards against the warning over-firing on correctly-configured worktrees). ---
+HASKEY_HOME="${TMPDIR_TEST}/home-haskey"
+mkdir -p "${HASKEY_HOME}/.config/catalyst" "${HASKEY_HOME}/repo/.catalyst"
+printf '%s' '{"catalyst":{"linear":{"bot":{"orchestrator":{"clientId":"orch-only"}}}}}' \
+  >"${HASKEY_HOME}/.config/catalyst/config.json"
+printf '%s' '{"catalyst":{"linear":{"agent":{"clientId":"hk-cid","clientSecret":"hk-csec"}}}}' \
+  >"${HASKEY_HOME}/.config/catalyst/config-catalyst-workspace.json"
+printf '%s' '{"catalyst":{"projectKey":"catalyst-workspace"}}' \
+  >"${HASKEY_HOME}/repo/.catalyst/config.json"
+HK_STDERR="$(PATH="${BIN_DIR}:$PATH" env HOME="${HASKEY_HOME}" \
+  bash -c "cd '${HASKEY_HOME}/repo' && bash '$HELPER' CTL-550 body" 2>&1 1>/dev/null || true)"
+if printf '%s' "$HK_STDERR" | grep -qi "no projectKey"; then
+  echo "FAIL: drift warning over-fired on a projectKey-present worktree (stderr: ${HK_STDERR})"
+  FAIL=$((FAIL+1))
+else
+  echo "PASS: no drift warning when projectKey resolves correctly"
+  PASS=$((PASS+1))
+fi
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ "$FAIL" -eq 0 ]]
