@@ -333,12 +333,18 @@ the CLI shim (always exits 0; degrades gracefully on bad input):
 ```bash
 REASON="${1:-remediation failed}"  # caller-supplied short string
 
-# CTL-1065: build structured explanation for the operator inbox.
+# CTL-1130: AUTHORIZATION — agent can re-remediate; only regression risk stops it.
 EXPL_JSON="$(node "${PLUGIN_ROOT}/scripts/execution-core/escalation-explain.mjs" \
   --ticket "$TICKET" --phase "$PHASE" \
-  --what-failed "remediation failed: ${REASON}" \
-  --why-gave-up "exhausted remediation budget or encountered an unrecoverable error" \
-  --human-question "should ${TICKET} be re-remediated manually, or should verify findings be waived?" \
+  --type authorization \
+  --problem "remediation failed: ${REASON}" \
+  --call-to-action "should ${TICKET} be re-remediated manually, or should verify findings be waived?" \
+  --recommendation "re-run verify with the updated remediation" \
+  --risk "${REGRESSION_RISK:+regression_risk ${REGRESSION_RISK} with ${HIGH_COUNT:-?} HIGH finding(s) — merging risks a regression}${REGRESSION_RISK:-remediation budget exhausted with unresolvable verify failures}" \
+  --why-asking "risk-authority gate, not a capability gap" \
+  --authorize-label "re-remediate ${TICKET}" \
+  --could-higher-tier-resolve false \
+  --can-execute true \
   2>/dev/null || echo '{}')"
 
 # Hard-error: emit failed + attention, exit non-zero. A `failed` event lets
